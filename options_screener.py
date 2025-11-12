@@ -293,38 +293,98 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
     return df
 
 
-def categorize_by_premium(df: pd.DataFrame) -> pd.DataFrame:
-    # Create low/medium/high bins by premium quantiles
+def categorize_by_premium(df: pd.DataFrame, budget: Optional[float] = None) -> pd.DataFrame:
+    """Categorize by premium using quantiles (single-stock) or budget-based (multi-stock)."""
     if df.empty:
         return df
-    premiums = df["premium"].astype(float)
-    q1 = premiums.quantile(1/3)
-    q2 = premiums.quantile(2/3)
+    
+    # Calculate contract cost
+    df["contract_cost"] = df["premium"] * 100
+    
+    if budget is not None:
+        # Budget mode: categorize based on % of budget
+        # LOW: 0-33% of budget, MEDIUM: 33-66%, HIGH: 66-100%
+        def cat_budget(cost):
+            pct = cost / budget
+            if pct <= 0.33:
+                return "LOW"
+            elif pct <= 0.66:
+                return "MEDIUM"
+            else:
+                return "HIGH"
+        df["price_bucket"] = df["contract_cost"].apply(cat_budget)
+    else:
+        # Single-stock mode: use quantiles
+        premiums = df["premium"].astype(float)
+        q1 = premiums.quantile(1/3)
+        q2 = premiums.quantile(2/3)
 
-    def cat(p):
-        if p <= q1:
-            return "LOW"
-        elif p <= q2:
-            return "MEDIUM"
-        else:
-            return "HIGH"
+        def cat(p):
+            if p <= q1:
+                return "LOW"
+            elif p <= q2:
+                return "MEDIUM"
+            else:
+                return "HIGH"
 
-    df["price_bucket"] = premiums.apply(cat)
+        df["price_bucket"] = premiums.apply(cat)
+    
     return df
 
 
-def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5) -> pd.DataFrame:
+def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers: bool = False) -> pd.DataFrame:
+    """Pick top options per bucket, optionally diversifying across tickers."""
     picks = []
     for bucket in ["LOW", "MEDIUM", "HIGH"]:
         sub = df[df["price_bucket"] == bucket].copy()
         if sub.empty:
             continue
-        # Tie-breakers: quality, tighter spreads, more volume, nearer expirations
-        sub = sub.sort_values(
-            by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
-            ascending=[False, True, False, False, True],
-        )
-        picks.append(sub.head(per_bucket))
+        
+        if diversify_tickers and "symbol" in sub.columns:
+            # Try to get diverse tickers in budget mode
+            # Sort by quality first
+            sub = sub.sort_values(
+                by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
+                ascending=[False, True, False, False, True],
+            )
+            
+            # Pick best from each ticker, then fill remaining slots
+            selected = []
+            tickers_used = set()
+            
+            # First pass: best option from each unique ticker
+            for _, row in sub.iterrows():
+                if row["symbol"] not in tickers_used:
+                    selected.append(row)
+                    tickers_used.add(row["symbol"])
+                    if len(selected) >= per_bucket:
+                        break
+            
+            # Second pass: fill remaining slots with next best regardless of ticker
+            if len(selected) < per_bucket:
+                for _, row in sub.iterrows():
+                    if len(selected) >= per_bucket:
+                        break
+                    # Check if this exact row is already selected
+                    is_duplicate = any(
+                        (s["symbol"] == row["symbol"] and 
+                         s["strike"] == row["strike"] and 
+                         s["expiration"] == row["expiration"] and
+                         s["type"] == row["type"]) 
+                        for s in selected
+                    )
+                    if not is_duplicate:
+                        selected.append(row)
+            
+            picks.append(pd.DataFrame(selected))
+        else:
+            # Standard sorting for single-stock mode
+            sub = sub.sort_values(
+                by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
+                ascending=[False, True, False, False, True],
+            )
+            picks.append(sub.head(per_bucket))
+    
     if not picks:
         return pd.DataFrame()
     out = pd.concat(picks, ignore_index=True)
@@ -403,6 +463,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         print(f"  Stock Price: ${underlying_price:.2f}")
     else:
         print(f"  Budget Constraint: ${budget:.2f} per contract (premium × 100)")
+        print(f"  Categories: LOW ($0-${budget*0.33:.2f}) | MEDIUM (${budget*0.33:.2f}-${budget*0.66:.2f}) | HIGH (${budget*0.66:.2f}-${budget:.2f})")
     print(f"  Risk-Free Rate: {rfr*100:.2f}% (13-week Treasury)")
     print(f"  Expirations Scanned: {num_expiries}")
     print(f"  DTE Range: {min_dte} - {max_dte} days")
@@ -590,10 +651,16 @@ def main():
                 print(f"No contracts found within budget of ${budget:.2f}.")
                 sys.exit(0)
             print(f"Found {len(df_scored)} contracts within budget.")
+            
+            # Show budget distribution for user clarity
+            print(f"\nBudget Categories:")
+            print(f"  LOW:    $0 - ${budget*0.33:.2f} (0-33% of budget)")
+            print(f"  MEDIUM: ${budget*0.33:.2f} - ${budget*0.66:.2f} (33-66% of budget)")
+            print(f"  HIGH:   ${budget*0.66:.2f} - ${budget:.2f} (66-100% of budget)")
         
         # Categorize and pick
-        df_bucketed = categorize_by_premium(df_scored)
-        picks = pick_top_per_bucket(df_bucketed, per_bucket=5)
+        df_bucketed = categorize_by_premium(df_scored, budget=budget if is_budget_mode else None)
+        picks = pick_top_per_bucket(df_bucketed, per_bucket=5, diversify_tickers=is_budget_mode)
         if picks.empty:
             print("Could not produce picks in the requested buckets.")
             sys.exit(0)

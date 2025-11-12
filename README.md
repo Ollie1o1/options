@@ -78,8 +78,21 @@ Using risk-free rate: 4.35% (13-week Treasury)
 In budget mode, the screener:
 - Scans multiple liquid tickers (default or custom list)
 - Filters options where `(premium × 100) ≤ budget`
-- Presents top 5 picks in each premium category across all tickers
+- **Budget-based categorization:**
+  - **LOW**: 0-33% of budget (e.g., $0-$165 for $500 budget)
+  - **MEDIUM**: 33-66% of budget (e.g., $165-$330 for $500 budget)
+  - **HIGH**: 66-100% of budget (e.g., $330-$500 for $500 budget)
+- Presents top 5 picks in each category across all tickers
+- **Diversifies tickers**: Prioritizes different stocks in each category
 - Displays ticker, stock price, and contract cost for each pick
+
+**Example Budget Breakdown:**
+```
+Budget: $500
+  LOW:    $0 - $165    (budget-friendly options)
+  MEDIUM: $165 - $330  (moderate cost options)
+  HIGH:   $330 - $500  (premium options at budget limit)
+```
 
 **Sample Output:**
 ```
@@ -206,10 +219,19 @@ Quality Score = 0.35×Liquidity + 0.25×Spread + 0.20×ΔQuality + 0.20×IVQuali
 
 ### 3. Premium Categorization
 
-After scoring, contracts are divided into three price buckets by premium:
+**Single-Stock Mode:**
+Contracts are divided into three price buckets by premium quantiles:
 - **LOW**: Bottom 33rd percentile of premiums
 - **MEDIUM**: Middle 33rd percentile
 - **HIGH**: Top 33rd percentile
+
+**Budget Mode:**
+Contracts are categorized based on percentage of your budget:
+- **LOW**: 0-33% of budget (affordable options)
+- **MEDIUM**: 33-66% of budget (moderate investments)
+- **HIGH**: 66-100% of budget (higher-cost opportunities)
+
+This ensures you see options across the full spectrum of your budget, not just the cheapest options available.
 
 ### 4. Selection & Ranking
 
