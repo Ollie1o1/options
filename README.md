@@ -11,9 +11,13 @@ This screener analyzes options chains for any stock ticker and outputs **15 top 
 - Automatic risk-free rate fetching from 13-week Treasury
 - Multi-factor quality scoring algorithm
 - Black-Scholes delta calculations
+- **Top Overall Pick** with intelligent justification
+- ITM/OTM moneyness indicators
+- Category summary statistics (avg IV, spread, delta)
 - User-friendly CLI with sensible defaults
 - Automatic premium categorization (low/medium/high)
 - Detailed rationale for each pick
+- Comprehensive scan summary footer
 
 ---
 
@@ -54,17 +58,52 @@ Using risk-free rate: 4.35% (13-week Treasury)
 
 **Sample Output:**
 ```
-============ LOW PREMIUM (top 5) ============
-TSLA CALL  Strike 250.00  Exp 2025-02-21  Prem $1.25  IV 45.2%  OI   1250  Vol    320  Δ +0.38
-  → liquidity vol 320, OI 1250; spread 3.2%; delta +0.38; IV 45.2% (≈ chain median 44.8%); quality 0.82
+================================================================================
+  OPTIONS SCREENER REPORT - TSLA
+================================================================================
+  Stock Price: $250.35
+  Risk-Free Rate: 4.35% (13-week Treasury)
+  Expirations Scanned: 4
+  DTE Range: 7 - 120 days
+  Chain Median IV: 45.3%
+================================================================================
 
+────────────────────────────────────────────────────────────────────────────────
+  LOW PREMIUM (Top 5 Picks)
+────────────────────────────────────────────────────────────────────────────────
+  Summary: Avg IV 42.1% | Avg Spread 3.2% | Median |Δ| 0.41
+
+  Type  Strike   Exp          Prem     IV      OI       Vol      Δ       Tag 
+  ----------------------------------------------------------------------------
+  CALL   250.00  2025-02-21   $1.25    45.2%     1250     320    +0.38  OTM
+    → liquidity vol 320, OI 1250; spread 3.2%; delta +0.38; IV 45.2% | DTE: 42d
 ...
 
-============ MEDIUM PREMIUM (top 5) ============
-...
+================================================================================
+  ⭐ TOP OVERALL PICK
+================================================================================
 
-============ HIGH PREMIUM (top 5) ============
-...
+  TSLA CALL | Strike $255.00 | Exp 2025-03-15 (35d) | OTM
+
+  Premium: $3.45
+  IV: 44.8% | Delta: +0.42 | Quality: 0.87
+  Volume: 2150 | OI: 5820 | Spread: 2.1%
+
+  💡 Rationale: Chosen for excellent liquidity, balanced IV near chain median, 
+     tight bid-ask spread. Also offers optimal delta range, short-term play.
+
+================================================================================
+  SCAN SUMMARY
+================================================================================
+  Total Picks Displayed: 15
+  Chain Median IV: 45.3%
+  Expirations Scanned: 4
+  Risk-Free Rate Used: 4.35%
+  DTE Filter: 7-120 days
+================================================================================
+
+  ⚠️  Not financial advice. Verify all data before trading.
+================================================================================
 ```
 
 ---
@@ -134,6 +173,24 @@ Within each bucket:
 5. Tie-breaker: time to expiration (ascending - prefer nearer)
 
 Return top 5 from each bucket.
+
+### 5. Top Overall Pick
+
+After displaying all categories, the screener computes a **Top Overall Pick** using enhanced weighting:
+
+```
+Overall Score = 0.40×Quality + 0.20×Liquidity + 0.15×Spread + 0.15×Delta + 0.10×IV
+```
+
+The pick includes:
+- Complete option details (strike, expiration, DTE, moneyness)
+- Key metrics (premium, IV, delta, volume, OI, spread)
+- **Intelligent justification** explaining why it was selected based on:
+  - Liquidity level (volume/OI)
+  - IV positioning relative to chain median
+  - Bid-ask spread tightness
+  - Delta optimality (0.35-0.50 range)
+  - Time horizon (short/medium/long-term)
 
 ---
 
@@ -221,10 +278,28 @@ picks = pick_top_per_bucket(df_bucketed, per_bucket=5)  # Line ~447
 
 ## 📈 Interpreting Results
 
+### Report Structure
+
+The enhanced output includes:
+
+1. **Header Section** - Stock price, risk-free rate, scan parameters, chain median IV
+2. **Category Sections** - Low/Medium/High premium picks with summary statistics
+3. **Top Overall Pick** - Single best opportunity with detailed justification
+4. **Summary Footer** - Scan metadata and disclaimer
+
 ### Output Format
+
+**Category Header:**
 ```
-TICKER TYPE  Strike XXX.XX  Exp YYYY-MM-DD  Prem $X.XX  IV XX.X%  OI XXXXXX  Vol XXXXXX  Δ ±X.XX
-  → liquidity vol XXX, OI XXX; spread X.X%; delta ±X.XX; IV XX.X% (relation chain median); quality X.XX
+  LOW PREMIUM (Top 5 Picks)
+  Summary: Avg IV 42.1% | Avg Spread 3.2% | Median |Δ| 0.41
+```
+
+**Option Row:**
+```
+  Type  Strike   Exp          Prem     IV      OI       Vol      Δ       Tag
+  CALL   250.00  2025-02-21   $1.25    45.2%     1250     320    +0.38  OTM
+    → liquidity vol 320, OI 1250; spread 3.2%; delta +0.38; IV 45.2% | DTE: 42d
 ```
 
 ### Key Metrics

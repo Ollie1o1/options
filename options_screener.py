@@ -347,6 +347,21 @@ def format_money(x: Optional[float]) -> str:
         return "-"
 
 
+def determine_moneyness(row: pd.Series) -> str:
+    """Determine if option is ITM or OTM based on strike vs underlying."""
+    try:
+        strike = float(row["strike"])
+        underlying = float(row["underlying"])
+        opt_type = row["type"].lower()
+        
+        if opt_type == "call":
+            return "ITM" if strike < underlying else "OTM"
+        else:  # put
+            return "ITM" if strike > underlying else "OTM"
+    except Exception:
+        return "---"
+
+
 def rationale_row(row: pd.Series, chain_iv_median: float) -> str:
     parts: List[str] = []
     # Liquidity
@@ -369,31 +384,68 @@ def rationale_row(row: pd.Series, chain_iv_median: float) -> str:
     return "; ".join(parts)
 
 
-def print_report(df_picks: pd.DataFrame):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int):
+    """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
         return
+    
     chain_iv_median = df_picks["impliedVolatility"].median(skipna=True)
+    
+    # Header with context
+    print("\n" + "="*80)
+    print(f"  OPTIONS SCREENER REPORT - {df_picks.iloc[0]['symbol']}")
+    print("="*80)
+    print(f"  Stock Price: ${underlying_price:.2f}")
+    print(f"  Risk-Free Rate: {rfr*100:.2f}% (13-week Treasury)")
+    print(f"  Expirations Scanned: {num_expiries}")
+    print(f"  DTE Range: {min_dte} - {max_dte} days")
+    print(f"  Chain Median IV: {format_pct(chain_iv_median)}")
+    print("="*80)
 
     def header(txt: str):
-        print("\n" + "=" * 12 + f" {txt} " + "=" * 12)
+        print("\n" + "─" * 80)
+        print(f"  {txt}")
+        print("─" * 80)
 
+    # Print each bucket with summary stats
     for bucket in ["LOW", "MEDIUM", "HIGH"]:
         sub = df_picks[df_picks["price_bucket"] == bucket]
         if sub.empty:
             continue
-        header(f"{bucket} PREMIUM (top {len(sub)})")
+        
+        # Bucket header
+        header(f"{bucket} PREMIUM (Top {len(sub)} Picks)")
+        
+        # Category summary stats
+        avg_iv = sub["impliedVolatility"].mean()
+        avg_spread = sub["spread_pct"].mean(skipna=True)
+        median_delta = sub["abs_delta"].median()
+        print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |Δ| {median_delta:.2f}\n")
+        
+        # Column headers
+        print(f"  {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<8} {'Δ':<7} {'Tag':<4}")
+        print("  " + "-"*76)
+        
         for _, r in sub.iterrows():
             exp = pd.to_datetime(r["expiration"]).date()
+            moneyness = determine_moneyness(r)
+            dte = int(r["T_years"] * 365)
+            
+            # Main line with aligned columns
             print(
-                f"{r['symbol']} {r['type'].upper():>4}  "
-                f"Strike {r['strike']:.2f}  Exp {exp}  "
-                f"Prem {format_money(r['premium'])}  "
-                f"IV {format_pct(r['impliedVolatility'])}  "
-                f"OI {int(r['openInterest']):>6}  Vol {int(r['volume']):>6}  "
-                f"Δ {r['delta']:+.2f}"
+                f"  {r['type'].upper():<5} "
+                f"{r['strike']:>7.2f} "
+                f"{exp} "
+                f"{format_money(r['premium']):<8} "
+                f"{format_pct(r['impliedVolatility']):<7} "
+                f"{int(r['openInterest']):>7} "
+                f"{int(r['volume']):>7} "
+                f"{r['delta']:>+6.2f} "
+                f"{moneyness:<4}"
             )
-            print(f"  → {rationale_row(r, chain_iv_median)}")
+            # Rationale
+            print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d\n")
 
 
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
@@ -448,7 +500,95 @@ def main():
         if picks.empty:
             print("Could not produce picks in the requested buckets.")
             sys.exit(0)
-        print_report(picks)
+        
+        # Get underlying price for report
+        underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty else 0.0
+        
+        # Print main report
+        print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte)
+        
+        # Compute and display top overall pick
+        print("\n" + "="*80)
+        print("  ⭐ TOP OVERALL PICK")
+        print("="*80)
+        
+        # Enhanced scoring for top pick: balance quality with practical factors
+        picks_copy = picks.copy()
+        chain_iv_median = picks["impliedVolatility"].median(skipna=True)
+        
+        # Weighted overall score
+        # Favor: high quality, good liquidity, moderate IV, tight spread, balanced delta
+        picks_copy["overall_score"] = (
+            0.40 * picks_copy["quality_score"] +
+            0.20 * picks_copy["liquidity_score"] +
+            0.15 * picks_copy["spread_score"] +
+            0.15 * picks_copy["delta_quality"] +
+            0.10 * picks_copy["iv_quality"]
+        )
+        
+        top_pick = picks_copy.sort_values("overall_score", ascending=False).iloc[0]
+        exp = pd.to_datetime(top_pick["expiration"]).date()
+        moneyness = determine_moneyness(top_pick)
+        dte = int(top_pick["T_years"] * 365)
+        
+        print(
+            f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
+            f"Strike ${top_pick['strike']:.2f} | Exp {exp} ({dte}d) | {moneyness}\n"
+        )
+        print(f"  Premium: {format_money(top_pick['premium'])}")
+        print(f"  IV: {format_pct(top_pick['impliedVolatility'])} | Delta: {top_pick['delta']:+.2f} | Quality: {top_pick['quality_score']:.2f}")
+        print(f"  Volume: {int(top_pick['volume'])} | OI: {int(top_pick['openInterest'])} | Spread: {format_pct(top_pick['spread_pct'])}")
+        
+        # Generate justification
+        justification_parts = []
+        
+        # Liquidity assessment
+        if top_pick["volume"] > picks["volume"].quantile(0.75):
+            justification_parts.append("excellent liquidity")
+        elif top_pick["volume"] > picks["volume"].median():
+            justification_parts.append("good liquidity")
+        
+        # IV assessment
+        iv_diff = abs(top_pick["impliedVolatility"] - chain_iv_median)
+        if iv_diff <= 0.05:
+            justification_parts.append("balanced IV near chain median")
+        elif top_pick["impliedVolatility"] < chain_iv_median:
+            justification_parts.append("favorable IV below median")
+        
+        # Spread assessment
+        if pd.notna(top_pick["spread_pct"]) and top_pick["spread_pct"] < 0.05:
+            justification_parts.append("tight bid-ask spread")
+        
+        # Delta assessment
+        if 0.35 <= abs(top_pick["delta"]) <= 0.50:
+            justification_parts.append("optimal delta range")
+        
+        # DTE assessment
+        if dte <= 30:
+            justification_parts.append("short-term play")
+        elif dte <= 60:
+            justification_parts.append("medium-term opportunity")
+        else:
+            justification_parts.append("longer-dated position")
+        
+        justification = "Chosen for " + ", ".join(justification_parts[:3]) + "."
+        if len(justification_parts) > 3:
+            justification += f" Also offers {', '.join(justification_parts[3:])}." 
+        
+        print(f"\n  💡 Rationale: {justification}")
+        
+        # Summary footer
+        print("\n" + "="*80)
+        print("  SCAN SUMMARY")
+        print("="*80)
+        print(f"  Total Picks Displayed: {len(picks)}")
+        print(f"  Chain Median IV: {format_pct(chain_iv_median)}")
+        print(f"  Expirations Scanned: {max_expiries}")
+        print(f"  Risk-Free Rate Used: {rfr*100:.2f}%")
+        print(f"  DTE Filter: {min_dte}-{max_dte} days")
+        print("="*80)
+        print("\n  ⚠️  Not financial advice. Verify all data before trading.")
+        print("="*80 + "\n")
     except KeyboardInterrupt:
         print("\nCancelled.")
     except Exception as e:
