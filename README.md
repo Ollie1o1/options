@@ -7,9 +7,10 @@ A Python-based options screening tool that fetches real-time options data and id
 This screener analyzes options chains for any stock ticker and outputs **15 top picks**: 5 low-priced, 5 medium-priced, and 5 high-priced options. Each pick is evaluated on multiple quality dimensions including liquidity, bid-ask spread, delta characteristics, and implied volatility.
 
 **Key Features:**
-- **Two Operating Modes:**
+- **Three Operating Modes:**
   - **Single-Stock Mode**: Deep dive analysis of one ticker
   - **Budget-Based Multi-Stock Mode**: Scan multiple tickers within budget constraints
+  - **Discovery Mode**: Scan top 100 most-traded tickers for best overall opportunities
 - Real-time data via Yahoo Finance (yfinance API)
 - Automatic risk-free rate fetching from 13-week Treasury
 - Multi-factor quality scoring algorithm
@@ -65,7 +66,7 @@ Using risk-free rate: 4.35% (13-week Treasury)
 
 **Interactive Prompts:**
 ```
-Enter stock ticker or 'ALL' for budget mode []: ALL
+Enter stock ticker, 'ALL', or 'DISCOVER': ALL
 Enter your budget per contract in USD (e.g., 500) [500]: 750
 Enter comma-separated tickers to scan [AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META]: 
 How many nearest expirations to scan [4]: 4
@@ -93,6 +94,36 @@ Budget: $500
   MEDIUM: $165 - $330  (moderate cost options)
   HIGH:   $330 - $500  (premium options at budget limit)
 ```
+
+#### Mode 3: Discovery Mode
+
+**Interactive Prompts:**
+```
+Enter stock ticker, 'ALL', or 'DISCOVER' []: DISCOVER
+How many tickers to scan (1-100) [50]: 50
+How many nearest expirations to scan [4]: 4
+Minimum days to expiration (DTE) [7]: 7
+Maximum days to expiration (DTE) [120]: 90
+Fetching current risk-free rate...
+Using risk-free rate: 4.35% (13-week Treasury)
+```
+
+**Discovery Mode Features:**
+- **Scans top 100 most-traded options tickers** (ETFs, mega-cap tech, financials, healthcare, etc.)
+- **No budget limit** - finds best opportunities regardless of price
+- **Quantile-based categorization:**
+  - **LOW**: Bottom 33% of all premiums found
+  - **MEDIUM**: Middle 33% of premiums
+  - **HIGH**: Top 33% of premiums
+- **Auto-diversifies tickers** - different stocks in each category
+- **Best for:** Finding the absolute best opportunities across the market
+
+**Included Tickers:**
+- Major ETFs: SPY, QQQ, IWM, DIA, sector ETFs
+- Tech: AAPL, MSFT, NVDA, AMD, TSLA, GOOGL, META, AMZN
+- Finance: JPM, BAC, GS, V, MA
+- Healthcare: JNJ, UNH, PFE, LLY
+- And 80+ more liquid tickers...
 
 **Sample Output:**
 ```
@@ -148,14 +179,16 @@ Budget: $500
 
 ## 🔄 Modes Comparison
 
-| Feature | Single-Stock Mode | Budget-Based Multi-Stock Mode |
-|---------|------------------|-------------------------------|
-| **Trigger** | Enter ticker (e.g., "AAPL") | Enter "ALL" or leave blank |
-| **Tickers Scanned** | 1 | 1-10+ (customizable) |
-| **Budget Filter** | None | Yes (premium × 100 ≤ budget) |
-| **Output** | Top 5 each category for one stock | Top 5 each category across all stocks |
-| **Stock Price Display** | In header | Per contract in listing |
-| **Best Use Case** | Deep analysis of specific stock | Finding best opportunities within budget |
+| Feature | Single-Stock | Budget Multi-Stock | Discovery Mode |
+|---------|--------------|-------------------|----------------|
+| **Trigger** | Enter ticker (e.g., "AAPL") | Enter "ALL" | Enter "DISCOVER" or blank |
+| **Tickers Scanned** | 1 | 1-10+ (custom) | Up to 100 (top liquid) |
+| **Budget Filter** | None | Yes (cost ≤ budget) | None |
+| **Categorization** | Quantile (33% splits) | Budget-based (% of budget) | Quantile (33% splits) |
+| **Ticker Diversity** | Single ticker | Diversified | Diversified |
+| **Output** | Top 5 per category | Top 5 per category (multi-ticker) | Top 5 per category (multi-ticker) |
+| **Stock Price Display** | In header | Per contract | Per contract |
+| **Best Use Case** | Deep dive one stock | Budget-constrained search | Find absolute best opportunities |
 
 ---
 
