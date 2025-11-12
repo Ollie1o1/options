@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""
+Options Screener (Top 5 low / 5 medium / 5 high by premium)
+
+Features:
+- Fetches options chains via yfinance (Yahoo Finance data; check terms).
+- Scores contracts by liquidity (volume/OI), spread tightness, delta quality, and IV balance.
+- Categorizes by premium into low/medium/high and picks top 5 in each.
+- User-friendly prompts, input validation, and formatted console output.
+
+Note:
+- Not financial advice. For personal/informational use only.
+- Data availability and timeliness depend on the data provider.
+"""
+
+import sys
+import math
+from datetime import datetime, timezone
+from typing import Optional, Tuple, List
+
+# Dependency checks
+missing = []
+try:
+    import pandas as pd
+except Exception:
+    missing.append("pandas")
+try:
+    import yfinance as yf
+except Exception:
+    missing.append("yfinance")
+
+if missing:
+    print(f"Missing dependencies: {', '.join(missing)}")
+    print("Install with: pip install " + " ".join(missing))
+    sys.exit(1)
+
+
+def norm_cdf(x: float) -> float:
+    # Standard normal CDF using erf to avoid external deps
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def bs_delta(option_type: str, S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
+    """
+    Black-Scholes delta. Returns:
+      call: N(d1)
+      put:  N(d1) - 1
+    """
+    try:
+        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+            return None
+        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        if option_type.lower() == "call":
+            return norm_cdf(d1)
+        else:
+            return norm_cdf(d1) - 1.0
+    except Exception:
+        return None
+
+
+def safe_float(x, default=None):
+    try:
+        if x is None:
+            return default
+        v = float(x)
+        if math.isfinite(v):
+            return v
+        return default
+    except Exception:
+        return default
+
+
+def get_underlying_price(ticker: yf.Ticker) -> Optional[float]:
+    # Try fast_info, then info, then last close
+    try:
+        fi = getattr(ticker, "fast_info", None)
+        if fi:
+            lp = safe_float(getattr(fi, "last_price", None))
+            if lp:
+                return lp
+            # Sometimes as dict
+            lp = safe_float(getattr(fi, "last_price", None) or fi.get("last_price") if isinstance(fi, dict) else None)
+            if lp:
+                return lp
+    except Exception:
+        pass
+    try:
+        info = ticker.info or {}
+        lp = safe_float(info.get("regularMarketPrice"))
+        if lp:
+            return lp
+    except Exception:
+        pass
+    try:
+        hist = ticker.history(period="5d", interval="1d")
+        if not hist.empty:
+            return safe_float(hist["Close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def fetch_options_yfinance(symbol: str, max_expiries: int) -> pd.DataFrame:
+    tkr = yf.Ticker(symbol)
+    underlying = get_underlying_price(tkr)
+    if underlying is None:
+        raise ValueError("Could not determine underlying price for ticker.")
+    try:
+        expirations = tkr.options
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch options expirations: {e}")
+    if not expirations:
+        raise RuntimeError("No options expirations available.")
+
+    expirations = expirations[:max_expiries]
+    frames = []
+    for exp in expirations:
+        try:
+            oc = tkr.option_chain(exp)
+        except Exception as e:
+            # Skip this expiration if it fails
+            continue
+        for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
+            if df is None or df.empty:
+                continue
+            sub = df.copy()
+            sub["type"] = opt_type
+            sub["expiration"] = exp
+            sub["symbol"] = symbol.upper()
+
+            # Normalize column names we rely on
+            # yfinance has: 'strike','lastPrice','bid','ask','volume','openInterest','impliedVolatility','lastTradeDate','inTheMoney','contractSymbol'
+            for col in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]:
+                if col not in sub.columns:
+                    sub[col] = pd.NA
+
+            frames.append(sub)
+
+    if not frames:
+        raise RuntimeError("No options data frames fetched from yfinance.")
+    df = pd.concat(frames, ignore_index=True)
+    df["underlying"] = underlying
+    return df
+
+
+def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rate: float) -> pd.DataFrame:
+    # Prepare and filter
+    now = datetime.now(timezone.utc)
+
+    # expiration to dt
+    df["exp_dt"] = pd.to_datetime(df["expiration"], errors="coerce", utc=True)
+    df = df[df["exp_dt"].notna()].copy()
+    df["T_years"] = (df["exp_dt"] - now).dt.total_seconds() / (365.0 * 24 * 3600)
+    # filter by DTE bounds
+    df = df[(df["T_years"] > min_dte / 365.0) & (df["T_years"] < max_dte / 365.0)].copy()
+
+    # Numerics
+    for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility", "underlying"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Premium as mid if possible, else last
+    df["bid"] = df["bid"].fillna(0.0)
+    df["ask"] = df["ask"].fillna(0.0)
+    df["mid"] = (df["bid"] + df["ask"]) / 2.0
+    df["premium"] = df["mid"].where(df["mid"] > 0.0, df["lastPrice"])
+
+    # Drop where we have no usable premium
+    df = df[(df["premium"].notna()) & (df["premium"] > 0)].copy()
+
+    # Spread pct (relative to mid)
+    df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"]
+    df.loc[~df["spread_pct"].replace([pd.NA, pd.NaT], pd.NA).apply(lambda x: pd.notna(x) and math.isfinite(x)), "spread_pct"] = float("inf")
+
+    # Liquidity filters: remove totally dead contracts
+    df["volume"] = df["volume"].fillna(0).astype(float)
+    df["openInterest"] = df["openInterest"].fillna(0).astype(float)
+    df = df[(df["volume"] > 0) | (df["openInterest"] > 0)].copy()
+
+    if df.empty:
+        return df
+
+    # Fill missing IV with chain median per expiration + type to avoid skew
+    df["impliedVolatility"] = df["impliedVolatility"].astype(float)
+    df["iv_group_median"] = df.groupby(["exp_dt", "type"])["impliedVolatility"].transform(lambda s: s.median(skipna=True))
+    df["impliedVolatility"] = df["impliedVolatility"].fillna(df["iv_group_median"])
+    overall_iv_median = df["impliedVolatility"].median(skipna=True)
+    df["impliedVolatility"] = df["impliedVolatility"].fillna(overall_iv_median)
+
+    # Compute delta
+    def _row_delta(row):
+        d = bs_delta(
+            option_type=row["type"],
+            S=safe_float(row["underlying"], 0.0) or 0.0,
+            K=safe_float(row["strike"], 0.0) or 0.0,
+            T=safe_float(row["T_years"], 0.0) or 0.0,
+            r=risk_free_rate,
+            sigma=max(1e-9, safe_float(row["impliedVolatility"], 0.0) or 0.0),
+        )
+        return float("nan") if d is None else d
+
+    df["delta"] = df.apply(_row_delta, axis=1)
+    df["abs_delta"] = df["delta"].abs()
+
+    # Normalize features using ranks to reduce outlier impact
+    def rank_norm(s: pd.Series) -> pd.Series:
+        n = len(s)
+        if n <= 1:
+            return pd.Series([0.5] * n, index=s.index)
+        r = s.rank(method="average", na_option="keep")
+        return (r - 1.0) / (n - 1.0)
+
+    vol_n = rank_norm(df["volume"].fillna(0))
+    oi_n = rank_norm(df["openInterest"].fillna(0))
+
+    # Spread score: 1 for very tight spreads, 0 for very wide
+    # Cap spread at 25% of mid; beyond that is treated equally poor
+    sp = df["spread_pct"].replace([pd.NA, pd.NaT], float("inf"))
+    sp = sp.clip(lower=0, upper=0.25)
+    spread_score = 1.0 - (sp / 0.25)
+
+    # Delta quality: target around 0.4 absolute delta
+    delta_target = 0.40
+    delta_quality = 1.0 - (df["abs_delta"] - delta_target).abs() / max(delta_target, 1e-6)
+    delta_quality = delta_quality.clip(lower=0.0, upper=1.0)
+
+    # IV quality: prefer moderate IV vs chain (avoid extremes)
+    iv_n = rank_norm(df["impliedVolatility"].fillna(df["impliedVolatility"].median()))
+    iv_quality = 1.0 - (2.0 * (iv_n - 0.5).abs())  # 1 at mid, 0 at edges
+
+    # Liquidity (volume+OI)
+    liquidity = 0.5 * (vol_n + oi_n)
+
+    # Composite score
+    df["quality_score"] = (
+        0.35 * liquidity +
+        0.25 * spread_score +
+        0.20 * delta_quality +
+        0.20 * iv_quality
+    )
+
+    # Keep helpful computed columns
+    df["spread_pct"] = df["spread_pct"].replace([float("inf"), -float("inf")], pd.NA)
+    df["liquidity_score"] = liquidity
+    df["delta_quality"] = delta_quality
+    df["iv_quality"] = iv_quality
+    df["spread_score"] = spread_score
+
+    # Basic sanity ordering hints
+    df = df.sort_values(["quality_score", "volume", "openInterest"], ascending=[False, False, False]).reset_index(drop=True)
+    return df
+
+
+def categorize_by_premium(df: pd.DataFrame) -> pd.DataFrame:
+    # Create low/medium/high bins by premium quantiles
+    if df.empty:
+        return df
+    premiums = df["premium"].astype(float)
+    q1 = premiums.quantile(1/3)
+    q2 = premiums.quantile(2/3)
+
+    def cat(p):
+        if p <= q1:
+            return "LOW"
+        elif p <= q2:
+            return "MEDIUM"
+        else:
+            return "HIGH"
+
+    df["price_bucket"] = premiums.apply(cat)
+    return df
+
+
+def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5) -> pd.DataFrame:
+    picks = []
+    for bucket in ["LOW", "MEDIUM", "HIGH"]:
+        sub = df[df["price_bucket"] == bucket].copy()
+        if sub.empty:
+            continue
+        # Tie-breakers: quality, tighter spreads, more volume, nearer expirations
+        sub = sub.sort_values(
+            by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
+            ascending=[False, True, False, False, True],
+        )
+        picks.append(sub.head(per_bucket))
+    if not picks:
+        return pd.DataFrame()
+    out = pd.concat(picks, ignore_index=True)
+    return out
+
+
+def format_pct(x: Optional[float]) -> str:
+    try:
+        if x is None or (isinstance(x, float) and not math.isfinite(x)) or pd.isna(x):
+            return "-"
+        return f"{100.0 * float(x):.1f}%"
+    except Exception:
+        return "-"
+
+
+def format_money(x: Optional[float]) -> str:
+    try:
+        return f"${float(x):.2f}"
+    except Exception:
+        return "-"
+
+
+def rationale_row(row: pd.Series, chain_iv_median: float) -> str:
+    parts: List[str] = []
+    # Liquidity
+    parts.append(f"liquidity vol {int(row['volume'])}, OI {int(row['openInterest'])}")
+    # Spread
+    sp = row.get("spread_pct", pd.NA)
+    if pd.notna(sp) and math.isfinite(sp):
+        parts.append(f"spread {format_pct(sp)}")
+    # Delta
+    d = row.get("delta", pd.NA)
+    if pd.notna(d) and math.isfinite(d):
+        parts.append(f"delta {d:+.2f}")
+    # IV vs chain
+    iv = row.get("impliedVolatility", pd.NA)
+    if pd.notna(iv) and math.isfinite(iv):
+        rel = "≈" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
+        parts.append(f"IV {format_pct(iv)} ({rel} chain median {format_pct(chain_iv_median)})")
+    # Overall
+    parts.append(f"quality {row['quality_score']:.2f}")
+    return "; ".join(parts)
+
+
+def print_report(df_picks: pd.DataFrame):
+    if df_picks.empty:
+        print("No picks available after filtering.")
+        return
+    chain_iv_median = df_picks["impliedVolatility"].median(skipna=True)
+
+    def header(txt: str):
+        print("\n" + "=" * 12 + f" {txt} " + "=" * 12)
+
+    for bucket in ["LOW", "MEDIUM", "HIGH"]:
+        sub = df_picks[df_picks["price_bucket"] == bucket]
+        if sub.empty:
+            continue
+        header(f"{bucket} PREMIUM (top {len(sub)})")
+        for _, r in sub.iterrows():
+            exp = pd.to_datetime(r["expiration"]).date()
+            print(
+                f"{r['symbol']} {r['type'].upper():>4}  "
+                f"Strike {r['strike']:.2f}  Exp {exp}  "
+                f"Prem {format_money(r['premium'])}  "
+                f"IV {format_pct(r['impliedVolatility'])}  "
+                f"OI {int(r['openInterest']):>6}  Vol {int(r['volume']):>6}  "
+                f"Δ {r['delta']:+.2f}"
+            )
+            print(f"  → {rationale_row(r, chain_iv_median)}")
+
+
+def prompt_input(prompt: str, default: Optional[str] = None) -> str:
+    sfx = f" [{default}]" if default is not None else ""
+    val = input(f"{prompt}{sfx}: ").strip()
+    return default if (not val and default is not None) else val
+
+
+def main():
+    print("Options Screener (yfinance)")
+    print("Note: For personal/informational use only. Review data provider terms.")
+    symbol = prompt_input("Enter stock ticker (e.g., AAPL)").upper()
+    if not symbol.isalnum():
+        print("Please enter a valid alphanumeric ticker (e.g., AAPL).")
+        sys.exit(1)
+
+    try:
+        max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
+        if max_expiries <= 0 or max_expiries > 12:
+            print("Please choose between 1 and 12 expirations.")
+            sys.exit(1)
+    except Exception:
+        print("Invalid number for expirations.")
+        sys.exit(1)
+
+    try:
+        min_dte = int(prompt_input("Minimum days to expiration (DTE)", "7"))
+        max_dte = int(prompt_input("Maximum days to expiration (DTE)", "120"))
+        if min_dte < 0 or max_dte <= min_dte:
+            print("DTE bounds invalid. Ensure 0 <= min < max.")
+            sys.exit(1)
+    except Exception:
+        print("Invalid DTE inputs.")
+        sys.exit(1)
+
+    try:
+        rfr_str = prompt_input("Risk-free rate (annualized, e.g., 0.045 for 4.5%)", "0.045")
+        rfr = float(rfr_str)
+        if rfr < -0.01 or rfr > 0.25:
+            print("Risk-free rate seems out of typical bounds (-1% to 25%).")
+    except Exception:
+        print("Invalid risk-free rate. Use a number like 0.045")
+        sys.exit(1)
+
+    try:
+        df_raw = fetch_options_yfinance(symbol, max_expiries=max_expiries)
+        if df_raw.empty:
+            print("No options returned for this ticker/expirations.")
+            sys.exit(0)
+        df_scored = enrich_and_score(df_raw, min_dte=min_dte, max_dte=max_dte, risk_free_rate=rfr)
+        if df_scored.empty:
+            print("No contracts passed filters (check DTE bounds or liquidity).")
+            sys.exit(0)
+        df_bucketed = categorize_by_premium(df_scored)
+        picks = pick_top_per_bucket(df_bucketed, per_bucket=5)
+        if picks.empty:
+            print("Could not produce picks in the requested buckets.")
+            sys.exit(0)
+        print_report(picks)
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
