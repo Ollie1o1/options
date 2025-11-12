@@ -384,7 +384,7 @@ def rationale_row(row: pd.Series, chain_iv_median: float) -> str:
     return "; ".join(parts)
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
@@ -394,13 +394,20 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     
     # Header with context
     print("\n" + "="*80)
-    print(f"  OPTIONS SCREENER REPORT - {df_picks.iloc[0]['symbol']}")
+    if mode == "Budget scan":
+        print(f"  OPTIONS SCREENER REPORT - MULTI-TICKER (Budget: ${budget:.2f})")
+    else:
+        print(f"  OPTIONS SCREENER REPORT - {df_picks.iloc[0]['symbol']}")
     print("="*80)
-    print(f"  Stock Price: ${underlying_price:.2f}")
+    if mode != "Budget scan":
+        print(f"  Stock Price: ${underlying_price:.2f}")
+    else:
+        print(f"  Budget Constraint: ${budget:.2f} per contract (premium × 100)")
     print(f"  Risk-Free Rate: {rfr*100:.2f}% (13-week Treasury)")
     print(f"  Expirations Scanned: {num_expiries}")
     print(f"  DTE Range: {min_dte} - {max_dte} days")
     print(f"  Chain Median IV: {format_pct(chain_iv_median)}")
+    print(f"  Mode: {mode}")
     print("="*80)
 
     def header(txt: str):
@@ -423,9 +430,13 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         median_delta = sub["abs_delta"].median()
         print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |Δ| {median_delta:.2f}\n")
         
-        # Column headers
-        print(f"  {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<8} {'Δ':<7} {'Tag':<4}")
-        print("  " + "-"*76)
+        # Column headers (add Ticker for multi-stock mode)
+        if mode == "Budget scan":
+            print(f"  {'Tkr':<5} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<7} {'Δ':<7} {'Tag':<4}")
+            print("  " + "-"*78)
+        else:
+            print(f"  {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<8} {'Δ':<7} {'Tag':<4}")
+            print("  " + "-"*76)
         
         for _, r in sub.iterrows():
             exp = pd.to_datetime(r["expiration"]).date()
@@ -433,19 +444,38 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             dte = int(r["T_years"] * 365)
             
             # Main line with aligned columns
-            print(
-                f"  {r['type'].upper():<5} "
-                f"{r['strike']:>7.2f} "
-                f"{exp} "
-                f"{format_money(r['premium']):<8} "
-                f"{format_pct(r['impliedVolatility']):<7} "
-                f"{int(r['openInterest']):>7} "
-                f"{int(r['volume']):>7} "
-                f"{r['delta']:>+6.2f} "
-                f"{moneyness:<4}"
-            )
+            if mode == "Budget scan":
+                print(
+                    f"  {r['symbol']:<5} "
+                    f"{r['type'].upper():<5} "
+                    f"{r['strike']:>7.2f} "
+                    f"{exp} "
+                    f"{format_money(r['premium']):<8} "
+                    f"{format_pct(r['impliedVolatility']):<7} "
+                    f"{int(r['openInterest']):>6} "
+                    f"{int(r['volume']):>6} "
+                    f"{r['delta']:>+6.2f} "
+                    f"{moneyness:<4}"
+                )
+            else:
+                print(
+                    f"  {r['type'].upper():<5} "
+                    f"{r['strike']:>7.2f} "
+                    f"{exp} "
+                    f"{format_money(r['premium']):<8} "
+                    f"{format_pct(r['impliedVolatility']):<7} "
+                    f"{int(r['openInterest']):>7} "
+                    f"{int(r['volume']):>7} "
+                    f"{r['delta']:>+6.2f} "
+                    f"{moneyness:<4}"
+                )
             # Rationale
-            print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d\n")
+            ticker_info = f"${r['underlying']:.2f}" if mode == "Budget scan" else ""
+            cost_per_contract = r['premium'] * 100
+            if mode == "Budget scan":
+                print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d | Stock: {ticker_info} | Cost: ${cost_per_contract:.2f}\n")
+            else:
+                print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d\n")
 
 
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
@@ -457,10 +487,46 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
 def main():
     print("Options Screener (yfinance)")
     print("Note: For personal/informational use only. Review data provider terms.")
-    symbol = prompt_input("Enter stock ticker (e.g., AAPL)").upper()
-    if not symbol.isalnum():
-        print("Please enter a valid alphanumeric ticker (e.g., AAPL).")
-        sys.exit(1)
+    print("\nModes:")
+    print("  - Enter a ticker (e.g., AAPL) for single-stock analysis")
+    print("  - Enter 'ALL' or leave blank for budget-based multi-stock scan\n")
+    
+    symbol_input = prompt_input("Enter stock ticker or 'ALL' for budget mode", "").upper()
+    
+    # Determine mode
+    is_budget_mode = (symbol_input == "ALL" or symbol_input == "")
+    mode = "Budget scan" if is_budget_mode else "Single-stock"
+    budget = None
+    tickers = []
+    
+    if is_budget_mode:
+        # Budget mode setup
+        try:
+            budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
+            if budget <= 0:
+                print("Budget must be positive.")
+                sys.exit(1)
+        except Exception:
+            print("Invalid budget amount.")
+            sys.exit(1)
+        
+        # Default liquid tickers
+        default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
+        tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
+        tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+        
+        if not tickers:
+            print("No valid tickers provided.")
+            sys.exit(1)
+        
+        print(f"\nBudget Mode: Scanning {len(tickers)} tickers with ${budget:.2f} budget...")
+    else:
+        # Single-stock mode
+        if not symbol_input.isalnum():
+            print("Please enter a valid alphanumeric ticker (e.g., AAPL).")
+            sys.exit(1)
+        tickers = [symbol_input]
+        print(f"\nSingle-Stock Mode: Analyzing {symbol_input}...")
 
     try:
         max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
@@ -487,25 +553,56 @@ def main():
     print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
 
     try:
-        df_raw = fetch_options_yfinance(symbol, max_expiries=max_expiries)
-        if df_raw.empty:
-            print("No options returned for this ticker/expirations.")
+        # Collect data from all tickers
+        all_frames = []
+        for ticker in tickers:
+            try:
+                print(f"  Fetching {ticker}...", end="")
+                df_raw = fetch_options_yfinance(ticker, max_expiries=max_expiries)
+                if not df_raw.empty:
+                    all_frames.append(df_raw)
+                    print(" ✓")
+                else:
+                    print(" (no data)")
+            except Exception as e:
+                print(f" (error: {str(e)[:30]})")
+                continue
+        
+        if not all_frames:
+            print("\nNo options data retrieved from any ticker.")
             sys.exit(0)
-        df_scored = enrich_and_score(df_raw, min_dte=min_dte, max_dte=max_dte, risk_free_rate=rfr)
+        
+        # Combine all data
+        df_combined = pd.concat(all_frames, ignore_index=True)
+        print(f"\nProcessing {len(df_combined)} total options contracts...")
+        
+        # Score and filter
+        df_scored = enrich_and_score(df_combined, min_dte=min_dte, max_dte=max_dte, risk_free_rate=rfr)
         if df_scored.empty:
             print("No contracts passed filters (check DTE bounds or liquidity).")
             sys.exit(0)
+        
+        # Apply budget filter if in budget mode
+        if is_budget_mode:
+            df_scored["contract_cost"] = df_scored["premium"] * 100
+            df_scored = df_scored[df_scored["contract_cost"] <= budget].copy()
+            if df_scored.empty:
+                print(f"No contracts found within budget of ${budget:.2f}.")
+                sys.exit(0)
+            print(f"Found {len(df_scored)} contracts within budget.")
+        
+        # Categorize and pick
         df_bucketed = categorize_by_premium(df_scored)
         picks = pick_top_per_bucket(df_bucketed, per_bucket=5)
         if picks.empty:
             print("Could not produce picks in the requested buckets.")
             sys.exit(0)
         
-        # Get underlying price for report
-        underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty else 0.0
+        # Get underlying price for report (first ticker in single mode, or 0 in budget mode)
+        underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty and not is_budget_mode else 0.0
         
         # Print main report
-        print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte)
+        print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget)
         
         # Compute and display top overall pick
         print("\n" + "="*80)
@@ -535,7 +632,12 @@ def main():
             f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
             f"Strike ${top_pick['strike']:.2f} | Exp {exp} ({dte}d) | {moneyness}\n"
         )
+        if mode == "Budget scan":
+            print(f"  Stock Price: ${top_pick['underlying']:.2f}")
         print(f"  Premium: {format_money(top_pick['premium'])}")
+        if mode == "Budget scan":
+            contract_cost = top_pick['premium'] * 100
+            print(f"  Contract Cost: ${contract_cost:.2f} (within ${budget:.2f} budget)")
         print(f"  IV: {format_pct(top_pick['impliedVolatility'])} | Delta: {top_pick['delta']:+.2f} | Quality: {top_pick['quality_score']:.2f}")
         print(f"  Volume: {int(top_pick['volume'])} | OI: {int(top_pick['openInterest'])} | Spread: {format_pct(top_pick['spread_pct'])}")
         
@@ -582,10 +684,15 @@ def main():
         print("  SCAN SUMMARY")
         print("="*80)
         print(f"  Total Picks Displayed: {len(picks)}")
+        if mode == "Budget scan":
+            unique_tickers = picks["symbol"].nunique()
+            print(f"  Tickers Covered: {unique_tickers}")
+            print(f"  Budget Constraint: ${budget:.2f} per contract")
         print(f"  Chain Median IV: {format_pct(chain_iv_median)}")
         print(f"  Expirations Scanned: {max_expiries}")
         print(f"  Risk-Free Rate Used: {rfr*100:.2f}%")
         print(f"  DTE Filter: {min_dte}-{max_dte} days")
+        print(f"  Mode: {mode}")
         print("="*80)
         print("\n  ⚠️  Not financial advice. Verify all data before trading.")
         print("="*80 + "\n")

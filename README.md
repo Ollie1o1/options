@@ -7,6 +7,9 @@ A Python-based options screening tool that fetches real-time options data and id
 This screener analyzes options chains for any stock ticker and outputs **15 top picks**: 5 low-priced, 5 medium-priced, and 5 high-priced options. Each pick is evaluated on multiple quality dimensions including liquidity, bid-ask spread, delta characteristics, and implied volatility.
 
 **Key Features:**
+- **Two Operating Modes:**
+  - **Single-Stock Mode**: Deep dive analysis of one ticker
+  - **Budget-Based Multi-Stock Mode**: Scan multiple tickers within budget constraints
 - Real-time data via Yahoo Finance (yfinance API)
 - Automatic risk-free rate fetching from 13-week Treasury
 - Multi-factor quality scoring algorithm
@@ -46,15 +49,37 @@ Run the screener:
 python options_screener.py
 ```
 
+#### Mode 1: Single-Stock Analysis
+
 **Interactive Prompts:**
 ```
-Enter stock ticker (e.g., AAPL): TSLA
+Enter stock ticker or 'ALL' for budget mode: TSLA
 How many nearest expirations to scan [4]: 6
 Minimum days to expiration (DTE) [7]: 14
 Maximum days to expiration (DTE) [120]: 90
 Fetching current risk-free rate...
 Using risk-free rate: 4.35% (13-week Treasury)
 ```
+
+#### Mode 2: Budget-Based Multi-Stock Scan
+
+**Interactive Prompts:**
+```
+Enter stock ticker or 'ALL' for budget mode []: ALL
+Enter your budget per contract in USD (e.g., 500) [500]: 750
+Enter comma-separated tickers to scan [AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META]: 
+How many nearest expirations to scan [4]: 4
+Minimum days to expiration (DTE) [7]: 7
+Maximum days to expiration (DTE) [120]: 60
+Fetching current risk-free rate...
+Using risk-free rate: 4.35% (13-week Treasury)
+```
+
+In budget mode, the screener:
+- Scans multiple liquid tickers (default or custom list)
+- Filters options where `(premium × 100) ≤ budget`
+- Presents top 5 picks in each premium category across all tickers
+- Displays ticker, stock price, and contract cost for each pick
 
 **Sample Output:**
 ```
@@ -108,11 +133,34 @@ Using risk-free rate: 4.35% (13-week Treasury)
 
 ---
 
-## 📊 How It Works
+## 🔄 Modes Comparison
+
+| Feature | Single-Stock Mode | Budget-Based Multi-Stock Mode |
+|---------|------------------|-------------------------------|
+| **Trigger** | Enter ticker (e.g., "AAPL") | Enter "ALL" or leave blank |
+| **Tickers Scanned** | 1 | 1-10+ (customizable) |
+| **Budget Filter** | None | Yes (premium × 100 ≤ budget) |
+| **Output** | Top 5 each category for one stock | Top 5 each category across all stocks |
+| **Stock Price Display** | In header | Per contract in listing |
+| **Best Use Case** | Deep analysis of specific stock | Finding best opportunities within budget |
+
+---
+
+## 📈 How It Works
 
 ### 1. Data Collection
+
+**Single-Stock Mode:**
+- Fetches options chains for the specified ticker
+
+**Budget Mode:**
+- Scans multiple tickers (default: AAPL, MSFT, NVDA, AMD, TSLA, SPY, QQQ, AMZN, GOOGL, META)
+- User can specify custom ticker list
+- Combines all options data into unified dataset
+
+**Both Modes:**
 The script uses **yfinance** to fetch:
-- Current underlying stock price
+- Current underlying stock price(s)
 - Current risk-free rate from 13-week Treasury bill (^IRX)
 - Options chains (calls and puts) for the nearest N expirations
 - Bid/ask prices, volume, open interest, implied volatility, strike prices, expiration dates
