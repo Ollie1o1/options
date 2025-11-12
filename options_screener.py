@@ -456,14 +456,21 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     print("\n" + "="*80)
     if mode == "Budget scan":
         print(f"  OPTIONS SCREENER REPORT - MULTI-TICKER (Budget: ${budget:.2f})")
+    elif mode == "Discovery scan":
+        unique_tickers = df_picks["symbol"].nunique()
+        print(f"  OPTIONS SCREENER REPORT - DISCOVERY MODE ({unique_tickers} Tickers)")
     else:
         print(f"  OPTIONS SCREENER REPORT - {df_picks.iloc[0]['symbol']}")
     print("="*80)
-    if mode != "Budget scan":
+    
+    if mode == "Single-stock":
         print(f"  Stock Price: ${underlying_price:.2f}")
-    else:
+    elif mode == "Budget scan":
         print(f"  Budget Constraint: ${budget:.2f} per contract (premium × 100)")
         print(f"  Categories: LOW ($0-${budget*0.33:.2f}) | MEDIUM (${budget*0.33:.2f}-${budget*0.66:.2f}) | HIGH (${budget*0.66:.2f}-${budget:.2f})")
+    elif mode == "Discovery scan":
+        print(f"  Scan Type: Top opportunities across all price ranges (no budget limit)")
+        print(f"  Categories: LOW (bottom 33%) | MEDIUM (middle 33%) | HIGH (top 33%) by premium")
     print(f"  Risk-Free Rate: {rfr*100:.2f}% (13-week Treasury)")
     print(f"  Expirations Scanned: {num_expiries}")
     print(f"  DTE Range: {min_dte} - {max_dte} days")
@@ -491,8 +498,8 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         median_delta = sub["abs_delta"].median()
         print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |Δ| {median_delta:.2f}\n")
         
-        # Column headers (add Ticker for multi-stock mode)
-        if mode == "Budget scan":
+        # Column headers (add Ticker for multi-stock modes)
+        if mode in ["Budget scan", "Discovery scan"]:
             print(f"  {'Tkr':<5} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<7} {'Δ':<7} {'Tag':<4}")
             print("  " + "-"*78)
         else:
@@ -505,7 +512,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             dte = int(r["T_years"] * 365)
             
             # Main line with aligned columns
-            if mode == "Budget scan":
+            if mode in ["Budget scan", "Discovery scan"]:
                 print(
                     f"  {r['symbol']:<5} "
                     f"{r['type'].upper():<5} "
@@ -531,9 +538,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                     f"{moneyness:<4}"
                 )
             # Rationale
-            ticker_info = f"${r['underlying']:.2f}" if mode == "Budget scan" else ""
             cost_per_contract = r['premium'] * 100
-            if mode == "Budget scan":
+            if mode in ["Budget scan", "Discovery scan"]:
+                ticker_info = f"${r['underlying']:.2f}"
                 print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d | Stock: {ticker_info} | Cost: ${cost_per_contract:.2f}\n")
             else:
                 print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d\n")
@@ -549,18 +556,65 @@ def main():
     print("Options Screener (yfinance)")
     print("Note: For personal/informational use only. Review data provider terms.")
     print("\nModes:")
-    print("  - Enter a ticker (e.g., AAPL) for single-stock analysis")
-    print("  - Enter 'ALL' or leave blank for budget-based multi-stock scan\n")
+    print("  1. Enter a ticker (e.g., AAPL) for single-stock analysis")
+    print("  2. Enter 'ALL' for budget-based multi-stock scan")
+    print("  3. Enter 'DISCOVER' to scan top 100 most-traded tickers (no budget limit)\n")
     
-    symbol_input = prompt_input("Enter stock ticker or 'ALL' for budget mode", "").upper()
+    symbol_input = prompt_input("Enter stock ticker, 'ALL', or 'DISCOVER'", "").upper()
     
     # Determine mode
-    is_budget_mode = (symbol_input == "ALL" or symbol_input == "")
-    mode = "Budget scan" if is_budget_mode else "Single-stock"
+    is_budget_mode = (symbol_input == "ALL")
+    is_discovery_mode = (symbol_input == "DISCOVER" or symbol_input == "")
+    
+    if is_discovery_mode:
+        mode = "Discovery scan"
+    elif is_budget_mode:
+        mode = "Budget scan"
+    else:
+        mode = "Single-stock"
+    
     budget = None
     tickers = []
     
-    if is_budget_mode:
+    if is_discovery_mode:
+        # Discovery mode: scan top 100 most-traded options tickers
+        print("\n=== DISCOVERY MODE ===")
+        print("Scanning top 100 most-traded options tickers for best opportunities...")
+        
+        # Top 100 most liquid options tickers (ordered by typical volume)
+        tickers = [
+            # Major Indices & ETFs
+            "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "EEM", "GLD", "SLV", "TLT",
+            "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE",
+            # Mega Cap Tech
+            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "INTC",
+            "CRM", "ORCL", "ADBE", "CSCO", "AVGO", "QCOM", "TXN", "AMAT", "MU", "LRCX",
+            # Financial
+            "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "V",
+            "MA", "PYPL", "SQ", "COIN",
+            # Healthcare & Pharma
+            "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "LLY", "ABT", "DHR", "BMY",
+            "AMGN", "GILD", "CVS", "MRNA", "BNTX",
+            # Consumer & Retail
+            "WMT", "HD", "DIS", "NKE", "MCD", "SBUX", "TGT", "COST", "LOW", "TJX",
+            # Energy
+            "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO",
+            # Industrial & Manufacturing
+            "BA", "CAT", "GE", "MMM", "HON", "UPS", "LMT", "RTX", "DE",
+            # Communication & Media
+            "T", "VZ", "CMCSA", "TMUS", "CHTR",
+            # Automotive & Transportation
+            "F", "GM", "RIVN", "LCID", "NIO", "UBER", "LYFT", "DAL", "UAL", "AAL"
+        ]
+        
+        # Limit to 50 for reasonable scan time
+        max_scan = int(prompt_input("How many tickers to scan (1-100)", "50"))
+        max_scan = max(1, min(100, max_scan))
+        tickers = tickers[:max_scan]
+        
+        print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+        
+    elif is_budget_mode:
         # Budget mode setup
         try:
             budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
@@ -657,10 +711,16 @@ def main():
             print(f"  LOW:    $0 - ${budget*0.33:.2f} (0-33% of budget)")
             print(f"  MEDIUM: ${budget*0.33:.2f} - ${budget*0.66:.2f} (33-66% of budget)")
             print(f"  HIGH:   ${budget*0.66:.2f} - ${budget:.2f} (66-100% of budget)")
+        elif is_discovery_mode:
+            # Discovery mode: no budget filter, use quantiles for categorization
+            print(f"\nDiscovery Mode: Analyzing {len(df_scored)} quality options across all price ranges...")
         
         # Categorize and pick
+        # Use budget categorization for budget mode, quantile for single-stock and discovery
         df_bucketed = categorize_by_premium(df_scored, budget=budget if is_budget_mode else None)
-        picks = pick_top_per_bucket(df_bucketed, per_bucket=5, diversify_tickers=is_budget_mode)
+        
+        # Diversify tickers in budget and discovery modes
+        picks = pick_top_per_bucket(df_bucketed, per_bucket=5, diversify_tickers=(is_budget_mode or is_discovery_mode))
         if picks.empty:
             print("Could not produce picks in the requested buckets.")
             sys.exit(0)
@@ -699,12 +759,15 @@ def main():
             f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
             f"Strike ${top_pick['strike']:.2f} | Exp {exp} ({dte}d) | {moneyness}\n"
         )
-        if mode == "Budget scan":
+        if mode in ["Budget scan", "Discovery scan"]:
             print(f"  Stock Price: ${top_pick['underlying']:.2f}")
         print(f"  Premium: {format_money(top_pick['premium'])}")
         if mode == "Budget scan":
             contract_cost = top_pick['premium'] * 100
             print(f"  Contract Cost: ${contract_cost:.2f} (within ${budget:.2f} budget)")
+        elif mode == "Discovery scan":
+            contract_cost = top_pick['premium'] * 100
+            print(f"  Contract Cost: ${contract_cost:.2f}")
         print(f"  IV: {format_pct(top_pick['impliedVolatility'])} | Delta: {top_pick['delta']:+.2f} | Quality: {top_pick['quality_score']:.2f}")
         print(f"  Volume: {int(top_pick['volume'])} | OI: {int(top_pick['openInterest'])} | Spread: {format_pct(top_pick['spread_pct'])}")
         
@@ -751,9 +814,10 @@ def main():
         print("  SCAN SUMMARY")
         print("="*80)
         print(f"  Total Picks Displayed: {len(picks)}")
-        if mode == "Budget scan":
+        if mode in ["Budget scan", "Discovery scan"]:
             unique_tickers = picks["symbol"].nunique()
             print(f"  Tickers Covered: {unique_tickers}")
+        if mode == "Budget scan":
             print(f"  Budget Constraint: ${budget:.2f} per contract")
         print(f"  Chain Median IV: {format_pct(chain_iv_median)}")
         print(f"  Expirations Scanned: {max_expiries}")
