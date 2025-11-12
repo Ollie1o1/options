@@ -15,8 +15,10 @@ Note:
 
 import sys
 import math
+import os
+import csv
 from datetime import datetime, timezone
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 # Dependency checks
 missing = []
@@ -54,6 +56,105 @@ def bs_delta(option_type: str, S: float, K: float, T: float, r: float, sigma: fl
             return norm_cdf(d1)
         else:
             return norm_cdf(d1) - 1.0
+    except Exception:
+        return None
+
+
+def calculate_probability_of_profit(option_type: str, S: float, K: float, T: float, sigma: float, premium: float) -> Optional[float]:
+    """Calculate probability of profit at expiration."""
+    try:
+        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0 or premium <= 0:
+            return None
+        
+        # Break-even point
+        if option_type.lower() == "call":
+            breakeven = K + premium
+        else:  # put
+            breakeven = K - premium
+        
+        # Probability that stock will be beyond break-even
+        d = (math.log(S / breakeven) - (0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        
+        if option_type.lower() == "call":
+            return norm_cdf(d)
+        else:
+            return 1.0 - norm_cdf(d)
+    except Exception:
+        return None
+
+
+def calculate_expected_move(S: float, sigma: float, T: float) -> Optional[float]:
+    """Calculate expected move (1 standard deviation) until expiration."""
+    try:
+        if S <= 0 or sigma <= 0 or T <= 0:
+            return None
+        return S * sigma * math.sqrt(T)
+    except Exception:
+        return None
+
+
+def calculate_probability_of_touch(option_type: str, S: float, K: float, T: float, sigma: float) -> Optional[float]:
+    """Calculate probability that option will touch the strike price before expiration."""
+    try:
+        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+            return None
+        
+        # Probability of touching is approximately 2 * delta for ATM options
+        # More precise: P(touch) ≈ 2 * N(d2)
+        d2 = (math.log(S / K) - (0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        
+        if option_type.lower() == "call" and K > S:
+            return 2 * norm_cdf(d2)
+        elif option_type.lower() == "put" and K < S:
+            return 2 * (1.0 - norm_cdf(d2))
+        else:
+            # ITM already touched
+            return 1.0
+    except Exception:
+        return None
+
+
+def calculate_risk_reward(option_type: str, premium: float, S: float, K: float) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Calculate max loss, break-even, and potential reward ratio."""
+    try:
+        if premium <= 0 or S <= 0 or K <= 0:
+            return None, None, None
+        
+        max_loss = premium * 100  # Per contract
+        
+        if option_type.lower() == "call":
+            breakeven = K + premium
+            # Potential reward: assume move to 2x expected (simplified)
+            potential_reward = max(0, (S * 1.5 - K) * 100 - max_loss)
+        else:  # put
+            breakeven = K - premium
+            potential_reward = max(0, (K - S * 0.5) * 100 - max_loss)
+        
+        risk_reward_ratio = potential_reward / max_loss if max_loss > 0 else 0
+        
+        return max_loss, breakeven, risk_reward_ratio
+    except Exception:
+        return None, None, None
+
+
+def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[float]:
+    """Fetch historical volatility (annualized) from recent price data."""
+    try:
+        hist = ticker.history(period=f"{period+10}d", interval="1d")
+        if hist.empty or len(hist) < period:
+            return None
+        
+        # Calculate log returns
+        returns = (hist['Close'] / hist['Close'].shift(1)).apply(math.log).dropna()
+        
+        if len(returns) < 2:
+            return None
+        
+        # Annualized standard deviation
+        daily_vol = returns.std()
+        annual_vol = daily_vol * math.sqrt(252)  # Trading days
+        
+        return annual_vol
     except Exception:
         return None
 
@@ -142,11 +243,16 @@ def get_risk_free_rate() -> float:
     return default_rate
 
 
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> pd.DataFrame:
+def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float]]:
+    """Fetch options data and historical volatility for a symbol."""
     tkr = yf.Ticker(symbol)
     underlying = get_underlying_price(tkr)
     if underlying is None:
         raise ValueError("Could not determine underlying price for ticker.")
+    
+    # Fetch historical volatility
+    hv = get_historical_volatility(tkr, period=30)
+    
     try:
         expirations = tkr.options
     except Exception as e:
@@ -182,7 +288,8 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> pd.DataFrame:
         raise RuntimeError("No options data frames fetched from yfinance.")
     df = pd.concat(frames, ignore_index=True)
     df["underlying"] = underlying
-    return df
+    df["hv_30d"] = hv  # Add historical volatility column
+    return df, hv
 
 
 def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rate: float) -> pd.DataFrame:
@@ -243,6 +350,89 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
 
     df["delta"] = df.apply(_row_delta, axis=1)
     df["abs_delta"] = df["delta"].abs()
+    
+    # === NEW ADVANCED METRICS ===
+    
+    # Probability of Profit
+    def _calc_pop(row):
+        return calculate_probability_of_profit(
+            row["type"],
+            safe_float(row["underlying"]),
+            safe_float(row["strike"]),
+            safe_float(row["T_years"]),
+            safe_float(row["impliedVolatility"]),
+            safe_float(row["premium"])
+        )
+    df["prob_profit"] = df.apply(_calc_pop, axis=1)
+    
+    # Expected Move
+    def _calc_exp_move(row):
+        return calculate_expected_move(
+            safe_float(row["underlying"]),
+            safe_float(row["impliedVolatility"]),
+            safe_float(row["T_years"])
+        )
+    df["expected_move"] = df.apply(_calc_exp_move, axis=1)
+    
+    # Probability of Touch
+    def _calc_pot(row):
+        return calculate_probability_of_touch(
+            row["type"],
+            safe_float(row["underlying"]),
+            safe_float(row["strike"]),
+            safe_float(row["T_years"]),
+            safe_float(row["impliedVolatility"])
+        )
+    df["prob_touch"] = df.apply(_calc_pot, axis=1)
+    
+    # Risk/Reward Analysis
+    def _calc_rr(row):
+        max_loss, breakeven, rr_ratio = calculate_risk_reward(
+            row["type"],
+            safe_float(row["premium"]),
+            safe_float(row["underlying"]),
+            safe_float(row["strike"])
+        )
+        return pd.Series({
+            'max_loss': max_loss,
+            'breakeven': breakeven,
+            'rr_ratio': rr_ratio
+        })
+    
+    rr_data = df.apply(_calc_rr, axis=1)
+    df["max_loss"] = rr_data["max_loss"]
+    df["breakeven"] = rr_data["breakeven"]
+    df["rr_ratio"] = rr_data["rr_ratio"]
+    
+    # IV vs HV comparison (IV advantage)
+    if "hv_30d" in df.columns and df["hv_30d"].notna().any():
+        df["iv_vs_hv"] = df["impliedVolatility"] - df["hv_30d"]
+        df["iv_hv_ratio"] = df["impliedVolatility"] / df["hv_30d"].replace(0, float('nan'))
+    else:
+        df["iv_vs_hv"] = 0.0
+        df["iv_hv_ratio"] = 1.0
+    
+    # IV Skew (calls vs puts at same strike/expiry)
+    df["iv_skew"] = 0.0  # Default
+    for (exp, strike), group in df.groupby(["expiration", "strike"]):
+        if len(group) == 2:  # Has both call and put
+            call_iv = group[group["type"] == "call"]["impliedVolatility"].values
+            put_iv = group[group["type"] == "put"]["impliedVolatility"].values
+            if len(call_iv) > 0 and len(put_iv) > 0:
+                skew = put_iv[0] - call_iv[0]
+                df.loc[group.index, "iv_skew"] = skew
+    
+    # Liquidity Quality Flags
+    df["liquidity_flag"] = "GOOD"
+    df.loc[(df["volume"] < 10) & (df["openInterest"] < 100), "liquidity_flag"] = "POOR"
+    df.loc[(df["volume"] >= 10) & (df["volume"] < 50) & (df["openInterest"] >= 100) & (df["openInterest"] < 500), "liquidity_flag"] = "FAIR"
+    
+    # Wide Spread Flag
+    df["spread_flag"] = "OK"
+    df.loc[df["spread_pct"] > 0.10, "spread_flag"] = "WIDE"
+    df.loc[df["spread_pct"] > 0.20, "spread_flag"] = "VERY_WIDE"
+    
+    # === END NEW METRICS ===
 
     # Normalize features using ranks to reduce outlier impact
     def rank_norm(s: pd.Series) -> pd.Series:
@@ -272,13 +462,26 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
 
     # Liquidity (volume+OI)
     liquidity = 0.5 * (vol_n + oi_n)
+    
+    # IV Advantage Score (prefer IV > HV but not extreme)
+    iv_advantage = df["iv_vs_hv"].fillna(0).clip(lower=-0.2, upper=0.2)
+    iv_advantage_score = (iv_advantage + 0.2) / 0.4  # Normalize to 0-1
+    
+    # Probability of Profit Score
+    pop_score = df["prob_profit"].fillna(0.5).clip(lower=0, upper=1)
+    
+    # Risk/Reward Score (higher is better, cap at 3:1)
+    rr_score = df["rr_ratio"].fillna(0).clip(lower=0, upper=3) / 3.0
 
-    # Composite score
+    # Enhanced Composite Score
+    # 25% liquidity, 20% IV advantage, 20% R/R, 15% PoP, 10% spread, 10% delta
     df["quality_score"] = (
-        0.35 * liquidity +
-        0.25 * spread_score +
-        0.20 * delta_quality +
-        0.20 * iv_quality
+        0.25 * liquidity +
+        0.20 * iv_advantage_score +
+        0.20 * rr_score +
+        0.15 * pop_score +
+        0.10 * spread_score +
+        0.10 * delta_quality
     )
 
     # Keep helpful computed columns
@@ -546,6 +749,81 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d\n")
 
 
+def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = None) -> str:
+    """Export picks to CSV with timestamp."""
+    try:
+        # Create exports directory if it doesn't exist
+        os.makedirs("exports", exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"exports/options_picks_{mode.replace(' ', '_')}_{timestamp}.csv"
+        
+        # Select relevant columns for export
+        export_cols = [
+            "symbol", "type", "strike", "expiration", "premium", "underlying",
+            "delta", "impliedVolatility", "hv_30d", "iv_vs_hv",
+            "volume", "openInterest", "spread_pct",
+            "prob_profit", "expected_move", "prob_touch",
+            "max_loss", "breakeven", "rr_ratio",
+            "quality_score", "liquidity_flag", "spread_flag", "price_bucket"
+        ]
+        
+        # Filter to existing columns
+        export_cols = [c for c in export_cols if c in df_picks.columns]
+        
+        df_picks[export_cols].to_csv(filename, index=False)
+        return filename
+    except Exception as e:
+        print(f"Warning: Could not export CSV: {e}")
+        return None
+
+
+def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
+    """Log trade entries for future P/L tracking."""
+    try:
+        # Create trades_log directory if it doesn't exist
+        os.makedirs("trades_log", exist_ok=True)
+        
+        log_file = "trades_log/entries.csv"
+        file_exists = os.path.exists(log_file)
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        with open(log_file, 'a', newline='') as f:
+            fieldnames = [
+                'timestamp', 'mode', 'symbol', 'type', 'strike', 'expiration',
+                'entry_premium', 'entry_underlying', 'delta', 'iv', 'hv',
+                'prob_profit', 'rr_ratio', 'quality_score', 'status'
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            
+            if not file_exists:
+                writer.writeheader()
+            
+            for _, row in df_picks.iterrows():
+                writer.writerow({
+                    'timestamp': timestamp,
+                    'mode': mode,
+                    'symbol': row.get('symbol', ''),
+                    'type': row.get('type', ''),
+                    'strike': row.get('strike', ''),
+                    'expiration': row.get('expiration', ''),
+                    'entry_premium': row.get('premium', ''),
+                    'entry_underlying': row.get('underlying', ''),
+                    'delta': row.get('delta', ''),
+                    'iv': row.get('impliedVolatility', ''),
+                    'hv': row.get('hv_30d', ''),
+                    'prob_profit': row.get('prob_profit', ''),
+                    'rr_ratio': row.get('rr_ratio', ''),
+                    'quality_score': row.get('quality_score', ''),
+                    'status': 'OPEN'
+                })
+        
+        print(f"\n  💾 Trade entries logged to {log_file}")
+    except Exception as e:
+        print(f"Warning: Could not log trades: {e}")
+
+
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     sfx = f" [{default}]" if default is not None else ""
     val = input(f"{prompt}{sfx}: ").strip()
@@ -673,10 +951,11 @@ def main():
         for ticker in tickers:
             try:
                 print(f"  Fetching {ticker}...", end="")
-                df_raw = fetch_options_yfinance(ticker, max_expiries=max_expiries)
+                df_raw, hv = fetch_options_yfinance(ticker, max_expiries=max_expiries)
                 if not df_raw.empty:
                     all_frames.append(df_raw)
-                    print(" ✓")
+                    hv_str = f" HV:{hv*100:.1f}%" if hv else ""
+                    print(f" ✓{hv_str}")
                 else:
                     print(" (no data)")
             except Exception as e:
@@ -827,10 +1106,26 @@ def main():
         print("="*80)
         print("\n  ⚠️  Not financial advice. Verify all data before trading.")
         print("="*80 + "\n")
+        
+        # === EXPORT AND LOGGING ===
+        export_choice = prompt_input("Export results to CSV? (y/n)", "n").lower()
+        if export_choice == "y":
+            csv_file = export_to_csv(picks, mode, budget)
+            if csv_file:
+                print(f"\n  📄 Results exported to: {csv_file}")
+        
+        log_choice = prompt_input("Log trades for P/L tracking? (y/n)", "n").lower()
+        if log_choice == "y":
+            log_trade_entry(picks, mode)
+        
+        print("\n👋 Done! Happy trading!\n")
+        
     except KeyboardInterrupt:
         print("\nCancelled.")
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
