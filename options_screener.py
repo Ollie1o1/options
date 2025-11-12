@@ -100,6 +100,48 @@ def get_underlying_price(ticker: yf.Ticker) -> Optional[float]:
     return None
 
 
+def get_risk_free_rate() -> float:
+    """
+    Fetch the current risk-free rate from yfinance using 13-week Treasury bill (^IRX).
+    Returns annualized rate as decimal (e.g., 0.045 for 4.5%).
+    Falls back to 4.5% if unable to fetch.
+    """
+    default_rate = 0.045
+    try:
+        # ^IRX is the 13-week Treasury bill yield (quoted as annual %)
+        tbill = yf.Ticker("^IRX")
+        # Try fast_info first
+        try:
+            fi = getattr(tbill, "fast_info", None)
+            if fi:
+                rate = safe_float(getattr(fi, "last_price", None))
+                if rate and rate > 0:
+                    return rate / 100.0  # Convert from percentage to decimal
+        except Exception:
+            pass
+        
+        # Try info dict
+        try:
+            info = tbill.info or {}
+            rate = safe_float(info.get("regularMarketPrice"))
+            if rate and rate > 0:
+                return rate / 100.0
+        except Exception:
+            pass
+        
+        # Try recent history
+        hist = tbill.history(period="5d", interval="1d")
+        if not hist.empty:
+            rate = safe_float(hist["Close"].iloc[-1])
+            if rate and rate > 0:
+                return rate / 100.0
+    except Exception:
+        pass
+    
+    # Fallback to default
+    return default_rate
+
+
 def fetch_options_yfinance(symbol: str, max_expiries: int) -> pd.DataFrame:
     tkr = yf.Ticker(symbol)
     underlying = get_underlying_price(tkr)
@@ -387,14 +429,10 @@ def main():
         print("Invalid DTE inputs.")
         sys.exit(1)
 
-    try:
-        rfr_str = prompt_input("Risk-free rate (annualized, e.g., 0.045 for 4.5%)", "0.045")
-        rfr = float(rfr_str)
-        if rfr < -0.01 or rfr > 0.25:
-            print("Risk-free rate seems out of typical bounds (-1% to 25%).")
-    except Exception:
-        print("Invalid risk-free rate. Use a number like 0.045")
-        sys.exit(1)
+    # Fetch risk-free rate automatically
+    print("Fetching current risk-free rate...")
+    rfr = get_risk_free_rate()
+    print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
 
     try:
         df_raw = fetch_options_yfinance(symbol, max_expiries=max_expiries)
