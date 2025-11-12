@@ -17,8 +17,12 @@ import sys
 import math
 import os
 import csv
+import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional, Tuple, List, Dict
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Dependency checks
 missing = []
@@ -30,7 +34,6 @@ try:
     import yfinance as yf
 except Exception:
     missing.append("yfinance")
-
 if missing:
     print(f"Missing dependencies: {', '.join(missing)}")
     print("Install with: pip install " + " ".join(missing))
@@ -58,6 +61,33 @@ def bs_delta(option_type: str, S: float, K: float, T: float, r: float, sigma: fl
             return norm_cdf(d1) - 1.0
     except Exception:
         return None
+
+
+def bs_price(option_type: str, S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
+    """Black-Scholes theoretical option price (using N(d1), N(d2))."""
+    try:
+        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+            return None
+        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        if option_type.lower() == "call":
+            return S * math.exp(r * T) * norm_cdf(d1) - K * norm_cdf(d2)
+        else:
+            return K * norm_cdf(-d2) - S * math.exp(r * T) * norm_cdf(-d1)
+    except Exception:
+        return None
+
+
+def _d1d2(S: float, K: float, T: float, r: float, sigma: float) -> Tuple[Optional[float], Optional[float]]:
+    """Compute d1, d2 for Black-Scholes; returns (d1, d2) or (None, None)."""
+    try:
+        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+            return None, None
+        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        return d1, d2
+    except Exception:
+        return None, None
 
 
 def calculate_probability_of_profit(option_type: str, S: float, K: float, T: float, sigma: float, premium: float) -> Optional[float]:
@@ -434,6 +464,36 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
     
     # === END NEW METRICS ===
 
+    # Expected value (EV) and probability ITM using Black-Scholes
+    def _calc_ev(row):
+        S = safe_float(row["underlying"], 0.0) or 0.0
+        K = safe_float(row["strike"], 0.0) or 0.0
+        T = safe_float(row["T_years"], 0.0) or 0.0
+        sigma = max(1e-9, safe_float(row["impliedVolatility"], 0.0) or 0.0)
+        opt_type = row["type"].lower()
+        d1, d2 = _d1d2(S, K, T, risk_free_rate, sigma)
+        if d1 is None:
+            return pd.Series({"p_itm": None, "theo_value": None, "ev_per_contract": None})
+        # Probability of expiring ITM under risk-neutral measure
+        p_itm = norm_cdf(d2) if opt_type == "call" else norm_cdf(-d2)
+        # Expected payoff at expiration (risk-neutral)
+        if opt_type == "call":
+            expected_payoff = S * math.exp(risk_free_rate * T) * norm_cdf(d1) - K * norm_cdf(d2)
+        else:
+            expected_payoff = K * norm_cdf(-d2) - S * math.exp(risk_free_rate * T) * norm_cdf(-d1)
+        theo_value = expected_payoff  # theoretical RN value
+        premium = safe_float(row["premium"], 0.0) or 0.0
+        # Approximate round-trip half-spread cost (enter+exit ~ 1 spread)
+        spread_pct = row.get("spread_pct", 0.0)
+        spread_cost = 100.0 * premium * float(spread_pct if pd.notna(spread_pct) else 0.0)
+        ev = 100.0 * (expected_payoff - premium) - spread_cost
+        return pd.Series({"p_itm": p_itm, "theo_value": theo_value, "ev_per_contract": ev})
+
+    ev_data = df.apply(_calc_ev, axis=1)
+    df["p_itm"] = ev_data["p_itm"]
+    df["theo_value"] = ev_data["theo_value"]
+    df["ev_per_contract"] = ev_data["ev_per_contract"]
+
     # Normalize features using ranks to reduce outlier impact
     def rank_norm(s: pd.Series) -> pd.Series:
         n = len(s)
@@ -473,16 +533,19 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
     # Risk/Reward Score (higher is better, cap at 3:1)
     rr_score = df["rr_ratio"].fillna(0).clip(lower=0, upper=3) / 3.0
 
-    # Enhanced Composite Score
-    # 25% liquidity, 20% IV advantage, 20% R/R, 15% PoP, 10% spread, 10% delta
+    # EV score (rank-normalized expected value per contract)
+    ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
+
+    # Enhanced Composite Score (prioritize profit accuracy via EV and PoP)
     df["quality_score"] = (
-        0.25 * liquidity +
-        0.20 * iv_advantage_score +
-        0.20 * rr_score +
+        0.30 * ev_score +
+        0.20 * liquidity +
+        0.15 * iv_advantage_score +
         0.15 * pop_score +
         0.10 * spread_score +
         0.10 * delta_quality
     )
+    df["ev_score"] = ev_score
 
     # Keep helpful computed columns
     df["spread_pct"] = df["spread_pct"].replace([float("inf"), -float("inf")], pd.NA)
@@ -545,7 +608,7 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
         
         if diversify_tickers and "symbol" in sub.columns:
             # Try to get diverse tickers in budget mode
-            # Sort by quality first
+            # Sort by quality first (now includes EV)
             sub = sub.sort_values(
                 by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
                 ascending=[False, True, False, False, True],
@@ -763,8 +826,9 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
             "symbol", "type", "strike", "expiration", "premium", "underlying",
             "delta", "impliedVolatility", "hv_30d", "iv_vs_hv",
             "volume", "openInterest", "spread_pct",
-            "prob_profit", "expected_move", "prob_touch",
+            "prob_profit", "expected_move", "prob_touch", "p_itm",
             "max_loss", "breakeven", "rr_ratio",
+            "theo_value", "ev_per_contract", "ev_score",
             "quality_score", "liquidity_flag", "spread_flag", "price_bucket"
         ]
         
@@ -793,7 +857,8 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
             fieldnames = [
                 'timestamp', 'mode', 'symbol', 'type', 'strike', 'expiration',
                 'entry_premium', 'entry_underlying', 'delta', 'iv', 'hv',
-                'prob_profit', 'rr_ratio', 'quality_score', 'status'
+                'prob_profit', 'p_itm', 'rr_ratio', 'theo_value', 'ev_per_contract',
+                'quality_score', 'status'
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             
@@ -814,7 +879,10 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
                     'iv': row.get('impliedVolatility', ''),
                     'hv': row.get('hv_30d', ''),
                     'prob_profit': row.get('prob_profit', ''),
+                    'p_itm': row.get('p_itm', ''),
                     'rr_ratio': row.get('rr_ratio', ''),
+                    'theo_value': row.get('theo_value', ''),
+                    'ev_per_contract': row.get('ev_per_contract', ''),
                     'quality_score': row.get('quality_score', ''),
                     'status': 'OPEN'
                 })
@@ -822,6 +890,33 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
         print(f"\n  💾 Trade entries logged to {log_file}")
     except Exception as e:
         print(f"Warning: Could not log trades: {e}")
+
+
+def setup_logging() -> logging.Logger:
+    """Configure a simple console logger and JSONL file logger.
+    LOG_LEVEL env var controls verbosity (default INFO).
+    """
+    level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(level=getattr(logging, level, logging.INFO), format="%(message)s")
+    logger = logging.getLogger("options_screener")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs("logs", exist_ok=True)
+    logger.json_path = os.path.join("logs", f"run_{ts}.jsonl")  # type: ignore[attr-defined]
+    return logger
+
+
+def log_picks_json(logger: logging.Logger, picks_df: pd.DataFrame, context: Dict):
+    """Append picks to a JSONL log for later evaluation/backtesting."""
+    try:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "context": context,
+            "picks": picks_df.to_dict(orient="records"),
+        }
+        with open(logger.json_path, "a") as f:  # type: ignore[attr-defined]
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
 
 
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
@@ -921,6 +1016,7 @@ def main():
         tickers = [symbol_input]
         print(f"\nSingle-Stock Mode: Analyzing {symbol_input}...")
 
+    logger = setup_logging()
     try:
         max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
         if max_expiries <= 0 or max_expiries > 12:
@@ -946,26 +1042,46 @@ def main():
     print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
 
     try:
-        # Collect data from all tickers
+        # Collect data from all tickers (parallel for speed)
         all_frames = []
-        for ticker in tickers:
+        errors = []
+        def _fetch(tkr: str):
             try:
-                print(f"  Fetching {ticker}...", end="")
-                df_raw, hv = fetch_options_yfinance(ticker, max_expiries=max_expiries)
-                if not df_raw.empty:
-                    all_frames.append(df_raw)
-                    hv_str = f" HV:{hv*100:.1f}%" if hv else ""
-                    print(f" ✓{hv_str}")
-                else:
-                    print(" (no data)")
+                df_raw, hv = fetch_options_yfinance(tkr, max_expiries=max_expiries)
+                return {"ticker": tkr, "df": df_raw, "hv": hv, "error": None}
             except Exception as e:
-                print(f" (error: {str(e)[:30]})")
-                continue
-        
+                return {"ticker": tkr, "df": None, "hv": None, "error": str(e)}
+
+        max_workers = min(8, len(tickers)) if len(tickers) > 1 else 1
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {ex.submit(_fetch, t): t for t in tickers}
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    t = res["ticker"]
+                    if res["df"] is not None and not res["df"].empty:
+                        all_frames.append(res["df"])
+                        hv = res["hv"]
+                        hv_str = f" HV:{hv*100:.1f}%" if hv else ""
+                        print(f"  Fetched {t} ✓{hv_str}")
+                    else:
+                        print(f"  Fetched {t} (no data)")
+                    if res["error"]:
+                        errors.append({"ticker": t, "error": res["error"]})
+        else:
+            res = _fetch(tickers[0])
+            if res["df"] is not None and not res["df"].empty:
+                all_frames.append(res["df"])
+                hv = res["hv"]
+                hv_str = f" HV:{hv*100:.1f}%" if hv else ""
+                print(f"  Fetched {tickers[0]} ✓{hv_str}")
+            elif res["error"]:
+                errors.append({"ticker": tickers[0], "error": res["error"]})
+
         if not all_frames:
             print("\nNo options data retrieved from any ticker.")
             sys.exit(0)
-        
+
         # Combine all data
         df_combined = pd.concat(all_frames, ignore_index=True)
         print(f"\nProcessing {len(df_combined)} total options contracts...")
@@ -1010,6 +1126,19 @@ def main():
         # Print main report
         print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget)
         
+        # Structured JSONL logging of the picks and context
+        log_picks_json(
+            logger,
+            picks,
+            context={
+                "mode": mode,
+                "budget": budget,
+                "max_expiries": max_expiries,
+                "min_dte": min_dte,
+                "max_dte": max_dte,
+                "risk_free_rate": rfr,
+            },
+        )
         # Compute and display top overall pick
         print("\n" + "="*80)
         print("  ⭐ TOP OVERALL PICK")
