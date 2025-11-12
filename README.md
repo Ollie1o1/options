@@ -8,6 +8,7 @@ This screener analyzes options chains for any stock ticker and outputs **15 top 
 
 **Key Features:**
 - Real-time data via Yahoo Finance (yfinance API)
+- Automatic risk-free rate fetching from 13-week Treasury
 - Multi-factor quality scoring algorithm
 - Black-Scholes delta calculations
 - User-friendly CLI with sensible defaults
@@ -47,7 +48,8 @@ Enter stock ticker (e.g., AAPL): TSLA
 How many nearest expirations to scan [4]: 6
 Minimum days to expiration (DTE) [7]: 14
 Maximum days to expiration (DTE) [120]: 90
-Risk-free rate (annualized, e.g., 0.045 for 4.5%) [0.045]: 0.05
+Fetching current risk-free rate...
+Using risk-free rate: 4.35% (13-week Treasury)
 ```
 
 **Sample Output:**
@@ -72,6 +74,7 @@ TSLA CALL  Strike 250.00  Exp 2025-02-21  Prem $1.25  IV 45.2%  OI   1250  Vol  
 ### 1. Data Collection
 The script uses **yfinance** to fetch:
 - Current underlying stock price
+- Current risk-free rate from 13-week Treasury bill (^IRX)
 - Options chains (calls and puts) for the nearest N expirations
 - Bid/ask prices, volume, open interest, implied volatility, strike prices, expiration dates
 
@@ -190,7 +193,7 @@ d₁ = [ln(S/K) + (r + σ²/2)T] / (σ√T)
 | Max Expirations | 4 | Number of nearest expiration dates to scan |
 | Min DTE | 7 | Minimum days to expiration filter |
 | Max DTE | 120 | Maximum days to expiration filter |
-| Risk-Free Rate | 0.045 | Annualized rate (4.5% = 0.045) for delta calc |
+| Risk-Free Rate | Auto | Fetched from 13-week Treasury (^IRX), fallback 4.5% |
 
 ### Code-Level Customization
 
