@@ -1,0 +1,54 @@
+{
+  "weights": {
+    "ev_score": 0.30,
+    "liquidity": 0.20,
+    "iv_advantage": 0.15,
+    "pop": 0.15,
+    "spread": 0.10,
+    "delta_quality": 0.10
+  },
+  "vix_regimes": {
+    "low": {
+      "threshold": 15,
+      "weights": {
+        "ev_score": 0.30,
+        "liquidity": 0.20,
+        "iv_advantage": 0.10,
+        "pop": 0.15,
+        "spread": 0.20,
+        "delta_quality": 0.05
+      }
+    },
+    "normal": {
+      "threshold_min": 15,
+      "threshold_max": 25,
+      "weights": {
+        "ev_score": 0.30,
+        "liquidity": 0.20,
+        "iv_advantage": 0.15,
+        "pop": 0.15,
+        "spread": 0.10,
+        "delta_quality": 0.10
+      }
+    },
+    "high": {
+      "threshold": 25,
+      "weights": {
+        "ev_score": 0.25,
+        "liquidity": 0.20,
+        "iv_advantage": 0.30,
+        "pop": 0.15,
+        "spread": 0.05,
+        "delta_quality": 0.05
+      }
+    }
+  },
+  "moneyness_band": 0.15,
+  "max_expirations": 4,
+  "default_budget": 750,
+  "target_delta": 0.40,
+  "earnings_buffer_days": 5,
+  "iv_rank_weight_threshold": 0.5,
+  "iv_rank_low_threshold": 0.2,
+  "monte_carlo_simulations": 10000
+}
