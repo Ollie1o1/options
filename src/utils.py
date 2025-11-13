@@ -5,7 +5,7 @@ This module re-exports commonly used helpers from ``options_screener`` so they
 can be imported without pulling in the full CLI entrypoint.
 """
 
-from options_screener import (
+from .options_screener import (
     safe_float,
     norm_cdf,
     bs_delta,

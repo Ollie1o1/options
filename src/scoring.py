@@ -5,7 +5,7 @@ This module provides access to the core scoring and reporting routines
 without importing the CLI ``main`` entrypoint.
 """
 
-from options_screener import (
+from .options_screener import (
     enrich_and_score,
     rationale_row,
     print_report,
