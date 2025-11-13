@@ -34,10 +34,107 @@ try:
     import yfinance as yf
 except Exception:
     missing.append("yfinance")
+try:
+    import numpy as np
+except Exception:
+    missing.append("numpy")
 if missing:
     print(f"Missing dependencies: {', '.join(missing)}")
     print("Install with: pip install " + " ".join(missing))
     sys.exit(1)
+
+# Optional imports
+try:
+    from simulation import monte_carlo_pop
+    HAS_SIMULATION = True
+except ImportError:
+    HAS_SIMULATION = False
+
+try:
+    from visualize_results import create_visualizations
+    HAS_VISUALIZATION = True
+except ImportError:
+    HAS_VISUALIZATION = False
+
+
+def load_config(config_path: str = "config.json") -> Dict:
+    """Load configuration from JSON file with fallback defaults."""
+    default_config = {
+        "weights": {
+            "ev_score": 0.30,
+            "liquidity": 0.20,
+            "iv_advantage": 0.15,
+            "pop": 0.15,
+            "spread": 0.10,
+            "delta_quality": 0.10
+        },
+        "moneyness_band": 0.15,
+        "target_delta": 0.40,
+        "earnings_buffer_days": 5,
+        "monte_carlo_simulations": 10000
+    }
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+            # Merge with defaults
+            for key in default_config:
+                if key not in config:
+                    config[key] = default_config[key]
+            return config
+    except Exception:
+        return default_config
+
+
+def get_vix_level() -> Optional[float]:
+    """Fetch current VIX level from yfinance."""
+    try:
+        vix = yf.Ticker("^VIX")
+        # Try fast_info first
+        try:
+            fi = getattr(vix, "fast_info", None)
+            if fi:
+                level = safe_float(getattr(fi, "last_price", None))
+                if level and level > 0:
+                    return level
+        except Exception:
+            pass
+        
+        # Try info dict
+        try:
+            info = vix.info or {}
+            level = safe_float(info.get("regularMarketPrice"))
+            if level and level > 0:
+                return level
+        except Exception:
+            pass
+        
+        # Try recent history
+        hist = vix.history(period="5d", interval="1d")
+        if not hist.empty:
+            level = safe_float(hist["Close"].iloc[-1])
+            if level and level > 0:
+                return level
+    except Exception:
+        pass
+    
+    return None
+
+
+def determine_vix_regime(vix_level: Optional[float], config: Dict) -> Tuple[str, Dict]:
+    """Determine volatility regime and return appropriate weights."""
+    if vix_level is None:
+        # Default to normal regime
+        return "normal", config.get("weights", {})
+    
+    vix_regimes = config.get("vix_regimes", {})
+    
+    if vix_level < vix_regimes.get("low", {}).get("threshold", 15):
+        return "low", vix_regimes.get("low", {}).get("weights", config.get("weights", {}))
+    elif vix_level > vix_regimes.get("high", {}).get("threshold", 25):
+        return "high", vix_regimes.get("high", {}).get("weights", config.get("weights", {}))
+    else:
+        return "normal", vix_regimes.get("normal", {}).get("weights", config.get("weights", {}))
 
 
 def norm_cdf(x: float) -> float:
@@ -189,6 +286,70 @@ def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[f
         return None
 
 
+def get_iv_rank_percentile(ticker: yf.Ticker, current_iv: float, period_days: int = 252) -> Tuple[Optional[float], Optional[float]]:
+    """Calculate IV Rank and IV Percentile over the specified period."""
+    try:
+        # Fetch 1-year historical data to approximate historical IV range
+        hist = ticker.history(period="1y", interval="1d")
+        if hist.empty or len(hist) < 30:
+            return None, None
+        
+        # Calculate rolling 30-day historical volatility as proxy for IV history
+        returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
+        
+        if len(returns) < 30:
+            return None, None
+        
+        # Rolling 30-day volatility (annualized)
+        rolling_vol = returns.rolling(window=30).std() * np.sqrt(252)
+        rolling_vol = rolling_vol.dropna()
+        
+        if len(rolling_vol) < 2:
+            return None, None
+        
+        # IV Rank: (current - min) / (max - min)
+        iv_min = rolling_vol.min()
+        iv_max = rolling_vol.max()
+        
+        if iv_max - iv_min <= 0:
+            return None, None
+        
+        iv_rank = (current_iv - iv_min) / (iv_max - iv_min)
+        
+        # IV Percentile: percentage of days when IV was below current
+        iv_percentile = (rolling_vol < current_iv).sum() / len(rolling_vol)
+        
+        return float(iv_rank), float(iv_percentile)
+    
+    except Exception:
+        return None, None
+
+
+def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
+    """Fetch next earnings date from yfinance calendar."""
+    try:
+        calendar = ticker.calendar
+        if calendar is not None and not calendar.empty:
+            # Try to extract earnings date
+            if 'Earnings Date' in calendar.index:
+                earnings = calendar.loc['Earnings Date']
+                if pd.notna(earnings.iloc[0]):
+                    return pd.to_datetime(earnings.iloc[0])
+        
+        # Fallback: try from info dict
+        info = ticker.info or {}
+        earnings_date = info.get('earningsDate')
+        if earnings_date:
+            if isinstance(earnings_date, list) and len(earnings_date) > 0:
+                return pd.to_datetime(earnings_date[0], unit='s')
+            else:
+                return pd.to_datetime(earnings_date, unit='s')
+    except Exception:
+        pass
+    
+    return None
+
+
 def safe_float(x, default=None):
     try:
         if x is None:
@@ -273,8 +434,8 @@ def get_risk_free_rate() -> float:
     return default_rate
 
 
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float]]:
-    """Fetch options data and historical volatility for a symbol."""
+def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime]]:
+    """Fetch options data, historical volatility, IV Rank/Percentile, and earnings date for a symbol."""
     tkr = yf.Ticker(symbol)
     underlying = get_underlying_price(tkr)
     if underlying is None:
@@ -282,6 +443,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     
     # Fetch historical volatility
     hv = get_historical_volatility(tkr, period=30)
+    
+    # Fetch earnings date
+    earnings_date = get_next_earnings_date(tkr)
     
     try:
         expirations = tkr.options
@@ -292,6 +456,8 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
 
     expirations = expirations[:max_expiries]
     frames = []
+    median_iv = None
+    
     for exp in expirations:
         try:
             oc = tkr.option_chain(exp)
@@ -319,10 +485,30 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     df = pd.concat(frames, ignore_index=True)
     df["underlying"] = underlying
     df["hv_30d"] = hv  # Add historical volatility column
-    return df, hv
+    
+    # Calculate median IV for IV Rank/Percentile calculation
+    df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
+    median_iv = df["impliedVolatility"].median(skipna=True)
+    
+    # Get IV Rank and Percentile
+    iv_rank, iv_percentile = None, None
+    if median_iv and pd.notna(median_iv) and median_iv > 0:
+        iv_rank, iv_percentile = get_iv_rank_percentile(tkr, median_iv)
+    
+    return df, hv, iv_rank, iv_percentile, earnings_date
 
 
-def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rate: float) -> pd.DataFrame:
+def enrich_and_score(
+    df: pd.DataFrame,
+    min_dte: int,
+    max_dte: int,
+    risk_free_rate: float,
+    config: Dict,
+    vix_regime_weights: Dict,
+    iv_rank: Optional[float] = None,
+    iv_percentile: Optional[float] = None,
+    earnings_date: Optional[datetime] = None
+) -> pd.DataFrame:
     # Prepare and filter
     now = datetime.now(timezone.utc)
 
@@ -337,6 +523,14 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
     for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility", "underlying"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    
+    # === STRIKE FILTERING (Clean Moneyness Bands) ===
+    moneyness_band = config.get("moneyness_band", 0.15)
+    if "underlying" in df.columns and "strike" in df.columns:
+        df = df[
+            (df["strike"] >= df["underlying"] * (1 - moneyness_band)) &
+            (df["strike"] <= df["underlying"] * (1 + moneyness_band))
+        ].copy()
 
     # Premium as mid if possible, else last
     df["bid"] = df["bid"].fillna(0.0)
@@ -462,6 +656,46 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
     df.loc[df["spread_pct"] > 0.10, "spread_flag"] = "WIDE"
     df.loc[df["spread_pct"] > 0.20, "spread_flag"] = "VERY_WIDE"
     
+    # === IV RANK AND PERCENTILE ===
+    df["iv_rank"] = iv_rank if iv_rank is not None else pd.NA
+    df["iv_percentile"] = iv_percentile if iv_percentile is not None else pd.NA
+    
+    # === EARNINGS AWARENESS ===
+    df["event_flag"] = "OK"
+    if earnings_date is not None:
+        earnings_buffer_days = config.get("earnings_buffer_days", 5)
+        for idx, row in df.iterrows():
+            exp_dt = row["exp_dt"]
+            if pd.notna(exp_dt):
+                # Check if expiration is within buffer of earnings
+                days_to_earnings = abs((exp_dt.replace(tzinfo=None) - earnings_date.replace(tzinfo=None)).days)
+                if days_to_earnings <= earnings_buffer_days:
+                    df.at[idx, "event_flag"] = "EARNINGS_NEARBY"
+    
+    # === MONTE CARLO PROBABILITY SIMULATION ===
+    if HAS_SIMULATION:
+        n_sims = config.get("monte_carlo_simulations", 10000)
+        
+        def _calc_mc_pop(row):
+            pop_sim, pot_sim = monte_carlo_pop(
+                S=safe_float(row["underlying"]),
+                K=safe_float(row["strike"]),
+                T=safe_float(row["T_years"]),
+                sigma=safe_float(row["impliedVolatility"]),
+                r=risk_free_rate,
+                premium=safe_float(row["premium"]),
+                option_type=row["type"],
+                n_simulations=n_sims
+            )
+            return pd.Series({"pop_sim": pop_sim, "pot_sim": pot_sim})
+        
+        mc_results = df.apply(_calc_mc_pop, axis=1)
+        df["pop_sim"] = mc_results["pop_sim"]
+        df["pot_sim"] = mc_results["pot_sim"]
+    else:
+        df["pop_sim"] = pd.NA
+        df["pot_sim"] = pd.NA
+    
     # === END NEW METRICS ===
 
     # Expected value (EV) and probability ITM using Black-Scholes
@@ -536,15 +770,40 @@ def enrich_and_score(df: pd.DataFrame, min_dte: int, max_dte: int, risk_free_rat
     # EV score (rank-normalized expected value per contract)
     ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
 
-    # Enhanced Composite Score (prioritize profit accuracy via EV and PoP)
+    # === ADAPTIVE QUALITY SCORING WITH VIX REGIME WEIGHTS ===
+    # Use VIX-based weights instead of hard-coded
+    w_ev = vix_regime_weights.get("ev_score", 0.30)
+    w_liq = vix_regime_weights.get("liquidity", 0.20)
+    w_iv_adv = vix_regime_weights.get("iv_advantage", 0.15)
+    w_pop = vix_regime_weights.get("pop", 0.15)
+    w_spread = vix_regime_weights.get("spread", 0.10)
+    w_delta = vix_regime_weights.get("delta_quality", 0.10)
+    
+    # Base quality score with adaptive weights
     df["quality_score"] = (
-        0.30 * ev_score +
-        0.20 * liquidity +
-        0.15 * iv_advantage_score +
-        0.15 * pop_score +
-        0.10 * spread_score +
-        0.10 * delta_quality
+        w_ev * ev_score +
+        w_liq * liquidity +
+        w_iv_adv * iv_advantage_score +
+        w_pop * pop_score +
+        w_spread * spread_score +
+        w_delta * delta_quality
     )
+    
+    # Earnings penalty: reduce quality score by 0.1 for contracts near earnings
+    df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.1
+    
+    # IV Rank bonus/penalty
+    if iv_rank is not None and pd.notna(iv_rank):
+        # Bonus for favorable IV Rank (>0.5 for sellers, <0.2 for buyers)
+        # For simplicity, assume we're selling options (premium collection)
+        if iv_rank > 0.5:
+            df["quality_score"] += 0.05  # Bonus for high IV rank
+        elif iv_rank < 0.2:
+            df["quality_score"] -= 0.05  # Penalty for low IV rank
+    
+    # Ensure quality_score stays in reasonable range
+    df["quality_score"] = df["quality_score"].clip(lower=0, upper=1)
+    
     df["ev_score"] = ev_score
 
     # Keep helpful computed columns
@@ -824,12 +1083,12 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
         # Select relevant columns for export
         export_cols = [
             "symbol", "type", "strike", "expiration", "premium", "underlying",
-            "delta", "impliedVolatility", "hv_30d", "iv_vs_hv",
+            "delta", "impliedVolatility", "hv_30d", "iv_vs_hv", "iv_rank", "iv_percentile",
             "volume", "openInterest", "spread_pct",
-            "prob_profit", "expected_move", "prob_touch", "p_itm",
+            "prob_profit", "pop_sim", "expected_move", "prob_touch", "pot_sim", "p_itm",
             "max_loss", "breakeven", "rr_ratio",
             "theo_value", "ev_per_contract", "ev_score",
-            "quality_score", "liquidity_flag", "spread_flag", "price_bucket"
+            "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket"
         ]
         
         # Filter to existing columns
@@ -856,9 +1115,10 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
         with open(log_file, 'a', newline='') as f:
             fieldnames = [
                 'timestamp', 'mode', 'symbol', 'type', 'strike', 'expiration',
-                'entry_premium', 'entry_underlying', 'delta', 'iv', 'hv',
+                'entry_premium', 'entry_underlying', 'delta', 'iv', 'hv', 'iv_rank',
                 'prob_profit', 'p_itm', 'rr_ratio', 'theo_value', 'ev_per_contract',
-                'quality_score', 'status'
+                'quality_score', 'event_flag', 'status',
+                'exit_premium', 'exit_underlying', 'exit_date', 'realized_pnl'
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             
@@ -878,13 +1138,19 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
                     'delta': row.get('delta', ''),
                     'iv': row.get('impliedVolatility', ''),
                     'hv': row.get('hv_30d', ''),
+                    'iv_rank': row.get('iv_rank', ''),
                     'prob_profit': row.get('prob_profit', ''),
                     'p_itm': row.get('p_itm', ''),
                     'rr_ratio': row.get('rr_ratio', ''),
                     'theo_value': row.get('theo_value', ''),
                     'ev_per_contract': row.get('ev_per_contract', ''),
                     'quality_score': row.get('quality_score', ''),
-                    'status': 'OPEN'
+                    'event_flag': row.get('event_flag', ''),
+                    'status': 'OPEN',
+                    'exit_premium': '',
+                    'exit_underlying': '',
+                    'exit_date': '',
+                    'realized_pnl': ''
                 })
         
         print(f"\n  💾 Trade entries logged to {log_file}")
@@ -925,7 +1191,111 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     return default if (not val and default is not None) else val
 
 
+def close_trades():
+    """Update trade log with closing prices and realized P/L."""
+    log_file = "trades_log/entries.csv"
+    
+    if not os.path.exists(log_file):
+        print("No trade log found. Run the screener first and log some trades.")
+        sys.exit(1)
+    
+    print("=" * 80)
+    print("  CLOSE TRADES - Update Trade Log with Realized P/L")
+    print("=" * 80)
+    
+    # Read existing log
+    df_trades = pd.read_csv(log_file)
+    
+    # Filter for OPEN trades
+    open_trades = df_trades[df_trades['status'] == 'OPEN'].copy()
+    
+    if open_trades.empty:
+        print("\nNo open trades found in log.")
+        sys.exit(0)
+    
+    print(f"\nFound {len(open_trades)} open trades.")
+    print("\nFetching current prices and calculating P/L...\n")
+    
+    updated_count = 0
+    for idx, trade in open_trades.iterrows():
+        symbol = trade['symbol']
+        exp_date = pd.to_datetime(trade['expiration']).date()
+        
+        # Check if expired
+        if exp_date > datetime.now().date():
+            continue  # Skip unexpired trades
+        
+        print(f"Processing {symbol} {trade['type']} ${trade['strike']} exp {exp_date}...")
+        
+        try:
+            ticker = yf.Ticker(symbol)
+            
+            # Get price at or near expiration
+            start_date = exp_date - timedelta(days=3)
+            end_date = exp_date + timedelta(days=3)
+            hist = ticker.history(start=start_date, end=end_date, interval="1d")
+            
+            if hist.empty:
+                print(f"  ⚠️  No price data available")
+                continue
+            
+            # Find closest date to expiration
+            hist_dates = hist.index.date
+            closest_date = min(hist_dates, key=lambda d: abs((d - exp_date).days))
+            exit_price = float(hist[hist.index.date == closest_date]['Close'].iloc[0])
+            
+            # Calculate intrinsic value at expiration
+            strike = float(trade['strike'])
+            option_type = trade['type'].lower()
+            
+            if option_type == 'call':
+                intrinsic_value = max(0, exit_price - strike)
+            else:  # put
+                intrinsic_value = max(0, strike - exit_price)
+            
+            entry_premium = float(trade['entry_premium'])
+            exit_premium = intrinsic_value
+            
+            # P/L per share
+            pnl_per_share = exit_premium - entry_premium
+            realized_pnl = pnl_per_share * 100  # Per contract
+            
+            # Update the dataframe
+            df_trades.at[idx, 'exit_premium'] = exit_premium
+            df_trades.at[idx, 'exit_underlying'] = exit_price
+            df_trades.at[idx, 'exit_date'] = closest_date.strftime('%Y-%m-%d')
+            df_trades.at[idx, 'realized_pnl'] = realized_pnl
+            df_trades.at[idx, 'status'] = 'CLOSED'
+            
+            updated_count += 1
+            print(f"  ✓ Closed at ${exit_price:.2f} | P/L: ${realized_pnl:.2f}")
+        
+        except Exception as e:
+            print(f"  ⚠️  Error: {e}")
+    
+    # Save updated log
+    if updated_count > 0:
+        df_trades.to_csv(log_file, index=False)
+        print(f"\n✓ Updated {updated_count} trades in {log_file}")
+    else:
+        print("\nNo trades were updated.")
+    
+    print("\n" + "=" * 80)
+    print("  Done!")
+    print("=" * 80 + "\n")
+
+
 def main():
+    # Check for command-line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--close-trades":
+            close_trades()
+            sys.exit(0)
+        else:
+            print(f"Unknown argument: {sys.argv[1]}")
+            print("Usage: python options_screener.py [--close-trades]")
+            sys.exit(1)
+    
     print("Options Screener (yfinance)")
     print("Note: For personal/informational use only. Review data provider terms.")
     print("\nModes:")
@@ -1016,6 +1386,22 @@ def main():
         tickers = [symbol_input]
         print(f"\nSingle-Stock Mode: Analyzing {symbol_input}...")
 
+    # === LOAD CONFIGURATION ===
+    print("\nLoading configuration...")
+    config = load_config("config.json")
+    print("✓ Configuration loaded")
+    
+    # === FETCH VIX FOR ADAPTIVE WEIGHTING ===
+    print("Fetching VIX level for adaptive scoring...")
+    vix_level = get_vix_level()
+    if vix_level:
+        print(f"✓ VIX Level: {vix_level:.2f}")
+    else:
+        print("⚠️  Could not fetch VIX, using default weights")
+    
+    vix_regime, vix_weights = determine_vix_regime(vix_level, config)
+    print(f"✓ Market Regime: {vix_regime.upper()}")
+    
     logger = setup_logging()
     try:
         max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
@@ -1044,13 +1430,22 @@ def main():
     try:
         # Collect data from all tickers (parallel for speed)
         all_frames = []
+        ticker_metadata = {}  # Store IV Rank, earnings dates per ticker
         errors = []
         def _fetch(tkr: str):
             try:
-                df_raw, hv = fetch_options_yfinance(tkr, max_expiries=max_expiries)
-                return {"ticker": tkr, "df": df_raw, "hv": hv, "error": None}
+                df_raw, hv, iv_rank, iv_percentile, earnings_date = fetch_options_yfinance(tkr, max_expiries=max_expiries)
+                return {
+                    "ticker": tkr,
+                    "df": df_raw,
+                    "hv": hv,
+                    "iv_rank": iv_rank,
+                    "iv_percentile": iv_percentile,
+                    "earnings_date": earnings_date,
+                    "error": None
+                }
             except Exception as e:
-                return {"ticker": tkr, "df": None, "hv": None, "error": str(e)}
+                return {"ticker": tkr, "df": None, "hv": None, "iv_rank": None, "iv_percentile": None, "earnings_date": None, "error": str(e)}
 
         max_workers = min(8, len(tickers)) if len(tickers) > 1 else 1
         if max_workers > 1:
@@ -1061,9 +1456,17 @@ def main():
                     t = res["ticker"]
                     if res["df"] is not None and not res["df"].empty:
                         all_frames.append(res["df"])
+                        # Store metadata per ticker
+                        ticker_metadata[t] = {
+                            "hv": res["hv"],
+                            "iv_rank": res["iv_rank"],
+                            "iv_percentile": res["iv_percentile"],
+                            "earnings_date": res["earnings_date"]
+                        }
                         hv = res["hv"]
                         hv_str = f" HV:{hv*100:.1f}%" if hv else ""
-                        print(f"  Fetched {t} ✓{hv_str}")
+                        iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
+                        print(f"  Fetched {t} ✓{hv_str}{iv_rank_str}")
                     else:
                         print(f"  Fetched {t} (no data)")
                     if res["error"]:
@@ -1072,9 +1475,16 @@ def main():
             res = _fetch(tickers[0])
             if res["df"] is not None and not res["df"].empty:
                 all_frames.append(res["df"])
+                ticker_metadata[tickers[0]] = {
+                    "hv": res["hv"],
+                    "iv_rank": res["iv_rank"],
+                    "iv_percentile": res["iv_percentile"],
+                    "earnings_date": res["earnings_date"]
+                }
                 hv = res["hv"]
                 hv_str = f" HV:{hv*100:.1f}%" if hv else ""
-                print(f"  Fetched {tickers[0]} ✓{hv_str}")
+                iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
+                print(f"  Fetched {tickers[0]} ✓{hv_str}{iv_rank_str}")
             elif res["error"]:
                 errors.append({"ticker": tickers[0], "error": res["error"]})
 
@@ -1086,8 +1496,34 @@ def main():
         df_combined = pd.concat(all_frames, ignore_index=True)
         print(f"\nProcessing {len(df_combined)} total options contracts...")
         
-        # Score and filter
-        df_scored = enrich_and_score(df_combined, min_dte=min_dte, max_dte=max_dte, risk_free_rate=rfr)
+        # Score and filter - process per ticker to get correct metadata
+        scored_frames = []
+        for ticker_symbol in df_combined["symbol"].unique():
+            ticker_df = df_combined[df_combined["symbol"] == ticker_symbol].copy()
+            metadata = ticker_metadata.get(ticker_symbol, {})
+            
+            df_ticker_scored = enrich_and_score(
+                ticker_df,
+                min_dte=min_dte,
+                max_dte=max_dte,
+                risk_free_rate=rfr,
+                config=config,
+                vix_regime_weights=vix_weights,
+                iv_rank=metadata.get("iv_rank"),
+                iv_percentile=metadata.get("iv_percentile"),
+                earnings_date=metadata.get("earnings_date")
+            )
+            
+            if not df_ticker_scored.empty:
+                scored_frames.append(df_ticker_scored)
+        
+        if not scored_frames:
+            print("No contracts passed filters (check DTE bounds or liquidity).")
+            sys.exit(0)
+        
+        df_scored = pd.concat(scored_frames, ignore_index=True)
+        print(f"Scored {len(df_scored)} contracts after filtering.")
+        
         if df_scored.empty:
             print("No contracts passed filters (check DTE bounds or liquidity).")
             sys.exit(0)
@@ -1242,6 +1678,12 @@ def main():
             csv_file = export_to_csv(picks, mode, budget)
             if csv_file:
                 print(f"\n  📄 Results exported to: {csv_file}")
+        
+        # === VISUALIZATION ===
+        if HAS_VISUALIZATION:
+            viz_choice = prompt_input("Generate visualization charts? (y/n)", "n").lower()
+            if viz_choice == "y":
+                create_visualizations(picks, mode, output_dir="reports")
         
         log_choice = prompt_input("Log trades for P/L tracking? (y/n)", "n").lower()
         if log_choice == "y":
