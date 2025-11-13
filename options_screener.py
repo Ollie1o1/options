@@ -19,10 +19,12 @@ import os
 import csv
 import json
 import logging
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.error import URLError
 
 # Dependency checks
 missing = []
@@ -42,6 +44,11 @@ if missing:
     print(f"Missing dependencies: {', '.join(missing)}")
     print("Install with: pip install " + " ".join(missing))
     sys.exit(1)
+
+# Simple in-process caches to avoid refetching HV/IV/momentum for the same ticker
+_HV_CACHE: Dict[str, float] = {}
+_MOMENTUM_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
+_IV_RANK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]] = {}
 
 # Optional imports
 try:
@@ -307,8 +314,16 @@ def calculate_risk_reward(
 
 
 def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[float]:
-    """Fetch historical volatility (annualized) from recent price data."""
+    """Fetch historical volatility (annualized) from recent price data.
+
+    Uses an in-memory cache keyed by ticker symbol and period to avoid
+    repeated downloads within a single run.
+    """
     try:
+        key = f"{ticker.ticker}:{period}"  # type: ignore[attr-defined]
+        if key in _HV_CACHE:
+            return _HV_CACHE[key]
+
         hist = ticker.history(period=f"{period+10}d", interval="1d")
         if hist.empty or len(hist) < period:
             return None
@@ -323,6 +338,7 @@ def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[f
         daily_vol = returns.std()
         annual_vol = daily_vol * math.sqrt(252)  # Trading days
         
+        _HV_CACHE[key] = annual_vol
         return annual_vol
     except Exception:
         return None
@@ -335,6 +351,10 @@ def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optiona
     All values are floats or None if insufficient data.
     """
     try:
+        key = f"{ticker.ticker}:momentum"  # type: ignore[attr-defined]
+        if key in _MOMENTUM_CACHE:
+            return _MOMENTUM_CACHE[key]
+
         # Use ~90 trading days of history for stable indicators
         hist = ticker.history(period="6mo", interval="1d")
         if hist.empty or len(hist) < 20:
@@ -382,7 +402,9 @@ def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optiona
             else:
                 atr_trend = None
 
-        return ret_5d, rsi_14, atr_trend
+        result = (ret_5d, rsi_14, atr_trend)
+        _MOMENTUM_CACHE[key] = result
+        return result
     except Exception:
         return None, None, None
 
@@ -398,6 +420,10 @@ def get_iv_rank_percentile(
     Returns (iv_rank_30, iv_percentile_30, iv_rank_90, iv_percentile_90).
     """
     try:
+        key = f"{ticker.ticker}:iv_rank:{current_iv:.6f}"  # type: ignore[attr-defined]
+        if key in _IV_RANK_CACHE:
+            return _IV_RANK_CACHE[key]
+
         # Fetch ~1 year of daily data
         hist = ticker.history(period="1y", interval="1d")
         if hist.empty or len(hist) < 30:
@@ -425,7 +451,9 @@ def get_iv_rank_percentile(
         iv_rank_30, iv_pct_30 = _iv_stats(30)
         iv_rank_90, iv_pct_90 = _iv_stats(90)
 
-        return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90
+        result = (iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90)
+        _IV_RANK_CACHE[key] = result
+        return result
     except Exception:
         return None, None, None, None
 
@@ -563,10 +591,14 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     IV rank/percentiles, earnings date) attached as columns, plus summary
     values for HV and IV metrics.
     """
-    tkr = yf.Ticker(symbol)
+    try:
+        tkr = yf.Ticker(symbol)
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize ticker {symbol}: {e}")
+
     underlying = get_underlying_price(tkr)
     if underlying is None:
-        raise ValueError("Could not determine underlying price for ticker.")
+        raise RuntimeError(f"Could not determine underlying price for ticker {symbol}.")
 
     # Historical volatility and momentum indicators
     hv = get_historical_volatility(tkr, period=30)
@@ -577,10 +609,13 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
 
     try:
         expirations = tkr.options
+    except (URLError, ConnectionError, OSError) as e:  # type: ignore[name-defined]
+        raise RuntimeError(f"Network error while fetching expirations for {symbol}: {e}")
     except Exception as e:
-        raise RuntimeError(f"Failed to fetch options expirations: {e}")
+        raise RuntimeError(f"Failed to fetch options expirations for {symbol}: {e}")
+
     if not expirations:
-        raise RuntimeError("No options expirations available.")
+        raise RuntimeError(f"No options expirations available for {symbol}.")
 
     expirations = expirations[:max_expiries]
     frames = []
@@ -589,6 +624,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     for exp in expirations:
         try:
             oc = tkr.option_chain(exp)
+        except (URLError, ConnectionError, OSError):  # type: ignore[name-defined]
+            # Network issue for this expiration; skip but continue others
+            continue
         except Exception:
             # Skip this expiration if it fails
             continue
@@ -609,7 +647,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
             frames.append(sub)
 
     if not frames:
-        raise RuntimeError("No options data frames fetched from yfinance.")
+        raise RuntimeError(f"No options data frames fetched from yfinance for {symbol}.")
 
     df = pd.concat(frames, ignore_index=True)
     df["underlying"] = underlying
@@ -839,7 +877,7 @@ def enrich_and_score(
         df["iv_hv_ratio"] = 1.0
     
     # IV Skew (calls vs puts at same strike/expiry)
-    df["iv_skew"] = 0.0  # Default
+    df["iv_skew"] = np.nan  # start as NaN, then fill for stability
     for (exp, strike), group in df.groupby(["expiration", "strike"]):
         if len(group) == 2:  # Has both call and put
             call_iv = group[group["type"] == "call"]["impliedVolatility"].values
@@ -847,6 +885,8 @@ def enrich_and_score(
             if len(call_iv) > 0 and len(put_iv) > 0:
                 skew = put_iv[0] - call_iv[0]
                 df.loc[group.index, "iv_skew"] = skew
+    # Forward/backward fill any remaining NaNs so downstream summaries don't break
+    df["iv_skew"] = df["iv_skew"].ffill().bfill().fillna(0.0)
     
     # Liquidity Quality Flags
     df["liquidity_flag"] = "GOOD"
@@ -1405,7 +1445,10 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
 
 
 def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
-    """Log trade entries for future P/L tracking."""
+    """Log trade entries for future P/L tracking.
+
+    Adds a unique entry_id so rows can be reliably joined/updated later.
+    """
     try:
         # Create trades_log directory if it doesn't exist
         os.makedirs("trades_log", exist_ok=True)
@@ -1417,7 +1460,7 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
         
         with open(log_file, 'a', newline='') as f:
             fieldnames = [
-                'timestamp', 'mode', 'symbol', 'type', 'strike', 'expiration',
+                'entry_id', 'timestamp', 'mode', 'symbol', 'type', 'strike', 'expiration',
                 'entry_premium', 'entry_underlying', 'delta', 'iv', 'hv', 'iv_rank',
                 'prob_profit', 'p_itm', 'rr_ratio', 'theo_value', 'ev_per_contract',
                 'quality_score', 'event_flag', 'status',
@@ -1429,7 +1472,9 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
                 writer.writeheader()
             
             for _, row in df_picks.iterrows():
+                entry_id = f"{datetime.now(timezone.utc).isoformat()}_{str(uuid.uuid4())[:8]}"
                 writer.writerow({
+                    'entry_id': entry_id,
                     'timestamp': timestamp,
                     'mode': mode,
                     'symbol': row.get('symbol', ''),
@@ -1802,10 +1847,29 @@ def main():
                     "earnings_date": earnings_date,
                     "error": None
                 }
+            except RuntimeError as e:
+                return {
+                    "ticker": tkr,
+                    "df": None,
+                    "hv": None,
+                    "iv_rank": None,
+                    "iv_percentile": None,
+                    "earnings_date": None,
+                    "error": str(e),
+                }
             except Exception as e:
-                return {"ticker": tkr, "df": None, "hv": None, "iv_rank": None, "iv_percentile": None, "earnings_date": None, "error": str(e)}
+                return {
+                    "ticker": tkr,
+                    "df": None,
+                    "hv": None,
+                    "iv_rank": None,
+                    "iv_percentile": None,
+                    "earnings_date": None,
+                    "error": f"Unexpected error: {e}",
+                }
 
-        max_workers = min(8, len(tickers)) if len(tickers) > 1 else 1
+        # Parallelize across tickers; cap workers to avoid rate limits
+        max_workers = min(10, len(tickers)) if len(tickers) > 1 else 1
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures = {ex.submit(_fetch, t): t for t in tickers}
@@ -1845,6 +1909,17 @@ def main():
                 print(f"  Fetched {tickers[0]} ✓{hv_str}{iv_rank_str}")
             elif res["error"]:
                 errors.append({"ticker": tickers[0], "error": res["error"]})
+
+        if errors:
+            for err in errors:
+                tkr = err.get("ticker", "?")
+                msg = err.get("error", "")
+                if "Network error" in msg:
+                    print(f"⚠️  Network error for {tkr}: {msg}. Check your connection and retry.")
+                elif "No options data frames" in msg or "No options expirations" in msg:
+                    print(f"⚠️  No options data for {tkr}; try a more liquid symbol such as SPY or AAPL.")
+                else:
+                    print(f"⚠️  Skipping {tkr}: {msg}")
 
         if not all_frames:
             print("\nNo options data retrieved from any ticker.")

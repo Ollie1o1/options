@@ -52,7 +52,13 @@ git clone https://github.com/Ollie1o1/options.git
 cd options
 ```
 
-2. **Install required dependencies:**
+2. **(Recommended) Create and activate a virtual environment:**
+```bash
+python -m venv env
+source env/bin/activate  # On Windows: env\Scripts\activate
+```
+
+3. **Install required dependencies:**
 ```bash
 pip install -r requirements.txt
 ```
