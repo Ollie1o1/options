@@ -125,90 +125,226 @@ Maximum days to expiration (DTE) [120]: 90
 
 ---
 
-## 📈 Advanced Metrics Explained
+## 📈 Advanced Metrics Explained (v3+)
 
-### 1. Probability of Profit (PoP)
-**Formula:** Uses log-normal distribution to calculate probability of being profitable at expiration.
+The screener now focuses on **probability-aware, scenario-based metrics**. This
+section walks through what each metric means and how to read the output.
+
+### 1. Expected Move (EM)
+**Formula:** `EM ≈ Stock Price × IV × √(DTE / 365)`
+
+This is the **1 standard deviation price move** the options market is
+implying between now and expiration.
+
+- EM is shown per contract as `Expected Move: ±$X.YZ`.
+- In the CSV export it appears as the `expected_move` column.
+
+**Use cases:**
+- Sanity-check whether your strike is *inside* or *outside* the expected move.
+- Compare required move to EM (see next section) to filter unrealistic plays.
+
+### 2. Break-even Realism – Required Move vs EM
+For each contract we calculate:
+
+- **Required move**: how far the stock must move from current price to
+  reach break-even.
+  - Calls: `breakeven = strike + premium` → `required_move = max(0, breakeven - spot)`
+  - Puts:  `breakeven = strike - premium` → `required_move = max(0, spot - breakeven)`
+- **EM Realism score (0–1)** – compares required move to EM:
+  - `required_move ≤ 0.5 × EM` → score ≈ 1.0 (very realistic)
+  - `0.5–1.0 × EM` → score ≈ 0.7 (reasonable)
+  - `> 1.0 × EM` → score decays toward 0.1 (unrealistic / “needs hero move”).
+
+**Where you’ll see it:**
+- In the rationale line: `req 3.20 vs EM 8.50`.
+- In CSV: `required_move`, `em_realism_score`.
+
+**How to use it:**
+- Prefer trades where required move is **well inside EM**.
+- Avoid trades where `required_move` is **much larger** than EM – they are
+  unlikely to break even within the expected move envelope.
+
+### 3. Probability of Profit (PoP)
+PoP is now **delta-based and EM-aware**:
+
+- Base approximation: `PoP ≈ 1 − |delta|`.
+- If the strike sits **outside the EM band** (too far from spot), PoP is
+  reduced (e.g. multiplied by ~0.7).
+
+**Where you’ll see it:**
+- Screen output: `PoP 58.3%` in the rationale line.
+- CSV: `prob_profit`.
 
 **Interpretation:**
-- **50-60%**: Moderate probability
-- **60-75%**: Good probability
-- **>75%**: High probability (but lower potential reward)
+- **50–60%**: balanced probability / reward.
+- **60–70%**: high probability, usually lower RR.
+- **>70%**: very conservative, often better for premium-selling structures.
 
-### 2. Expected Move
-**Formula:** `Stock Price × IV × √(T)`
+### 4. Theta Decay Pressure (TDP)
+Theta Decay Pressure estimates **how much you are paying per day relative to
+how sensitive the option is** (delta).
 
-Represents 1 standard deviation price movement expected by expiration.
+- Raw measure (contract-level): `premium × 100 / DTE`.
+- Adjusted for delta so low-delta, high-premium, short-dated options are
+  penalized more.
+- For DTE ≤ 7 days, the impact of high TDP is increased.
 
-**Example:** Stock at $100, IV 40%, 30 DTE → Expected move ≈ $11
+**Where you’ll see it:**
+- Rationale: `TDP 14.2/day`.
+- CSV: `theta_decay_pressure`, `theta_score` (0–1 where higher is better).
 
-### 3. Probability of Touch
-Likelihood that the strike price will be touched/reached before expiration.
+**How to use it:**
+- As a buyer, avoid contracts with **very high TDP** unless you have a strong
+  near-term catalyst.
+- As a short-term trader, compare candidates – lower TDP for similar setups
+  generally offers more breathing room.
 
-**Use Case:** Important for selling options (you want low PoT) or setting profit targets.
+### 5. Risk / Reward (RR)
+Risk/Reward is now tied directly to **Expected Move**:
 
-### 4. Risk/Reward Ratio
-**Calculation:**
-- Max Loss = Premium × 100 (per contract)
-- Potential Reward = Projected profit at target price
-- R/R Ratio = Reward / Risk
+- Target price is set using EM:
+  - Call: `target = spot + 0.75 × EM`
+  - Put:  `target = spot − 0.75 × EM`
+- Reward is the profit per share at that target **after** paying the premium.
+- **RR** = `max_gain_if_target_hit / premium`.
+
+**Where you’ll see it:**
+- Output: `RR 3.4x`.
+- CSV: `rr_ratio`.
 
 **Interpretation:**
-- **<1:1**: Unfavorable
-- **1:1 to 2:1**: Reasonable
-- **>2:1**: Attractive
+- **RR < 2** → “avoid” region.
+- **2–3** → solid.
+- **3–4** → strong.
+- **≥4** → excellent, but sanity-check EM realism and PoP so it’s not a
+  lottery ticket.
 
-### 5. Historical Volatility vs Implied Volatility
+### 6. Volatility Context: HV, IV Rank & Percentiles
+The screener now computes **short-term and medium-term IV context**:
 
-**IV > HV:** Options are relatively expensive (good for selling)
-**IV < HV:** Options are relatively cheap (good for buying)
-**IV ≈ HV:** Fairly priced
+- 30-day historical volatility (`hv_30d`).
+- 30-day & 90-day IV rank and percentile (using realized vol as a proxy):
+  - `iv_rank_30`, `iv_percentile_30`.
+  - `iv_rank_90`, `iv_percentile_90`.
 
-### 6. IV Skew
-**Skew = Put IV - Call IV** (at same strike/expiry)
+**Simple interpretation:**
+- **Low percentile (0–20%)** → IV is cheap → better for **buying** options.
+- **Mid (20–60%)** → IV is fair.
+- **High (60–100%)** → IV is expensive → better for **selling** premium.
 
-- **Positive skew**: Puts more expensive (normal, reflects downside risk)
-- **Negative skew**: Calls more expensive (unusual, potential opportunity)
+These feed into the `iv_rank_score` used by the composite quality score.
+
+### 7. Momentum Indicators
+Momentum is computed once per underlying and applied to all its contracts:
+
+- **5-day return (`ret_5d`)** – short-term price momentum.
+- **14-day RSI (`rsi_14`)** – mean-reversion vs. trend strength.
+- **ATR trend (`atr_trend`)** – how current ATR compares to its recent
+  average (measures volatility expansion/ contraction).
+
+**Where you’ll see it:**
+- Rationale: `5d +3.2%, RSI 54`.
+- CSV: `ret_5d`, `rsi_14`, `atr_trend`, `momentum_score`.
+
+**How to use it:**
+- Strong positive `ret_5d` + healthy RSI (40–60) with mildly rising ATR can
+  support trend-following call buys.
+- Overbought RSI (>70) + high ATR might call for caution on new longs.
+
+### 8. Catalyst Awareness (Earnings)
+The screener now tries to detect the **next earnings date** via yfinance and
+marks options whose expiration is close to that date.
+
+- Column `event_flag`:
+  - `OK` → no major catalyst detected.
+  - `EARNINGS_NEARBY` → expiration within a small buffer around earnings
+    (configurable, default 5 days).
+
+**Where you’ll see it:**
+- Rationale: includes `earnings soon` when flagged.
+- CSV: `event_flag`, `catalyst_score`.
+
+**How to use it:**
+- For **directional earnings bets**, you may *prefer* `EARNINGS_NEARBY`.
+- For **theta strategies** (selling options), you may choose to avoid these
+  unless that risk is intentional.
 
 ---
 
-## 🏆 Quality Scoring System
+---
 
-### Enhanced Weighting (v2.0):
+## 🏆 Composite Quality Score (0–1.0)
+
+The old 6-factor score has been replaced by a **probability-based composite
+score** that better reflects real-world trade quality.
+
+### High-level formula
+
+The final `quality_score` is a weighted blend of the following normalized
+components (all 0–1):
+
+- **PoP score** – from `prob_profit`.
+- **EM Realism** – from `em_realism_score`.
+- **Risk/Reward score** – from `rr_score`.
+- **Momentum score** – from `momentum_score`.
+- **IV Rank score** – from `iv_rank_score`.
+- **Liquidity score** – from `liquidity_score`.
+- **Catalyst score** – from `catalyst_score`.
+- **Theta score** – from `theta_score`.
+- **EV score** – from `ev_score` (expected value per contract).
+- **Trader preference** – from `trader_pref_score` (day vs swing).
+
+Default weights (configurable in `config.json` under `composite_weights`):
+
+```text
+pop:         0.18
+em_realism:  0.12
+rr:          0.15
+momentum:    0.10
+iv_rank:     0.10
+liquidity:   0.15
+catalyst:    0.05
+theta:       0.10
+ev:          0.05
+trader_pref: 0.10
 ```
-Quality Score = 25% Liquidity 
-              + 20% IV Advantage 
-              + 20% Risk/Reward 
-              + 15% Probability of Profit 
-              + 10% Spread Tightness 
-              + 10% Delta Quality
+
+Weights are automatically normalized to sum to 1.0.
+
+### Reading the Score
+
+- **0.80 – 1.00**: A+ / A setup – strong across most dimensions.
+- **0.65 – 0.80**: Solid, worth consideration.
+- **0.50 – 0.65**: Mixed bag – inspect the rationale carefully.
+- **< 0.50**: Low quality – usually fails on realism, liquidity, or RR.
+
+The qualitative rationale line (under each contract) is designed to tell you
+*why* the score is high/low:
+
+- Liquidity, spread, and delta context.
+- EM realism, PoP, and RR.
+- Momentum and RSI snapshot.
+- Catalyst warning (earnings soon) and theta pressure.
+
+### Day trader vs Swing trader modes
+
+After choosing DTE bounds, the CLI asks for a trading style profile:
+
+```text
+Select trading style profile:
+  1. Swing trader (default) - balanced delta + more DTE
+  2. Day / short-term trader - prioritize liquidity & tight spreads
 ```
 
-### Component Details:
+This choice influences `trader_pref_score`:
 
-**Liquidity (25%)**
-- Rank-normalized volume and open interest
-- Ensures easy entry/exit
+- **Swing trader (default)**
+  - Prefers contracts with **healthy |delta|** and **more time to expiry**.
+- **Day / short-term trader**
+  - Prefers **higher liquidity** and **tighter spreads**, even if DTE is short.
 
-**IV Advantage (20%)**
-- Prefers IV slightly above HV (but not extreme)
-- Indicates good value
-
-**Risk/Reward (20%)**
-- Targets R/R ratio > 1.5:1
-- Caps at 3:1 to avoid unrealistic scenarios
-
-**Probability of Profit (15%)**
-- Balances PoP with reward potential
-- Optimal range: 55-70%
-
-**Spread Tightness (10%)**
-- Tight spreads = lower transaction costs
-- Wide spreads penalized
-
-**Delta Quality (10%)**
-- Targets |delta| around 0.40
-- Balanced directional exposure
+This does **not** override your other filters – it simply nudges similarly
+scored trades toward those that match your style.
 
 ---
 
@@ -448,6 +584,21 @@ For issues or questions:
 ---
 
 ## 🆕 Changelog
+
+### v3.0.0 - Probability-Based Upgrade (2025-11-13)
+- ✨ Added EM-based break-even realism scoring (required move vs expected move).
+- ✨ Reworked Probability of Profit to use delta + EM band adjustments.
+- ✨ Implemented theta decay pressure and a theta risk score.
+- ✨ Redesigned Risk/Reward ratio around EM-based target prices.
+- ✨ Added 30/90 day IV rank & percentile metrics with IV rank scoring.
+- ✨ Introduced momentum analytics (5d return, 14d RSI, ATR trend).
+- ✨ Re-enabled robust earnings awareness and catalyst scoring.
+- ✨ Replaced the old 6-factor quality score with a composite 0–1 score
+  combining PoP, EM realism, RR, momentum, IV rank, liquidity, catalysts,
+  theta, EV, and trader style preference.
+- ✨ Added day trader vs swing trader profile to influence ranking.
+- ✨ Exported all new metrics (EM, realism, theta, momentum, IV ranks, sub-scores)
+  in CSV output.
 
 ### v2.0.0 - Professional Edition (2025-01-12)
 - ✨ Added Probability of Profit calculations
