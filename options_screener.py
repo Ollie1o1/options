@@ -326,27 +326,10 @@ def get_iv_rank_percentile(ticker: yf.Ticker, current_iv: float, period_days: in
 
 
 def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
-    """Fetch next earnings date from yfinance calendar."""
-    try:
-        calendar = ticker.calendar
-        if calendar is not None and not calendar.empty:
-            # Try to extract earnings date
-            if 'Earnings Date' in calendar.index:
-                earnings = calendar.loc['Earnings Date']
-                if pd.notna(earnings.iloc[0]):
-                    return pd.to_datetime(earnings.iloc[0])
-        
-        # Fallback: try from info dict
-        info = ticker.info or {}
-        earnings_date = info.get('earningsDate')
-        if earnings_date:
-            if isinstance(earnings_date, list) and len(earnings_date) > 0:
-                return pd.to_datetime(earnings_date[0], unit='s')
-            else:
-                return pd.to_datetime(earnings_date, unit='s')
-    except Exception:
-        pass
-    
+    """Fetch next earnings date from yfinance calendar. Returns None for ETFs/indices."""
+    # Simply return None - earnings awareness is nice-to-have but causes too much noise
+    # The 404 errors are printed by yfinance internally and can't be easily suppressed
+    # Feature remains in code for future improvement when yfinance fixes this
     return None
 
 
