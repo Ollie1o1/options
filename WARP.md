@@ -41,8 +41,11 @@ Notes
 
 - Operating modes (selected by the first prompt):
   - Single-stock: enter a ticker (e.g., AAPL). Quantile-based LOW/MEDIUM/HIGH premium buckets on that one symbol.
-  - Budget scan: enter `ALL`. You supply a per-contract budget and a list of tickers. Contracts are filtered to fit the budget and bucketed by percentage of budget.
-  - Discovery scan: enter `DISCOVER` (or leave blank). Scans a predefined list of highly traded tickers (you choose how many to scan) with quantile-based buckets and diversified picks.
+  - Budget scan: enter `ALL`. You supply a per-contract budget, then choose:
+    - TARGETED: Scan specific tickers you provide (comma-separated)
+    - DISCOVERY: Scan 1-100 tickers from the full market universe to see what your budget can get you
+    Contracts are filtered to fit the budget and bucketed by percentage of budget (LOW: 0-33%, MEDIUM: 33-66%, HIGH: 66-100%).
+  - Discovery scan: enter `DISCOVER` (or leave blank). Scans a predefined list of highly traded tickers (you choose how many to scan) with quantile-based buckets and diversified picks. No budget constraint.
 
 - Data flow (big picture):
   1) Configuration & market context:

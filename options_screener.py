@@ -1342,6 +1342,9 @@ def main():
         
     elif is_budget_mode:
         # Budget mode setup
+        print("\n=== BUDGET MODE ===")
+        print("Find options within your budget constraint.\n")
+        
         try:
             budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
             if budget <= 0:
@@ -1351,16 +1354,61 @@ def main():
             print("Invalid budget amount.")
             sys.exit(1)
         
-        # Default liquid tickers
-        default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
-        tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
-        tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+        print("\nSelect scan type:")
+        print("  1. TARGETED - Scan specific tickers you choose")
+        print("  2. DISCOVERY - Scan many tickers to see what your budget can get you")
         
-        if not tickers:
-            print("No valid tickers provided.")
-            sys.exit(1)
+        scan_type = prompt_input("Enter 1 for TARGETED or 2 for DISCOVERY", "1")
         
-        print(f"\nBudget Mode: Scanning {len(tickers)} tickers with ${budget:.2f} budget...")
+        if scan_type == "2":
+            # Discovery-style budget scan
+            print("\n=== BUDGET DISCOVERY SCAN ===")
+            print(f"Scanning market with ${budget:.2f} budget constraint...")
+            
+            # Use same ticker universe as Discovery mode
+            tickers = [
+                # Major Indices & ETFs
+                "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "EEM", "GLD", "SLV", "TLT",
+                "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE",
+                # Mega Cap Tech
+                "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "INTC",
+                "CRM", "ORCL", "ADBE", "CSCO", "AVGO", "QCOM", "TXN", "AMAT", "MU", "LRCX",
+                # Financial
+                "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "V",
+                "MA", "PYPL", "SQ", "COIN",
+                # Healthcare & Pharma
+                "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "LLY", "ABT", "DHR", "BMY",
+                "AMGN", "GILD", "CVS", "MRNA", "BNTX",
+                # Consumer & Retail
+                "WMT", "HD", "DIS", "NKE", "MCD", "SBUX", "TGT", "COST", "LOW", "TJX",
+                # Energy
+                "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO",
+                # Industrial & Manufacturing
+                "BA", "CAT", "GE", "MMM", "HON", "UPS", "LMT", "RTX", "DE",
+                # Communication & Media
+                "T", "VZ", "CMCSA", "TMUS", "CHTR",
+                # Automotive & Transportation
+                "F", "GM", "RIVN", "LCID", "NIO", "UBER", "LYFT", "DAL", "UAL", "AAL"
+            ]
+            
+            max_scan = int(prompt_input("How many tickers to scan (1-100)", "50"))
+            max_scan = max(1, min(100, max_scan))
+            tickers = tickers[:max_scan]
+            
+            print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+            print(f"Budget: ${budget:.2f} per contract (premium × 100)\n")
+        else:
+            # Targeted budget scan
+            print("\n=== BUDGET TARGETED SCAN ===")
+            default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
+            tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
+            tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+            
+            if not tickers:
+                print("No valid tickers provided.")
+                sys.exit(1)
+            
+            print(f"\nScanning {len(tickers)} tickers with ${budget:.2f} budget...")
     else:
         # Single-stock mode
         if not symbol_input.isalnum():
