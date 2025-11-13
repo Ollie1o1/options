@@ -19,7 +19,7 @@ import os
 import csv
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -67,6 +67,19 @@ def load_config(config_path: str = "config.json") -> Dict:
             "pop": 0.15,
             "spread": 0.10,
             "delta_quality": 0.10
+        },
+        # New composite quality score weights (can be overridden in config.json)
+        "composite_weights": {
+            "pop": 0.18,
+            "em_realism": 0.12,
+            "rr": 0.15,
+            "momentum": 0.10,
+            "iv_rank": 0.10,
+            "liquidity": 0.15,
+            "catalyst": 0.05,
+            "theta": 0.10,
+            "ev": 0.05,
+            "trader_pref": 0.10
         },
         "moneyness_band": 0.15,
         "target_delta": 0.40,
@@ -241,24 +254,53 @@ def calculate_probability_of_touch(option_type: str, S: float, K: float, T: floa
         return None
 
 
-def calculate_risk_reward(option_type: str, premium: float, S: float, K: float) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """Calculate max loss, break-even, and potential reward ratio."""
+def calculate_risk_reward(
+    option_type: str,
+    premium: float,
+    S: float,
+    K: float,
+    expected_move: Optional[float] = None,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Calculate max loss, break-even, and risk/reward ratio.
+
+    Uses the prompt's definition:
+      - target_price = stock_price ± 0.75 * EM
+      - RR = max_gain_if_target_hit / premium
+    where gains and premium are measured per share.
+    """
     try:
         if premium <= 0 or S <= 0 or K <= 0:
             return None, None, None
-        
+
         max_loss = premium * 100  # Per contract
-        
-        if option_type.lower() == "call":
+        otype = option_type.lower()
+
+        # Break-even price
+        if otype == "call":
             breakeven = K + premium
-            # Potential reward: assume move to 2x expected (simplified)
-            potential_reward = max(0, (S * 1.5 - K) * 100 - max_loss)
         else:  # put
             breakeven = K - premium
-            potential_reward = max(0, (K - S * 0.5) * 100 - max_loss)
-        
-        risk_reward_ratio = potential_reward / max_loss if max_loss > 0 else 0
-        
+
+        # Compute max gain at target using expected move when available
+        if expected_move is not None and expected_move > 0:
+            if otype == "call":
+                target_price = S + 0.75 * expected_move
+                payoff_per_share = max(0.0, target_price - K)
+            else:
+                target_price = S - 0.75 * expected_move
+                payoff_per_share = max(0.0, K - target_price)
+        else:
+            # Fallback: simple heuristic target if EM is unavailable
+            if otype == "call":
+                target_price = S * 1.5
+                payoff_per_share = max(0.0, target_price - K)
+            else:
+                target_price = S * 0.5
+                payoff_per_share = max(0.0, K - target_price)
+
+        max_gain_per_share = max(0.0, payoff_per_share - premium)
+        risk_reward_ratio = max_gain_per_share / premium if premium > 0 else 0.0
+
         return max_loss, breakeven, risk_reward_ratio
     except Exception:
         return None, None, None
@@ -286,50 +328,147 @@ def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[f
         return None
 
 
-def get_iv_rank_percentile(ticker: yf.Ticker, current_iv: float, period_days: int = 252) -> Tuple[Optional[float], Optional[float]]:
-    """Calculate IV Rank and IV Percentile over the specified period."""
+def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Compute basic price momentum indicators.
+
+    Returns a tuple of (5-day return, 14-day RSI, ATR trend).
+    All values are floats or None if insufficient data.
+    """
     try:
-        # Fetch 1-year historical data to approximate historical IV range
+        # Use ~90 trading days of history for stable indicators
+        hist = ticker.history(period="6mo", interval="1d")
+        if hist.empty or len(hist) < 20:
+            return None, None, None
+
+        close = hist["Close"].astype(float)
+        high = hist.get("High", close)
+        low = hist.get("Low", close)
+
+        # 5-day simple return
+        if len(close) >= 6:
+            ret_5d = float(close.iloc[-1] / close.iloc[-6] - 1.0)
+        else:
+            ret_5d = None
+
+        # RSI (14-day) implementation without external TA libraries
+        delta = close.diff().dropna()
+        if len(delta) >= 14:
+            gain = delta.clip(lower=0.0)
+            loss = -delta.clip(upper=0.0)
+            avg_gain = gain.rolling(window=14).mean()
+            avg_loss = loss.rolling(window=14).mean()
+            rs = avg_gain / avg_loss.replace(0, np.nan)
+            rsi_series = 100.0 - (100.0 / (1.0 + rs))
+            rsi_14 = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else None
+        else:
+            rsi_14 = None
+
+        # ATR trend (14-day ATR vs its own 20-day average)
+        high = high.astype(float)
+        low = low.astype(float)
+        prev_close = close.shift(1)
+        tr1 = (high - low).abs()
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=14).mean()
+        if len(atr.dropna()) < 20:
+            atr_trend = None
+        else:
+            recent_atr = atr.iloc[-1]
+            atr_ma = atr.rolling(window=20).mean().iloc[-1]
+            if atr_ma and atr_ma > 0:
+                atr_trend = float(recent_atr / atr_ma - 1.0)
+            else:
+                atr_trend = None
+
+        return ret_5d, rsi_14, atr_trend
+    except Exception:
+        return None, None, None
+
+
+def get_iv_rank_percentile(
+    ticker: yf.Ticker,
+    current_iv: float,
+    period_days: int = 252,
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Calculate 30-day and 90-day IV Rank and IV Percentile.
+
+    Uses rolling realized volatility as a proxy for historical IV.
+    Returns (iv_rank_30, iv_percentile_30, iv_rank_90, iv_percentile_90).
+    """
+    try:
+        # Fetch ~1 year of daily data
         hist = ticker.history(period="1y", interval="1d")
         if hist.empty or len(hist) < 30:
-            return None, None
-        
-        # Calculate rolling 30-day historical volatility as proxy for IV history
-        returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
-        
+            return None, None, None, None
+
+        returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
         if len(returns) < 30:
-            return None, None
-        
-        # Rolling 30-day volatility (annualized)
-        rolling_vol = returns.rolling(window=30).std() * np.sqrt(252)
-        rolling_vol = rolling_vol.dropna()
-        
-        if len(rolling_vol) < 2:
-            return None, None
-        
-        # IV Rank: (current - min) / (max - min)
-        iv_min = rolling_vol.min()
-        iv_max = rolling_vol.max()
-        
-        if iv_max - iv_min <= 0:
-            return None, None
-        
-        iv_rank = (current_iv - iv_min) / (iv_max - iv_min)
-        
-        # IV Percentile: percentage of days when IV was below current
-        iv_percentile = (rolling_vol < current_iv).sum() / len(rolling_vol)
-        
-        return float(iv_rank), float(iv_percentile)
-    
+            return None, None, None, None
+
+        def _iv_stats(window: int) -> Tuple[Optional[float], Optional[float]]:
+            if len(returns) < window:
+                return None, None
+            rolling_vol = returns.rolling(window=window).std() * np.sqrt(252)
+            rolling_vol = rolling_vol.dropna()
+            if len(rolling_vol) < 2:
+                return None, None
+            iv_min = rolling_vol.min()
+            iv_max = rolling_vol.max()
+            if iv_max - iv_min <= 0:
+                return None, None
+            iv_rank = (current_iv - iv_min) / (iv_max - iv_min)
+            iv_percentile = (rolling_vol < current_iv).sum() / len(rolling_vol)
+            return float(iv_rank), float(iv_percentile)
+
+        iv_rank_30, iv_pct_30 = _iv_stats(30)
+        iv_rank_90, iv_pct_90 = _iv_stats(90)
+
+        return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90
     except Exception:
-        return None, None
+        return None, None, None, None
 
 
 def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
-    """Fetch next earnings date from yfinance calendar. Returns None for ETFs/indices."""
-    # Simply return None - earnings awareness is nice-to-have but causes too much noise
-    # The 404 errors are printed by yfinance internally and can't be easily suppressed
-    # Feature remains in code for future improvement when yfinance fixes this
+    """Fetch next earnings date from yfinance.
+
+    Tries multiple yfinance endpoints but always fails gracefully if data is missing.
+    Returns a timezone-aware UTC datetime or None.
+    """
+    try:
+        # Preferred: get_earnings_dates (newer yfinance API)
+        try:
+            ed = ticker.get_earnings_dates(limit=1)
+            if ed is not None and not ed.empty:
+                # Index is the earnings date
+                dt = ed.index[0]
+                if not isinstance(dt, datetime):
+                    dt = datetime.fromtimestamp(dt.timestamp())  # type: ignore[attr-defined]
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+        except Exception:
+            pass
+
+        # Fallback: older calendar interface
+        try:
+            cal = getattr(ticker, "calendar", None)
+            if cal is not None and not getattr(cal, "empty", False):
+                # yfinance often uses the index as the event date
+                if hasattr(cal, "index") and len(cal.index) > 0:
+                    dt = cal.index[0]
+                    if not isinstance(dt, datetime):
+                        dt = datetime.fromtimestamp(dt.timestamp())  # type: ignore[attr-defined]
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
+        except Exception:
+            pass
+    except Exception:
+        # Any failure just returns None so the rest of the pipeline can continue
+        return None
+
     return None
 
 
@@ -418,18 +557,24 @@ def get_risk_free_rate() -> float:
 
 
 def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime]]:
-    """Fetch options data, historical volatility, IV Rank/Percentile, and earnings date for a symbol."""
+    """Fetch options data and enriched context for a symbol.
+
+    Returns a DataFrame of options with underlying-level context (HV, momentum,
+    IV rank/percentiles, earnings date) attached as columns, plus summary
+    values for HV and IV metrics.
+    """
     tkr = yf.Ticker(symbol)
     underlying = get_underlying_price(tkr)
     if underlying is None:
         raise ValueError("Could not determine underlying price for ticker.")
-    
-    # Fetch historical volatility
+
+    # Historical volatility and momentum indicators
     hv = get_historical_volatility(tkr, period=30)
-    
-    # Fetch earnings date
+    ret_5d, rsi_14, atr_trend = get_momentum_indicators(tkr)
+
+    # Upcoming earnings
     earnings_date = get_next_earnings_date(tkr)
-    
+
     try:
         expirations = tkr.options
     except Exception as e:
@@ -440,11 +585,11 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     expirations = expirations[:max_expiries]
     frames = []
     median_iv = None
-    
+
     for exp in expirations:
         try:
             oc = tkr.option_chain(exp)
-        except Exception as e:
+        except Exception:
             # Skip this expiration if it fails
             continue
         for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
@@ -465,19 +610,32 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
 
     if not frames:
         raise RuntimeError("No options data frames fetched from yfinance.")
+
     df = pd.concat(frames, ignore_index=True)
     df["underlying"] = underlying
     df["hv_30d"] = hv  # Add historical volatility column
-    
+    df["ret_5d"] = ret_5d
+    df["rsi_14"] = rsi_14
+    df["atr_trend"] = atr_trend
+
     # Calculate median IV for IV Rank/Percentile calculation
     df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
     median_iv = df["impliedVolatility"].median(skipna=True)
-    
-    # Get IV Rank and Percentile
+
+    # Get IV Rank and Percentile (30 and 90 day)
     iv_rank, iv_percentile = None, None
+    iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = None, None, None, None
     if median_iv and pd.notna(median_iv) and median_iv > 0:
-        iv_rank, iv_percentile = get_iv_rank_percentile(tkr, median_iv)
-    
+        iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = get_iv_rank_percentile(tkr, median_iv)
+        # Backwards-compatible aggregate values (use 30-day by default)
+        iv_rank = iv_rank_30
+        iv_percentile = iv_pct_30
+
+    df["iv_rank_30"] = iv_rank_30
+    df["iv_percentile_30"] = iv_pct_30
+    df["iv_rank_90"] = iv_rank_90
+    df["iv_percentile_90"] = iv_pct_90
+
     return df, hv, iv_rank, iv_percentile, earnings_date
 
 
@@ -488,9 +646,10 @@ def enrich_and_score(
     risk_free_rate: float,
     config: Dict,
     vix_regime_weights: Dict,
+    trader_profile: str = "swing",
     iv_rank: Optional[float] = None,
     iv_percentile: Optional[float] = None,
-    earnings_date: Optional[datetime] = None
+    earnings_date: Optional[datetime] = None,
 ) -> pd.DataFrame:
     # Prepare and filter
     now = datetime.now(timezone.utc)
@@ -559,58 +718,118 @@ def enrich_and_score(
     df["abs_delta"] = df["delta"].abs()
     
     # === NEW ADVANCED METRICS ===
-    
-    # Probability of Profit
-    def _calc_pop(row):
-        return calculate_probability_of_profit(
-            row["type"],
-            safe_float(row["underlying"]),
-            safe_float(row["strike"]),
-            safe_float(row["T_years"]),
-            safe_float(row["impliedVolatility"]),
-            safe_float(row["premium"])
-        )
-    df["prob_profit"] = df.apply(_calc_pop, axis=1)
-    
-    # Expected Move
+
+    # Expected Move (1-sigma price move until expiration)
     def _calc_exp_move(row):
         return calculate_expected_move(
             safe_float(row["underlying"]),
             safe_float(row["impliedVolatility"]),
-            safe_float(row["T_years"])
+            safe_float(row["T_years"]),
         )
+
     df["expected_move"] = df.apply(_calc_exp_move, axis=1)
-    
-    # Probability of Touch
+
+    # Probability of Profit using delta approximation and expected-move adjustments
+    def _calc_pop_delta(row):
+        try:
+            delta_val = safe_float(row["delta"])
+            S = safe_float(row["underlying"])
+            K = safe_float(row["strike"])
+            em = safe_float(row["expected_move"])
+            if delta_val is None or S is None or K is None:
+                return None
+            otm_delta = abs(delta_val)
+            pop = 1.0 - otm_delta
+            # Adjust PoP if strike sits outside expected move band
+            if em is not None and em > 0:
+                upper = S + em
+                lower = S - em
+                opt_type = str(row["type"]).lower()
+                outside_em = (opt_type == "call" and K > upper) or (opt_type == "put" and K < lower)
+                if outside_em:
+                    pop *= 0.7
+            return max(0.0, min(1.0, pop))
+        except Exception:
+            return None
+
+    df["prob_profit"] = df.apply(_calc_pop_delta, axis=1)
+
+    # Probability of Touch (keep BS-based approximation)
     def _calc_pot(row):
         return calculate_probability_of_touch(
             row["type"],
             safe_float(row["underlying"]),
             safe_float(row["strike"]),
             safe_float(row["T_years"]),
-            safe_float(row["impliedVolatility"])
+            safe_float(row["impliedVolatility"]),
         )
+
     df["prob_touch"] = df.apply(_calc_pot, axis=1)
-    
-    # Risk/Reward Analysis
+
+    # Risk/Reward Analysis with EM-based target price
     def _calc_rr(row):
         max_loss, breakeven, rr_ratio = calculate_risk_reward(
             row["type"],
             safe_float(row["premium"]),
             safe_float(row["underlying"]),
-            safe_float(row["strike"])
+            safe_float(row["strike"]),
+            safe_float(row["expected_move"]),
         )
-        return pd.Series({
-            'max_loss': max_loss,
-            'breakeven': breakeven,
-            'rr_ratio': rr_ratio
-        })
-    
+        return pd.Series(
+            {"max_loss": max_loss, "breakeven": breakeven, "rr_ratio": rr_ratio}
+        )
+
     rr_data = df.apply(_calc_rr, axis=1)
     df["max_loss"] = rr_data["max_loss"]
     df["breakeven"] = rr_data["breakeven"]
     df["rr_ratio"] = rr_data["rr_ratio"]
-    
+
+    # Break-even realism: required move vs expected move
+    def _calc_em_realism(row):
+        S = safe_float(row["underlying"])
+        K = safe_float(row["strike"])
+        premium = safe_float(row["premium"])
+        em = safe_float(row["expected_move"])
+        opt_type = str(row["type"]).lower()
+        if S is None or K is None or premium is None or em is None or em <= 0:
+            return pd.Series({"required_move": None, "em_realism_score": None})
+        if opt_type == "call":
+            breakeven = K + premium
+            required_move = max(0.0, breakeven - S)
+        else:  # put
+            breakeven = K - premium
+            required_move = max(0.0, S - breakeven)
+        ratio = required_move / em if em > 0 else None
+        if ratio is None:
+            score = None
+        elif ratio <= 0.5:
+            score = 1.0
+        elif ratio <= 1.0:
+            score = 0.7
+        else:
+            # Penalize contracts that need a move beyond EM
+            score = max(0.1, em / (required_move + 1e-9))
+        return pd.Series({"required_move": required_move, "em_realism_score": score})
+
+    em_data = df.apply(_calc_em_realism, axis=1)
+    df["required_move"] = em_data["required_move"]
+    df["em_realism_score"] = em_data["em_realism_score"]
+
+    # Theta Decay Pressure (premium per day relative to delta)
+    def _calc_theta_pressure(row):
+        premium = safe_float(row["premium"])
+        T_yrs = safe_float(row["T_years"])
+        abs_delta = abs(safe_float(row["delta"]) or 0.0)
+        if premium is None or T_yrs is None or T_yrs <= 0:
+            return None
+        dte = max(int(T_yrs * 365), 1)
+        tdp_raw = (premium * 100.0) / dte
+        # Normalize by delta so low-delta, high-premium short-term options are penalized more
+        effective_tdp = tdp_raw / max(abs_delta, 0.1)
+        return effective_tdp
+
+    df["theta_decay_pressure"] = df.apply(_calc_theta_pressure, axis=1)
+
     # IV vs HV comparison (IV advantage)
     if "hv_30d" in df.columns and df["hv_30d"].notna().any():
         df["iv_vs_hv"] = df["impliedVolatility"] - df["hv_30d"]
@@ -739,54 +958,120 @@ def enrich_and_score(
 
     # Liquidity (volume+OI)
     liquidity = 0.5 * (vol_n + oi_n)
-    
-    # IV Advantage Score (prefer IV > HV but not extreme)
+
+    # IV Advantage Score (keep for diagnostics)
     iv_advantage = df["iv_vs_hv"].fillna(0).clip(lower=-0.2, upper=0.2)
     iv_advantage_score = (iv_advantage + 0.2) / 0.4  # Normalize to 0-1
-    
+
     # Probability of Profit Score
     pop_score = df["prob_profit"].fillna(0.5).clip(lower=0, upper=1)
-    
-    # Risk/Reward Score (higher is better, cap at 3:1)
-    rr_score = df["rr_ratio"].fillna(0).clip(lower=0, upper=3) / 3.0
+
+    # Risk/Reward Score per prompt thresholds
+    rr_raw = df["rr_ratio"].fillna(0.0)
+    rr_score = pd.Series(0.2, index=df.index)
+    rr_score = rr_score.mask(rr_raw >= 2.0, 0.5)
+    rr_score = rr_score.mask(rr_raw >= 3.0, 0.8)
+    rr_score = rr_score.mask(rr_raw >= 4.0, 1.0)
 
     # EV score (rank-normalized expected value per contract)
     ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
 
-    # === ADAPTIVE QUALITY SCORING WITH VIX REGIME WEIGHTS ===
-    # Use VIX-based weights instead of hard-coded
-    w_ev = vix_regime_weights.get("ev_score", 0.30)
-    w_liq = vix_regime_weights.get("liquidity", 0.20)
-    w_iv_adv = vix_regime_weights.get("iv_advantage", 0.15)
-    w_pop = vix_regime_weights.get("pop", 0.15)
-    w_spread = vix_regime_weights.get("spread", 0.10)
-    w_delta = vix_regime_weights.get("delta_quality", 0.10)
-    
-    # Base quality score with adaptive weights
-    df["quality_score"] = (
-        w_ev * ev_score +
-        w_liq * liquidity +
-        w_iv_adv * iv_advantage_score +
-        w_pop * pop_score +
-        w_spread * spread_score +
-        w_delta * delta_quality
+    # EM realism score (already 0-1, fallback to neutral 0.5)
+    em_realism_score = df["em_realism_score"].fillna(0.5).clip(lower=0.0, upper=1.0)
+
+    # Theta decay pressure => score where lower pressure is better
+    theta_raw = df["theta_decay_pressure"].replace([pd.NA, pd.NaT], np.nan)
+    theta_rank = rank_norm(theta_raw.fillna(theta_raw.median()))
+    theta_score = (1.0 - theta_rank).clip(lower=0.0, upper=1.0)
+    # For very short-dated options, weight theta risk more heavily by slightly
+    # compressing high scores (i.e., making high TDP hurt more)
+    short_dte_mask = (df["T_years"] * 365.0) <= 7
+    theta_score = theta_score.where(~short_dte_mask, theta_score * 0.7)
+
+    # Momentum score combining 5d return, RSI distance from 50, and ATR trend
+    ret_score = rank_norm(df.get("ret_5d", pd.Series(0.0, index=df.index)).fillna(0.0))
+    rsi_vals = pd.to_numeric(df.get("rsi_14", pd.Series(np.nan, index=df.index)), errors="coerce")
+    rsi_score = 1.0 - (abs((rsi_vals - 50.0) / 50.0)).clip(lower=0.0, upper=1.0)
+    atr_trend_vals = pd.to_numeric(df.get("atr_trend", pd.Series(0.0, index=df.index)), errors="coerce")
+    atr_score = rank_norm(atr_trend_vals.fillna(0.0))
+    momentum_score = (
+        0.4 * ret_score.fillna(0.5)
+        + 0.3 * rsi_score.fillna(0.5)
+        + 0.3 * atr_score.fillna(0.5)
     )
-    
-    # Earnings penalty: reduce quality score by 0.1 for contracts near earnings
-    df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.1
-    
-    # IV Rank bonus/penalty
-    if iv_rank is not None and pd.notna(iv_rank):
-        # Bonus for favorable IV Rank (>0.5 for sellers, <0.2 for buyers)
-        # For simplicity, assume we're selling options (premium collection)
-        if iv_rank > 0.5:
-            df["quality_score"] += 0.05  # Bonus for high IV rank
-        elif iv_rank < 0.2:
-            df["quality_score"] -= 0.05  # Penalty for low IV rank
-    
-    # Ensure quality_score stays in reasonable range
+
+    # IV rank score: favor cheaper IV (lower percentile) for buyers
+    iv_pct_series = pd.to_numeric(
+        df.get("iv_percentile_30", df.get("iv_percentile", pd.Series(np.nan, index=df.index))),
+        errors="coerce",
+    )
+    iv_rank_score = (1.0 - iv_pct_series.clip(lower=0.0, upper=1.0)).fillna(0.5)
+
+    # Catalyst strength from event flags (earnings proximity, etc.)
+    catalyst_score = pd.Series(0.3, index=df.index)
+    catalyst_score = catalyst_score.mask(df["event_flag"] == "EARNINGS_NEARBY", 0.8)
+
+    # Trader profile adjustment: day trader vs swing trader preferences
+    dte_days = df["T_years"] * 365.0
+    # Normalize DTE between the configured bounds
+    dte_norm = ((dte_days - min_dte) / max(1, (max_dte - min_dte))).clip(lower=0.0, upper=1.0)
+    if trader_profile.lower().startswith("day"):
+        trader_pref_score = 0.6 * liquidity + 0.4 * spread_score
+    else:  # swing trader (default)
+        trader_pref_score = 0.5 * delta_quality + 0.5 * dte_norm
+
+    # Composite quality score redesign (0-1)
+    default_weights = {
+        "pop": 0.18,
+        "em_realism": 0.12,
+        "rr": 0.15,
+        "momentum": 0.10,
+        "iv_rank": 0.10,
+        "liquidity": 0.15,
+        "catalyst": 0.05,
+        "theta": 0.10,
+        "ev": 0.05,
+        "trader_pref": 0.10,
+    }
+    composite_weights = config.get("composite_weights", {}) or {}
+
+    def _w(key: str) -> float:
+        return float(composite_weights.get(key, default_weights[key]))
+
+    w_pop = _w("pop")
+    w_em = _w("em_realism")
+    w_rr = _w("rr")
+    w_mom = _w("momentum")
+    w_iv = _w("iv_rank")
+    w_liq = _w("liquidity")
+    w_cat = _w("catalyst")
+    w_theta = _w("theta")
+    w_ev = _w("ev")
+    w_tp = _w("trader_pref")
+
+    # Normalize weights to sum to 1.0
+    w_sum = w_pop + w_em + w_rr + w_mom + w_iv + w_liq + w_cat + w_theta + w_ev + w_tp
+    if w_sum <= 0:
+        w_sum = 1.0
+
+    df["quality_score"] = (
+        w_pop * pop_score
+        + w_em * em_realism_score
+        + w_rr * rr_score
+        + w_mom * momentum_score
+        + w_iv * iv_rank_score
+        + w_liq * liquidity
+        + w_cat * catalyst_score
+        + w_theta * theta_score
+        + w_ev * ev_score
+        + w_tp * trader_pref_score
+    ) / w_sum
+
+    # Earnings penalty: modestly reduce score if very close to earnings
+    df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
+
+    # Ensure quality_score stays in [0, 1]
     df["quality_score"] = df["quality_score"].clip(lower=0, upper=1)
-    
     df["ev_score"] = ev_score
 
     # Keep helpful computed columns
@@ -795,6 +1080,11 @@ def enrich_and_score(
     df["delta_quality"] = delta_quality
     df["iv_quality"] = iv_quality
     df["spread_score"] = spread_score
+    df["theta_score"] = theta_score
+    df["momentum_score"] = momentum_score
+    df["iv_rank_score"] = iv_rank_score
+    df["catalyst_score"] = catalyst_score
+    df["iv_advantage_score"] = iv_advantage_score
 
     # Basic sanity ordering hints
     df = df.sort_values(["quality_score", "volume", "openInterest"], ascending=[False, False, False]).reset_index(drop=True)
@@ -947,7 +1237,32 @@ def rationale_row(row: pd.Series, chain_iv_median: float) -> str:
     if pd.notna(iv) and math.isfinite(iv):
         rel = "≈" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
         parts.append(f"IV {format_pct(iv)} ({rel} chain median {format_pct(chain_iv_median)})")
-    # Overall
+    # Expected move realism
+    em = row.get("expected_move", pd.NA)
+    req = row.get("required_move", pd.NA)
+    if pd.notna(em) and pd.notna(req) and math.isfinite(em) and math.isfinite(req):
+        parts.append(f"req {req:.2f} vs EM {em:.2f}")
+    # Probability of profit and risk/reward
+    pop = row.get("prob_profit", pd.NA)
+    if pd.notna(pop) and math.isfinite(pop):
+        parts.append(f"PoP {format_pct(pop)}")
+    rr = row.get("rr_ratio", pd.NA)
+    if pd.notna(rr) and math.isfinite(rr):
+        parts.append(f"RR {float(rr):.1f}x")
+    # Momentum snapshot
+    ret5 = row.get("ret_5d", pd.NA)
+    if pd.notna(ret5) and math.isfinite(ret5):
+        parts.append(f"5d {format_pct(ret5)}")
+    rsi = row.get("rsi_14", pd.NA)
+    if pd.notna(rsi) and math.isfinite(rsi):
+        parts.append(f"RSI {float(rsi):.0f}")
+    # Catalyst and theta
+    if row.get("event_flag") == "EARNINGS_NEARBY":
+        parts.append("earnings soon")
+    tdp = row.get("theta_decay_pressure", pd.NA)
+    if pd.notna(tdp) and math.isfinite(tdp):
+        parts.append(f"TDP {float(tdp):.1f}/day")
+    # Overall composite quality
     parts.append(f"quality {row['quality_score']:.2f}")
     return "; ".join(parts)
 
@@ -1067,10 +1382,15 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
         export_cols = [
             "symbol", "type", "strike", "expiration", "premium", "underlying",
             "delta", "impliedVolatility", "hv_30d", "iv_vs_hv", "iv_rank", "iv_percentile",
+            "iv_rank_30", "iv_percentile_30", "iv_rank_90", "iv_percentile_90",
             "volume", "openInterest", "spread_pct",
-            "prob_profit", "pop_sim", "expected_move", "prob_touch", "pot_sim", "p_itm",
+            "prob_profit", "pop_sim", "expected_move", "required_move", "em_realism_score",
+            "theta_decay_pressure", "theta_score",
+            "prob_touch", "pot_sim", "p_itm",
             "max_loss", "breakeven", "rr_ratio",
             "theo_value", "ev_per_contract", "ev_score",
+            "liquidity_score", "momentum_score", "iv_rank_score", "catalyst_score",
+            "ret_5d", "rsi_14", "atr_trend",
             "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket"
         ]
         
@@ -1453,6 +1773,13 @@ def main():
         print("Invalid DTE inputs.")
         sys.exit(1)
 
+    # Trading style profile (day trader vs swing trader)
+    print("\nSelect trading style profile:")
+    print("  1. Swing trader (default) - balanced delta + more DTE")
+    print("  2. Day / short-term trader - prioritize liquidity & tight spreads")
+    profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
+    trader_profile = "day" if profile_choice == "2" else "swing"
+
     # Fetch risk-free rate automatically
     print("Fetching current risk-free rate...")
     rfr = get_risk_free_rate()
@@ -1540,9 +1867,10 @@ def main():
                 risk_free_rate=rfr,
                 config=config,
                 vix_regime_weights=vix_weights,
+                trader_profile=trader_profile,
                 iv_rank=metadata.get("iv_rank"),
                 iv_percentile=metadata.get("iv_percentile"),
-                earnings_date=metadata.get("earnings_date")
+                earnings_date=metadata.get("earnings_date"),
             )
             
             if not df_ticker_scored.empty:
