@@ -5,7 +5,7 @@ These thin wrappers re-export the core data-access helpers from
 ``options_screener`` so they can be imported independently.
 """
 
-from options_screener import (
+from .options_screener import (
     load_config,
     get_vix_level,
     determine_vix_regime,

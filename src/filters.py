@@ -4,7 +4,7 @@
 Thin wrappers around the bucketing helpers in ``options_screener``.
 """
 
-from options_screener import (
+from .options_screener import (
     categorize_by_premium,
     pick_top_per_bucket,
 )
