@@ -219,11 +219,10 @@ Risk/Reward is now tied directly to **Expected Move**:
 - CSV: `rr_ratio`.
 
 **Interpretation:**
-- **RR < 2** → “avoid” region.
-- **2–3** → solid.
-- **3–4** → strong.
-- **≥4** → excellent, but sanity-check EM realism and PoP so it’s not a
-  lottery ticket.
+- **RR Filter Status**: The screener now applies a minimum filter of **RR ≥ 0.5x** to all contracts.
+- **< 1.0x**: The position covers its premium if the EM target is hit, but offers low net profit. (Focus on this range for higher PoP).
+- **1.0x – 2.0x**: Balanced risk/reward; solid opportunities.
+- **2.0x – 4.0x**: High-leverage directional trade; stronger profit potential.
 
 ### 6. Volatility Context: HV, IV Rank & Percentiles
 The screener now computes **short-term and medium-term IV context**:
@@ -324,6 +323,13 @@ Weights are automatically normalized to sum to 1.0.
 - **0.50 – 0.65**: Mixed bag – inspect the rationale carefully.
 - **< 0.50**: Low quality – usually fails on realism, liquidity, or RR.
 
+**Important Filtering Note:** The quality score is calculated only on contracts that have already passed three mandatory, non-negotiable hard filters you configured:
+- **Spread**: Bid-Ask Spread ≤ 20%
+- **Delta**: Absolute Delta |Δ| ≥ 0.30 (eliminates far OTM/ITM lottery tickets)
+- **Risk/Reward**: RR Ratio ≥ 0.5x (eliminates low-leverage losing bets)
+
+Any contract not displayed has failed one of these three primary profitability checks.
+
 The qualitative rationale line (under each contract) is designed to tell you
 *why* the score is high/low:
 
@@ -352,6 +358,21 @@ This choice influences `trader_pref_score`:
 This does **not** override your other filters – it simply nudges similarly
 scored trades toward those that match your style.
 
+---
+🎯 The Final Profitability Check: Entry Timing
+While the Quality Score confirms a contract is statistically sound, the final decision requires interpreting short-term momentum and volatility signals provided in the rationale line.
+To maximize the probability of profit, evaluate these factors in the option's rationale (5d +X.X%; RSI XX):
+1. Volatility Context (IV vs. HV / Chain Median)
+| Scenario | Indicator to Check | Profitability Implication |
+|---|---|---|
+| Favorable Buy Entry | IV: below chain median | You are buying volatility when it is relatively cheap. If the stock moves, the contract can benefit from both the price change and potential IV expansion. |
+| Warrant Caution | IV: above chain median | You are paying a higher premium for the expectation of a large move. If the stock does not move as expected, the contract is prone to rapid IV crush. |
+2. Directional Alignment (RSI and 5d Return)
+| Scenario | Indicator to Check | Profitability Implication |
+|---|---|---|
+| Call (Bullish) Entry | RSI ≤ 65 and 5d is positive | A healthy trend without being overbought. Avoid calls on stocks with RSI ≥ 70 as they are due for a pullback. |
+| Put (Bearish) Entry | RSI ≥ 35 and 5d is negative | A declining trend without being oversold. Avoid puts on stocks with RSI ≤ 30 as they are due for a bounce. |
+By combining the High Quality Score (Tier 1) with Favorable Entry Signals (Tier 3), users can make the most informed decision possible.
 ---
 
 ## 💾 Export & Logging Features
