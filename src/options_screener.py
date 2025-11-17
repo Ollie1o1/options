@@ -827,6 +827,7 @@ def enrich_and_score(
     df["max_loss"] = rr_data["max_loss"]
     df["breakeven"] = rr_data["breakeven"]
     df["rr_ratio"] = rr_data["rr_ratio"]
+    df = df[df["rr_ratio"] >= 0.50].copy()
 
     # Break-even realism: required move vs expected move
     def _calc_em_realism(row):
