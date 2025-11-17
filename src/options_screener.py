@@ -759,7 +759,7 @@ def enrich_and_score(
     df["abs_delta"] = df["delta"].abs()
 
     # Hard filter for delta
-    df = df[df["abs_delta"] >= 0.20].copy()
+    df = df[df["abs_delta"] >= 0.30].copy()
     
     # === NEW ADVANCED METRICS ===
 
