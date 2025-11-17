@@ -725,9 +725,6 @@ def enrich_and_score(
     df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"]
     df.loc[~df["spread_pct"].replace([pd.NA, pd.NaT], pd.NA).apply(lambda x: pd.notna(x) and math.isfinite(x)), "spread_pct"] = float("inf")
 
-    # Hard filter for wide spreads
-    df = df[df["spread_pct"] <= 0.20].copy()
-
     # Liquidity filters: remove totally dead contracts
     df["volume"] = df["volume"].fillna(0).astype(float)
     df["openInterest"] = df["openInterest"].fillna(0).astype(float)
@@ -759,7 +756,7 @@ def enrich_and_score(
     df["abs_delta"] = df["delta"].abs()
 
     # Hard filter for delta
-    df = df[df["abs_delta"] >= 0.20].copy()
+    df = df[df["abs_delta"] >= 0.30].copy()
     
     # === NEW ADVANCED METRICS ===
 
