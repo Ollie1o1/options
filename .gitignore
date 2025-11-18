@@ -72,3 +72,4 @@ Thumbs.db
 # Export directories
 exports/
 trades_log/
+logs/
