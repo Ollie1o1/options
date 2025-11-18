@@ -933,6 +933,9 @@ def enrich_and_score(
         df["rr_ratio"] = rr_data["rr_ratio"]
         df = df[df["rr_ratio"] >= 0.50].copy()
 
+        if df.empty:
+            return df
+
         # Break-even realism: required move vs expected move
         def _calc_em_realism(row):
             S = safe_float(row["underlying"])
