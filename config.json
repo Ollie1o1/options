@@ -50,5 +50,18 @@
   "earnings_buffer_days": 5,
   "iv_rank_weight_threshold": 0.5,
   "iv_rank_low_threshold": 0.2,
-  "monte_carlo_simulations": 10000
+  "monte_carlo_simulations": 10000,
+  "premium_selling_weights": {
+    "pop": 0.30,
+    "return_on_risk": 0.25,
+    "iv_rank": 0.15,
+    "liquidity": 0.10,
+    "theta": 0.10,
+    "ev": 0.05,
+    "trader_pref": 0.05,
+    "em_realism": 0.0,
+    "rr": 0.0,
+    "momentum": 0.0,
+    "catalyst": 0.0
+  }
 }

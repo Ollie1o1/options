@@ -685,6 +685,7 @@ def enrich_and_score(
     config: Dict,
     vix_regime_weights: Dict,
     trader_profile: str = "swing",
+    mode: str = "Single-stock",
     iv_rank: Optional[float] = None,
     iv_percentile: Optional[float] = None,
     earnings_date: Optional[datetime] = None,
@@ -717,6 +718,15 @@ def enrich_and_score(
     df["ask"] = df["ask"].fillna(0.0)
     df["mid"] = (df["bid"] + df["ask"]) / 2.0
     df["premium"] = df["mid"].where(df["mid"] > 0.0, df["lastPrice"])
+
+    # === PREMIUM SELLING MODE LOGIC ===
+    if mode == "Premium Selling":
+        # a. Filter the DataFrame to only include type == 'put'.
+        df = df[df['type'] == 'put'].copy()
+        if df.empty:
+            return df
+        # d. Add a new metric: return_on_risk = df['premium'] / df['strike'].
+        df['return_on_risk'] = df['premium'] / df['strike']
 
     # Drop where we have no usable premium
     df = df[(df["premium"].notna()) & (df["premium"] > 0)].copy()
@@ -759,8 +769,12 @@ def enrich_and_score(
     df["abs_delta"] = df["delta"].abs()
 
     # Hard filter for delta
-    df = df[df["abs_delta"] >= 0.30].copy()
-    
+    if mode == "Premium Selling":
+        # b. Change the delta filter to target abs_delta between 0.20 and 0.40.
+        df = df[(df["abs_delta"] >= 0.20) & (df["abs_delta"] <= 0.40)].copy()
+    else:
+        df = df[df["abs_delta"] >= 0.30].copy()
+
     # === NEW ADVANCED METRICS ===
 
     # Expected Move (1-sigma price move until expiration)
@@ -810,55 +824,63 @@ def enrich_and_score(
 
     df["prob_touch"] = df.apply(_calc_pot, axis=1)
 
-    # Risk/Reward Analysis with EM-based target price
-    def _calc_rr(row):
-        max_loss, breakeven, rr_ratio = calculate_risk_reward(
-            row["type"],
-            safe_float(row["premium"]),
-            safe_float(row["underlying"]),
-            safe_float(row["strike"]),
-            safe_float(row["expected_move"]),
-        )
-        return pd.Series(
-            {"max_loss": max_loss, "breakeven": breakeven, "rr_ratio": rr_ratio}
-        )
+    if mode != "Premium Selling":
+        # Risk/Reward Analysis with EM-based target price
+        def _calc_rr(row):
+            max_loss, breakeven, rr_ratio = calculate_risk_reward(
+                row["type"],
+                safe_float(row["premium"]),
+                safe_float(row["underlying"]),
+                safe_float(row["strike"]),
+                safe_float(row["expected_move"]),
+            )
+            return pd.Series(
+                {"max_loss": max_loss, "breakeven": breakeven, "rr_ratio": rr_ratio}
+            )
 
-    rr_data = df.apply(_calc_rr, axis=1)
-    df["max_loss"] = rr_data["max_loss"]
-    df["breakeven"] = rr_data["breakeven"]
-    df["rr_ratio"] = rr_data["rr_ratio"]
-    df = df[df["rr_ratio"] >= 0.50].copy()
+        rr_data = df.apply(_calc_rr, axis=1)
+        df["max_loss"] = rr_data["max_loss"]
+        df["breakeven"] = rr_data["breakeven"]
+        df["rr_ratio"] = rr_data["rr_ratio"]
+        df = df[df["rr_ratio"] >= 0.50].copy()
 
-    # Break-even realism: required move vs expected move
-    def _calc_em_realism(row):
-        S = safe_float(row["underlying"])
-        K = safe_float(row["strike"])
-        premium = safe_float(row["premium"])
-        em = safe_float(row["expected_move"])
-        opt_type = str(row["type"]).lower()
-        if S is None or K is None or premium is None or em is None or em <= 0:
-            return pd.Series({"required_move": None, "em_realism_score": None})
-        if opt_type == "call":
-            breakeven = K + premium
-            required_move = max(0.0, breakeven - S)
-        else:  # put
-            breakeven = K - premium
-            required_move = max(0.0, S - breakeven)
-        ratio = required_move / em if em > 0 else None
-        if ratio is None:
-            score = None
-        elif ratio <= 0.5:
-            score = 1.0
-        elif ratio <= 1.0:
-            score = 0.7
-        else:
-            # Penalize contracts that need a move beyond EM
-            score = max(0.1, em / (required_move + 1e-9))
-        return pd.Series({"required_move": required_move, "em_realism_score": score})
+        # Break-even realism: required move vs expected move
+        def _calc_em_realism(row):
+            S = safe_float(row["underlying"])
+            K = safe_float(row["strike"])
+            premium = safe_float(row["premium"])
+            em = safe_float(row["expected_move"])
+            opt_type = str(row["type"]).lower()
+            if S is None or K is None or premium is None or em is None or em <= 0:
+                return pd.Series({"required_move": None, "em_realism_score": None})
+            if opt_type == "call":
+                breakeven = K + premium
+                required_move = max(0.0, breakeven - S)
+            else:  # put
+                breakeven = K - premium
+                required_move = max(0.0, S - breakeven)
+            ratio = required_move / em if em > 0 else None
+            if ratio is None:
+                score = None
+            elif ratio <= 0.5:
+                score = 1.0
+            elif ratio <= 1.0:
+                score = 0.7
+            else:
+                # Penalize contracts that need a move beyond EM
+                score = max(0.1, em / (required_move + 1e-9))
+            return pd.Series({"required_move": required_move, "em_realism_score": score})
 
-    em_data = df.apply(_calc_em_realism, axis=1)
-    df["required_move"] = em_data["required_move"]
-    df["em_realism_score"] = em_data["em_realism_score"]
+        em_data = df.apply(_calc_em_realism, axis=1)
+        df["required_move"] = em_data["required_move"]
+        df["em_realism_score"] = em_data["em_realism_score"]
+    else:
+        # For premium selling, these metrics are not used. Set defaults.
+        df["max_loss"] = None
+        df["breakeven"] = None
+        df["rr_ratio"] = None
+        df["required_move"] = None
+        df["em_realism_score"] = None
 
     # Theta Decay Pressure (premium per day relative to delta)
     def _calc_theta_pressure(row):
@@ -1052,7 +1074,11 @@ def enrich_and_score(
         df.get("iv_percentile_30", df.get("iv_percentile", pd.Series(np.nan, index=df.index))),
         errors="coerce",
     )
-    iv_rank_score = (1.0 - iv_pct_series.clip(lower=0.0, upper=1.0)).fillna(0.5)
+    if mode == "Premium Selling":
+        # c. Invert the iv_rank_score calculation.
+        iv_rank_score = iv_pct_series.clip(lower=0.0, upper=1.0).fillna(0.5)
+    else:
+        iv_rank_score = (1.0 - iv_pct_series.clip(lower=0.0, upper=1.0)).fillna(0.5)
 
     # Catalyst strength from event flags (earnings proximity, etc.)
     catalyst_score = pd.Series(0.3, index=df.index)
@@ -1068,51 +1094,77 @@ def enrich_and_score(
         trader_pref_score = 0.5 * delta_quality + 0.5 * dte_norm
 
     # Composite quality score redesign (0-1)
-    default_weights = {
-        "pop": 0.18,
-        "em_realism": 0.12,
-        "rr": 0.15,
-        "momentum": 0.10,
-        "iv_rank": 0.10,
-        "liquidity": 0.15,
-        "catalyst": 0.05,
-        "theta": 0.10,
-        "ev": 0.05,
-        "trader_pref": 0.10,
-    }
-    composite_weights = config.get("composite_weights", {}) or {}
+    if mode == "Premium Selling":
+        composite_weights = config.get("premium_selling_weights", {})
+        return_on_risk_score = rank_norm(df["return_on_risk"].fillna(df["return_on_risk"].median()))
+        w_pop = composite_weights.get("pop", 0.0)
+        w_ror = composite_weights.get("return_on_risk", 0.0)
+        w_iv = composite_weights.get("iv_rank", 0.0)
+        w_liq = composite_weights.get("liquidity", 0.0)
+        w_theta = composite_weights.get("theta", 0.0)
+        w_ev = composite_weights.get("ev", 0.0)
+        w_tp = composite_weights.get("trader_pref", 0.0)
 
-    def _w(key: str) -> float:
-        return float(composite_weights.get(key, default_weights[key]))
+        # Normalize weights to sum to 1.0
+        w_sum = w_pop + w_ror + w_iv + w_liq + w_theta + w_ev + w_tp
+        if w_sum <= 0:
+            w_sum = 1.0
 
-    w_pop = _w("pop")
-    w_em = _w("em_realism")
-    w_rr = _w("rr")
-    w_mom = _w("momentum")
-    w_iv = _w("iv_rank")
-    w_liq = _w("liquidity")
-    w_cat = _w("catalyst")
-    w_theta = _w("theta")
-    w_ev = _w("ev")
-    w_tp = _w("trader_pref")
+        df["quality_score"] = (
+            w_pop * pop_score
+            + w_ror * return_on_risk_score
+            + w_iv * iv_rank_score
+            + w_liq * liquidity
+            + w_theta * theta_score
+            + w_ev * ev_score
+            + w_tp * trader_pref_score
+        ) / w_sum
+    else:
+        default_weights = {
+            "pop": 0.18,
+            "em_realism": 0.12,
+            "rr": 0.15,
+            "momentum": 0.10,
+            "iv_rank": 0.10,
+            "liquidity": 0.15,
+            "catalyst": 0.05,
+            "theta": 0.10,
+            "ev": 0.05,
+            "trader_pref": 0.10,
+        }
+        composite_weights = config.get("composite_weights", {}) or {}
 
-    # Normalize weights to sum to 1.0
-    w_sum = w_pop + w_em + w_rr + w_mom + w_iv + w_liq + w_cat + w_theta + w_ev + w_tp
-    if w_sum <= 0:
-        w_sum = 1.0
+        def _w(key: str) -> float:
+            return float(composite_weights.get(key, default_weights[key]))
 
-    df["quality_score"] = (
-        w_pop * pop_score
-        + w_em * em_realism_score
-        + w_rr * rr_score
-        + w_mom * momentum_score
-        + w_iv * iv_rank_score
-        + w_liq * liquidity
-        + w_cat * catalyst_score
-        + w_theta * theta_score
-        + w_ev * ev_score
-        + w_tp * trader_pref_score
-    ) / w_sum
+        w_pop = _w("pop")
+        w_em = _w("em_realism")
+        w_rr = _w("rr")
+        w_mom = _w("momentum")
+        w_iv = _w("iv_rank")
+        w_liq = _w("liquidity")
+        w_cat = _w("catalyst")
+        w_theta = _w("theta")
+        w_ev = _w("ev")
+        w_tp = _w("trader_pref")
+
+        # Normalize weights to sum to 1.0
+        w_sum = w_pop + w_em + w_rr + w_mom + w_iv + w_liq + w_cat + w_theta + w_ev + w_tp
+        if w_sum <= 0:
+            w_sum = 1.0
+
+        df["quality_score"] = (
+            w_pop * pop_score
+            + w_em * em_realism_score
+            + w_rr * rr_score
+            + w_mom * momentum_score
+            + w_iv * iv_rank_score
+            + w_liq * liquidity
+            + w_cat * catalyst_score
+            + w_theta * theta_score
+            + w_ev * ev_score
+            + w_tp * trader_pref_score
+        ) / w_sum
 
     # Earnings penalty: modestly reduce score if very close to earnings
     df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
@@ -1267,7 +1319,7 @@ def determine_moneyness(row: pd.Series) -> str:
         return "---"
 
 
-def rationale_row(row: pd.Series, chain_iv_median: float) -> str:
+def rationale_row(row: pd.Series, chain_iv_median: float, mode: str = "Single-stock") -> str:
     parts: List[str] = []
     # Liquidity
     parts.append(f"liquidity vol {int(row['volume'])}, OI {int(row['openInterest'])}")
@@ -1285,17 +1337,24 @@ def rationale_row(row: pd.Series, chain_iv_median: float) -> str:
         rel = "≈" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
         parts.append(f"IV {format_pct(iv)} ({rel} chain median {format_pct(chain_iv_median)})")
     # Expected move realism
-    em = row.get("expected_move", pd.NA)
-    req = row.get("required_move", pd.NA)
-    if pd.notna(em) and pd.notna(req) and math.isfinite(em) and math.isfinite(req):
-        parts.append(f"req {req:.2f} vs EM {em:.2f}")
+    if mode != "Premium Selling":
+        em = row.get("expected_move", pd.NA)
+        req = row.get("required_move", pd.NA)
+        if pd.notna(em) and pd.notna(req) and math.isfinite(em) and math.isfinite(req):
+            parts.append(f"req {req:.2f} vs EM {em:.2f}")
     # Probability of profit and risk/reward
     pop = row.get("prob_profit", pd.NA)
     if pd.notna(pop) and math.isfinite(pop):
         parts.append(f"PoP {format_pct(pop)}")
-    rr = row.get("rr_ratio", pd.NA)
-    if pd.notna(rr) and math.isfinite(rr):
-        parts.append(f"RR {float(rr):.1f}x")
+
+    if mode == "Premium Selling":
+        ror = row.get("return_on_risk", pd.NA)
+        if pd.notna(ror) and math.isfinite(ror):
+            parts.append(f"RoR {format_pct(ror)}")
+    else:
+        rr = row.get("rr_ratio", pd.NA)
+        if pd.notna(rr) and math.isfinite(rr):
+            parts.append(f"RR {float(rr):.1f}x")
     # Momentum snapshot
     ret5 = row.get("ret_5d", pd.NA)
     if pd.notna(ret5) and math.isfinite(ret5):
@@ -1329,6 +1388,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     elif mode == "Discovery scan":
         unique_tickers = df_picks["symbol"].nunique()
         print(f"  OPTIONS SCREENER REPORT - DISCOVERY MODE ({unique_tickers} Tickers)")
+    elif mode == "Premium Selling":
+        unique_tickers = df_picks["symbol"].nunique()
+        print(f"  OPTIONS SCREENER REPORT - PREMIUM SELLING ({unique_tickers} Tickers)")
     else:
         print(f"  OPTIONS SCREENER REPORT - {df_picks.iloc[0]['symbol']}")
     print("="*80)
@@ -1338,7 +1400,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     elif mode == "Budget scan":
         print(f"  Budget Constraint: ${budget:.2f} per contract (premium × 100)")
         print(f"  Categories: LOW ($0-${budget*0.33:.2f}) | MEDIUM (${budget*0.33:.2f}-${budget*0.66:.2f}) | HIGH (${budget*0.66:.2f}-${budget:.2f})")
-    elif mode == "Discovery scan":
+    elif mode in ["Discovery scan", "Premium Selling"]:
         print(f"  Scan Type: Top opportunities across all price ranges (no budget limit)")
         print(f"  Categories: LOW (bottom 33%) | MEDIUM (middle 33%) | HIGH (top 33%) by premium")
     print(f"  Risk-Free Rate: {rfr*100:.2f}% (13-week Treasury)")
@@ -1409,11 +1471,11 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 )
             # Rationale
             cost_per_contract = r['premium'] * 100
-            if mode in ["Budget scan", "Discovery scan"]:
+            if mode in ["Budget scan", "Discovery scan", "Premium Selling"]:
                 ticker_info = f"${r['underlying']:.2f}"
-                print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d | Stock: {ticker_info} | Cost: ${cost_per_contract:.2f}\n")
+                print(f"    → {rationale_row(r, chain_iv_median, mode=mode)} | DTE: {dte}d | Stock: {ticker_info} | Cost: ${cost_per_contract:.2f}\n")
             else:
-                print(f"    → {rationale_row(r, chain_iv_median)} | DTE: {dte}d\n")
+                print(f"    → {rationale_row(r, chain_iv_median, mode=mode)} | DTE: {dte}d\n")
 
 
 def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = None) -> str:
@@ -1434,7 +1496,7 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
             "prob_profit", "pop_sim", "expected_move", "required_move", "em_realism_score",
             "theta_decay_pressure", "theta_score",
             "prob_touch", "pot_sim", "p_itm",
-            "max_loss", "breakeven", "rr_ratio",
+            "max_loss", "breakeven", "rr_ratio", "return_on_risk",
             "theo_value", "ev_per_contract", "ev_score",
             "liquidity_score", "momentum_score", "iv_rank_score", "catalyst_score",
             "ret_5d", "rsi_14", "atr_trend",
@@ -1656,28 +1718,36 @@ def main():
     print("\nModes:")
     print("  1. Enter a ticker (e.g., AAPL) for single-stock analysis")
     print("  2. Enter 'ALL' for budget-based multi-stock scan")
-    print("  3. Enter 'DISCOVER' to scan top 100 most-traded tickers (no budget limit)\n")
-    
-    symbol_input = prompt_input("Enter stock ticker, 'ALL', or 'DISCOVER'", "").upper()
-    
+    print("  3. Enter 'DISCOVER' to scan top 100 most-traded tickers (no budget limit)")
+    print("  4. Enter 'SELL' for Premium Selling analysis (short puts)\n")
+
+    symbol_input = prompt_input("Enter stock ticker, 'ALL', 'DISCOVER', or 'SELL'", "").upper()
+
     # Determine mode
     is_budget_mode = (symbol_input == "ALL")
     is_discovery_mode = (symbol_input == "DISCOVER" or symbol_input == "")
-    
+    is_premium_selling_mode = (symbol_input == "SELL")
+
     if is_discovery_mode:
         mode = "Discovery scan"
     elif is_budget_mode:
         mode = "Budget scan"
+    elif is_premium_selling_mode:
+        mode = "Premium Selling"
     else:
         mode = "Single-stock"
-    
+
     budget = None
     tickers = []
-    
-    if is_discovery_mode:
+
+    if is_discovery_mode or is_premium_selling_mode:
         # Discovery mode: scan top 100 most-traded options tickers
-        print("\n=== DISCOVERY MODE ===")
-        print("Scanning top 100 most-traded options tickers for best opportunities...")
+        if is_premium_selling_mode:
+            print("\n=== PREMIUM SELLING MODE ===")
+            print("Scanning top 100 most-traded options tickers for short put opportunities...")
+        else:
+            print("\n=== DISCOVERY MODE ===")
+            print("Scanning top 100 most-traded options tickers for best opportunities...")
         
         # Top 100 most liquid options tickers (ordered by typical volume)
         tickers = [
@@ -1950,6 +2020,7 @@ def main():
                 config=config,
                 vix_regime_weights=vix_weights,
                 trader_profile=trader_profile,
+                mode=mode,
                 iv_rank=metadata.get("iv_rank"),
                 iv_percentile=metadata.get("iv_percentile"),
                 earnings_date=metadata.get("earnings_date"),
