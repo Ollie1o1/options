@@ -851,6 +851,19 @@ def enrich_and_score(
     else:
         df = df[df["abs_delta"] >= 0.30].copy()
 
+    # Hard filter for delta
+    if mode == "Premium Selling":
+        # b. Change the delta filter to target abs_delta between 0.20 and 0.40.
+        df = df[(df["abs_delta"] >= 0.20) & (df["abs_delta"] <= 0.40)].copy()
+    else:
+        df = df[df["abs_delta"] >= 0.30].copy()
+
+    # !!! ADD THIS CHECK !!!
+    if df.empty:
+        return df  # Return the empty frame cleanly if no options survived the delta filter
+
+    # === NEW ADVANCED METRICS ===
+
     # === NEW ADVANCED METRICS ===
 
     # Expected Move (1-sigma price move until expiration)
