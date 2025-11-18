@@ -1416,64 +1416,79 @@ def determine_moneyness(row: pd.Series) -> str:
         return "---"
 
 
-def rationale_row(row: pd.Series, chain_iv_median: float, mode: str = "Single-stock") -> str:
-    parts: List[str] = []
+def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> str:
+    """Formats the second detail row for the screener report (analysis)."""
+    parts = []
+
+    # IV context
+    iv = row.get("impliedVolatility", pd.NA)
+    if pd.notna(iv) and math.isfinite(iv):
+        rel = "≈" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
+        parts.append(f"IV: {format_pct(iv)} ({rel} median)")
+
+    # Probability of Profit
+    pop = row.get("prob_profit", pd.NA)
+    if pd.notna(pop) and math.isfinite(pop):
+        parts.append(f"PoP: {format_pct(pop)}")
+
+    # Risk/Reward or Return on Risk
+    if mode == "Premium Selling":
+        ror = row.get("return_on_risk", pd.NA)
+        if pd.notna(ror):
+            parts.append(f"RoR: {format_pct(ror)}")
+    else:
+        rr = row.get("rr_ratio", pd.NA)
+        if pd.notna(rr):
+            parts.append(f"RR: {float(rr):.1f}x")
+
+    # Momentum
+    rsi = row.get("rsi_14", pd.NA)
+    ret5 = row.get("ret_5d", pd.NA)
+    if pd.notna(rsi) and pd.notna(ret5):
+        parts.append(f"Momentum: RSI {float(rsi):.0f}, 5d {format_pct(ret5)}")
+
+    # Quality Score
+    quality = row.get('quality_score', 0.0)
+    parts.append(f"Quality: {quality:.2f}")
+
+    # Stock Price and DTE
+    stock_price = row.get('underlying', 0.0)
+    dte = int(row.get('T_years', 0) * 365)
+    parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
+
+    return " | ".join(parts)
+
+
+def format_mechanics_row(row: pd.Series) -> str:
+    """Formats the first detail row for the screener report (market mechanics)."""
+    parts = []
+
     # Liquidity
-    parts.append(f"liquidity vol {int(row['volume'])}, OI {int(row['openInterest'])}")
+    vol = int(row.get('volume', 0))
+    oi = int(row.get('openInterest', 0))
+    parts.append(f"Vol: {vol} OI: {oi}")
+
     # Spread
     sp = row.get("spread_pct", pd.NA)
-    if pd.notna(sp) and math.isfinite(sp):
-        parts.append(f"spread {format_pct(sp)}")
+    parts.append(f"Spread: {format_pct(sp)}")
+
     # Delta
     d = row.get("delta", pd.NA)
     if pd.notna(d) and math.isfinite(d):
-        parts.append(f"delta {d:+.2f}")
+        parts.append(f"Delta: {d:+.2f}")
+
     # Greeks
     gamma = row.get("gamma", pd.NA)
     vega = row.get("vega", pd.NA)
     theta = row.get("theta", pd.NA)
     if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
-        parts.append(f"Γ: {gamma:.3f}, V: {vega:.2f}, Θ: {theta:.2f}")
-    # IV vs chain
-    iv = row.get("impliedVolatility", pd.NA)
-    if pd.notna(iv) and math.isfinite(iv):
-        rel = "≈" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
-        parts.append(f"IV {format_pct(iv)} ({rel} chain median {format_pct(chain_iv_median)})")
-    # Expected move realism
-    if mode != "Premium Selling":
-        em = row.get("expected_move", pd.NA)
-        req = row.get("required_move", pd.NA)
-        if pd.notna(em) and pd.notna(req) and math.isfinite(em) and math.isfinite(req):
-            parts.append(f"req {req:.2f} vs EM {em:.2f}")
-    # Probability of profit and risk/reward
-    pop = row.get("prob_profit", pd.NA)
-    if pd.notna(pop) and math.isfinite(pop):
-        parts.append(f"PoP {format_pct(pop)}")
+        parts.append(f"Greeks: Γ {gamma:.3f}, V {vega:.2f}, Θ {theta:.2f}")
 
-    if mode == "Premium Selling":
-        ror = row.get("return_on_risk", pd.NA)
-        if pd.notna(ror) and math.isfinite(ror):
-            parts.append(f"RoR {format_pct(ror)}")
-    else:
-        rr = row.get("rr_ratio", pd.NA)
-        if pd.notna(rr) and math.isfinite(rr):
-            parts.append(f"RR {float(rr):.1f}x")
-    # Momentum snapshot
-    ret5 = row.get("ret_5d", pd.NA)
-    if pd.notna(ret5) and math.isfinite(ret5):
-        parts.append(f"5d {format_pct(ret5)}")
-    rsi = row.get("rsi_14", pd.NA)
-    if pd.notna(rsi) and math.isfinite(rsi):
-        parts.append(f"RSI {float(rsi):.0f}")
-    # Catalyst and theta
-    if row.get("event_flag") == "EARNINGS_NEARBY":
-        parts.append("earnings soon")
-    tdp = row.get("theta_decay_pressure", pd.NA)
-    if pd.notna(tdp) and math.isfinite(tdp):
-        parts.append(f"TDP {float(tdp):.1f}/day")
-    # Overall composite quality
-    parts.append(f"quality {row['quality_score']:.2f}")
-    return "; ".join(parts)
+    # Cost
+    cost = row.get('premium', 0.0) * 100
+    parts.append(f"Cost: {format_money(cost)}")
+
+    return " | ".join(parts)
 
 
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None):
@@ -1573,12 +1588,11 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                     f"{moneyness:<4}"
                 )
             # Rationale
-            cost_per_contract = r['premium'] * 100
-            if mode in ["Budget scan", "Discovery scan", "Premium Selling"]:
-                ticker_info = f"${r['underlying']:.2f}"
-                print(f"    → {rationale_row(r, chain_iv_median, mode=mode)} | DTE: {dte}d | Stock: {ticker_info} | Cost: ${cost_per_contract:.2f}\n")
-            else:
-                print(f"    → {rationale_row(r, chain_iv_median, mode=mode)} | DTE: {dte}d\n")
+            mechanics_line = format_mechanics_row(r)
+            analysis_line = format_analysis_row(r, chain_iv_median, mode)
+
+            print(f"    ↳ Mechanics: {mechanics_line}")
+            print(f"    ↳ Analysis:  {analysis_line}\n")
 
 
 def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = None) -> str:
