@@ -25,6 +25,35 @@ from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
+from finvizfinance.screener.performance import Performance
+
+
+def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
+    """
+    Fetches a list of tickers from Finviz based on a given scan type.
+    """
+    filters_dict = {
+        'Option/Short': 'Optionable',
+        'Average Volume': 'Over 500K',
+        'Country': 'USA',
+    }
+    order = 'Change'  # Default for gainers
+    if scan_type == 'high_iv':
+        order = 'Volatility (Month)'
+
+    try:
+        fperformance = Performance()
+        fperformance.set_filter(filters_dict=filters_dict)
+        df = fperformance.screener_view(order=order, limit=max_tickers)
+
+        if df.empty:
+            raise RuntimeError("No tickers found matching the criteria.")
+
+        tickers = df['Ticker'].tolist()
+        return tickers
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch '{scan_type}' from Finviz: {e}")
+
 
 # Dependency checks
 missing = []
@@ -1702,6 +1731,54 @@ def close_trades():
     print("=" * 80 + "\n")
 
 
+def prompt_for_tickers() -> List[str]:
+    """
+    Prompts the user to select a ticker source and returns a list of tickers.
+    """
+    print("\nSelect Ticker Source:")
+    print("  1. Curated Liquid (default)")
+    print("  2. Top Gainers (Finviz)")
+    print("  3. High IV Stocks (Finviz)")
+    source_choice = prompt_input("Enter 1, 2, or 3", "1")
+
+    if source_choice == "1":
+        # Top 100 most liquid options tickers (ordered by typical volume)
+        tickers = [
+            # Major Indices & ETFs
+            "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "EEM", "GLD", "SLV", "TLT",
+            "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE",
+            # Mega Cap Tech
+            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "INTC",
+            "CRM", "ORCL", "ADBE", "CSCO", "AVGO", "QCOM", "TXN", "AMAT", "MU", "LRCX",
+            # Financial
+            "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "V",
+            "MA", "PYPL", "SQ", "COIN",
+            # Healthcare & Pharma
+            "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "LLY", "ABT", "DHR", "BMY",
+            "AMGN", "GILD", "CVS", "MRNA", "BNTX",
+            # Consumer & Retail
+            "WMT", "HD", "DIS", "NKE", "MCD", "SBUX", "TGT", "COST", "LOW", "TJX",
+            # Energy
+            "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO",
+            # Industrial & Manufacturing
+            "BA", "CAT", "GE", "MMM", "HON", "UPS", "LMT", "RTX", "DE",
+            # Communication & Media
+            "T", "VZ", "CMCSA", "TMUS", "CHTR",
+            # Automotive & Transportation
+            "F", "GM", "RIVN", "LCID", "NIO", "UBER", "LYFT", "DAL", "UAL", "AAL"
+        ]
+        return tickers
+    else:
+        scan_type = "gainers" if source_choice == "2" else "high_iv"
+        try:
+            max_tickers = int(prompt_input("How many tickers to scan (1-100)", "50"))
+            max_tickers = max(1, min(100, max_tickers))
+            return get_dynamic_tickers(scan_type, max_tickers=max_tickers)
+        except RuntimeError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+
 def main():
     # Check for command-line arguments
     if len(sys.argv) > 1:
@@ -1748,38 +1825,8 @@ def main():
         else:
             print("\n=== DISCOVERY MODE ===")
             print("Scanning top 100 most-traded options tickers for best opportunities...")
-        
-        # Top 100 most liquid options tickers (ordered by typical volume)
-        tickers = [
-            # Major Indices & ETFs
-            "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "EEM", "GLD", "SLV", "TLT",
-            "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE",
-            # Mega Cap Tech
-            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "INTC",
-            "CRM", "ORCL", "ADBE", "CSCO", "AVGO", "QCOM", "TXN", "AMAT", "MU", "LRCX",
-            # Financial
-            "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "V",
-            "MA", "PYPL", "SQ", "COIN",
-            # Healthcare & Pharma
-            "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "LLY", "ABT", "DHR", "BMY",
-            "AMGN", "GILD", "CVS", "MRNA", "BNTX",
-            # Consumer & Retail
-            "WMT", "HD", "DIS", "NKE", "MCD", "SBUX", "TGT", "COST", "LOW", "TJX",
-            # Energy
-            "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO",
-            # Industrial & Manufacturing
-            "BA", "CAT", "GE", "MMM", "HON", "UPS", "LMT", "RTX", "DE",
-            # Communication & Media
-            "T", "VZ", "CMCSA", "TMUS", "CHTR",
-            # Automotive & Transportation
-            "F", "GM", "RIVN", "LCID", "NIO", "UBER", "LYFT", "DAL", "UAL", "AAL"
-        ]
-        
-        # Limit to 50 for reasonable scan time
-        max_scan = int(prompt_input("How many tickers to scan (1-100)", "50"))
-        max_scan = max(1, min(100, max_scan))
-        tickers = tickers[:max_scan]
-        
+
+        tickers = prompt_for_tickers()
         print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
         
     elif is_budget_mode:
@@ -1807,35 +1854,7 @@ def main():
             print("\n=== BUDGET DISCOVERY SCAN ===")
             print(f"Scanning market with ${budget:.2f} budget constraint...")
             
-            # Use same ticker universe as Discovery mode
-            tickers = [
-                # Major Indices & ETFs
-                "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "EEM", "GLD", "SLV", "TLT",
-                "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE",
-                # Mega Cap Tech
-                "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "INTC",
-                "CRM", "ORCL", "ADBE", "CSCO", "AVGO", "QCOM", "TXN", "AMAT", "MU", "LRCX",
-                # Financial
-                "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "V",
-                "MA", "PYPL", "SQ", "COIN",
-                # Healthcare & Pharma
-                "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "LLY", "ABT", "DHR", "BMY",
-                "AMGN", "GILD", "CVS", "MRNA", "BNTX",
-                # Consumer & Retail
-                "WMT", "HD", "DIS", "NKE", "MCD", "SBUX", "TGT", "COST", "LOW", "TJX",
-                # Energy
-                "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO",
-                # Industrial & Manufacturing
-                "BA", "CAT", "GE", "MMM", "HON", "UPS", "LMT", "RTX", "DE",
-                # Communication & Media
-                "T", "VZ", "CMCSA", "TMUS", "CHTR",
-                # Automotive & Transportation
-                "F", "GM", "RIVN", "LCID", "NIO", "UBER", "LYFT", "DAL", "UAL", "AAL"
-            ]
-            
-            max_scan = int(prompt_input("How many tickers to scan (1-100)", "50"))
-            max_scan = max(1, min(100, max_scan))
-            tickers = tickers[:max_scan]
+            tickers = prompt_for_tickers()
             
             print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
             print(f"Budget: ${budget:.2f} per contract (premium × 100)\n")
