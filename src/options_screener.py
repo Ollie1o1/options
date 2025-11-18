@@ -236,6 +236,53 @@ def _d1d2(S: float, K: float, T: float, r: float, sigma: float) -> Tuple[Optiona
         return None, None
 
 
+def norm_pdf(x: float) -> float:
+    """Standard normal probability density function."""
+    return (1.0 / (math.sqrt(2.0 * math.pi))) * math.exp(-0.5 * x * x)
+
+
+def bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
+    """Black-Scholes gamma: N'(d1) / (S * sigma * sqrt(T))."""
+    try:
+        d1, _ = _d1d2(S, K, T, r, sigma)
+        if d1 is None:
+            return None
+        return norm_pdf(d1) / (S * sigma * math.sqrt(T))
+    except Exception:
+        return None
+
+
+def bs_vega(S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
+    """Black-Scholes vega: S * N'(d1) * sqrt(T)."""
+    try:
+        d1, _ = _d1d2(S, K, T, r, sigma)
+        if d1 is None:
+            return None
+        return S * norm_pdf(d1) * math.sqrt(T) / 100 # per 1% change in IV
+    except Exception:
+        return None
+
+
+def bs_theta(option_type: str, S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
+    """Black-Scholes theta (per day)."""
+    try:
+        d1, d2 = _d1d2(S, K, T, r, sigma)
+        if d1 is None or d2 is None:
+            return None
+
+        p1 = - (S * norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
+        if option_type.lower() == "call":
+            p2 = r * K * math.exp(-r * T) * norm_cdf(d2)
+            theta = (p1 - p2) / 365.0
+        else: # put
+            p2 = r * K * math.exp(-r * T) * norm_cdf(-d2)
+            theta = (p1 + p2) / 365.0
+
+        return theta
+    except Exception:
+        return None
+
+
 def calculate_probability_of_profit(option_type: str, S: float, K: float, T: float, sigma: float, premium: float) -> Optional[float]:
     """Calculate probability of profit at expiration."""
     try:
@@ -1006,8 +1053,13 @@ def enrich_and_score(
         sigma = max(1e-9, safe_float(row["impliedVolatility"], 0.0) or 0.0)
         opt_type = row["type"].lower()
         d1, d2 = _d1d2(S, K, T, risk_free_rate, sigma)
+
+        gamma = bs_gamma(S, K, T, risk_free_rate, sigma)
+        vega = bs_vega(S, K, T, risk_free_rate, sigma)
+        theta = bs_theta(opt_type, S, K, T, risk_free_rate, sigma)
+
         if d1 is None:
-            return pd.Series({"p_itm": None, "theo_value": None, "ev_per_contract": None})
+            return pd.Series({"p_itm": None, "theo_value": None, "ev_per_contract": None, "gamma": None, "vega": None, "theta": None})
         # Probability of expiring ITM under risk-neutral measure
         p_itm = norm_cdf(d2) if opt_type == "call" else norm_cdf(-d2)
         # Expected payoff at expiration (risk-neutral)
@@ -1021,12 +1073,15 @@ def enrich_and_score(
         spread_pct = row.get("spread_pct", 0.0)
         spread_cost = 100.0 * premium * float(spread_pct if pd.notna(spread_pct) else 0.0)
         ev = 100.0 * (expected_payoff - premium) - spread_cost
-        return pd.Series({"p_itm": p_itm, "theo_value": theo_value, "ev_per_contract": ev})
+        return pd.Series({"p_itm": p_itm, "theo_value": theo_value, "ev_per_contract": ev, "gamma": gamma, "vega": vega, "theta": theta})
 
     ev_data = df.apply(_calc_ev, axis=1)
     df["p_itm"] = ev_data["p_itm"]
     df["theo_value"] = ev_data["theo_value"]
     df["ev_per_contract"] = ev_data["ev_per_contract"]
+    df["gamma"] = ev_data["gamma"]
+    df["vega"] = ev_data["vega"]
+    df["theta"] = ev_data["theta"]
 
     # Normalize features using ranks to reduce outlier impact
     def rank_norm(s: pd.Series) -> pd.Series:
@@ -1360,6 +1415,12 @@ def rationale_row(row: pd.Series, chain_iv_median: float, mode: str = "Single-st
     d = row.get("delta", pd.NA)
     if pd.notna(d) and math.isfinite(d):
         parts.append(f"delta {d:+.2f}")
+    # Greeks
+    gamma = row.get("gamma", pd.NA)
+    vega = row.get("vega", pd.NA)
+    theta = row.get("theta", pd.NA)
+    if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
+        parts.append(f"Γ: {gamma:.3f}, V: {vega:.2f}, Θ: {theta:.2f}")
     # IV vs chain
     iv = row.get("impliedVolatility", pd.NA)
     if pd.notna(iv) and math.isfinite(iv):
@@ -1519,7 +1580,7 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
         # Select relevant columns for export
         export_cols = [
             "symbol", "type", "strike", "expiration", "premium", "underlying",
-            "delta", "impliedVolatility", "hv_30d", "iv_vs_hv", "iv_rank", "iv_percentile",
+            "delta", "gamma", "vega", "theta", "impliedVolatility", "hv_30d", "iv_vs_hv", "iv_rank", "iv_percentile",
             "iv_rank_30", "iv_percentile_30", "iv_rank_90", "iv_percentile_90",
             "volume", "openInterest", "spread_pct",
             "prob_profit", "pop_sim", "expected_move", "required_move", "em_realism_score",
