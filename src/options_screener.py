@@ -1853,6 +1853,237 @@ def prompt_for_tickers() -> List[str]:
             sys.exit(1)
 
 
+def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger):
+    # Determine mode booleans for internal logic
+    is_budget_mode = (mode == "Budget scan")
+    is_discovery_mode = (mode == "Discovery scan")
+
+    # === LOAD CONFIGURATION ===
+    print("\nLoading configuration...")
+    config = load_config("config.json")
+    print("✓ Configuration loaded")
+
+    # === FETCH VIX FOR ADAPTIVE WEIGHTING ===
+    print("Fetching VIX level for adaptive scoring...")
+    vix_level = get_vix_level()
+    if vix_level:
+        print(f"✓ VIX Level: {vix_level:.2f}")
+    else:
+        print("⚠️  Could not fetch VIX, using default weights")
+
+    vix_regime, vix_weights = determine_vix_regime(vix_level, config)
+    print(f"✓ Market Regime: {vix_regime.upper()}")
+
+    # Fetch risk-free rate automatically
+    print("Fetching current risk-free rate...")
+    rfr = get_risk_free_rate()
+    print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
+
+    # Collect data from all tickers (parallel for speed)
+    all_frames = []
+    ticker_metadata = {}  # Store IV Rank, earnings dates per ticker
+    errors = []
+    def _fetch(tkr: str):
+        try:
+            df_raw, hv, iv_rank, iv_percentile, earnings_date = fetch_options_yfinance(tkr, max_expiries=max_expiries)
+            return {
+                "ticker": tkr,
+                "df": df_raw,
+                "hv": hv,
+                "iv_rank": iv_rank,
+                "iv_percentile": iv_percentile,
+                "earnings_date": earnings_date,
+                "error": None
+            }
+        except RuntimeError as e:
+            return {
+                "ticker": tkr,
+                "df": None,
+                "hv": None,
+                "iv_rank": None,
+                "iv_percentile": None,
+                "earnings_date": None,
+                "error": str(e),
+            }
+        except Exception as e:
+            return {
+                "ticker": tkr,
+                "df": None,
+                "hv": None,
+                "iv_rank": None,
+                "iv_percentile": None,
+                "earnings_date": None,
+                "error": f"Unexpected error: {e}",
+            }
+
+    # Parallelize across tickers; cap workers to avoid rate limits
+    max_workers = min(10, len(tickers)) if len(tickers) > 1 else 1
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch, t): t for t in tickers}
+            for fut in as_completed(futures):
+                res = fut.result()
+                t = res["ticker"]
+                if res["df"] is not None and not res["df"].empty:
+                    all_frames.append(res["df"])
+                    # Store metadata per ticker
+                    ticker_metadata[t] = {
+                        "hv": res["hv"],
+                        "iv_rank": res["iv_rank"],
+                        "iv_percentile": res["iv_percentile"],
+                        "earnings_date": res["earnings_date"]
+                    }
+                    hv = res["hv"]
+                    hv_str = f" HV:{hv*100:.1f}%" if hv else ""
+                    iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
+                    print(f"  Fetched {t} ✓{hv_str}{iv_rank_str}")
+                else:
+                    print(f"  Fetched {t} (no data)")
+                if res["error"]:
+                    errors.append({"ticker": t, "error": res["error"]})
+    else:
+        res = _fetch(tickers[0])
+        if res["df"] is not None and not res["df"].empty:
+            all_frames.append(res["df"])
+            ticker_metadata[tickers[0]] = {
+                "hv": res["hv"],
+                "iv_rank": res["iv_rank"],
+                "iv_percentile": res["iv_percentile"],
+                "earnings_date": res["earnings_date"]
+            }
+            hv = res["hv"]
+            hv_str = f" HV:{hv*100:.1f}%" if hv else ""
+            iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
+            print(f"  Fetched {tickers[0]} ✓{hv_str}{iv_rank_str}")
+        elif res["error"]:
+            errors.append({"ticker": tickers[0], "error": res["error"]})
+
+    if errors:
+        for err in errors:
+            tkr = err.get("ticker", "?")
+            msg = err.get("error", "")
+            if "Network error" in msg:
+                print(f"⚠️  Network error for {tkr}: {msg}. Check your connection and retry.")
+            elif "No options data frames" in msg or "No options expirations" in msg:
+                print(f"⚠️  No options data for {tkr}; try a more liquid symbol such as SPY or AAPL.")
+            else:
+                print(f"⚠️  Skipping {tkr}: {msg}")
+
+    if not all_frames:
+        print("\nNo options data retrieved from any ticker.")
+        return None
+
+    # Combine all data
+    df_combined = pd.concat(all_frames, ignore_index=True)
+    print(f"\nProcessing {len(df_combined)} total options contracts...")
+
+    # Score and filter - process per ticker to get correct metadata
+    scored_frames = []
+    for ticker_symbol in df_combined["symbol"].unique():
+        ticker_df = df_combined[df_combined["symbol"] == ticker_symbol].copy()
+        metadata = ticker_metadata.get(ticker_symbol, {})
+
+        df_ticker_scored = enrich_and_score(
+            ticker_df,
+            min_dte=min_dte,
+            max_dte=max_dte,
+            risk_free_rate=rfr,
+            config=config,
+            vix_regime_weights=vix_weights,
+            trader_profile=trader_profile,
+            mode=mode,
+            iv_rank=metadata.get("iv_rank"),
+            iv_percentile=metadata.get("iv_percentile"),
+            earnings_date=metadata.get("earnings_date"),
+        )
+
+        if not df_ticker_scored.empty:
+            scored_frames.append(df_ticker_scored)
+
+    if not scored_frames:
+        print("No contracts passed filters (check DTE bounds or liquidity).")
+        return None
+
+    df_scored = pd.concat(scored_frames, ignore_index=True)
+    print(f"Scored {len(df_scored)} contracts after filtering.")
+
+    if df_scored.empty:
+        print("No contracts passed filters (check DTE bounds or liquidity).")
+        return None
+
+    # Apply budget filter if in budget mode
+    if is_budget_mode:
+        df_scored["contract_cost"] = df_scored["premium"] * 100
+        df_scored = df_scored[df_scored["contract_cost"] <= budget].copy()
+        if df_scored.empty:
+            print(f"No contracts found within budget of ${budget:.2f}.")
+            return None
+        print(f"Found {len(df_scored)} contracts within budget.")
+
+        # Show budget distribution for user clarity
+        print(f"\nBudget Categories:")
+        print(f"  LOW:    $0 - ${budget*0.33:.2f} (0-33% of budget)")
+        print(f"  MEDIUM: ${budget*0.33:.2f} - ${budget*0.66:.2f} (33-66% of budget)")
+        print(f"  HIGH:   ${budget*0.66:.2f} - ${budget:.2f} (66-100% of budget)")
+    elif is_discovery_mode:
+        # Discovery mode: no budget filter, use quantiles for categorization
+        print(f"\nDiscovery Mode: Analyzing {len(df_scored)} quality options across all price ranges...")
+
+    # Categorize and pick
+    # Use budget categorization for budget mode, quantile for single-stock and discovery
+    df_bucketed = categorize_by_premium(df_scored, budget=budget if is_budget_mode else None)
+
+    # Diversify tickers in budget and discovery modes
+    picks = pick_top_per_bucket(df_bucketed, per_bucket=5, diversify_tickers=(is_budget_mode or is_discovery_mode))
+    if picks.empty:
+        print("Could not produce picks in the requested buckets.")
+        return None
+
+    # Get underlying price for report (first ticker in single mode, or 0 in budget mode)
+    underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty and not is_budget_mode else 0.0
+
+    # Structured JSONL logging of the picks and context
+    log_picks_json(
+        logger,
+        picks,
+        context={
+            "mode": mode,
+            "budget": budget,
+            "max_expiries": max_expiries,
+            "min_dte": min_dte,
+            "max_dte": max_dte,
+            "risk_free_rate": rfr,
+        },
+    )
+    # Enhanced scoring for top pick: balance quality with practical factors
+    picks_copy = picks.copy()
+    chain_iv_median = picks["impliedVolatility"].median(skipna=True)
+
+    # Weighted overall score
+    # Favor: high quality, good liquidity, moderate IV, tight spread, balanced delta
+    picks_copy["overall_score"] = (
+        0.40 * picks_copy["quality_score"] +
+        0.20 * picks_copy["liquidity_score"] +
+        0.15 * picks_copy["spread_score"] +
+        0.15 * picks_copy["delta_quality"] +
+        0.10 * picks_copy["iv_quality"]
+    )
+
+    top_pick = picks_copy.sort_values("overall_score", ascending=False).iloc[0]
+
+    return {
+        'picks': picks,
+        'top_pick': top_pick,
+        'rfr': rfr,
+        'chain_iv_median': chain_iv_median,
+        'underlying_price': underlying_price,
+        'num_expiries': max_expiries,
+        'min_dte': min_dte,
+        'max_dte': max_dte,
+        'mode': mode,
+        'budget': budget,
+    }
+
 def main():
     # Check for command-line arguments
     if len(sys.argv) > 1:
@@ -1951,22 +2182,6 @@ def main():
             sys.exit(1)
         tickers = [symbol_input]
         print(f"\nSingle-Stock Mode: Analyzing {symbol_input}...")
-
-    # === LOAD CONFIGURATION ===
-    print("\nLoading configuration...")
-    config = load_config("config.json")
-    print("✓ Configuration loaded")
-    
-    # === FETCH VIX FOR ADAPTIVE WEIGHTING ===
-    print("Fetching VIX level for adaptive scoring...")
-    vix_level = get_vix_level()
-    if vix_level:
-        print(f"✓ VIX Level: {vix_level:.2f}")
-    else:
-        print("⚠️  Could not fetch VIX, using default weights")
-    
-    vix_regime, vix_weights = determine_vix_regime(vix_level, config)
-    print(f"✓ Market Regime: {vix_regime.upper()}")
     
     logger = setup_logging()
     try:
@@ -1995,211 +2210,35 @@ def main():
     profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
     trader_profile = "day" if profile_choice == "2" else "swing"
 
-    # Fetch risk-free rate automatically
-    print("Fetching current risk-free rate...")
-    rfr = get_risk_free_rate()
-    print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
-
     try:
-        # Collect data from all tickers (parallel for speed)
-        all_frames = []
-        ticker_metadata = {}  # Store IV Rank, earnings dates per ticker
-        errors = []
-        def _fetch(tkr: str):
-            try:
-                df_raw, hv, iv_rank, iv_percentile, earnings_date = fetch_options_yfinance(tkr, max_expiries=max_expiries)
-                return {
-                    "ticker": tkr,
-                    "df": df_raw,
-                    "hv": hv,
-                    "iv_rank": iv_rank,
-                    "iv_percentile": iv_percentile,
-                    "earnings_date": earnings_date,
-                    "error": None
-                }
-            except RuntimeError as e:
-                return {
-                    "ticker": tkr,
-                    "df": None,
-                    "hv": None,
-                    "iv_rank": None,
-                    "iv_percentile": None,
-                    "earnings_date": None,
-                    "error": str(e),
-                }
-            except Exception as e:
-                return {
-                    "ticker": tkr,
-                    "df": None,
-                    "hv": None,
-                    "iv_rank": None,
-                    "iv_percentile": None,
-                    "earnings_date": None,
-                    "error": f"Unexpected error: {e}",
-                }
-
-        # Parallelize across tickers; cap workers to avoid rate limits
-        max_workers = min(10, len(tickers)) if len(tickers) > 1 else 1
-        if max_workers > 1:
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {ex.submit(_fetch, t): t for t in tickers}
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    t = res["ticker"]
-                    if res["df"] is not None and not res["df"].empty:
-                        all_frames.append(res["df"])
-                        # Store metadata per ticker
-                        ticker_metadata[t] = {
-                            "hv": res["hv"],
-                            "iv_rank": res["iv_rank"],
-                            "iv_percentile": res["iv_percentile"],
-                            "earnings_date": res["earnings_date"]
-                        }
-                        hv = res["hv"]
-                        hv_str = f" HV:{hv*100:.1f}%" if hv else ""
-                        iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
-                        print(f"  Fetched {t} ✓{hv_str}{iv_rank_str}")
-                    else:
-                        print(f"  Fetched {t} (no data)")
-                    if res["error"]:
-                        errors.append({"ticker": t, "error": res["error"]})
-        else:
-            res = _fetch(tickers[0])
-            if res["df"] is not None and not res["df"].empty:
-                all_frames.append(res["df"])
-                ticker_metadata[tickers[0]] = {
-                    "hv": res["hv"],
-                    "iv_rank": res["iv_rank"],
-                    "iv_percentile": res["iv_percentile"],
-                    "earnings_date": res["earnings_date"]
-                }
-                hv = res["hv"]
-                hv_str = f" HV:{hv*100:.1f}%" if hv else ""
-                iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
-                print(f"  Fetched {tickers[0]} ✓{hv_str}{iv_rank_str}")
-            elif res["error"]:
-                errors.append({"ticker": tickers[0], "error": res["error"]})
-
-        if errors:
-            for err in errors:
-                tkr = err.get("ticker", "?")
-                msg = err.get("error", "")
-                if "Network error" in msg:
-                    print(f"⚠️  Network error for {tkr}: {msg}. Check your connection and retry.")
-                elif "No options data frames" in msg or "No options expirations" in msg:
-                    print(f"⚠️  No options data for {tkr}; try a more liquid symbol such as SPY or AAPL.")
-                else:
-                    print(f"⚠️  Skipping {tkr}: {msg}")
-
-        if not all_frames:
-            print("\nNo options data retrieved from any ticker.")
+        scan_results = run_scan(
+            mode=mode,
+            tickers=tickers,
+            budget=budget,
+            max_expiries=max_expiries,
+            min_dte=min_dte,
+            max_dte=max_dte,
+            trader_profile=trader_profile,
+            logger=logger,
+        )
+        if scan_results is None:
             sys.exit(0)
 
-        # Combine all data
-        df_combined = pd.concat(all_frames, ignore_index=True)
-        print(f"\nProcessing {len(df_combined)} total options contracts...")
-        
-        # Score and filter - process per ticker to get correct metadata
-        scored_frames = []
-        for ticker_symbol in df_combined["symbol"].unique():
-            ticker_df = df_combined[df_combined["symbol"] == ticker_symbol].copy()
-            metadata = ticker_metadata.get(ticker_symbol, {})
-            
-            df_ticker_scored = enrich_and_score(
-                ticker_df,
-                min_dte=min_dte,
-                max_dte=max_dte,
-                risk_free_rate=rfr,
-                config=config,
-                vix_regime_weights=vix_weights,
-                trader_profile=trader_profile,
-                mode=mode,
-                iv_rank=metadata.get("iv_rank"),
-                iv_percentile=metadata.get("iv_percentile"),
-                earnings_date=metadata.get("earnings_date"),
-            )
-            
-            if not df_ticker_scored.empty:
-                scored_frames.append(df_ticker_scored)
-        
-        if not scored_frames:
-            print("No contracts passed filters (check DTE bounds or liquidity).")
-            sys.exit(0)
-        
-        df_scored = pd.concat(scored_frames, ignore_index=True)
-        print(f"Scored {len(df_scored)} contracts after filtering.")
-        
-        if df_scored.empty:
-            print("No contracts passed filters (check DTE bounds or liquidity).")
-            sys.exit(0)
-        
-        # Apply budget filter if in budget mode
-        if is_budget_mode:
-            df_scored["contract_cost"] = df_scored["premium"] * 100
-            df_scored = df_scored[df_scored["contract_cost"] <= budget].copy()
-            if df_scored.empty:
-                print(f"No contracts found within budget of ${budget:.2f}.")
-                sys.exit(0)
-            print(f"Found {len(df_scored)} contracts within budget.")
-            
-            # Show budget distribution for user clarity
-            print(f"\nBudget Categories:")
-            print(f"  LOW:    $0 - ${budget*0.33:.2f} (0-33% of budget)")
-            print(f"  MEDIUM: ${budget*0.33:.2f} - ${budget*0.66:.2f} (33-66% of budget)")
-            print(f"  HIGH:   ${budget*0.66:.2f} - ${budget:.2f} (66-100% of budget)")
-        elif is_discovery_mode:
-            # Discovery mode: no budget filter, use quantiles for categorization
-            print(f"\nDiscovery Mode: Analyzing {len(df_scored)} quality options across all price ranges...")
-        
-        # Categorize and pick
-        # Use budget categorization for budget mode, quantile for single-stock and discovery
-        df_bucketed = categorize_by_premium(df_scored, budget=budget if is_budget_mode else None)
-        
-        # Diversify tickers in budget and discovery modes
-        picks = pick_top_per_bucket(df_bucketed, per_bucket=5, diversify_tickers=(is_budget_mode or is_discovery_mode))
-        if picks.empty:
-            print("Could not produce picks in the requested buckets.")
-            sys.exit(0)
-        
-        # Get underlying price for report (first ticker in single mode, or 0 in budget mode)
-        underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty and not is_budget_mode else 0.0
+        # Unpack results
+        picks = scan_results['picks']
+        top_pick = scan_results['top_pick']
+        rfr = scan_results['rfr']
+        chain_iv_median = scan_results['chain_iv_median']
+        underlying_price = scan_results['underlying_price']
         
         # Print main report
         print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget)
         
-        # Structured JSONL logging of the picks and context
-        log_picks_json(
-            logger,
-            picks,
-            context={
-                "mode": mode,
-                "budget": budget,
-                "max_expiries": max_expiries,
-                "min_dte": min_dte,
-                "max_dte": max_dte,
-                "risk_free_rate": rfr,
-            },
-        )
         # Compute and display top overall pick
         print("\n" + "="*80)
         print("  ⭐ TOP OVERALL PICK")
         print("="*80)
         
-        # Enhanced scoring for top pick: balance quality with practical factors
-        picks_copy = picks.copy()
-        chain_iv_median = picks["impliedVolatility"].median(skipna=True)
-        
-        # Weighted overall score
-        # Favor: high quality, good liquidity, moderate IV, tight spread, balanced delta
-        picks_copy["overall_score"] = (
-            0.40 * picks_copy["quality_score"] +
-            0.20 * picks_copy["liquidity_score"] +
-            0.15 * picks_copy["spread_score"] +
-            0.15 * picks_copy["delta_quality"] +
-            0.10 * picks_copy["iv_quality"]
-        )
-        
-        top_pick = picks_copy.sort_values("overall_score", ascending=False).iloc[0]
         exp = pd.to_datetime(top_pick["expiration"]).date()
         moneyness = determine_moneyness(top_pick)
         dte = int(top_pick["T_years"] * 365)
