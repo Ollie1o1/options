@@ -1594,7 +1594,7 @@ def enrich_and_score(
     pop_score = df["prob_profit"].fillna(0.5).clip(lower=0, upper=1)
 
     # Risk/Reward Score per prompt thresholds
-    rr_raw = df["rr_ratio"].fillna(0.0)
+    rr_raw = pd.to_numeric(df["rr_ratio"], errors='coerce').fillna(0.0)
     rr_score = pd.Series(0.2, index=df.index)
     rr_score = rr_score.mask(rr_raw >= 2.0, 0.5)
     rr_score = rr_score.mask(rr_raw >= 3.0, 0.8)
@@ -1604,7 +1604,7 @@ def enrich_and_score(
     ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
 
     # EM realism score (already 0-1, fallback to neutral 0.5)
-    em_realism_score = df["em_realism_score"].fillna(0.5).clip(lower=0.0, upper=1.0)
+    em_realism_score = pd.to_numeric(df["em_realism_score"], errors='coerce').fillna(0.5).clip(lower=0.0, upper=1.0)
 
     # Theta decay pressure => score where lower pressure is better
     theta_raw = df["theta_decay_pressure"].replace([pd.NA, pd.NaT], np.nan)
@@ -1616,7 +1616,7 @@ def enrich_and_score(
     theta_score = theta_score.where(~short_dte_mask, theta_score * 0.7)
 
     # Momentum score combining 5d return, RSI distance from 50, and ATR trend
-    ret_score = rank_norm(df.get("ret_5d", pd.Series(0.0, index=df.index)).fillna(0.0))
+    ret_score = rank_norm(pd.to_numeric(df.get("ret_5d", pd.Series(0.0, index=df.index)), errors='coerce').fillna(0.0))
     rsi_vals = pd.to_numeric(df.get("rsi_14", pd.Series(np.nan, index=df.index)), errors="coerce")
     rsi_score = 1.0 - (abs((rsi_vals - 50.0) / 50.0)).clip(lower=0.0, upper=1.0)
     atr_trend_vals = pd.to_numeric(df.get("atr_trend", pd.Series(0.0, index=df.index)), errors="coerce")
@@ -2703,6 +2703,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
 
     # Collect data from all tickers (parallel for speed)
+    tickers = list(set(tickers))  # Deduplicate tickers
     all_frames = []
     ticker_metadata = {}  # Store IV Rank, earnings dates per ticker
     errors = []
@@ -2816,6 +2817,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     # Combine all data
     df_combined = pd.concat(all_frames, ignore_index=True)
+    # Deduplicate contracts (same symbol, expiration, strike, type)
+    df_combined.drop_duplicates(subset=['symbol', 'expiration', 'strike', 'type'], inplace=True)
     print(f"\nProcessing {len(df_combined)} total options contracts...")
 
     # Score and filter - process per ticker to get correct metadata
