@@ -2283,7 +2283,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |Δ| {median_delta:.2f}\n")
         
         # Column headers (add Ticker for multi-stock modes)
-        if mode in ["Budget scan", "Discovery scan"]:
+        if mode in ["Budget scan", "Discovery scan", "Premium Selling"]:
             print(f"  {'Tkr':<5} {'Whale':<3} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<7} {'Δ':<7} {'Tag':<4}")
             print("  " + "-"*81)
         else:
@@ -2297,7 +2297,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             whale_emoji = "🐋" if r.get("Unusual_Whale", False) else ""
             
             # Main line with aligned columns
-            if mode in ["Budget scan", "Discovery scan"]:
+            if mode in ["Budget scan", "Discovery scan", "Premium Selling"]:
                 print(
                     f"  {r['symbol']:<5} "
                     f"{whale_emoji:<3} "
