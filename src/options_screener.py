@@ -1168,24 +1168,28 @@ def enrich_and_score(
         expiry_df = df[df["expiration"] == expiry]
 
         # Find Call Wall
-        call_wall_strike = expiry_df[expiry_df["type"] == "call"]["openInterest"].idxmax()
-        if pd.notna(call_wall_strike):
-            call_wall = expiry_df.loc[call_wall_strike]["strike"]
-            # Get the strike immediately below the wall
-            strikes_below = sorted([s for s in expiry_df[(expiry_df["type"] == "call") & (expiry_df["strike"] < call_wall)]["strike"].unique()], reverse=True)
-            strike_below_wall = strikes_below[0] if strikes_below else None
+        calls = expiry_df[expiry_df["type"] == "call"]
+        if not calls.empty:
+            call_wall_strike_idx = calls["openInterest"].idxmax()
+            if pd.notna(call_wall_strike_idx):
+                call_wall = expiry_df.loc[call_wall_strike_idx]["strike"]
+                # Get the strike immediately below the wall
+                strikes_below = sorted([s for s in calls[calls["strike"] < call_wall]["strike"].unique()], reverse=True)
+                strike_below_wall = strikes_below[0] if strikes_below else None
 
-            df.loc[(df["expiration"] == expiry) & (df["type"] == "call") & ((df["strike"] == call_wall) | (df["strike"] == strike_below_wall)), "oi_wall_warning"] = "LIMITED UPSIDE"
+                df.loc[(df["expiration"] == expiry) & (df["type"] == "call") & ((df["strike"] == call_wall) | (df["strike"] == strike_below_wall)), "oi_wall_warning"] = "LIMITED UPSIDE"
 
         # Find Put Wall
-        put_wall_strike = expiry_df[expiry_df["type"] == "put"]["openInterest"].idxmax()
-        if pd.notna(put_wall_strike):
-            put_wall = expiry_df.loc[put_wall_strike]["strike"]
-            # Get the strike immediately above the wall
-            strikes_above = sorted([s for s in expiry_df[(expiry_df["type"] == "put") & (expiry_df["strike"] > put_wall)]["strike"].unique()])
-            strike_above_wall = strikes_above[0] if strikes_above else None
+        puts = expiry_df[expiry_df["type"] == "put"]
+        if not puts.empty:
+            put_wall_strike_idx = puts["openInterest"].idxmax()
+            if pd.notna(put_wall_strike_idx):
+                put_wall = expiry_df.loc[put_wall_strike_idx]["strike"]
+                # Get the strike immediately above the wall
+                strikes_above = sorted([s for s in puts[puts["strike"] > put_wall]["strike"].unique()])
+                strike_above_wall = strikes_above[0] if strikes_above else None
 
-            df.loc[(df["expiration"] == expiry) & (df["type"] == "put") & ((df["strike"] == put_wall) | (df["strike"] == strike_above_wall)), "oi_wall_warning"] = "LIMITED DOWNSIDE"
+                df.loc[(df["expiration"] == expiry) & (df["type"] == "put") & ((df["strike"] == put_wall) | (df["strike"] == strike_above_wall)), "oi_wall_warning"] = "LIMITED DOWNSIDE"
 
     # IV Skew (calls vs puts at same strike/expiry)
     df["iv_skew"] = np.nan  # start as NaN, then fill for stability
