@@ -42,7 +42,6 @@ def load_historical_logs(logs_dir: str = "logs") -> List[Dict]:
         try:
             with open(log_file, 'r') as f:
                 for line in f:
-                    print(f"Reading line: {line}")
                     entry = json.loads(line.strip())
                     all_entries.append(entry)
         except Exception as e:
