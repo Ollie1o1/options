@@ -7,7 +7,9 @@ Evaluates historical performance of screener picks.
 import os
 import sys
 import json
+import time
 import pandas as pd
+import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -17,6 +19,14 @@ try:
     from .visualize_results import create_backtest_charts
 except ImportError:
     create_backtest_charts = None
+
+
+def generate_option_symbol(row: pd.Series) -> str:
+    """Generates a yfinance-compatible option symbol."""
+    exp_date = pd.to_datetime(row['expiration']).strftime('%y%m%d')
+    option_type = row['type'][0].upper()
+    strike_price = f"{int(row['strike'] * 1000):08d}"
+    return f"{row['symbol']}{exp_date}{option_type}{strike_price}"
 
 
 def load_historical_logs(logs_dir: str = "logs") -> List[Dict]:
@@ -32,6 +42,7 @@ def load_historical_logs(logs_dir: str = "logs") -> List[Dict]:
         try:
             with open(log_file, 'r') as f:
                 for line in f:
+                    print(f"Reading line: {line}")
                     entry = json.loads(line.strip())
                     all_entries.append(entry)
         except Exception as e:
@@ -40,13 +51,84 @@ def load_historical_logs(logs_dir: str = "logs") -> List[Dict]:
     return all_entries
 
 
+def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
+    """
+    Simulates a managed trade strategy with profit-taking and stop-loss.
+    """
+    results = []
+    today = datetime.now().date()
+    print(f"\nRunning Managed Trade Simulation on {len(log_entries)} log entries...")
+
+    for entry in log_entries:
+        picks = entry.get("picks", [])
+        for pick in picks:
+            try:
+                time.sleep(0.5) # Rate limit
+                option_symbol = generate_option_symbol(pd.Series(pick))
+                entry_date = pd.to_datetime(entry.get("timestamp")).date()
+                exp_date = pd.to_datetime(pick.get("expiration")).date()
+
+                if exp_date >= today:
+                    print(f"  - Skipping {option_symbol} (not expired)")
+                    continue
+
+                hist = yf.download(option_symbol, start=entry_date, end=exp_date, progress=False)
+                if hist.empty:
+                    print(f"  - No historical data for {option_symbol}")
+                    continue
+
+                entry_price = pick.get("premium") # Midpoint of Bid/Ask from screener
+                if not entry_price:
+                    entry_price = hist.iloc[0]["Close"] # Fallback to Close
+                if not entry_price:
+                    print(f"  - Could not determine entry price for {option_symbol}")
+                    continue
+
+                profit_target = entry_price * 1.5
+                stop_loss = entry_price * 0.5
+
+                outcome = "EXPIRED"
+                for _, day in hist.iterrows():
+                    if day["High"] >= profit_target:
+                        outcome = "WIN"
+                        break
+                    if day["Low"] <= stop_loss:
+                        outcome = "LOSS"
+                        break
+
+                pnl_data = {}
+                if outcome == "EXPIRED":
+                    final_price = fetch_price_at_expiration(pick["symbol"], pick["expiration"])
+                    if final_price is not None:
+                        pnl_data = calculate_realized_pnl(pick["type"], pick["strike"], entry_price, final_price)
+                        if pnl_data.get("pnl_per_contract", 0) > 0:
+                            outcome = "WIN"
+                        else:
+                            outcome = "LOSS"
+
+                elif outcome == "WIN":
+                    pnl_data = {"pnl_per_contract": (profit_target - entry_price) * 100}
+                elif outcome == "LOSS":
+                    pnl_data = {"pnl_per_contract": (stop_loss - entry_price) * 100}
+
+                pick["outcome"] = outcome
+                pick.update(pnl_data)
+                results.append(pick)
+                print(f"  ✓ {option_symbol}: {outcome}")
+
+            except Exception as e:
+                print(f"  - Skipping {pick.get('symbol')}: {e}")
+                continue
+
+    return pd.DataFrame(results)
+
+
 def fetch_price_at_expiration(symbol: str, expiration_date: str) -> Optional[float]:
     """Fetch the closing price on or near expiration date."""
     try:
         exp_dt = pd.to_datetime(expiration_date).date()
         ticker = yf.Ticker(symbol)
         
-        # Fetch a window around expiration
         start_date = exp_dt - timedelta(days=5)
         end_date = exp_dt + timedelta(days=5)
         
@@ -55,11 +137,9 @@ def fetch_price_at_expiration(symbol: str, expiration_date: str) -> Optional[flo
         if hist.empty:
             return None
         
-        # Try to get exact expiration date, or closest available
         if exp_dt in hist.index.date:
             return float(hist.loc[hist.index.date == exp_dt, "Close"].iloc[0])
         else:
-            # Get closest date
             hist["date_diff"] = abs((hist.index.date - exp_dt).days)
             closest_idx = hist["date_diff"].idxmin()
             return float(hist.loc[closest_idx, "Close"])
@@ -113,77 +193,6 @@ def calculate_realized_pnl(
         }
 
 
-def backtest_entries(log_entries: List[Dict]) -> pd.DataFrame:
-    """
-    Process log entries and calculate realized P/L for expired contracts.
-    
-    Returns:
-        DataFrame with backtest results
-    """
-    results = []
-    
-    print(f"\nProcessing {len(log_entries)} log entries...")
-    
-    for entry in log_entries:
-        picks = entry.get("picks", [])
-        context = entry.get("context", {})
-        timestamp = entry.get("timestamp", "")
-        
-        for pick in picks:
-            exp_date = pick.get("expiration")
-            symbol = pick.get("symbol")
-            
-            if not exp_date or not symbol:
-                continue
-            
-            # Check if option has expired
-            exp_dt = pd.to_datetime(exp_date).date()
-            if exp_dt > datetime.now().date():
-                continue  # Not yet expired
-            
-            # Fetch price at expiration
-            final_price = fetch_price_at_expiration(symbol, exp_date)
-            
-            if final_price is None:
-                continue
-            
-            # Calculate P/L
-            pnl_data = calculate_realized_pnl(
-                pick.get("type", "call"),
-                pick.get("strike", 0),
-                pick.get("premium", 0),
-                final_price
-            )
-            
-            # Compile result
-            result = {
-                "timestamp": timestamp,
-                "symbol": symbol,
-                "type": pick.get("type"),
-                "strike": pick.get("strike"),
-                "expiration": exp_date,
-                "entry_premium": pick.get("premium"),
-                "entry_underlying": pick.get("underlying"),
-                "final_underlying": final_price,
-                "delta": pick.get("delta"),
-                "iv": pick.get("impliedVolatility"),
-                "hv": pick.get("hv_30d"),
-                "prob_profit": pick.get("prob_profit"),
-                "p_itm": pick.get("p_itm"),
-                "rr_ratio": pick.get("rr_ratio"),
-                "theo_value": pick.get("theo_value"),
-                "ev_per_contract": pick.get("ev_per_contract"),
-                "quality_score": pick.get("quality_score"),
-                "mode": context.get("mode"),
-                **pnl_data
-            }
-            
-            results.append(result)
-            print(f"  ✓ {symbol} {pick.get('type')} ${pick.get('strike')} exp {exp_date}: P/L ${pnl_data.get('pnl_per_contract', 0):.2f}")
-    
-    return pd.DataFrame(results)
-
-
 def calculate_correlations(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate correlations between metrics and realized P/L."""
     if df.empty or "pnl_per_contract" not in df.columns:
@@ -208,14 +217,15 @@ def calculate_correlations(df: pd.DataFrame) -> pd.DataFrame:
 
 def generate_performance_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Generate performance statistics."""
-    if df.empty or "pnl_per_contract" not in df.columns:
+    if df.empty or "outcome" not in df.columns:
         return pd.DataFrame()
     
     summary = {
         "Total Trades": len(df),
-        "Winners": len(df[df["pnl_per_contract"] > 0]),
-        "Losers": len(df[df["pnl_per_contract"] <= 0]),
-        "Win Rate %": f"{(len(df[df['pnl_per_contract'] > 0]) / len(df) * 100):.1f}",
+        "Winners": len(df[df["outcome"] == "WIN"]),
+        "Losers": len(df[df["outcome"] == "LOSS"]),
+        "Expired": len(df[df["outcome"] == "EXPIRED"]),
+        "Win Rate %": f"{(len(df[df['outcome'] == 'WIN']) / len(df) * 100):.1f}",
         "Avg P/L": f"${df['pnl_per_contract'].mean():.2f}",
         "Median P/L": f"${df['pnl_per_contract'].median():.2f}",
         "Total P/L": f"${df['pnl_per_contract'].sum():.2f}",
@@ -233,6 +243,7 @@ def main():
     
     # Load historical logs
     logs_dir = "logs"
+    print(f"Loading logs from: {logs_dir}")
     if not os.path.exists(logs_dir):
         print(f"\nNo logs directory found. Run the screener first to generate logs.")
         sys.exit(1)
@@ -246,7 +257,7 @@ def main():
     print(f"Loaded {len(log_entries)} historical entries from logs.")
     
     # Backtest
-    results_df = backtest_entries(log_entries)
+    results_df = managed_trade_simulation(log_entries)
     
     if results_df.empty:
         print("\nNo expired contracts found to backtest.")
