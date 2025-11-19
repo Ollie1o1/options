@@ -20,6 +20,7 @@ import csv
 import json
 import logging
 import uuid
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
@@ -91,6 +92,48 @@ try:
     HAS_VISUALIZATION = True
 except ImportError:
     HAS_VISUALIZATION = False
+
+try:
+    from textblob import TextBlob
+    HAS_TEXTBLOB = True
+except ImportError:
+    HAS_TEXTBLOB = False
+
+# Cache for sentiment scores to avoid re-fetching
+_SENTIMENT_CACHE: Dict[str, float] = {}
+
+
+def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
+    """
+    Fetches news headlines and calculates a sentiment polarity score using TextBlob.
+    """
+    if not HAS_TEXTBLOB:
+        return None
+
+    key = f"{ticker.ticker}:sentiment"
+    if key in _SENTIMENT_CACHE:
+        return _SENTIMENT_CACHE[key]
+
+    try:
+        # yfinance .news returns a list of dicts with 'title' and 'publisher'
+        news = ticker.news
+        if not news:
+            return None
+
+        # Combine all headlines into a single text block for analysis
+        headlines = ". ".join([item.get("title", "") for item in news])
+        if not headlines.strip():
+            return None
+
+        # Create a TextBlob and get the polarity score
+        blob = TextBlob(headlines)
+        score = blob.sentiment.polarity
+
+        _SENTIMENT_CACHE[key] = score
+        return score
+    except Exception:
+        # Fail gracefully if news fetch or sentiment analysis fails
+        return None
 
 
 def load_config(config_path: str = "config.json") -> Dict:
@@ -660,7 +703,7 @@ def get_risk_free_rate() -> float:
     return default_rate
 
 
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime]]:
+def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime], Optional[float]]:
     """Fetch options data and enriched context for a symbol.
 
     Returns a DataFrame of options with underlying-level context (HV, momentum,
@@ -682,6 +725,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
 
     # Upcoming earnings
     earnings_date = get_next_earnings_date(tkr)
+
+    # Sentiment analysis
+    sentiment_score = get_sentiment(tkr)
 
     try:
         expirations = tkr.options
@@ -731,6 +777,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     df["ret_5d"] = ret_5d
     df["rsi_14"] = rsi_14
     df["atr_trend"] = atr_trend
+    df["sentiment_score"] = sentiment_score
 
     # Calculate median IV for IV Rank/Percentile calculation
     df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
@@ -750,7 +797,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     df["iv_rank_90"] = iv_rank_90
     df["iv_percentile_90"] = iv_pct_90
 
-    return df, hv, iv_rank, iv_percentile, earnings_date
+    return df, hv, iv_rank, iv_percentile, earnings_date, sentiment_score
 
 
 def enrich_and_score(
@@ -765,6 +812,7 @@ def enrich_and_score(
     iv_rank: Optional[float] = None,
     iv_percentile: Optional[float] = None,
     earnings_date: Optional[datetime] = None,
+    sentiment_score: Optional[float] = None,
 ) -> pd.DataFrame:
     # Prepare and filter
     now = datetime.now(timezone.utc)
@@ -821,6 +869,31 @@ def enrich_and_score(
 
     if df.empty:
         return df
+
+    # --- Institutional Flow & Sentiment ---
+    df["Vol_OI_Ratio"] = df["volume"] / df["openInterest"].replace(0, pd.NA)
+    df["Unusual_Whale"] = (df["Vol_OI_Ratio"] > 1.5) & (df["volume"] > 500)
+
+    # Sentiment Tag
+    def _sentiment_tag(score):
+        if score is None or pd.isna(score):
+            return "Neutral"
+        if score > 0.05:
+            return "Bullish"
+        elif score < -0.05:
+            return "Bearish"
+        else:
+            return "Neutral"
+
+    df["sentiment_tag"] = df["sentiment_score"].apply(_sentiment_tag)
+
+    # --- Earnings Volatility Logic ---
+    df["Earnings Play"] = "NO"
+    if earnings_date:
+        df.loc[(df["exp_dt"] > earnings_date), "Earnings Play"] = "YES"
+
+    df["is_underpriced"] = pd.NA
+    df.loc[df["Earnings Play"] == "YES", "is_underpriced"] = df["impliedVolatility"] < df["hv_30d"]
 
     # Fill missing IV with chain median per expiration + type to avoid skew
     df["impliedVolatility"] = df["impliedVolatility"].astype(float)
@@ -1286,7 +1359,7 @@ def enrich_and_score(
     df["iv_advantage_score"] = iv_advantage_score
 
     # Basic sanity ordering hints
-    df = df.sort_values(["quality_score", "volume", "openInterest"], ascending=[False, False, False]).reset_index(drop=True)
+    df = df.sort_values(["Unusual_Whale", "quality_score", "volume", "openInterest"], ascending=[False, False, False, False]).reset_index(drop=True)
     return df
 
 
@@ -1388,6 +1461,57 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
     return out
 
 
+def find_vertical_spreads(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Identifies vertical spreads from a DataFrame of single options.
+    """
+    spreads = []
+
+    # Identify "Buy" candidates
+    buy_candidates = df[df["quality_score"] > 0.7].copy()
+
+    for _, buy_leg in buy_candidates.iterrows():
+        # Find potential "Sell" candidates in the same expiry
+        if buy_leg["type"] == "call":
+            sell_candidates = df[
+                (df["expiration"] == buy_leg["expiration"]) &
+                (df["type"] == buy_leg["type"]) &
+                (df["symbol"] == buy_leg["symbol"]) &
+                (df["strike"] > buy_leg["strike"]) & # OTM
+                (df["strike"] <= buy_leg["strike"] + 2) # 1 or 2 strikes away
+            ]
+        else: # Put
+            sell_candidates = df[
+                (df["expiration"] == buy_leg["expiration"]) &
+                (df["type"] == buy_leg["type"]) &
+                (df["symbol"] == buy_leg["symbol"]) &
+                (df["strike"] < buy_leg["strike"]) & # OTM
+                (df["strike"] >= buy_leg["strike"] - 2) # 1 or 2 strikes away
+            ]
+
+        for _, sell_leg in sell_candidates.iterrows():
+            if sell_leg["openInterest"] > 0 and sell_leg["volume"] > 0:
+                spread_cost = buy_leg["premium"] - sell_leg["premium"]
+                strike_width = abs(sell_leg["strike"] - buy_leg["strike"])
+                max_profit = strike_width - spread_cost
+            risk = spread_cost
+
+            if risk > 0 and max_profit > 1.5 * risk:
+                spreads.append({
+                    "symbol": buy_leg["symbol"],
+                    "type": f"{buy_leg['type'].upper()} Spread",
+                    "long_strike": buy_leg["strike"],
+                    "short_strike": sell_leg["strike"],
+                    "expiration": buy_leg["expiration"],
+                    "spread_cost": spread_cost,
+                    "max_profit": max_profit,
+                    "risk": risk,
+                    "underlying": buy_leg["underlying"]
+                })
+
+    return pd.DataFrame(spreads) if spreads else pd.DataFrame()
+
+
 def format_pct(x: Optional[float]) -> str:
     try:
         if x is None or (isinstance(x, float) and not math.isfinite(x)) or pd.isna(x):
@@ -1450,9 +1574,18 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     if pd.notna(rsi) and pd.notna(ret5):
         parts.append(f"Momentum: RSI {float(rsi):.0f}, 5d {format_pct(ret5)}")
 
+    # Sentiment
+    sentiment = row.get("sentiment_tag", "Neutral")
+    parts.append(f"Sentiment: {sentiment}")
+
     # Quality Score
     quality = row.get('quality_score', 0.0)
     parts.append(f"Quality: {quality:.2f}")
+
+    # Earnings Play
+    if row.get("Earnings Play") == "YES":
+        underpriced_status = "Underpriced" if row.get("is_underpriced") else "Overpriced"
+        parts.append(f"Earnings: YES ({underpriced_status})")
 
     # Stock Price and DTE
     stock_price = row.get('underlying', 0.0)
@@ -1553,21 +1686,23 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         
         # Column headers (add Ticker for multi-stock modes)
         if mode in ["Budget scan", "Discovery scan"]:
-            print(f"  {'Tkr':<5} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<7} {'Δ':<7} {'Tag':<4}")
-            print("  " + "-"*78)
+            print(f"  {'Tkr':<5} {'Whale':<3} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<7} {'Δ':<7} {'Tag':<4}")
+            print("  " + "-"*81)
         else:
-            print(f"  {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<8} {'Δ':<7} {'Tag':<4}")
-            print("  " + "-"*76)
+            print(f"  {'Whale':<3} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<8} {'Δ':<7} {'Tag':<4}")
+            print("  " + "-"*79)
         
         for _, r in sub.iterrows():
             exp = pd.to_datetime(r["expiration"]).date()
             moneyness = determine_moneyness(r)
             dte = int(r["T_years"] * 365)
+            whale_emoji = "🐋" if r.get("Unusual_Whale", False) else ""
             
             # Main line with aligned columns
             if mode in ["Budget scan", "Discovery scan"]:
                 print(
                     f"  {r['symbol']:<5} "
+                    f"{whale_emoji:<3} "
                     f"{r['type'].upper():<5} "
                     f"{r['strike']:>7.2f} "
                     f"{exp} "
@@ -1580,7 +1715,8 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 )
             else:
                 print(
-                    f"  {r['type'].upper():<5} "
+                    f"  {whale_emoji:<3} "
+                    f"{r['type'].upper():<5} "
                     f"{r['strike']:>7.2f} "
                     f"{exp} "
                     f"{format_money(r['premium']):<8} "
@@ -1598,6 +1734,32 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             print(f"    ↳ Analysis:  {analysis_line}\n")
 
 
+def print_spreads_report(df_spreads: pd.DataFrame):
+    """Prints a report of the vertical spreads found."""
+    if df_spreads.empty:
+        return
+
+    print("\n" + "="*80)
+    print("  VERTICAL SPREADS REPORT")
+    print("="*80)
+
+    print(f"  {'Symbol':<7} {'Type':<12} {'Long Strike':<12} {'Short Strike':<13} {'Expiration':<12} {'Cost':<8} {'Max Profit':<12} {'Risk':<8}")
+    print("  " + "-"*78)
+
+    for _, row in df_spreads.iterrows():
+        exp = pd.to_datetime(row["expiration"]).date()
+        print(
+            f"  {row['symbol']:<7} "
+            f"{row['type']:<12} "
+            f"{row['long_strike']:>11.2f} "
+            f"{row['short_strike']:>12.2f} "
+            f"{exp} "
+            f"{format_money(row['spread_cost']):<8} "
+            f"{format_money(row['max_profit']):<12} "
+            f"{format_money(row['risk']):<8}"
+        )
+
+
 def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = None) -> str:
     """Export picks to CSV with timestamp."""
     try:
@@ -1612,7 +1774,9 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
             "symbol", "type", "strike", "expiration", "premium", "underlying",
             "delta", "gamma", "vega", "theta", "impliedVolatility", "hv_30d", "iv_vs_hv", "iv_rank", "iv_percentile",
             "iv_rank_30", "iv_percentile_30", "iv_rank_90", "iv_percentile_90",
-            "volume", "openInterest", "spread_pct",
+            "volume", "openInterest", "spread_pct", "Vol_OI_Ratio", "Unusual_Whale",
+            "sentiment_score", "sentiment_tag",
+            "Earnings Play", "is_underpriced",
             "prob_profit", "pop_sim", "expected_move", "required_move", "em_realism_score",
             "theta_decay_pressure", "theta_score",
             "prob_touch", "pot_sim", "p_itm",
@@ -1703,23 +1867,38 @@ def setup_logging() -> logging.Logger:
     logging.basicConfig(level=getattr(logging, level, logging.INFO), format="%(message)s")
     logger = logging.getLogger("options_screener")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    os.makedirs("logs", exist_ok=True)
-    logger.json_path = os.path.join("logs", f"run_{ts}.jsonl")  # type: ignore[attr-defined]
+
+    # Ensure logs are always created in the project's root 'logs' directory
+    # Get the absolute path of the current script.
+    script_path = os.path.abspath(__file__)
+    # Navigate up two levels to get to the project root (src -> root).
+    project_root = os.path.dirname(os.path.dirname(script_path))
+
+    logs_dir = os.path.join(project_root, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    logger.json_path = os.path.join(logs_dir, f"run_{ts}.jsonl")  # type: ignore[attr-defined]
     return logger
 
 
 def log_picks_json(logger: logging.Logger, picks_df: pd.DataFrame, context: Dict):
     """Append picks to a JSONL log for later evaluation/backtesting."""
     try:
+        # Create a copy to avoid modifying the original DataFrame
+        log_df = picks_df.copy()
+
+        # Convert any datetime-like columns to ISO 8601 strings
+        for col in log_df.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+            log_df[col] = log_df[col].dt.strftime('%Y-%m-%dT%H:%M:%S%z')
+
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "context": context,
-            "picks": picks_df.to_dict(orient="records"),
+            "picks": log_df.to_dict(orient="records"),
         }
         with open(logger.json_path, "a") as f:  # type: ignore[attr-defined]
             f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Failed to write to log file: {e}")
 
 
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
@@ -1902,7 +2081,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     errors = []
     def _fetch(tkr: str):
         try:
-            df_raw, hv, iv_rank, iv_percentile, earnings_date = fetch_options_yfinance(tkr, max_expiries=max_expiries)
+            df_raw, hv, iv_rank, iv_percentile, earnings_date, sentiment_score = fetch_options_yfinance(tkr, max_expiries=max_expiries)
             return {
                 "ticker": tkr,
                 "df": df_raw,
@@ -1910,6 +2089,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "iv_rank": iv_rank,
                 "iv_percentile": iv_percentile,
                 "earnings_date": earnings_date,
+                "sentiment_score": sentiment_score,
                 "error": None
             }
         except RuntimeError as e:
@@ -1920,6 +2100,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "iv_rank": None,
                 "iv_percentile": None,
                 "earnings_date": None,
+                "sentiment_score": None,
                 "error": str(e),
             }
         except Exception as e:
@@ -1930,6 +2111,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "iv_rank": None,
                 "iv_percentile": None,
                 "earnings_date": None,
+                "sentiment_score": None,
                 "error": f"Unexpected error: {e}",
             }
 
@@ -1939,6 +2121,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(_fetch, t): t for t in tickers}
             for fut in as_completed(futures):
+                time.sleep(0.5) # Rate limit
                 res = fut.result()
                 t = res["ticker"]
                 if res["df"] is not None and not res["df"].empty:
@@ -1948,7 +2131,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                         "hv": res["hv"],
                         "iv_rank": res["iv_rank"],
                         "iv_percentile": res["iv_percentile"],
-                        "earnings_date": res["earnings_date"]
+                        "earnings_date": res["earnings_date"],
+                        "sentiment_score": res["sentiment_score"]
                     }
                     hv = res["hv"]
                     hv_str = f" HV:{hv*100:.1f}%" if hv else ""
@@ -1966,7 +2150,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "hv": res["hv"],
                 "iv_rank": res["iv_rank"],
                 "iv_percentile": res["iv_percentile"],
-                "earnings_date": res["earnings_date"]
+                "earnings_date": res["earnings_date"],
+                "sentiment_score": res["sentiment_score"]
             }
             hv = res["hv"]
             hv_str = f" HV:{hv*100:.1f}%" if hv else ""
@@ -2012,6 +2197,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             iv_rank=metadata.get("iv_rank"),
             iv_percentile=metadata.get("iv_percentile"),
             earnings_date=metadata.get("earnings_date"),
+            sentiment_score=metadata.get("sentiment_score"),
         )
 
         if not df_ticker_scored.empty:
@@ -2056,6 +2242,9 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         print("Could not produce picks in the requested buckets.")
         return None
 
+    # Find vertical spreads
+    spreads = find_vertical_spreads(df_scored)
+
     # Get underlying price for report (first ticker in single mode, or 0 in budget mode)
     underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty and not is_budget_mode else 0.0
 
@@ -2091,6 +2280,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     return {
         'picks': picks,
         'top_pick': top_pick,
+        'spreads': spreads,
         'rfr': rfr,
         'chain_iv_median': chain_iv_median,
         'underlying_price': underlying_price,
@@ -2244,6 +2434,7 @@ def main():
         # Unpack results
         picks = scan_results['picks']
         top_pick = scan_results['top_pick']
+        spreads = scan_results['spreads']
         rfr = scan_results['rfr']
         chain_iv_median = scan_results['chain_iv_median']
         underlying_price = scan_results['underlying_price']
@@ -2251,6 +2442,9 @@ def main():
         # Print main report
         print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget)
         
+        # Print spreads report
+        print_spreads_report(spreads)
+
         # Compute and display top overall pick
         print("\n" + "="*80)
         print("  ⭐ TOP OVERALL PICK")
