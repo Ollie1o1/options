@@ -27,11 +27,43 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 from finvizfinance.screener.performance import Performance
+import functools
+import random
+
+# Default liquid tickers for fallback
+DEFAULT_TICKERS = [
+    "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
+    "META", "NFLX", "BRK-B", "JPM", "JNJ", "V", "PG", "MA", "UNH", "HD"
+]
+
+def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)):
+    """
+    Decorator to retry a function with exponential backoff.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            x = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except error_types as e:
+                    if x == retries:
+                        logging.warning(f"Function {func.__name__} failed after {retries} retries: {e}")
+                        raise e
+                    sleep = (backoff_in_seconds * 2 ** x + random.uniform(0, 1))
+                    logging.info(f"Retrying {func.__name__} in {sleep:.2f}s due to error: {e}")
+                    time.sleep(sleep)
+                    x += 1
+        return wrapper
+    return decorator
 
 
+@retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
 def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
     """
     Fetches a list of tickers from Finviz based on a given scan type.
+    Falls back to DEFAULT_TICKERS if fetching fails.
     """
     filters_dict = {
         'Option/Short': 'Optionable',
@@ -45,15 +77,19 @@ def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
     try:
         fperformance = Performance()
         fperformance.set_filter(filters_dict=filters_dict)
-        df = fperformance.screener_view(order=order, limit=max_tickers)
+        # Suppress print output from finvizfinance if possible, or just let it be.
+        # finvizfinance often prints "Scraping..." which we can't easily silence without redirecting stdout.
+        df = fperformance.screener_view(order=order, limit=max_tickers, verbose=0)
 
         if df.empty:
-            raise RuntimeError("No tickers found matching the criteria.")
+            logging.warning("Finviz returned empty dataframe. Using default tickers.")
+            return DEFAULT_TICKERS[:max_tickers]
 
         tickers = df['Ticker'].tolist()
         return tickers
     except Exception as e:
-        raise RuntimeError(f"Could not fetch '{scan_type}' from Finviz: {e}")
+        logging.warning(f"Could not fetch '{scan_type}' from Finviz: {e}. Using default tickers.")
+        return DEFAULT_TICKERS[:max_tickers]
 
 
 # Dependency checks
@@ -104,6 +140,7 @@ _SENTIMENT_CACHE: Dict[str, float] = {}
 _SEASONALITY_CACHE: Dict[str, float] = {}
 
 
+@retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
     """
     Calculates the historical win rate for the current month over the last 5 years.
@@ -134,6 +171,7 @@ def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
         return None
 
 
+@retry_with_backoff(retries=2, backoff_in_seconds=1)
 def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
     """
     Fetches news headlines and calculates a sentiment polarity score using TextBlob.
@@ -277,6 +315,7 @@ SECTOR_MAP = {
 }
 
 
+@retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_macro_risk() -> bool:
     """
     Checks for Macro Risk via Forex Volatility (EURUSD=X).
@@ -298,6 +337,7 @@ def check_macro_risk() -> bool:
         return False
 
 
+@retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_yield_spike() -> Tuple[bool, float]:
     """
     Checks if 10-Year Treasury Yield (^TNX) is up > 2.5% today.
@@ -315,6 +355,7 @@ def check_yield_spike() -> Tuple[bool, float]:
         return False, 0.0
 
 
+@retry_with_backoff(retries=2, backoff_in_seconds=1)
 def get_sector_performance(ticker_symbol: str) -> Dict:
     """
     Fetches 5-day return of the Ticker and its Sector ETF.
@@ -345,6 +386,7 @@ def get_sector_performance(ticker_symbol: str) -> Dict:
         return {}
 
 
+@retry_with_backoff(retries=2, backoff_in_seconds=1)
 def get_market_context() -> Tuple[str, str, bool, float]:
     """
     Fetches SPY and VIX data to determine market trend and volatility regime.
@@ -928,6 +970,40 @@ def get_risk_free_rate() -> float:
     return default_rate
 
 
+def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
+    """Helper to fetch and process a single expiration's option chain."""
+    frames = []
+    try:
+        oc = tkr.option_chain(exp)
+    except (URLError, ConnectionError, OSError):
+        # Network issue for this expiration; skip
+        return []
+    except Exception:
+        # Skip this expiration if it fails
+        return []
+
+    for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
+        if df is None or df.empty:
+            continue
+        sub = df.copy()
+        sub["type"] = opt_type
+        sub["expiration"] = exp
+        sub["symbol"] = symbol.upper()
+
+        # Normalize column names we rely on
+        for col in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]:
+            if col not in sub.columns:
+                sub[col] = pd.NA
+
+        # Calculate Max Pain for this expiration
+        max_pain = calculate_max_pain(sub)
+        sub["max_pain"] = max_pain
+
+        frames.append(sub)
+    return frames
+
+
+@retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
 def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime], Optional[float], Optional[float], Optional[float], Dict]:
     """Fetch options data and enriched context for a symbol.
 
@@ -980,34 +1056,15 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     frames = []
     median_iv = None
 
-    for exp in expirations_to_scan:
-        try:
-            oc = tkr.option_chain(exp)
-        except (URLError, ConnectionError, OSError):  # type: ignore[name-defined]
-            # Network issue for this expiration; skip but continue others
-            continue
-        except Exception:
-            # Skip this expiration if it fails
-            continue
-        for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
-            if df is None or df.empty:
+    # Use ThreadPoolExecutor to fetch expirations in parallel for speed
+    with ThreadPoolExecutor(max_workers=min(4, len(expirations_to_scan))) as executor:
+        future_to_exp = {executor.submit(_process_option_chain, tkr, symbol, exp): exp for exp in expirations_to_scan}
+        for future in as_completed(future_to_exp):
+            try:
+                result_frames = future.result()
+                frames.extend(result_frames)
+            except Exception:
                 continue
-            sub = df.copy()
-            sub["type"] = opt_type
-            sub["expiration"] = exp
-            sub["symbol"] = symbol.upper()
-
-            # Normalize column names we rely on
-            # yfinance has: 'strike','lastPrice','bid','ask','volume','openInterest','impliedVolatility','lastTradeDate','inTheMoney','contractSymbol'
-            for col in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]:
-                if col not in sub.columns:
-                    sub[col] = pd.NA
-
-            # Calculate Max Pain for this expiration
-            max_pain = calculate_max_pain(sub)
-            sub["max_pain"] = max_pain
-
-            frames.append(sub)
 
     if not frames:
         raise RuntimeError(f"No options data frames fetched from yfinance for {symbol}.")
@@ -2695,12 +2752,12 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             }
 
     # Parallelize across tickers; cap workers to avoid rate limits
-    max_workers = min(10, len(tickers)) if len(tickers) > 1 else 1
+    max_workers = min(20, len(tickers)) if len(tickers) > 1 else 1
     if max_workers > 1:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(_fetch, t): t for t in tickers}
             for fut in as_completed(futures):
-                time.sleep(0.5) # Rate limit
+                time.sleep(0.1) # Rate limit (tuned for speed/safety)
                 res = fut.result()
                 t = res["ticker"]
                 if res["df"] is not None and not res["df"].empty:
