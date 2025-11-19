@@ -101,6 +101,37 @@ except ImportError:
 
 # Cache for sentiment scores to avoid re-fetching
 _SENTIMENT_CACHE: Dict[str, float] = {}
+_SEASONALITY_CACHE: Dict[str, float] = {}
+
+
+def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
+    """
+    Calculates the historical win rate for the current month over the last 5 years.
+    """
+    key = f"{ticker.ticker}:seasonality"
+    if key in _SEASONALITY_CACHE:
+        return _SEASONALITY_CACHE[key]
+
+    try:
+        hist = ticker.history(period="5y", interval="1mo")
+        if hist.empty:
+            return None
+
+        current_month = datetime.now().month
+        monthly_data = hist[hist.index.month == current_month]
+
+        if monthly_data.empty:
+            return None
+
+        wins = (monthly_data['Close'] > monthly_data['Open']).sum()
+        total_months = len(monthly_data)
+
+        win_rate = wins / total_months if total_months > 0 else 0.0
+
+        _SEASONALITY_CACHE[key] = win_rate
+        return win_rate
+    except Exception:
+        return None
 
 
 def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
@@ -492,10 +523,10 @@ def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[f
         return None
 
 
-def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]:
+def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool]:
     """Compute basic price momentum and technical indicators.
 
-    Returns a tuple of (5-day return, 14-day RSI, ATR trend, 20-day SMA, 20-day High, 20-day Low).
+    Returns a tuple of (5-day return, 14-day RSI, ATR trend, 20-day SMA, 20-day High, 20-day Low, is_squeezing).
     All values are floats or None if insufficient data.
     """
     try:
@@ -555,11 +586,24 @@ def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optiona
         high_20 = float(high.rolling(window=20).max().iloc[-1])
         low_20 = float(low.rolling(window=20).min().iloc[-1])
 
-        result = (ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20)
+        # Bollinger Bands (20, 2)
+        bb_std = close.rolling(window=20).std()
+        bb_upper = sma_20 + (bb_std.iloc[-1] * 2)
+        bb_lower = sma_20 - (bb_std.iloc[-1] * 2)
+
+        # Keltner Channels (20, 1.5)
+        kc_atr = atr.iloc[-1]
+        kc_upper = sma_20 + (kc_atr * 1.5)
+        kc_lower = sma_20 - (kc_atr * 1.5)
+
+        # Squeeze Check
+        is_squeezing = (bb_upper < kc_upper) and (bb_lower > kc_lower)
+
+        result = (ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing)
         _MOMENTUM_CACHE[key] = result
         return result
     except Exception:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, False
 
 
 def get_iv_rank_percentile(
@@ -737,7 +781,7 @@ def get_risk_free_rate() -> float:
     return default_rate
 
 
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime], Optional[float]]:
+def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime], Optional[float], Optional[float]]:
     """Fetch options data and enriched context for a symbol.
 
     Returns a DataFrame of options with underlying-level context (HV, momentum,
@@ -755,13 +799,16 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
 
     # Historical volatility and momentum indicators
     hv = get_historical_volatility(tkr, period=30)
-    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20 = get_momentum_indicators(tkr)
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing = get_momentum_indicators(tkr)
 
     # Upcoming earnings
     earnings_date = get_next_earnings_date(tkr)
 
     # Sentiment analysis
     sentiment_score = get_sentiment(tkr)
+
+    # Seasonality check
+    seasonal_win_rate = check_seasonality(tkr)
 
     try:
         expirations = tkr.options
@@ -815,6 +862,8 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     df["high_20"] = high_20
     df["low_20"] = low_20
     df["sentiment_score"] = sentiment_score
+    df["seasonal_win_rate"] = seasonal_win_rate
+    df["is_squeezing"] = is_squeezing
 
     # Calculate median IV for IV Rank/Percentile calculation
     df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
@@ -834,7 +883,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     df["iv_rank_90"] = iv_rank_90
     df["iv_percentile_90"] = iv_pct_90
 
-    return df, hv, iv_rank, iv_percentile, earnings_date, sentiment_score
+    return df, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate
 
 
 def enrich_and_score(
@@ -850,6 +899,7 @@ def enrich_and_score(
     iv_percentile: Optional[float] = None,
     earnings_date: Optional[datetime] = None,
     sentiment_score: Optional[float] = None,
+    seasonal_win_rate: Optional[float] = None,
 ) -> pd.DataFrame:
     # Prepare and filter
     now = datetime.now(timezone.utc)
@@ -1112,6 +1162,31 @@ def enrich_and_score(
         df["iv_vs_hv"] = 0.0
         df["iv_hv_ratio"] = 1.0
     
+    # --- OI Wall Detection ---
+    df["oi_wall_warning"] = ""
+    for expiry in df["expiration"].unique():
+        expiry_df = df[df["expiration"] == expiry]
+
+        # Find Call Wall
+        call_wall_strike = expiry_df[expiry_df["type"] == "call"]["openInterest"].idxmax()
+        if pd.notna(call_wall_strike):
+            call_wall = expiry_df.loc[call_wall_strike]["strike"]
+            # Get the strike immediately below the wall
+            strikes_below = sorted([s for s in expiry_df[(expiry_df["type"] == "call") & (expiry_df["strike"] < call_wall)]["strike"].unique()], reverse=True)
+            strike_below_wall = strikes_below[0] if strikes_below else None
+
+            df.loc[(df["expiration"] == expiry) & (df["type"] == "call") & ((df["strike"] == call_wall) | (df["strike"] == strike_below_wall)), "oi_wall_warning"] = "LIMITED UPSIDE"
+
+        # Find Put Wall
+        put_wall_strike = expiry_df[expiry_df["type"] == "put"]["openInterest"].idxmax()
+        if pd.notna(put_wall_strike):
+            put_wall = expiry_df.loc[put_wall_strike]["strike"]
+            # Get the strike immediately above the wall
+            strikes_above = sorted([s for s in expiry_df[(expiry_df["type"] == "put") & (expiry_df["strike"] > put_wall)]["strike"].unique()])
+            strike_above_wall = strikes_above[0] if strikes_above else None
+
+            df.loc[(df["expiration"] == expiry) & (df["type"] == "put") & ((df["strike"] == put_wall) | (df["strike"] == strike_above_wall)), "oi_wall_warning"] = "LIMITED DOWNSIDE"
+
     # IV Skew (calls vs puts at same strike/expiry)
     df["iv_skew"] = np.nan  # start as NaN, then fill for stability
     for (exp, strike), group in df.groupby(["expiration", "strike"]):
@@ -1399,6 +1474,16 @@ def enrich_and_score(
     df.loc[df["decay_warning"] == True, "quality_score"] -= 0.20
     df.loc[df["sr_warning"] != "", "quality_score"] -= 0.10
 
+    # --- Probability Enhancer Score Adjustments ---
+    if "seasonal_win_rate" in df.columns:
+        df.loc[df["seasonal_win_rate"] >= 0.8, "quality_score"] += 0.10
+        df.loc[df["seasonal_win_rate"] <= 0.2, "quality_score"] -= 0.10
+
+    df.loc[df["oi_wall_warning"] != "", "quality_score"] -= 0.10
+
+    df["squeeze_play"] = (df["is_squeezing"] == True) & (df["Unusual_Whale"] == True)
+    df.loc[df["squeeze_play"], "quality_score"] += 0.25
+
 
     # Ensure quality_score stays in [0, 1]
     df["quality_score"] = df["quality_score"].clip(lower=0, upper=1)
@@ -1552,10 +1637,10 @@ def find_vertical_spreads(df: pd.DataFrame) -> pd.DataFrame:
                 spread_cost = buy_leg["premium"] - sell_leg["premium"]
                 strike_width = abs(sell_leg["strike"] - buy_leg["strike"])
                 max_profit = strike_width - spread_cost
-            risk = spread_cost
+                risk = spread_cost
 
-            if risk > 0 and max_profit > 1.5 * risk:
-                spreads.append({
+                if risk > 0 and max_profit > 1.5 * risk:
+                    spreads.append({
                     "symbol": buy_leg["symbol"],
                     "type": f"{buy_leg['type'].upper()} Spread",
                     "long_strike": buy_leg["strike"],
@@ -1650,11 +1735,21 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     dte = int(row.get('T_years', 0) * 365)
     parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
 
-    # --- Warnings ---
+    # --- Seasonality ---
+    if pd.notna(row.get("seasonal_win_rate")):
+        win_rate = row["seasonal_win_rate"]
+        current_month_name = datetime.now().strftime("%b")
+        parts.append(f"{current_month_name} Hist: {win_rate:.0%}")
+
+    # --- Warnings & Squeeze---
     if row.get("decay_warning"):
         parts.append("HIGH DECAY RISK")
     if row.get("sr_warning"):
         parts.append(row["sr_warning"])
+    if row.get("oi_wall_warning"):
+        parts.append(row["oi_wall_warning"])
+    if row.get("squeeze_play"):
+        parts.append("🔥 SQUEEZE PLAY")
 
     return " | ".join(parts)
 
@@ -2146,7 +2241,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     errors = []
     def _fetch(tkr: str):
         try:
-            df_raw, hv, iv_rank, iv_percentile, earnings_date, sentiment_score = fetch_options_yfinance(tkr, max_expiries=max_expiries)
+            df_raw, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate = fetch_options_yfinance(tkr, max_expiries=max_expiries)
             return {
                 "ticker": tkr,
                 "df": df_raw,
@@ -2155,6 +2250,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "iv_percentile": iv_percentile,
                 "earnings_date": earnings_date,
                 "sentiment_score": sentiment_score,
+                "seasonal_win_rate": seasonal_win_rate,
                 "error": None
             }
         except RuntimeError as e:
@@ -2166,6 +2262,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "iv_percentile": None,
                 "earnings_date": None,
                 "sentiment_score": None,
+                "seasonal_win_rate": None,
                 "error": str(e),
             }
         except Exception as e:
@@ -2177,6 +2274,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "iv_percentile": None,
                 "earnings_date": None,
                 "sentiment_score": None,
+                "seasonal_win_rate": None,
                 "error": f"Unexpected error: {e}",
             }
 
@@ -2263,6 +2361,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             iv_percentile=metadata.get("iv_percentile"),
             earnings_date=metadata.get("earnings_date"),
             sentiment_score=metadata.get("sentiment_score"),
+            seasonal_win_rate=metadata.get("seasonal_win_rate"),
         )
 
         if not df_ticker_scored.empty:
