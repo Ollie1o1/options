@@ -781,7 +781,7 @@ def get_risk_free_rate() -> float:
     return default_rate
 
 
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime], Optional[float], Optional[float]]:
+def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime], Optional[float], Optional[float], Optional[float]]:
     """Fetch options data and enriched context for a symbol.
 
     Returns a DataFrame of options with underlying-level context (HV, momentum,
@@ -820,11 +820,17 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     if not expirations:
         raise RuntimeError(f"No options expirations available for {symbol}.")
 
-    expirations = expirations[:max_expiries]
+    # --- Term Structure Requirement ---
+    # Ensure we fetch at least 2 expiries if available, even if user asks for 1
+    num_expiries_to_fetch = max_expiries
+    if max_expiries == 1 and len(expirations) > 1:
+        num_expiries_to_fetch = 2
+
+    expirations_to_scan = expirations[:num_expiries_to_fetch]
     frames = []
     median_iv = None
 
-    for exp in expirations:
+    for exp in expirations_to_scan:
         try:
             oc = tkr.option_chain(exp)
         except (URLError, ConnectionError, OSError):  # type: ignore[name-defined]
@@ -883,7 +889,40 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     df["iv_rank_90"] = iv_rank_90
     df["iv_percentile_90"] = iv_pct_90
 
-    return df, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate
+    # --- Volatility Term Structure Calculation ---
+    term_structure_spread = None
+    if len(expirations_to_scan) >= 2 and 'exp_dt' in df.columns:
+        try:
+            # Ensure exp_dt is present and sorted to find front/back months
+            df['exp_dt'] = pd.to_datetime(df['expiration'], errors='coerce', utc=True)
+            sorted_expiries = sorted(df['exp_dt'].dropna().unique())
+
+            if len(sorted_expiries) >= 2:
+                front_month_exp = sorted_expiries[0]
+                back_month_exp = sorted_expiries[1]
+
+                front_month_df = df[df['exp_dt'] == front_month_exp].copy()
+                back_month_df = df[df['exp_dt'] == back_month_exp].copy()
+
+                # Find ATM IV for front month
+                front_month_df['dist_from_atm'] = (front_month_df['strike'] - underlying).abs()
+                front_atm_strike = front_month_df.loc[front_month_df['dist_from_atm'].idxmin()]['strike']
+                front_atm_ivs = front_month_df[front_month_df['strike'] == front_atm_strike]['impliedVolatility'].dropna()
+                front_atm_iv = front_atm_ivs.mean() if not front_atm_ivs.empty else None
+
+                # Find ATM IV for back month
+                back_month_df['dist_from_atm'] = (back_month_df['strike'] - underlying).abs()
+                back_atm_strike = back_month_df.loc[back_month_df['dist_from_atm'].idxmin()]['strike']
+                back_atm_ivs = back_month_df[back_month_df['strike'] == back_atm_strike]['impliedVolatility'].dropna()
+                back_atm_iv = back_atm_ivs.mean() if not back_atm_ivs.empty else None
+
+                if pd.notna(front_atm_iv) and pd.notna(back_atm_iv):
+                    term_structure_spread = back_atm_iv - front_atm_iv
+        except Exception:
+            term_structure_spread = None # Fail gracefully
+
+
+    return df, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate, term_structure_spread
 
 
 def enrich_and_score(
@@ -900,6 +939,7 @@ def enrich_and_score(
     earnings_date: Optional[datetime] = None,
     sentiment_score: Optional[float] = None,
     seasonal_win_rate: Optional[float] = None,
+    term_structure_spread: Optional[float] = None,
 ) -> pd.DataFrame:
     # Prepare and filter
     now = datetime.now(timezone.utc)
@@ -1488,6 +1528,12 @@ def enrich_and_score(
     df["squeeze_play"] = (df["is_squeezing"] == True) & (df["Unusual_Whale"] == True)
     df.loc[df["squeeze_play"], "quality_score"] += 0.25
 
+    # --- Term Structure Score Adjustment ---
+    if term_structure_spread is not None and term_structure_spread < 0: # Backwardation
+        # Penalize long calls, boost short puts
+        df.loc[df["type"] == "call", "quality_score"] -= 0.10
+        df.loc[df["type"] == "put", "quality_score"] += 0.10
+
 
     # Ensure quality_score stays in [0, 1]
     df["quality_score"] = df["quality_score"].clip(lower=0, upper=1)
@@ -1657,6 +1703,114 @@ def find_vertical_spreads(df: pd.DataFrame) -> pd.DataFrame:
                 })
 
     return pd.DataFrame(spreads) if spreads else pd.DataFrame()
+
+
+def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Identifies high-probability Bull Put and Bear Call credit spreads.
+    """
+    spreads = []
+
+    # --- Bull Put Spreads (Sell a Put, Buy a lower Put) ---
+    # Short leg candidates: Delta between -0.20 and -0.30
+    put_df = df[df['type'] == 'put'].copy()
+    short_put_candidates = put_df[
+        (put_df['delta'] >= -0.30) & (put_df['delta'] <= -0.20)
+    ].copy()
+
+    for _, short_leg in short_put_candidates.iterrows():
+        # Find potential long legs (protection) 1 or 2 strikes lower
+        # Find potential long legs (protection) 1 or 2 strikes lower
+        strikes = sorted(put_df[
+            (put_df['expiration'] == short_leg['expiration']) &
+            (put_df['symbol'] == short_leg['symbol'])
+        ]['strike'].unique(), reverse=True)
+
+        try:
+            current_strike_index = strikes.index(short_leg['strike'])
+        except ValueError:
+            continue
+
+        potential_long_strikes = []
+        if current_strike_index + 1 < len(strikes):
+            potential_long_strikes.append(strikes[current_strike_index + 1])
+        if current_strike_index + 2 < len(strikes):
+            potential_long_strikes.append(strikes[current_strike_index + 2])
+
+        long_leg_candidates = put_df[
+            (put_df['expiration'] == short_leg['expiration']) &
+            (put_df['symbol'] == short_leg['symbol']) &
+            (put_df['strike'].isin(potential_long_strikes))
+        ]
+
+        for _, long_leg in long_leg_candidates.iterrows():
+            strike_width = short_leg['strike'] - long_leg['strike']
+            net_credit = short_leg['premium'] - long_leg['premium']
+
+            # Profitability Filter: Net Credit > 0.33 * Strike Width
+            if net_credit > (0.33 * strike_width):
+                spreads.append({
+                    "symbol": short_leg['symbol'],
+                    "type": "Bull Put",
+                    "short_strike": short_leg['strike'],
+                    "long_strike": long_leg['strike'],
+                    "expiration": short_leg['expiration'],
+                    "net_credit": net_credit,
+                    "max_profit": net_credit * 100,
+                    "max_loss": (strike_width - net_credit) * 100,
+                    "quality_score": (short_leg['quality_score'] + long_leg['quality_score']) / 2
+                })
+
+    # --- Bear Call Spreads (Sell a Call, Buy a higher Call) ---
+    call_df = df[df['type'] == 'call'].copy()
+    # Short leg candidates: Delta between 0.20 and 0.30
+    short_call_candidates = call_df[
+        (call_df['delta'] >= 0.20) & (call_df['delta'] <= 0.30)
+    ].copy()
+
+    for _, short_leg in short_call_candidates.iterrows():
+        # Find potential long legs (protection) 1 or 2 strikes higher
+        strikes = sorted(call_df[
+            (call_df['expiration'] == short_leg['expiration']) &
+            (call_df['symbol'] == short_leg['symbol'])
+        ]['strike'].unique())
+
+        try:
+            current_strike_index = strikes.index(short_leg['strike'])
+        except ValueError:
+            continue
+
+        potential_long_strikes = []
+        if current_strike_index + 1 < len(strikes):
+            potential_long_strikes.append(strikes[current_strike_index + 1])
+        if current_strike_index + 2 < len(strikes):
+            potential_long_strikes.append(strikes[current_strike_index + 2])
+
+        long_leg_candidates = call_df[
+            (call_df['expiration'] == short_leg['expiration']) &
+            (call_df['symbol'] == short_leg['symbol']) &
+            (call_df['strike'].isin(potential_long_strikes))
+        ]
+
+        for _, long_leg in long_leg_candidates.iterrows():
+            strike_width = long_leg['strike'] - short_leg['strike']
+            net_credit = short_leg['premium'] - long_leg['premium']
+
+            # Profitability Filter: Net Credit > 0.33 * Strike Width
+            if net_credit > (0.33 * strike_width):
+                spreads.append({
+                    "symbol": short_leg['symbol'],
+                    "type": "Bear Call",
+                    "short_strike": short_leg['strike'],
+                    "long_strike": long_leg['strike'],
+                    "expiration": short_leg['expiration'],
+                    "net_credit": net_credit,
+                    "max_profit": net_credit * 100,
+                    "max_loss": (strike_width - net_credit) * 100,
+                    "quality_score": (short_leg['quality_score'] + long_leg['quality_score']) / 2
+                })
+
+    return pd.DataFrame(spreads).sort_values(by="quality_score", ascending=False) if spreads else pd.DataFrame()
 
 
 def format_pct(x: Optional[float]) -> str:
@@ -1921,6 +2075,35 @@ def print_spreads_report(df_spreads: pd.DataFrame):
             f"{format_money(row['spread_cost']):<8} "
             f"{format_money(row['max_profit']):<12} "
             f"{format_money(row['risk']):<8}"
+        )
+
+
+def print_credit_spreads_report(df_spreads: pd.DataFrame):
+    """Prints a dedicated report for credit spreads."""
+    if df_spreads.empty:
+        print("\nNo credit spreads meeting the criteria were found.")
+        return
+
+    print("\n" + "="*80)
+    print("  CREDIT SPREADS REPORT (INCOME ENGINE)")
+    print("="*80)
+
+    header = f"  {'Symbol':<7} {'Type':<10} {'Short Strike':<13} {'Long Strike':<12} {'Expiration':<12} {'Credit':<8} {'Max Profit':<12} {'Max Loss':<10} {'Score':<5}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    for _, row in df_spreads.iterrows():
+        exp = pd.to_datetime(row["expiration"]).date()
+        print(
+            f"  {row['symbol']:<7} "
+            f"{row['type']:<10} "
+            f"{row['short_strike']:>12.2f} "
+            f"{row['long_strike']:>11.2f} "
+            f"{exp} "
+            f"{format_money(row['net_credit']):<8} "
+            f"{format_money(row['max_profit']):<12} "
+            f"{format_money(row['max_loss']):<10} "
+            f"{row['quality_score']:.2f}"
         )
 
 
@@ -2245,7 +2428,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     errors = []
     def _fetch(tkr: str):
         try:
-            df_raw, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate = fetch_options_yfinance(tkr, max_expiries=max_expiries)
+            df_raw, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate, term_structure_spread = fetch_options_yfinance(tkr, max_expiries=max_expiries)
             return {
                 "ticker": tkr,
                 "df": df_raw,
@@ -2255,6 +2438,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "earnings_date": earnings_date,
                 "sentiment_score": sentiment_score,
                 "seasonal_win_rate": seasonal_win_rate,
+                "term_structure_spread": term_structure_spread,
                 "error": None
             }
         except RuntimeError as e:
@@ -2267,6 +2451,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "earnings_date": None,
                 "sentiment_score": None,
                 "seasonal_win_rate": None,
+                "term_structure_spread": None,
                 "error": str(e),
             }
         except Exception as e:
@@ -2279,6 +2464,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 "earnings_date": None,
                 "sentiment_score": None,
                 "seasonal_win_rate": None,
+                "term_structure_spread": None,
                 "error": f"Unexpected error: {e}",
             }
 
@@ -2299,7 +2485,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                         "iv_rank": res["iv_rank"],
                         "iv_percentile": res["iv_percentile"],
                         "earnings_date": res["earnings_date"],
-                        "sentiment_score": res["sentiment_score"]
+                        "sentiment_score": res["sentiment_score"],
+                        "term_structure_spread": res["term_structure_spread"]
                     }
                     hv = res["hv"]
                     hv_str = f" HV:{hv*100:.1f}%" if hv else ""
@@ -2366,6 +2553,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             earnings_date=metadata.get("earnings_date"),
             sentiment_score=metadata.get("sentiment_score"),
             seasonal_win_rate=metadata.get("seasonal_win_rate"),
+            term_structure_spread=metadata.get("term_structure_spread"),
         )
 
         if not df_ticker_scored.empty:
@@ -2413,6 +2601,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Find vertical spreads
     spreads = find_vertical_spreads(df_scored)
 
+    credit_spreads = pd.DataFrame()
+    if mode == "Credit Spreads":
+        credit_spreads = find_credit_spreads(df_scored)
+
+
     # Get underlying price for report (first ticker in single mode, or 0 in budget mode)
     underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty and not is_budget_mode else 0.0
 
@@ -2449,6 +2642,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         'picks': picks,
         'top_pick': top_pick,
         'spreads': spreads,
+        'credit_spreads': credit_spreads,
         'rfr': rfr,
         'chain_iv_median': chain_iv_median,
         'underlying_price': underlying_price,
@@ -2476,14 +2670,16 @@ def main():
     print("  1. Enter a ticker (e.g., AAPL) for single-stock analysis")
     print("  2. Enter 'ALL' for budget-based multi-stock scan")
     print("  3. Enter 'DISCOVER' to scan top 100 most-traded tickers (no budget limit)")
-    print("  4. Enter 'SELL' for Premium Selling analysis (short puts)\n")
+    print("  4. Enter 'SELL' for Premium Selling analysis (short puts)")
+    print("  5. Enter 'SPREADS' for Credit Spread analysis\n")
 
-    symbol_input = prompt_input("Enter stock ticker, 'ALL', 'DISCOVER', or 'SELL'", "").upper()
+    symbol_input = prompt_input("Enter stock ticker or command", "DISCOVER").upper()
 
     # Determine mode
     is_budget_mode = (symbol_input == "ALL")
     is_discovery_mode = (symbol_input == "DISCOVER" or symbol_input == "")
     is_premium_selling_mode = (symbol_input == "SELL")
+    is_credit_spread_mode = (symbol_input == "SPREADS")
 
     if is_discovery_mode:
         mode = "Discovery scan"
@@ -2491,20 +2687,25 @@ def main():
         mode = "Budget scan"
     elif is_premium_selling_mode:
         mode = "Premium Selling"
+    elif is_credit_spread_mode:
+        mode = "Credit Spreads"
     else:
         mode = "Single-stock"
 
     budget = None
     tickers = []
 
-    if is_discovery_mode or is_premium_selling_mode:
+    if is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode:
         # Discovery mode: scan top 100 most-traded options tickers
         if is_premium_selling_mode:
             print("\n=== PREMIUM SELLING MODE ===")
-            print("Scanning top 100 most-traded options tickers for short put opportunities...")
+            print("Scanning top tickers for short put opportunities...")
+        elif is_credit_spread_mode:
+            print("\n=== CREDIT SPREAD MODE ===")
+            print("Scanning top tickers for credit spread opportunities...")
         else:
             print("\n=== DISCOVERY MODE ===")
-            print("Scanning top 100 most-traded options tickers for best opportunities...")
+            print("Scanning top tickers for best opportunities...")
 
         tickers = prompt_for_tickers()
         print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
@@ -2611,15 +2812,18 @@ def main():
         picks = scan_results['picks']
         top_pick = scan_results['top_pick']
         spreads = scan_results['spreads']
+        credit_spreads = scan_results['credit_spreads']
         rfr = scan_results['rfr']
         chain_iv_median = scan_results['chain_iv_median']
         underlying_price = scan_results['underlying_price']
         
-        # Print main report
-        print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget, market_trend, volatility_regime)
-
-        # Print spreads report
-        print_spreads_report(spreads)
+        if mode == "Credit Spreads":
+            print_credit_spreads_report(credit_spreads)
+        else:
+            # Print main report
+            print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget, market_trend, volatility_regime)
+            # Print spreads report
+            print_spreads_report(spreads)
 
         # Compute and display top overall pick
         print("\n" + "="*80)
