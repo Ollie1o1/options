@@ -178,6 +178,35 @@ def load_config(config_path: str = "config.json") -> Dict:
         return default_config
 
 
+def get_market_context() -> Tuple[str, str]:
+    """
+    Fetches SPY and VIX data to determine market trend and volatility regime.
+    """
+    try:
+        # Get SPY data for trend analysis
+        spy = yf.Ticker("SPY")
+        spy_hist = spy.history(period="3mo") # 3 months for a stable 50-day SMA
+        if not spy_hist.empty:
+            spy_sma50 = spy_hist['Close'].rolling(window=50).mean().iloc[-1]
+            spy_current = spy_hist['Close'].iloc[-1]
+            market_trend = "Bull" if spy_current > spy_sma50 else "Bear"
+        else:
+            market_trend = "Unknown"
+
+        # Get VIX data for volatility regime
+        vix = yf.Ticker("^VIX")
+        vix_hist = vix.history(period="5d")
+        if not vix_hist.empty:
+            vix_current = vix_hist['Close'].iloc[-1]
+            volatility_regime = "High" if vix_current > 20 else "Low"
+        else:
+            volatility_regime = "Unknown"
+
+        return market_trend, volatility_regime
+    except Exception:
+        return "Unknown", "Unknown"
+
+
 def get_vix_level() -> Optional[float]:
     """Fetch current VIX level from yfinance."""
     try:
@@ -463,21 +492,21 @@ def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[f
         return None
 
 
-def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """Compute basic price momentum indicators.
+def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Compute basic price momentum and technical indicators.
 
-    Returns a tuple of (5-day return, 14-day RSI, ATR trend).
+    Returns a tuple of (5-day return, 14-day RSI, ATR trend, 20-day SMA, 20-day High, 20-day Low).
     All values are floats or None if insufficient data.
     """
     try:
-        key = f"{ticker.ticker}:momentum"  # type: ignore[attr-defined]
+        key = f"{ticker.ticker}:momentum_ta"
         if key in _MOMENTUM_CACHE:
             return _MOMENTUM_CACHE[key]
 
         # Use ~90 trading days of history for stable indicators
         hist = ticker.history(period="6mo", interval="1d")
-        if hist.empty or len(hist) < 20:
-            return None, None, None
+        if hist.empty or len(hist) < 21: # Need 21 for 20-day calculations
+            return None, None, None, None, None, None
 
         close = hist["Close"].astype(float)
         high = hist.get("High", close)
@@ -521,11 +550,16 @@ def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optiona
             else:
                 atr_trend = None
 
-        result = (ret_5d, rsi_14, atr_trend)
+        # 20-day SMA, High, and Low
+        sma_20 = float(close.rolling(window=20).mean().iloc[-1])
+        high_20 = float(high.rolling(window=20).max().iloc[-1])
+        low_20 = float(low.rolling(window=20).min().iloc[-1])
+
+        result = (ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20)
         _MOMENTUM_CACHE[key] = result
         return result
     except Exception:
-        return None, None, None
+        return None, None, None, None, None, None
 
 
 def get_iv_rank_percentile(
@@ -721,7 +755,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
 
     # Historical volatility and momentum indicators
     hv = get_historical_volatility(tkr, period=30)
-    ret_5d, rsi_14, atr_trend = get_momentum_indicators(tkr)
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20 = get_momentum_indicators(tkr)
 
     # Upcoming earnings
     earnings_date = get_next_earnings_date(tkr)
@@ -777,6 +811,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame
     df["ret_5d"] = ret_5d
     df["rsi_14"] = rsi_14
     df["atr_trend"] = atr_trend
+    df["sma_20"] = sma_20
+    df["high_20"] = high_20
+    df["low_20"] = low_20
     df["sentiment_score"] = sentiment_score
 
     # Calculate median IV for IV Rank/Percentile calculation
@@ -894,6 +931,11 @@ def enrich_and_score(
 
     df["is_underpriced"] = pd.NA
     df.loc[df["Earnings Play"] == "YES", "is_underpriced"] = df["impliedVolatility"] < df["hv_30d"]
+
+    # --- Trend Alignment Filter ---
+    df["Trend_Aligned"] = False
+    df.loc[(df["type"] == "call") & (df["underlying"] > df["sma_20"]), "Trend_Aligned"] = True
+    df.loc[(df["type"] == "put") & (df["underlying"] < df["sma_20"]), "Trend_Aligned"] = True
 
     # Fill missing IV with chain median per expiration + type to avoid skew
     df["impliedVolatility"] = df["impliedVolatility"].astype(float)
@@ -1172,6 +1214,16 @@ def enrich_and_score(
     df["vega"] = ev_data["vega"]
     df["theta"] = ev_data["theta"]
 
+    # --- Theta Safety Check ---
+    df["Theta_Burn_Rate"] = df.apply(lambda row: abs(row["theta"]) / row["premium"] if row["premium"] > 0 and pd.notna(row["theta"]) else 0, axis=1)
+    df["decay_warning"] = df["Theta_Burn_Rate"] > 0.06
+
+    # --- Support/Resistance Warnings ---
+    df["sr_warning"] = ""
+    df.loc[(df["type"] == "call") & (df["underlying"] > df["high_20"] * 0.98), "sr_warning"] = "NEAR RESISTANCE"
+    df.loc[(df["type"] == "put") & (df["underlying"] < df["low_20"] * 1.02), "sr_warning"] = "NEAR SUPPORT"
+
+
     # Normalize features using ranks to reduce outlier impact
     def rank_norm(s: pd.Series) -> pd.Series:
         n = len(s)
@@ -1341,6 +1393,12 @@ def enrich_and_score(
 
     # Earnings penalty: modestly reduce score if very close to earnings
     df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
+
+    # --- Safety Filter Score Adjustments ---
+    df.loc[df["Trend_Aligned"] == True, "quality_score"] += 0.15
+    df.loc[df["decay_warning"] == True, "quality_score"] -= 0.20
+    df.loc[df["sr_warning"] != "", "quality_score"] -= 0.10
+
 
     # Ensure quality_score stays in [0, 1]
     df["quality_score"] = df["quality_score"].clip(lower=0, upper=1)
@@ -1592,6 +1650,12 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     dte = int(row.get('T_years', 0) * 365)
     parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
 
+    # --- Warnings ---
+    if row.get("decay_warning"):
+        parts.append("HIGH DECAY RISK")
+    if row.get("sr_warning"):
+        parts.append(row["sr_warning"])
+
     return " | ".join(parts)
 
 
@@ -1627,7 +1691,7 @@ def format_mechanics_row(row: pd.Series) -> str:
     return " | ".join(parts)
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown"):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
@@ -1657,6 +1721,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     elif mode in ["Discovery scan", "Premium Selling"]:
         print(f"  Scan Type: Top opportunities across all price ranges (no budget limit)")
         print(f"  Categories: LOW (bottom 33%) | MEDIUM (middle 33%) | HIGH (top 33%) by premium")
+    print(f"  Market Status: Trend is {market_trend} | Volatility is {volatility_regime}")
     print(f"  Risk-Free Rate: {rfr*100:.2f}% (13-week Treasury)")
     print(f"  Expirations Scanned: {num_expiries}")
     print(f"  DTE Range: {min_dte} - {max_dte} days")
@@ -2049,7 +2114,7 @@ def prompt_for_tickers() -> List[str]:
             sys.exit(1)
 
 
-def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger):
+def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str):
     # Determine mode booleans for internal logic
     is_budget_mode = (mode == "Budget scan")
     is_discovery_mode = (mode == "Discovery scan")
@@ -2391,6 +2456,12 @@ def main():
         print(f"\nSingle-Stock Mode: Analyzing {symbol_input}...")
     
     logger = setup_logging()
+
+    # === GET MARKET CONTEXT ===
+    print("\nFetching market context (SPY/VIX)...")
+    market_trend, volatility_regime = get_market_context()
+    print(f"✓ Market Trend: {market_trend} | Volatility: {volatility_regime}")
+
     try:
         max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
         if max_expiries <= 0 or max_expiries > 12:
@@ -2427,6 +2498,8 @@ def main():
             max_dte=max_dte,
             trader_profile=trader_profile,
             logger=logger,
+            market_trend=market_trend,
+            volatility_regime=volatility_regime,
         )
         if scan_results is None:
             sys.exit(0)
@@ -2440,8 +2513,8 @@ def main():
         underlying_price = scan_results['underlying_price']
         
         # Print main report
-        print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget)
-        
+        print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget, market_trend, volatility_regime)
+
         # Print spreads report
         print_spreads_report(spreads)
 
