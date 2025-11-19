@@ -1,40 +1,17 @@
 # Options Screener - Professional Edition
 
-A comprehensive Python-based options screening tool with advanced analytics, probability calculations, and trade tracking capabilities.
+A comprehensive Python-based options screening tool designed to identify high-probability trading opportunities by layering advanced analytics, institutional-level metrics, and dynamic safety filters.
 
-## 🎯 Overview
+## 🎯 Core Philosophy: Hunting for Alignment
 
-This professional-grade screener analyzes options chains with **institutional-level metrics** and outputs actionable trading opportunities across different price ranges.
+This is not just a tool that finds options with high volume. It's an intelligent screener built on a core philosophy of **Alignment**. A high-quality trade occurs when multiple independent factors align:
 
-### **Key Features:**
-- **Three Operating Modes:**
-  - **Single-Stock Mode**: Deep dive analysis of one ticker
-  - **Budget-Based Multi-Stock Mode**: Scan multiple tickers within budget constraints
-  - **Discovery Mode**: Scan top 100 most-traded tickers for best overall opportunities
-- **Advanced Options Analytics:**
-  - Probability of Profit (PoP)
-  - Expected Move (1 SD)
-  - Probability of Touch
-  - Risk/Reward Ratios
-  - Max Loss & Break-even calculations
-- **Volatility Analysis:**
-  - 30-day Historical Volatility (HV) fetching
-  - IV vs HV comparison
-  - IV Skew (put IV vs call IV)
-- **Quality Scoring System:**
-  - Multi-factor weighted algorithm
-  - 25% Liquidity + 20% IV Advantage + 20% R/R + 15% PoP + 10% Spread + 10% Delta
-- **Trade Management:**
-  - CSV export with all metrics
-  - Trade logging for P/L tracking
-  - Timestamp-based file organization
-- Real-time data via Yahoo Finance (yfinance API)
-- Automatic risk-free rate fetching from 13-week Treasury
-- Black-Scholes delta calculations
-- **Top Overall Pick** with intelligent justification
-- ITM/OTM moneyness indicators
-- Liquidity & spread quality flags
-- Category summary statistics
+1.  **Action:** The market is interested (high volume, tight spreads).
+2.  **Edge:** The probabilities are in your favor (IV vs. HV, seasonality, risk/reward).
+3.  **Structure:** The trade is not positioned against a major technical barrier (support/resistance, OI Walls).
+4.  **Trend:** The trade is aligned with the underlying stock's momentum and the broader market context.
+
+This screener finds opportunities where these forces align, giving you a statistical edge. Consistency comes from saying "No" to good volume on a bad chart.
 
 ---
 
@@ -46,392 +23,141 @@ This professional-grade screener analyzes options chains with **institutional-le
 
 ### Installation
 
-1. **Clone the repository:**
-```bash
-git clone https://github.com/Ollie1o1/options.git
-cd options
-```
+1.  **Clone the repository:**
+    ```bash
+    git clone <your_repo_url>
+    cd <your_repo_directory>
+    ```
 
-2. **(Recommended) Create and activate a virtual environment:**
-```bash
-python -m venv env
-source env/bin/activate  # On Windows: env\Scripts\activate
-```
+2.  **(Recommended) Create and activate a virtual environment:**
+    ```bash
+    python -m venv env
+    source env/bin/activate  # On Windows: env\Scripts\activate
+    ```
 
-3. **Install required dependencies:**
-```bash
-pip install -r requirements.txt
-```
+3.  **Install required dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
 
 ### Usage
 
-Run the screener:
+**Run the Screener:**
 ```bash
-python options_screener.py
+python3 src/options_screener.py
 ```
+The script will guide you through interactive prompts to select a mode and configure your scan.
+
+**Run the Backtester:**
+```bash
+python3 src/backtest_screener.py
+```
+This script runs automatically, analyzing past screener results saved in the `logs/` directory.
 
 ---
 
-## 📊 Operating Modes
+## 📊 Features Deep Dive
 
-### Mode 1: Single-Stock Analysis
+The screener's power comes from its layered, multi-factor analysis. Features are grouped into four categories:
 
-**Interactive Prompts:**
-```
-Enter stock ticker, 'ALL', or 'DISCOVER': AAPL
-How many nearest expirations to scan [4]: 4
-Minimum days to expiration (DTE) [7]: 7
-Maximum days to expiration (DTE) [120]: 60
-Fetching current risk-free rate...
-Using risk-free rate: 4.35% (13-week Treasury)
-```
+### 1. The Core Engine (Base Analytics)
 
-**What You Get:**
-- Deep analysis of one ticker
-- 15 picks (5 low/5 medium/5 high premium)
-- All advanced metrics for focused trading
+These are the foundational metrics calculated for every option.
 
----
+-   **Multi-Factor Quality Score:** A sophisticated weighted algorithm (configurable in `config.json`) that combines dozens of metrics into a single `quality_score` from 0 to 1. This is the primary sorting mechanism.
+-   **Greeks Calculation:** Provides standard Black-Scholes Greeks (`delta`, `gamma`, `vega`, `theta`) to assess risk and sensitivity.
+-   **Volatility Analysis:**
+    -   Calculates 30-day **Historical Volatility (HV)**.
+    -   Compares **Implied Volatility (IV)** to HV to determine if options are statistically cheap or expensive.
+    -   Calculates **IV Rank and Percentile** (30 & 90-day) to contextualize the current IV level.
+-   **Probability Metrics:**
+    -   **Probability of Profit (PoP):** A delta-based, expected-move-aware calculation of the likelihood of the trade being profitable at expiration.
+    -   **Expected Move (EM):** The market-implied 1 standard deviation price move until expiration.
+-   **Risk/Reward Analysis:** Calculates the break-even price, max loss, and a realistic risk/reward ratio based on a target price derived from the Expected Move.
 
-### Mode 2: Budget-Based Multi-Stock Scan
+### 2. Edge-Finding Features (The "Why")
 
-**Interactive Prompts:**
-```
-Enter stock ticker, 'ALL', or 'DISCOVER': ALL
-Enter your budget per contract in USD (e.g., 500) [500]: 750
-Enter comma-separated tickers to scan [AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META]: 
-How many nearest expirations to scan [4]: 4
-Minimum days to expiration (DTE) [7]: 7
-Maximum days to expiration (DTE) [120]: 60
-```
+These features are designed to find a statistical "edge" in the market.
 
-**Budget Categorization:**
-- **LOW**: 0-33% of budget (e.g., $0-$250 for $750 budget)
-- **MEDIUM**: 33-66% of budget (e.g., $250-$500 for $750 budget)
-- **HIGH**: 66-100% of budget (e.g., $500-$750 for $750 budget)
+-   **Institutional Flow ("Unusual Whales"):** Automatically flags contracts with unusually high `Volume` relative to their `Open Interest` (`Vol_OI_Ratio > 1.5`), indicating potential large, informed traders are entering a position. These trades are prioritized in the output.
+-   **Vertical Spread Finder:** Identifies potential debit spreads by pairing "buy" candidates with a suitable "sell" leg 1-2 strikes further OTM, filtering for trades where `Max Profit > 1.5 * Risk`.
+-   **Earnings Volatility:** Flags options as an **"Earnings Play"** if an earnings report is due before expiration. For these plays, it checks if the option is **"Underpriced"** by comparing its IV to the stock's recent historical volatility.
+-   **Sentiment Analysis:** Fetches recent news headlines for the underlying stock and uses `TextBlob` to perform sentiment analysis, scoring it from -1 (Bearish) to +1 (Bullish).
 
----
+### 3. Safety Filters (The "Why Not")
 
-### Mode 3: Discovery Mode
+These filters act as a defensive layer, penalizing the `quality_score` of trades that have hidden risks.
 
-**Interactive Prompts:**
-```
-Enter stock ticker, 'ALL', or 'DISCOVER' []: DISCOVER
-How many tickers to scan (1-100) [50]: 50
-How many nearest expirations to scan [4]: 4
-Minimum days to expiration (DTE) [7]: 7
-Maximum days to expiration (DTE) [120]: 90
-```
+-   **Market Context Filter:**
+    -   At runtime, the screener fetches data for **SPY** and the **VIX**.
+    -   It determines the broad **Market Trend** (Bull/Bear) based on SPY's position relative to its 50-day SMA.
+    -   It determines the **Volatility Regime** (High/Low) based on whether the VIX is above 20.
+    -   This status is printed in the report header for immediate context.
+-   **Trend Alignment Filter:** Calculates the stock's 20-day SMA and rewards trades that align with the trend (`+0.15 score` bonus for Calls above the SMA or Puts below it).
+-   **Theta (Time Decay) Safety Check:** Calculates the `Theta_Burn_Rate` (daily decay as a % of the option's price). If the decay is too high (`>6%`), the trade is flagged as **"HIGH DECAY RISK"** and its score is heavily penalized (`-0.20 penalty`).
+-   **Support/Resistance Warning:** Calculates the 20-day high and low for the stock. If a Call is being bought near the high or a Put is being bought near the low, it's flagged as **"NEAR RESISTANCE"** or **"NEAR SUPPORT"** and its score is penalized (`-0.10 penalty`).
 
-**Features:**
-- Scans top 100 most-traded tickers
-- No budget limit
-- Quantile-based categorization
-- Auto-diversifies across tickers
+### 4. Probability Enhancers (The "When")
+
+These features look for specific market structures that can increase the probability of a successful trade.
+
+-   **Historical Seasonality Check:** For the current month, it calculates the **`Seasonal_Win_Rate`**—the percentage of times the stock has finished positive over the last 5 years. Trades aligned with strong seasonality get a score bonus (`+0.1`), while those fighting it get a penalty (`-0.1`).
+-   **"OI Wall" Detection:** For each expiration, the screener identifies the strike with the highest Call Open Interest (the `Call_Wall`) and Put Open Interest (`Put_Wall`). Trades placed too close to these "walls" are flagged with **"LIMITED UPSIDE"** or **"LIMITED DOWNSIDE"** and their score is penalized (`-0.10 penalty`).
+-   **Bollinger Band Squeeze:** The screener calculates Bollinger Bands and Keltner Channels to detect when a stock is in a "squeeze" (low volatility, coiling for a big move). If a squeeze is detected AND institutional whale activity is present, the trade is flagged as a **"🔥 SQUEEZE PLAY"** and receives a massive score bonus (`+0.25 bonus`).
 
 ---
 
-## 📈 Advanced Metrics Explained (v3+)
+## ⚙️ Modes of Operation
 
-The screener now focuses on **probability-aware, scenario-based metrics**. This
-section walks through what each metric means and how to read the output.
+The screener can be run in several modes by following the initial prompt:
 
-### 1. Expected Move (EM)
-**Formula:** `EM ≈ Stock Price × IV × √(DTE / 365)`
-
-This is the **1 standard deviation price move** the options market is
-implying between now and expiration.
-
-- EM is shown per contract as `Expected Move: ±$X.YZ`.
-- In the CSV export it appears as the `expected_move` column.
-
-**Use cases:**
-- Sanity-check whether your strike is *inside* or *outside* the expected move.
-- Compare required move to EM (see next section) to filter unrealistic plays.
-
-### 2. Break-even Realism – Required Move vs EM
-For each contract we calculate:
-
-- **Required move**: how far the stock must move from current price to
-  reach break-even.
-  - Calls: `breakeven = strike + premium` → `required_move = max(0, breakeven - spot)`
-  - Puts:  `breakeven = strike - premium` → `required_move = max(0, spot - breakeven)`
-- **EM Realism score (0–1)** – compares required move to EM:
-  - `required_move ≤ 0.5 × EM` → score ≈ 1.0 (very realistic)
-  - `0.5–1.0 × EM` → score ≈ 0.7 (reasonable)
-  - `> 1.0 × EM` → score decays toward 0.1 (unrealistic / “needs hero move”).
-
-**Where you’ll see it:**
-- In the rationale line: `req 3.20 vs EM 8.50`.
-- In CSV: `required_move`, `em_realism_score`.
-
-**How to use it:**
-- Prefer trades where required move is **well inside EM**.
-- Avoid trades where `required_move` is **much larger** than EM – they are
-  unlikely to break even within the expected move envelope.
-
-### 3. Probability of Profit (PoP)
-PoP is now **delta-based and EM-aware**:
-
-- Base approximation: `PoP ≈ 1 − |delta|`.
-- If the strike sits **outside the EM band** (too far from spot), PoP is
-  reduced (e.g. multiplied by ~0.7).
-
-**Where you’ll see it:**
-- Screen output: `PoP 58.3%` in the rationale line.
-- CSV: `prob_profit`.
-
-**Interpretation:**
-- **50–60%**: balanced probability / reward.
-- **60–70%**: high probability, usually lower RR.
-- **>70%**: very conservative, often better for premium-selling structures.
-
-### 4. Theta Decay Pressure (TDP)
-Theta Decay Pressure estimates **how much you are paying per day relative to
-how sensitive the option is** (delta).
-
-- Raw measure (contract-level): `premium × 100 / DTE`.
-- Adjusted for delta so low-delta, high-premium, short-dated options are
-  penalized more.
-- For DTE ≤ 7 days, the impact of high TDP is increased.
-
-**Where you’ll see it:**
-- Rationale: `TDP 14.2/day`.
-- CSV: `theta_decay_pressure`, `theta_score` (0–1 where higher is better).
-
-**How to use it:**
-- As a buyer, avoid contracts with **very high TDP** unless you have a strong
-  near-term catalyst.
-- As a short-term trader, compare candidates – lower TDP for similar setups
-  generally offers more breathing room.
-
-### 5. Risk / Reward (RR)
-Risk/Reward is now tied directly to **Expected Move**:
-
-- Target price is set using EM:
-  - Call: `target = spot + 0.75 × EM`
-  - Put:  `target = spot − 0.75 × EM`
-- Reward is the profit per share at that target **after** paying the premium.
-- **RR** = `max_gain_if_target_hit / premium`.
-
-**Where you’ll see it:**
-- Output: `RR 3.4x`.
-- CSV: `rr_ratio`.
-
-**Interpretation:**
-- **RR Filter Status**: The screener now applies a minimum filter of **RR ≥ 0.5x** to all contracts.
-- **< 1.0x**: The position covers its premium if the EM target is hit, but offers low net profit. (Focus on this range for higher PoP).
-- **1.0x – 2.0x**: Balanced risk/reward; solid opportunities.
-- **2.0x – 4.0x**: High-leverage directional trade; stronger profit potential.
-
-### 6. Volatility Context: HV, IV Rank & Percentiles
-The screener now computes **short-term and medium-term IV context**:
-
-- 30-day historical volatility (`hv_30d`).
-- 30-day & 90-day IV rank and percentile (using realized vol as a proxy):
-  - `iv_rank_30`, `iv_percentile_30`.
-  - `iv_rank_90`, `iv_percentile_90`.
-
-**Simple interpretation:**
-- **Low percentile (0–20%)** → IV is cheap → better for **buying** options.
-- **Mid (20–60%)** → IV is fair.
-- **High (60–100%)** → IV is expensive → better for **selling** premium.
-
-These feed into the `iv_rank_score` used by the composite quality score.
-
-### 7. Momentum Indicators
-Momentum is computed once per underlying and applied to all its contracts:
-
-- **5-day return (`ret_5d`)** – short-term price momentum.
-- **14-day RSI (`rsi_14`)** – mean-reversion vs. trend strength.
-- **ATR trend (`atr_trend`)** – how current ATR compares to its recent
-  average (measures volatility expansion/ contraction).
-
-**Where you’ll see it:**
-- Rationale: `5d +3.2%, RSI 54`.
-- CSV: `ret_5d`, `rsi_14`, `atr_trend`, `momentum_score`.
-
-**How to use it:**
-- Strong positive `ret_5d` + healthy RSI (40–60) with mildly rising ATR can
-  support trend-following call buys.
-- Overbought RSI (>70) + high ATR might call for caution on new longs.
-
-### 8. Catalyst Awareness (Earnings)
-The screener now tries to detect the **next earnings date** via yfinance and
-marks options whose expiration is close to that date.
-
-- Column `event_flag`:
-  - `OK` → no major catalyst detected.
-  - `EARNINGS_NEARBY` → expiration within a small buffer around earnings
-    (configurable, default 5 days).
-
-**Where you’ll see it:**
-- Rationale: includes `earnings soon` when flagged.
-- CSV: `event_flag`, `catalyst_score`.
-
-**How to use it:**
-- For **directional earnings bets**, you may *prefer* `EARNINGS_NEARBY`.
-- For **theta strategies** (selling options), you may choose to avoid these
-  unless that risk is intentional.
+1.  **Single-Stock Analysis (e.g., `AAPL`):** A deep dive into a single ticker. Best for focused analysis.
+2.  **Budget Scan (`ALL`):** Scans a user-defined list of tickers for trades that fall within a specific budget per contract.
+3.  **Discovery Scan (`DISCOVER`):** Scans a pre-defined list of the top 100 most liquid tickers to find the absolute best opportunities across the market, without a budget constraint.
+4.  **Premium Selling (`SELL`):** A specialized mode that scans for high-probability short put opportunities, using a different set of filters and scoring weights optimized for selling premium.
 
 ---
 
----
+## 🔬 Backtesting Engine
 
-## 🏆 Composite Quality Score (0–1.0)
+The repository includes a backtesting engine to evaluate the historical performance of the screener's picks.
 
-The old 6-factor score has been replaced by a **probability-based composite
-score** that better reflects real-world trade quality.
+**Logic: Managed Trade Simulation**
 
-### High-level formula
-
-The final `quality_score` is a weighted blend of the following normalized
-components (all 0–1):
-
-- **PoP score** – from `prob_profit`.
-- **EM Realism** – from `em_realism_score`.
-- **Risk/Reward score** – from `rr_score`.
-- **Momentum score** – from `momentum_score`.
-- **IV Rank score** – from `iv_rank_score`.
-- **Liquidity score** – from `liquidity_score`.
-- **Catalyst score** – from `catalyst_score`.
-- **Theta score** – from `theta_score`.
-- **EV score** – from `ev_score` (expected value per contract).
-- **Trader preference** – from `trader_pref_score` (day vs swing).
-
-Default weights (configurable in `config.json` under `composite_weights`):
-
-```text
-pop:         0.18
-em_realism:  0.12
-rr:          0.15
-momentum:    0.10
-iv_rank:     0.10
-liquidity:   0.15
-catalyst:    0.05
-theta:       0.10
-ev:          0.05
-trader_pref: 0.10
-```
-
-Weights are automatically normalized to sum to 1.0.
-
-### Reading the Score
-
-- **0.80 – 1.00**: A+ / A setup – strong across most dimensions.
-- **0.65 – 0.80**: Solid, worth consideration.
-- **0.50 – 0.65**: Mixed bag – inspect the rationale carefully.
-- **< 0.50**: Low quality – usually fails on realism, liquidity, or RR.
-
-**Important Filtering Note:** The quality score is calculated only on contracts that have already passed three mandatory, non-negotiable hard filters you configured:
-- **Spread**: Bid-Ask Spread ≤ 20%
-- **Delta**: Absolute Delta |Δ| ≥ 0.30 (eliminates far OTM/ITM lottery tickets)
-- **Risk/Reward**: RR Ratio ≥ 0.5x (eliminates low-leverage losing bets)
-
-Any contract not displayed has failed one of these three primary profitability checks.
-
-The qualitative rationale line (under each contract) is designed to tell you
-*why* the score is high/low:
-
-- Liquidity, spread, and delta context.
-- EM realism, PoP, and RR.
-- Momentum and RSI snapshot.
-- Catalyst warning (earnings soon) and theta pressure.
-
-### Day trader vs Swing trader modes
-
-After choosing DTE bounds, the CLI asks for a trading style profile:
-
-```text
-Select trading style profile:
-  1. Swing trader (default) - balanced delta + more DTE
-  2. Day / short-term trader - prioritize liquidity & tight spreads
-```
-
-This choice influences `trader_pref_score`:
-
-- **Swing trader (default)**
-  - Prefers contracts with **healthy |delta|** and **more time to expiry**.
-- **Day / short-term trader**
-  - Prefers **higher liquidity** and **tighter spreads**, even if DTE is short.
-
-This does **not** override your other filters – it simply nudges similarly
-scored trades toward those that match your style.
-
----
-🎯 The Final Profitability Check: Entry Timing
-While the Quality Score confirms a contract is statistically sound, the final decision requires interpreting short-term momentum and volatility signals provided in the rationale line.
-To maximize the probability of profit, evaluate these factors in the option's rationale (5d +X.X%; RSI XX):
-1. Volatility Context (IV vs. HV / Chain Median)
-| Scenario | Indicator to Check | Profitability Implication |
-|---|---|---|
-| Favorable Buy Entry | IV: below chain median | You are buying volatility when it is relatively cheap. If the stock moves, the contract can benefit from both the price change and potential IV expansion. |
-| Warrant Caution | IV: above chain median | You are paying a higher premium for the expectation of a large move. If the stock does not move as expected, the contract is prone to rapid IV crush. |
-2. Directional Alignment (RSI and 5d Return)
-| Scenario | Indicator to Check | Profitability Implication |
-|---|---|---|
-| Call (Bullish) Entry | RSI ≤ 65 and 5d is positive | A healthy trend without being overbought. Avoid calls on stocks with RSI ≥ 70 as they are due for a pullback. |
-| Put (Bearish) Entry | RSI ≥ 35 and 5d is negative | A declining trend without being oversold. Avoid puts on stocks with RSI ≤ 30 as they are due for a bounce. |
-By combining the High Quality Score (Tier 1) with Favorable Entry Signals (Tier 3), users can make the most informed decision possible.
----
-
-## 💾 Export & Logging Features
-
-### CSV Export
-After each scan, optionally export all picks with complete metrics:
-
-**Columns Include:**
-- symbol, type, strike, expiration, premium
-- delta, IV, HV, IV vs HV
-- volume, OI, spread %
-- prob_profit, expected_move, prob_touch
-- max_loss, breakeven, rr_ratio
-- quality_score, liquidity_flag, spread_flag
-
-**Location:** `exports/options_picks_[mode]_[timestamp].csv`
-
-### Trade Logging
-Enable P/L tracking by logging entry data:
-
-**Logged Data:**
-- Entry timestamp
-- Option details (symbol, type, strike, expiry)
-- Entry premium & underlying price
-- All key metrics (IV, HV, PoP, R/R, quality score)
-- Status: OPEN
-
-**Location:** `trades_log/entries.csv`
-
-**Future Use:** Compare entry data with exit data to calculate realized P/L and track strategy performance over time.
+Instead of a simple "hold to expiration" model, the backtester simulates a realistic managed trade strategy:
+-   **Entry:** The entry price is the option's premium on the day the screener ran.
+-   **Exit Rules:** For each day after entry, the backtester checks if:
+    -   The daily `High` hits the profit target (`Entry Price * 1.5`). If so, it's marked as a **WIN**.
+    -   The daily `Low` hits the stop-loss (`Entry Price * 0.5`). If so, it's marked as a **LOSS**.
+-   **Output:** The backtester calculates the overall **Win Rate %**, total P/L, and other performance statistics based on this strategy.
 
 ---
 
-## 📋 Output Format
-
-### Sample Output:
+## 📋 Example Output
 
 ```
 ================================================================================
   OPTIONS SCREENER REPORT - AAPL
 ================================================================================
-  Stock Price: $192.50
-  Risk-Free Rate: 4.35% (13-week Treasury)
+  Stock Price: $267.44
+  Market Status: Trend is Bear | Volatility is High
+  Risk-Free Rate: 3.77% (13-week Treasury)
   Expirations Scanned: 4
-  DTE Range: 7 - 60 days
-  Chain Median IV: 38.5%
+  DTE Range: 7 - 120 days
+  Chain Median IV: 25.3%
   Mode: Single-stock
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
   LOW PREMIUM (Top 5 Picks)
 ────────────────────────────────────────────────────────────────────────────────
-  Summary: Avg IV 36.2% | Avg Spread 2.1% | Median |Δ| 0.42
+  Summary: Avg IV 25.2% | Avg Spread 4.3% | Median |Δ| 0.47
 
-  Type  Strike   Exp          Prem     IV      OI       Vol      Δ       Tag
-  ----------------------------------------------------------------------------
-  CALL   195.00  2025-02-21   $2.85    36.5%     8420    2250    +0.41  OTM
-    → liquidity vol 2250, OI 8420; spread 2.1%; delta +0.41 | DTE: 42d
-      PoP: 58.3% | R/R: 1.8:1 | Max Loss: $285 | IV vs HV: +2.3%
+  Whale Type  Strike   Exp          Prem     IV      OI       Vol      Δ       Tag
+  -------------------------------------------------------------------------------
+  🐋    PUT    265.00 2025-12-12 $5.53    25.0%       944     604  -0.41 OTM
+    ↳ Mechanics: Vol: 604 OI: 944 | Spread: 4.5% | Delta: -0.41 | Cost: $552.50
+    ↳ Analysis:  IV: 25.0% (≈ median) | PoP: 58.5% | RR: 0.8x | Quality: 0.73 | Nov Hist: 60% | 🔥 SQUEEZE PLAY
 
 ...
 
@@ -439,220 +165,17 @@ Enable P/L tracking by logging entry data:
   ⭐ TOP OVERALL PICK
 ================================================================================
 
-  AAPL CALL | Strike $195.00 | Exp 2025-02-21 (42d) | OTM
+  AAPL PUT | Strike $265.00 | Exp 2025-12-12 (22d) | OTM
 
-  Premium: $2.85
-  IV: 36.5% | Delta: +0.41 | Quality: 0.89
-  Volume: 2250 | OI: 8420 | Spread: 2.1%
-  
-  Advanced Metrics:
-    • Probability of Profit: 58.3%
-    • Risk/Reward Ratio: 1.8:1
-    • Max Loss: $285 | Break-even: $197.85
-    • Expected Move: ±$8.20
-    • IV vs HV: +2.3% (slight premium)
+  Premium: $5.53
+  IV: 25.0% | Delta: -0.41 | Quality: 0.73
+  Volume: 604 | OI: 944 | Spread: 4.5%
 
-  💡 Rationale: Chosen for excellent liquidity, balanced IV near chain median,
-     tight bid-ask spread. Also offers optimal delta range, short-term play.
+  💡 Rationale: Chosen for excellent liquidity, balanced IV, tight spread. Also offers optimal delta range.
 
-================================================================================
-  SCAN SUMMARY
-================================================================================
-  Total Picks Displayed: 15
-  Chain Median IV: 38.5%
-  Expirations Scanned: 4
-  Risk-Free Rate Used: 4.35%
-  DTE Filter: 7-60 days
-  Mode: Single-stock
-================================================================================
+---
 
-  ⚠️  Not financial advice. Verify all data before trading.
-================================================================================
+## ⚠️ Disclaimer
 
-Export results to CSV? (y/n) [n]: y
-  📄 Results exported to: exports/options_picks_Single-stock_20250112_045532.csv
-
-Log trades for P/L tracking? (y/n) [n]: y
-  💾 Trade entries logged to trades_log/entries.csv
-
-👋 Done! Happy trading!
+This tool is for educational and informational purposes only and does not constitute financial advice. Options trading involves substantial risk and is not suitable for all investors. All data is provided by Yahoo Finance and may be delayed or contain inaccuracies. Always perform your own due diligence before making any trade.
 ```
-
----
-
-## 🔄 Modes Comparison
-
-| Feature | Single-Stock | Budget Multi-Stock | Discovery Mode |
-|---------|--------------|-------------------|----------------|
-| **Trigger** | Enter ticker (e.g., "AAPL") | Enter "ALL" | Enter "DISCOVER" or blank |
-| **Tickers Scanned** | 1 | 1-10+ (custom) | Up to 100 (top liquid) |
-| **Budget Filter** | None | Yes (cost ≤ budget) | None |
-| **Categorization** | Quantile (33% splits) | Budget-based (% of budget) | Quantile (33% splits) |
-| **Ticker Diversity** | Single ticker | Diversified | Diversified |
-| **HV Fetching** | Yes | Yes (per ticker) | Yes (per ticker) |
-| **Best Use Case** | Deep dive one stock | Budget-constrained search | Find absolute best opportunities |
-
----
-
-## ⚠️ Important Disclaimers
-
-### Legal & Compliance
-- **Not Financial Advice:** This tool is for educational and informational purposes only
-- **Personal Use:** Review Yahoo Finance Terms of Service for data usage limitations
-- **No Warranties:** Data accuracy depends on upstream provider; use at your own risk
-- **Market Risk:** Options trading involves substantial risk of loss. Never risk more than you can afford to lose.
-
-### Data Limitations
-- **Delayed Data:** Yahoo Finance may have 15-20 minute delays
-- **Coverage:** Not all tickers have complete options data
-- **Accuracy:** Implied volatility, Greeks, and probability calculations are estimates
-- **Market Hours:** Data freshness varies outside trading hours
-- **Historical Volatility:** 30-day HV may not reflect current market conditions
-
-### Probability Disclaimers
-- **Model Risk:** Probability calculations assume log-normal distribution and constant volatility
-- **Not Guarantees:** PoP and PoT are statistical estimates, not predictions
-- **Market Events:** Black swan events, earnings, news can invalidate probability models
-- **Slippage:** Actual fill prices may differ from mid-price used in calculations
-
-### Recommended Validation
-Before trading any screened option:
-1. ✅ Verify current bid/ask on your broker platform
-2. ✅ Check recent news/events affecting the underlying
-3. ✅ Confirm expiration date and contract specifications
-4. ✅ Review upcoming earnings dates and ex-dividend dates
-5. ✅ Assess personal risk tolerance and position sizing
-6. ✅ Consider transaction costs and taxes
-7. ✅ Validate probability assumptions match your outlook
-8. ✅ Review tax implications with a professional
-
----
-
-## 🐛 Troubleshooting
-
-### "No options expirations available"
-- Ticker may not have listed options
-- Try a more liquid symbol (e.g., SPY, AAPL, MSLA)
-
-### "No contracts passed filters"
-- DTE range may be too restrictive
-- Try widening min/max DTE or scanning more expirations
-- Check if budget is too low (for budget mode)
-
-### "Could not fetch historical volatility"
-- Normal for some tickers with limited history
-- Screener will use IV-only scoring
-
-### Slow Performance
-- Scanning 50+ tickers takes 2-5 minutes
-- Reduce to 20-30 tickers for faster results
-- Network speed affects data fetch time
-
-### CSV Export Fails
-- Ensure you have write permissions
-- Check disk space
-- `exports/` directory is auto-created
-
----
-
-## 📚 Resources
-
-### Options Education
-- [CBOE Options Institute](https://www.cboe.com/education/)
-- [Options Playbook](https://www.optionsplaybook.com/)
-- [TastyTrade Options Basics](https://www.tastytrade.com/concepts-strategies)
-- [Option Alpha Probability Guide](https://optionalpha.com/lessons/)
-
-### Technical References
-- Black-Scholes Model
-- Log-Normal Distribution
-- Volatility Surface Analysis
-- Greeks and Risk Management
-
-### API Documentation
-- [yfinance Documentation](https://pypi.org/project/yfinance/)
-- [pandas Documentation](https://pandas.pydata.org/docs/)
-
-### Market Data Providers (Alternatives)
-- [Alpha Vantage](https://www.alphavantage.co/) - Free tier available
-- [Polygon.io](https://polygon.io/) - Real-time options data
-- [Tradier](https://tradier.com/) - Developer-friendly brokerage API
-- [Interactive Brokers TWS API](https://www.interactivebrokers.com/en/trading/ib-api.php)
-
----
-
-## 📝 License
-
-This project is provided as-is for educational purposes. No warranty or guarantee of fitness for any particular purpose is provided.
-
-**Data Attribution:** Market data provided by Yahoo Finance via yfinance library.
-
----
-
-## 🤝 Contributing
-
-Enhancements welcome! Areas for contribution:
-- Additional probability models (binomial, Monte Carlo)
-- More Greeks (gamma, theta, vega, rho)
-- Portfolio-level analysis
-- Backtesting engine enhancements
-- ML-based quality scoring
-- Real-time alerts
-- Web UI
-
----
-
-## 📧 Support
-
-For issues or questions:
-- Open an issue on GitHub: [Ollie1o1/options](https://github.com/Ollie1o1/options)
-- Review the Troubleshooting section above
-
----
-
-## 🆕 Changelog
-
-### v3.0.0 - Probability-Based Upgrade (2025-11-13)
-- ✨ Added EM-based break-even realism scoring (required move vs expected move).
-- ✨ Reworked Probability of Profit to use delta + EM band adjustments.
-- ✨ Implemented theta decay pressure and a theta risk score.
-- ✨ Redesigned Risk/Reward ratio around EM-based target prices.
-- ✨ Added 30/90 day IV rank & percentile metrics with IV rank scoring.
-- ✨ Introduced momentum analytics (5d return, 14d RSI, ATR trend).
-- ✨ Re-enabled robust earnings awareness and catalyst scoring.
-- ✨ Replaced the old 6-factor quality score with a composite 0–1 score
-  combining PoP, EM realism, RR, momentum, IV rank, liquidity, catalysts,
-  theta, EV, and trader style preference.
-- ✨ Added day trader vs swing trader profile to influence ranking.
-- ✨ Exported all new metrics (EM, realism, theta, momentum, IV ranks, sub-scores)
-  in CSV output.
-
-### v2.0.0 - Professional Edition (2025-01-12)
-- ✨ Added Probability of Profit calculations
-- ✨ Added Expected Move (1 SD) calculations
-- ✨ Added Probability of Touch calculations
-- ✨ Added Risk/Reward ratio analysis
-- ✨ Added 30-day Historical Volatility fetching
-- ✨ Added IV vs HV comparison and advantage scoring
-- ✨ Added IV Skew calculations (put vs call IV)
-- ✨ Added liquidity quality flags (GOOD/FAIR/POOR)
-- ✨ Added spread quality flags (OK/WIDE/VERY_WIDE)
-- ✨ Enhanced quality scoring with 6-factor weighted algorithm
-- ✨ Added CSV export functionality with timestamps
-- ✨ Added trade logging for P/L tracking
-- ✨ Added max loss and break-even point calculations
-- 🔧 Improved output formatting with advanced metrics
-- 🔧 Enhanced error handling and traceback reporting
-
-### v1.0.0 - Initial Release
-- Basic options screening
-- Single/Budget/Discovery modes
-- Black-Scholes delta
-- Quality scoring
-- Terminal-friendly output
-
----
-
-**Happy Screening! 📊✨**
-
-*Remember: Past performance does not guarantee future results. Probability calculations are estimates based on assumptions that may not hold in real markets. Always perform your own due diligence before trading. Options trading involves significant risk and is not suitable for all investors.*
