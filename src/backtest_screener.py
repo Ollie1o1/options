@@ -76,11 +76,43 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                     print(f"  - No historical data for {option_symbol}")
                     continue
 
-                entry_price = pick.get("premium") # Midpoint of Bid/Ask from screener
+                # --- Realistic Slippage Logic ---
+                bid = pick.get("bid")
+                ask = pick.get("ask")
+                mid = pick.get("premium")  # 'premium' is the mid-price
+                entry_price = None
+
+                # Determine trade direction from the context of the log entry
+                trade_mode = entry.get("context", {}).get("mode", "Unknown")
+                is_short_trade = (trade_mode == "Premium Selling")
+
+                if not is_short_trade: # Long trade (buy to open)
+                    # Primary: Use Ask if available
+                    if ask and ask > 0:
+                        entry_price = ask
+                    # Secondary: Use Mid + 10% of spread width
+                    elif mid and bid and ask and (ask - bid) > 0:
+                        entry_price = mid + (0.10 * (ask - bid))
+                    # Tertiary: Use Mid + 1% slippage
+                    elif mid:
+                        entry_price = mid * 1.01
+                else: # Short trade (sell to open)
+                    # Primary: Use Bid if available
+                    if bid and bid > 0:
+                        entry_price = bid
+                    # Secondary: Use Mid - 10% of spread width
+                    elif mid and bid and ask and (ask - bid) > 0:
+                        entry_price = mid - (0.10 * (ask - bid))
+                    # Tertiary: Use Mid - 1% slippage
+                    elif mid:
+                        entry_price = mid * 0.99
+
+                # Quaternary (Final Fallback): Use historical close
                 if not entry_price:
-                    entry_price = hist.iloc[0]["Close"] # Fallback to Close
-                if not entry_price:
-                    print(f"  - Could not determine entry price for {option_symbol}")
+                    entry_price = hist.iloc[0]["Close"]
+
+                if not entry_price or entry_price <= 0:
+                    print(f"  - Could not determine valid entry price for {option_symbol}")
                     continue
 
                 profit_target = entry_price * 1.5
