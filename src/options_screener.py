@@ -2529,9 +2529,16 @@ def main():
     print("  3. Enter 'DISCOVER' to scan top 100 most-traded tickers (no budget limit)")
     print("  4. Enter 'SELL' for Premium Selling analysis (short puts)")
     print("  5. Enter 'SPREADS' for Credit Spread analysis")
-    print("  6. Enter 'IRON' for Iron Condor analysis\n")
+    print("  6. Enter 'IRON' for Iron Condor analysis")
+    print("  7. Enter 'PORTFOLIO' to view open position P/L\n")
 
     symbol_input = prompt_input("Enter stock ticker or command", "DISCOVER").upper()
+
+    # Handle portfolio viewer
+    if symbol_input == "PORTFOLIO":
+        from .check_pnl import view_portfolio
+        view_portfolio()
+        sys.exit(0)
 
     # Determine mode
     is_budget_mode = (symbol_input == "ALL")
