@@ -22,7 +22,7 @@ from src.options_screener import run_scan, load_config, get_market_context, setu
 # Configure page
 st.set_page_config(
     page_title="Options Screener Dashboard",
-    page_icon="\ud83d\udcc8",
+    page_icon=":chart_with_upwards_trend:",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -73,10 +73,10 @@ if not st.session_state.market_context_loaded:
             st.error(f"Could not load market context: {e}")
 
 # Header
-st.markdown('<div class="main-header">\ud83d\udcc8 Options Screener Dashboard</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">:chart_with_upwards_trend: Options Screener Dashboard</div>', unsafe_allow_html=True)
 
 # Market Context Header (Always Visible)
-st.markdown("### \ud83c\udf0e Market Context")
+st.markdown("### :earth_americas: Market Context")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
@@ -86,7 +86,7 @@ with col2:
     st.metric("Volatility Regime", st.session_state.volatility_regime)
 
 with col3:
-    macro_status = "\u26a0\ufe0f Risk Detected" if st.session_state.macro_risk_active else "\u2713 Normal"
+    macro_status = ":warning: Risk Detected" if st.session_state.macro_risk_active else ":white_check_mark: Normal"
     st.metric("Macro Risk", macro_status)
 
 with col4:
@@ -96,7 +96,7 @@ with col4:
 st.divider()
 
 # Sidebar Configuration
-st.sidebar.header("\u2699\ufe0f Configuration")
+st.sidebar.header(":gear: Configuration")
 
 # 1. Scan Mode Dropdown
 scan_mode = st.sidebar.selectbox(
@@ -119,13 +119,13 @@ else:
     tickers = []  # Will be populated programmatically
 
 # 3. Filter Controls
-st.sidebar.subheader("\ud83c\udfaf Filters")
+st.sidebar.subheader(":dart: Filters")
 min_dte = st.sidebar.slider("Minimum DTE", min_value=1, max_value=365, value=7)
 max_dte = st.sidebar.slider("Maximum DTE", min_value=1, max_value=365, value=60)
 max_expiries = st.sidebar.slider("Max Expirations", min_value=1, max_value=10, value=3)
 
 # 4. Advanced Settings (Expandable)
-with st.sidebar.expander("\ud83d\udd27 Advanced Settings"):
+with st.sidebar.expander(":wrench: Advanced Settings"):
     trader_profile = st.selectbox("Trader Profile", ["scalp", "swing", "long-term"], index=1)
     
     st.markdown("**Scoring Weights**")
@@ -161,7 +161,7 @@ with st.sidebar.expander("\ud83d\udd27 Advanced Settings"):
 
 # Main Area - Run Scan Button
 st.sidebar.divider()
-run_button = st.sidebar.button("\ud83d\ude80 Run Scan", type="primary", use_container_width=True)
+run_button = st.sidebar.button(":rocket: Run Scan", type="primary", use_container_width=True)
 
 if run_button:
     # Populate tickers if needed
@@ -211,7 +211,7 @@ if run_button:
                 custom_weights=custom_weights  # Pass custom weights
             )
             st.session_state.scan_results = results
-            st.success(f"\u2713 Scan complete! Found {len(results.get('picks', pd.DataFrame()))} options.")
+            st.success(f":white_check_mark: Scan complete! Found {len(results.get('picks', pd.DataFrame()))} options.")
         except Exception as e:
             st.error(f"Error during scan: {e}")
             st.session_state.scan_results = None
@@ -221,18 +221,18 @@ if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
     
     # Results Header
-    st.markdown("## \ud83d\udcca Scan Results")
+    st.markdown("## :bar_chart: Scan Results")
     
     # Display scan timestamp and underlying price
     col1, col2 = st.columns(2)
     with col1:
-        st.info(f"\u23f0 Scan Time: {results.get('timestamp', 'N/A')}")
+        st.info(f":alarm_clock: Scan Time: {results.get('timestamp', 'N/A')}")
     with col2:
         if results.get('underlying_price', 0.0) > 0:
-            st.info(f"\ud83d\udcb5 Underlying Price: ${results['underlying_price']:.2f}")
+            st.info(f":dollar: Underlying Price: ${results['underlying_price']:.2f}")
     
     # Analysis Tabs
-    tab1, tab2, tab3 = st.tabs(["\ud83d\udcca Results", "\ud83d\udd0d Dynamic Filtering", "\ud83d\udcbc Portfolio Manager"])
+    tab1, tab2, tab3 = st.tabs([":bar_chart: Results", ":mag: Dynamic Filtering", ":briefcase: Portfolio Manager"])
     
     with tab1:
         st.markdown("### Options Picks")
@@ -271,7 +271,7 @@ if st.session_state.scan_results is not None:
             # Download button
             csv = picks_df.to_csv(index=False)
             st.download_button(
-                label="\ud83d\udcbe Download Results CSV",
+                label=":floppy_disk: Download Results CSV",
                 data=csv,
                 file_name=f"options_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
@@ -346,10 +346,10 @@ if st.session_state.scan_results is not None:
                 )
                 
                 # Save changes button
-                if st.button("\ud83d\udcbe Save Changes", type="primary"):
+                if st.button(":floppy_disk: Save Changes", type="primary"):
                     try:
                         edited_df.to_csv(trades_log_path, index=False)
-                        st.success("\u2713 Changes saved successfully!")
+                        st.success(":white_check_mark: Changes saved successfully!")
                     except Exception as e:
                         st.error(f"Error saving changes: {e}")
                 
@@ -360,9 +360,9 @@ if st.session_state.scan_results is not None:
 else:
     # Welcome message when no scan has been run
     st.markdown("""
-    ## \ud83d\udc4b Welcome to the Options Screener Dashboard
+    ## :wave: Welcome to the Options Screener Dashboard
     
-    Configure your scan parameters in the sidebar and click **\ud83d\ude80 Run Scan** to get started.
+    Configure your scan parameters in the sidebar and click **:rocket: Run Scan** to get started.
     
     ### Features:
     - **Market Context**: View real-time SPY trend, VIX regime, and macro risk indicators
