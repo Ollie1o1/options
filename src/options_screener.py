@@ -1952,6 +1952,115 @@ def prompt_for_tickers() -> List[str]:
             sys.exit(1)
 
 
+def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_dte: int, rfr: float, config: Dict, vix_weights: Dict, trader_profile: str, budget: Optional[float], macro_risk_active: bool, tnx_change_pct: float) -> Dict:
+    """
+    Process a single ticker: fetch data, enrich, score, and filter.
+    Returns a dict with picks, spreads, history, and metadata.
+    """
+    result = {
+        'symbol': symbol,
+        'picks': [],
+        'credit_spreads': [],
+        'history': None,
+        'success': False,
+        'error': None
+    }
+    
+    try:
+        # Fetch data
+        data_result = fetch_options_yfinance(symbol, max_expiries)
+        
+        df_chain = data_result["df"]
+        history_df = data_result["history_df"]
+        context = data_result["context"]
+        
+        # Cache history for correlation check
+        if history_df is not None and not history_df.empty:
+            result['history'] = history_df
+
+        # Unpack context
+        hv = context.get("hv")
+        iv_rank = context.get("iv_rank")
+        iv_percentile = context.get("iv_percentile")
+        earnings_date = context.get("earnings_date")
+        sentiment_score = context.get("sentiment_score")
+        seasonal_win_rate = context.get("seasonal_win_rate")
+        term_structure_spread = context.get("term_structure_spread")
+        sector_perf = context.get("sector_perf", {})
+        
+        # Build context log
+        context_log = []
+        if hv: context_log.append(f"HV (30d): {hv:.2%}")
+        if iv_rank: context_log.append(f"IV Rank: {iv_rank:.2f}")
+        if earnings_date: context_log.append(f"Earnings: {earnings_date.strftime('%Y-%m-%d')}")
+        if context.get("rvol"): context_log.append(f"RVOL: {context['rvol']:.2f}x")
+        result['context_log'] = context_log
+
+        # Enrich and Score
+        df_scored = enrich_and_score(
+            df_chain,
+            min_dte=min_dte,
+            max_dte=max_dte,
+            risk_free_rate=rfr,
+            config=config,
+            vix_regime_weights=vix_weights,
+            trader_profile=trader_profile,
+            mode=mode,
+            iv_rank=iv_rank,
+            iv_percentile=iv_percentile,
+            earnings_date=earnings_date,
+            sentiment_score=sentiment_score,
+            seasonal_win_rate=seasonal_win_rate,
+            term_structure_spread=term_structure_spread,
+            macro_risk_active=macro_risk_active,
+            sector_perf=sector_perf,
+            tnx_change_pct=tnx_change_pct
+        )
+
+        if df_scored.empty:
+            result['error'] = "No contracts passed filters"
+            return result
+
+        # Validate required columns
+        if "symbol" not in df_scored.columns:
+            result['error'] = f"'symbol' column missing from {symbol} data"
+            return result
+
+        # Apply budget filter if in budget mode
+        is_budget_mode = (mode == "Budget scan")
+        if is_budget_mode and budget:
+            df_scored["contract_cost"] = df_scored["premium"] * 100
+            df_scored = df_scored[df_scored["contract_cost"] <= budget].copy()
+            if df_scored.empty:
+                result['error'] = "No contracts within budget"
+                return result
+
+        # Collect results based on mode
+        if mode == "Credit Spreads":
+            # Vertical Spreads
+            spreads = find_credit_spreads(df_scored)
+            if not spreads.empty:
+                result['credit_spreads'].append(spreads)
+                result['success'] = True
+
+        elif mode == "Premium Selling":
+            # Filter for short puts
+            puts = df_scored[df_scored["type"] == "put"].copy()
+            if not puts.empty:
+                result['picks'].append(puts)
+                result['success'] = True
+
+        else:
+            # Single stock, Budget, Discovery
+            result['picks'].append(df_scored)
+            result['success'] = True
+
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+
 def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0):
     # Determine mode booleans for internal logic
     is_budget_mode = (mode == "Budget scan")
@@ -1978,110 +2087,75 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     rfr = get_risk_free_rate()
     print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
 
-    # Collect data from all tickers (parallel for speed)
+    # Collect data from all tickers (PARALLEL PROCESSING)
     tickers = list(set(tickers))  # Deduplicate tickers
     all_picks = []
     all_credit_spreads = []
     ticker_histories = {} # For Portfolio Protection
 
-    for symbol in tickers:
-        print(f"\n>>> Scanning {symbol}...")
-        try:
-            # NEW: fetch_options_yfinance returns a dict
-            data_result = fetch_options_yfinance(symbol, max_expiries)
-            
-            df_chain = data_result["df"]
-            history_df = data_result["history_df"]
-            context = data_result["context"]
-            
-            # Cache history for correlation check
-            if history_df is not None and not history_df.empty:
-                ticker_histories[symbol] = history_df
+    print(f"\n{'='*80}")
+    print(f"  Fetching data for {len(tickers)} ticker(s) in parallel...")
+    print(f"{'='*80}\n")
 
-            # Unpack context for logging/logic
-            hv = context.get("hv")
-            iv_rank = context.get("iv_rank")
-            iv_percentile = context.get("iv_percentile")
-            earnings_date = context.get("earnings_date")
-            sentiment_score = context.get("sentiment_score")
-            seasonal_win_rate = context.get("seasonal_win_rate")
-            term_structure_spread = context.get("term_structure_spread")
-            sector_perf = context.get("sector_perf", {})
-            
-            # Log context
-            if hv: print(f"    HV (30d): {hv:.2%}")
-            if iv_rank: print(f"    IV Rank: {iv_rank:.2f}")
-            if earnings_date: print(f"    Earnings: {earnings_date.strftime('%Y-%m-%d')}")
-            if context.get("rvol"): print(f"    RVOL: {context['rvol']:.2f}x")
-
-            # Enrich and Score
-            df_scored = enrich_and_score(
-                df_chain,
-                min_dte=min_dte,
-                max_dte=max_dte,
-                risk_free_rate=rfr,
-                config=config,
-                vix_regime_weights=vix_weights,
-                trader_profile=trader_profile,
-                mode=mode,
-                iv_rank=iv_rank,
-                iv_percentile=iv_percentile,
-                earnings_date=earnings_date,
-                sentiment_score=sentiment_score,
-                seasonal_win_rate=seasonal_win_rate,
-                term_structure_spread=term_structure_spread,
-                macro_risk_active=macro_risk_active,
-                sector_perf=sector_perf,
-                tnx_change_pct=tnx_change_pct
-            )
-
-            if df_scored.empty:
-                print("    No contracts passed filters.")
-                continue
-
-            # Validate required columns
-            if "symbol" not in df_scored.columns:
-                print(f"    ⚠️  Warning: 'symbol' column missing from {symbol} data, skipping...")
-                continue
-
-            # Apply budget filter if in budget mode
-            if is_budget_mode:
-                df_scored["contract_cost"] = df_scored["premium"] * 100
-                df_scored = df_scored[df_scored["contract_cost"] <= budget].copy()
-                if df_scored.empty:
-                    continue
-
-            # Collect results
-            if mode == "Credit Spreads":
-                # Vertical Spreads
-                spreads = find_credit_spreads(df_scored)
-                if not spreads.empty:
-                    all_credit_spreads.append(spreads)
-                    print(f"    Found {len(spreads)} Credit Spreads.")
+    # Use ThreadPoolExecutor for parallel processing
+    # Limit to 8 workers to avoid rate limiting
+    max_workers = min(8, len(tickers))
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all ticker processing jobs
+        future_to_symbol = {
+            executor.submit(
+                process_ticker,
+                symbol,
+                mode,
+                max_expiries,
+                min_dte,
+                max_dte,
+                rfr,
+                config,
+                vix_weights,
+                trader_profile,
+                budget,
+                macro_risk_active,
+                tnx_change_pct
+            ): symbol
+            for symbol in tickers
+        }
+        
+        # Process results as they complete
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                result = future.result()
                 
-                # Iron Condors
-                condors = find_iron_condors(df_scored)
-                if not condors.empty:
-                    condors["type"] = "Iron Condor"
-                    # We can't easily mix them into 'all_credit_spreads' without standardizing columns.
-                    # For now, just print them.
-                    print(f"    Found {len(condors)} Iron Condors.")
-                    print(condors[["expiration", "short_call_strike", "short_put_strike", "credit", "roi"]].head().to_string(index=False))
-
-            elif mode == "Premium Selling":
-                # Filter for short puts
-                puts = df_scored[df_scored["type"] == "put"].copy()
-                if not puts.empty:
-                    all_picks.append(puts)
-                    print(f"    Found {len(puts)} Premium Selling candidates.")
-
-            else:
-                # Single stock, Budget, Discovery
-                all_picks.append(df_scored)
-                print(f"    Found {len(df_scored)} contracts.")
-
-        except Exception as e:
-            print(f"    ⚠️  Error scanning {symbol}: {e}")
+                # Log the ticker processing
+                print(f"\n>>> Scanning {symbol}...")
+                
+                # Print context logs
+                for log in result.get('context_log', []):
+                    print(f"    {log}")
+                
+                if result['success']:
+                    # Store history
+                    if result['history'] is not None:
+                        ticker_histories[symbol] = result['history']
+                    
+                    # Aggregate picks
+                    for picks_df in result['picks']:
+                        all_picks.append(picks_df)
+                        print(f"    Found {len(picks_df)} contracts.")
+                    
+                    # Aggregate credit spreads
+                    for spreads_df in result['credit_spreads']:
+                        all_credit_spreads.append(spreads_df)
+                        print(f"    Found {len(spreads_df)} Credit Spreads.")
+                else:
+                    if result['error']:
+                        print(f"    {result['error']}")
+                
+            except Exception as e:
+                print(f"\n>>> Scanning {symbol}...")
+                print(f"    ⚠️  Error: {e}")
 
     # --- Portfolio Protection: Correlation Warning ---
     if len(ticker_histories) > 1:
@@ -2124,25 +2198,34 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Generate Final Reports
     if mode == "Budget scan":
         if all_picks:
-            final_df = pd.concat(all_picks, ignore_index=True)
-            # Re-sort by quality score
-            final_df = final_df.sort_values("quality_score", ascending=False)
-            # Categorize by premium
-            final_df = categorize_by_premium(final_df, budget=budget)
-            # Pick top unique tickers
-            top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
-            print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
+            # Filter out empty DataFrames to avoid FutureWarning
+            non_empty_picks = [df for df in all_picks if not df.empty]
+            if non_empty_picks:
+                final_df = pd.concat(non_empty_picks, ignore_index=True)
+                # Re-sort by quality score
+                final_df = final_df.sort_values("quality_score", ascending=False)
+                # Categorize by premium
+                final_df = categorize_by_premium(final_df, budget=budget)
+                # Pick top unique tickers
+                top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
+                print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
+            else:
+                print("\nNo options found within budget.")
         else:
             print("\nNo options found within budget.")
 
     elif mode == "Discovery scan":
         if all_picks:
-            final_df = pd.concat(all_picks, ignore_index=True)
-            final_df = final_df.sort_values("quality_score", ascending=False)
-            # Categorize by premium
-            final_df = categorize_by_premium(final_df, budget=None)
-            # Show top 10 overall
-            print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+            non_empty_picks = [df for df in all_picks if not df.empty]
+            if non_empty_picks:
+                final_df = pd.concat(non_empty_picks, ignore_index=True)
+                final_df = final_df.sort_values("quality_score", ascending=False)
+                # Categorize by premium
+                final_df = categorize_by_premium(final_df, budget=None)
+                # Show top 10 overall
+                print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+            else:
+                print("\nNo discovery picks found.")
         else:
             print("\nNo discovery picks found.")
             
@@ -2156,21 +2239,29 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     elif mode == "Premium Selling":
         if all_picks:
-            final_df = pd.concat(all_picks, ignore_index=True)
-            final_df = final_df.sort_values("quality_score", ascending=False)
-            # Categorize by premium
-            final_df = categorize_by_premium(final_df, budget=None)
-            print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+            non_empty_picks = [df for df in all_picks if not df.empty]
+            if non_empty_picks:
+                final_df = pd.concat(non_empty_picks, ignore_index=True)
+                final_df = final_df.sort_values("quality_score", ascending=False)
+                # Categorize by premium
+                final_df = categorize_by_premium(final_df, budget=None)
+                print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+            else:
+                print("\nNo premium selling candidates found.")
         else:
             print("\nNo premium selling candidates found.")
 
     else:
         # Single stock mode
         if all_picks:
-            final_df = pd.concat(all_picks, ignore_index=True)
-            # Categorize by premium
-            final_df = categorize_by_premium(final_df, budget=None)
-            print_report(final_df, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+            non_empty_picks = [df for df in all_picks if not df.empty]
+            if non_empty_picks:
+                final_df = pd.concat(non_empty_picks, ignore_index=True)
+                # Categorize by premium
+                final_df = categorize_by_premium(final_df, budget=None)
+                print_report(final_df, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+            else:
+                print("\nNo suitable options found.")
         else:
             print("\nNo suitable options found.")
 
@@ -2183,7 +2274,10 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Consolidate for top pick selection
     picks = pd.DataFrame()
     if all_picks:
-        picks = pd.concat(all_picks, ignore_index=True)
+        # Filter out empty DataFrames to avoid FutureWarning
+        non_empty_picks = [df for df in all_picks if not df.empty]
+        if non_empty_picks:
+            picks = pd.concat(non_empty_picks, ignore_index=True)
     
     top_pick = None
     if not picks.empty:
