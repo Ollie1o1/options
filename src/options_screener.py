@@ -2253,31 +2253,43 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
     return result
 
 
-def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0):
+def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None):
     # Determine mode booleans for internal logic
     is_budget_mode = (mode == "Budget scan")
     is_discovery_mode = (mode == "Discovery scan")
 
     # === LOAD CONFIGURATION ===
-    print("\nLoading configuration...")
+    if verbose:
+        print("\nLoading configuration...")
     config = load_config("config.json")
-    print("✓ Configuration loaded")
+    
+    # Merge custom weights if provided (from UI)
+    if custom_weights:
+        config['composite_weights'].update(custom_weights)
+    
+    if verbose:
+        print("✓ Configuration loaded")
 
     # === FETCH VIX FOR ADAPTIVE WEIGHTING ===
-    print("Fetching VIX level for adaptive scoring...")
+    if verbose:
+        print("Fetching VIX level for adaptive scoring...")
     vix_level = get_vix_level()
-    if vix_level:
-        print(f"✓ VIX Level: {vix_level:.2f}")
-    else:
-        print("⚠️  Could not fetch VIX, using default weights")
+    if verbose:
+        if vix_level:
+            print(f"✓ VIX Level: {vix_level:.2f}")
+        else:
+            print("⚠️  Could not fetch VIX, using default weights")
 
     vix_regime, vix_weights = determine_vix_regime(vix_level, config)
-    print(f"✓ Market Regime: {vix_regime.upper()}")
+    if verbose:
+        print(f"✓ Market Regime: {vix_regime.upper()}")
 
     # Fetch risk-free rate automatically
-    print("Fetching current risk-free rate...")
+    if verbose:
+        print("Fetching current risk-free rate...")
     rfr = get_risk_free_rate()
-    print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
+    if verbose:
+        print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
 
     # Collect data from all tickers (PARALLEL PROCESSING)
     tickers = list(set(tickers))  # Deduplicate tickers
@@ -2286,9 +2298,10 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     all_iron_condors = []
     ticker_histories = {} # For Portfolio Protection
 
-    print(f"\n{'='*80}")
-    print(f"  Fetching data for {len(tickers)} ticker(s) in parallel...")
-    print(f"{'='*80}\n")
+    if verbose:
+        print(f"\n{'='*80}")
+        print(f"  Fetching data for {len(tickers)} ticker(s) in parallel...")
+        print(f"{'='*80}\n")
 
     # Use ThreadPoolExecutor for parallel processing
     # Limit to 8 workers to avoid rate limiting
@@ -2322,11 +2335,12 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 result = future.result()
                 
                 # Log the ticker processing
-                print(f"\n>>> Scanning {symbol}...")
-                
-                # Print context logs
-                for log in result.get('context_log', []):
-                    print(f"    {log}")
+                if verbose:
+                    print(f"\n>>> Scanning {symbol}...")
+                    
+                    # Print context logs
+                    for log in result.get('context_log', []):
+                        print(f"    {log}")
                 
                 if result['success']:
                     # Store history
@@ -2336,27 +2350,31 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                     # Aggregate picks
                     for picks_df in result['picks']:
                         all_picks.append(picks_df)
-                        print(f"    Found {len(picks_df)} contracts.")
+                        if verbose:
+                            print(f"    Found {len(picks_df)} contracts.")
                     
                     # Aggregate credit spreads
                     for spreads_df in result['credit_spreads']:
                         all_credit_spreads.append(spreads_df)
-                        print(f"    Found {len(spreads_df)} Credit Spreads.")
+                        if verbose:
+                            print(f"    Found {len(spreads_df)} Credit Spreads.")
                     
                     # Aggregate iron condors
                     if 'iron_condors' in result and not result['iron_condors'].empty:
                         all_iron_condors.append(result['iron_condors'])
-                        print(f"    Found {len(result['iron_condors'])} Iron Condors.")
+                        if verbose:
+                            print(f"    Found {len(result['iron_condors'])} Iron Condors.")
                 else:
-                    if result['error']:
+                    if verbose and result['error']:
                         print(f"    {result['error']}")
                 
             except Exception as e:
-                print(f"\n>>> Scanning {symbol}...")
-                print(f"    ⚠️  Error: {e}")
+                if verbose:
+                    print(f"\n>>> Scanning {symbol}...")
+                    print(f"    ⚠️  Error: {e}")
 
     # --- Portfolio Protection: Correlation Warning ---
-    if len(ticker_histories) > 1:
+    if verbose and len(ticker_histories) > 1:
         print("\n🔎 Checking Portfolio Correlation...")
         try:
             # Create a combined DF of 'Close' prices
@@ -2406,11 +2424,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 final_df = categorize_by_premium(final_df, budget=budget)
                 # Pick top unique tickers
                 top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
-                print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
+                if verbose:
+                    print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
             else:
-                print("\nNo options found within budget.")
+                if verbose:
+                    print("\nNo options found within budget.")
         else:
-            print("\nNo options found within budget.")
+            if verbose:
+                print("\nNo options found within budget.")
 
     elif mode == "Discovery scan":
         if all_picks:
@@ -2421,27 +2442,34 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 # Categorize by premium
                 final_df = categorize_by_premium(final_df, budget=None)
                 # Show top 10 overall
-                print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+                if verbose:
+                    print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
             else:
-                print("\nNo discovery picks found.")
+                if verbose:
+                    print("\nNo discovery picks found.")
         else:
-            print("\nNo discovery picks found.")
+            if verbose:
+                print("\nNo discovery picks found.")
             
     elif mode == "Credit Spreads":
         if all_credit_spreads:
             final_spreads = pd.concat(all_credit_spreads, ignore_index=True)
             final_spreads = final_spreads.sort_values("quality_score", ascending=False)
-            print_credit_spreads_report(final_spreads)
+            if verbose:
+                print_credit_spreads_report(final_spreads)
         else:
-            print("\nNo credit spreads found.")
+            if verbose:
+                print("\nNo credit spreads found.")
     
     elif mode == "Iron Condor":
         if all_iron_condors:
             final_condors = pd.concat(all_iron_condors, ignore_index=True)
             final_condors = final_condors.sort_values("return_on_risk", ascending=False)
-            print_iron_condor_report(final_condors)
+            if verbose:
+                print_iron_condor_report(final_condors)
         else:
-            print("\nNo iron condors found.")
+            if verbose:
+                print("\nNo iron condors found.")
 
     elif mode == "Premium Selling":
         if all_picks:
@@ -2451,11 +2479,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 final_df = final_df.sort_values("quality_score", ascending=False)
                 # Categorize by premium
                 final_df = categorize_by_premium(final_df, budget=None)
-                print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+                if verbose:
+                    print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
             else:
-                print("\nNo premium selling candidates found.")
+                if verbose:
+                    print("\nNo premium selling candidates found.")
         else:
-            print("\nNo premium selling candidates found.")
+            if verbose:
+                print("\nNo premium selling candidates found.")
 
     else:
         # Single stock mode
@@ -2465,49 +2496,63 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 final_df = pd.concat(non_empty_picks, ignore_index=True)
                 # Categorize by premium
                 final_df = categorize_by_premium(final_df, budget=None)
-                print_report(final_df, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+                if verbose:
+                    print_report(final_df, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
             else:
-                print("\nNo suitable options found.")
+                if verbose:
+                    print("\nNo suitable options found.")
         else:
-            print("\nNo suitable options found.")
+            if verbose:
+                print("\nNo suitable options found.")
 
-    # Return results for main() to use if needed (though we printed reports already)
-    # We need to construct a return dict to match what main() expects, 
-    # OR we can just return None and let main exit if we handled printing.
-    # But main() has logic to print "TOP OVERALL PICK" after run_scan returns.
-    # So we should return the best pick.
-    
-    # Consolidate for top pick selection
+    # Consolidate top pick and prepare enhanced return dictionary
     picks = pd.DataFrame()
+    credit_spreads_df = pd.DataFrame()
+    iron_condors_df = pd.DataFrame()
+    
     if all_picks:
         # Filter out empty DataFrames to avoid FutureWarning
         non_empty_picks = [df for df in all_picks if not df.empty]
         if non_empty_picks:
             picks = pd.concat(non_empty_picks, ignore_index=True)
     
+    if all_credit_spreads:
+        credit_spreads_df = pd.concat(all_credit_spreads, ignore_index=True)
+    
+    if all_iron_condors:
+        iron_condors_df = pd.concat(all_iron_condors, ignore_index=True)
+    
     top_pick = None
+    underlying_price = 0.0  # Will get from first ticker if available
+    
     if not picks.empty:
         picks["overall_score"] = picks["quality_score"] # Simplified
         top_pick = picks.sort_values("overall_score", ascending=False).iloc[0]
-    elif all_credit_spreads:
+        if "underlying" in picks.columns:
+            underlying_price = picks.iloc[0]["underlying"]
+    elif not credit_spreads_df.empty:
          # If credit spreads mode, pick top spread
-         all_spreads = pd.concat(all_credit_spreads, ignore_index=True)
-         if not all_spreads.empty:
-             top_pick = all_spreads.sort_values("quality_score", ascending=False).iloc[0]
+         top_pick = credit_spreads_df.sort_values("quality_score", ascending=False).iloc[0]
+    elif not iron_condors_df.empty:
+         top_pick = iron_condors_df.sort_values("return_on_risk", ascending=False).iloc[0]
 
+    # Enhanced return dictionary for UI
     return {
         'picks': picks,
+        'credit_spreads': credit_spreads_df,
+        'iron_condors': iron_condors_df,
         'top_pick': top_pick,
-        'spreads': pd.DataFrame(), # Placeholder
-        'credit_spreads': pd.concat(all_credit_spreads, ignore_index=True) if all_credit_spreads else pd.DataFrame(),
+        'underlying_price': underlying_price,
         'rfr': rfr,
-        'chain_iv_median': 0.0, # Placeholder
-        'underlying_price': 0.0, # Placeholder
-        'num_expiries': max_expiries,
-        'min_dte': min_dte,
-        'max_dte': max_dte,
-        'mode': mode,
-        'budget': budget,
+        'timestamp': datetime.now().isoformat(),
+        'market_context': {
+            'vix_level': vix_level,
+            'vix_regime': vix_regime,
+            'market_trend': market_trend,
+            'volatility_regime': volatility_regime,
+            'macro_risk_active': macro_risk_active,
+            'tnx_change_pct': tnx_change_pct
+        }
     }
 
 def main():
@@ -2837,4 +2882,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Check for --ui flag to launch Streamlit dashboard
+    if "--ui" in sys.argv:
+        import subprocess
+        print("Launching Streamlit dashboard...")
+        subprocess.run(["streamlit", "run", "src/dashboard.py"])
+    else:
+        main()
