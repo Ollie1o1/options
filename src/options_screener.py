@@ -111,10 +111,16 @@ if missing:
     print("Install with: pip install " + " ".join(missing))
     sys.exit(1)
 
-# Simple in-process caches to avoid refetching HV/IV/momentum for the same ticker
-_HV_CACHE: Dict[str, float] = {}
-_MOMENTUM_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
-_IV_RANK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]] = {}
+from .data_fetching import (
+    get_underlying_price,
+    get_risk_free_rate,
+    get_vix_level,
+    determine_vix_regime,
+    get_market_context,
+    fetch_options_yfinance,
+    retry_with_backoff,
+    safe_float
+)
 
 # Optional imports (relative to this package)
 try:
@@ -129,80 +135,8 @@ try:
 except ImportError:
     HAS_VISUALIZATION = False
 
-try:
-    from textblob import TextBlob
-    HAS_TEXTBLOB = True
-except ImportError:
-    HAS_TEXTBLOB = False
-
-# Cache for sentiment scores to avoid re-fetching
-_SENTIMENT_CACHE: Dict[str, float] = {}
-_SEASONALITY_CACHE: Dict[str, float] = {}
 
 
-@retry_with_backoff(retries=2, backoff_in_seconds=1)
-def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
-    """
-    Calculates the historical win rate for the current month over the last 5 years.
-    """
-    key = f"{ticker.ticker}:seasonality"
-    if key in _SEASONALITY_CACHE:
-        return _SEASONALITY_CACHE[key]
-
-    try:
-        hist = ticker.history(period="5y", interval="1mo")
-        if hist.empty:
-            return None
-
-        current_month = datetime.now().month
-        monthly_data = hist[hist.index.month == current_month]
-
-        if monthly_data.empty:
-            return None
-
-        wins = (monthly_data['Close'] > monthly_data['Open']).sum()
-        total_months = len(monthly_data)
-
-        win_rate = wins / total_months if total_months > 0 else 0.0
-
-        _SEASONALITY_CACHE[key] = win_rate
-        return win_rate
-    except Exception:
-        return None
-
-
-@retry_with_backoff(retries=2, backoff_in_seconds=1)
-def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
-    """
-    Fetches news headlines and calculates a sentiment polarity score using TextBlob.
-    """
-    if not HAS_TEXTBLOB:
-        return None
-
-    key = f"{ticker.ticker}:sentiment"
-    if key in _SENTIMENT_CACHE:
-        return _SENTIMENT_CACHE[key]
-
-    try:
-        # yfinance .news returns a list of dicts with 'title' and 'publisher'
-        news = ticker.news
-        if not news:
-            return None
-
-        # Combine all headlines into a single text block for analysis
-        headlines = ". ".join([item.get("title", "") for item in news])
-        if not headlines.strip():
-            return None
-
-        # Create a TextBlob and get the polarity score
-        blob = TextBlob(headlines)
-        score = blob.sentiment.polarity
-
-        _SENTIMENT_CACHE[key] = score
-        return score
-    except Exception:
-        # Fail gracefully if news fetch or sentiment analysis fails
-        return None
 
 
 def load_config(config_path: str = "config.json") -> Dict:
@@ -247,235 +181,7 @@ def load_config(config_path: str = "config.json") -> Dict:
         return default_config
 
 
-def calculate_max_pain(chain_df: pd.DataFrame) -> Optional[float]:
-    """
-    Calculates the Max Pain price for a given option chain.
-    Max Pain is the strike price with the most open interest value (Intrinsic Value * OI)
-    that would expire worthless for option holders (maximum loss for buyers, max gain for sellers).
-    """
-    try:
-        if chain_df.empty:
-            return None
 
-        # We need calls and puts with Open Interest
-        relevant = chain_df[chain_df['openInterest'] > 0].copy()
-        if relevant.empty:
-            return None
-
-        strikes = sorted(relevant['strike'].unique())
-        max_pain_price = None
-        min_total_loss = float('inf')
-
-        # Iterate through each strike as a potential expiration price
-        for price_candidate in strikes:
-            total_loss = 0.0
-            
-            # Calculate loss for Call holders (Intrinsic Value if Price > Strike)
-            calls = relevant[relevant['type'] == 'call']
-            call_loss = calls.apply(lambda row: max(0.0, price_candidate - row['strike']) * row['openInterest'], axis=1).sum()
-            
-            # Calculate loss for Put holders (Intrinsic Value if Price < Strike)
-            puts = relevant[relevant['type'] == 'put']
-            put_loss = puts.apply(lambda row: max(0.0, row['strike'] - price_candidate) * row['openInterest'], axis=1).sum()
-
-            total_loss = call_loss + put_loss
-
-            if total_loss < min_total_loss:
-                min_total_loss = total_loss
-                max_pain_price = price_candidate
-
-        return max_pain_price
-    except Exception:
-        return None
-
-
-SECTOR_MAP = {
-    # Tech
-    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMD": "XLK", "INTC": "XLK", "CRM": "XLK", "ADBE": "XLK", "ORCL": "XLK",
-    # Finance
-    "JPM": "XLF", "BAC": "XLF", "WFC": "XLF", "GS": "XLF", "MS": "XLF", "C": "XLF", "BLK": "XLF", "V": "XLF", "MA": "XLF",
-    # Energy
-    "XOM": "XLE", "CVX": "XLE", "COP": "XLE", "SLB": "XLE", "EOG": "XLE",
-    # Retail / Consumer Discretionary
-    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY", "MCD": "XLY", "NKE": "XLY", "SBUX": "XLY", "TGT": "XLY", "LOW": "XLY",
-    # Consumer Staples
-    "WMT": "XLP", "PG": "XLP", "KO": "XLP", "PEP": "XLP", "COST": "XLP",
-    # Healthcare
-    "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV", "ABBV": "XLV", "MRK": "XLV", "LLY": "XLV",
-    # Industrial
-    "BA": "XLI", "CAT": "XLI", "GE": "XLI", "MMM": "XLI", "HON": "XLI", "UPS": "XLI",
-    # Communication
-    "GOOGL": "XLC", "GOOG": "XLC", "META": "XLC", "NFLX": "XLC", "DIS": "XLC", "T": "XLC", "VZ": "XLC",
-    # Real Estate
-    "AMT": "XLRE", "PLD": "XLRE", "CCI": "XLRE",
-    # Utilities
-    "NEE": "XLU", "DUK": "XLU", "SO": "XLU",
-    # Materials
-    "LIN": "XLB", "APD": "XLB", "SHW": "XLB",
-}
-
-
-@retry_with_backoff(retries=2, backoff_in_seconds=1)
-def check_macro_risk() -> bool:
-    """
-    Checks for Macro Risk via Forex Volatility (EURUSD=X).
-    If 1-day range is > 2 standard deviations above normal, assume macro event.
-    """
-    try:
-        eurusd = yf.Ticker("EURUSD=X")
-        fx_hist = eurusd.history(period="1mo")
-        if not fx_hist.empty and len(fx_hist) > 5:
-            daily_range = (fx_hist['High'] - fx_hist['Low']) / fx_hist['Open']
-            current_range = daily_range.iloc[-1]
-            avg_range = daily_range.mean()
-            std_range = daily_range.std()
-            
-            if current_range > (avg_range + 2 * std_range):
-                return True
-        return False
-    except Exception:
-        return False
-
-
-@retry_with_backoff(retries=2, backoff_in_seconds=1)
-def check_yield_spike() -> Tuple[bool, float]:
-    """
-    Checks if 10-Year Treasury Yield (^TNX) is up > 2.5% today.
-    Returns (is_spike, pct_change).
-    """
-    try:
-        tnx = yf.Ticker("^TNX")
-        tnx_hist = tnx.history(period="5d")
-        if not tnx_hist.empty and len(tnx_hist) >= 2:
-            tnx_close = tnx_hist['Close']
-            tnx_change_pct = (tnx_close.iloc[-1] - tnx_close.iloc[-2]) / tnx_close.iloc[-2]
-            return (tnx_change_pct > 0.025), tnx_change_pct
-        return False, 0.0
-    except Exception:
-        return False, 0.0
-
-
-@retry_with_backoff(retries=2, backoff_in_seconds=1)
-def get_sector_performance(ticker_symbol: str) -> Dict:
-    """
-    Fetches 5-day return of the Ticker and its Sector ETF.
-    Returns a dict with returns and divergence flags.
-    """
-    sector_etf = SECTOR_MAP.get(ticker_symbol, "SPY")
-    try:
-        # Fetch data for both
-        tkr = yf.Ticker(ticker_symbol)
-        etf = yf.Ticker(sector_etf)
-        
-        # Get 5d history
-        tkr_hist = tkr.history(period="5d")
-        etf_hist = etf.history(period="5d")
-        
-        if len(tkr_hist) < 2 or len(etf_hist) < 2:
-            return {}
-
-        tkr_ret = (tkr_hist['Close'].iloc[-1] / tkr_hist['Close'].iloc[0]) - 1
-        etf_ret = (etf_hist['Close'].iloc[-1] / etf_hist['Close'].iloc[0]) - 1
-        
-        return {
-            "sector_etf": sector_etf,
-            "ticker_return": tkr_ret,
-            "sector_return": etf_ret
-        }
-    except Exception:
-        return {}
-
-
-@retry_with_backoff(retries=2, backoff_in_seconds=1)
-def get_market_context() -> Tuple[str, str, bool, float]:
-    """
-    Fetches SPY and VIX data to determine market trend and volatility regime.
-    Also checks for Macro Risk (via EURUSD volatility) and Yield Spikes (^TNX).
-    
-    Returns: (market_trend, volatility_regime, macro_risk_active, tnx_change_pct)
-    """
-    market_trend = "Unknown"
-    volatility_regime = "Unknown"
-    macro_risk_active = False
-    tnx_change_pct = 0.0
-
-    try:
-        # 1. SPY Trend
-        spy = yf.Ticker("SPY")
-        spy_hist = spy.history(period="3mo")
-        if not spy_hist.empty:
-            spy_sma50 = spy_hist['Close'].rolling(window=50).mean().iloc[-1]
-            spy_current = spy_hist['Close'].iloc[-1]
-            market_trend = "Bull" if spy_current > spy_sma50 else "Bear"
-
-        # 2. VIX Regime
-        vix = yf.Ticker("^VIX")
-        vix_hist = vix.history(period="5d")
-        if not vix_hist.empty:
-            vix_current = vix_hist['Close'].iloc[-1]
-            volatility_regime = "High" if vix_current > 20 else "Low"
-
-        # 3. Macro Risk (EURUSD Volatility)
-        macro_risk_active = check_macro_risk()
-
-        # 4. Yield Spike (^TNX)
-        _, tnx_change_pct = check_yield_spike()
-
-        return market_trend, volatility_regime, macro_risk_active, tnx_change_pct
-
-    except Exception:
-        return "Unknown", "Unknown", False, 0.0
-
-
-def get_vix_level() -> Optional[float]:
-    """Fetch current VIX level from yfinance."""
-    try:
-        vix = yf.Ticker("^VIX")
-        # Try fast_info first
-        try:
-            fi = getattr(vix, "fast_info", None)
-            if fi:
-                level = safe_float(getattr(fi, "last_price", None))
-                if level and level > 0:
-                    return level
-        except Exception:
-            pass
-        
-        # Try info dict
-        try:
-            info = vix.info or {}
-            level = safe_float(info.get("regularMarketPrice"))
-            if level and level > 0:
-                return level
-        except Exception:
-            pass
-        
-        # Try recent history
-        hist = vix.history(period="5d", interval="1d")
-        if not hist.empty:
-            level = safe_float(hist["Close"].iloc[-1])
-            if level and level > 0:
-                return level
-    except Exception:
-        pass
-    
-    return None
-
-
-def determine_vix_regime(vix_level: Optional[float], config: Dict) -> Tuple[str, Dict]:
-    """Determine volatility regime and return appropriate weights."""
-    if vix_level is None:
-        # Default to normal regime
-        return "normal", config.get("weights", {})
-    
-    vix_regimes = config.get("vix_regimes", {})
-    
-    if vix_level < vix_regimes.get("low", {}).get("threshold", 15):
-        return "low", vix_regimes.get("low", {}).get("weights", config.get("weights", {}))
-    elif vix_level > vix_regimes.get("high", {}).get("threshold", 25):
-        return "high", vix_regimes.get("high", {}).get("weights", config.get("weights", {}))
-    else:
-        return "normal", vix_regimes.get("normal", {}).get("weights", config.get("weights", {}))
 
 
 def norm_cdf(x: float) -> float:
@@ -681,459 +387,7 @@ def calculate_risk_reward(
         return None, None, None
 
 
-def get_historical_volatility(ticker: yf.Ticker, period: int = 30) -> Optional[float]:
-    """Fetch historical volatility (annualized) from recent price data.
 
-    Uses an in-memory cache keyed by ticker symbol and period to avoid
-    repeated downloads within a single run.
-    """
-    try:
-        key = f"{ticker.ticker}:{period}"  # type: ignore[attr-defined]
-        if key in _HV_CACHE:
-            return _HV_CACHE[key]
-
-        hist = ticker.history(period=f"{period+10}d", interval="1d")
-        if hist.empty or len(hist) < period:
-            return None
-        
-        # Calculate log returns
-        returns = (hist['Close'] / hist['Close'].shift(1)).apply(math.log).dropna()
-        
-        if len(returns) < 2:
-            return None
-        
-        # Annualized standard deviation
-        daily_vol = returns.std()
-        annual_vol = daily_vol * math.sqrt(252)  # Trading days
-        
-        _HV_CACHE[key] = annual_vol
-        return annual_vol
-    except Exception:
-        return None
-
-
-def get_momentum_indicators(ticker: yf.Ticker) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool]:
-    """Compute basic price momentum and technical indicators.
-
-    Returns a tuple of (5-day return, 14-day RSI, ATR trend, 20-day SMA, 20-day High, 20-day Low, is_squeezing).
-    All values are floats or None if insufficient data.
-    """
-    try:
-        key = f"{ticker.ticker}:momentum_ta"
-        if key in _MOMENTUM_CACHE:
-            return _MOMENTUM_CACHE[key]
-
-        # Use ~90 trading days of history for stable indicators
-        hist = ticker.history(period="6mo", interval="1d")
-        if hist.empty or len(hist) < 21: # Need 21 for 20-day calculations
-            return None, None, None, None, None, None
-
-        close = hist["Close"].astype(float)
-        high = hist.get("High", close)
-        low = hist.get("Low", close)
-
-        # 5-day simple return
-        if len(close) >= 6:
-            ret_5d = float(close.iloc[-1] / close.iloc[-6] - 1.0)
-        else:
-            ret_5d = None
-
-        # RSI (14-day) implementation without external TA libraries
-        delta = close.diff().dropna()
-        if len(delta) >= 14:
-            gain = delta.clip(lower=0.0)
-            loss = -delta.clip(upper=0.0)
-            avg_gain = gain.rolling(window=14).mean()
-            avg_loss = loss.rolling(window=14).mean()
-            rs = avg_gain / avg_loss.replace(0, np.nan)
-            rsi_series = 100.0 - (100.0 / (1.0 + rs))
-            rsi_14 = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else None
-        else:
-            rsi_14 = None
-
-        # ATR trend (14-day ATR vs its own 20-day average)
-        high = high.astype(float)
-        low = low.astype(float)
-        prev_close = close.shift(1)
-        tr1 = (high - low).abs()
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=14).mean()
-        if len(atr.dropna()) < 20:
-            atr_trend = None
-        else:
-            recent_atr = atr.iloc[-1]
-            atr_ma = atr.rolling(window=20).mean().iloc[-1]
-            if atr_ma and atr_ma > 0:
-                atr_trend = float(recent_atr / atr_ma - 1.0)
-            else:
-                atr_trend = None
-
-        # 20-day SMA, High, and Low
-        sma_20 = float(close.rolling(window=20).mean().iloc[-1])
-        high_20 = float(high.rolling(window=20).max().iloc[-1])
-        low_20 = float(low.rolling(window=20).min().iloc[-1])
-
-        # Bollinger Bands (20, 2)
-        bb_std = close.rolling(window=20).std()
-        bb_upper = sma_20 + (bb_std.iloc[-1] * 2)
-        bb_lower = sma_20 - (bb_std.iloc[-1] * 2)
-
-        # Keltner Channels (20, 1.5)
-        kc_atr = atr.iloc[-1]
-        kc_upper = sma_20 + (kc_atr * 1.5)
-        kc_lower = sma_20 - (kc_atr * 1.5)
-
-        # Squeeze Check
-        is_squeezing = (bb_upper < kc_upper) and (bb_lower > kc_lower)
-
-        result = (ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing)
-        _MOMENTUM_CACHE[key] = result
-        return result
-    except Exception:
-        return None, None, None, None, None, None, False
-
-
-def get_iv_rank_percentile(
-    ticker: yf.Ticker,
-    current_iv: float,
-    period_days: int = 252,
-) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    """Calculate 30-day and 90-day IV Rank and IV Percentile.
-
-    Uses rolling realized volatility as a proxy for historical IV.
-    Returns (iv_rank_30, iv_percentile_30, iv_rank_90, iv_percentile_90).
-    """
-    try:
-        key = f"{ticker.ticker}:iv_rank:{current_iv:.6f}"  # type: ignore[attr-defined]
-        if key in _IV_RANK_CACHE:
-            return _IV_RANK_CACHE[key]
-
-        # Fetch ~1 year of daily data
-        hist = ticker.history(period="1y", interval="1d")
-        if hist.empty or len(hist) < 30:
-            return None, None, None, None
-
-        returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
-        if len(returns) < 30:
-            return None, None, None, None
-
-        def _iv_stats(window: int) -> Tuple[Optional[float], Optional[float]]:
-            if len(returns) < window:
-                return None, None
-            rolling_vol = returns.rolling(window=window).std() * np.sqrt(252)
-            rolling_vol = rolling_vol.dropna()
-            if len(rolling_vol) < 2:
-                return None, None
-            iv_min = rolling_vol.min()
-            iv_max = rolling_vol.max()
-            if iv_max - iv_min <= 0:
-                return None, None
-            iv_rank = (current_iv - iv_min) / (iv_max - iv_min)
-            iv_percentile = (rolling_vol < current_iv).sum() / len(rolling_vol)
-            return float(iv_rank), float(iv_percentile)
-
-        iv_rank_30, iv_pct_30 = _iv_stats(30)
-        iv_rank_90, iv_pct_90 = _iv_stats(90)
-
-        result = (iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90)
-        _IV_RANK_CACHE[key] = result
-        return result
-    except Exception:
-        return None, None, None, None
-
-
-def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
-    """Fetch next earnings date from yfinance.
-
-    Tries multiple yfinance endpoints but always fails gracefully if data is missing.
-    Returns a timezone-aware UTC datetime or None.
-    """
-    try:
-        # Preferred: get_earnings_dates (newer yfinance API)
-        try:
-            ed = ticker.get_earnings_dates(limit=1)
-            if ed is not None and not ed.empty:
-                # Index is the earnings date
-                dt = ed.index[0]
-                if not isinstance(dt, datetime):
-                    dt = datetime.fromtimestamp(dt.timestamp())  # type: ignore[attr-defined]
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
-        except Exception:
-            pass
-
-        # Fallback: older calendar interface
-        try:
-            cal = getattr(ticker, "calendar", None)
-            if cal is not None and not getattr(cal, "empty", False):
-                # yfinance often uses the index as the event date
-                if hasattr(cal, "index") and len(cal.index) > 0:
-                    dt = cal.index[0]
-                    if not isinstance(dt, datetime):
-                        dt = datetime.fromtimestamp(dt.timestamp())  # type: ignore[attr-defined]
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    return dt
-        except Exception:
-            pass
-    except Exception:
-        # Any failure just returns None so the rest of the pipeline can continue
-        return None
-
-    return None
-
-
-def safe_float(x, default=None):
-    try:
-        if x is None:
-            return default
-        v = float(x)
-        if math.isfinite(v):
-            return v
-        return default
-    except Exception:
-        return default
-
-
-def get_underlying_price(ticker: yf.Ticker) -> Optional[float]:
-    # Try fast_info, then info, then last close
-    try:
-        fi = getattr(ticker, "fast_info", None)
-        if fi:
-            lp = safe_float(getattr(fi, "last_price", None))
-            if lp:
-                return lp
-            # Sometimes as dict
-            lp = safe_float(getattr(fi, "last_price", None) or fi.get("last_price") if isinstance(fi, dict) else None)
-            if lp:
-                return lp
-    except Exception:
-        pass
-    try:
-        info = ticker.info or {}
-        lp = safe_float(info.get("regularMarketPrice"))
-        if lp:
-            return lp
-    except Exception:
-        pass
-    try:
-        hist = ticker.history(period="5d", interval="1d")
-        if not hist.empty:
-            return safe_float(hist["Close"].iloc[-1])
-    except Exception:
-        pass
-    return None
-
-
-def get_risk_free_rate() -> float:
-    """
-    Fetch the current risk-free rate from yfinance using 13-week Treasury bill (^IRX).
-    Returns annualized rate as decimal (e.g., 0.045 for 4.5%).
-    Falls back to 4.5% if unable to fetch.
-    """
-    default_rate = 0.045
-    try:
-        # ^IRX is the 13-week Treasury bill yield (quoted as annual %)
-        tbill = yf.Ticker("^IRX")
-        # Try fast_info first
-        try:
-            fi = getattr(tbill, "fast_info", None)
-            if fi:
-                rate = safe_float(getattr(fi, "last_price", None))
-                if rate and rate > 0:
-                    return rate / 100.0  # Convert from percentage to decimal
-        except Exception:
-            pass
-        
-        # Try info dict
-        try:
-            info = tbill.info or {}
-            rate = safe_float(info.get("regularMarketPrice"))
-            if rate and rate > 0:
-                return rate / 100.0
-        except Exception:
-            pass
-        
-        # Try recent history
-        hist = tbill.history(period="5d", interval="1d")
-        if not hist.empty:
-            rate = safe_float(hist["Close"].iloc[-1])
-            if rate and rate > 0:
-                return rate / 100.0
-    except Exception:
-        pass
-    
-    # Fallback to default
-    return default_rate
-
-
-def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
-    """Helper to fetch and process a single expiration's option chain."""
-    frames = []
-    try:
-        oc = tkr.option_chain(exp)
-    except (URLError, ConnectionError, OSError):
-        # Network issue for this expiration; skip
-        return []
-    except Exception:
-        # Skip this expiration if it fails
-        return []
-
-    for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
-        if df is None or df.empty:
-            continue
-        sub = df.copy()
-        sub["type"] = opt_type
-        sub["expiration"] = exp
-        sub["symbol"] = symbol.upper()
-
-        # Normalize column names we rely on
-        for col in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]:
-            if col not in sub.columns:
-                sub[col] = pd.NA
-
-        # Calculate Max Pain for this expiration
-        max_pain = calculate_max_pain(sub)
-        sub["max_pain"] = max_pain
-
-        frames.append(sub)
-    return frames
-
-
-@retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> Tuple[pd.DataFrame, Optional[float], Optional[float], Optional[float], Optional[datetime], Optional[float], Optional[float], Optional[float], Dict]:
-    """Fetch options data and enriched context for a symbol.
-
-    Returns a DataFrame of options with underlying-level context (HV, momentum,
-    IV rank/percentiles, earnings date) attached as columns, plus summary
-    values for HV and IV metrics.
-    """
-    try:
-        tkr = yf.Ticker(symbol)
-    except Exception as e:
-        raise RuntimeError(f"Failed to initialize ticker {symbol}: {e}")
-
-    underlying = get_underlying_price(tkr)
-    if underlying is None:
-        raise RuntimeError(f"Could not determine underlying price for ticker {symbol}.")
-
-    # Historical volatility and momentum indicators
-    hv = get_historical_volatility(tkr, period=30)
-    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing = get_momentum_indicators(tkr)
-
-    # Upcoming earnings
-    earnings_date = get_next_earnings_date(tkr)
-
-    # Sentiment analysis
-    sentiment_score = get_sentiment(tkr)
-
-    # Seasonality check
-    seasonal_win_rate = check_seasonality(tkr)
-
-    # Sector Performance
-    sector_perf = get_sector_performance(symbol)
-
-    try:
-        expirations = tkr.options
-    except (URLError, ConnectionError, OSError) as e:  # type: ignore[name-defined]
-        raise RuntimeError(f"Network error while fetching expirations for {symbol}: {e}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch options expirations for {symbol}: {e}")
-
-    if not expirations:
-        raise RuntimeError(f"No options expirations available for {symbol}.")
-
-    # --- Term Structure Requirement ---
-    # Ensure we fetch at least 2 expiries if available, even if user asks for 1
-    num_expiries_to_fetch = max_expiries
-    if max_expiries == 1 and len(expirations) > 1:
-        num_expiries_to_fetch = 2
-
-    expirations_to_scan = expirations[:num_expiries_to_fetch]
-    frames = []
-    median_iv = None
-
-    # Use ThreadPoolExecutor to fetch expirations in parallel for speed
-    with ThreadPoolExecutor(max_workers=min(4, len(expirations_to_scan))) as executor:
-        future_to_exp = {executor.submit(_process_option_chain, tkr, symbol, exp): exp for exp in expirations_to_scan}
-        for future in as_completed(future_to_exp):
-            try:
-                result_frames = future.result()
-                frames.extend(result_frames)
-            except Exception:
-                continue
-
-    if not frames:
-        raise RuntimeError(f"No options data frames fetched from yfinance for {symbol}.")
-
-    df = pd.concat(frames, ignore_index=True)
-    df["underlying"] = underlying
-    df["hv_30d"] = hv  # Add historical volatility column
-    df["ret_5d"] = ret_5d
-    df["rsi_14"] = rsi_14
-    df["atr_trend"] = atr_trend
-    df["sma_20"] = sma_20
-    df["high_20"] = high_20
-    df["low_20"] = low_20
-    df["sentiment_score"] = sentiment_score
-    df["seasonal_win_rate"] = seasonal_win_rate
-    df["is_squeezing"] = is_squeezing
-
-    # Calculate median IV for IV Rank/Percentile calculation
-    df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
-    median_iv = df["impliedVolatility"].median(skipna=True)
-
-    # Get IV Rank and Percentile (30 and 90 day)
-    iv_rank, iv_percentile = None, None
-    iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = None, None, None, None
-    if median_iv and pd.notna(median_iv) and median_iv > 0:
-        iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = get_iv_rank_percentile(tkr, median_iv)
-        # Backwards-compatible aggregate values (use 30-day by default)
-        iv_rank = iv_rank_30
-        iv_percentile = iv_pct_30
-
-    df["iv_rank_30"] = iv_rank_30
-    df["iv_percentile_30"] = iv_pct_30
-    df["iv_rank_90"] = iv_rank_90
-    df["iv_percentile_90"] = iv_pct_90
-
-    # --- Volatility Term Structure Calculation ---
-    term_structure_spread = None
-    if len(expirations_to_scan) >= 2 and 'exp_dt' in df.columns:
-        try:
-            # Ensure exp_dt is present and sorted to find front/back months
-            df['exp_dt'] = pd.to_datetime(df['expiration'], errors='coerce', utc=True)
-            sorted_expiries = sorted(df['exp_dt'].dropna().unique())
-
-            if len(sorted_expiries) >= 2:
-                front_month_exp = sorted_expiries[0]
-                back_month_exp = sorted_expiries[1]
-
-                front_month_df = df[df['exp_dt'] == front_month_exp].copy()
-                back_month_df = df[df['exp_dt'] == back_month_exp].copy()
-
-                # Find ATM IV for front month
-                front_month_df['dist_from_atm'] = (front_month_df['strike'] - underlying).abs()
-                front_atm_strike = front_month_df.loc[front_month_df['dist_from_atm'].idxmin()]['strike']
-                front_atm_ivs = front_month_df[front_month_df['strike'] == front_atm_strike]['impliedVolatility'].dropna()
-                front_atm_iv = front_atm_ivs.mean() if not front_atm_ivs.empty else None
-
-                # Find ATM IV for back month
-                back_month_df['dist_from_atm'] = (back_month_df['strike'] - underlying).abs()
-                back_atm_strike = back_month_df.loc[back_month_df['dist_from_atm'].idxmin()]['strike']
-                back_atm_ivs = back_month_df[back_month_df['strike'] == back_atm_strike]['impliedVolatility'].dropna()
-                back_atm_iv = back_atm_ivs.mean() if not back_atm_ivs.empty else None
-
-                if pd.notna(front_atm_iv) and pd.notna(back_atm_iv):
-                    term_structure_spread = back_atm_iv - front_atm_iv
-        except Exception:
-            term_structure_spread = None # Fail gracefully
-
-
-    return df, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate, term_structure_spread, sector_perf
 
 
 def enrich_and_score(
@@ -1766,17 +1020,6 @@ def enrich_and_score(
     if sector_perf:
         stock_ret = sector_perf.get("ticker_return", 0.0)
         sector_ret = sector_perf.get("sector_return", 0.0)
-        
-        if stock_ret > 0 and sector_ret < -0.015:
-             df["quality_score"] -= 0.15
-             # We can add a tag if we want, but prompt just said modify score.
-        elif stock_ret > 0 and sector_ret > 0:
-             df["quality_score"] += 0.05
-
-    # 3. Max Pain
-    # Logic: If stock > 5% away from Max Pain with < 3 DTE, add warning.
-    df["max_pain_warning"] = ""
-    if "max_pain" in df.columns:
         def _check_max_pain(row):
             mp = safe_float(row.get("max_pain"))
             und = safe_float(row.get("underlying"))
@@ -2164,6 +1407,19 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     stock_price = row.get('underlying', 0.0)
     dte = int(row.get('T_years', 0) * 365)
     parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
+    # Quality Score
+    quality = row.get('quality_score', 0.0)
+    parts.append(f"Quality: {quality:.2f}")
+
+    # Earnings Play
+    if row.get("Earnings Play") == "YES":
+        underpriced_status = "Underpriced" if row.get("is_underpriced") else "Overpriced"
+        parts.append(f"Earnings: YES ({underpriced_status})")
+
+    # Stock Price and DTE
+    stock_price = row.get('underlying', 0.0)
+    dte = int(row.get('T_years', 0) * 365)
+    parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
 
     # --- Seasonality ---
     if pd.notna(row.get("seasonal_win_rate")):
@@ -2188,6 +1444,8 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
         parts.append(row["max_pain_warning"])
     if row.get("yield_warning"):
         parts.append(row["yield_warning"])
+    if row.get("high_premium_turnover"):
+        parts.append("🐋 WHALE FLOW")
 
     return " | ".join(parts)
 
@@ -2237,13 +1495,14 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     if mode == "Budget scan":
         print(f"  OPTIONS SCREENER REPORT - MULTI-TICKER (Budget: ${budget:.2f})")
     elif mode == "Discovery scan":
-        unique_tickers = df_picks["symbol"].nunique()
+        unique_tickers = df_picks["symbol"].nunique() if "symbol" in df_picks.columns else 1
         print(f"  OPTIONS SCREENER REPORT - DISCOVERY MODE ({unique_tickers} Tickers)")
     elif mode == "Premium Selling":
-        unique_tickers = df_picks["symbol"].nunique()
+        unique_tickers = df_picks["symbol"].nunique() if "symbol" in df_picks.columns else 1
         print(f"  OPTIONS SCREENER REPORT - PREMIUM SELLING ({unique_tickers} Tickers)")
     else:
-        print(f"  OPTIONS SCREENER REPORT - {df_picks.iloc[0]['symbol']}")
+        symbol_name = df_picks.iloc[0]['symbol'] if "symbol" in df_picks.columns and not df_picks.empty else "UNKNOWN"
+        print(f"  OPTIONS SCREENER REPORT - {symbol_name}")
     print("="*80)
     
     if mode == "Single-stock":
@@ -2294,7 +1553,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             exp = pd.to_datetime(r["expiration"]).date()
             moneyness = determine_moneyness(r)
             dte = int(r["T_years"] * 365)
-            whale_emoji = "🐋" if r.get("Unusual_Whale", False) else ""
+            whale_emoji = "🐋" if r.get("high_premium_turnover", False) else ""
             
             # Main line with aligned columns
             if mode in ["Budget scan", "Discovery scan", "Premium Selling"]:
@@ -2329,7 +1588,23 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             analysis_line = format_analysis_row(r, chain_iv_median, mode)
 
             print(f"    ↳ Mechanics: {mechanics_line}")
-            print(f"    ↳ Analysis:  {analysis_line}\n")
+            print(f"    ↳ Analysis:  {analysis_line}")
+            
+            # --- NEW: Institutional Metrics ---
+            if "short_interest" in r and pd.notna(r["short_interest"]):
+                si_val = r["short_interest"] * 100
+                print(f"      • Short Interest: {si_val:.2f}%")
+            
+            if "rvol" in r and pd.notna(r["rvol"]):
+                print(f"      • RVOL: {r['rvol']:.2f}x")
+            
+            if "gex_flip_price" in r and pd.notna(r["gex_flip_price"]):
+                print(f"      • GEX Flip: ${r['gex_flip_price']:.2f}")
+            
+            if "vwap" in r and pd.notna(r["vwap"]):
+                 print(f"      • VWAP: ${r['vwap']:.2f}")
+            
+            print("") # Newline
 
 
 def print_spreads_report(df_spreads: pd.DataFrame):
@@ -2411,7 +1686,8 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
             "theo_value", "ev_per_contract", "ev_score",
             "liquidity_score", "momentum_score", "iv_rank_score", "catalyst_score",
             "ret_5d", "rsi_14", "atr_trend",
-            "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket"
+            "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket",
+            "short_interest", "rvol", "gex_flip_price", "vwap", "high_premium_turnover"
         ]
         
         # Filter to existing columns
@@ -2704,248 +1980,229 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     # Collect data from all tickers (parallel for speed)
     tickers = list(set(tickers))  # Deduplicate tickers
-    all_frames = []
-    ticker_metadata = {}  # Store IV Rank, earnings dates per ticker
-    errors = []
-    def _fetch(tkr: str):
+    all_picks = []
+    all_credit_spreads = []
+    ticker_histories = {} # For Portfolio Protection
+
+    for symbol in tickers:
+        print(f"\n>>> Scanning {symbol}...")
         try:
-            df_raw, hv, iv_rank, iv_percentile, earnings_date, sentiment_score, seasonal_win_rate, term_structure_spread, sector_perf = fetch_options_yfinance(tkr, max_expiries=max_expiries)
-            return {
-                "ticker": tkr,
-                "df": df_raw,
-                "hv": hv,
-                "iv_rank": iv_rank,
-                "iv_percentile": iv_percentile,
-                "earnings_date": earnings_date,
-                "sentiment_score": sentiment_score,
-                "seasonal_win_rate": seasonal_win_rate,
-                "term_structure_spread": term_structure_spread,
-                "sector_perf": sector_perf,
-                "error": None
-            }
-        except RuntimeError as e:
-            return {
-                "ticker": tkr,
-                "df": None,
-                "hv": None,
-                "iv_rank": None,
-                "iv_percentile": None,
-                "earnings_date": None,
-                "sentiment_score": None,
-                "seasonal_win_rate": None,
-                "term_structure_spread": None,
-                "sector_perf": {},
-                "error": str(e),
-            }
-        except Exception as e:
-            return {
-                "ticker": tkr,
-                "df": None,
-                "hv": None,
-                "iv_rank": None,
-                "iv_percentile": None,
-                "earnings_date": None,
-                "sentiment_score": None,
-                "seasonal_win_rate": None,
-                "term_structure_spread": None,
-                "sector_perf": {},
-                "error": f"Unexpected error: {e}",
-            }
+            # NEW: fetch_options_yfinance returns a dict
+            data_result = fetch_options_yfinance(symbol, max_expiries)
+            
+            df_chain = data_result["df"]
+            history_df = data_result["history_df"]
+            context = data_result["context"]
+            
+            # Cache history for correlation check
+            if history_df is not None and not history_df.empty:
+                ticker_histories[symbol] = history_df
 
-    # Parallelize across tickers; cap workers to avoid rate limits
-    max_workers = min(20, len(tickers)) if len(tickers) > 1 else 1
-    if max_workers > 1:
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(_fetch, t): t for t in tickers}
-            for fut in as_completed(futures):
-                time.sleep(0.1) # Rate limit (tuned for speed/safety)
-                res = fut.result()
-                t = res["ticker"]
-                if res["df"] is not None and not res["df"].empty:
-                    all_frames.append(res["df"])
-                    # Store metadata per ticker
-                    ticker_metadata[t] = {
-                        "hv": res["hv"],
-                        "iv_rank": res["iv_rank"],
-                        "iv_percentile": res["iv_percentile"],
-                        "earnings_date": res["earnings_date"],
-                        "sentiment_score": res["sentiment_score"],
-                        "sentiment_score": res["sentiment_score"],
-                        "term_structure_spread": res["term_structure_spread"],
-                        "sector_perf": res["sector_perf"]
-                    }
-                    hv = res["hv"]
-                    hv_str = f" HV:{hv*100:.1f}%" if hv else ""
-                    iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
-                    print(f"  Fetched {t} ✓{hv_str}{iv_rank_str}")
-                else:
-                    print(f"  Fetched {t} (no data)")
-                if res["error"]:
-                    errors.append({"ticker": t, "error": res["error"]})
-    else:
-        res = _fetch(tickers[0])
-        if res["df"] is not None and not res["df"].empty:
-            all_frames.append(res["df"])
-            ticker_metadata[tickers[0]] = {
-                "hv": res["hv"],
-                "iv_rank": res["iv_rank"],
-                "iv_percentile": res["iv_percentile"],
-                "earnings_date": res["earnings_date"],
-                "sentiment_score": res["sentiment_score"]
-            }
-            hv = res["hv"]
-            hv_str = f" HV:{hv*100:.1f}%" if hv else ""
-            iv_rank_str = f" IVR:{res['iv_rank']:.2f}" if res["iv_rank"] else ""
-            print(f"  Fetched {tickers[0]} ✓{hv_str}{iv_rank_str}")
-        elif res["error"]:
-            errors.append({"ticker": tickers[0], "error": res["error"]})
+            # Unpack context for logging/logic
+            hv = context.get("hv")
+            iv_rank = context.get("iv_rank")
+            iv_percentile = context.get("iv_percentile")
+            earnings_date = context.get("earnings_date")
+            sentiment_score = context.get("sentiment_score")
+            seasonal_win_rate = context.get("seasonal_win_rate")
+            term_structure_spread = context.get("term_structure_spread")
+            sector_perf = context.get("sector_perf", {})
+            
+            # Log context
+            if hv: print(f"    HV (30d): {hv:.2%}")
+            if iv_rank: print(f"    IV Rank: {iv_rank:.2f}")
+            if earnings_date: print(f"    Earnings: {earnings_date.strftime('%Y-%m-%d')}")
+            if context.get("rvol"): print(f"    RVOL: {context['rvol']:.2f}x")
 
-    if errors:
-        for err in errors:
-            tkr = err.get("ticker", "?")
-            msg = err.get("error", "")
-            if "Network error" in msg:
-                print(f"⚠️  Network error for {tkr}: {msg}. Check your connection and retry.")
-            elif "No options data frames" in msg or "No options expirations" in msg:
-                print(f"⚠️  No options data for {tkr}; try a more liquid symbol such as SPY or AAPL.")
+            # Enrich and Score
+            df_scored = enrich_and_score(
+                df_chain,
+                min_dte=min_dte,
+                max_dte=max_dte,
+                risk_free_rate=rfr,
+                config=config,
+                vix_regime_weights=vix_weights,
+                trader_profile=trader_profile,
+                mode=mode,
+                iv_rank=iv_rank,
+                iv_percentile=iv_percentile,
+                earnings_date=earnings_date,
+                sentiment_score=sentiment_score,
+                seasonal_win_rate=seasonal_win_rate,
+                term_structure_spread=term_structure_spread,
+                macro_risk_active=macro_risk_active,
+                sector_perf=sector_perf,
+                tnx_change_pct=tnx_change_pct
+            )
+
+            if df_scored.empty:
+                print("    No contracts passed filters.")
+                continue
+
+            # Validate required columns
+            if "symbol" not in df_scored.columns:
+                print(f"    ⚠️  Warning: 'symbol' column missing from {symbol} data, skipping...")
+                continue
+
+            # Apply budget filter if in budget mode
+            if is_budget_mode:
+                df_scored["contract_cost"] = df_scored["premium"] * 100
+                df_scored = df_scored[df_scored["contract_cost"] <= budget].copy()
+                if df_scored.empty:
+                    continue
+
+            # Collect results
+            if mode == "Credit Spreads":
+                # Vertical Spreads
+                spreads = find_credit_spreads(df_scored)
+                if not spreads.empty:
+                    all_credit_spreads.append(spreads)
+                    print(f"    Found {len(spreads)} Credit Spreads.")
+                
+                # Iron Condors
+                condors = find_iron_condors(df_scored)
+                if not condors.empty:
+                    condors["type"] = "Iron Condor"
+                    # We can't easily mix them into 'all_credit_spreads' without standardizing columns.
+                    # For now, just print them.
+                    print(f"    Found {len(condors)} Iron Condors.")
+                    print(condors[["expiration", "short_call_strike", "short_put_strike", "credit", "roi"]].head().to_string(index=False))
+
+            elif mode == "Premium Selling":
+                # Filter for short puts
+                puts = df_scored[df_scored["type"] == "put"].copy()
+                if not puts.empty:
+                    all_picks.append(puts)
+                    print(f"    Found {len(puts)} Premium Selling candidates.")
+
             else:
-                print(f"⚠️  Skipping {tkr}: {msg}")
+                # Single stock, Budget, Discovery
+                all_picks.append(df_scored)
+                print(f"    Found {len(df_scored)} contracts.")
 
-    if not all_frames:
-        print("\nNo options data retrieved from any ticker.")
-        return None
+        except Exception as e:
+            print(f"    ⚠️  Error scanning {symbol}: {e}")
 
-    # Combine all data
-    df_combined = pd.concat(all_frames, ignore_index=True)
-    # Deduplicate contracts (same symbol, expiration, strike, type)
-    df_combined.drop_duplicates(subset=['symbol', 'expiration', 'strike', 'type'], inplace=True)
-    print(f"\nProcessing {len(df_combined)} total options contracts...")
+    # --- Portfolio Protection: Correlation Warning ---
+    if len(ticker_histories) > 1:
+        print("\n🔎 Checking Portfolio Correlation...")
+        try:
+            # Create a combined DF of 'Close' prices
+            price_data = {}
+            for t, h in ticker_histories.items():
+                if not h.empty and "Close" in h.columns:
+                    # Use last 30 days
+                    price_data[t] = h["Close"].tail(30)
+            
+            if len(price_data) > 1:
+                prices_df = pd.DataFrame(price_data)
+                # Forward fill / Drop NA (using newer pandas syntax)
+                prices_df = prices_df.ffill().dropna()
+                
+                if not prices_df.empty and len(prices_df.columns) > 1:
+                    corr_matrix = prices_df.corr()
+                    
+                    # Check for high correlation (> 0.80)
+                    # Iterate upper triangle
+                    high_corr_pairs = []
+                    cols = corr_matrix.columns
+                    for i in range(len(cols)):
+                        for j in range(i+1, len(cols)):
+                            c = corr_matrix.iloc[i, j]
+                            if c > 0.80:
+                                high_corr_pairs.append((cols[i], cols[j], c))
+                    
+                    if high_corr_pairs:
+                        print("\n⚠️  PORTFOLIO PROTECTION WARNING: You are making the same bet twice!")
+                        for t1, t2, c in high_corr_pairs:
+                            print(f"  - {t1} and {t2} are highly correlated ({c:.2f})")
+                    else:
+                        print("✓ Portfolio correlation looks healthy (no pairs > 0.80).")
+        except Exception as e:
+            print(f"⚠️  Could not compute portfolio correlation: {e}")
 
-    # Score and filter - process per ticker to get correct metadata
-    scored_frames = []
-    for ticker_symbol in df_combined["symbol"].unique():
-        ticker_df = df_combined[df_combined["symbol"] == ticker_symbol].copy()
-        metadata = ticker_metadata.get(ticker_symbol, {})
-
-        df_ticker_scored = enrich_and_score(
-            ticker_df,
-            min_dte=min_dte,
-            max_dte=max_dte,
-            risk_free_rate=rfr,
-            config=config,
-            vix_regime_weights=vix_weights,
-            trader_profile=trader_profile,
-            mode=mode,
-            iv_rank=metadata.get("iv_rank"),
-            iv_percentile=metadata.get("iv_percentile"),
-            earnings_date=metadata.get("earnings_date"),
-            sentiment_score=metadata.get("sentiment_score"),
-            seasonal_win_rate=metadata.get("seasonal_win_rate"),
-            term_structure_spread=metadata.get("term_structure_spread"),
-            macro_risk_active=macro_risk_active,
-            sector_perf=metadata.get("sector_perf", {}),
-            tnx_change_pct=tnx_change_pct,
-        )
-
-        if not df_ticker_scored.empty:
-            scored_frames.append(df_ticker_scored)
-
-    if not scored_frames:
-        print("No contracts passed filters (check DTE bounds or liquidity).")
-        return None
-
-    df_scored = pd.concat(scored_frames, ignore_index=True)
-    print(f"Scored {len(df_scored)} contracts after filtering.")
-
-    if df_scored.empty:
-        print("No contracts passed filters (check DTE bounds or liquidity).")
-        return None
-
-    # Apply budget filter if in budget mode
-    if is_budget_mode:
-        df_scored["contract_cost"] = df_scored["premium"] * 100
-        df_scored = df_scored[df_scored["contract_cost"] <= budget].copy()
-        if df_scored.empty:
-            print(f"No contracts found within budget of ${budget:.2f}.")
-            return None
-        print(f"Found {len(df_scored)} contracts within budget.")
-
-        # Show budget distribution for user clarity
-        print(f"\nBudget Categories:")
-        print(f"  LOW:    $0 - ${budget*0.33:.2f} (0-33% of budget)")
-        print(f"  MEDIUM: ${budget*0.33:.2f} - ${budget*0.66:.2f} (33-66% of budget)")
-        print(f"  HIGH:   ${budget*0.66:.2f} - ${budget:.2f} (66-100% of budget)")
-    elif is_discovery_mode:
-        # Discovery mode: no budget filter, use quantiles for categorization
-        print(f"\nDiscovery Mode: Analyzing {len(df_scored)} quality options across all price ranges...")
-
-    # Categorize and pick
-    # Use budget categorization for budget mode, quantile for single-stock and discovery
-    df_bucketed = categorize_by_premium(df_scored, budget=budget if is_budget_mode else None)
-
-    # Diversify tickers in budget and discovery modes
-    picks = pick_top_per_bucket(df_bucketed, per_bucket=5, diversify_tickers=(is_budget_mode or is_discovery_mode))
-    if picks.empty:
-        print("Could not produce picks in the requested buckets.")
-        return None
-
-    # Find vertical spreads
-    spreads = find_vertical_spreads(df_scored)
-
-    credit_spreads = pd.DataFrame()
-    if mode == "Credit Spreads":
-        credit_spreads = find_credit_spreads(df_scored)
-
-
-    # Get underlying price for report (first ticker in single mode, or 0 in budget mode)
-    underlying_price = df_scored.iloc[0]["underlying"] if not df_scored.empty and not is_budget_mode else 0.0
-
-    # Structured JSONL logging of the picks and context
-    log_picks_json(
-        logger,
-        picks,
-        context={
-            "mode": mode,
-            "budget": budget,
-            "max_expiries": max_expiries,
-            "min_dte": min_dte,
-            "max_dte": max_dte,
-            "risk_free_rate": rfr,
-        },
-    )
-    # Enhanced scoring for top pick: balance quality with practical factors
-    picks_copy = picks.copy()
-    chain_iv_median = picks["impliedVolatility"].median(skipna=True)
-
-    # Weighted overall score
-    # Favor: high quality, good liquidity, moderate IV, tight spread, balanced delta
-    picks_copy["overall_score"] = (
-        0.40 * picks_copy["quality_score"] +
-        0.20 * picks_copy["liquidity_score"] +
-        0.15 * picks_copy["spread_score"] +
-        0.15 * picks_copy["delta_quality"] +
-        0.10 * picks_copy["iv_quality"]
-    )
-
-    if mode == "Credit Spreads":
-        if not credit_spreads.empty:
-            top_pick = credit_spreads.iloc[0]
+    # Generate Final Reports
+    if mode == "Budget scan":
+        if all_picks:
+            final_df = pd.concat(all_picks, ignore_index=True)
+            # Re-sort by quality score
+            final_df = final_df.sort_values("quality_score", ascending=False)
+            # Categorize by premium
+            final_df = categorize_by_premium(final_df, budget=budget)
+            # Pick top unique tickers
+            top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
+            print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
         else:
-            top_pick = None
+            print("\nNo options found within budget.")
+
+    elif mode == "Discovery scan":
+        if all_picks:
+            final_df = pd.concat(all_picks, ignore_index=True)
+            final_df = final_df.sort_values("quality_score", ascending=False)
+            # Categorize by premium
+            final_df = categorize_by_premium(final_df, budget=None)
+            # Show top 10 overall
+            print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+        else:
+            print("\nNo discovery picks found.")
+            
+    elif mode == "Credit Spreads":
+        if all_credit_spreads:
+            final_spreads = pd.concat(all_credit_spreads, ignore_index=True)
+            final_spreads = final_spreads.sort_values("quality_score", ascending=False)
+            print_credit_spreads_report(final_spreads)
+        else:
+            print("\nNo credit spreads found.")
+
+    elif mode == "Premium Selling":
+        if all_picks:
+            final_df = pd.concat(all_picks, ignore_index=True)
+            final_df = final_df.sort_values("quality_score", ascending=False)
+            # Categorize by premium
+            final_df = categorize_by_premium(final_df, budget=None)
+            print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+        else:
+            print("\nNo premium selling candidates found.")
+
     else:
-        if not picks_copy.empty:
-            top_pick = picks_copy.sort_values("overall_score", ascending=False).iloc[0]
+        # Single stock mode
+        if all_picks:
+            final_df = pd.concat(all_picks, ignore_index=True)
+            # Categorize by premium
+            final_df = categorize_by_premium(final_df, budget=None)
+            print_report(final_df, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
         else:
-            top_pick = None
+            print("\nNo suitable options found.")
+
+    # Return results for main() to use if needed (though we printed reports already)
+    # We need to construct a return dict to match what main() expects, 
+    # OR we can just return None and let main exit if we handled printing.
+    # But main() has logic to print "TOP OVERALL PICK" after run_scan returns.
+    # So we should return the best pick.
+    
+    # Consolidate for top pick selection
+    picks = pd.DataFrame()
+    if all_picks:
+        picks = pd.concat(all_picks, ignore_index=True)
+    
+    top_pick = None
+    if not picks.empty:
+        picks["overall_score"] = picks["quality_score"] # Simplified
+        top_pick = picks.sort_values("overall_score", ascending=False).iloc[0]
+    elif all_credit_spreads:
+         # If credit spreads mode, pick top spread
+         all_spreads = pd.concat(all_credit_spreads, ignore_index=True)
+         if not all_spreads.empty:
+             top_pick = all_spreads.sort_values("quality_score", ascending=False).iloc[0]
 
     return {
         'picks': picks,
         'top_pick': top_pick,
-        'spreads': spreads,
-        'credit_spreads': credit_spreads,
+        'spreads': pd.DataFrame(), # Placeholder
+        'credit_spreads': pd.concat(all_credit_spreads, ignore_index=True) if all_credit_spreads else pd.DataFrame(),
         'rfr': rfr,
-        'chain_iv_median': chain_iv_median,
-        'underlying_price': underlying_price,
+        'chain_iv_median': 0.0, # Placeholder
+        'underlying_price': 0.0, # Placeholder
         'num_expiries': max_expiries,
         'min_dte': min_dte,
         'max_dte': max_dte,
@@ -3124,11 +2381,9 @@ def main():
         underlying_price = scan_results['underlying_price']
         
         if mode == "Credit Spreads":
-            print_credit_spreads_report(credit_spreads)
+            pass # Already printed in run_scan
         else:
-            # Print main report
-            print_report(picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode, budget, market_trend, volatility_regime)
-            # Print spreads report
+            # Print spreads report if any found
             print_spreads_report(spreads)
 
         if top_pick is not None:
@@ -3175,11 +2430,12 @@ def main():
                 # Generate justification
                 justification_parts = []
                 
-                # Liquidity assessment
-                if top_pick["volume"] > picks["volume"].quantile(0.75):
-                    justification_parts.append("excellent liquidity")
-                elif top_pick["volume"] > picks["volume"].median():
-                    justification_parts.append("good liquidity")
+                # Liquidity assessment (only if picks is not empty)
+                if not picks.empty and "volume" in picks.columns:
+                    if top_pick["volume"] > picks["volume"].quantile(0.75):
+                        justification_parts.append("excellent liquidity")
+                    elif top_pick["volume"] > picks["volume"].median():
+                        justification_parts.append("good liquidity")
                 
                 # IV assessment
                 iv_diff = abs(top_pick["impliedVolatility"] - chain_iv_median)
@@ -3216,7 +2472,7 @@ def main():
         print("="*80)
         print(f"  Total Picks Displayed: {len(picks)}")
         if mode in ["Budget scan", "Discovery scan"]:
-            unique_tickers = picks["symbol"].nunique()
+            unique_tickers = picks["symbol"].nunique() if not picks.empty and "symbol" in picks.columns else 0
             print(f"  Tickers Covered: {unique_tickers}")
         if mode == "Budget scan":
             print(f"  Budget Constraint: ${budget:.2f} per contract")
