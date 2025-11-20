@@ -25,8 +25,8 @@ This screener finds opportunities where these forces align, giving you a statist
 
 1.  **Clone the repository:**
     ```bash
-    git clone <your_repo_url>
-    cd <your_repo_directory>
+    git clone https://github.com/Ollie1o1/options.git
+    cd options
     ```
 
 2.  **(Recommended) Create and activate a virtual environment:**
@@ -36,6 +36,30 @@ This screener finds opportunities where these forces align, giving you a statist
     ```
 
 3.  **Install required dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+### Usage
+
+**Run the Screener:**
+```bash
+python -m src.options_screener
+```
+> **Important:** The screener must be run as a module using `-m` because it uses relative imports. Running `python src/options_screener.py` directly will cause an ImportError.
+
+The script will guide you through interactive prompts to select a mode and configure your scan.
+
+**Run the Backtester:**
+```bash
+python -m src.backtest_screener
+```
+This script runs automatically, analyzing past screener results saved in the `logs/` directory.
+
+---
+
+## 📊 Features Deep Dive
+
     ```bash
     pip install -r requirements.txt
     ```
