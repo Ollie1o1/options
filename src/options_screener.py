@@ -1366,9 +1366,10 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
         best_put_credit = 0
         
         for _, short_put in short_put_candidates.iterrows():
-            # Long Put: Delta > -0.15 (closer to 0, further OTM) AND lower strike
+            # Long Put: abs(delta) < 0.15 (closer to 0, further OTM) AND lower strike
+            # This ensures the long put is a protective wing, not ITM
             long_put_candidates = put_group[
-                (put_group['delta'] > -0.15) &
+                (put_group['delta'].abs() < 0.15) &
                 (put_group['strike'] < short_put['strike'])
             ]
             
@@ -1425,8 +1426,10 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
         max_width = max(best_put_spread['put_width'], best_call_spread['call_width'])
         max_risk = max_width - total_credit
         
-        # Filter: Must collect at least 1/3 of the width as credit
-        if total_credit <= (0.30 * max_width) or max_risk <= 0:
+        # Filter: Must collect at least 1/5 of the width as credit (relaxed from 1/3)
+        min_credit = 0.20 * max_width
+        if total_credit <= min_credit or max_risk <= 0:
+            print(f"    DEBUG: {symbol} {exp} - Credit ${total_credit:.2f} < Min ${min_credit:.2f} (20% of ${max_width:.2f})")
             continue
         
         # Delta Neutrality Check: abs(short_put_delta + short_call_delta) < 0.10
@@ -1435,6 +1438,7 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
         net_delta = short_put_delta + short_call_delta
         
         if abs(net_delta) >= 0.10:
+            print(f"    DEBUG: {symbol} {exp} - Net Delta {net_delta:.3f} too directional (abs must be < 0.10)")
             continue  # Too directional
         
         # Calculate metrics
@@ -2639,9 +2643,18 @@ def main():
         print("Invalid number for expirations.")
         sys.exit(1)
 
+    # DTE defaults depend on mode - Iron Condors need longer expiration for theta decay
+    if is_iron_condor_mode:
+        default_min_dte = "30"
+        default_max_dte = "60"
+        print("\n💡 Iron Condors typically perform best with 30-60 DTE for optimal theta decay.")
+    else:
+        default_min_dte = "7"
+        default_max_dte = "120"
+
     try:
-        min_dte = int(prompt_input("Minimum days to expiration (DTE)", "7"))
-        max_dte = int(prompt_input("Maximum days to expiration (DTE)", "120"))
+        min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
+        max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
         if min_dte < 0 or max_dte <= min_dte:
             print("DTE bounds invalid. Ensure 0 <= min < max.")
             sys.exit(1)
