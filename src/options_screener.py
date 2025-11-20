@@ -1984,10 +1984,10 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
     spreads = []
 
     # --- Bull Put Spreads (Sell a Put, Buy a lower Put) ---
-    # Short leg candidates: Delta between -0.20 and -0.30
+    # Short leg candidates: Delta between -0.15 and -0.40 (Relaxed)
     put_df = df[df['type'] == 'put'].copy()
     short_put_candidates = put_df[
-        (put_df['delta'] >= -0.30) & (put_df['delta'] <= -0.20)
+        (put_df['delta'] >= -0.40) & (put_df['delta'] <= -0.15)
     ].copy()
 
     for _, short_leg in short_put_candidates.iterrows():
@@ -2019,8 +2019,8 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
             strike_width = short_leg['strike'] - long_leg['strike']
             net_credit = short_leg['premium'] - long_leg['premium']
 
-            # Profitability Filter: Net Credit > 0.33 * Strike Width
-            if net_credit > (0.33 * strike_width):
+            # Profitability Filter: Net Credit > 0.20 * Strike Width (Relaxed)
+            if net_credit > (0.20 * strike_width):
                 spreads.append({
                     "symbol": short_leg['symbol'],
                     "type": "Bull Put",
@@ -2035,9 +2035,9 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Bear Call Spreads (Sell a Call, Buy a higher Call) ---
     call_df = df[df['type'] == 'call'].copy()
-    # Short leg candidates: Delta between 0.20 and 0.30
+    # Short leg candidates: Delta between 0.15 and 0.40 (Relaxed)
     short_call_candidates = call_df[
-        (call_df['delta'] >= 0.20) & (call_df['delta'] <= 0.30)
+        (call_df['delta'] >= 0.15) & (call_df['delta'] <= 0.40)
     ].copy()
 
     for _, short_leg in short_call_candidates.iterrows():
@@ -2068,8 +2068,8 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
             strike_width = long_leg['strike'] - short_leg['strike']
             net_credit = short_leg['premium'] - long_leg['premium']
 
-            # Profitability Filter: Net Credit > 0.33 * Strike Width
-            if net_credit > (0.33 * strike_width):
+            # Profitability Filter: Net Credit > 0.20 * Strike Width (Relaxed)
+            if net_credit > (0.20 * strike_width):
                 spreads.append({
                     "symbol": short_leg['symbol'],
                     "type": "Bear Call",
@@ -2927,7 +2927,16 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         0.10 * picks_copy["iv_quality"]
     )
 
-    top_pick = picks_copy.sort_values("overall_score", ascending=False).iloc[0]
+    if mode == "Credit Spreads":
+        if not credit_spreads.empty:
+            top_pick = credit_spreads.iloc[0]
+        else:
+            top_pick = None
+    else:
+        if not picks_copy.empty:
+            top_pick = picks_copy.sort_values("overall_score", ascending=False).iloc[0]
+        else:
+            top_pick = None
 
     return {
         'picks': picks,
@@ -3122,68 +3131,84 @@ def main():
             # Print spreads report
             print_spreads_report(spreads)
 
-        # Compute and display top overall pick
-        print("\n" + "="*80)
-        print("  ⭐ TOP OVERALL PICK")
-        print("="*80)
-        
-        exp = pd.to_datetime(top_pick["expiration"]).date()
-        moneyness = determine_moneyness(top_pick)
-        dte = int(top_pick["T_years"] * 365)
-        
-        print(
-            f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
-            f"Strike ${top_pick['strike']:.2f} | Exp {exp} ({dte}d) | {moneyness}\n"
-        )
-        if mode in ["Budget scan", "Discovery scan"]:
-            print(f"  Stock Price: ${top_pick['underlying']:.2f}")
-        print(f"  Premium: {format_money(top_pick['premium'])}")
-        if mode == "Budget scan":
-            contract_cost = top_pick['premium'] * 100
-            print(f"  Contract Cost: ${contract_cost:.2f} (within ${budget:.2f} budget)")
-        elif mode == "Discovery scan":
-            contract_cost = top_pick['premium'] * 100
-            print(f"  Contract Cost: ${contract_cost:.2f}")
-        print(f"  IV: {format_pct(top_pick['impliedVolatility'])} | Delta: {top_pick['delta']:+.2f} | Quality: {top_pick['quality_score']:.2f}")
-        print(f"  Volume: {int(top_pick['volume'])} | OI: {int(top_pick['openInterest'])} | Spread: {format_pct(top_pick['spread_pct'])}")
-        
-        # Generate justification
-        justification_parts = []
-        
-        # Liquidity assessment
-        if top_pick["volume"] > picks["volume"].quantile(0.75):
-            justification_parts.append("excellent liquidity")
-        elif top_pick["volume"] > picks["volume"].median():
-            justification_parts.append("good liquidity")
-        
-        # IV assessment
-        iv_diff = abs(top_pick["impliedVolatility"] - chain_iv_median)
-        if iv_diff <= 0.05:
-            justification_parts.append("balanced IV near chain median")
-        elif top_pick["impliedVolatility"] < chain_iv_median:
-            justification_parts.append("favorable IV below median")
-        
-        # Spread assessment
-        if pd.notna(top_pick["spread_pct"]) and top_pick["spread_pct"] < 0.05:
-            justification_parts.append("tight bid-ask spread")
-        
-        # Delta assessment
-        if 0.35 <= abs(top_pick["delta"]) <= 0.50:
-            justification_parts.append("optimal delta range")
-        
-        # DTE assessment
-        if dte <= 30:
-            justification_parts.append("short-term play")
-        elif dte <= 60:
-            justification_parts.append("medium-term opportunity")
-        else:
-            justification_parts.append("longer-dated position")
-        
-        justification = "Chosen for " + ", ".join(justification_parts[:3]) + "."
-        if len(justification_parts) > 3:
-            justification += f" Also offers {', '.join(justification_parts[3:])}." 
-        
-        print(f"\n  💡 Rationale: {justification}")
+        if top_pick is not None:
+            # Compute and display top overall pick
+            print("\n" + "="*80)
+            print("  ⭐ TOP OVERALL PICK")
+            print("="*80)
+            
+            exp = pd.to_datetime(top_pick["expiration"]).date()
+            
+            if mode == "Credit Spreads":
+                # Spread-specific display
+                print(
+                    f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
+                    f"Short ${top_pick['short_strike']:.2f} / Long ${top_pick['long_strike']:.2f} | Exp {exp}\n"
+                )
+                print(f"  Net Credit: {format_money(top_pick['net_credit'])} (Max Profit)")
+                print(f"  Max Risk:   {format_money(top_pick['max_loss'])}")
+                print(f"  Score:      {top_pick['quality_score']:.2f}")
+                
+                print(f"\n  💡 Rationale: High probability income strategy. Defined risk with {format_money(top_pick['net_credit'])} credit collected upfront.")
+            
+            else:
+                # Standard single-leg display
+                moneyness = determine_moneyness(top_pick)
+                dte = int(top_pick["T_years"] * 365)
+                
+                print(
+                    f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
+                    f"Strike ${top_pick['strike']:.2f} | Exp {exp} ({dte}d) | {moneyness}\n"
+                )
+                if mode in ["Budget scan", "Discovery scan"]:
+                    print(f"  Stock Price: ${top_pick['underlying']:.2f}")
+                print(f"  Premium: {format_money(top_pick['premium'])}")
+                if mode == "Budget scan":
+                    contract_cost = top_pick['premium'] * 100
+                    print(f"  Contract Cost: ${contract_cost:.2f} (within ${budget:.2f} budget)")
+                elif mode == "Discovery scan":
+                    contract_cost = top_pick['premium'] * 100
+                    print(f"  Contract Cost: ${contract_cost:.2f}")
+                print(f"  IV: {format_pct(top_pick['impliedVolatility'])} | Delta: {top_pick['delta']:+.2f} | Quality: {top_pick['quality_score']:.2f}")
+                print(f"  Volume: {int(top_pick['volume'])} | OI: {int(top_pick['openInterest'])} | Spread: {format_pct(top_pick['spread_pct'])}")
+                
+                # Generate justification
+                justification_parts = []
+                
+                # Liquidity assessment
+                if top_pick["volume"] > picks["volume"].quantile(0.75):
+                    justification_parts.append("excellent liquidity")
+                elif top_pick["volume"] > picks["volume"].median():
+                    justification_parts.append("good liquidity")
+                
+                # IV assessment
+                iv_diff = abs(top_pick["impliedVolatility"] - chain_iv_median)
+                if iv_diff <= 0.05:
+                    justification_parts.append("balanced IV near chain median")
+                elif top_pick["impliedVolatility"] < chain_iv_median:
+                    justification_parts.append("favorable IV below median")
+                
+                # Spread assessment
+                if pd.notna(top_pick["spread_pct"]) and top_pick["spread_pct"] < 0.05:
+                    justification_parts.append("tight bid-ask spread")
+                
+                # Delta assessment
+                if 0.35 <= abs(top_pick["delta"]) <= 0.50:
+                    justification_parts.append("optimal delta range")
+                
+                # DTE assessment
+                if dte <= 30:
+                    justification_parts.append("short-term play")
+                elif dte <= 60:
+                    justification_parts.append("medium-term opportunity")
+                else:
+                    justification_parts.append("longer-dated position")
+                
+                justification = "Chosen for " + ", ".join(justification_parts[:3]) + "."
+                if len(justification_parts) > 3:
+                    justification += f" Also offers {', '.join(justification_parts[3:])}." 
+                
+                print(f"\n  💡 Rationale: {justification}")
         
         # Summary footer
         print("\n" + "="*80)
