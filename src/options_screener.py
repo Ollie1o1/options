@@ -1328,6 +1328,144 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(spreads).sort_values(by="quality_score", ascending=False) if spreads else pd.DataFrame()
 
 
+def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Identifies Iron Condor opportunities (Bull Put Spread + Bear Call Spread).
+    
+    An Iron Condor sells premium on both sides expecting the stock to stay range-bound.
+    Includes strict liquidity requirements and delta neutrality checks.
+    """
+    condors = []
+    
+    # Separate puts and calls
+    put_df = df[df['type'] == 'put'].copy()
+    call_df = df[df['type'] == 'call'].copy()
+    
+    # Strict liquidity filter for all legs (volume > 50, OI > 500)
+    put_df = put_df[(put_df['volume'] > 50) & (put_df['openInterest'] > 500)].copy()
+    call_df = call_df[(call_df['volume'] > 50) & (call_df['openInterest'] > 500)].copy()
+    
+    if put_df.empty or call_df.empty:
+        return pd.DataFrame()
+    
+    # Group by symbol and expiration
+    for (symbol, exp), group_data in df.groupby(['symbol', 'expiration']):
+        put_group = put_df[(put_df['symbol'] == symbol) & (put_df['expiration'] == exp)]
+        call_group = call_df[(call_df['symbol'] == symbol) & (call_df['expiration'] == exp)]
+        
+        if put_group.empty or call_group.empty:
+            continue
+        
+        # --- PUT WING (Bull Put Spread) ---
+        # Short Put: Delta between -0.30 and -0.20
+        short_put_candidates = put_group[
+            (put_group['delta'] >= -0.30) & (put_group['delta'] <= -0.20)
+        ].copy()
+        
+        best_put_spread = None
+        best_put_credit = 0
+        
+        for _, short_put in short_put_candidates.iterrows():
+            # Long Put: Delta > -0.15 (closer to 0, further OTM) AND lower strike
+            long_put_candidates = put_group[
+                (put_group['delta'] > -0.15) &
+                (put_group['strike'] < short_put['strike'])
+            ]
+            
+            for _, long_put in long_put_candidates.iterrows():
+                put_width = short_put['strike'] - long_put['strike']
+                put_credit = short_put['premium'] - long_put['premium']
+                
+                if put_credit > best_put_credit and put_credit > 0:
+                    best_put_credit = put_credit
+                    best_put_spread = {
+                        'short_put': short_put,
+                        'long_put': long_put,
+                        'put_width': put_width,
+                        'put_credit': put_credit
+                    }
+        
+        if not best_put_spread:
+            continue
+        
+        # --- CALL WING (Bear Call Spread) ---
+        # Short Call: Delta between 0.20 and 0.30
+        short_call_candidates = call_group[
+            (call_group['delta'] >= 0.20) & (call_group['delta'] <= 0.30)
+        ].copy()
+        
+        best_call_spread = None
+        best_call_credit = 0
+        
+        for _, short_call in short_call_candidates.iterrows():
+            # Long Call: Delta < 0.15 (further OTM) AND higher strike
+            long_call_candidates = call_group[
+                (call_group['delta'] < 0.15) &
+                (call_group['strike'] > short_call['strike'])
+            ]
+            
+            for _, long_call in long_call_candidates.iterrows():
+                call_width = long_call['strike'] - short_call['strike']
+                call_credit = short_call['premium'] - long_call['premium']
+                
+                if call_credit > best_call_credit and call_credit > 0:
+                    best_call_credit = call_credit
+                    best_call_spread = {
+                        'short_call': short_call,
+                        'long_call': long_call,
+                        'call_width': call_width,
+                        'call_credit': call_credit
+                    }
+        
+        if not best_call_spread:
+            continue
+        
+        # --- COMBINE AND FILTER ---
+        total_credit = best_put_spread['put_credit'] + best_call_spread['call_credit']
+        max_width = max(best_put_spread['put_width'], best_call_spread['call_width'])
+        max_risk = max_width - total_credit
+        
+        # Filter: Must collect at least 1/3 of the width as credit
+        if total_credit <= (0.30 * max_width) or max_risk <= 0:
+            continue
+        
+        # Delta Neutrality Check: abs(short_put_delta + short_call_delta) < 0.10
+        short_put_delta = best_put_spread['short_put']['delta']
+        short_call_delta = best_call_spread['short_call']['delta']
+        net_delta = short_put_delta + short_call_delta
+        
+        if abs(net_delta) >= 0.10:
+            continue  # Too directional
+        
+        # Calculate metrics
+        return_on_risk = total_credit / max_risk if max_risk > 0 else 0
+        avg_quality = (
+            best_put_spread['short_put']['quality_score'] +
+            best_put_spread['long_put']['quality_score'] +
+            best_call_spread['short_call']['quality_score'] +
+            best_call_spread['long_call']['quality_score']
+        ) / 4
+        
+        condors.append({
+            'symbol': symbol,
+            'expiration': exp,
+            'short_put_strike': best_put_spread['short_put']['strike'],
+            'long_put_strike': best_put_spread['long_put']['strike'],
+            'short_call_strike': best_call_spread['short_call']['strike'],
+            'long_call_strike': best_call_spread['long_call']['strike'],
+            'put_credit': best_put_spread['put_credit'],
+            'call_credit': best_call_spread['call_credit'],
+            'total_credit': total_credit,
+            'max_width': max_width,
+            'max_risk': max_risk * 100,  # Per contract
+            'return_on_risk': return_on_risk,
+            'net_delta': net_delta,
+            'quality_score': avg_quality
+        })
+    
+    return pd.DataFrame(condors).sort_values(by="return_on_risk", ascending=False) if condors else pd.DataFrame()
+
+
 def format_pct(x: Optional[float]) -> str:
     try:
         if x is None or (isinstance(x, float) and not math.isfinite(x)) or pd.isna(x):
@@ -1662,6 +1800,48 @@ def print_credit_spreads_report(df_spreads: pd.DataFrame):
         )
 
 
+def print_iron_condor_report(df_condors: pd.DataFrame):
+    """Prints a dedicated report for iron condors."""
+    if df_condors.empty:
+        print("\nNo iron condors meeting the criteria were found.")
+        return
+
+    print("\n" + "="*120)
+    print("  IRON CONDOR REPORT (RANGE-BOUND STRATEGIES)")
+    print("="*120)
+
+    header = (
+        f"  {'Symbol':<7} {'Exp':<12} "
+        f"{'Put Wing':<20} {'Call Wing':<20} "
+        f"{'Credit':<8} {'Max Risk':<10} {'RoR':<8} {'Net Δ':<8} {'Score':<5}"
+    )
+    print(header)
+    print("  " + "-" * 118)
+
+    for _, row in df_condors.iterrows():
+        exp = pd.to_datetime(row["expiration"]).date()
+        
+        # Format wings
+        put_wing = f"{row['long_put_strike']:.0f}/{row['short_put_strike']:.0f}"
+        call_wing = f"{row['short_call_strike']:.0f}/{row['long_call_strike']:.0f}"
+        
+        # Format delta with sign
+        delta_sign = "+" if row['net_delta'] >= 0 else ""
+        
+        print(
+            f"  {row['symbol']:<7} {exp} "
+            f"{put_wing:<20} {call_wing:<20} "
+            f"{format_money(row['total_credit']):<8} "
+            f"{format_money(row['max_risk']):<10} "
+            f"{row['return_on_risk']:.2f}x    "
+            f"{delta_sign}{row['net_delta']:>+.3f}   "
+            f"{row['quality_score']:.2f}"
+        )
+    
+    print("\n  💡 Iron Condors profit from range-bound movement with defined risk on both sides.")
+    print("  📊 Net Delta shows directional bias (closer to 0 = more neutral)")
+
+
 def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = None) -> str:
     """Export picks to CSV with timestamp."""
     try:
@@ -1961,6 +2141,7 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
         'symbol': symbol,
         'picks': [],
         'credit_spreads': [],
+        'iron_condors': [],
         'history': None,
         'success': False,
         'error': None
@@ -2042,6 +2223,13 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
             if not spreads.empty:
                 result['credit_spreads'].append(spreads)
                 result['success'] = True
+        
+        elif mode == "Iron Condor":
+            # Iron Condors
+            condors = find_iron_condors(df_scored)
+            if not condors.empty:
+                result['iron_condors'] = condors
+                result['success'] = True
 
         elif mode == "Premium Selling":
             # Filter for short puts
@@ -2091,6 +2279,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     tickers = list(set(tickers))  # Deduplicate tickers
     all_picks = []
     all_credit_spreads = []
+    all_iron_condors = []
     ticker_histories = {} # For Portfolio Protection
 
     print(f"\n{'='*80}")
@@ -2149,6 +2338,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                     for spreads_df in result['credit_spreads']:
                         all_credit_spreads.append(spreads_df)
                         print(f"    Found {len(spreads_df)} Credit Spreads.")
+                    
+                    # Aggregate iron condors
+                    if 'iron_condors' in result and not result['iron_condors'].empty:
+                        all_iron_condors.append(result['iron_condors'])
+                        print(f"    Found {len(result['iron_condors'])} Iron Condors.")
                 else:
                     if result['error']:
                         print(f"    {result['error']}")
@@ -2236,6 +2430,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             print_credit_spreads_report(final_spreads)
         else:
             print("\nNo credit spreads found.")
+    
+    elif mode == "Iron Condor":
+        if all_iron_condors:
+            final_condors = pd.concat(all_iron_condors, ignore_index=True)
+            final_condors = final_condors.sort_values("return_on_risk", ascending=False)
+            print_iron_condor_report(final_condors)
+        else:
+            print("\nNo iron condors found.")
 
     elif mode == "Premium Selling":
         if all_picks:
@@ -2322,7 +2524,8 @@ def main():
     print("  2. Enter 'ALL' for budget-based multi-stock scan")
     print("  3. Enter 'DISCOVER' to scan top 100 most-traded tickers (no budget limit)")
     print("  4. Enter 'SELL' for Premium Selling analysis (short puts)")
-    print("  5. Enter 'SPREADS' for Credit Spread analysis\n")
+    print("  5. Enter 'SPREADS' for Credit Spread analysis")
+    print("  6. Enter 'IRON' for Iron Condor analysis\n")
 
     symbol_input = prompt_input("Enter stock ticker or command", "DISCOVER").upper()
 
@@ -2331,6 +2534,7 @@ def main():
     is_discovery_mode = (symbol_input == "DISCOVER" or symbol_input == "")
     is_premium_selling_mode = (symbol_input == "SELL")
     is_credit_spread_mode = (symbol_input == "SPREADS")
+    is_iron_condor_mode = (symbol_input == "IRON")
 
     if is_discovery_mode:
         mode = "Discovery scan"
@@ -2340,13 +2544,15 @@ def main():
         mode = "Premium Selling"
     elif is_credit_spread_mode:
         mode = "Credit Spreads"
+    elif is_iron_condor_mode:
+        mode = "Iron Condor"
     else:
         mode = "Single-stock"
 
     budget = None
     tickers = []
 
-    if is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode:
+    if is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
         # Discovery mode: scan top 100 most-traded options tickers
         if is_premium_selling_mode:
             print("\n=== PREMIUM SELLING MODE ===")
@@ -2354,6 +2560,9 @@ def main():
         elif is_credit_spread_mode:
             print("\n=== CREDIT SPREAD MODE ===")
             print("Scanning top tickers for credit spread opportunities...")
+        elif is_iron_condor_mode:
+            print("\n=== IRON CONDOR MODE ===")
+            print("Scanning top tickers for iron condor opportunities...")
         else:
             print("\n=== DISCOVERY MODE ===")
             print("Scanning top tickers for best opportunities...")
