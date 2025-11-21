@@ -2360,7 +2360,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                             print(f"    Found {len(spreads_df)} Credit Spreads.")
                     
                     # Aggregate iron condors
-                    if 'iron_condors' in result and not result['iron_condors'].empty:
+                    if 'iron_condors' in result and isinstance(result['iron_condors'], pd.DataFrame) and not result['iron_condors'].empty:
                         all_iron_condors.append(result['iron_condors'])
                         if verbose:
                             print(f"    Found {len(result['iron_condors'])} Iron Condors.")
@@ -2441,9 +2441,10 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 final_df = final_df.sort_values("quality_score", ascending=False)
                 # Categorize by premium
                 final_df = categorize_by_premium(final_df, budget=None)
-                # Show top 10 overall
+                # Show top picks per bucket to ensure variety (Low/Med/High premium)
+                top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
                 if verbose:
-                    print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+                    print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
             else:
                 if verbose:
                     print("\nNo discovery picks found.")
@@ -2536,14 +2537,21 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     elif not iron_condors_df.empty:
          top_pick = iron_condors_df.sort_values("return_on_risk", ascending=False).iloc[0]
 
+    # Calculate chain median IV for the return dict
+    chain_iv_median = 0.0
+    if not picks.empty and "impliedVolatility" in picks.columns:
+        chain_iv_median = picks["impliedVolatility"].median()
+
     # Enhanced return dictionary for UI
     return {
         'picks': picks,
+        'spreads': pd.DataFrame(), # Placeholder for vertical spreads if needed
         'credit_spreads': credit_spreads_df,
         'iron_condors': iron_condors_df,
         'top_pick': top_pick,
         'underlying_price': underlying_price,
         'rfr': rfr,
+        'chain_iv_median': chain_iv_median,
         'timestamp': datetime.now().isoformat(),
         'market_context': {
             'vix_level': vix_level,
@@ -2755,84 +2763,69 @@ def main():
             print_spreads_report(spreads)
 
         if top_pick is not None:
-            # Compute and display top overall pick
+            # Compute and display top 3 overall picks
             print("\n" + "="*80)
-            print("  ⭐ TOP OVERALL PICK")
+            print("  ⭐ TOP 3 BEST OPTIONS CONTRACTS (Profitability Focus)")
             print("="*80)
             
-            exp = pd.to_datetime(top_pick["expiration"]).date()
-            
-            if mode == "Credit Spreads":
-                # Spread-specific display
-                print(
-                    f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
-                    f"Short ${top_pick['short_strike']:.2f} / Long ${top_pick['long_strike']:.2f} | Exp {exp}\n"
-                )
-                print(f"  Net Credit: {format_money(top_pick['net_credit'])} (Max Profit)")
-                print(f"  Max Risk:   {format_money(top_pick['max_loss'])}")
-                print(f"  Score:      {top_pick['quality_score']:.2f}")
-                
-                print(f"\n  💡 Rationale: High probability income strategy. Defined risk with {format_money(top_pick['net_credit'])} credit collected upfront.")
-            
+            # Get top 3 picks based on quality score
+            if not picks.empty:
+                top_picks = picks.sort_values("quality_score", ascending=False).head(3)
+            elif not credit_spreads_df.empty:
+                top_picks = credit_spreads_df.sort_values("quality_score", ascending=False).head(3)
+            elif not iron_condors_df.empty:
+                top_picks = iron_condors_df.sort_values("return_on_risk", ascending=False).head(3)
             else:
-                # Standard single-leg display
-                moneyness = determine_moneyness(top_pick)
-                dte = int(top_pick["T_years"] * 365)
+                top_picks = pd.DataFrame()
+
+            for i, (_, pick) in enumerate(top_picks.iterrows(), 1):
+                exp = pd.to_datetime(pick["expiration"]).date()
                 
-                print(
-                    f"\n  {top_pick['symbol']} {top_pick['type'].upper()} | "
-                    f"Strike ${top_pick['strike']:.2f} | Exp {exp} ({dte}d) | {moneyness}\n"
-                )
-                if mode in ["Budget scan", "Discovery scan"]:
-                    print(f"  Stock Price: ${top_pick['underlying']:.2f}")
-                print(f"  Premium: {format_money(top_pick['premium'])}")
-                if mode == "Budget scan":
-                    contract_cost = top_pick['premium'] * 100
-                    print(f"  Contract Cost: ${contract_cost:.2f} (within ${budget:.2f} budget)")
-                elif mode == "Discovery scan":
-                    contract_cost = top_pick['premium'] * 100
-                    print(f"  Contract Cost: ${contract_cost:.2f}")
-                print(f"  IV: {format_pct(top_pick['impliedVolatility'])} | Delta: {top_pick['delta']:+.2f} | Quality: {top_pick['quality_score']:.2f}")
-                print(f"  Volume: {int(top_pick['volume'])} | OI: {int(top_pick['openInterest'])} | Spread: {format_pct(top_pick['spread_pct'])}")
+                print(f"\n  #{i} {pick['symbol']} {pick['type'].upper()} | Strike ${pick['strike']:.2f} | Exp {exp}")
                 
-                # Generate justification
-                justification_parts = []
-                
-                # Liquidity assessment (only if picks is not empty)
-                if not picks.empty and "volume" in picks.columns:
-                    if top_pick["volume"] > picks["volume"].quantile(0.75):
-                        justification_parts.append("excellent liquidity")
-                    elif top_pick["volume"] > picks["volume"].median():
-                        justification_parts.append("good liquidity")
-                
-                # IV assessment
-                iv_diff = abs(top_pick["impliedVolatility"] - chain_iv_median)
-                if iv_diff <= 0.05:
-                    justification_parts.append("balanced IV near chain median")
-                elif top_pick["impliedVolatility"] < chain_iv_median:
-                    justification_parts.append("favorable IV below median")
-                
-                # Spread assessment
-                if pd.notna(top_pick["spread_pct"]) and top_pick["spread_pct"] < 0.05:
-                    justification_parts.append("tight bid-ask spread")
-                
-                # Delta assessment
-                if 0.35 <= abs(top_pick["delta"]) <= 0.50:
-                    justification_parts.append("optimal delta range")
-                
-                # DTE assessment
-                if dte <= 30:
-                    justification_parts.append("short-term play")
-                elif dte <= 60:
-                    justification_parts.append("medium-term opportunity")
+                if mode == "Credit Spreads":
+                    print(f"     Net Credit: {format_money(pick['net_credit'])} | Max Risk: {format_money(pick['max_loss'])}")
+                    print(f"     Score: {pick['quality_score']:.2f}")
+                elif mode == "Iron Condor":
+                    print(f"     Credit: {format_money(pick['total_credit'])} | Max Risk: {format_money(pick['max_risk'])}")
+                    print(f"     RoR: {pick['return_on_risk']:.2f}x | Score: {pick['quality_score']:.2f}")
                 else:
-                    justification_parts.append("longer-dated position")
-                
-                justification = "Chosen for " + ", ".join(justification_parts[:3]) + "."
-                if len(justification_parts) > 3:
-                    justification += f" Also offers {', '.join(justification_parts[3:])}." 
-                
-                print(f"\n  💡 Rationale: {justification}")
+                    # Standard single-leg display
+                    moneyness = determine_moneyness(pick)
+                    dte = int(pick["T_years"] * 365)
+                    
+                    print(f"     Premium: {format_money(pick['premium'])} | Cost: {format_money(pick['premium']*100)}")
+                    print(f"     IV: {format_pct(pick['impliedVolatility'])} | Delta: {pick['delta']:+.2f} | Quality: {pick['quality_score']:.2f}")
+                    print(f"     Vol: {int(pick['volume'])} | OI: {int(pick['openInterest'])} | Spread: {format_pct(pick['spread_pct'])}")
+                    
+                    # Generate justification
+                    justification_parts = []
+                    
+                    # Liquidity assessment
+                    if not picks.empty and "volume" in picks.columns:
+                        if pick["volume"] > picks["volume"].quantile(0.75):
+                            justification_parts.append("excellent liquidity")
+                        elif pick["volume"] > picks["volume"].median():
+                            justification_parts.append("good liquidity")
+                    
+                    # IV assessment
+                    iv_diff = abs(pick["impliedVolatility"] - chain_iv_median)
+                    if iv_diff <= 0.05:
+                        justification_parts.append("balanced IV")
+                    elif pick["impliedVolatility"] < chain_iv_median:
+                        justification_parts.append("favorable IV")
+                    
+                    # Spread assessment
+                    if pd.notna(pick["spread_pct"]) and pick["spread_pct"] < 0.05:
+                        justification_parts.append("tight spreads")
+                    
+                    # Delta assessment
+                    if 0.35 <= abs(pick["delta"]) <= 0.50:
+                        justification_parts.append("optimal delta")
+                    
+                    justification = ", ".join(justification_parts)
+                    if justification:
+                        print(f"     💡 Why: {justification}")
         
         # Summary footer
         print("\n" + "="*80)
