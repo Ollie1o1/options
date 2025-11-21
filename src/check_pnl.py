@@ -88,8 +88,36 @@ def view_portfolio():
     if open_trades.empty:
         print("✓ No open trades found.")
         print("  All positions are closed or no trades have been logged yet.")
-        return
+        # Still show activity summary even if no open trades
     
+    # === TRADE ACTIVITY SUMMARY ===
+    print("\n" + "=" * 80)
+    print("  TRADE ACTIVITY SUMMARY")
+    print("=" * 80)
+    
+    # Extract date from timestamp
+    if 'timestamp' in df.columns:
+        # Handle potential parsing errors gracefully
+        try:
+            df['date'] = pd.to_datetime(df['timestamp']).dt.date
+            daily_counts = df.groupby('date').size().sort_index(ascending=False)
+            
+            print(f"  {'Date':<15} {'Trades Taken':<15}")
+            print("  " + "-" * 30)
+            
+            for date, count in daily_counts.items():
+                print(f"  {str(date):<15} {count:<15}")
+                
+        except Exception as e:
+            print(f"  ⚠️  Could not parse dates for summary: {e}")
+    else:
+        print("  ⚠️  Timestamp column missing in log.")
+        
+    print("=" * 80 + "\n")
+
+    if open_trades.empty:
+        return
+
     print("=" * 120)
     print("  UNREALIZED P/L TRACKER - Active Options Positions")
     print("=" * 120)

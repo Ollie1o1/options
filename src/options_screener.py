@@ -2563,6 +2563,74 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         }
     }
 
+def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Interactive helper to let the user select specific trades to log.
+    Returns a DataFrame containing only the selected rows.
+    """
+    if df.empty:
+        print("No trades to select.")
+        return pd.DataFrame()
+
+    # Sort by quality score for better presentation
+    if "quality_score" in df.columns:
+        df_sorted = df.sort_values("quality_score", ascending=False).reset_index(drop=True)
+    else:
+        df_sorted = df.reset_index(drop=True)
+
+    # Limit to top 50 to avoid overwhelming the user
+    top_n = df_sorted.head(50)
+
+    print("\n" + "="*60)
+    print("  SELECT TRADES TO LOG")
+    print("="*60)
+    
+    for i, row in top_n.iterrows():
+        symbol = row.get('symbol', 'N/A')
+        type_ = row.get('type', 'N/A').upper()
+        strike = row.get('strike', 0.0)
+        exp = row.get('expiration', 'N/A')
+        if isinstance(exp, str):
+            exp = exp.split("T")[0] # Simplify date if ISO format
+        
+        premium = row.get('premium', 0.0)
+        quality = row.get('quality_score', 0.0)
+        
+        print(f"  [{i+1}] {symbol:<5} {type_:<4} {strike:>7.2f} {exp} | Prem: ${premium:>6.2f} | Qual: {quality:.2f}")
+
+    print("="*60)
+    print("Enter the numbers of the trades you want to log, separated by commas.")
+    print("Example: 1, 3, 5 (or 'all' for all listed, 'q' to cancel)")
+    
+    selection = prompt_input("Selection", "").strip().lower()
+    
+    if not selection or selection == 'q':
+        print("Selection cancelled.")
+        return pd.DataFrame()
+    
+    if selection == 'all':
+        return top_n
+
+    try:
+        # Parse indices (1-based to 0-based)
+        indices = [int(x.strip()) - 1 for x in selection.split(",") if x.strip().isdigit()]
+        
+        # Filter valid indices
+        valid_indices = [i for i in indices if 0 <= i < len(top_n)]
+        
+        if not valid_indices:
+            print("No valid selections made.")
+            return pd.DataFrame()
+            
+        selected_df = top_n.iloc[valid_indices].copy()
+        print(f"Selected {len(selected_df)} trades.")
+        return selected_df
+        
+    except Exception as e:
+        print(f"Error parsing selection: {e}")
+        return pd.DataFrame()
+
+
 def main():
     # Check for command-line arguments
     if len(sys.argv) > 1:
@@ -2861,7 +2929,13 @@ def main():
         
         log_choice = prompt_input("Log trades for P/L tracking? (y/n)", "n").lower()
         if log_choice == "y":
-            log_trade_entry(picks, mode)
+            mode_choice = prompt_input("Log (A)ll or (S)elect specific?", "s").lower()
+            if mode_choice == "s":
+                picks_to_log = select_trades_to_log(picks)
+                if not picks_to_log.empty:
+                    log_trade_entry(picks_to_log, mode)
+            else:
+                log_trade_entry(picks, mode)
         
         print("\n👋 Done! Happy trading!\n")
         
