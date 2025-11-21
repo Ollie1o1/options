@@ -5,3 +5,4 @@ finvizfinance
 textblob
 streamlit>=1.28.0
 watchdog>=3.0.0
+plotly>=5.0.0
