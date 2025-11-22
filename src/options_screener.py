@@ -2837,28 +2837,39 @@ def main():
             print("="*80)
             
             # Get top 3 picks based on quality score
+            # Get top 3 picks based on quality score
             if not picks.empty:
                 top_picks = picks.sort_values("quality_score", ascending=False).head(3)
-            elif not credit_spreads_df.empty:
-                top_picks = credit_spreads_df.sort_values("quality_score", ascending=False).head(3)
-            elif not iron_condors_df.empty:
-                top_picks = iron_condors_df.sort_values("return_on_risk", ascending=False).head(3)
+            elif isinstance(credit_spreads, pd.DataFrame) and not credit_spreads.empty:
+                top_picks = credit_spreads.sort_values("quality_score", ascending=False).head(3)
+            elif isinstance(scan_results.get('iron_condors'), pd.DataFrame) and not scan_results['iron_condors'].empty:
+                top_picks = scan_results['iron_condors'].sort_values("return_on_risk", ascending=False).head(3)
             else:
                 top_picks = pd.DataFrame()
 
             for i, (_, pick) in enumerate(top_picks.iterrows(), 1):
                 exp = pd.to_datetime(pick["expiration"]).date()
                 
-                print(f"\n  #{i} {pick['symbol']} {pick['type'].upper()} | Strike ${pick['strike']:.2f} | Exp {exp}")
-                
                 if mode == "Credit Spreads":
+                    print(f"\n  #{i} {pick['symbol']} {pick['type'].upper()} | Short ${pick['short_strike']:.2f} / Long ${pick['long_strike']:.2f} | Exp {exp}")
                     print(f"     Net Credit: {format_money(pick['net_credit'])} | Max Risk: {format_money(pick['max_loss'])}")
                     print(f"     Score: {pick['quality_score']:.2f}")
                 elif mode == "Iron Condor":
+                    # Iron Condors usually have 4 legs, but for summary we might just show the wings or main strikes
+                    # Assuming standard columns for now, or just printing generic info
+                    print(f"\n  #{i} {pick['symbol']} IRON CONDOR | Exp {exp}")
                     print(f"     Credit: {format_money(pick['total_credit'])} | Max Risk: {format_money(pick['max_risk'])}")
                     print(f"     RoR: {pick['return_on_risk']:.2f}x | Score: {pick['quality_score']:.2f}")
                 else:
                     # Standard single-leg display
+                    print(f"\n  #{i} {pick['symbol']} {pick['type'].upper()} | Strike ${pick['strike']:.2f} | Exp {exp}")
+                    
+                    moneyness = determine_moneyness(pick)
+                    dte = int(pick["T_years"] * 365)
+                    
+                    print(f"     Premium: {format_money(pick['premium'])} | Cost: {format_money(pick['premium']*100)}")
+                    print(f"     IV: {format_pct(pick['impliedVolatility'])} | Delta: {pick['delta']:+.2f} | Quality: {pick['quality_score']:.2f}")
+                    print(f"     Vol: {int(pick['volume'])} | OI: {int(pick['openInterest'])} | Spread: {format_pct(pick['spread_pct'])}")
                     moneyness = determine_moneyness(pick)
                     dte = int(pick["T_years"] * 365)
                     
