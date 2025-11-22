@@ -316,7 +316,7 @@ def render_main():
                 # If we want strict budget buckets, we need the budget value.
                 # Let's assume quantile based for now unless we can get budget.
                 
-                picks_df = categorize_by_premium(picks_df, budget=None) 
+                picks_df = categorize_by_premium(picks_df, budget=budget) 
                 
                 # 2. Pick Top Candidates
                 top_picks_df = pick_top_per_bucket(picks_df, per_bucket=3, diversify_tickers=True)
@@ -445,6 +445,13 @@ def render_main():
                 st.warning("No results found. Try adjusting filters.")
         else:
             st.info("👈 Configure and Run Scan to see results.")
+            
+        # Error/Warning Display
+        if st.session_state.scan_results:
+            results = st.session_state.scan_results
+            # Check for errors in individual tickers if available (we might need to update run_scan to return them more explicitly)
+            # For now, let's just check if picks are empty but we had tickers
+            pass
 
     # --- TAB 2: VISUALIZER ---
     with tab2:

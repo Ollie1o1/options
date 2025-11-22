@@ -455,7 +455,7 @@ def enrich_and_score(
     df.loc[~df["spread_pct"].replace([pd.NA, pd.NaT], pd.NA).apply(lambda x: pd.notna(x) and math.isfinite(x)), "spread_pct"] = float("inf")
 
     # Hard filter for wide spreads
-    df = df[df["spread_pct"] <= 0.20].copy()
+    df = df[df["spread_pct"] <= 0.40].copy()
 
     # Liquidity filters: remove totally dead contracts
     df["volume"] = df["volume"].fillna(0).astype(float)
@@ -529,7 +529,8 @@ def enrich_and_score(
         # b. Change the delta filter to target abs_delta between 0.20 and 0.40.
         df = df[(df["abs_delta"] >= 0.20) & (df["abs_delta"] <= 0.40)].copy()
     else:
-        df = df[df["abs_delta"] >= 0.30].copy()
+        # Relaxed delta floor for discovery
+        df = df[df["abs_delta"] >= 0.15].copy()
 
     # !!! ADD THIS CHECK !!!
     if df.empty:
@@ -604,7 +605,8 @@ def enrich_and_score(
         df["max_loss"] = rr_data["max_loss"]
         df["breakeven"] = rr_data["breakeven"]
         df["rr_ratio"] = rr_data["rr_ratio"]
-        df = df[df["rr_ratio"] >= 0.50].copy()
+        df["rr_ratio"] = rr_data["rr_ratio"]
+        df = df[df["rr_ratio"] >= 0.25].copy()
 
         if df.empty:
             return df
