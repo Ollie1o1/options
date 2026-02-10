@@ -81,6 +81,7 @@ from .filters import (
     categorize_by_premium,
     pick_top_per_bucket
 )
+from .paper_manager import PaperManager
 
 # Optional imports (relative to this package)
 try:
@@ -126,7 +127,11 @@ def load_config(config_path: str = "config.json") -> Dict:
         "moneyness_band": 0.15,
         "target_delta": 0.40,
         "earnings_buffer_days": 5,
-        "monte_carlo_simulations": 10000
+        "monte_carlo_simulations": 10000,
+        "exit_rules": {
+            "take_profit": 0.50,
+            "stop_loss": -0.25
+        }
     }
     
     try:
@@ -339,7 +344,10 @@ def enrich_and_score(
 
     # Spread pct (relative to mid)
     df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"]
-    df.loc[~df["spread_pct"].replace([pd.NA, pd.NaT], pd.NA).apply(lambda x: pd.notna(x) and np.isfinite(x)), "spread_pct"] = float("inf")
+    
+    # Vectorized check for finite and non-null spread_pct
+    valid_spread = pd.to_numeric(df["spread_pct"], errors='coerce').notna() & np.isfinite(df["spread_pct"].astype(float))
+    df.loc[~valid_spread, "spread_pct"] = float("inf")
 
     # Get filtering thresholds from config
     f_config = config.get("filters", {})
@@ -351,18 +359,18 @@ def enrich_and_score(
     df = df[df["spread_pct"] <= max_spread].copy()
 
     # Liquidity filters: remove totally dead or low-activity contracts
-    df["volume"] = df["volume"].fillna(0).astype(float)
-    df["openInterest"] = df["openInterest"].fillna(0).astype(float)
+    df["volume"] = pd.to_numeric(df["volume"], errors='coerce').fillna(0)
+    df["openInterest"] = pd.to_numeric(df["openInterest"], errors='coerce').fillna(0)
     df = df[(df["volume"] >= min_vol) | (df["openInterest"] >= min_oi)].copy()
 
     if df.empty:
         return df
 
     # --- Institutional Flow & Sentiment ---
-    df["Vol_OI_Ratio"] = df["volume"] / df["openInterest"].replace(0, pd.NA)
+    df["Vol_OI_Ratio"] = df["volume"] / df["openInterest"].replace(0, np.nan)
     df["Unusual_Whale"] = (df["Vol_OI_Ratio"] > 1.5) & (df["volume"] > 500)
 
-    # Sentiment Tag
+    # Sentiment Tag (Keep apply for simple string mapping)
     def _sentiment_tag(score):
         if score is None or pd.isna(score):
             return "Neutral"
@@ -380,8 +388,10 @@ def enrich_and_score(
     if earnings_date:
         df.loc[(df["exp_dt"] > earnings_date), "Earnings Play"] = "YES"
 
-    df["is_underpriced"] = pd.NA
-    df.loc[df["Earnings Play"] == "YES", "is_underpriced"] = df["impliedVolatility"] < df["hv_30d"]
+    df["is_underpriced"] = False
+    earnings_mask = df["Earnings Play"] == "YES"
+    if earnings_mask.any():
+        df.loc[earnings_mask, "is_underpriced"] = df.loc[earnings_mask, "impliedVolatility"] < df.loc[earnings_mask, "hv_30d"]
 
     # --- Trend Alignment Filter ---
     df["Trend_Aligned"] = False
@@ -389,11 +399,11 @@ def enrich_and_score(
     df.loc[(df["type"] == "put") & (df["underlying"] < df["sma_20"]), "Trend_Aligned"] = True
 
     # Fill missing IV with chain median per expiration + type to avoid skew
-    df["impliedVolatility"] = df["impliedVolatility"].astype(float)
+    df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors='coerce')
     df["iv_group_median"] = df.groupby(["exp_dt", "type"])["impliedVolatility"].transform(lambda s: s.median(skipna=True))
     df["impliedVolatility"] = df["impliedVolatility"].fillna(df["iv_group_median"])
     overall_iv_median = df["impliedVolatility"].median(skipna=True)
-    df["impliedVolatility"] = df["impliedVolatility"].fillna(overall_iv_median)
+    df["impliedVolatility"] = df["impliedVolatility"].fillna(overall_iv_median if pd.notna(overall_iv_median) else 0.25)
 
     # --- VECTORIZED GREEKS ---
     S_vals = df["underlying"].values
@@ -848,21 +858,27 @@ def enrich_and_score(
     # Logic:
     # If (Stock > 0%) AND (Sector < -1.5%): "Fakeout Divergence". Penalize 0.15.
     # If (Stock > 0%) AND (Sector > 0%): Boost 0.05 (Aligned).
+    df["max_pain_warning"] = ""
     if sector_perf:
         stock_ret = sector_perf.get("ticker_return", 0.0)
         sector_ret = sector_perf.get("sector_return", 0.0)
-        def _check_max_pain(row):
-            mp = safe_float(row.get("max_pain"))
-            und = safe_float(row.get("underlying"))
-            dte = safe_float(row.get("T_years")) * 365.0
-            
-            if mp and und and dte < 3:
-                diff_pct = abs(und - mp) / mp
-                if diff_pct > 0.05:
-                    return "⚠️ FIGHTING MAX PAIN"
-            return ""
         
-        df["max_pain_warning"] = df.apply(_check_max_pain, axis=1)
+        # Vectorized Max Pain check
+        if "max_pain" in df.columns:
+            mp = pd.to_numeric(df["max_pain"], errors='coerce')
+            und = pd.to_numeric(df["underlying"], errors='coerce')
+            dte = pd.to_numeric(df["T_years"], errors='coerce') * 365.0
+            
+            mask_mp = mp.notna() & und.notna() & (dte < 3)
+            diff_pct = (und - mp).abs() / mp
+            df.loc[mask_mp & (diff_pct > 0.05), "max_pain_warning"] = "⚠️ FIGHTING MAX PAIN"
+
+        # Sector Relative Strength Logic
+        if stock_ret > 0 and sector_ret < -0.015:
+            df["quality_score"] -= 0.15
+            df["macro_warning"] = np.where(df["macro_warning"] != "", df["macro_warning"] + " | FAKE-OUT DIVERGENCE", "FAKE-OUT DIVERGENCE")
+        elif stock_ret > 0 and sector_ret > 0:
+            df["quality_score"] += 0.05
 
     # 4. Yield Spike Guard
     # Logic: If ^TNX up > 2.5% today, penalize Tech/High Beta calls by 0.20 and add tag.
@@ -2102,108 +2118,12 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         except Exception as e:
             print(f"⚠️  Could not compute portfolio correlation: {e}")
 
-    # Generate Final Reports
-    if mode == "Budget scan":
-        if all_picks:
-            # Filter out empty DataFrames to avoid FutureWarning
-            non_empty_picks = [df for df in all_picks if not df.empty]
-            if non_empty_picks:
-                final_df = pd.concat(non_empty_picks, ignore_index=True)
-                # Re-sort by quality score
-                final_df = final_df.sort_values("quality_score", ascending=False)
-                # Categorize by premium
-                final_df = categorize_by_premium(final_df, budget=budget)
-                # Pick top unique tickers
-                top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
-                if verbose:
-                    print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
-            else:
-                if verbose:
-                    print("\nNo options found within budget.")
-        else:
-            if verbose:
-                print("\nNo options found within budget.")
-
-    elif mode == "Discovery scan":
-        if all_picks:
-            non_empty_picks = [df for df in all_picks if not df.empty]
-            if non_empty_picks:
-                final_df = pd.concat(non_empty_picks, ignore_index=True)
-                final_df = final_df.sort_values("quality_score", ascending=False)
-                # Categorize by premium
-                final_df = categorize_by_premium(final_df, budget=None)
-                # Show top picks per bucket to ensure variety (Low/Med/High premium)
-                top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
-                if verbose:
-                    print_report(top_picks, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
-            else:
-                if verbose:
-                    print("\nNo discovery picks found.")
-        else:
-            if verbose:
-                print("\nNo discovery picks found.")
-            
-    elif mode == "Credit Spreads":
-        if all_credit_spreads:
-            final_spreads = pd.concat(all_credit_spreads, ignore_index=True)
-            final_spreads = final_spreads.sort_values("quality_score", ascending=False)
-            if verbose:
-                print_credit_spreads_report(final_spreads)
-        else:
-            if verbose:
-                print("\nNo credit spreads found.")
-    
-    elif mode == "Iron Condor":
-        if all_iron_condors:
-            final_condors = pd.concat(all_iron_condors, ignore_index=True)
-            final_condors = final_condors.sort_values("return_on_risk", ascending=False)
-            if verbose:
-                print_iron_condor_report(final_condors)
-        else:
-            if verbose:
-                print("\nNo iron condors found.")
-
-    elif mode == "Premium Selling":
-        if all_picks:
-            non_empty_picks = [df for df in all_picks if not df.empty]
-            if non_empty_picks:
-                final_df = pd.concat(non_empty_picks, ignore_index=True)
-                final_df = final_df.sort_values("quality_score", ascending=False)
-                # Categorize by premium
-                final_df = categorize_by_premium(final_df, budget=None)
-                if verbose:
-                    print_report(final_df.head(10), 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
-            else:
-                if verbose:
-                    print("\nNo premium selling candidates found.")
-        else:
-            if verbose:
-                print("\nNo premium selling candidates found.")
-
-    else:
-        # Single stock mode
-        if all_picks:
-            non_empty_picks = [df for df in all_picks if not df.empty]
-            if non_empty_picks:
-                final_df = pd.concat(non_empty_picks, ignore_index=True)
-                # Categorize by premium
-                final_df = categorize_by_premium(final_df, budget=None)
-                if verbose:
-                    print_report(final_df, 0.0, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
-            else:
-                if verbose:
-                    print("\nNo suitable options found.")
-        else:
-            if verbose:
-                print("\nNo suitable options found.")
-
-    # Consolidate top pick and prepare enhanced return dictionary
+    # Consolidate picks and determine underlying price
     picks = pd.DataFrame()
     credit_spreads_df = pd.DataFrame()
     iron_condors_df = pd.DataFrame()
     
     if all_picks:
-        # Filter out empty DataFrames to avoid FutureWarning
         non_empty_picks = [df for df in all_picks if not df.empty]
         if non_empty_picks:
             picks = pd.concat(non_empty_picks, ignore_index=True)
@@ -2214,29 +2134,82 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     if all_iron_condors:
         iron_condors_df = pd.concat(all_iron_condors, ignore_index=True)
     
-    top_pick = None
-    underlying_price = 0.0  # Will get from first ticker if available
+    underlying_price = 0.0
+    if not picks.empty and "underlying" in picks.columns:
+        underlying_price = picks.iloc[0]["underlying"]
+
+    # Generate Final Reports
+    if mode == "Budget scan":
+        if not picks.empty:
+            final_df = picks.sort_values("quality_score", ascending=False)
+            final_df = categorize_by_premium(final_df, budget=budget)
+            top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
+            if verbose:
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
+        elif verbose:
+            print("\nNo options found within budget.")
+
+    elif mode == "Discovery scan":
+        if not picks.empty:
+            final_df = picks.sort_values("quality_score", ascending=False)
+            final_df = categorize_by_premium(final_df, budget=None)
+            top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
+            if verbose:
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+        elif verbose:
+            print("\nNo discovery picks found.")
+            
+    elif mode == "Credit Spreads":
+        if not credit_spreads_df.empty:
+            final_spreads = credit_spreads_df.sort_values("quality_score", ascending=False)
+            if verbose:
+                print_credit_spreads_report(final_spreads)
+        elif verbose:
+            print("\nNo credit spreads found.")
     
+    elif mode == "Iron Condor":
+        if not iron_condors_df.empty:
+            final_condors = iron_condors_df.sort_values("return_on_risk", ascending=False)
+            if verbose:
+                print_iron_condor_report(final_condors)
+        elif verbose:
+            print("\nNo iron condors found.")
+
+    elif mode == "Premium Selling":
+        if not picks.empty:
+            final_df = picks.sort_values("quality_score", ascending=False)
+            final_df = categorize_by_premium(final_df, budget=None)
+            if verbose:
+                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+        elif verbose:
+            print("\nNo premium selling candidates found.")
+
+    else:
+        # Single stock mode
+        if not picks.empty:
+            final_df = picks.copy()
+            final_df = categorize_by_premium(final_df, budget=None)
+            if verbose:
+                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+        elif verbose:
+            print("\nNo suitable options found.")
+
+    top_pick = None
     if not picks.empty:
-        picks["overall_score"] = picks["quality_score"] # Simplified
+        picks["overall_score"] = picks["quality_score"]
         top_pick = picks.sort_values("overall_score", ascending=False).iloc[0]
-        if "underlying" in picks.columns:
-            underlying_price = picks.iloc[0]["underlying"]
     elif not credit_spreads_df.empty:
-         # If credit spreads mode, pick top spread
          top_pick = credit_spreads_df.sort_values("quality_score", ascending=False).iloc[0]
     elif not iron_condors_df.empty:
          top_pick = iron_condors_df.sort_values("return_on_risk", ascending=False).iloc[0]
 
-    # Calculate chain median IV for the return dict
     chain_iv_median = 0.0
     if not picks.empty and "impliedVolatility" in picks.columns:
         chain_iv_median = picks["impliedVolatility"].median()
 
-    # Enhanced return dictionary for UI
     return {
         'picks': picks,
-        'spreads': pd.DataFrame(), # Placeholder for vertical spreads if needed
+        'spreads': pd.DataFrame(),
         'credit_spreads': credit_spreads_df,
         'iron_condors': iron_condors_df,
         'top_pick': top_pick,
@@ -2263,13 +2236,11 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
         print("No trades to select.")
         return pd.DataFrame()
 
-    # Sort by quality score for better presentation
     if "quality_score" in df.columns:
         df_sorted = df.sort_values("quality_score", ascending=False).reset_index(drop=True)
     else:
         df_sorted = df.reset_index(drop=True)
 
-    # Limit to top 50 to avoid overwhelming the user
     top_n = df_sorted.head(50)
 
     print("\n" + "="*60)
@@ -2282,7 +2253,7 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
         strike = row.get('strike', 0.0)
         exp = row.get('expiration', 'N/A')
         if isinstance(exp, str):
-            exp = exp.split("T")[0] # Simplify date if ISO format
+            exp = exp.split("T")[0]
         
         premium = row.get('premium', 0.0)
         quality = row.get('quality_score', 0.0)
@@ -2303,10 +2274,7 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
         return top_n
 
     try:
-        # Parse indices (1-based to 0-based)
         indices = [int(x.strip()) - 1 for x in selection.split(",") if x.strip().isdigit()]
-        
-        # Filter valid indices
         valid_indices = [i for i in indices if 0 <= i < len(top_n)]
         
         if not valid_indices:
@@ -2323,7 +2291,6 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
-    # Check for command-line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "--close-trades":
             close_trades()
@@ -2333,8 +2300,12 @@ def main():
             print("Usage: python options_screener.py [--close-trades]")
             sys.exit(1)
     
-    # Load configuration early so it's available for defaults
     config = load_config("config.json")
+    
+    # Initialize PaperManager and update positions
+    pm = PaperManager(config_path="config.json")
+    print("\nChecking existing paper trade positions...")
+    pm.update_positions()
 
     print("Options Screener (yfinance)")
     print("Note: For personal/informational use only. Review data provider terms.")
@@ -2349,128 +2320,60 @@ def main():
 
     symbol_input = prompt_input("Enter stock ticker or command", "DISCOVER").upper()
 
-    # Handle portfolio viewer
     if symbol_input == "PORTFOLIO":
         from .check_pnl import view_portfolio
         view_portfolio()
         sys.exit(0)
 
-    # Determine mode
     is_budget_mode = (symbol_input == "ALL")
     is_discovery_mode = (symbol_input == "DISCOVER" or symbol_input == "")
     is_premium_selling_mode = (symbol_input == "SELL")
     is_credit_spread_mode = (symbol_input == "SPREADS")
     is_iron_condor_mode = (symbol_input == "IRON")
 
-    if is_discovery_mode:
-        mode = "Discovery scan"
-    elif is_budget_mode:
-        mode = "Budget scan"
-    elif is_premium_selling_mode:
-        mode = "Premium Selling"
-    elif is_credit_spread_mode:
-        mode = "Credit Spreads"
-    elif is_iron_condor_mode:
-        mode = "Iron Condor"
-    else:
-        mode = "Single-stock"
+    if is_discovery_mode: mode = "Discovery scan"
+    elif is_budget_mode: mode = "Budget scan"
+    elif is_premium_selling_mode: mode = "Premium Selling"
+    elif is_credit_spread_mode: mode = "Credit Spreads"
+    elif is_iron_condor_mode: mode = "Iron Condor"
+    else: mode = "Single-stock"
 
     budget = None
     tickers = []
 
     if is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
-        # Discovery mode: scan top 100 most-traded options tickers
-        if is_premium_selling_mode:
-            print("\n=== PREMIUM SELLING MODE ===")
-            print("Scanning top tickers for short put opportunities...")
-        elif is_credit_spread_mode:
-            print("\n=== CREDIT SPREAD MODE ===")
-            print("Scanning top tickers for credit spread opportunities...")
-        elif is_iron_condor_mode:
-            print("\n=== IRON CONDOR MODE ===")
-            print("Scanning top tickers for iron condor opportunities...")
-        else:
-            print("\n=== DISCOVERY MODE ===")
-            print("Scanning top tickers for best opportunities...")
-
         tickers = prompt_for_tickers()
         print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
-        
     elif is_budget_mode:
-        # Budget mode setup
-        print("\n=== BUDGET MODE ===")
-        print("Find options within your budget constraint.\n")
-        
         try:
             budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
-            if budget <= 0:
-                print("Budget must be positive.")
-                sys.exit(1)
         except Exception:
-            print("Invalid budget amount.")
-            sys.exit(1)
-        
-        print("\nSelect scan type:")
-        print("  1. TARGETED - Scan specific tickers you choose")
-        print("  2. DISCOVERY - Scan many tickers to see what your budget can get you")
-        
+            print("Invalid budget amount."); sys.exit(1)
         scan_type = prompt_input("Enter 1 for TARGETED or 2 for DISCOVERY", "1")
-        
-        if scan_type == "2":
-            # Discovery-style budget scan
-            print("\n=== BUDGET DISCOVERY SCAN ===")
-            print(f"Scanning market with ${budget:.2f} budget constraint...")
-            
-            tickers = prompt_for_tickers()
-            
-            print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
-            print(f"Budget: ${budget:.2f} per contract (premium × 100)\n")
+        if scan_type == "2": tickers = prompt_for_tickers()
         else:
-            # Targeted budget scan
-            print("\n=== BUDGET TARGETED SCAN ===")
             default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
             tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
             tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-            
-            if not tickers:
-                print("No valid tickers provided.")
-                sys.exit(1)
-            
-            print(f"\nScanning {len(tickers)} tickers with ${budget:.2f} budget...")
     else:
-        # Single-stock mode
         if not symbol_input.isalnum():
-            print("Please enter a valid alphanumeric ticker (e.g., AAPL).")
-            sys.exit(1)
+            print("Please enter a valid alphanumeric ticker."); sys.exit(1)
         tickers = [symbol_input]
-        print(f"\nSingle-Stock Mode: Analyzing {symbol_input}...")
     
     logger = setup_logging()
-
-    # === GET MARKET CONTEXT ===
     print("\nFetching market context (SPY/VIX)...")
     market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
     print(f"✓ Market Trend: {market_trend} | Volatility: {volatility_regime}")
-    if macro_risk_active:
-        print("⚠️  MACRO RISK DETECTED (Forex Volatility)")
-    if tnx_change_pct > 0.025:
-        print(f"⚠️  YIELD SPIKE DETECTED (^TNX +{tnx_change_pct:.1%})")
 
     try:
         max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
-        if max_expiries <= 0 or max_expiries > 12:
-            print("Please choose between 1 and 12 expirations.")
-            sys.exit(1)
     except Exception:
-        print("Invalid number for expirations.")
-        sys.exit(1)
+        print("Invalid number for expirations."); sys.exit(1)
 
-    # DTE defaults depend on mode - Iron Condors need longer expiration for theta decay
     f_config = config.get("filters", {})
     if is_iron_condor_mode:
         default_min_dte = str(f_config.get("min_days_to_expiration_iron", 30))
         default_max_dte = str(f_config.get("max_days_to_expiration_iron", 60))
-        print(f"\n💡 Iron Condors typically perform best with {default_min_dte}-{default_max_dte} DTE for optimal theta decay.")
     else:
         default_min_dte = str(f_config.get("min_days_to_expiration", 7))
         default_max_dte = str(f_config.get("max_days_to_expiration", 45))
@@ -2478,178 +2381,68 @@ def main():
     try:
         min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
         max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
-        if min_dte < 0 or max_dte <= min_dte:
-            print("DTE bounds invalid. Ensure 0 <= min < max.")
-            sys.exit(1)
     except Exception:
-        print("Invalid DTE inputs.")
-        sys.exit(1)
+        print("Invalid DTE inputs."); sys.exit(1)
 
-    # Trading style profile (day trader vs swing trader)
-    print("\nSelect trading style profile:")
-    print("  1. Swing trader (default) - balanced delta + more DTE")
-    print("  2. Day / short-term trader - prioritize liquidity & tight spreads")
     profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
     trader_profile = "day" if profile_choice == "2" else "swing"
 
     try:
-        scan_results = run_scan(
-            mode=mode,
-            tickers=tickers,
-            budget=budget,
-            max_expiries=max_expiries,
-            min_dte=min_dte,
-            max_dte=max_dte,
-            trader_profile=trader_profile,
-            logger=logger,
-            market_trend=market_trend,
-            volatility_regime=volatility_regime,
-            macro_risk_active=macro_risk_active,
-            tnx_change_pct=tnx_change_pct,
-        )
-        if scan_results is None:
-            sys.exit(0)
+        scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct)
+        if scan_results is None: sys.exit(0)
 
-        # Unpack results
         picks = scan_results['picks']
-        top_pick = scan_results['top_pick']
-        spreads = scan_results['spreads']
-        credit_spreads = scan_results['credit_spreads']
         rfr = scan_results['rfr']
         chain_iv_median = scan_results['chain_iv_median']
-        underlying_price = scan_results['underlying_price']
         
-        if mode == "Credit Spreads":
-            pass # Already printed in run_scan
-        else:
-            # Print spreads report if any found
-            print_spreads_report(spreads)
-
-        if top_pick is not None:
-            # Compute and display top 3 overall picks
-            print("\n" + "="*80)
-            print("  ⭐ TOP 3 BEST OPTIONS CONTRACTS (Profitability Focus)")
-            print("="*80)
-            
-            # Get top 3 picks based on quality score
-            if not picks.empty:
-                top_picks = picks.sort_values("quality_score", ascending=False).head(3)
-            elif isinstance(credit_spreads, pd.DataFrame) and not credit_spreads.empty:
-                top_picks = credit_spreads.sort_values("quality_score", ascending=False).head(3)
-            elif isinstance(scan_results.get('iron_condors'), pd.DataFrame) and not scan_results['iron_condors'].empty:
-                top_picks = scan_results['iron_condors'].sort_values("return_on_risk", ascending=False).head(3)
-            else:
-                top_picks = pd.DataFrame()
-
-            for i, (_, pick) in enumerate(top_picks.iterrows(), 1):
-                exp = pd.to_datetime(pick["expiration"]).date()
-                
-                if mode == "Credit Spreads":
-                    print(f"\n  #{i} {pick['symbol']} {pick['type'].upper()} | Short ${pick['short_strike']:.2f} / Long ${pick['long_strike']:.2f} | Exp {exp}")
-                    print(f"     Net Credit: {format_money(pick['net_credit'])} | Max Risk: {format_money(pick['max_loss'])}")
-                    print(f"     Score: {pick['quality_score']:.2f}")
-                elif mode == "Iron Condor":
-                    print(f"\n  #{i} {pick['symbol']} IRON CONDOR | Exp {exp}")
-                    print(f"     Credit: {format_money(pick['total_credit'])} | Max Risk: {format_money(pick['max_risk'])}")
-                    print(f"     RoR: {pick['return_on_risk']:.2f}x | Score: {pick['quality_score']:.2f}")
-                else:
-                    # Standard single-leg display
-                    print(f"\n  #{i} {pick['symbol']} {pick['type'].upper()} | Strike ${pick['strike']:.2f} | Exp {exp}")
-                    
-                    moneyness = determine_moneyness(pick)
-                    dte = int(pick["T_years"] * 365)
-                    
-                    print(f"     Premium: {format_money(pick['premium'])} | Cost: {format_money(pick['premium']*100)}")
-                    print(f"     IV: {format_pct(pick['impliedVolatility'])} | Delta: {pick['delta']:+.2f} | Quality: {pick['quality_score']:.2f}")
-                    print(f"     Vol: {int(pick['volume'])} | OI: {int(pick['openInterest'])} | Spread: {format_pct(pick['spread_pct'])}")
-                    
-                    # Generate justification
-                    justification_parts = []
-                    
-                    # Liquidity assessment
-                    if not picks.empty and "volume" in picks.columns:
-                        if pick["volume"] > picks["volume"].quantile(0.75):
-                            justification_parts.append("excellent liquidity")
-                        elif pick["volume"] > picks["volume"].median():
-                            justification_parts.append("good liquidity")
-                    
-                    # IV assessment
-                    iv_diff = abs(pick["impliedVolatility"] - chain_iv_median)
-                    if iv_diff <= 0.05:
-                        justification_parts.append("balanced IV")
-                    elif pick["impliedVolatility"] < chain_iv_median:
-                        justification_parts.append("favorable IV")
-                    
-                    # Spread assessment
-                    if pd.notna(pick["spread_pct"]) and pick["spread_pct"] < 0.05:
-                        justification_parts.append("tight spreads")
-                    
-                    # Delta assessment
-                    if 0.35 <= abs(pick["delta"]) <= 0.50:
-                        justification_parts.append("optimal delta")
-                    
-                    justification = ", ".join(justification_parts)
-                    if justification:
-                        print(f"     💡 Why: {justification}")
+        # === PAPER TRADING INTERACTIVE PROMPT ===
+        if not picks.empty and mode != "Credit Spreads" and mode != "Iron Condor":
+            pt_choice = prompt_input("Would you like to paper trade the top 5 picks? (y/n)", "n").lower()
+            if pt_choice == "y":
+                top_5_pt = picks.sort_values("quality_score", ascending=False).head(5)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                for _, row in top_5_pt.iterrows():
+                    trade_dict = {
+                        "date": today_str,
+                        "ticker": row["symbol"],
+                        "expiration": row["expiration"],
+                        "strike": row["strike"],
+                        "type": str(row["type"]).capitalize(),
+                        "entry_price": safe_float(row.get("ask"), row["lastPrice"]),
+                        "quality_score": row["quality_score"],
+                        "strategy_name": f"Long {str(row['type']).capitalize()}"
+                    }
+                    pm.log_trade(trade_dict)
+                print(f"\n  ✅ Successfully logged {len(top_5_pt)} paper trades.")
         
-        # Summary footer
-        print("\n" + "="*80)
-        print("  SCAN SUMMARY")
-        print("="*80)
-        print(f"  Total Picks Displayed: {len(picks)}")
-        if mode in ["Budget scan", "Discovery scan"]:
-            unique_tickers = picks["symbol"].nunique() if not picks.empty and "symbol" in picks.columns else 0
-            print(f"  Tickers Covered: {unique_tickers}")
-        if mode == "Budget scan":
-            print(f"  Budget Constraint: ${budget:.2f} per contract")
-        print(f"  Chain Median IV: {format_pct(chain_iv_median)}")
-        print(f"  Expirations Scanned: {max_expiries}")
-        print(f"  Risk-Free Rate Used: {rfr*100:.2f}%")
-        print(f"  DTE Filter: {min_dte}-{max_dte} days")
-        print(f"  Mode: {mode}")
-        print("="*80)
-        print("\n  ⚠️  Not financial advice. Verify all data before trading.")
-        print("="*80 + "\n")
-        
-        # === EXPORT AND LOGGING ===
         export_choice = prompt_input("Export results to CSV? (y/n)", "n").lower()
         if export_choice == "y":
             csv_file = export_to_csv(picks, mode, budget)
-            if csv_file:
-                print(f"\n  📄 Results exported to: {csv_file}")
+            if csv_file: print(f"\n  📄 Results exported to: {csv_file}")
         
-        # === VISUALIZATION ===
         if HAS_VISUALIZATION:
             viz_choice = prompt_input("Generate visualization charts? (y/n)", "n").lower()
-            if viz_choice == "y":
-                create_visualizations(picks, mode, output_dir="reports")
+            if viz_choice == "y": create_visualizations(picks, mode, output_dir="reports")
         
         log_choice = prompt_input("Log trades for P/L tracking? (y/n)", "n").lower()
         if log_choice == "y":
             mode_choice = prompt_input("Log (A)ll or (S)elect specific?", "s").lower()
             if mode_choice == "s":
                 picks_to_log = select_trades_to_log(picks)
-                if not picks_to_log.empty:
-                    log_trade_entry(picks_to_log, mode)
-            else:
-                log_trade_entry(picks, mode)
+                if not picks_to_log.empty: log_trade_entry(picks_to_log, mode)
+            else: log_trade_entry(picks, mode)
         
         print("\n👋 Done! Happy trading!\n")
         
-    except KeyboardInterrupt:
-        print("\nCancelled.")
+    except KeyboardInterrupt: print("\nCancelled.")
     except Exception as e:
         print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        import traceback; traceback.print_exc(); sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Check for --ui flag to launch Streamlit dashboard
     if "--ui" in sys.argv:
         import subprocess
         print("Launching Streamlit dashboard...")
         subprocess.run(["streamlit", "run", "src/dashboard.py"])
-    else:
-        main()
+    else: main()
