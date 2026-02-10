@@ -22,10 +22,15 @@ trades_log/
 *.log
 *.jsonl
 *.sqlite
+*.db
 
 # Redundant test files
 test_*.py
 temp_*.py
+
+# Allow main unit tests
+!tests/
+!tests/*.py
 
 # OS specific
 .DS_Store
