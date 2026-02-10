@@ -253,7 +253,7 @@ def calculate_historical_volatility(hist: pd.DataFrame, period: int = 30) -> Opt
             return None
         # Use last 'period' days
         subset = hist.iloc[-(period+1):].copy()
-        returns = (subset['Close'] / subset['Close'].shift(1)).apply(math.log).dropna()
+        returns = np.log(subset['Close'] / subset['Close'].shift(1)).dropna()
         if len(returns) < 2:
             return None
         daily_vol = returns.std()

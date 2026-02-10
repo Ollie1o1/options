@@ -6,6 +6,7 @@ Generates charts for IV analysis, risk/reward, and expected moves.
 
 import os
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 from typing import Optional
@@ -27,10 +28,18 @@ def create_visualizations(df: pd.DataFrame, mode: str, output_dir: str = "report
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Filter valid data
-        df_clean = df.dropna(subset=["impliedVolatility", "hv_30d", "rr_ratio", "expected_move"])
+        required_cols = ["impliedVolatility", "hv_30d", "rr_ratio", "expected_move"]
+        
+        # Check for missing columns before dropping
+        missing_cols = [c for c in required_cols if c not in df.columns]
+        if missing_cols:
+            print(f"  ⚠️  Missing columns for visualization: {missing_cols}")
+            return
+
+        df_clean = df.dropna(subset=required_cols)
         
         if df_clean.empty:
-            print("  ⚠️  Insufficient data for visualization.")
+            print("  ⚠️  Insufficient data for visualization after filtering out NaNs.")
             return
         
         # Create a figure with multiple subplots
@@ -70,6 +79,7 @@ def create_visualizations(df: pd.DataFrame, mode: str, output_dir: str = "report
         ax3 = axes[1, 0]
         # Group by expiration and calculate average expected move
         df_clean["exp_date"] = pd.to_datetime(df_clean["expiration"])
+        # Use T_years * 365 for DTE
         df_clean["dte"] = (df_clean["T_years"] * 365).astype(int)
         exp_grouped = df_clean.groupby("exp_date").agg({
             "expected_move": "mean",

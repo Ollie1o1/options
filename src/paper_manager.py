@@ -107,17 +107,24 @@ class PaperManager:
                 tkr = yf.Ticker(symbol)
                 current_price = None
                 
-                # Check history for today
-                hist = tkr.history(period="1d")
-                if not hist.empty:
-                    current_price = float(hist["Close"].iloc[-1])
+                # Prioritize fast_info for speed and reliability on option tickers
+                try:
+                    current_price = getattr(tkr.fast_info, "last_price", None)
+                except Exception:
+                    pass
                 
-                if current_price is None or current_price <= 0:
-                    # Fallback to info if history fails
+                if current_price is None or np.isnan(current_price) or current_price <= 0:
+                    # Fallback 1: history
+                    hist = tkr.history(period="1d")
+                    if not hist.empty:
+                        current_price = float(hist["Close"].iloc[-1])
+                
+                if current_price is None or np.isnan(current_price) or current_price <= 0:
+                    # Fallback 2: info (slowest)
                     info = tkr.info
                     current_price = info.get("regularMarketPrice") or info.get("lastPrice")
                 
-                if current_price is not None and current_price > 0:
+                if current_price is not None and not np.isnan(current_price) and current_price > 0:
                     entry_price = float(row["entry_price"])
                     pnl_pct = (current_price - entry_price) / entry_price
                     
