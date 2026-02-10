@@ -26,70 +26,8 @@ from typing import Optional, Tuple, List, Dict, Union, Any
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
-from finvizfinance.screener.performance import Performance
 import functools
 import random
-
-# Default liquid tickers for fallback
-DEFAULT_TICKERS = [
-    "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
-    "META", "NFLX", "BRK-B", "JPM", "JNJ", "V", "PG", "MA", "UNH", "HD"
-]
-
-def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)):
-    """
-    Decorator to retry a function with exponential backoff.
-    """
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            x = 0
-            while True:
-                try:
-                    return func(*args, **kwargs)
-                except error_types as e:
-                    if x == retries:
-                        logging.warning(f"Function {func.__name__} failed after {retries} retries: {e}")
-                        raise e
-                    sleep = (backoff_in_seconds * 2 ** x + random.uniform(0, 1))
-                    logging.info(f"Retrying {func.__name__} in {sleep:.2f}s due to error: {e}")
-                    time.sleep(sleep)
-                    x += 1
-        return wrapper
-    return decorator
-
-
-@retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
-def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
-    """
-    Fetches a list of tickers from Finviz based on a given scan type.
-    Falls back to DEFAULT_TICKERS if fetching fails.
-    """
-    filters_dict = {
-        'Option/Short': 'Optionable',
-        'Average Volume': 'Over 500K',
-        'Country': 'USA',
-    }
-    order = 'Change'  # Default for gainers
-    if scan_type == 'high_iv':
-        order = 'Volatility (Month)'
-
-    try:
-        fperformance = Performance()
-        fperformance.set_filter(filters_dict=filters_dict)
-        # Suppress print output from finvizfinance if possible, or just let it be.
-        # finvizfinance often prints "Scraping..." which we can't easily silence without redirecting stdout.
-        df = fperformance.screener_view(order=order, limit=max_tickers, verbose=0)
-
-        if df.empty:
-            logging.warning("Finviz returned empty dataframe. Using default tickers.")
-            return DEFAULT_TICKERS[:max_tickers]
-
-        tickers = df['Ticker'].tolist()
-        return tickers
-    except Exception as e:
-        logging.warning(f"Could not fetch '{scan_type}' from Finviz: {e}. Using default tickers.")
-        return DEFAULT_TICKERS[:max_tickers]
 
 
 # Dependency checks
@@ -118,7 +56,8 @@ from .data_fetching import (
     determine_vix_regime,
     get_market_context,
     fetch_options_yfinance,
-    retry_with_backoff
+    retry_with_backoff,
+    get_dynamic_tickers
 )
 from .utils import (
     safe_float,

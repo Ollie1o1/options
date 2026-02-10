@@ -12,10 +12,15 @@ import functools
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import requests_cache
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
+from finvizfinance.screener.performance import Performance
+
+# Install intelligent request caching (15-minute expiry)
+requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
 
 # In-memory caches
 _HV_CACHE: Dict[str, float] = {}
@@ -55,6 +60,37 @@ def safe_float(x, default=None):
         return default
 
 # --- Core Data Fetching Functions ---
+
+@retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
+def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
+    """
+    Fetches a list of tickers from Finviz based on a given scan type.
+    Falls back to a hardcoded list if fetching fails.
+    """
+    BACKUP_TICKERS = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "AMZN", "GOOGL"]
+    
+    filters_dict = {
+        'Option/Short': 'Optionable',
+        'Average Volume': 'Over 500K',
+        'Country': 'USA',
+    }
+    order = 'Change'  # Default for gainers
+    if scan_type == 'high_iv':
+        order = 'Volatility (Month)'
+
+    try:
+        fperformance = Performance()
+        fperformance.set_filter(filters_dict=filters_dict)
+        df = fperformance.screener_view(order=order, limit=max_tickers, verbose=0)
+
+        if df.empty:
+            logging.warning("Finviz returned empty dataframe. Using backup tickers.")
+            return BACKUP_TICKERS[:max_tickers]
+
+        return df['Ticker'].tolist()
+    except Exception as e:
+        logging.warning(f"Could not fetch '{scan_type}' from Finviz: {e}. Using backup tickers.")
+        return BACKUP_TICKERS[:max_tickers]
 
 def get_underlying_price(ticker: yf.Ticker) -> Optional[float]:
     # Try fast_info, then info, then last close
@@ -361,21 +397,6 @@ def get_iv_rank_percentile_from_history(hist: pd.DataFrame, current_iv: float) -
 def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
     """Fetch short interest from fast_info or info (non-blocking preferred)."""
     try:
-        # Try fast_info first (unlikely to have SI, but worth checking)
-        # yfinance 'fast_info' usually has shares, market_cap, etc.
-        # 'info' has 'shortPercentFloat'.
-        
-        # We will try to access .info but wrap it in a way that we don't hang forever?
-        # Actually, yfinance .info IS the blocking call. 
-        # The user said: "Attempt to fetch it from ticker.fast_info or ticker.stats() only if it is instant."
-        # .stats() isn't a standard yfinance property. 
-        # We will try to access a specific key from .info, but if it triggers a full scrape, we can't easily stop it.
-        # However, we can skip it if we want strict speed.
-        # Let's try to be safe: access .info only if we are willing to wait a bit, 
-        # OR just skip it as per "Speed is more important".
-        # Compromise: We will skip .info for now to guarantee speed, unless we find a fast way.
-        # Actually, let's try to see if we can get it from 'key_statistics' if available?
-        # For now, return None to be safe on speed as requested.
         return None 
     except Exception:
         return None
@@ -482,9 +503,9 @@ def calculate_max_pain(chain_df: pd.DataFrame) -> Optional[float]:
         min_total_loss = float('inf')
         for price_candidate in strikes:
             calls = relevant[relevant['type'] == 'call']
-            call_loss = calls.apply(lambda row: max(0.0, price_candidate - row['strike']) * row['openInterest'], axis=1).sum()
+            call_loss = (np.maximum(0.0, price_candidate - calls['strike'].values) * calls['openInterest'].values).sum()
             puts = relevant[relevant['type'] == 'put']
-            put_loss = puts.apply(lambda row: max(0.0, row['strike'] - price_candidate) * row['openInterest'], axis=1).sum()
+            put_loss = (np.maximum(0.0, puts['strike'].values - price_candidate) * puts['openInterest'].values).sum()
             total_loss = call_loss + put_loss
             if total_loss < min_total_loss:
                 min_total_loss = total_loss
@@ -496,8 +517,10 @@ def calculate_max_pain(chain_df: pd.DataFrame) -> Optional[float]:
 def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
     frames = []
     try:
+        # Wrap ticker.option_chain in try/except to handle invalid/empty expirations gracefully
         oc = tkr.option_chain(exp)
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Warning: Could not fetch options for {symbol} on {exp}: {e}")
         return []
 
     for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
@@ -526,7 +549,6 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         raise RuntimeError(f"Failed to initialize ticker {symbol}: {e}")
 
     # 1. Fetch History ONCE (1 year daily)
-    # Used for: Underlying Price, HV, Momentum, RVOL, Technical Levels, IV Rank
     try:
         hist = tkr.history(period="1y", interval="1d")
     except Exception:
@@ -547,7 +569,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     sentiment_score = get_sentiment(tkr)
     seasonal_win_rate = check_seasonality(tkr)
     sector_perf = get_sector_performance(symbol)
-    short_interest = get_short_interest(tkr) # Will likely be None to save time
+    short_interest = get_short_interest(tkr)
 
     # 4. Fetch Options Chains
     try:
@@ -590,8 +612,6 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     df["sentiment_score"] = sentiment_score
     df["seasonal_win_rate"] = seasonal_win_rate
     df["is_squeezing"] = is_squeezing
-    
-    # New Columns
     df["rvol"] = rvol
     df["short_interest"] = short_interest
     df["vwap"] = vwap
@@ -638,7 +658,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     # Return structured result
     return {
         "df": df,
-        "history_df": hist, # Return history for portfolio correlation!
+        "history_df": hist,
         "context": {
             "hv": hv_30d,
             "iv_rank": iv_rank_30,
