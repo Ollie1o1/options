@@ -21,6 +21,7 @@ trades_log/
 *.csv
 *.log
 *.jsonl
+*.sqlite
 
 # Redundant test files
 test_*.py
