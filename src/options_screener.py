@@ -22,7 +22,7 @@ import logging
 import uuid
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Union, Any
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
@@ -201,68 +201,91 @@ def load_config(config_path: str = "config.json") -> Dict:
 
 
 
-def calculate_probability_of_profit(option_type: str, S: float, K: float, T: float, sigma: float, premium: float) -> Optional[float]:
-    """Calculate probability of profit at expiration."""
+def calculate_probability_of_profit(option_type: Union[str, np.ndarray], S: Union[float, np.ndarray], K: Union[float, np.ndarray], T: Union[float, np.ndarray], sigma: Union[float, np.ndarray], premium: Union[float, np.ndarray]) -> Union[float, np.ndarray, None]:
+    """Calculate probability of profit at expiration (Vectorized)."""
     try:
-        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0 or premium <= 0:
-            return None
+        S = np.asanyarray(S)
+        K = np.asanyarray(K)
+        T = np.asanyarray(T)
+        sigma = np.asanyarray(sigma)
+        premium = np.asanyarray(premium)
         
+        if isinstance(option_type, str):
+            is_call = option_type.lower() == "call"
+        else:
+            is_call = np.char.lower(np.asanyarray(option_type).astype(str)) == "call"
+            
         # Break-even point
-        if option_type.lower() == "call":
-            breakeven = K + premium
-        else:  # put
-            breakeven = K - premium
+        breakeven = np.where(is_call, K + premium, K - premium)
         
         # Probability that stock will be beyond break-even
-        d = (math.log(S / breakeven) - (0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            d = (np.log(S / breakeven) - (0.5 * sigma * sigma) * T) / (sigma * np.sqrt(T))
         
-        if option_type.lower() == "call":
-            return norm_cdf(d)
+        pop = np.where(is_call, norm_cdf(d), 1.0 - norm_cdf(d))
+        
+        if np.isscalar(option_type) and np.isscalar(S):
+            return float(pop)
+        return pop
+    except Exception:
+        return None
+
+
+def calculate_expected_move(S: Union[float, np.ndarray], sigma: Union[float, np.ndarray], T: Union[float, np.ndarray]) -> Union[float, np.ndarray, None]:
+    """Calculate expected move (1 standard deviation) until expiration (Vectorized)."""
+    try:
+        S = np.asanyarray(S)
+        sigma = np.asanyarray(sigma)
+        T = np.asanyarray(T)
+        move = S * sigma * np.sqrt(T)
+        if move.ndim == 0:
+            return float(move)
+        return move
+    except Exception:
+        return None
+
+
+def calculate_probability_of_touch(option_type: Union[str, np.ndarray], S: Union[float, np.ndarray], K: Union[float, np.ndarray], T: Union[float, np.ndarray], sigma: Union[float, np.ndarray]) -> Union[float, np.ndarray, None]:
+    """Calculate probability that option will touch the strike price before expiration (Vectorized)."""
+    try:
+        S = np.asanyarray(S)
+        K = np.asanyarray(K)
+        T = np.asanyarray(T)
+        sigma = np.asanyarray(sigma)
+        
+        if isinstance(option_type, str):
+            is_call = option_type.lower() == "call"
         else:
-            return 1.0 - norm_cdf(d)
-    except Exception:
-        return None
+            is_call = np.char.lower(np.asanyarray(option_type).astype(str)) == "call"
 
-
-def calculate_expected_move(S: float, sigma: float, T: float) -> Optional[float]:
-    """Calculate expected move (1 standard deviation) until expiration."""
-    try:
-        if S <= 0 or sigma <= 0 or T <= 0:
-            return None
-        return S * sigma * math.sqrt(T)
-    except Exception:
-        return None
-
-
-def calculate_probability_of_touch(option_type: str, S: float, K: float, T: float, sigma: float) -> Optional[float]:
-    """Calculate probability that option will touch the strike price before expiration."""
-    try:
-        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
-            return None
-        
         # Probability of touching is approximately 2 * delta for ATM options
         # More precise: P(touch) ≈ 2 * N(d2)
-        d2 = (math.log(S / K) - (0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            d2 = (np.log(S / K) - (0.5 * sigma * sigma) * T) / (sigma * np.sqrt(T))
         
-        if option_type.lower() == "call" and K > S:
-            return 2 * norm_cdf(d2)
-        elif option_type.lower() == "put" and K < S:
-            return 2 * (1.0 - norm_cdf(d2))
-        else:
-            # ITM already touched
-            return 1.0
+        pot = np.ones_like(S, dtype=float)
+        
+        call_otm = is_call & (K > S)
+        put_otm = (~is_call) & (K < S)
+        
+        pot[call_otm] = 2 * norm_cdf(d2[call_otm])
+        pot[put_otm] = 2 * (1.0 - norm_cdf(d2[put_otm]))
+        
+        if np.isscalar(option_type) and np.isscalar(S):
+            return float(pot)
+        return pot
     except Exception:
         return None
 
 
 def calculate_risk_reward(
-    option_type: str,
-    premium: float,
-    S: float,
-    K: float,
-    expected_move: Optional[float] = None,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """Calculate max loss, break-even, and risk/reward ratio.
+    option_type: Union[str, np.ndarray],
+    premium: Union[float, np.ndarray],
+    S: Union[float, np.ndarray],
+    K: Union[float, np.ndarray],
+    expected_move: Optional[Union[float, np.ndarray]] = None,
+) -> Tuple[Union[float, np.ndarray, None], Union[float, np.ndarray, None], Union[float, np.ndarray, None]]:
+    """Calculate max loss, break-even, and risk/reward ratio (Vectorized).
 
     Uses the prompt's definition:
       - target_price = stock_price ± 0.75 * EM
@@ -270,38 +293,38 @@ def calculate_risk_reward(
     where gains and premium are measured per share.
     """
     try:
-        if premium <= 0 or S <= 0 or K <= 0:
-            return None, None, None
+        premium = np.asanyarray(premium)
+        S = np.asanyarray(S)
+        K = np.asanyarray(K)
+        
+        if isinstance(option_type, str):
+            is_call = option_type.lower() == "call"
+        else:
+            is_call = np.char.lower(np.asanyarray(option_type).astype(str)) == "call"
 
         max_loss = premium * 100  # Per contract
-        otype = option_type.lower()
 
         # Break-even price
-        if otype == "call":
-            breakeven = K + premium
-        else:  # put
-            breakeven = K - premium
+        breakeven = np.where(is_call, K + premium, K - premium)
 
         # Compute max gain at target using expected move when available
-        if expected_move is not None and expected_move > 0:
-            if otype == "call":
-                target_price = S + 0.75 * expected_move
-                payoff_per_share = max(0.0, target_price - K)
-            else:
-                target_price = S - 0.75 * expected_move
-                payoff_per_share = max(0.0, K - target_price)
+        if expected_move is not None:
+            expected_move = np.asanyarray(expected_move)
+            target_price = np.where(is_call, S + 0.75 * expected_move, S - 0.75 * expected_move)
+            payoff_per_share = np.where(is_call, np.maximum(0.0, target_price - K), np.maximum(0.0, K - target_price))
         else:
             # Fallback: simple heuristic target if EM is unavailable
-            if otype == "call":
-                target_price = S * 1.5
-                payoff_per_share = max(0.0, target_price - K)
-            else:
-                target_price = S * 0.5
-                payoff_per_share = max(0.0, K - target_price)
+            target_price = np.where(is_call, S * 1.5, S * 0.5)
+            payoff_per_share = np.where(is_call, np.maximum(0.0, target_price - K), np.maximum(0.0, K - target_price))
 
-        max_gain_per_share = max(0.0, payoff_per_share - premium)
-        risk_reward_ratio = max_gain_per_share / premium if premium > 0 else 0.0
+        max_gain_per_share = np.maximum(0.0, payoff_per_share - premium)
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            risk_reward_ratio = np.where(premium > 0, max_gain_per_share / premium, 0.0)
 
+        if premium.ndim == 0:
+            return float(max_loss), float(breakeven), float(risk_reward_ratio)
+            
         return max_loss, breakeven, risk_reward_ratio
     except Exception:
         return None, None, None
@@ -422,145 +445,97 @@ def enrich_and_score(
     overall_iv_median = df["impliedVolatility"].median(skipna=True)
     df["impliedVolatility"] = df["impliedVolatility"].fillna(overall_iv_median)
 
-    # Compute delta
-    def _row_delta(row):
-        d = bs_delta(
-            option_type=row["type"],
-            S=safe_float(row["underlying"], 0.0) or 0.0,
-            K=safe_float(row["strike"], 0.0) or 0.0,
-            T=safe_float(row["T_years"], 0.0) or 0.0,
-            r=risk_free_rate,
-            sigma=max(1e-9, safe_float(row["impliedVolatility"], 0.0) or 0.0),
-        )
-        return float("nan") if d is None else d
+    # --- VECTORIZED GREEKS ---
+    S_vals = df["underlying"].values
+    K_vals = df["strike"].values
+    T_vals = df["T_years"].values
+    IV_vals = np.maximum(1e-9, df["impliedVolatility"].values)
+    types_vals = df["type"].values
 
-    df["delta"] = df.apply(_row_delta, axis=1)
-    df["abs_delta"] = df["delta"].abs()
-
-    # Hard filter for delta
-    if mode == "Premium Selling":
-        # b. Change the delta filter to target abs_delta between 0.20 and 0.40.
-        df = df[(df["abs_delta"] >= 0.20) & (df["abs_delta"] <= 0.40)].copy()
-    else:
-        df = df[df["abs_delta"] >= 0.30].copy()
+    df["delta"] = bs_delta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    df["abs_delta"] = np.abs(df["delta"].values)
+    df["gamma"] = bs_gamma(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    df["vega"] = bs_vega(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    df["theta"] = bs_theta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    df["rho"] = bs_rho(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
 
     # Hard filter for delta
     if mode == "Premium Selling":
         # b. Change the delta filter to target abs_delta between 0.20 and 0.40.
         df = df[(df["abs_delta"] >= 0.20) & (df["abs_delta"] <= 0.40)].copy()
     else:
-        # Relaxed delta floor for discovery
         df = df[df["abs_delta"] >= 0.15].copy()
 
     # !!! ADD THIS CHECK !!!
     if df.empty:
         return df  # Return the empty frame cleanly if no options survived the delta filter
 
-    # === NEW ADVANCED METRICS ===
+    # === NEW ADVANCED METRICS (Vectorized) ===
 
-    # === NEW ADVANCED METRICS ===
+    # Re-extract values after filtering
+    S_vals = df["underlying"].values
+    K_vals = df["strike"].values
+    T_vals = df["T_years"].values
+    IV_vals = np.maximum(1e-9, df["impliedVolatility"].values)
+    types_vals = df["type"].values
+    prem_vals = df["premium"].values
 
     # Expected Move (1-sigma price move until expiration)
-    def _calc_exp_move(row):
-        return calculate_expected_move(
-            safe_float(row["underlying"]),
-            safe_float(row["impliedVolatility"]),
-            safe_float(row["T_years"]),
-        )
-
-    df["expected_move"] = df.apply(_calc_exp_move, axis=1)
+    df["expected_move"] = calculate_expected_move(S_vals, IV_vals, T_vals)
 
     # Probability of Profit using delta approximation and expected-move adjustments
-    def _calc_pop_delta(row):
-        try:
-            delta_val = safe_float(row["delta"])
-            S = safe_float(row["underlying"])
-            K = safe_float(row["strike"])
-            em = safe_float(row["expected_move"])
-            if delta_val is None or S is None or K is None:
-                return None
-            otm_delta = abs(delta_val)
-            pop = 1.0 - otm_delta
-            # Adjust PoP if strike sits outside expected move band
-            if em is not None and em > 0:
-                upper = S + em
-                lower = S - em
-                opt_type = str(row["type"]).lower()
-                outside_em = (opt_type == "call" and K > upper) or (opt_type == "put" and K < lower)
-                if outside_em:
-                    pop *= 0.7
-            return max(0.0, min(1.0, pop))
-        except Exception:
-            return None
-
-    df["prob_profit"] = df.apply(_calc_pop_delta, axis=1)
+    pop = 1.0 - df["abs_delta"].values
+    em = df["expected_move"].values
+    upper = S_vals + em
+    lower = S_vals - em
+    is_call = np.char.lower(types_vals.astype(str)) == "call"
+    outside_em = np.where(is_call, K_vals > upper, K_vals < lower)
+    pop = np.where(outside_em & (em > 0), pop * 0.7, pop)
+    df["prob_profit"] = np.clip(pop, 0.0, 1.0)
 
     # Probability of Touch (keep BS-based approximation)
-    def _calc_pot(row):
-        return calculate_probability_of_touch(
-            row["type"],
-            safe_float(row["underlying"]),
-            safe_float(row["strike"]),
-            safe_float(row["T_years"]),
-            safe_float(row["impliedVolatility"]),
-        )
-
-    df["prob_touch"] = df.apply(_calc_pot, axis=1)
+    df["prob_touch"] = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
 
     if mode != "Premium Selling":
         # Risk/Reward Analysis with EM-based target price
-        def _calc_rr(row):
-            max_loss, breakeven, rr_ratio = calculate_risk_reward(
-                row["type"],
-                safe_float(row["premium"]),
-                safe_float(row["underlying"]),
-                safe_float(row["strike"]),
-                safe_float(row["expected_move"]),
-            )
-            return pd.Series(
-                {"max_loss": max_loss, "breakeven": breakeven, "rr_ratio": rr_ratio}
-            )
-
-        rr_data = df.apply(_calc_rr, axis=1)
-        df["max_loss"] = rr_data["max_loss"]
-        df["breakeven"] = rr_data["breakeven"]
-        df["rr_ratio"] = rr_data["rr_ratio"]
-        df["rr_ratio"] = rr_data["rr_ratio"]
+        max_loss, breakeven, rr_ratio = calculate_risk_reward(
+            types_vals,
+            prem_vals,
+            S_vals,
+            K_vals,
+            df["expected_move"].values,
+        )
+        df["max_loss"] = max_loss
+        df["breakeven"] = breakeven
+        df["rr_ratio"] = rr_ratio
+        
         df = df[df["rr_ratio"] >= 0.25].copy()
 
         if df.empty:
             return df
 
         # Break-even realism: required move vs expected move
-        def _calc_em_realism(row):
-            S = safe_float(row["underlying"])
-            K = safe_float(row["strike"])
-            premium = safe_float(row["premium"])
-            em = safe_float(row["expected_move"])
-            opt_type = str(row["type"]).lower()
-            if S is None or K is None or premium is None or em is None or em <= 0:
-                return pd.Series({"required_move": None, "em_realism_score": None})
-            if opt_type == "call":
-                breakeven = K + premium
-                required_move = max(0.0, breakeven - S)
-            else:  # put
-                breakeven = K - premium
-                required_move = max(0.0, S - breakeven)
-            ratio = required_move / em if em > 0 else None
-            if ratio is None:
-                score = None
-            elif ratio <= 0.5:
-                score = 1.0
-            elif ratio <= 1.0:
-                score = 0.7
-            else:
-                # Penalize contracts that need a move beyond EM
-                score = max(0.1, em / (required_move + 1e-9))
-            return pd.Series({"required_move": required_move, "em_realism_score": score})
+        # Re-extract after RR filter
+        S_vals = df["underlying"].values
+        K_vals = df["strike"].values
+        prem_vals = df["premium"].values
+        em_vals = df["expected_move"].values
+        types_vals = df["type"].values
+        is_call = np.char.lower(types_vals.astype(str)) == "call"
 
-        em_data = df.apply(_calc_em_realism, axis=1)
-        df["required_move"] = em_data["required_move"]
-        df["em_realism_score"] = em_data["em_realism_score"]
+        be_vals = np.where(is_call, K_vals + prem_vals, K_vals - prem_vals)
+        req_move = np.where(is_call, np.maximum(0.0, be_vals - S_vals), np.maximum(0.0, S_vals - be_vals))
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.where(em_vals > 0, req_move / em_vals, np.nan)
+        
+        em_realism = np.full_like(ratio, 0.5)
+        em_realism[ratio <= 0.5] = 1.0
+        em_realism[(ratio > 0.5) & (ratio <= 1.0)] = 0.7
+        em_realism[ratio > 1.0] = np.maximum(0.1, em_vals[ratio > 1.0] / (req_move[ratio > 1.0] + 1e-9))
+        
+        df["required_move"] = req_move
+        df["em_realism_score"] = em_realism
     else:
         # For premium selling, these metrics are not used. Set defaults.
         df["max_loss"] = None
@@ -570,19 +545,9 @@ def enrich_and_score(
         df["em_realism_score"] = None
 
     # Theta Decay Pressure (premium per day relative to delta)
-    def _calc_theta_pressure(row):
-        premium = safe_float(row["premium"])
-        T_yrs = safe_float(row["T_years"])
-        abs_delta = abs(safe_float(row["delta"]) or 0.0)
-        if premium is None or T_yrs is None or T_yrs <= 0:
-            return None
-        dte = max(int(T_yrs * 365), 1)
-        tdp_raw = (premium * 100.0) / dte
-        # Normalize by delta so low-delta, high-premium short-term options are penalized more
-        effective_tdp = tdp_raw / max(abs_delta, 0.1)
-        return effective_tdp
-
-    df["theta_decay_pressure"] = df.apply(_calc_theta_pressure, axis=1)
+    dte_vals = np.maximum(df["T_years"].values * 365.0, 1.0)
+    tdp_raw = (df["premium"].values * 100.0) / dte_vals
+    df["theta_decay_pressure"] = tdp_raw / np.maximum(df["abs_delta"].values, 0.1)
 
     # IV vs HV comparison (IV advantage)
     if "hv_30d" in df.columns and df["hv_30d"].notna().any():
@@ -685,46 +650,35 @@ def enrich_and_score(
     
     # === END NEW METRICS ===
 
-    # Expected value (EV) and probability ITM using Black-Scholes
-    def _calc_ev(row):
-        S = safe_float(row["underlying"], 0.0) or 0.0
-        K = safe_float(row["strike"], 0.0) or 0.0
-        T = safe_float(row["T_years"], 0.0) or 0.0
-        sigma = max(1e-9, safe_float(row["impliedVolatility"], 0.0) or 0.0)
-        opt_type = row["type"].lower()
-        d1, d2 = _d1d2(S, K, T, risk_free_rate, sigma)
-
-        gamma = bs_gamma(S, K, T, risk_free_rate, sigma)
-        vega = bs_vega(S, K, T, risk_free_rate, sigma)
-        theta = bs_theta(opt_type, S, K, T, risk_free_rate, sigma)
-
-        if d1 is None:
-            return pd.Series({"p_itm": None, "theo_value": None, "ev_per_contract": None, "gamma": None, "vega": None, "theta": None})
-        # Probability of expiring ITM under risk-neutral measure
-        p_itm = norm_cdf(d2) if opt_type == "call" else norm_cdf(-d2)
-        # Expected payoff at expiration (risk-neutral)
-        if opt_type == "call":
-            expected_payoff = S * math.exp(risk_free_rate * T) * norm_cdf(d1) - K * norm_cdf(d2)
-        else:
-            expected_payoff = K * norm_cdf(-d2) - S * math.exp(risk_free_rate * T) * norm_cdf(-d1)
-        theo_value = expected_payoff  # theoretical RN value
-        premium = safe_float(row["premium"], 0.0) or 0.0
-        # Approximate round-trip half-spread cost (enter+exit ~ 1 spread)
-        spread_pct = row.get("spread_pct", 0.0)
-        spread_cost = 100.0 * premium * float(spread_pct if pd.notna(spread_pct) else 0.0)
-        ev = 100.0 * (expected_payoff - premium) - spread_cost
-        return pd.Series({"p_itm": p_itm, "theo_value": theo_value, "ev_per_contract": ev, "gamma": gamma, "vega": vega, "theta": theta})
-
-    ev_data = df.apply(_calc_ev, axis=1)
-    df["p_itm"] = ev_data["p_itm"]
-    df["theo_value"] = ev_data["theo_value"]
-    df["ev_per_contract"] = ev_data["ev_per_contract"]
-    df["gamma"] = ev_data["gamma"]
-    df["vega"] = ev_data["vega"]
-    df["theta"] = ev_data["theta"]
+    # Expected value (EV) and probability ITM using Black-Scholes (Vectorized)
+    S_vals = df["underlying"].values
+    K_vals = df["strike"].values
+    T_vals = df["T_years"].values
+    IV_vals = np.maximum(1e-9, df["impliedVolatility"].values)
+    types_vals = df["type"].values
+    
+    d1, d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    
+    is_call = np.char.lower(types_vals.astype(str)) == "call"
+    p_itm = np.where(is_call, norm_cdf(d2), norm_cdf(-d2))
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        exp_payoff = np.where(is_call,
+            S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(d1) - K_vals * norm_cdf(d2),
+            K_vals * norm_cdf(-d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-d1)
+        )
+    
+    premium = df["premium"].values
+    spread_pct = df["spread_pct"].fillna(0.0).values
+    spread_cost = 100.0 * premium * spread_pct
+    ev = 100.0 * (exp_payoff - premium) - spread_cost
+    
+    df["p_itm"] = p_itm
+    df["theo_value"] = exp_payoff
+    df["ev_per_contract"] = ev
 
     # --- Theta Safety Check ---
-    df["Theta_Burn_Rate"] = df.apply(lambda row: abs(row["theta"]) / row["premium"] if row["premium"] > 0 and pd.notna(row["theta"]) else 0, axis=1)
+    df["Theta_Burn_Rate"] = np.where(df["premium"] > 0, np.abs(df["theta"].values) / df["premium"].values, 0.0)
     df["decay_warning"] = df["Theta_Burn_Rate"] > 0.06
 
     # --- Support/Resistance Warnings ---
@@ -1441,19 +1395,6 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     stock_price = row.get('underlying', 0.0)
     dte = int(row.get('T_years', 0) * 365)
     parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
-    # Quality Score
-    quality = row.get('quality_score', 0.0)
-    parts.append(f"Quality: {quality:.2f}")
-
-    # Earnings Play
-    if row.get("Earnings Play") == "YES":
-        underpriced_status = "Underpriced" if row.get("is_underpriced") else "Overpriced"
-        parts.append(f"Earnings: YES ({underpriced_status})")
-
-    # Stock Price and DTE
-    stock_price = row.get('underlying', 0.0)
-    dte = int(row.get('T_years', 0) * 365)
-    parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
 
     # --- Seasonality ---
     if pd.notna(row.get("seasonal_win_rate")):
@@ -1750,7 +1691,7 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
         # Select relevant columns for export
         export_cols = [
             "symbol", "type", "strike", "expiration", "premium", "underlying",
-            "delta", "gamma", "vega", "theta", "impliedVolatility", "hv_30d", "iv_vs_hv", "iv_rank", "iv_percentile",
+            "delta", "gamma", "vega", "theta", "rho", "impliedVolatility", "hv_30d", "iv_vs_hv", "iv_rank", "iv_percentile",
             "iv_rank_30", "iv_percentile_30", "iv_rank_90", "iv_percentile_90",
             "volume", "openInterest", "spread_pct", "Vol_OI_Ratio", "Unusual_Whale",
             "sentiment_score", "sentiment_tag",
@@ -2729,7 +2670,6 @@ def main():
             print("="*80)
             
             # Get top 3 picks based on quality score
-            # Get top 3 picks based on quality score
             if not picks.empty:
                 top_picks = picks.sort_values("quality_score", ascending=False).head(3)
             elif isinstance(credit_spreads, pd.DataFrame) and not credit_spreads.empty:
@@ -2747,8 +2687,6 @@ def main():
                     print(f"     Net Credit: {format_money(pick['net_credit'])} | Max Risk: {format_money(pick['max_loss'])}")
                     print(f"     Score: {pick['quality_score']:.2f}")
                 elif mode == "Iron Condor":
-                    # Iron Condors usually have 4 legs, but for summary we might just show the wings or main strikes
-                    # Assuming standard columns for now, or just printing generic info
                     print(f"\n  #{i} {pick['symbol']} IRON CONDOR | Exp {exp}")
                     print(f"     Credit: {format_money(pick['total_credit'])} | Max Risk: {format_money(pick['max_risk'])}")
                     print(f"     RoR: {pick['return_on_risk']:.2f}x | Score: {pick['quality_score']:.2f}")
@@ -2756,12 +2694,6 @@ def main():
                     # Standard single-leg display
                     print(f"\n  #{i} {pick['symbol']} {pick['type'].upper()} | Strike ${pick['strike']:.2f} | Exp {exp}")
                     
-                    moneyness = determine_moneyness(pick)
-                    dte = int(pick["T_years"] * 365)
-                    
-                    print(f"     Premium: {format_money(pick['premium'])} | Cost: {format_money(pick['premium']*100)}")
-                    print(f"     IV: {format_pct(pick['impliedVolatility'])} | Delta: {pick['delta']:+.2f} | Quality: {pick['quality_score']:.2f}")
-                    print(f"     Vol: {int(pick['volume'])} | OI: {int(pick['openInterest'])} | Spread: {format_pct(pick['spread_pct'])}")
                     moneyness = determine_moneyness(pick)
                     dte = int(pick["T_years"] * 365)
                     
