@@ -1,35 +1,51 @@
 #!/usr/bin/env python3
 """
 Paper Trading Manager for Options Screener.
-Handles logging forward tests and updating open positions.
+Handles logging forward tests and updating open positions using SQLite.
 """
 
 import os
 import json
+import sqlite3
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Tuple
 
 class PaperManager:
-    """Manages paper trades stored in a CSV file."""
+    """Manages paper trades stored in a SQLite database."""
     
-    def __init__(self, csv_path: str = "paper_trades.csv", config_path: str = "config.json"):
-        self.csv_path = csv_path
+    def __init__(self, db_path: str = "paper_trades.db", config_path: str = "config.json"):
+        self.db_path = db_path
         self.config_path = config_path
-        self.columns = [
-            "date", "ticker", "expiration", "strike", "type", 
-            "entry_price", "quality_score", "strategy_name", 
-            "status", "exit_price", "exit_date", "pnl_pct"
-        ]
-        self._ensure_csv_exists()
+        self._init_db()
 
-    def _ensure_csv_exists(self):
-        """Creates the CSV file with headers if it doesn't exist."""
-        if not os.path.exists(self.csv_path):
-            df = pd.DataFrame(columns=self.columns)
-            df.to_csv(self.csv_path, index=False)
+    def _get_connection(self):
+        """Returns a new sqlite3 connection."""
+        return sqlite3.connect(self.db_path)
+
+    def _init_db(self):
+        """Creates the trades table if it doesn't exist."""
+        query = """
+        CREATE TABLE IF NOT EXISTS trades (
+            entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            ticker TEXT,
+            expiration TEXT,
+            strike REAL,
+            type TEXT,
+            entry_price REAL,
+            quality_score REAL,
+            strategy_name TEXT,
+            status TEXT,
+            exit_price REAL,
+            exit_date TEXT,
+            pnl_pct REAL
+        )
+        """
+        with self._get_connection() as conn:
+            conn.execute(query)
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads configuration for exit rules."""
@@ -46,86 +62,100 @@ class PaperManager:
 
     def log_trade(self, trade_dict: Dict[str, Any]):
         """
-        Logs a new paper trade.
+        Logs a new paper trade to the SQLite database.
         Required keys: ticker, expiration, strike, type, entry_price, quality_score, strategy_name
         """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        new_row = {
-            "date": trade_dict.get("date", now),
-            "ticker": trade_dict["ticker"].upper(),
-            "expiration": trade_dict["expiration"],
-            "strike": float(trade_dict["strike"]),
-            "type": trade_dict["type"].lower(),
-            "entry_price": float(trade_dict["entry_price"]),
-            "quality_score": float(trade_dict["quality_score"]),
-            "strategy_name": trade_dict["strategy_name"],
-            "status": "OPEN",
-            "exit_price": np.nan,
-            "exit_date": "",
-            "pnl_pct": np.nan
-        }
         
-        df = pd.read_csv(self.csv_path)
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        df.to_csv(self.csv_path, index=False)
-        print(f"Logged {new_row['type'].upper()} on {new_row['ticker']} at ${new_row['entry_price']:.2f}")
+        query = """
+        INSERT INTO trades (
+            date, ticker, expiration, strike, type, 
+            entry_price, quality_score, strategy_name, 
+            status, exit_price, exit_date, pnl_pct
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        params = (
+            trade_dict.get("date", now),
+            trade_dict["ticker"].upper(),
+            trade_dict["expiration"],
+            float(trade_dict["strike"]),
+            trade_dict["type"].lower(),
+            float(trade_dict["entry_price"]),
+            float(trade_dict["quality_score"]),
+            trade_dict["strategy_name"],
+            "OPEN",
+            None, # exit_price
+            "",   # exit_date
+            None  # pnl_pct
+        )
+        
+        with self._get_connection() as conn:
+            conn.execute(query, params)
+            
+        print(f"Logged {trade_dict['type'].upper()} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
 
     def _get_option_symbol(self, ticker: str, expiration: str, strike: float, option_type: str) -> str:
         """Generates a yfinance-compatible option symbol."""
-        # Convert 2026-06-19 to 260619
-        exp_date = pd.to_datetime(expiration).strftime('%y%m%d')
-        # Type: C or P
-        otype = 'C' if option_type.lower() == 'call' else 'P'
-        # Strike: 8 digits (5 for integer part, 3 for decimals)
-        strike_price = f"{int(strike * 1000):08d}"
-        return f"{ticker}{exp_date}{otype}{strike_price}"
+        try:
+            exp_date = pd.to_datetime(expiration).strftime('%y%m%d')
+            otype = 'C' if option_type.lower() == 'call' else 'P'
+            strike_price = f"{int(strike * 1000):08d}"
+            return f"{ticker}{exp_date}{otype}{strike_price}"
+        except Exception:
+            return ""
 
     def update_positions(self):
-        """Updates all OPEN positions and checks exit rules."""
-        df = pd.read_csv(self.csv_path)
-        if df.empty:
-            print("No paper trades found.")
-            return
-
-        open_mask = df["status"] == "OPEN"
-        if not open_mask.any():
-            print("No open positions to update.")
-            return
-
+        """Updates all OPEN positions using SQLite and checks exit rules."""
         config = self._load_config()
         exit_rules = config.get("exit_rules", {"take_profit": 0.50, "stop_loss": -0.25})
         tp = exit_rules.get("take_profit", 0.50)
         sl = exit_rules.get("stop_loss", -0.25)
 
-        print(f"Updating {open_mask.sum()} open positions...")
-        
+        # Fetch open trades
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM trades WHERE status='OPEN'")
+            open_trades = cursor.fetchall()
+
+        if not open_trades:
+            print("No open positions to update.")
+            return
+
+        print(f"Updating {len(open_trades)} open positions...")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        for idx, row in df[open_mask].iterrows():
-            symbol = self._get_option_symbol(row["ticker"], row["expiration"], row["strike"], row["type"])
+        for row in open_trades:
+            entry_id = row["entry_id"]
+            ticker = row["ticker"]
+            expiration = row["expiration"]
+            strike = row["strike"]
+            option_type = row["type"]
+            entry_price = row["entry_price"]
+            
+            symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
+            if not symbol:
+                continue
+                
             try:
                 tkr = yf.Ticker(symbol)
                 current_price = None
                 
-                # Prioritize fast_info for speed and reliability on option tickers
                 try:
                     current_price = getattr(tkr.fast_info, "last_price", None)
                 except Exception:
                     pass
                 
                 if current_price is None or np.isnan(current_price) or current_price <= 0:
-                    # Fallback 1: history
                     hist = tkr.history(period="1d")
                     if not hist.empty:
                         current_price = float(hist["Close"].iloc[-1])
                 
                 if current_price is None or np.isnan(current_price) or current_price <= 0:
-                    # Fallback 2: info (slowest)
                     info = tkr.info
                     current_price = info.get("regularMarketPrice") or info.get("lastPrice")
                 
                 if current_price is not None and not np.isnan(current_price) and current_price > 0:
-                    entry_price = float(row["entry_price"])
                     pnl_pct = (current_price - entry_price) / entry_price
                     
                     hit_tp = pnl_pct >= tp
@@ -134,10 +164,14 @@ class PaperManager:
                     if hit_tp or hit_sl:
                         reason = "Take Profit" if hit_tp else "Stop Loss"
                         print(f"  - {reason} hit for {symbol}: {pnl_pct:.1%}")
-                        df.at[idx, "status"] = "CLOSED"
-                        df.at[idx, "exit_price"] = current_price
-                        df.at[idx, "exit_date"] = now
-                        df.at[idx, "pnl_pct"] = pnl_pct
+                        
+                        update_query = """
+                        UPDATE trades 
+                        SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=? 
+                        WHERE entry_id=?
+                        """
+                        with self._get_connection() as conn:
+                            conn.execute(update_query, (current_price, now, pnl_pct, entry_id))
                     else:
                         print(f"  - {symbol} remains OPEN: {pnl_pct:.1%}")
                 else:
@@ -145,52 +179,50 @@ class PaperManager:
             except Exception as e:
                 print(f"  - ⚠️ Error updating {symbol}: {e}")
 
-        df.to_csv(self.csv_path, index=False)
+    def get_all_trades(self) -> pd.DataFrame:
+        """Returns all trades as a pandas DataFrame."""
+        with self._get_connection() as conn:
+            return pd.read_sql_query("SELECT * FROM trades", conn)
 
     def get_performance_summary(self) -> pd.DataFrame:
-        """Returns a summary of trading performance."""
-        df = pd.read_csv(self.csv_path)
-        if df.empty:
-            return pd.DataFrame()
+        """Returns a summary of trading performance using SQL aggregations."""
+        queries = {
+            "total_count": "SELECT COUNT(*) FROM trades",
+            "closed_count": "SELECT COUNT(*) FROM trades WHERE status='CLOSED'",
+            "win_count": "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_pct > 0",
+            "avg_pnl": "SELECT AVG(pnl_pct) FROM trades WHERE status='CLOSED'",
+            "sum_pnl": "SELECT SUM(pnl_pct) FROM trades WHERE status='CLOSED'"
+        }
+        
+        results = {}
+        with self._get_connection() as conn:
+            for key, q in queries.items():
+                res = conn.execute(q).fetchone()[0]
+                results[key] = res if res is not None else 0
 
-        closed_df = df[df["status"] == "CLOSED"].copy()
-        if closed_df.empty:
-            return pd.DataFrame({
-                "Total Trades": [len(df)],
-                "Closed Trades": [0],
-                "Win Rate": ["0%"],
-                "Total PnL %": ["0%"],
-                "Avg Return": ["0%"]
-            })
-
-        wins = (closed_df["pnl_pct"] > 0).sum()
-        total_closed = len(closed_df)
-        win_rate = wins / total_closed if total_closed > 0 else 0
-        total_pnl = closed_df["pnl_pct"].sum()
-        avg_return = closed_df["pnl_pct"].mean()
-
+        total_closed = results["closed_count"]
+        win_rate = (results["win_count"] / total_closed) if total_closed > 0 else 0
+        
         summary = {
-            "Total Trades": [len(df)],
+            "Total Trades": [results["total_count"]],
             "Closed Trades": [total_closed],
             "Win Rate": [f"{win_rate:.1%}"],
-            "Total PnL %": [f"{total_pnl:.1%}"],
-            "Avg Return": [f"{avg_return:.1%}"]
+            "Total PnL %": [f"{results['sum_pnl']:.1%}"],
+            "Avg Return": [f"{results['avg_pnl']:.1%}"]
         }
         return pd.DataFrame(summary)
 
 if __name__ == "__main__":
-    # Test script
-    manager = PaperManager(csv_path="test_paper_trades.csv")
+    # Test script with temporary database
+    test_db = "test_paper_trades.db"
+    manager = PaperManager(db_path=test_db)
     
-    # Mock trade (using a likely real symbol for testing price fetch)
-    # yfinance often needs specific strike format, e.g. AAPL260619C00150000
-    # Let's use a strike that likely exists
     test_trade = {
         "ticker": "AAPL",
         "expiration": "2026-06-19",
         "strike": 150.0,
         "type": "call",
-        "entry_price": 50.0, # High entry so we don't accidentally hit TP/SL if live
+        "entry_price": 50.0,
         "quality_score": 0.85,
         "strategy_name": "Test Strategy"
     }
@@ -200,6 +232,6 @@ if __name__ == "__main__":
     print("\nPerformance Summary:")
     print(manager.get_performance_summary())
     
-    # Cleanup test file
-    if os.path.exists("test_paper_trades.csv"):
-        os.remove("test_paper_trades.csv")
+    # Cleanup test database
+    if os.path.exists(test_db):
+        os.remove(test_db)

@@ -401,7 +401,7 @@ def render_paper_portfolio_tab():
     # Performance Metrics
     summary = pm.get_performance_summary()
     if not summary.empty:
-        df_paper = pd.read_csv(pm.csv_path)
+        df_paper = pm.get_all_trades()
         open_count = len(df_paper[df_paper["status"] == "OPEN"])
         closed_df = df_paper[df_paper["status"] == "CLOSED"]
         total_pnl_usd = ((closed_df["exit_price"] - closed_df["entry_price"]) * 100).sum() if not closed_df.empty else 0.0
