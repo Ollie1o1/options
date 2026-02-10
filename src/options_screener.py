@@ -118,8 +118,24 @@ from .data_fetching import (
     determine_vix_regime,
     get_market_context,
     fetch_options_yfinance,
-    retry_with_backoff,
-    safe_float
+    retry_with_backoff
+)
+from .utils import (
+    safe_float,
+    norm_cdf,
+    norm_pdf,
+    bs_call,
+    bs_put,
+    bs_delta,
+    bs_price,
+    bs_gamma,
+    bs_vega,
+    bs_theta,
+    bs_rho,
+    _d1d2,
+    format_pct,
+    format_money,
+    determine_moneyness,
 )
 
 # Optional imports (relative to this package)
@@ -183,102 +199,6 @@ def load_config(config_path: str = "config.json") -> Dict:
 
 
 
-
-def norm_cdf(x: float) -> float:
-    # Standard normal CDF using erf to avoid external deps
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def bs_delta(option_type: str, S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
-    """
-    Black-Scholes delta. Returns:
-      call: N(d1)
-      put:  N(d1) - 1
-    """
-    try:
-        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
-            return None
-        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-        if option_type.lower() == "call":
-            return norm_cdf(d1)
-        else:
-            return norm_cdf(d1) - 1.0
-    except Exception:
-        return None
-
-
-def bs_price(option_type: str, S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
-    """Black-Scholes theoretical option price (using N(d1), N(d2))."""
-    try:
-        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
-            return None
-        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        if option_type.lower() == "call":
-            return S * math.exp(r * T) * norm_cdf(d1) - K * norm_cdf(d2)
-        else:
-            return K * norm_cdf(-d2) - S * math.exp(r * T) * norm_cdf(-d1)
-    except Exception:
-        return None
-
-
-def _d1d2(S: float, K: float, T: float, r: float, sigma: float) -> Tuple[Optional[float], Optional[float]]:
-    """Compute d1, d2 for Black-Scholes; returns (d1, d2) or (None, None)."""
-    try:
-        if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
-            return None, None
-        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        return d1, d2
-    except Exception:
-        return None, None
-
-
-def norm_pdf(x: float) -> float:
-    """Standard normal probability density function."""
-    return (1.0 / (math.sqrt(2.0 * math.pi))) * math.exp(-0.5 * x * x)
-
-
-def bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
-    """Black-Scholes gamma: N'(d1) / (S * sigma * sqrt(T))."""
-    try:
-        d1, _ = _d1d2(S, K, T, r, sigma)
-        if d1 is None:
-            return None
-        return norm_pdf(d1) / (S * sigma * math.sqrt(T))
-    except Exception:
-        return None
-
-
-def bs_vega(S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
-    """Black-Scholes vega: S * N'(d1) * sqrt(T)."""
-    try:
-        d1, _ = _d1d2(S, K, T, r, sigma)
-        if d1 is None:
-            return None
-        return S * norm_pdf(d1) * math.sqrt(T) / 100 # per 1% change in IV
-    except Exception:
-        return None
-
-
-def bs_theta(option_type: str, S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
-    """Black-Scholes theta (per day)."""
-    try:
-        d1, d2 = _d1d2(S, K, T, r, sigma)
-        if d1 is None or d2 is None:
-            return None
-
-        p1 = - (S * norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
-        if option_type.lower() == "call":
-            p2 = r * K * math.exp(-r * T) * norm_cdf(d2)
-            theta = (p1 - p2) / 365.0
-        else: # put
-            p2 = r * K * math.exp(-r * T) * norm_cdf(-d2)
-            theta = (p1 + p2) / 365.0
-
-        return theta
-    except Exception:
-        return None
 
 
 def calculate_probability_of_profit(option_type: str, S: float, K: float, T: float, sigma: float, premium: float) -> Optional[float]:
@@ -1471,36 +1391,6 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
     
     return pd.DataFrame(condors).sort_values(by="return_on_risk", ascending=False) if condors else pd.DataFrame()
 
-
-def format_pct(x: Optional[float]) -> str:
-    try:
-        if x is None or (isinstance(x, float) and not math.isfinite(x)) or pd.isna(x):
-            return "-"
-        return f"{100.0 * float(x):.1f}%"
-    except Exception:
-        return "-"
-
-
-def format_money(x: Optional[float]) -> str:
-    try:
-        return f"${float(x):.2f}"
-    except Exception:
-        return "-"
-
-
-def determine_moneyness(row: pd.Series) -> str:
-    """Determine if option is ITM or OTM based on strike vs underlying."""
-    try:
-        strike = float(row["strike"])
-        underlying = float(row["underlying"])
-        opt_type = row["type"].lower()
-        
-        if opt_type == "call":
-            return "ITM" if strike < underlying else "OTM"
-        else:  # put
-            return "ITM" if strike > underlying else "OTM"
-    except Exception:
-        return "---"
 
 
 def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> str:
