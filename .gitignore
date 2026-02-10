@@ -2,7 +2,6 @@
 .env
 *.key
 *.pem
-config.json
 
 # Python
 __pycache__/
@@ -26,9 +25,6 @@ trades_log/
 # Redundant test files
 test_*.py
 temp_*.py
-
-# Documentation (as requested)
-*.md
 
 # OS specific
 .DS_Store

@@ -43,10 +43,23 @@
       }
     }
   },
+  "filters": {
+    "min_volume": 50,
+    "min_open_interest": 10,
+    "max_bid_ask_spread_pct": 0.40,
+    "min_days_to_expiration": 7,
+    "max_days_to_expiration": 45,
+    "min_days_to_expiration_iron": 30,
+    "max_days_to_expiration_iron": 60,
+    "delta_min": 0.15,
+    "delta_max": 0.35,
+    "min_iv_percentile": 20
+  },
   "moneyness_band": 0.15,
   "max_expirations": 4,
   "default_budget": 750,
   "target_delta": 0.40,
+  "spread_score_cap": 0.25,
   "earnings_buffer_days": 5,
   "iv_rank_weight_threshold": 0.5,
   "iv_rank_low_threshold": 0.2,

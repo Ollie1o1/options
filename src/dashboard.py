@@ -19,7 +19,8 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from the options screener module
-from src.options_screener import run_scan, load_config, get_market_context, setup_logging, categorize_by_premium, pick_top_per_bucket
+from src.options_screener import run_scan, load_config, get_market_context, setup_logging
+from src.filters import categorize_by_premium, pick_top_per_bucket
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
