@@ -76,6 +76,11 @@ from .utils import (
     format_money,
     determine_moneyness,
 )
+from .filters import (
+    filter_options,
+    categorize_by_premium,
+    pick_top_per_bucket
+)
 
 # Optional imports (relative to this package)
 try:
@@ -334,15 +339,21 @@ def enrich_and_score(
 
     # Spread pct (relative to mid)
     df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"]
-    df.loc[~df["spread_pct"].replace([pd.NA, pd.NaT], pd.NA).apply(lambda x: pd.notna(x) and math.isfinite(x)), "spread_pct"] = float("inf")
+    df.loc[~df["spread_pct"].replace([pd.NA, pd.NaT], pd.NA).apply(lambda x: pd.notna(x) and np.isfinite(x)), "spread_pct"] = float("inf")
+
+    # Get filtering thresholds from config
+    f_config = config.get("filters", {})
+    max_spread = f_config.get("max_bid_ask_spread_pct", 0.40)
+    min_vol = f_config.get("min_volume", 50)
+    min_oi = f_config.get("min_open_interest", 10)
 
     # Hard filter for wide spreads
-    df = df[df["spread_pct"] <= 0.40].copy()
+    df = df[df["spread_pct"] <= max_spread].copy()
 
-    # Liquidity filters: remove totally dead contracts
+    # Liquidity filters: remove totally dead or low-activity contracts
     df["volume"] = df["volume"].fillna(0).astype(float)
     df["openInterest"] = df["openInterest"].fillna(0).astype(float)
-    df = df[(df["volume"] > 0) | (df["openInterest"] > 0)].copy()
+    df = df[(df["volume"] >= min_vol) | (df["openInterest"] >= min_oi)].copy()
 
     if df.empty:
         return df
@@ -398,12 +409,16 @@ def enrich_and_score(
     df["theta"] = bs_theta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     df["rho"] = bs_rho(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
 
+    # Get delta limits from config
+    d_min = f_config.get("delta_min", 0.15)
+    d_max = f_config.get("delta_max", 0.35)
+
     # Hard filter for delta
     if mode == "Premium Selling":
         # b. Change the delta filter to target abs_delta between 0.20 and 0.40.
         df = df[(df["abs_delta"] >= 0.20) & (df["abs_delta"] <= 0.40)].copy()
     else:
-        df = df[df["abs_delta"] >= 0.15].copy()
+        df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
 
     # !!! ADD THIS CHECK !!!
     if df.empty:
@@ -638,13 +653,14 @@ def enrich_and_score(
     oi_n = rank_norm(df["openInterest"].fillna(0))
 
     # Spread score: 1 for very tight spreads, 0 for very wide
-    # Cap spread at 25% of mid; beyond that is treated equally poor
+    # Cap spread at configured value (default 25%) of mid; beyond that is treated equally poor
+    spread_cap = config.get("spread_score_cap", 0.25)
     sp = df["spread_pct"].replace([pd.NA, pd.NaT], float("inf"))
-    sp = sp.clip(lower=0, upper=0.25)
-    spread_score = 1.0 - (sp / 0.25)
+    sp = sp.clip(lower=0, upper=spread_cap)
+    spread_score = 1.0 - (sp / spread_cap)
 
-    # Delta quality: target around 0.4 absolute delta
-    delta_target = 0.40
+    # Delta quality: target around absolute delta from config (default 0.40)
+    delta_target = config.get("target_delta", 0.40)
     delta_quality = 1.0 - (df["abs_delta"] - delta_target).abs() / max(delta_target, 1e-6)
     delta_quality = delta_quality.clip(lower=0.0, upper=1.0)
 
@@ -885,103 +901,6 @@ def enrich_and_score(
     df = df.sort_values(["Unusual_Whale", "quality_score", "volume", "openInterest"], ascending=[False, False, False, False]).reset_index(drop=True)
     return df
 
-
-def categorize_by_premium(df: pd.DataFrame, budget: Optional[float] = None) -> pd.DataFrame:
-    """Categorize by premium using quantiles (single-stock) or budget-based (multi-stock)."""
-    if df.empty:
-        return df
-    
-    # Calculate contract cost
-    df["contract_cost"] = df["premium"] * 100
-    
-    if budget is not None:
-        # Budget mode: categorize based on % of budget
-        # LOW: 0-33% of budget, MEDIUM: 33-66%, HIGH: 66-100%
-        def cat_budget(cost):
-            pct = cost / budget
-            if pct <= 0.33:
-                return "LOW"
-            elif pct <= 0.66:
-                return "MEDIUM"
-            else:
-                return "HIGH"
-        df["price_bucket"] = df["contract_cost"].apply(cat_budget)
-    else:
-        # Single-stock mode: use quantiles
-        premiums = df["premium"].astype(float)
-        q1 = premiums.quantile(1/3)
-        q2 = premiums.quantile(2/3)
-
-        def cat(p):
-            if p <= q1:
-                return "LOW"
-            elif p <= q2:
-                return "MEDIUM"
-            else:
-                return "HIGH"
-
-        df["price_bucket"] = premiums.apply(cat)
-    
-    return df
-
-
-def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers: bool = False) -> pd.DataFrame:
-    """Pick top options per bucket, optionally diversifying across tickers."""
-    picks = []
-    for bucket in ["LOW", "MEDIUM", "HIGH"]:
-        sub = df[df["price_bucket"] == bucket].copy()
-        if sub.empty:
-            continue
-        
-        if diversify_tickers and "symbol" in sub.columns:
-            # Try to get diverse tickers in budget mode
-            # Sort by quality first (now includes EV)
-            sub = sub.sort_values(
-                by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
-                ascending=[False, True, False, False, True],
-            )
-            
-            # Pick best from each ticker, then fill remaining slots
-            selected = []
-            tickers_used = set()
-            
-            # First pass: best option from each unique ticker
-            for _, row in sub.iterrows():
-                if row["symbol"] not in tickers_used:
-                    selected.append(row)
-                    tickers_used.add(row["symbol"])
-                    if len(selected) >= per_bucket:
-                        break
-            
-            # Second pass: fill remaining slots with next best regardless of ticker
-            if len(selected) < per_bucket:
-                for _, row in sub.iterrows():
-                    if len(selected) >= per_bucket:
-                        break
-                    # Check if this exact row is already selected
-                    is_duplicate = any(
-                        (s["symbol"] == row["symbol"] and 
-                         s["strike"] == row["strike"] and 
-                         s["expiration"] == row["expiration"] and
-                         s["type"] == row["type"]) 
-                        for s in selected
-                    )
-                    if not is_duplicate:
-                        selected.append(row)
-            
-            picks.append(pd.DataFrame(selected))
-        else:
-            # Standard sorting for single-stock mode
-            sub = sub.sort_values(
-                by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
-                ascending=[False, True, False, False, True],
-            )
-            picks.append(sub.head(per_bucket))
-    
-    if not picks:
-        return pd.DataFrame()
-    out = pd.concat(picks, ignore_index=True)
-    return out
 
 
 def find_vertical_spreads(df: pd.DataFrame) -> pd.DataFrame:
@@ -2414,6 +2333,9 @@ def main():
             print("Usage: python options_screener.py [--close-trades]")
             sys.exit(1)
     
+    # Load configuration early so it's available for defaults
+    config = load_config("config.json")
+
     print("Options Screener (yfinance)")
     print("Note: For personal/informational use only. Review data provider terms.")
     print("\nModes:")
@@ -2544,13 +2466,14 @@ def main():
         sys.exit(1)
 
     # DTE defaults depend on mode - Iron Condors need longer expiration for theta decay
+    f_config = config.get("filters", {})
     if is_iron_condor_mode:
-        default_min_dte = "30"
-        default_max_dte = "60"
-        print("\n💡 Iron Condors typically perform best with 30-60 DTE for optimal theta decay.")
+        default_min_dte = str(f_config.get("min_days_to_expiration_iron", 30))
+        default_max_dte = str(f_config.get("max_days_to_expiration_iron", 60))
+        print(f"\n💡 Iron Condors typically perform best with {default_min_dte}-{default_max_dte} DTE for optimal theta decay.")
     else:
-        default_min_dte = "7"
-        default_max_dte = "120"
+        default_min_dte = str(f_config.get("min_days_to_expiration", 7))
+        default_max_dte = str(f_config.get("max_days_to_expiration", 45))
 
     try:
         min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
