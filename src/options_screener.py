@@ -279,98 +279,25 @@ def calculate_risk_reward(
         return None, None, None
 
 
-
-
-
-def enrich_and_score(
+def calculate_metrics(
     df: pd.DataFrame,
-    min_dte: int,
-    max_dte: int,
     risk_free_rate: float,
+    earnings_date: Optional[datetime],
     config: Dict,
-    vix_regime_weights: Dict,
-    trader_profile: str = "swing",
-    mode: str = "Single-stock",
-    iv_rank: Optional[float] = None,
-    iv_percentile: Optional[float] = None,
-    earnings_date: Optional[datetime] = None,
-    sentiment_score: Optional[float] = None,
-    seasonal_win_rate: Optional[float] = None,
-    term_structure_spread: Optional[float] = None,
-    macro_risk_active: bool = False,
-    sector_perf: Dict = {},
-    tnx_change_pct: float = 0.0,
+    iv_rank: Optional[float],
+    iv_percentile: Optional[float],
+    sentiment_score: Optional[float],
+    macro_risk_active: bool,
+    sector_perf: Dict,
+    tnx_change_pct: float
 ) -> pd.DataFrame:
-    # Prepare and filter
-    now = datetime.now(timezone.utc)
-
-    # expiration to dt
-    df["exp_dt"] = pd.to_datetime(df["expiration"], errors="coerce", utc=True)
-    df = df[df["exp_dt"].notna()].copy()
-    df["T_years"] = (df["exp_dt"] - now).dt.total_seconds() / (365.0 * 24 * 3600)
-    # filter by DTE bounds
-    df = df[(df["T_years"] > min_dte / 365.0) & (df["T_years"] < max_dte / 365.0)].copy()
-
-    # Numerics
-    for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility", "underlying"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    """Calculates all objective mathematical metrics and merges external data."""
     
-    # === STRIKE FILTERING (Clean Moneyness Bands) ===
-    moneyness_band = config.get("moneyness_band", 0.15)
-    if "underlying" in df.columns and "strike" in df.columns:
-        df = df[
-            (df["strike"] >= df["underlying"] * (1 - moneyness_band)) &
-            (df["strike"] <= df["underlying"] * (1 + moneyness_band))
-        ].copy()
-
-    # Premium as mid if possible, else last
-    df["bid"] = df["bid"].fillna(0.0)
-    df["ask"] = df["ask"].fillna(0.0)
-    df["mid"] = (df["bid"] + df["ask"]) / 2.0
-    df["premium"] = df["mid"].where(df["mid"] > 0.0, df["lastPrice"])
-
-    # === PREMIUM SELLING MODE LOGIC ===
-    if mode == "Premium Selling":
-        # a. Filter the DataFrame to only include type == 'put'.
-        df = df[df['type'] == 'put'].copy()
-        if df.empty:
-            return df
-        # d. Add a new metric: return_on_risk = df['premium'] / df['strike'].
-        df['return_on_risk'] = df['premium'] / df['strike']
-
-    # Drop where we have no usable premium
-    df = df[(df["premium"].notna()) & (df["premium"] > 0)].copy()
-
-    # Spread pct (relative to mid)
-    df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"]
-    
-    # Vectorized check for finite and non-null spread_pct
-    valid_spread = pd.to_numeric(df["spread_pct"], errors='coerce').notna() & np.isfinite(df["spread_pct"].astype(float))
-    df.loc[~valid_spread, "spread_pct"] = float("inf")
-
-    # Get filtering thresholds from config
-    f_config = config.get("filters", {})
-    max_spread = f_config.get("max_bid_ask_spread_pct", 0.40)
-    min_vol = f_config.get("min_volume", 50)
-    min_oi = f_config.get("min_open_interest", 10)
-
-    # Hard filter for wide spreads
-    df = df[df["spread_pct"] <= max_spread].copy()
-
-    # Liquidity filters: remove totally dead or low-activity contracts
-    df["volume"] = pd.to_numeric(df["volume"], errors='coerce').fillna(0)
-    df["openInterest"] = pd.to_numeric(df["openInterest"], errors='coerce').fillna(0)
-    df = df[(df["volume"] >= min_vol) | (df["openInterest"] >= min_oi)].copy()
-
-    if df.empty:
-        return df
-
     # --- Institutional Flow & Sentiment ---
     df["Vol_OI_Ratio"] = df["volume"] / df["openInterest"].replace(0, np.nan)
     df["Unusual_Whale"] = (df["Vol_OI_Ratio"] > 1.5) & (df["volume"] > 500)
+    df["high_premium_turnover"] = (df["premium"] * df["volume"] * 100) > 25000
 
-    # Sentiment Tag (Keep apply for simple string mapping)
     def _sentiment_tag(score):
         if score is None or pd.isna(score):
             return "Neutral"
@@ -398,13 +325,6 @@ def enrich_and_score(
     df.loc[(df["type"] == "call") & (df["underlying"] > df["sma_20"]), "Trend_Aligned"] = True
     df.loc[(df["type"] == "put") & (df["underlying"] < df["sma_20"]), "Trend_Aligned"] = True
 
-    # Fill missing IV with chain median per expiration + type to avoid skew
-    df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors='coerce')
-    df["iv_group_median"] = df.groupby(["exp_dt", "type"])["impliedVolatility"].transform(lambda s: s.median(skipna=True))
-    df["impliedVolatility"] = df["impliedVolatility"].fillna(df["iv_group_median"])
-    overall_iv_median = df["impliedVolatility"].median(skipna=True)
-    df["impliedVolatility"] = df["impliedVolatility"].fillna(overall_iv_median if pd.notna(overall_iv_median) else 0.25)
-
     # --- VECTORIZED GREEKS ---
     S_vals = df["underlying"].values
     K_vals = df["strike"].values
@@ -419,35 +339,10 @@ def enrich_and_score(
     df["theta"] = bs_theta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     df["rho"] = bs_rho(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
 
-    # Get delta limits from config
-    d_min = f_config.get("delta_min", 0.15)
-    d_max = f_config.get("delta_max", 0.35)
-
-    # Hard filter for delta
-    if mode == "Premium Selling":
-        # b. Change the delta filter to target abs_delta between 0.20 and 0.40.
-        df = df[(df["abs_delta"] >= 0.20) & (df["abs_delta"] <= 0.40)].copy()
-    else:
-        df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
-
-    # !!! ADD THIS CHECK !!!
-    if df.empty:
-        return df  # Return the empty frame cleanly if no options survived the delta filter
-
-    # === NEW ADVANCED METRICS (Vectorized) ===
-
-    # Re-extract values after filtering
-    S_vals = df["underlying"].values
-    K_vals = df["strike"].values
-    T_vals = df["T_years"].values
-    IV_vals = np.maximum(1e-9, df["impliedVolatility"].values)
-    types_vals = df["type"].values
-    prem_vals = df["premium"].values
-
-    # Expected Move (1-sigma price move until expiration)
+    # --- ADVANCED METRICS ---
     df["expected_move"] = calculate_expected_move(S_vals, IV_vals, T_vals)
 
-    # Probability of Profit using delta approximation and expected-move adjustments
+    # Probability of Profit adjustment
     pop = 1.0 - df["abs_delta"].values
     em = df["expected_move"].values
     upper = S_vals + em
@@ -457,63 +352,33 @@ def enrich_and_score(
     pop = np.where(outside_em & (em > 0), pop * 0.7, pop)
     df["prob_profit"] = np.clip(pop, 0.0, 1.0)
 
-    # Probability of Touch (keep BS-based approximation)
     df["prob_touch"] = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
 
-    if mode != "Premium Selling":
-        # Risk/Reward Analysis with EM-based target price
-        max_loss, breakeven, rr_ratio = calculate_risk_reward(
-            types_vals,
-            prem_vals,
-            S_vals,
-            K_vals,
-            df["expected_move"].values,
-        )
-        df["max_loss"] = max_loss
-        df["breakeven"] = breakeven
-        df["rr_ratio"] = rr_ratio
-        
-        df = df[df["rr_ratio"] >= 0.25].copy()
+    # Risk/Reward Analysis
+    prem_vals = df["premium"].values
+    max_loss, breakeven, rr_ratio = calculate_risk_reward(types_vals, prem_vals, S_vals, K_vals, df["expected_move"].values)
+    df["max_loss"] = max_loss
+    df["breakeven"] = breakeven
+    df["rr_ratio"] = rr_ratio
 
-        if df.empty:
-            return df
+    # Break-even realism
+    be_vals = np.where(is_call, K_vals + prem_vals, K_vals - prem_vals)
+    req_move = np.where(is_call, np.maximum(0.0, be_vals - S_vals), np.maximum(0.0, S_vals - be_vals))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(em > 0, req_move / em, np.nan)
+    em_realism = np.full_like(ratio, 0.5)
+    em_realism[ratio <= 0.5] = 1.0
+    em_realism[(ratio > 0.5) & (ratio <= 1.0)] = 0.7
+    em_realism[ratio > 1.0] = np.maximum(0.1, em[ratio > 1.0] / (req_move[ratio > 1.0] + 1e-9))
+    df["required_move"] = req_move
+    df["em_realism_score"] = em_realism
 
-        # Break-even realism: required move vs expected move
-        # Re-extract after RR filter
-        S_vals = df["underlying"].values
-        K_vals = df["strike"].values
-        prem_vals = df["premium"].values
-        em_vals = df["expected_move"].values
-        types_vals = df["type"].values
-        is_call = np.char.lower(types_vals.astype(str)) == "call"
-
-        be_vals = np.where(is_call, K_vals + prem_vals, K_vals - prem_vals)
-        req_move = np.where(is_call, np.maximum(0.0, be_vals - S_vals), np.maximum(0.0, S_vals - be_vals))
-        
-        with np.errstate(divide='ignore', invalid='ignore'):
-            ratio = np.where(em_vals > 0, req_move / em_vals, np.nan)
-        
-        em_realism = np.full_like(ratio, 0.5)
-        em_realism[ratio <= 0.5] = 1.0
-        em_realism[(ratio > 0.5) & (ratio <= 1.0)] = 0.7
-        em_realism[ratio > 1.0] = np.maximum(0.1, em_vals[ratio > 1.0] / (req_move[ratio > 1.0] + 1e-9))
-        
-        df["required_move"] = req_move
-        df["em_realism_score"] = em_realism
-    else:
-        # For premium selling, these metrics are not used. Set defaults.
-        df["max_loss"] = None
-        df["breakeven"] = None
-        df["rr_ratio"] = None
-        df["required_move"] = None
-        df["em_realism_score"] = None
-
-    # Theta Decay Pressure (premium per day relative to delta)
+    # Theta Decay Pressure
     dte_vals = np.maximum(df["T_years"].values * 365.0, 1.0)
     tdp_raw = (df["premium"].values * 100.0) / dte_vals
     df["theta_decay_pressure"] = tdp_raw / np.maximum(df["abs_delta"].values, 0.1)
 
-    # IV vs HV comparison (IV advantage)
+    # IV vs HV comparison
     if "hv_30d" in df.columns and df["hv_30d"].notna().any():
         df["iv_vs_hv"] = df["impliedVolatility"] - df["hv_30d"]
         df["iv_hv_ratio"] = df["impliedVolatility"] / df["hv_30d"].replace(0, float('nan'))
@@ -525,395 +390,256 @@ def enrich_and_score(
     df["oi_wall_warning"] = ""
     for expiry in df["expiration"].unique():
         expiry_df = df[df["expiration"] == expiry]
-
-        # Find Call Wall
         calls = expiry_df[expiry_df["type"] == "call"]
         if not calls.empty:
-            call_wall_strike_idx = calls["openInterest"].idxmax()
-            if pd.notna(call_wall_strike_idx):
-                call_wall = expiry_df.loc[call_wall_strike_idx]["strike"]
-                # Get the strike immediately below the wall
+            call_wall_idx = calls["openInterest"].idxmax()
+            if pd.notna(call_wall_idx):
+                call_wall = expiry_df.loc[call_wall_idx]["strike"]
                 strikes_below = sorted([s for s in calls[calls["strike"] < call_wall]["strike"].unique()], reverse=True)
                 strike_below_wall = strikes_below[0] if strikes_below else None
-
                 df.loc[(df["expiration"] == expiry) & (df["type"] == "call") & ((df["strike"] == call_wall) | (df["strike"] == strike_below_wall)), "oi_wall_warning"] = "LIMITED UPSIDE"
-
-        # Find Put Wall
         puts = expiry_df[expiry_df["type"] == "put"]
         if not puts.empty:
-            put_wall_strike_idx = puts["openInterest"].idxmax()
-            if pd.notna(put_wall_strike_idx):
-                put_wall = expiry_df.loc[put_wall_strike_idx]["strike"]
-                # Get the strike immediately above the wall
+            put_wall_idx = puts["openInterest"].idxmax()
+            if pd.notna(put_wall_idx):
+                put_wall = expiry_df.loc[put_wall_idx]["strike"]
                 strikes_above = sorted([s for s in puts[puts["strike"] > put_wall]["strike"].unique()])
                 strike_above_wall = strikes_above[0] if strikes_above else None
-
                 df.loc[(df["expiration"] == expiry) & (df["type"] == "put") & ((df["strike"] == put_wall) | (df["strike"] == strike_above_wall)), "oi_wall_warning"] = "LIMITED DOWNSIDE"
 
-    # IV Skew (calls vs puts at same strike/expiry)
-    df["iv_skew"] = np.nan  # start as NaN, then fill for stability
+    # IV Skew
+    df["iv_skew"] = np.nan
     for (exp, strike), group in df.groupby(["expiration", "strike"]):
-        if len(group) == 2:  # Has both call and put
+        if len(group) == 2:
             call_iv = group[group["type"] == "call"]["impliedVolatility"].values
             put_iv = group[group["type"] == "put"]["impliedVolatility"].values
             if len(call_iv) > 0 and len(put_iv) > 0:
-                skew = put_iv[0] - call_iv[0]
-                df.loc[group.index, "iv_skew"] = skew
-    # Forward/backward fill any remaining NaNs so downstream summaries don't break
+                df.loc[group.index, "iv_skew"] = put_iv[0] - call_iv[0]
     df["iv_skew"] = df["iv_skew"].ffill().bfill().fillna(0.0)
     
-    # Liquidity Quality Flags
+    # Flags
     df["liquidity_flag"] = "GOOD"
     df.loc[(df["volume"] < 10) & (df["openInterest"] < 100), "liquidity_flag"] = "POOR"
     df.loc[(df["volume"] >= 10) & (df["volume"] < 50) & (df["openInterest"] >= 100) & (df["openInterest"] < 500), "liquidity_flag"] = "FAIR"
-    
-    # Wide Spread Flag
     df["spread_flag"] = "OK"
     df.loc[df["spread_pct"] > 0.10, "spread_flag"] = "WIDE"
     df.loc[df["spread_pct"] > 0.20, "spread_flag"] = "VERY_WIDE"
     
-    # === IV RANK AND PERCENTILE ===
+    # External data
     df["iv_rank"] = iv_rank if iv_rank is not None else pd.NA
     df["iv_percentile"] = iv_percentile if iv_percentile is not None else pd.NA
-    
-    # === EARNINGS AWARENESS ===
     df["event_flag"] = "OK"
     if earnings_date is not None:
-        earnings_buffer_days = config.get("earnings_buffer_days", 5)
+        eb_days = config.get("earnings_buffer_days", 5)
         for idx, row in df.iterrows():
-            exp_dt = row["exp_dt"]
-            if pd.notna(exp_dt):
-                # Check if expiration is within buffer of earnings
-                days_to_earnings = abs((exp_dt.replace(tzinfo=None) - earnings_date.replace(tzinfo=None)).days)
-                if days_to_earnings <= earnings_buffer_days:
-                    df.at[idx, "event_flag"] = "EARNINGS_NEARBY"
+            if pd.notna(row["exp_dt"]):
+                days_to_e = abs((row["exp_dt"].replace(tzinfo=None) - earnings_date.replace(tzinfo=None)).days)
+                if days_to_e <= eb_days: df.at[idx, "event_flag"] = "EARNINGS_NEARBY"
     
-    # === MONTE CARLO PROBABILITY SIMULATION ===
+    # Monte Carlo
     if HAS_SIMULATION:
         n_sims = config.get("monte_carlo_simulations", 10000)
-        
         def _calc_mc_pop(row):
-            pop_sim, pot_sim = monte_carlo_pop(
-                S=safe_float(row["underlying"]),
-                K=safe_float(row["strike"]),
-                T=safe_float(row["T_years"]),
-                sigma=safe_float(row["impliedVolatility"]),
-                r=risk_free_rate,
-                premium=safe_float(row["premium"]),
-                option_type=row["type"],
-                n_simulations=n_sims
-            )
+            pop_sim, pot_sim = monte_carlo_pop(S=safe_float(row["underlying"]), K=safe_float(row["strike"]), T=safe_float(row["T_years"]), sigma=safe_float(row["impliedVolatility"]), r=risk_free_rate, premium=safe_float(row["premium"]), option_type=row["type"], n_simulations=n_sims)
             return pd.Series({"pop_sim": pop_sim, "pot_sim": pot_sim})
-        
-        mc_results = df.apply(_calc_mc_pop, axis=1)
-        df["pop_sim"] = mc_results["pop_sim"]
-        df["pot_sim"] = mc_results["pot_sim"]
+        mc_res = df.apply(_calc_mc_pop, axis=1)
+        df["pop_sim"], df["pot_sim"] = mc_res["pop_sim"], mc_res["pot_sim"]
     else:
-        df["pop_sim"] = pd.NA
-        df["pot_sim"] = pd.NA
-    
-    # === END NEW METRICS ===
+        df["pop_sim"], df["pot_sim"] = pd.NA, pd.NA
 
-    # Expected value (EV) and probability ITM using Black-Scholes (Vectorized)
-    S_vals = df["underlying"].values
-    K_vals = df["strike"].values
-    T_vals = df["T_years"].values
-    IV_vals = np.maximum(1e-9, df["impliedVolatility"].values)
-    types_vals = df["type"].values
-    
+    # Expected Value (EV)
     d1, d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
-    
-    is_call = np.char.lower(types_vals.astype(str)) == "call"
     p_itm = np.where(is_call, norm_cdf(d2), norm_cdf(-d2))
-    
     with np.errstate(divide='ignore', invalid='ignore'):
-        exp_payoff = np.where(is_call,
-            S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(d1) - K_vals * norm_cdf(d2),
-            K_vals * norm_cdf(-d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-d1)
-        )
-    
-    premium = df["premium"].values
-    spread_pct = df["spread_pct"].fillna(0.0).values
-    spread_cost = 100.0 * premium * spread_pct
-    ev = 100.0 * (exp_payoff - premium) - spread_cost
-    
-    df["p_itm"] = p_itm
-    df["theo_value"] = exp_payoff
-    df["ev_per_contract"] = ev
+        exp_payoff = np.where(is_call, S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(d1) - K_vals * norm_cdf(d2), K_vals * norm_cdf(-d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-d1))
+    df["p_itm"], df["theo_value"] = p_itm, exp_payoff
+    df["ev_per_contract"] = 100.0 * (exp_payoff - prem_vals) - (100.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
 
-    # --- Theta Safety Check ---
+    # Warnings
     df["Theta_Burn_Rate"] = np.where(df["premium"] > 0, np.abs(df["theta"].values) / df["premium"].values, 0.0)
     df["decay_warning"] = df["Theta_Burn_Rate"] > 0.06
-
-    # --- Support/Resistance Warnings ---
     df["sr_warning"] = ""
     df.loc[(df["type"] == "call") & (df["underlying"] > df["high_20"] * 0.98), "sr_warning"] = "NEAR RESISTANCE"
     df.loc[(df["type"] == "put") & (df["underlying"] < df["low_20"] * 1.02), "sr_warning"] = "NEAR SUPPORT"
 
+    # Professional Filters
+    df["macro_warning"] = "⛔ MACRO RISK" if macro_risk_active else ""
+    df["max_pain_warning"] = ""
+    if sector_perf:
+        stock_ret, sector_ret = sector_perf.get("ticker_return", 0.0), sector_perf.get("sector_return", 0.0)
+        if "max_pain" in df.columns:
+            mp, und, dte = pd.to_numeric(df["max_pain"], errors='coerce'), pd.to_numeric(df["underlying"], errors='coerce'), pd.to_numeric(df["T_years"], errors='coerce') * 365.0
+            mask_mp = mp.notna() & und.notna() & (dte < 3)
+            df.loc[mask_mp & ((und - mp).abs() / mp > 0.05), "max_pain_warning"] = "⚠️ FIGHTING MAX PAIN"
+        if stock_ret > 0 and sector_ret < -0.015:
+            df["macro_warning"] = np.where(df["macro_warning"] != "", df["macro_warning"] + " | FAKE-OUT DIVERGENCE", "FAKE-OUT DIVERGENCE")
+    df["yield_warning"] = "📉 RATES UP" if tnx_change_pct > 0.025 and df["symbol"].isin(["QQQ", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"]).any() else ""
+    
+    return df
 
-    # Normalize features using ranks to reduce outlier impact
+
+def calculate_scores(
+    df: pd.DataFrame,
+    config: Dict,
+    vix_regime_weights: Dict,
+    trader_profile: str,
+    mode: str,
+    min_dte: int,
+    max_dte: int
+) -> pd.DataFrame:
+    """Calculates subjective quality scores using normalization and weights."""
+    
     def rank_norm(s: pd.Series) -> pd.Series:
         n = len(s)
-        if n <= 1:
-            return pd.Series([0.5] * n, index=s.index)
+        if n <= 1: return pd.Series([0.5] * n, index=s.index)
         r = s.rank(method="average", na_option="keep")
         return (r - 1.0) / (n - 1.0)
 
-    vol_n = rank_norm(df["volume"].fillna(0))
-    oi_n = rank_norm(df["openInterest"].fillna(0))
-
-    # Spread score: 1 for very tight spreads, 0 for very wide
-    # Cap spread at configured value (default 25%) of mid; beyond that is treated equally poor
-    spread_cap = config.get("spread_score_cap", 0.25)
-    sp = df["spread_pct"].replace([pd.NA, pd.NaT], float("inf"))
-    sp = sp.clip(lower=0, upper=spread_cap)
-    spread_score = 1.0 - (sp / spread_cap)
-
-    # Delta quality: target around absolute delta from config (default 0.40)
-    delta_target = config.get("target_delta", 0.40)
-    delta_quality = 1.0 - (df["abs_delta"] - delta_target).abs() / max(delta_target, 1e-6)
-    delta_quality = delta_quality.clip(lower=0.0, upper=1.0)
-
-    # IV quality: prefer moderate IV vs chain (avoid extremes)
+    # Base features
+    vol_n, oi_n = rank_norm(df["volume"].fillna(0)), rank_norm(df["openInterest"].fillna(0))
+    sp_cap = config.get("spread_score_cap", 0.25)
+    sp = df["spread_pct"].replace([pd.NA, pd.NaT], float("inf")).clip(lower=0, upper=sp_cap)
+    spread_score = 1.0 - (sp / sp_cap)
+    d_target = config.get("target_delta", 0.40)
+    delta_quality = (1.0 - (df["abs_delta"] - d_target).abs() / max(d_target, 1e-6)).clip(0, 1)
     iv_n = rank_norm(df["impliedVolatility"].fillna(df["impliedVolatility"].median()))
-    iv_quality = 1.0 - (2.0 * (iv_n - 0.5).abs())  # 1 at mid, 0 at edges
-
-    # Liquidity (volume+OI)
+    iv_quality = 1.0 - (2.0 * (iv_n - 0.5).abs())
     liquidity = 0.5 * (vol_n + oi_n)
-
-    # IV Advantage Score (keep for diagnostics)
-    iv_advantage = df["iv_vs_hv"].fillna(0).clip(lower=-0.2, upper=0.2)
-    iv_advantage_score = (iv_advantage + 0.2) / 0.4  # Normalize to 0-1
-
-    # Probability of Profit Score
-    pop_score = df["prob_profit"].fillna(0.5).clip(lower=0, upper=1)
-
-    # Risk/Reward Score per prompt thresholds
+    pop_score = df["prob_profit"].fillna(0.5).clip(0, 1)
     rr_raw = pd.to_numeric(df["rr_ratio"], errors='coerce').fillna(0.0)
-    rr_score = pd.Series(0.2, index=df.index)
-    rr_score = rr_score.mask(rr_raw >= 2.0, 0.5)
-    rr_score = rr_score.mask(rr_raw >= 3.0, 0.8)
-    rr_score = rr_score.mask(rr_raw >= 4.0, 1.0)
-
-    # EV score (rank-normalized expected value per contract)
+    rr_score = pd.Series(0.2, index=df.index).mask(rr_raw >= 2.0, 0.5).mask(rr_raw >= 3.0, 0.8).mask(rr_raw >= 4.0, 1.0)
     ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
-
-    # EM realism score (already 0-1, fallback to neutral 0.5)
-    em_realism_score = pd.to_numeric(df["em_realism_score"], errors='coerce').fillna(0.5).clip(lower=0.0, upper=1.0)
-
-    # Theta decay pressure => score where lower pressure is better
+    em_realism_score = pd.to_numeric(df["em_realism_score"], errors='coerce').fillna(0.5).clip(0, 1)
     theta_raw = df["theta_decay_pressure"].replace([pd.NA, pd.NaT], np.nan)
-    theta_rank = rank_norm(theta_raw.fillna(theta_raw.median()))
-    theta_score = (1.0 - theta_rank).clip(lower=0.0, upper=1.0)
-    # For very short-dated options, weight theta risk more heavily by slightly
-    # compressing high scores (i.e., making high TDP hurt more)
-    short_dte_mask = (df["T_years"] * 365.0) <= 7
-    theta_score = theta_score.where(~short_dte_mask, theta_score * 0.7)
-
-    # Momentum score combining 5d return, RSI distance from 50, and ATR trend
+    theta_score = (1.0 - rank_norm(theta_raw.fillna(theta_raw.median()))).clip(0, 1)
+    theta_score = theta_score.where((df["T_years"] * 365.0) > 7, theta_score * 0.7)
+    
     ret_score = rank_norm(pd.to_numeric(df.get("ret_5d", pd.Series(0.0, index=df.index)), errors='coerce').fillna(0.0))
     rsi_vals = pd.to_numeric(df.get("rsi_14", pd.Series(np.nan, index=df.index)), errors="coerce")
-    rsi_score = 1.0 - (abs((rsi_vals - 50.0) / 50.0)).clip(lower=0.0, upper=1.0)
-    atr_trend_vals = pd.to_numeric(df.get("atr_trend", pd.Series(0.0, index=df.index)), errors="coerce")
-    atr_score = rank_norm(atr_trend_vals.fillna(0.0))
-    momentum_score = (
-        0.4 * ret_score.fillna(0.5)
-        + 0.3 * rsi_score.fillna(0.5)
-        + 0.3 * atr_score.fillna(0.5)
-    )
+    rsi_score = (1.0 - (abs((rsi_vals - 50.0) / 50.0))).clip(0, 1)
+    atr_score = rank_norm(pd.to_numeric(df.get("atr_trend", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0))
+    momentum_score = 0.4 * ret_score.fillna(0.5) + 0.3 * rsi_score.fillna(0.5) + 0.3 * atr_score.fillna(0.5)
+    
+    iv_pct_series = pd.to_numeric(df.get("iv_percentile_30", df.get("iv_percentile", pd.Series(np.nan, index=df.index))), errors="coerce")
+    iv_rank_score = iv_pct_series.clip(0, 1).fillna(0.5) if mode == "Premium Selling" else (1.0 - iv_pct_series.clip(0, 1)).fillna(0.5)
+    catalyst_score = pd.Series(0.3, index=df.index).mask(df["event_flag"] == "EARNINGS_NEARBY", 0.8)
+    dte_norm = ((df["T_years"] * 365.0 - min_dte) / max(1, (max_dte - min_dte))).clip(0, 1)
+    trader_pref_score = (0.6 * liquidity + 0.4 * spread_score) if trader_profile.lower().startswith("day") else (0.5 * delta_quality + 0.5 * dte_norm)
 
-    # IV rank score: favor cheaper IV (lower percentile) for buyers
-    iv_pct_series = pd.to_numeric(
-        df.get("iv_percentile_30", df.get("iv_percentile", pd.Series(np.nan, index=df.index))),
-        errors="coerce",
-    )
+    # Weight Application
     if mode == "Premium Selling":
-        # c. Invert the iv_rank_score calculation.
-        iv_rank_score = iv_pct_series.clip(lower=0.0, upper=1.0).fillna(0.5)
+        weights = config.get("premium_selling_weights", {})
+        ror_score = rank_norm(df["return_on_risk"].fillna(df["return_on_risk"].median()))
+        w = {k: weights.get(k, 0.0) for k in ["pop", "return_on_risk", "iv_rank", "liquidity", "theta", "ev", "trader_pref"]}
+        w_sum = sum(w.values()) or 1.0
+        df["quality_score"] = (w["pop"]*pop_score + w["return_on_risk"]*ror_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score) / w_sum
     else:
-        iv_rank_score = (1.0 - iv_pct_series.clip(lower=0.0, upper=1.0)).fillna(0.5)
+        dw = {"pop": 0.18, "em_realism": 0.12, "rr": 0.15, "momentum": 0.10, "iv_rank": 0.10, "liquidity": 0.15, "catalyst": 0.05, "theta": 0.10, "ev": 0.05, "trader_pref": 0.10}
+        cw = config.get("composite_weights", {}) or {}
+        w = {k: cw.get(k, dw[k]) for k in dw}
+        w_sum = sum(w.values()) or 1.0
+        df["quality_score"] = (w["pop"]*pop_score + w["em_realism"]*em_realism_score + w["rr"]*rr_score + w["momentum"]*momentum_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["catalyst"]*catalyst_score + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score) / w_sum
 
-    # Catalyst strength from event flags (earnings proximity, etc.)
-    catalyst_score = pd.Series(0.3, index=df.index)
-    catalyst_score = catalyst_score.mask(df["event_flag"] == "EARNINGS_NEARBY", 0.8)
-
-    # Trader profile adjustment: day trader vs swing trader preferences
-    dte_days = df["T_years"] * 365.0
-    # Normalize DTE between the configured bounds
-    dte_norm = ((dte_days - min_dte) / max(1, (max_dte - min_dte))).clip(lower=0.0, upper=1.0)
-    if trader_profile.lower().startswith("day"):
-        trader_pref_score = 0.6 * liquidity + 0.4 * spread_score
-    else:  # swing trader (default)
-        trader_pref_score = 0.5 * delta_quality + 0.5 * dte_norm
-
-    # Composite quality score redesign (0-1)
-    if mode == "Premium Selling":
-        composite_weights = config.get("premium_selling_weights", {})
-        return_on_risk_score = rank_norm(df["return_on_risk"].fillna(df["return_on_risk"].median()))
-        w_pop = composite_weights.get("pop", 0.0)
-        w_ror = composite_weights.get("return_on_risk", 0.0)
-        w_iv = composite_weights.get("iv_rank", 0.0)
-        w_liq = composite_weights.get("liquidity", 0.0)
-        w_theta = composite_weights.get("theta", 0.0)
-        w_ev = composite_weights.get("ev", 0.0)
-        w_tp = composite_weights.get("trader_pref", 0.0)
-
-        # Normalize weights to sum to 1.0
-        w_sum = w_pop + w_ror + w_iv + w_liq + w_theta + w_ev + w_tp
-        if w_sum <= 0:
-            w_sum = 1.0
-
-        df["quality_score"] = (
-            w_pop * pop_score
-            + w_ror * return_on_risk_score
-            + w_iv * iv_rank_score
-            + w_liq * liquidity
-            + w_theta * theta_score
-            + w_ev * ev_score
-            + w_tp * trader_pref_score
-        ) / w_sum
-    else:
-        default_weights = {
-            "pop": 0.18,
-            "em_realism": 0.12,
-            "rr": 0.15,
-            "momentum": 0.10,
-            "iv_rank": 0.10,
-            "liquidity": 0.15,
-            "catalyst": 0.05,
-            "theta": 0.10,
-            "ev": 0.05,
-            "trader_pref": 0.10,
-        }
-        composite_weights = config.get("composite_weights", {}) or {}
-
-        def _w(key: str) -> float:
-            return float(composite_weights.get(key, default_weights[key]))
-
-        w_pop = _w("pop")
-        w_em = _w("em_realism")
-        w_rr = _w("rr")
-        w_mom = _w("momentum")
-        w_iv = _w("iv_rank")
-        w_liq = _w("liquidity")
-        w_cat = _w("catalyst")
-        w_theta = _w("theta")
-        w_ev = _w("ev")
-        w_tp = _w("trader_pref")
-
-        # Normalize weights to sum to 1.0
-        w_sum = w_pop + w_em + w_rr + w_mom + w_iv + w_liq + w_cat + w_theta + w_ev + w_tp
-        if w_sum <= 0:
-            w_sum = 1.0
-
-        df["quality_score"] = (
-            w_pop * pop_score
-            + w_em * em_realism_score
-            + w_rr * rr_score
-            + w_mom * momentum_score
-            + w_iv * iv_rank_score
-            + w_liq * liquidity
-            + w_cat * catalyst_score
-            + w_theta * theta_score
-            + w_ev * ev_score
-            + w_tp * trader_pref_score
-        ) / w_sum
-
-    # Earnings penalty: modestly reduce score if very close to earnings
+    # Adjustments
     df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
-
-    # --- Safety Filter Score Adjustments ---
     df.loc[df["Trend_Aligned"] == True, "quality_score"] += 0.15
     df.loc[df["decay_warning"] == True, "quality_score"] -= 0.20
     df.loc[df["sr_warning"] != "", "quality_score"] -= 0.10
-
-    # --- Probability Enhancer Score Adjustments ---
     if "seasonal_win_rate" in df.columns:
         df.loc[df["seasonal_win_rate"] >= 0.8, "quality_score"] += 0.10
         df.loc[df["seasonal_win_rate"] <= 0.2, "quality_score"] -= 0.10
-
     df.loc[df["oi_wall_warning"] != "", "quality_score"] -= 0.10
-
     df["squeeze_play"] = (df["is_squeezing"] == True) & (df["Unusual_Whale"] == True)
     df.loc[df["squeeze_play"], "quality_score"] += 0.25
-
-    # --- Term Structure Score Adjustment ---
-    if term_structure_spread is not None and term_structure_spread < 0: # Backwardation
-        # Penalize long calls, boost short puts
-        df.loc[df["type"] == "call", "quality_score"] -= 0.10
-        df.loc[df["type"] == "put", "quality_score"] += 0.10
-
-
-    # --- INVISIBLE FILTERS (Professional Edition) ---
-
-    # 1. Macro Risk
-    df["macro_warning"] = ""
-    if macro_risk_active:
-        df["macro_warning"] = "⛔ MACRO RISK"
-        # Optional: penalize score slightly? Prompt didn't specify score penalty, just "Red Light" string.
-        # But let's be safe and penalize slightly to bubble up safer plays.
-        df["quality_score"] -= 0.10
-
-    # 2. Sector Relative Strength
-    # Logic:
-    # If (Stock > 0%) AND (Sector < -1.5%): "Fakeout Divergence". Penalize 0.15.
-    # If (Stock > 0%) AND (Sector > 0%): Boost 0.05 (Aligned).
-    df["max_pain_warning"] = ""
-    if sector_perf:
-        stock_ret = sector_perf.get("ticker_return", 0.0)
-        sector_ret = sector_perf.get("sector_return", 0.0)
-        
-        # Vectorized Max Pain check
-        if "max_pain" in df.columns:
-            mp = pd.to_numeric(df["max_pain"], errors='coerce')
-            und = pd.to_numeric(df["underlying"], errors='coerce')
-            dte = pd.to_numeric(df["T_years"], errors='coerce') * 365.0
-            
-            mask_mp = mp.notna() & und.notna() & (dte < 3)
-            diff_pct = (und - mp).abs() / mp
-            df.loc[mask_mp & (diff_pct > 0.05), "max_pain_warning"] = "⚠️ FIGHTING MAX PAIN"
-
-        # Sector Relative Strength Logic
-        if stock_ret > 0 and sector_ret < -0.015:
-            df["quality_score"] -= 0.15
-            df["macro_warning"] = np.where(df["macro_warning"] != "", df["macro_warning"] + " | FAKE-OUT DIVERGENCE", "FAKE-OUT DIVERGENCE")
-        elif stock_ret > 0 and sector_ret > 0:
-            df["quality_score"] += 0.05
-
-    # 4. Yield Spike Guard
-    # Logic: If ^TNX up > 2.5% today, penalize Tech/High Beta calls by 0.20 and add tag.
-    df["yield_warning"] = ""
-    if tnx_change_pct > 0.025:
-        high_beta_tickers = ["QQQ", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"]
-        # Check if current ticker is in high beta list
-        # Since df contains one ticker usually, we can check the first row's symbol or pass it in.
-        # But df has 'symbol' column.
-        
-        mask_tech = df["symbol"].isin(high_beta_tickers)
-        mask_calls = df["type"] == "call"
-        
-        # Apply penalty
-        df.loc[mask_tech & mask_calls, "quality_score"] -= 0.20
-        df.loc[mask_tech & mask_calls, "yield_warning"] = "📉 RATES UP"
-
-
-    # Ensure quality_score stays in [0, 1]
-    df["quality_score"] = df["quality_score"].clip(lower=0, upper=1)
+    if df["macro_warning"].str.contains("MACRO RISK").any(): df["quality_score"] -= 0.10
+    
+    # Save components
+    df["quality_score"] = df["quality_score"].clip(0, 1)
     df["ev_score"] = ev_score
-
-    # Keep helpful computed columns
     df["spread_pct"] = df["spread_pct"].replace([float("inf"), -float("inf")], pd.NA)
-    df["liquidity_score"] = liquidity
-    df["delta_quality"] = delta_quality
-    df["iv_quality"] = iv_quality
-    df["spread_score"] = spread_score
-    df["theta_score"] = theta_score
-    df["momentum_score"] = momentum_score
-    df["iv_rank_score"] = iv_rank_score
-    df["catalyst_score"] = catalyst_score
-    df["iv_advantage_score"] = iv_advantage_score
+    df["liquidity_score"], df["delta_quality"], df["iv_quality"] = liquidity, delta_quality, iv_quality
+    df["spread_score"], df["theta_score"], df["momentum_score"] = spread_score, theta_score, momentum_score
+    df["iv_rank_score"], df["catalyst_score"] = iv_rank_score, catalyst_score
+    df["iv_advantage_score"] = (df["iv_vs_hv"].fillna(0).clip(-0.2, 0.2) + 0.2) / 0.4
+    
+    return df
 
-    # Basic sanity ordering hints
+
+def enrich_and_score(
+    df: pd.DataFrame,
+    min_dte: int,
+    max_dte: int,
+    risk_free_rate: float,
+    config: Dict,
+    vix_regime_weights: Dict,
+    trader_profile: str = "swing",
+    mode: str = "Single-stock",
+    iv_rank: Optional[float] = None,
+    iv_percentile: Optional[float] = None,
+    earnings_date: Optional[datetime] = None,
+    sentiment_score: Optional[float] = None,
+    seasonal_win_rate: Optional[float] = None,
+    term_structure_spread: Optional[float] = None,
+    macro_risk_active: bool = False,
+    sector_perf: Dict = {},
+    tnx_change_pct: float = 0.0,
+) -> pd.DataFrame:
+    # Prepare
+    now = datetime.now(timezone.utc)
+    df["exp_dt"] = pd.to_datetime(df["expiration"], errors="coerce", utc=True)
+    df = df[df["exp_dt"].notna()].copy()
+    df["T_years"] = (df["exp_dt"] - now).dt.total_seconds() / (365.0 * 24 * 3600)
+    df = df[(df["T_years"] > min_dte / 365.0) & (df["T_years"] < max_dte / 365.0)].copy()
+
+    for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility", "underlying"]:
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
+    
+    mb = config.get("moneyness_band", 0.15)
+    if "underlying" in df.columns and "strike" in df.columns:
+        df = df[(df["strike"] >= df["underlying"] * (1 - mb)) & (df["strike"] <= df["underlying"] * (1 + mb))].copy()
+
+    df["bid"], df["ask"] = df["bid"].fillna(0.0), df["ask"].fillna(0.0)
+    df["mid"] = (df["bid"] + df["ask"]) / 2.0
+    df["premium"] = df["mid"].where(df["mid"] > 0.0, df["lastPrice"])
+
+    if mode == "Premium Selling":
+        df = df[df['type'] == 'put'].copy()
+        if df.empty: return df
+        df['return_on_risk'] = df['premium'] / df['strike']
+
+    df = df[(df["premium"].notna()) & (df["premium"] > 0)].copy()
+    df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"]
+    valid_spread = pd.to_numeric(df["spread_pct"], errors='coerce').notna() & np.isfinite(df["spread_pct"].astype(float))
+    df.loc[~valid_spread, "spread_pct"] = float("inf")
+
+    fc = config.get("filters", {})
+    df = df[df["spread_pct"] <= fc.get("max_bid_ask_spread_pct", 0.40)].copy()
+    df["volume"] = pd.to_numeric(df["volume"], errors='coerce').fillna(0)
+    df["openInterest"] = pd.to_numeric(df["openInterest"], errors='coerce').fillna(0)
+    df = df[(df["volume"] >= fc.get("min_volume", 50)) | (df["openInterest"] >= fc.get("min_open_interest", 10))].copy()
+
+    if df.empty: return df
+
+    df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors='coerce')
+    df["iv_group_median"] = df.groupby(["exp_dt", "type"])["impliedVolatility"].transform(lambda s: s.median(skipna=True))
+    df["impliedVolatility"] = df["impliedVolatility"].fillna(df["iv_group_median"])
+    ov_iv_m = df["impliedVolatility"].median(skipna=True)
+    df["impliedVolatility"] = df["impliedVolatility"].fillna(ov_iv_m if pd.notna(ov_iv_m) else 0.25)
+
+    # 1. Call Helper: Metrics
+    df = calculate_metrics(df, risk_free_rate, earnings_date, config, iv_rank, iv_percentile, sentiment_score, macro_risk_active, sector_perf, tnx_change_pct)
+
+    # 2. Call Helper: Scores
+    df = calculate_scores(df, config, vix_regime_weights, trader_profile, mode, min_dte, max_dte)
+
+    # Final Filters
+    d_min, d_max = (0.20, 0.40) if mode == "Premium Selling" else (fc.get("delta_min", 0.15), fc.get("delta_max", 0.35))
+    df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
+    if mode != "Premium Selling": df = df[df["rr_ratio"] >= 0.25].copy()
+
+    if df.empty: return df
+    
+    # Sorting
     df = df.sort_values(["Unusual_Whale", "quality_score", "volume", "openInterest"], ascending=[False, False, False, False]).reset_index(drop=True)
     return df
 
@@ -1179,7 +905,6 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
         # Filter: Must collect at least 1/5 of the width as credit (relaxed from 1/3)
         min_credit = 0.20 * max_width
         if total_credit <= min_credit or max_risk <= 0:
-            print(f"    DEBUG: {symbol} {exp} - Credit ${total_credit:.2f} < Min ${min_credit:.2f} (20% of ${max_width:.2f})")
             continue
         
         # Delta Neutrality Check: abs(short_put_delta + short_call_delta) < 0.10
@@ -1188,7 +913,6 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
         net_delta = short_put_delta + short_call_delta
         
         if abs(net_delta) >= 0.10:
-            print(f"    DEBUG: {symbol} {exp} - Net Delta {net_delta:.3f} too directional (abs must be < 0.10)")
             continue  # Too directional
         
         # Calculate metrics
@@ -2303,7 +2027,7 @@ def main():
     config = load_config("config.json")
     
     # Initialize PaperManager and update positions
-    pm = PaperManager(config_path="config.json")
+    pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
     print("\nChecking existing paper trade positions...")
     pm.update_positions()
 
