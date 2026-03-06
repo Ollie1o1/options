@@ -515,7 +515,6 @@ def calculate_max_pain(chain_df: pd.DataFrame) -> Optional[float]:
         return None
 
 def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
-    frames = []
     try:
         # Wrap ticker.option_chain in try/except to handle invalid/empty expirations gracefully
         oc = tkr.option_chain(exp)
@@ -523,6 +522,7 @@ def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.Data
         print(f"⚠️ Warning: Could not fetch options for {symbol} on {exp}: {e}")
         return []
 
+    sub_frames = []
     for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
         if df is None or df.empty:
             continue
@@ -533,9 +533,18 @@ def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.Data
         for col in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]:
             if col not in sub.columns:
                 sub[col] = pd.NA
-        sub["max_pain"] = calculate_max_pain(sub)
-        frames.append(sub)
-    return frames
+        sub_frames.append(sub)
+
+    if not sub_frames:
+        return []
+
+    # Max pain requires both calls AND puts — compute on the combined chain
+    combined = pd.concat(sub_frames, ignore_index=True)
+    max_pain_val = calculate_max_pain(combined)
+    for sub in sub_frames:
+        sub["max_pain"] = max_pain_val
+
+    return sub_frames
 
 @retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
 def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
