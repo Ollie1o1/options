@@ -261,11 +261,28 @@ def calculate_historical_volatility(hist: pd.DataFrame, period: int = 30) -> Opt
     except Exception:
         return None
 
-def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool]:
-    """Calculate RSI, ATR, SMA, etc. from history DataFrame."""
+def calculate_ewma_volatility(hist: pd.DataFrame, span: int = 20) -> Optional[float]:
+    """
+    EWMA annualized volatility (exponentially weighted).
+    More responsive to recent price moves than a simple rolling std,
+    giving a better near-term realized vol estimate for EV calculations.
+    """
+    try:
+        if hist.empty or len(hist) < 10:
+            return None
+        returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
+        if len(returns) < 5:
+            return None
+        ewm_var = (returns ** 2).ewm(span=span, adjust=False).mean()
+        return float(np.sqrt(ewm_var.iloc[-1] * 252))
+    except Exception:
+        return None
+
+def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool, Optional[float]]:
+    """Calculate RSI, ATR, SMA-20, SMA-50, etc. from history DataFrame."""
     try:
         if hist.empty or len(hist) < 21:
-            return None, None, None, None, None, None, False
+            return None, None, None, None, None, None, False, None
         
         close = hist["Close"].astype(float)
         high = hist.get("High", close).astype(float)
@@ -304,6 +321,9 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
         high_20 = float(high.rolling(window=20).max().iloc[-1])
         low_20 = float(low.rolling(window=20).min().iloc[-1])
 
+        # 50-day SMA (confirms medium-term trend; requires at least 50 bars)
+        sma_50 = float(close.rolling(window=50).mean().iloc[-1]) if len(close) >= 50 else None
+
         # Squeeze
         bb_std = close.rolling(window=20).std()
         bb_upper = sma_20 + (bb_std.iloc[-1] * 2)
@@ -313,9 +333,9 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
         kc_lower = sma_20 - (kc_atr * 1.5)
         is_squeezing = (bb_upper < kc_upper) and (bb_lower > kc_lower)
 
-        return ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing
+        return ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50
     except Exception:
-        return None, None, None, None, None, None, False
+        return None, None, None, None, None, None, False, None
 
 def calculate_rvol(hist: pd.DataFrame) -> Optional[float]:
     """Calculate Relative Volume (Current Vol / 30-day Avg Vol)."""
@@ -568,8 +588,14 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
 
     # 2. Derive Metrics from History
     underlying = safe_float(hist["Close"].iloc[-1])
-    hv_30d = calculate_historical_volatility(hist, period=30)
-    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing = calculate_momentum_indicators(hist)
+    hv_30d_rolling = calculate_historical_volatility(hist, period=30)
+    hv_ewma = calculate_ewma_volatility(hist, span=20)
+    # Blend rolling and EWMA vol: rolling gives stability, EWMA gives recency
+    if hv_30d_rolling and hv_ewma:
+        hv_30d = 0.5 * hv_30d_rolling + 0.5 * hv_ewma
+    else:
+        hv_30d = hv_30d_rolling or hv_ewma
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50 = calculate_momentum_indicators(hist)
     rvol = calculate_rvol(hist)
     vwap, fib_50, fib_618 = calculate_technical_levels(hist)
 
@@ -616,6 +642,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     df["rsi_14"] = rsi_14
     df["atr_trend"] = atr_trend
     df["sma_20"] = sma_20
+    df["sma_50"] = sma_50
     df["high_20"] = high_20
     df["low_20"] = low_20
     df["sentiment_score"] = sentiment_score
