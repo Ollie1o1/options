@@ -115,17 +115,31 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                     print(f"  - Could not determine valid entry price for {option_symbol}")
                     continue
 
-                profit_target = entry_price * 1.5
-                stop_loss = entry_price * 0.5
+                # For long trades: profit at 1.5x, stop at 0.5x
+                # For short trades: profit at 0.5x (buy back cheap), stop at 1.5x (buy back expensive)
+                if is_short_trade:
+                    profit_target = entry_price * 0.5
+                    stop_loss = entry_price * 1.5
+                else:
+                    profit_target = entry_price * 1.5
+                    stop_loss = entry_price * 0.5
 
                 outcome = "EXPIRED"
                 for _, day in hist.iterrows():
-                    if day["High"] >= profit_target:
-                        outcome = "WIN"
-                        break
-                    if day["Low"] <= stop_loss:
-                        outcome = "LOSS"
-                        break
+                    if is_short_trade:
+                        if day["Low"] <= profit_target:
+                            outcome = "WIN"
+                            break
+                        if day["High"] >= stop_loss:
+                            outcome = "LOSS"
+                            break
+                    else:
+                        if day["High"] >= profit_target:
+                            outcome = "WIN"
+                            break
+                        if day["Low"] <= stop_loss:
+                            outcome = "LOSS"
+                            break
 
                 pnl_data = {}
                 if outcome == "EXPIRED":
@@ -138,9 +152,11 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                             outcome = "LOSS"
 
                 elif outcome == "WIN":
-                    pnl_data = {"pnl_per_contract": (profit_target - entry_price) * 100}
+                    # Long: bought at entry_price, sold at profit_target (1.5x)
+                    # Short: sold at entry_price, bought back at profit_target (0.5x)
+                    pnl_data = {"pnl_per_contract": abs(profit_target - entry_price) * 100}
                 elif outcome == "LOSS":
-                    pnl_data = {"pnl_per_contract": (stop_loss - entry_price) * 100}
+                    pnl_data = {"pnl_per_contract": -abs(stop_loss - entry_price) * 100}
 
                 pick["outcome"] = outcome
                 pick.update(pnl_data)
@@ -171,8 +187,7 @@ def fetch_price_at_expiration(symbol: str, expiration_date: str) -> Optional[flo
         if exp_dt in hist.index.date:
             return float(hist.loc[hist.index.date == exp_dt, "Close"].iloc[0])
         else:
-            hist["date_diff"] = abs((hist.index.date - exp_dt).days)
-            closest_idx = hist["date_diff"].idxmin()
+            closest_idx = min(hist.index, key=lambda d: abs((d.date() - exp_dt).days))
             return float(hist.loc[closest_idx, "Close"])
     
     except Exception as e:
