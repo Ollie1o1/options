@@ -326,9 +326,22 @@ def calculate_metrics(
         df.loc[earnings_mask, "is_underpriced"] = df.loc[earnings_mask, "impliedVolatility"] < df.loc[earnings_mask, "hv_30d"]
 
     # --- Trend Alignment Filter ---
+    # Require price above BOTH SMA-20 and SMA-50 for calls (and below both for puts)
+    # to confirm a genuine medium-term trend rather than just short-term noise.
     df["Trend_Aligned"] = False
-    df.loc[(df["type"] == "call") & (df["underlying"] > df["sma_20"]), "Trend_Aligned"] = True
-    df.loc[(df["type"] == "put") & (df["underlying"] < df["sma_20"]), "Trend_Aligned"] = True
+    has_sma50 = "sma_50" in df.columns and df["sma_50"].notna().any()
+    if has_sma50:
+        df.loc[
+            (df["type"] == "call") & (df["underlying"] > df["sma_20"]) & (df["underlying"] > df["sma_50"]),
+            "Trend_Aligned"
+        ] = True
+        df.loc[
+            (df["type"] == "put") & (df["underlying"] < df["sma_20"]) & (df["underlying"] < df["sma_50"]),
+            "Trend_Aligned"
+        ] = True
+    else:
+        df.loc[(df["type"] == "call") & (df["underlying"] > df["sma_20"]), "Trend_Aligned"] = True
+        df.loc[(df["type"] == "put") & (df["underlying"] < df["sma_20"]), "Trend_Aligned"] = True
 
     # --- VECTORIZED GREEKS ---
     S_vals = df["underlying"].values
@@ -346,21 +359,17 @@ def calculate_metrics(
 
     # --- ADVANCED METRICS ---
     df["expected_move"] = calculate_expected_move(S_vals, IV_vals, T_vals)
-
-    # Probability of Profit adjustment
-    pop = 1.0 - df["abs_delta"].values
-    em = df["expected_move"].values
-    upper = S_vals + em
-    lower = S_vals - em
     is_call = np.char.lower(types_vals.astype(str)) == "call"
-    outside_em = np.where(is_call, K_vals > upper, K_vals < lower)
-    pop = np.where(outside_em & (em > 0), pop * 0.7, pop)
-    df["prob_profit"] = np.clip(pop, 0.0, 1.0)
+
+    # Probability of Profit: breakeven-based formula P(S_T > K+prem) for calls,
+    # P(S_T < K-prem) for puts — correctly accounts for premium cost unlike 1-delta.
+    prem_vals = df["premium"].values
+    pop_arr = calculate_probability_of_profit(types_vals, S_vals, K_vals, T_vals, IV_vals, prem_vals)
+    if pop_arr is None:
+        pop_arr = 1.0 - df["abs_delta"].values
+    df["prob_profit"] = np.clip(pop_arr, 0.0, 1.0)
 
     df["prob_touch"] = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
-
-    # Risk/Reward Analysis
-    prem_vals = df["premium"].values
     max_loss, breakeven, rr_ratio = calculate_risk_reward(types_vals, prem_vals, S_vals, K_vals, df["expected_move"].values)
     df["max_loss"] = max_loss
     df["breakeven"] = breakeven
@@ -421,7 +430,21 @@ def calculate_metrics(
             if len(call_iv) > 0 and len(put_iv) > 0:
                 df.loc[group.index, "iv_skew"] = put_iv[0] - call_iv[0]
     df["iv_skew"] = df["iv_skew"].ffill().bfill().fillna(0.0)
-    
+
+    # IV Skew Directional Alignment
+    # Positive skew (put IV > call IV) = market hedging downside → favour puts
+    # Negative/flat skew = normal regime → favours calls
+    skew_vals = df["iv_skew"].values
+    df["skew_alignment_score"] = np.where(
+        df["type"] == "call",
+        np.clip(0.5 - skew_vals * 4.0, 0.0, 1.0),   # calls: better when skew is low/negative
+        np.clip(0.5 + skew_vals * 4.0, 0.0, 1.0),   # puts:  better when skew is positive
+    )
+
+    # Gamma/Theta Efficiency: explosive payoff potential per unit of daily time decay
+    # Higher ratio = more leverage per dollar of daily premium bleed
+    df["gamma_theta_ratio"] = np.abs(df["gamma"].values) / np.maximum(np.abs(df["theta"].values), 1e-9)
+
     # Flags
     df["liquidity_flag"] = "GOOD"
     df.loc[(df["volume"] < 10) & (df["openInterest"] < 100), "liquidity_flag"] = "POOR"
@@ -452,13 +475,33 @@ def calculate_metrics(
     else:
         df["pop_sim"], df["pot_sim"] = pd.NA, pd.NA
 
-    # Expected Value (EV)
+    # Blend MC PoP (60%) with analytical PoP (40%) when simulation data is available.
+    # MC captures path-dependency and jump risk; analytical gives a stable floor.
+    if HAS_SIMULATION:
+        mc_valid = df["pop_sim"].notna()
+        if mc_valid.any():
+            df.loc[mc_valid, "prob_profit"] = (
+                0.6 * df.loc[mc_valid, "pop_sim"].astype(float)
+                + 0.4 * df.loc[mc_valid, "prob_profit"]
+            ).clip(0.0, 1.0)
+
+    # Theoretical value and P(ITM) using market IV (for display/reference)
     d1, d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     p_itm = np.where(is_call, norm_cdf(d2), norm_cdf(-d2))
     with np.errstate(divide='ignore', invalid='ignore'):
-        exp_payoff = np.where(is_call, S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(d1) - K_vals * norm_cdf(d2), K_vals * norm_cdf(-d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-d1))
-    df["p_itm"], df["theo_value"] = p_itm, exp_payoff
-    df["ev_per_contract"] = 100.0 * (exp_payoff - prem_vals) - (100.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
+        theo_payoff = np.where(is_call, S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(d1) - K_vals * norm_cdf(d2), K_vals * norm_cdf(-d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-d1))
+    df["p_itm"], df["theo_value"] = p_itm, theo_payoff
+
+    # HV-adjusted EV: BS(realized_vol) - market_price
+    # Positive = options cheap vs realized vol (edge for buyers)
+    # Negative = options expensive vs realized vol (edge for sellers)
+    hv_arr = np.maximum(df["hv_30d"].fillna(df["impliedVolatility"]).values, 1e-9)
+    hv_d1, hv_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, hv_arr)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        hv_payoff = np.where(is_call,
+            S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(hv_d1) - K_vals * norm_cdf(hv_d2),
+            K_vals * norm_cdf(-hv_d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-hv_d1))
+    df["ev_per_contract"] = 100.0 * (hv_payoff - prem_vals) - (100.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
 
     # Warnings
     df["Theta_Burn_Rate"] = np.where(df["premium"] > 0, np.abs(df["theta"].values) / df["premium"].values, 0.0)
@@ -516,7 +559,8 @@ def calculate_scores(
     liquidity = 0.5 * (vol_n + oi_n)
     pop_score = df["prob_profit"].fillna(0.5).clip(0, 1)
     rr_raw = pd.to_numeric(df["rr_ratio"], errors='coerce').fillna(0.0)
-    rr_score = pd.Series(0.2, index=df.index).mask(rr_raw >= 2.0, 0.5).mask(rr_raw >= 3.0, 0.8).mask(rr_raw >= 4.0, 1.0)
+    # Smooth linear mapping [0.5 → 0, 4.0 → 1] instead of hard step thresholds
+    rr_score = np.clip((rr_raw - 0.5) / 3.5, 0.0, 1.0)
     ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
     em_realism_score = pd.to_numeric(df["em_realism_score"], errors='coerce').fillna(0.5).clip(0, 1)
     theta_raw = df["theta_decay_pressure"].replace([pd.NA, pd.NaT], np.nan)
@@ -535,6 +579,26 @@ def calculate_scores(
     dte_norm = ((df["T_years"] * 365.0 - min_dte) / max(1, (max_dte - min_dte))).clip(0, 1)
     trader_pref_score = (0.6 * liquidity + 0.4 * spread_score) if trader_profile.lower().startswith("day") else (0.5 * delta_quality + 0.5 * dte_norm)
 
+    # IV Edge Score: rewards options where market IV is below realized HV (cheap options for buyers).
+    # For premium sellers the logic is flipped — high IV vs HV is the edge.
+    iv_vs_hv = df.get("iv_vs_hv", pd.Series(0.0, index=df.index)).fillna(0.0)
+    if mode == "Premium Selling":
+        iv_edge_score = ((iv_vs_hv.clip(-0.2, 0.2) + 0.2) / 0.4).clip(0, 1)
+    else:
+        iv_edge_score = ((-iv_vs_hv.clip(-0.2, 0.2) + 0.2) / 0.4).clip(0, 1)
+
+    # IV Skew Directional Alignment (computed in calculate_metrics)
+    skew_align_score = pd.to_numeric(
+        df.get("skew_alignment_score", pd.Series(0.5, index=df.index)), errors='coerce'
+    ).fillna(0.5).clip(0, 1)
+
+    # Gamma/Theta Efficiency (rank-normalised, capped at 95th pct to handle outliers)
+    gt_raw = pd.to_numeric(
+        df.get("gamma_theta_ratio", pd.Series(0.0, index=df.index)), errors='coerce'
+    ).fillna(0.0)
+    gt_cap = gt_raw.quantile(0.95) if len(gt_raw) > 10 else gt_raw.max()
+    gamma_theta_score = rank_norm(gt_raw.clip(upper=max(gt_cap, 1e-9))).fillna(0.5)
+
     # Weight Application
     if mode == "Premium Selling":
         weights = config.get("premium_selling_weights", {})
@@ -543,14 +607,27 @@ def calculate_scores(
         w_sum = sum(w.values()) or 1.0
         df["quality_score"] = (w["pop"]*pop_score + w["return_on_risk"]*ror_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score) / w_sum
     else:
-        dw = {"pop": 0.18, "em_realism": 0.12, "rr": 0.15, "momentum": 0.10, "iv_rank": 0.10, "liquidity": 0.15, "catalyst": 0.05, "theta": 0.10, "ev": 0.05, "trader_pref": 0.10}
+        dw = {
+            "pop": 0.20, "em_realism": 0.10, "rr": 0.12, "momentum": 0.08,
+            "iv_rank": 0.07, "liquidity": 0.12, "catalyst": 0.04, "theta": 0.08,
+            "ev": 0.10, "trader_pref": 0.07, "iv_edge": 0.08, "skew_align": 0.05, "gamma_theta": 0.04
+        }
         cw = config.get("composite_weights", {}) or {}
         w = {k: cw.get(k, dw[k]) for k in dw}
         w_sum = sum(w.values()) or 1.0
-        df["quality_score"] = (w["pop"]*pop_score + w["em_realism"]*em_realism_score + w["rr"]*rr_score + w["momentum"]*momentum_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["catalyst"]*catalyst_score + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score) / w_sum
+        df["quality_score"] = (
+            w["pop"]*pop_score + w["em_realism"]*em_realism_score + w["rr"]*rr_score
+            + w["momentum"]*momentum_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity
+            + w["catalyst"]*catalyst_score + w["theta"]*theta_score + w["ev"]*ev_score
+            + w["trader_pref"]*trader_pref_score + w["iv_edge"]*iv_edge_score
+            + w["skew_align"]*skew_align_score + w["gamma_theta"]*gamma_theta_score
+        ) / w_sum
 
     # Adjustments
     df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
+    # Reward earnings plays where IV is actually underpriced vs realized vol
+    if "Earnings Play" in df.columns and "is_underpriced" in df.columns:
+        df.loc[(df["Earnings Play"] == "YES") & (df["is_underpriced"] == True), "quality_score"] += 0.08
     df.loc[df["Trend_Aligned"] == True, "quality_score"] += 0.15
     df.loc[df["decay_warning"] == True, "quality_score"] -= 0.20
     df.loc[df["sr_warning"] != "", "quality_score"] -= 0.10
@@ -569,7 +646,7 @@ def calculate_scores(
     df["liquidity_score"], df["delta_quality"], df["iv_quality"] = liquidity, delta_quality, iv_quality
     df["spread_score"], df["theta_score"], df["momentum_score"] = spread_score, theta_score, momentum_score
     df["iv_rank_score"], df["catalyst_score"] = iv_rank_score, catalyst_score
-    df["iv_advantage_score"] = (df["iv_vs_hv"].fillna(0).clip(-0.2, 0.2) + 0.2) / 0.4
+    df["iv_advantage_score"] = iv_edge_score  # mode-aware: buyers rewarded for IV < HV
     
     return df
 
