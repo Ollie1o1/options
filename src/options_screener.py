@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 import functools
 import random
+import argparse
 
 
 # Dependency checks
@@ -1080,13 +1081,14 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     # IV context
     iv = row.get("impliedVolatility", pd.NA)
     if pd.notna(iv) and math.isfinite(iv):
-        rel = "≈" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
+        rel = "\u2248" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
         parts.append(f"IV: {format_pct(iv)} ({rel} median)")
 
     # Probability of Profit
     pop = row.get("prob_profit", pd.NA)
     if pd.notna(pop) and math.isfinite(pop):
-        parts.append(f"PoP: {format_pct(pop)}")
+        pop_str = fmt.format_pop(float(pop)) if HAS_ENHANCED_CLI else format_pct(pop)
+        parts.append(f"PoP: {pop_str}")
 
     # Risk/Reward or Return on Risk
     if mode == "Premium Selling":
@@ -1096,7 +1098,14 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     else:
         rr = row.get("rr_ratio", pd.NA)
         if pd.notna(rr):
-            parts.append(f"RR: {float(rr):.1f}x")
+            rr_str = fmt.format_rr(float(rr)) if HAS_ENHANCED_CLI else f"{float(rr):.1f}x"
+            parts.append(f"RR: {rr_str}")
+
+    # EV
+    ev = row.get("ev_per_contract", pd.NA)
+    if pd.notna(ev) and math.isfinite(float(ev)):
+        ev_str = fmt.format_ev(float(ev)) if HAS_ENHANCED_CLI else f"${float(ev):.0f}"
+        parts.append(f"EV: {ev_str}")
 
     # Momentum
     rsi = row.get("rsi_14", pd.NA)
@@ -1106,11 +1115,20 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
 
     # Sentiment
     sentiment = row.get("sentiment_tag", "Neutral")
-    parts.append(f"Sentiment: {sentiment}")
+    if HAS_ENHANCED_CLI:
+        s_color = fmt.Colors.GREEN if sentiment == "Bullish" else (fmt.Colors.RED if sentiment == "Bearish" else fmt.Colors.YELLOW)
+        sentiment_str = fmt.colorize(sentiment, s_color)
+    else:
+        sentiment_str = sentiment
+    parts.append(f"Sentiment: {sentiment_str}")
 
     # Quality Score
     quality = row.get('quality_score', 0.0)
-    parts.append(f"Quality: {quality:.2f}")
+    if HAS_ENHANCED_CLI:
+        stars, q_color = fmt.format_quality_score(quality)
+        parts.append(f"Quality: {fmt.colorize(f'{quality:.2f}', q_color)} {stars}")
+    else:
+        parts.append(f"Quality: {quality:.2f}")
 
     # Earnings Play
     if row.get("Earnings Play") == "YES":
@@ -1128,25 +1146,29 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
         current_month_name = datetime.now().strftime("%b")
         parts.append(f"{current_month_name} Hist: {win_rate:.0%}")
 
-    # --- Warnings & Squeeze---
+    # --- Warnings & Squeeze ---
     if row.get("decay_warning"):
-        parts.append("HIGH DECAY RISK")
+        w = fmt.format_warning("HIGH DECAY RISK") if HAS_ENHANCED_CLI else "HIGH DECAY RISK"
+        parts.append(w)
     if row.get("sr_warning"):
-        parts.append(row["sr_warning"])
+        w = fmt.colorize(row["sr_warning"], fmt.Colors.BRIGHT_RED) if HAS_ENHANCED_CLI else row["sr_warning"]
+        parts.append(w)
     if row.get("oi_wall_warning"):
-        parts.append(row["oi_wall_warning"])
+        w = fmt.colorize(row["oi_wall_warning"], fmt.Colors.BRIGHT_RED) if HAS_ENHANCED_CLI else row["oi_wall_warning"]
+        parts.append(w)
     if row.get("squeeze_play"):
-        parts.append("🔥 SQUEEZE PLAY")
+        parts.append("\U0001f525 SQUEEZE PLAY")
 
-    # Invisible Filters Tags
+    # Macro / yield warnings
     if row.get("macro_warning"):
-        parts.append(row["macro_warning"])
+        w = fmt.colorize(row["macro_warning"], fmt.Colors.BRIGHT_RED, bold=True) if HAS_ENHANCED_CLI else row["macro_warning"]
+        parts.append(w)
     if row.get("max_pain_warning"):
         parts.append(row["max_pain_warning"])
     if row.get("yield_warning"):
         parts.append(row["yield_warning"])
     if row.get("high_premium_turnover"):
-        parts.append("🐋 WHALE FLOW")
+        parts.append("\U0001f40b WHALE FLOW")
 
     return " | ".join(parts)
 
@@ -1158,27 +1180,43 @@ def format_mechanics_row(row: pd.Series) -> str:
     # Liquidity
     vol = int(row.get('volume', 0))
     oi = int(row.get('openInterest', 0))
-    parts.append(f"Vol: {vol} OI: {oi}")
+    if HAS_ENHANCED_CLI:
+        vol_color = fmt.Colors.GREEN if vol > 200 else (fmt.Colors.YELLOW if vol > 50 else fmt.Colors.RED)
+        oi_color = fmt.Colors.GREEN if oi > 500 else (fmt.Colors.YELLOW if oi > 100 else fmt.Colors.RED)
+        parts.append(f"Vol: {fmt.colorize(str(vol), vol_color)} OI: {fmt.colorize(str(oi), oi_color)}")
+    else:
+        parts.append(f"Vol: {vol} OI: {oi}")
 
     # Spread
     sp = row.get("spread_pct", pd.NA)
-    parts.append(f"Spread: {format_pct(sp)}")
+    if HAS_ENHANCED_CLI:
+        parts.append(f"Spread: {fmt.format_spread(float(sp) if pd.notna(sp) else 0.0)}")
+    else:
+        parts.append(f"Spread: {format_pct(sp)}")
 
     # Delta
     d = row.get("delta", pd.NA)
     if pd.notna(d) and math.isfinite(d):
-        parts.append(f"Delta: {d:+.2f}")
+        opt_type = row.get("type", "call")
+        if HAS_ENHANCED_CLI:
+            parts.append(f"Delta: {fmt.format_delta(d, is_call=(opt_type.lower() == 'call'))}")
+        else:
+            parts.append(f"Delta: {d:+.2f}")
 
     # Greeks
     gamma = row.get("gamma", pd.NA)
     vega = row.get("vega", pd.NA)
     theta = row.get("theta", pd.NA)
     if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
-        parts.append(f"Greeks: Γ {gamma:.3f}, V {vega:.2f}, Θ {theta:.2f}")
+        greeks_str = f"Greeks: \u0393 {gamma:.3f}, V {vega:.2f}, \u0398 {theta:.2f}"
+        parts.append(fmt.colorize(greeks_str, fmt.Colors.DIM) if HAS_ENHANCED_CLI else greeks_str)
 
     # Cost
     cost = row.get('premium', 0.0) * 100
-    parts.append(f"Cost: {format_money(cost)}")
+    if HAS_ENHANCED_CLI:
+        parts.append(f"Cost: {fmt.format_money(cost)}")
+    else:
+        parts.append(f"Cost: {format_money(cost)}")
 
     return " | ".join(parts)
 
@@ -1293,129 +1331,181 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     print()
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown"):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
         return
-    
+
+    if config is None:
+        config = load_config()
+
+    WIDTH = 100
     chain_iv_median = df_picks["impliedVolatility"].median(skipna=True)
-    
-    # Header with context
-    print("\n" + "="*80)
+    is_multi = mode in ["Budget scan", "Discovery scan", "Premium Selling"]
+
+    # ── Header ──────────────────────────────────────────────────────────────
     if mode == "Budget scan":
-        print(f"  OPTIONS SCREENER REPORT - MULTI-TICKER (Budget: ${budget:.2f})")
+        title = f"OPTIONS SCREENER  \u2014  MULTI-TICKER  (Budget: ${budget:.2f})"
     elif mode == "Discovery scan":
         unique_tickers = df_picks["symbol"].nunique() if "symbol" in df_picks.columns else 1
-        print(f"  OPTIONS SCREENER REPORT - DISCOVERY MODE ({unique_tickers} Tickers)")
+        title = f"OPTIONS SCREENER  \u2014  DISCOVERY  ({unique_tickers} Tickers)"
     elif mode == "Premium Selling":
         unique_tickers = df_picks["symbol"].nunique() if "symbol" in df_picks.columns else 1
-        print(f"  OPTIONS SCREENER REPORT - PREMIUM SELLING ({unique_tickers} Tickers)")
+        title = f"OPTIONS SCREENER  \u2014  PREMIUM SELLING  ({unique_tickers} Tickers)"
     else:
-        symbol_name = df_picks.iloc[0]['symbol'] if "symbol" in df_picks.columns and not df_picks.empty else "UNKNOWN"
-        print(f"  OPTIONS SCREENER REPORT - {symbol_name}")
-    print("="*80)
-    
+        symbol_name = df_picks.iloc[0]['symbol'] if "symbol" in df_picks.columns else "UNKNOWN"
+        title = f"OPTIONS SCREENER  \u2014  {symbol_name}"
+
+    print()
+    if HAS_ENHANCED_CLI:
+        print(fmt.draw_box(title, WIDTH, double=True))
+    else:
+        print("=" * WIDTH)
+        print(f"  {title}")
+        print("=" * WIDTH)
+
+    # Context lines
+    trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW)
+    vol_color = fmt.Colors.GREEN if volatility_regime == "Low" else (fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW)
+
     if mode == "Single-stock":
-        print(f"  Stock Price: ${underlying_price:.2f}")
+        sp_str = f"${underlying_price:.2f}"
+        print(f"  Stock Price: {fmt.colorize(sp_str, fmt.Colors.BRIGHT_WHITE, bold=True) if HAS_ENHANCED_CLI else sp_str}")
     elif mode == "Budget scan":
-        print(f"  Budget Constraint: ${budget:.2f} per contract (premium × 100)")
-        print(f"  Categories: LOW ($0-${budget*0.33:.2f}) | MEDIUM (${budget*0.33:.2f}-${budget*0.66:.2f}) | HIGH (${budget*0.66:.2f}-${budget:.2f})")
-    elif mode in ["Discovery scan", "Premium Selling"]:
-        print(f"  Scan Type: Top opportunities across all price ranges (no budget limit)")
-        print(f"  Categories: LOW (bottom 33%) | MEDIUM (middle 33%) | HIGH (top 33%) by premium")
-    print(f"  Market Status: Trend is {market_trend} | Volatility is {volatility_regime}")
-    print(f"  Risk-Free Rate: {rfr*100:.2f}% (13-week Treasury)")
-    print(f"  Expirations Scanned: {num_expiries}")
-    print(f"  DTE Range: {min_dte} - {max_dte} days")
-    print(f"  Chain Median IV: {format_pct(chain_iv_median)}")
-    print(f"  Mode: {mode}")
-    print("="*80)
+        print(f"  Budget: ${budget:.2f}/contract  |  LOW <${budget*0.33:.0f}  |  MED ${budget*0.33:.0f}\u2013${budget*0.66:.0f}  |  HIGH >${budget*0.66:.0f}")
+    else:
+        print(f"  Top opportunities across all price ranges  |  LOW / MED / HIGH by premium")
 
-    def header(txt: str):
-        print("\n" + "─" * 80)
-        print(f"  {txt}")
-        print("─" * 80)
+    trend_str = fmt.colorize(market_trend, trend_color, bold=True) if HAS_ENHANCED_CLI else market_trend
+    vol_str = fmt.colorize(volatility_regime, vol_color) if HAS_ENHANCED_CLI else volatility_regime
+    print(f"  Trend: {trend_str}  |  Volatility: {vol_str}  |  RFR: {rfr*100:.2f}%  |  Expiries: {num_expiries}  |  DTE: {min_dte}\u2013{max_dte}d  |  Chain IV: {format_pct(chain_iv_median)}")
 
-    # Print each bucket with summary stats
+    if HAS_ENHANCED_CLI:
+        print(fmt.draw_separator(WIDTH))
+    else:
+        print("=" * WIDTH)
+
+    # ── Buckets ──────────────────────────────────────────────────────────────
     for bucket in ["LOW", "MEDIUM", "HIGH"]:
         sub = df_picks[df_picks["price_bucket"] == bucket]
         if sub.empty:
             continue
-        
+
         # Bucket header
-        header(f"{bucket} PREMIUM (Top {len(sub)} Picks)")
-        
-        # Category summary stats
+        if HAS_ENHANCED_CLI:
+            bucket_color = fmt.Colors.DIM if bucket == "LOW" else (fmt.Colors.BRIGHT_YELLOW if bucket == "MEDIUM" else fmt.Colors.BRIGHT_GREEN)
+            label = fmt.colorize(f"  {bucket} PREMIUM", bucket_color, bold=(bucket == "HIGH"))
+            print(f"\n{label}  \u00b7  Top {len(sub)} Picks")
+        else:
+            print(f"\n  {bucket} PREMIUM  \u00b7  Top {len(sub)} Picks")
+
+        # Summary stats
         avg_iv = sub["impliedVolatility"].mean()
         avg_spread = sub["spread_pct"].mean(skipna=True)
         median_delta = sub["abs_delta"].median()
-        print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |Δ| {median_delta:.2f}\n")
-        
-        # Column headers (add Ticker for multi-stock modes)
-        if mode in ["Budget scan", "Discovery scan", "Premium Selling"]:
-            print(f"  {'Tkr':<5} {'Whale':<3} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<7} {'Δ':<7} {'Tag':<4}")
-            print("  " + "-"*81)
+        if HAS_ENHANCED_CLI:
+            iv_str = fmt.format_percentage(avg_iv, good=40, bad=80, higher_is_better=False)
+            sp_str = fmt.format_spread(float(avg_spread) if pd.notna(avg_spread) else 0.0)
+            print(f"  Summary: Avg IV {iv_str} | Avg Spread {sp_str} | Median |\u0394| {median_delta:.2f}\n")
         else:
-            print(f"  {'Whale':<3} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Prem':<8} {'IV':<7} {'OI':<8} {'Vol':<8} {'Δ':<7} {'Tag':<4}")
-            print("  " + "-"*79)
-        
+            print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |\u0394| {median_delta:.2f}\n")
+
+        # Column headers
+        if is_multi:
+            hdr = f"  {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+        else:
+            hdr = f"  {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+        print(fmt.colorize(hdr, fmt.Colors.BOLD + fmt.Colors.UNDERLINE) if HAS_ENHANCED_CLI else hdr)
+
+        if HAS_ENHANCED_CLI:
+            print("  " + fmt.draw_separator(WIDTH - 2))
+        else:
+            print("  " + "-" * (WIDTH - 2))
+
         for _, r in sub.iterrows():
             exp = pd.to_datetime(r["expiration"]).date()
             moneyness = determine_moneyness(r)
             dte = int(r["T_years"] * 365)
-            whale_emoji = "🐋" if r.get("high_premium_turnover", False) else ""
-            
-            # Main line with aligned columns
-            if mode in ["Budget scan", "Discovery scan", "Premium Selling"]:
-                print(
-                    f"  {r['symbol']:<5} "
-                    f"{whale_emoji:<3} "
-                    f"{r['type'].upper():<5} "
-                    f"{r['strike']:>7.2f} "
-                    f"{exp} "
-                    f"{format_money(r['premium']):<8} "
-                    f"{format_pct(r['impliedVolatility']):<7} "
-                    f"{int(r['openInterest']):>6} "
-                    f"{int(r['volume']):>6} "
-                    f"{r['delta']:>+6.2f} "
-                    f"{moneyness:<4}"
-                )
+            whale = "\U0001f40b" if r.get("high_premium_turnover", False) else "  "
+            opt_type = r["type"].upper()
+            strike = r["strike"]
+            premium = r.get("premium", 0.0)
+            iv = r.get("impliedVolatility", 0.0)
+            oi = int(r.get("openInterest", 0))
+            vol = int(r.get("volume", 0))
+            delta = r.get("delta", 0.0)
+            quality = r.get("quality_score", 0.0)
+
+            if HAS_ENHANCED_CLI:
+                sym_str = fmt.colorize(f"{r['symbol']:<6}", fmt.Colors.BRIGHT_WHITE, bold=True)
+                type_color = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
+                type_str = fmt.colorize(f"{opt_type:<5}", type_color)
+                exp_str = fmt.colorize(str(exp), fmt.Colors.YELLOW) if dte < 14 else str(exp)
+                prem_str = fmt.format_money(premium)
+                iv_color = fmt.Colors.GREEN if iv < chain_iv_median * 0.9 else (fmt.Colors.RED if iv > chain_iv_median * 1.2 else fmt.Colors.YELLOW)
+                iv_str = fmt.colorize(f"{format_pct(iv):<8}", iv_color)
+                oi_color = fmt.Colors.GREEN if oi > 500 else (fmt.Colors.YELLOW if oi > 100 else fmt.Colors.RED)
+                oi_str = fmt.colorize(f"{oi:>7}", oi_color)
+                vol_color = fmt.Colors.GREEN if vol > 200 else (fmt.Colors.YELLOW if vol > 50 else fmt.Colors.RED)
+                vol_str = fmt.colorize(f"{vol:>7}", vol_color)
+                delta_str = fmt.format_delta(delta, is_call=(opt_type == "CALL"))
+                mon_color = fmt.Colors.GREEN if moneyness == "ITM" else (fmt.Colors.YELLOW if moneyness == "ATM" else fmt.Colors.DIM)
+                mon_str = fmt.colorize(f"{moneyness:<4}", mon_color)
+                stars, _ = fmt.format_quality_score(quality)
+                if is_multi:
+                    print(f"  {sym_str} {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
+                else:
+                    print(f"  {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
             else:
-                print(
-                    f"  {whale_emoji:<3} "
-                    f"{r['type'].upper():<5} "
-                    f"{r['strike']:>7.2f} "
-                    f"{exp} "
-                    f"{format_money(r['premium']):<8} "
-                    f"{format_pct(r['impliedVolatility']):<7} "
-                    f"{int(r['openInterest']):>7} "
-                    f"{int(r['volume']):>7} "
-                    f"{r['delta']:>+6.2f} "
-                    f"{moneyness:<4}"
-                )
-            # Rationale
+                if is_multi:
+                    print(f"  {r['symbol']:<6} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
+                else:
+                    print(f"  {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
+
+            # Detail rows
             mechanics_line = format_mechanics_row(r)
             analysis_line = format_analysis_row(r, chain_iv_median, mode)
+            arrow = fmt.colorize("\u21b3", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u21b3"
+            mech_label = fmt.colorize("Mechanics:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Mechanics:"
+            anal_label = fmt.colorize("Analysis: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Analysis: "
+            print(f"    {arrow} {mech_label} {mechanics_line}")
+            print(f"    {arrow} {anal_label} {analysis_line}")
 
-            print(f"    ↳ Mechanics: {mechanics_line}")
-            print(f"    ↳ Analysis:  {analysis_line}")
-            
-            # --- NEW: Institutional Metrics ---
+            # Trade plan (thesis + entry/exit) — Phase 3
+            if HAS_ENHANCED_CLI:
+                thesis = generate_trade_thesis(r)
+                thesis_label = fmt.colorize("Thesis:   ", fmt.Colors.BRIGHT_CYAN)
+                thesis_text = fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN)
+                print(f"    {arrow} {thesis_label} {thesis_text}")
+                levels = calculate_entry_exit_levels(r, config)
+                tp_pct = config.get("exit_rules", {}).get("take_profit", 0.50)
+                sl_pct = abs(config.get("exit_rules", {}).get("stop_loss", -0.25))
+                entry_str = fmt.colorize(f"\u2264${levels['entry_price']:.2f}", fmt.Colors.BRIGHT_WHITE)
+                target_str = fmt.colorize(f"${levels['profit_target']:.2f} (+{tp_pct:.0%})", fmt.Colors.GREEN)
+                stop_str = fmt.colorize(f"${levels['stop_loss']:.2f} (-{sl_pct:.0%})", fmt.Colors.RED)
+                from .trade_analysis import calculate_confidence_score, assess_risk_factors
+                conf_score, conf_label = calculate_confidence_score(r)
+                risks = assess_risk_factors(r)
+                conf_color = fmt.Colors.GREEN if conf_label == "HIGH" else (fmt.Colors.YELLOW if conf_label == "MEDIUM" else fmt.Colors.RED)
+                conf_str = fmt.colorize(f"{conf_label} ({conf_score:.0%})", conf_color, bold=True)
+                print(f"    {arrow} {fmt.colorize('Entry:    ', fmt.Colors.DIM)} {entry_str}  |  Target: {target_str}  |  Stop: {stop_str}")
+                print(f"         Breakeven: ${levels['breakeven']:.2f}  |  Max Loss: ${levels['max_loss']:.0f}  |  Confidence: {conf_str}")
+                if risks and risks != ["Standard risks apply"]:
+                    risk_parts = [fmt.colorize(ri, fmt.Colors.BRIGHT_RED) for ri in risks[:2]]
+                    print(f"         Risks: {' | '.join(risk_parts)}")
+
+            # Institutional metrics
             if "short_interest" in r and pd.notna(r["short_interest"]):
-                si_val = r["short_interest"] * 100
-                print(f"      • Short Interest: {si_val:.2f}%")
-            
+                print(f"      \u2022 Short Interest: {r['short_interest']*100:.2f}%")
             if "rvol" in r and pd.notna(r["rvol"]):
-                print(f"      • RVOL: {r['rvol']:.2f}x")
-            
+                print(f"      \u2022 RVOL: {r['rvol']:.2f}x")
             if "gex_flip_price" in r and pd.notna(r["gex_flip_price"]):
-                print(f"      • GEX Flip: ${r['gex_flip_price']:.2f}")
-            
+                print(f"      \u2022 GEX Flip: ${r['gex_flip_price']:.2f}")
             if "vwap" in r and pd.notna(r["vwap"]):
-                 print(f"      • VWAP: ${r['vwap']:.2f}")
-            
-            print("") # Newline
+                print(f"      \u2022 VWAP: ${r['vwap']:.2f}")
+
+            print("")  # Newline
 
 
 def print_spreads_report(df_spreads: pd.DataFrame):
@@ -1450,26 +1540,40 @@ def print_credit_spreads_report(df_spreads: pd.DataFrame):
         print("\nNo credit spreads meeting the criteria were found.")
         return
 
-    print("\n" + "="*80)
-    print("  CREDIT SPREADS REPORT (INCOME ENGINE)")
-    print("="*80)
+    WIDTH = 100
+    print()
+    if HAS_ENHANCED_CLI:
+        print(fmt.draw_box("CREDIT SPREADS REPORT  \u2014  INCOME ENGINE", WIDTH, double=True))
+    else:
+        print("=" * WIDTH)
+        print("  CREDIT SPREADS REPORT (INCOME ENGINE)")
+        print("=" * WIDTH)
 
-    header = f"  {'Symbol':<7} {'Type':<10} {'Short Strike':<13} {'Long Strike':<12} {'Expiration':<12} {'Credit':<8} {'Max Profit':<12} {'Max Loss':<10} {'Score':<5}"
-    print(header)
-    print("  " + "-" * (len(header) - 2))
+    hdr = f"  {'Symbol':<7} {'Type':<10} {'Short':>8} {'Long':>8} {'Expiration':<12} {'Credit':<10} {'Max Profit':<12} {'Max Loss':<10} Score"
+    print(fmt.colorize(hdr, fmt.Colors.BOLD) if HAS_ENHANCED_CLI else hdr)
+    print(("  " + fmt.draw_separator(WIDTH - 2)) if HAS_ENHANCED_CLI else ("  " + "-" * (WIDTH - 2)))
 
     for _, row in df_spreads.iterrows():
         exp = pd.to_datetime(row["expiration"]).date()
+        quality = row["quality_score"]
+        credit_str = fmt.format_money(row['net_credit']) if HAS_ENHANCED_CLI else format_money(row['net_credit'])
+        profit_str = fmt.format_money(row['max_profit']) if HAS_ENHANCED_CLI else format_money(row['max_profit'])
+        loss_str = fmt.colorize(f"${row['max_loss']:.2f}", fmt.Colors.RED) if HAS_ENHANCED_CLI else format_money(row['max_loss'])
+        if HAS_ENHANCED_CLI:
+            stars, _ = fmt.format_quality_score(quality)
+            score_str = f"{quality:.2f} {stars}"
+        else:
+            score_str = f"{quality:.2f}"
         print(
             f"  {row['symbol']:<7} "
             f"{row['type']:<10} "
-            f"{row['short_strike']:>12.2f} "
-            f"{row['long_strike']:>11.2f} "
+            f"{row['short_strike']:>8.2f} "
+            f"{row['long_strike']:>8.2f} "
             f"{exp} "
-            f"{format_money(row['net_credit']):<8} "
-            f"{format_money(row['max_profit']):<12} "
-            f"{format_money(row['max_loss']):<10} "
-            f"{row['quality_score']:.2f}"
+            f"{credit_str:<10} "
+            f"{profit_str:<12} "
+            f"{loss_str:<10} "
+            f"{score_str}"
         )
 
 
@@ -1479,40 +1583,54 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
         print("\nNo iron condors meeting the criteria were found.")
         return
 
-    print("\n" + "="*120)
-    print("  IRON CONDOR REPORT (RANGE-BOUND STRATEGIES)")
-    print("="*120)
+    WIDTH = 100
+    print()
+    if HAS_ENHANCED_CLI:
+        print(fmt.draw_box("IRON CONDOR REPORT  \u2014  RANGE-BOUND STRATEGIES", WIDTH, double=True))
+    else:
+        print("=" * WIDTH)
+        print("  IRON CONDOR REPORT (RANGE-BOUND STRATEGIES)")
+        print("=" * WIDTH)
 
-    header = (
-        f"  {'Symbol':<7} {'Exp':<12} "
-        f"{'Put Wing':<20} {'Call Wing':<20} "
-        f"{'Credit':<8} {'Max Risk':<10} {'RoR':<8} {'Net Δ':<8} {'Score':<5}"
-    )
-    print(header)
-    print("  " + "-" * 118)
+    hdr = f"  {'Symbol':<7} {'Exp':<12} {'Put Wing':<18} {'Call Wing':<18} {'Credit':<10} {'Max Risk':<10} {'RoR':<8} {'Net \u0394':<8} Score"
+    print(fmt.colorize(hdr, fmt.Colors.BOLD) if HAS_ENHANCED_CLI else hdr)
+    print(("  " + fmt.draw_separator(WIDTH - 2)) if HAS_ENHANCED_CLI else ("  " + "-" * (WIDTH - 2)))
 
     for _, row in df_condors.iterrows():
         exp = pd.to_datetime(row["expiration"]).date()
-        
-        # Format wings
         put_wing = f"{row['long_put_strike']:.0f}/{row['short_put_strike']:.0f}"
         call_wing = f"{row['short_call_strike']:.0f}/{row['long_call_strike']:.0f}"
-        
-        # Format delta with sign
-        delta_sign = "+" if row['net_delta'] >= 0 else ""
-        
+        net_delta = row['net_delta']
+        quality = row['quality_score']
+
+        credit_str = fmt.format_money(row['total_credit']) if HAS_ENHANCED_CLI else format_money(row['total_credit'])
+        risk_str = fmt.colorize(f"${row['max_risk']:.2f}", fmt.Colors.RED) if HAS_ENHANCED_CLI else format_money(row['max_risk'])
+        ror_str = fmt.colorize(f"{row['return_on_risk']:.2f}x", fmt.Colors.GREEN if row['return_on_risk'] > 0.25 else fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"{row['return_on_risk']:.2f}x"
+        delta_color = fmt.Colors.GREEN if abs(net_delta) < 0.05 else fmt.Colors.RED
+        delta_str = fmt.colorize(f"{net_delta:>+.3f}", delta_color) if HAS_ENHANCED_CLI else f"{net_delta:>+.3f}"
+        if HAS_ENHANCED_CLI:
+            stars, _ = fmt.format_quality_score(quality)
+            score_str = f"{quality:.2f} {stars}"
+        else:
+            score_str = f"{quality:.2f}"
+
         print(
             f"  {row['symbol']:<7} {exp} "
-            f"{put_wing:<20} {call_wing:<20} "
-            f"{format_money(row['total_credit']):<8} "
-            f"{format_money(row['max_risk']):<10} "
-            f"{row['return_on_risk']:.2f}x    "
-            f"{delta_sign}{row['net_delta']:>+.3f}   "
-            f"{row['quality_score']:.2f}"
+            f"{put_wing:<18} {call_wing:<18} "
+            f"{credit_str:<10} "
+            f"{risk_str:<10} "
+            f"{ror_str:<8} "
+            f"{delta_str:<8} "
+            f"{score_str}"
         )
-    
-    print("\n  💡 Iron Condors profit from range-bound movement with defined risk on both sides.")
-    print("  📊 Net Delta shows directional bias (closer to 0 = more neutral)")
+
+    if HAS_ENHANCED_CLI:
+        print("\n" + fmt.draw_separator(WIDTH))
+        print(fmt.colorize("  Iron Condors profit from range-bound movement with defined risk on both sides.", fmt.Colors.DIM))
+        print(fmt.colorize("  Net Delta closer to 0 = more neutral position.", fmt.Colors.DIM))
+    else:
+        print("\n  Iron Condors profit from range-bound movement with defined risk on both sides.")
+        print("  Net Delta shows directional bias (closer to 0 = more neutral)")
 
 
 def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = None) -> str:
@@ -1658,8 +1776,16 @@ def log_picks_json(logger: logging.Logger, picks_df: pd.DataFrame, context: Dict
 
 
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
-    sfx = f" [{default}]" if default is not None else ""
-    val = input(f"{prompt}{sfx}: ").strip()
+    if HAS_ENHANCED_CLI:
+        colored_prompt = fmt.colorize(prompt, fmt.Colors.BRIGHT_CYAN)
+        if default is not None:
+            colored_default = fmt.colorize(f"[{default}]", fmt.Colors.DIM)
+            val = input(f"{colored_prompt} {colored_default}: ").strip()
+        else:
+            val = input(f"{colored_prompt}: ").strip()
+    else:
+        sfx = f" [{default}]" if default is not None else ""
+        val = input(f"{prompt}{sfx}: ").strip()
     return default if (not val and default is not None) else val
 
 
@@ -1967,15 +2093,21 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     all_iron_condors = []
     ticker_histories = {} # For Portfolio Protection
 
+    WIDTH = 100
     if verbose:
-        print(f"\n{'='*80}")
-        print(f"  Fetching data for {len(tickers)} ticker(s) in parallel...")
-        print(f"{'='*80}\n")
+        if HAS_ENHANCED_CLI:
+            print("\n" + fmt.draw_box(f"Scanning {len(tickers)} ticker(s) in parallel", WIDTH))
+        else:
+            print(f"\n{'='*WIDTH}")
+            print(f"  Fetching data for {len(tickers)} ticker(s) in parallel...")
+            print(f"{'='*WIDTH}\n")
 
     # Use ThreadPoolExecutor for parallel processing
     # Limit to 8 workers to avoid rate limiting
     max_workers = min(8, len(tickers))
-    
+
+    results_buffer: Dict[str, Any] = {}
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all ticker processing jobs
         future_to_symbol = {
@@ -1996,51 +2128,56 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             ): symbol
             for symbol in tickers
         }
-        
-        # Process results as they complete
-        for future in as_completed(future_to_symbol):
+
+        # Collect all results silently, showing a tqdm progress bar
+        if HAS_ENHANCED_CLI and verbose:
+            futures_iter = tqdm(as_completed(future_to_symbol), total=len(tickers), desc="  Scanning", unit="ticker", leave=True)
+        else:
+            futures_iter = as_completed(future_to_symbol)
+
+        for future in futures_iter:
             symbol = future_to_symbol[future]
             try:
-                result = future.result()
-                
-                # Log the ticker processing
-                if verbose:
-                    print(f"\n>>> Scanning {symbol}...")
-                    
-                    # Print context logs
-                    for log in result.get('context_log', []):
-                        print(f"    {log}")
-                
-                if result['success']:
-                    # Store history
-                    if result['history'] is not None:
-                        ticker_histories[symbol] = result['history']
-                    
-                    # Aggregate picks
-                    for picks_df in result['picks']:
-                        all_picks.append(picks_df)
-                        if verbose:
-                            print(f"    Found {len(picks_df)} contracts.")
-                    
-                    # Aggregate credit spreads
-                    for spreads_df in result['credit_spreads']:
-                        all_credit_spreads.append(spreads_df)
-                        if verbose:
-                            print(f"    Found {len(spreads_df)} Credit Spreads.")
-                    
-                    # Aggregate iron condors
-                    if 'iron_condors' in result and isinstance(result['iron_condors'], pd.DataFrame) and not result['iron_condors'].empty:
-                        all_iron_condors.append(result['iron_condors'])
-                        if verbose:
-                            print(f"    Found {len(result['iron_condors'])} Iron Condors.")
-                else:
-                    if verbose and result['error']:
-                        print(f"    {result['error']}")
-                
+                results_buffer[symbol] = future.result()
             except Exception as e:
-                if verbose:
-                    print(f"\n>>> Scanning {symbol}...")
-                    print(f"    ⚠️  Error: {e}")
+                results_buffer[symbol] = {
+                    'success': False, 'error': str(e),
+                    'context_log': [], 'picks': [],
+                    'credit_spreads': [], 'iron_condors': pd.DataFrame(),
+                    'history': None
+                }
+
+    # Print per-ticker summary after all futures complete
+    if verbose:
+        print()
+        for symbol in tickers:
+            result = results_buffer.get(symbol, {})
+            if result.get('success'):
+                n_picks = sum(len(p) for p in result.get('picks', []))
+                n_spreads = sum(len(s) for s in result.get('credit_spreads', []))
+                condors = result.get('iron_condors')
+                n_condors = len(condors) if isinstance(condors, pd.DataFrame) and not condors.empty else 0
+                total = n_picks + n_spreads + n_condors
+                line = f"  \u2713 {symbol:<6} \u2014 {total} contract(s)"
+                print(fmt.colorize(line, fmt.Colors.GREEN) if HAS_ENHANCED_CLI else line)
+            else:
+                err = result.get('error', 'Unknown error')
+                line = f"  \u2717 {symbol:<6} \u2014 {err}"
+                print(fmt.colorize(line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else line)
+        print()
+
+    # Aggregate buffered results
+    for symbol, result in results_buffer.items():
+        if result.get('success'):
+            if result.get('history') is not None:
+                ticker_histories[symbol] = result['history']
+            for picks_df in result.get('picks', []):
+                all_picks.append(picks_df)
+            for spreads_df in result.get('credit_spreads', []):
+                all_credit_spreads.append(spreads_df)
+            condors = result.get('iron_condors')
+            if isinstance(condors, pd.DataFrame) and not condors.empty:
+                all_iron_condors.append(condors)
 
     # --- Portfolio Protection: Correlation Warning ---
     if verbose and len(ticker_histories) > 1:
@@ -2107,7 +2244,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
         elif verbose:
             print("\nNo options found within budget.")
 
@@ -2117,7 +2254,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
         elif verbose:
             print("\nNo discovery picks found.")
             
@@ -2142,7 +2279,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.sort_values("quality_score", ascending=False)
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
         elif verbose:
             print("\nNo premium selling candidates found.")
 
@@ -2152,9 +2289,21 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.copy()
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime)
+                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
         elif verbose:
             print("\nNo suitable options found.")
+
+    # Phase 4: Executive Summary
+    if verbose and HAS_ENHANCED_CLI and not picks.empty:
+        print_executive_summary(
+            picks,
+            config,
+            mode=mode,
+            market_trend=market_trend,
+            volatility_regime=volatility_regime,
+            macro_risk_active=macro_risk_active,
+            num_tickers=len(tickers)
+        )
 
     top_pick = None
     if not picks.empty:
@@ -2253,32 +2402,103 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--close-trades":
-            close_trades()
-            sys.exit(0)
+    # ── CLI argument parsing (Phase 7) ───────────────────────────────────────
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
+    parser.add_argument("--help", "-h", action="store_true", help="Show help and exit")
+    parser.add_argument("--version", action="store_true", help="Show version and exit")
+    parser.add_argument("--close-trades", action="store_true", help="Update trade log with closing P/L")
+    parser.add_argument("--ui", action="store_true", help="Launch Streamlit dashboard")
+    args, _ = parser.parse_known_args()
+
+    if args.no_color and HAS_ENHANCED_CLI:
+        fmt.set_color_enabled(False)
+
+    if args.version:
+        print("Options Screener v1.0.0")
+        sys.exit(0)
+
+    WIDTH = 100
+
+    if args.help:
+        if HAS_ENHANCED_CLI:
+            print(fmt.draw_box("OPTIONS SCREENER  \u2014  HELP", WIDTH, double=True))
+            print(fmt.colorize("\nUsage:", fmt.Colors.BRIGHT_CYAN, bold=True))
+            print("  python -m src.options_screener [OPTIONS]\n")
+            print(fmt.colorize("Options:", fmt.Colors.BRIGHT_CYAN, bold=True))
+            for flag, desc in [
+                ("--no-color",     "Disable colored output"),
+                ("-h, --help",     "Show this help and exit"),
+                ("--version",      "Show version string and exit"),
+                ("--close-trades", "Update trade log with closing P/L"),
+                ("--ui",           "Launch the Streamlit dashboard"),
+            ]:
+                print(f"  {fmt.colorize(f'{flag:<18}', fmt.Colors.BRIGHT_YELLOW)} {desc}")
         else:
-            print(f"Unknown argument: {sys.argv[1]}")
-            print("Usage: python options_screener.py [--close-trades]")
-            sys.exit(1)
-    
+            print("Options Screener v1.0.0")
+            print("Usage: python -m src.options_screener [--no-color] [-h/--help] [--version] [--close-trades] [--ui]")
+        sys.exit(0)
+
+    if args.close_trades:
+        close_trades()
+        sys.exit(0)
+
+    if args.ui:
+        import subprocess
+        print("Launching Streamlit dashboard...")
+        subprocess.run(["streamlit", "run", "src/dashboard.py"])
+        sys.exit(0)
+
     config = load_config("config.json")
-    
-    # Initialize PaperManager and update positions
+
+    # ── Startup Banner (Phase 1) ─────────────────────────────────────────────
+    now_str = datetime.now().strftime("%a %d %b %Y  %H:%M")
+    if HAS_ENHANCED_CLI:
+        print("\n" + fmt.draw_box("OPTIONS SCREENER  \u2022  Pro Edition", WIDTH, double=True))
+        print(fmt.colorize(f"  {now_str}", fmt.Colors.DIM))
+    else:
+        print("\n" + "=" * WIDTH)
+        print("  OPTIONS SCREENER  \u2022  Pro Edition")
+        print(f"  {now_str}")
+        print("=" * WIDTH)
+
+    print(fmt.colorize("  Note: For personal/informational use only. Review data provider terms.", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "  Note: For personal/informational use only. Review data provider terms.")
+    print()
+
+    # Initialize PaperManager
     pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
-    print("\nChecking existing paper trade positions...")
+    init_msg = "Checking existing paper trade positions..."
+    print(fmt.colorize(f"  {init_msg}", fmt.Colors.DIM) if HAS_ENHANCED_CLI else f"  {init_msg}")
     pm.update_positions()
 
-    print("Options Screener (yfinance)")
-    print("Note: For personal/informational use only. Review data provider terms.")
-    print("\nModes:")
-    print("  1. Enter a ticker (e.g., AAPL) for single-stock analysis")
-    print("  2. Enter 'ALL' for budget-based multi-stock scan")
-    print("  3. Enter 'DISCOVER' to scan top 100 most-traded tickers (no budget limit)")
-    print("  4. Enter 'SELL' for Premium Selling analysis (short puts)")
-    print("  5. Enter 'SPREADS' for Credit Spread analysis")
-    print("  6. Enter 'IRON' for Iron Condor analysis")
-    print("  7. Enter 'PORTFOLIO' to view open position P/L\n")
+    # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
+    if HAS_ENHANCED_CLI:
+        print("\n" + fmt.draw_separator(WIDTH))
+        modes = [
+            ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
+            ("2", "ALL",       "Budget-based multi-stock scan"),
+            ("3", "DISCOVER",  "Top 100 most-traded tickers — no budget limit"),
+            ("4", "SELL",      "Premium Selling — income via short puts"),
+            ("5", "SPREADS",   "Credit Spread analysis"),
+            ("6", "IRON",      "Iron Condor analysis — range-bound"),
+            ("7", "PORTFOLIO", "View open position P/L"),
+        ]
+        for num, cmd, desc in modes:
+            n = fmt.colorize(f"[{num}]", fmt.Colors.BRIGHT_YELLOW)
+            c = fmt.colorize(f"{cmd:<10}", fmt.Colors.BRIGHT_WHITE, bold=True)
+            d = fmt.colorize(f"\u2014 {desc}", fmt.Colors.DIM)
+            print(f"  {n} {c} {d}")
+        print(fmt.draw_separator(WIDTH))
+    else:
+        print("\nModes:")
+        print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")
+        print("  [2] ALL        \u2014 Budget-based multi-stock scan")
+        print("  [3] DISCOVER   \u2014 Top 100 most-traded tickers (no budget limit)")
+        print("  [4] SELL       \u2014 Premium Selling analysis (short puts)")
+        print("  [5] SPREADS    \u2014 Credit Spread analysis")
+        print("  [6] IRON       \u2014 Iron Condor analysis")
+        print("  [7] PORTFOLIO  \u2014 View open position P/L")
+    print()
 
     symbol_input = prompt_input("Enter stock ticker or command", "DISCOVER").upper()
 
@@ -2325,7 +2545,16 @@ def main():
     logger = setup_logging()
     print("\nFetching market context (SPY/VIX)...")
     market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
-    print(f"✓ Market Trend: {market_trend} | Volatility: {volatility_regime}")
+    if HAS_ENHANCED_CLI:
+        trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW)
+        vix_color = fmt.Colors.GREEN if volatility_regime == "Low" else (fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW)
+        trend_str = fmt.colorize(market_trend, trend_color, bold=True)
+        vol_str = fmt.colorize(volatility_regime, vix_color)
+        print(f"\u2713 Market Trend: {trend_str} | Volatility: {vol_str}")
+        if macro_risk_active:
+            print(fmt.format_warning("Macro risk active \u2014 elevated market uncertainty"))
+    else:
+        print(f"\u2713 Market Trend: {market_trend} | Volatility: {volatility_regime}")
 
     try:
         max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
@@ -2375,26 +2604,41 @@ def main():
                         "strategy_name": f"Long {str(row['type']).capitalize()}"
                     }
                     pm.log_trade(trade_dict)
-                print(f"\n  ✅ Successfully logged {len(top_5_pt)} paper trades.")
-        
+                msg = f"Logged {len(top_5_pt)} paper trades."
+                print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \u2705 Successfully {msg}")
+
         export_choice = prompt_input("Export results to CSV? (y/n)", "n").lower()
         if export_choice == "y":
             csv_file = export_to_csv(picks, mode, budget)
-            if csv_file: print(f"\n  📄 Results exported to: {csv_file}")
-        
+            if csv_file:
+                msg = f"Results exported to: {csv_file}"
+                print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
+
         if HAS_VISUALIZATION:
             viz_choice = prompt_input("Generate visualization charts? (y/n)", "n").lower()
-            if viz_choice == "y": create_visualizations(picks, mode, output_dir="reports")
-        
+            if viz_choice == "y":
+                create_visualizations(picks, mode, output_dir="reports")
+
         log_choice = prompt_input("Log trades for P/L tracking? (y/n)", "n").lower()
         if log_choice == "y":
             mode_choice = prompt_input("Log (A)ll or (S)elect specific?", "s").lower()
             if mode_choice == "s":
                 picks_to_log = select_trades_to_log(picks)
-                if not picks_to_log.empty: log_trade_entry(picks_to_log, mode)
-            else: log_trade_entry(picks, mode)
-        
-        print("\n👋 Done! Happy trading!\n")
+                if not picks_to_log.empty:
+                    log_trade_entry(picks_to_log, mode)
+                    msg = f"Logged {len(picks_to_log)} trades."
+                    print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
+            else:
+                log_trade_entry(picks, mode)
+
+        # Done message (Phase 6)
+        if HAS_ENHANCED_CLI:
+            WIDTH = 100
+            print("\n" + fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL))
+            print(fmt.colorize("  \U0001f44b  Done! Happy trading!", fmt.Colors.BRIGHT_GREEN, bold=True))
+            print(fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL) + "\n")
+        else:
+            print("\n\U0001f44b Done! Happy trading!\n")
         
     except KeyboardInterrupt: print("\nCancelled.")
     except Exception as e:
@@ -2403,8 +2647,4 @@ def main():
 
 
 if __name__ == "__main__":
-    if "--ui" in sys.argv:
-        import subprocess
-        print("Launching Streamlit dashboard...")
-        subprocess.run(["streamlit", "run", "src/dashboard.py"])
-    else: main()
+    main()
