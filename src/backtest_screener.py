@@ -21,6 +21,20 @@ except ImportError:
     create_backtest_charts = None
 
 
+def load_config() -> Dict:
+    """Load configuration from config.json"""
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Warning: config.json not found at {config_path}, using defaults")
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Warning: Invalid JSON in config.json: {e}, using defaults")
+        return {}
+
+
 def generate_option_symbol(row: pd.Series) -> str:
     """Generates a yfinance-compatible option symbol."""
     exp_date = pd.to_datetime(row['expiration']).strftime('%y%m%d')
@@ -56,7 +70,17 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
     """
     results = []
     today = datetime.now().date()
+    config = load_config()
+    backtest_config = config.get("backtest", {})
+
+    # Load multipliers from config or use defaults
+    profit_mult_long = backtest_config.get("profit_target_multiplier_long", 1.5)
+    profit_mult_short = backtest_config.get("profit_target_multiplier_short", 0.5)
+    stop_mult_long = backtest_config.get("stop_loss_multiplier_long", 0.5)
+    stop_mult_short = backtest_config.get("stop_loss_multiplier_short", 1.5)
+
     print(f"\nRunning Managed Trade Simulation on {len(log_entries)} log entries...")
+    print(f"Using profit/stop multipliers: Long ({profit_mult_long}x/{stop_mult_long}x), Short ({profit_mult_short}x/{stop_mult_short}x)")
 
     for entry in log_entries:
         picks = entry.get("picks", [])
@@ -115,14 +139,13 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                     print(f"  - Could not determine valid entry price for {option_symbol}")
                     continue
 
-                # For long trades: profit at 1.5x, stop at 0.5x
-                # For short trades: profit at 0.5x (buy back cheap), stop at 1.5x (buy back expensive)
+                # Apply profit/stop multipliers from config
                 if is_short_trade:
-                    profit_target = entry_price * 0.5
-                    stop_loss = entry_price * 1.5
+                    profit_target = entry_price * profit_mult_short
+                    stop_loss = entry_price * stop_mult_short
                 else:
-                    profit_target = entry_price * 1.5
-                    stop_loss = entry_price * 0.5
+                    profit_target = entry_price * profit_mult_long
+                    stop_loss = entry_price * stop_mult_long
 
                 outcome = "EXPIRED"
                 for _, day in hist.iterrows():
@@ -154,9 +177,17 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                 elif outcome == "WIN":
                     # Long: bought at entry_price, sold at profit_target (1.5x)
                     # Short: sold at entry_price, bought back at profit_target (0.5x)
-                    pnl_data = {"pnl_per_contract": abs(profit_target - entry_price) * 100}
+                    if is_short_trade:
+                        pnl_data = {"pnl_per_contract": (entry_price - profit_target) * 100}
+                    else:
+                        pnl_data = {"pnl_per_contract": (profit_target - entry_price) * 100}
                 elif outcome == "LOSS":
-                    pnl_data = {"pnl_per_contract": -abs(stop_loss - entry_price) * 100}
+                    # Long: bought at entry_price, forced to sell at stop_loss (0.5x)
+                    # Short: sold at entry_price, forced to buy back at stop_loss (1.5x)
+                    if is_short_trade:
+                        pnl_data = {"pnl_per_contract": (entry_price - stop_loss) * 100}
+                    else:
+                        pnl_data = {"pnl_per_contract": (stop_loss - entry_price) * 100}
 
                 pick["outcome"] = outcome
                 pick.update(pnl_data)

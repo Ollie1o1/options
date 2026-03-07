@@ -44,16 +44,16 @@
     }
   },
   "filters": {
-    "min_volume": 50,
-    "min_open_interest": 10,
-    "max_bid_ask_spread_pct": 0.40,
+    "min_volume": 100,
+    "min_open_interest": 50,
+    "max_bid_ask_spread_pct": 0.20,
     "min_days_to_expiration": 7,
     "max_days_to_expiration": 45,
     "min_days_to_expiration_iron": 30,
     "max_days_to_expiration_iron": 60,
-    "delta_min": 0.15,
-    "delta_max": 0.35,
-    "min_iv_percentile": 20
+    "delta_min": 0.20,
+    "delta_max": 0.45,
+    "min_iv_percentile": 25
   },
   "moneyness_band": 0.15,
   "max_expirations": 4,
@@ -69,16 +69,37 @@
     "stop_loss": -0.25
   },
   "premium_selling_weights": {
-    "pop": 0.30,
-    "return_on_risk": 0.25,
-    "iv_rank": 0.15,
+    "pop": 0.32,
+    "return_on_risk": 0.24,
+    "iv_rank": 0.18,
     "liquidity": 0.10,
-    "theta": 0.10,
-    "ev": 0.05,
-    "trader_pref": 0.05,
+    "theta": 0.12,
+    "ev": 0.04,
+    "trader_pref": 0.0,
     "em_realism": 0.0,
     "rr": 0.0,
     "momentum": 0.0,
     "catalyst": 0.0
+  },
+  "composite_weights": {
+    "pop": 0.22,
+    "em_realism": 0.10,
+    "rr": 0.15,
+    "momentum": 0.08,
+    "iv_rank": 0.06,
+    "liquidity": 0.12,
+    "catalyst": 0.03,
+    "theta": 0.07,
+    "ev": 0.14,
+    "trader_pref": 0.05,
+    "iv_edge": 0.09,
+    "skew_align": 0.04,
+    "gamma_theta": 0.03
+  },
+  "backtest": {
+    "profit_target_multiplier_long": 1.5,
+    "profit_target_multiplier_short": 0.5,
+    "stop_loss_multiplier_long": 0.5,
+    "stop_loss_multiplier_short": 1.5
   }
 }

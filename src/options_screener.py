@@ -378,6 +378,7 @@ def calculate_metrics(
     # Break-even realism
     be_vals = np.where(is_call, K_vals + prem_vals, K_vals - prem_vals)
     req_move = np.where(is_call, np.maximum(0.0, be_vals - S_vals), np.maximum(0.0, S_vals - be_vals))
+    em = df["expected_move"].values
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio = np.where(em > 0, req_move / em, np.nan)
     em_realism = np.full_like(ratio, 0.5)
@@ -400,26 +401,37 @@ def calculate_metrics(
         df["iv_vs_hv"] = 0.0
         df["iv_hv_ratio"] = 1.0
     
-    # --- OI Wall Detection ---
+    # --- OI Wall Detection (Optimized) ---
     df["oi_wall_warning"] = ""
-    for expiry in df["expiration"].unique():
-        expiry_df = df[df["expiration"] == expiry]
-        calls = expiry_df[expiry_df["type"] == "call"]
-        if not calls.empty:
-            call_wall_idx = calls["openInterest"].idxmax()
-            if pd.notna(call_wall_idx):
-                call_wall = expiry_df.loc[call_wall_idx]["strike"]
-                strikes_below = sorted([s for s in calls[calls["strike"] < call_wall]["strike"].unique()], reverse=True)
-                strike_below_wall = strikes_below[0] if strikes_below else None
-                df.loc[(df["expiration"] == expiry) & (df["type"] == "call") & ((df["strike"] == call_wall) | (df["strike"] == strike_below_wall)), "oi_wall_warning"] = "LIMITED UPSIDE"
-        puts = expiry_df[expiry_df["type"] == "put"]
-        if not puts.empty:
-            put_wall_idx = puts["openInterest"].idxmax()
-            if pd.notna(put_wall_idx):
-                put_wall = expiry_df.loc[put_wall_idx]["strike"]
-                strikes_above = sorted([s for s in puts[puts["strike"] > put_wall]["strike"].unique()])
-                strike_above_wall = strikes_above[0] if strikes_above else None
-                df.loc[(df["expiration"] == expiry) & (df["type"] == "put") & ((df["strike"] == put_wall) | (df["strike"] == strike_above_wall)), "oi_wall_warning"] = "LIMITED DOWNSIDE"
+
+    # Find max OI strikes per expiration and type using vectorized groupby
+    max_oi_idx = df.groupby(["expiration", "type"])["openInterest"].idxmax()
+
+    for (expiry, opt_type), idx in max_oi_idx.items():
+        if pd.isna(idx):
+            continue
+
+        wall_strike = df.loc[idx, "strike"]
+
+        # Get all strikes for this expiration and type, sorted
+        mask = (df["expiration"] == expiry) & (df["type"] == opt_type)
+        strikes_sorted = df.loc[mask, "strike"].sort_values().unique()
+
+        # Find adjacent strike to the wall
+        wall_pos = np.searchsorted(strikes_sorted, wall_strike)
+
+        if opt_type == "call":
+            # For calls, warn at wall and one strike below
+            adjacent_strike = strikes_sorted[wall_pos - 1] if wall_pos > 0 else None
+            warning_strikes = [wall_strike] + ([adjacent_strike] if adjacent_strike is not None else [])
+            warning_mask = mask & df["strike"].isin(warning_strikes)
+            df.loc[warning_mask, "oi_wall_warning"] = "LIMITED UPSIDE"
+        else:  # put
+            # For puts, warn at wall and one strike above
+            adjacent_strike = strikes_sorted[wall_pos + 1] if wall_pos < len(strikes_sorted) - 1 else None
+            warning_strikes = [wall_strike] + ([adjacent_strike] if adjacent_strike is not None else [])
+            warning_mask = mask & df["strike"].isin(warning_strikes)
+            df.loc[warning_mask, "oi_wall_warning"] = "LIMITED DOWNSIDE"
 
     # IV Skew
     df["iv_skew"] = np.nan
@@ -684,9 +696,21 @@ def enrich_and_score(
     if "underlying" in df.columns and "strike" in df.columns:
         df = df[(df["strike"] >= df["underlying"] * (1 - mb)) & (df["strike"] <= df["underlying"] * (1 + mb))].copy()
 
-    df["bid"], df["ask"] = df["bid"].fillna(0.0), df["ask"].fillna(0.0)
-    df["mid"] = (df["bid"] + df["ask"]) / 2.0
-    df["premium"] = df["mid"].where(df["mid"] > 0.0, df["lastPrice"])
+    # Only use valid bid/ask prices (> 0), otherwise fall back to lastPrice
+    df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
+    df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
+
+    # Calculate mid only when both bid and ask are valid (> 0)
+    valid_bid = (df["bid"].notna()) & (df["bid"] > 0)
+    valid_ask = (df["ask"].notna()) & (df["ask"] > 0)
+    valid_quotes = valid_bid & valid_ask
+
+    df["mid"] = np.where(valid_quotes, (df["bid"] + df["ask"]) / 2.0, np.nan)
+    df["premium"] = df["mid"].where(df["mid"].notna() & (df["mid"] > 0.0), df["lastPrice"])
+
+    # For spread calculation, set bid/ask to NaN if invalid (filled later)
+    df.loc[~valid_bid, "bid"] = np.nan
+    df.loc[~valid_ask, "ask"] = np.nan
 
     if mode == "Premium Selling":
         df = df[df['type'] == 'put'].copy()

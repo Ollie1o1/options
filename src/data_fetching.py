@@ -574,13 +574,14 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     """
     try:
         tkr = yf.Ticker(symbol)
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         raise RuntimeError(f"Failed to initialize ticker {symbol}: {e}")
 
     # 1. Fetch History ONCE (1 year daily)
     try:
         hist = tkr.history(period="1y", interval="1d")
-    except Exception:
+    except (ValueError, KeyError, URLError) as e:
+        logging.warning(f"Failed to fetch history for {symbol}: {e}")
         hist = pd.DataFrame()
 
     if hist.empty:
@@ -609,7 +610,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     # 4. Fetch Options Chains
     try:
         expirations = tkr.options
-    except Exception as e:
+    except (ValueError, KeyError, AttributeError) as e:
         raise RuntimeError(f"Failed to fetch options expirations for {symbol}: {e}")
 
     if not expirations:
