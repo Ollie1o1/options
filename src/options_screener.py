@@ -2218,7 +2218,7 @@ def main():
                         "expiration": row["expiration"],
                         "strike": row["strike"],
                         "type": str(row["type"]).capitalize(),
-                        "entry_price": safe_float(row.get("ask"), row["lastPrice"]),
+                        "entry_price": safe_float(row.get("ask") or None, row["lastPrice"]),
                         "quality_score": row["quality_score"],
                         "strategy_name": f"Long {str(row['type']).capitalize()}"
                     }
