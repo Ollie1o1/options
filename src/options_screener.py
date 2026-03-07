@@ -29,6 +29,10 @@ from urllib.error import URLError
 import functools
 import random
 import argparse
+import shutil
+import warnings
+import contextlib
+import io
 
 
 # Dependency checks
@@ -117,6 +121,39 @@ except ImportError:
 
 
 
+
+
+def get_display_width() -> int:
+    """Return terminal width clamped to a readable range (60–120)."""
+    try:
+        w = shutil.get_terminal_size(fallback=(100, 24)).columns
+        return max(60, min(w, 120))
+    except Exception:
+        return 100
+
+
+@contextlib.contextmanager
+def _suppress_scan_noise():
+    """Suppress noisy third-party logging/warnings during parallel scan."""
+    _noisy = ['yfinance', 'urllib3', 'peewee', 'charset_normalizer',
+              'requests', 'asyncio', 'httpx', 'httpcore']
+    _saved = {}
+    for name in _noisy:
+        lg = logging.getLogger(name)
+        _saved[name] = lg.level
+        lg.setLevel(logging.CRITICAL)
+    # Also silence the root logger's stderr handler temporarily
+    _root = logging.getLogger()
+    _saved_root = _root.level
+    # Capture and discard warnings from third-party libs
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        try:
+            yield
+        finally:
+            for name, level in _saved.items():
+                logging.getLogger(name).setLevel(level)
+            _root.setLevel(_saved_root)
 
 
 def load_config(config_path: str = "config.json") -> Dict:
@@ -1247,7 +1284,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
         return
 
     # Use new formatting
-    width = config.get('display', {}).get('terminal_width', 100)
+    width = get_display_width()
 
     print("\n" + fmt.draw_box("⚡ EXECUTIVE SUMMARY", width, double=True))
 
@@ -1340,7 +1377,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     if config is None:
         config = load_config()
 
-    WIDTH = 100
+    WIDTH = get_display_width()
     chain_iv_median = df_picks["impliedVolatility"].median(skipna=True)
     is_multi = mode in ["Budget scan", "Discovery scan", "Premium Selling"]
 
@@ -1540,7 +1577,7 @@ def print_credit_spreads_report(df_spreads: pd.DataFrame):
         print("\nNo credit spreads meeting the criteria were found.")
         return
 
-    WIDTH = 100
+    WIDTH = get_display_width()
     print()
     if HAS_ENHANCED_CLI:
         print(fmt.draw_box("CREDIT SPREADS REPORT  \u2014  INCOME ENGINE", WIDTH, double=True))
@@ -1583,7 +1620,7 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
         print("\nNo iron condors meeting the criteria were found.")
         return
 
-    WIDTH = 100
+    WIDTH = get_display_width()
     print()
     if HAS_ENHANCED_CLI:
         print(fmt.draw_box("IRON CONDOR REPORT  \u2014  RANGE-BOUND STRATEGIES", WIDTH, double=True))
@@ -2093,13 +2130,13 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     all_iron_condors = []
     ticker_histories = {} # For Portfolio Protection
 
-    WIDTH = 100
+    WIDTH = get_display_width()
     if verbose:
         if HAS_ENHANCED_CLI:
-            print("\n" + fmt.draw_box(f"Scanning {len(tickers)} ticker(s) in parallel", WIDTH))
+            print("\n" + fmt.draw_box(f"Scanning {len(tickers)} ticker(s)", WIDTH))
         else:
             print(f"\n{'='*WIDTH}")
-            print(f"  Fetching data for {len(tickers)} ticker(s) in parallel...")
+            print(f"  Fetching data for {len(tickers)} ticker(s)...")
             print(f"{'='*WIDTH}\n")
 
     # Use ThreadPoolExecutor for parallel processing
@@ -2108,63 +2145,80 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     results_buffer: Dict[str, Any] = {}
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all ticker processing jobs
-        future_to_symbol = {
-            executor.submit(
-                process_ticker,
-                symbol,
-                mode,
-                max_expiries,
-                min_dte,
-                max_dte,
-                rfr,
-                config,
-                vix_weights,
-                trader_profile,
-                budget,
-                macro_risk_active,
-                tnx_change_pct
-            ): symbol
-            for symbol in tickers
-        }
+    with _suppress_scan_noise():
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_symbol = {
+                executor.submit(
+                    process_ticker,
+                    symbol,
+                    mode,
+                    max_expiries,
+                    min_dte,
+                    max_dte,
+                    rfr,
+                    config,
+                    vix_weights,
+                    trader_profile,
+                    budget,
+                    macro_risk_active,
+                    tnx_change_pct
+                ): symbol
+                for symbol in tickers
+            }
 
-        # Collect all results silently, showing a tqdm progress bar
-        if HAS_ENHANCED_CLI and verbose:
-            futures_iter = tqdm(as_completed(future_to_symbol), total=len(tickers), desc="  Scanning", unit="ticker", leave=True)
-        else:
-            futures_iter = as_completed(future_to_symbol)
+            if HAS_ENHANCED_CLI and verbose:
+                bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
+                futures_iter = tqdm(
+                    as_completed(future_to_symbol),
+                    total=len(tickers),
+                    desc="  Scanning",
+                    unit="",
+                    leave=False,
+                    dynamic_ncols=True,
+                    bar_format=bar_fmt,
+                    file=sys.stderr,
+                )
+            else:
+                futures_iter = as_completed(future_to_symbol)
 
-        for future in futures_iter:
-            symbol = future_to_symbol[future]
-            try:
-                results_buffer[symbol] = future.result()
-            except Exception as e:
-                results_buffer[symbol] = {
-                    'success': False, 'error': str(e),
-                    'context_log': [], 'picks': [],
-                    'credit_spreads': [], 'iron_condors': pd.DataFrame(),
-                    'history': None
-                }
+            for future in futures_iter:
+                symbol = future_to_symbol[future]
+                try:
+                    results_buffer[symbol] = future.result()
+                except Exception as e:
+                    results_buffer[symbol] = {
+                        'success': False, 'error': str(e),
+                        'context_log': [], 'picks': [],
+                        'credit_spreads': [], 'iron_condors': pd.DataFrame(),
+                        'history': None
+                    }
 
     # Print per-ticker summary after all futures complete
     if verbose:
-        print()
+        ok, fail = [], []
         for symbol in tickers:
             result = results_buffer.get(symbol, {})
             if result.get('success'):
-                n_picks = sum(len(p) for p in result.get('picks', []))
-                n_spreads = sum(len(s) for s in result.get('credit_spreads', []))
-                condors = result.get('iron_condors')
-                n_condors = len(condors) if isinstance(condors, pd.DataFrame) and not condors.empty else 0
-                total = n_picks + n_spreads + n_condors
-                line = f"  \u2713 {symbol:<6} \u2014 {total} contract(s)"
-                print(fmt.colorize(line, fmt.Colors.GREEN) if HAS_ENHANCED_CLI else line)
+                n = (sum(len(p) for p in result.get('picks', []))
+                     + sum(len(s) for s in result.get('credit_spreads', []))
+                     + (len(result['iron_condors']) if isinstance(result.get('iron_condors'), pd.DataFrame) and not result['iron_condors'].empty else 0))
+                ok.append((symbol, n))
             else:
-                err = result.get('error', 'Unknown error')
-                line = f"  \u2717 {symbol:<6} \u2014 {err}"
+                fail.append((symbol, result.get('error', 'no contracts passed filters')))
+
+        if ok or fail:
+            sep = fmt.draw_separator(WIDTH) if HAS_ENHANCED_CLI else "-" * WIDTH
+            print(sep)
+            for sym, n in ok:
+                line = f"  \u2713 {sym:<6}  {n} contract(s)"
+                print(fmt.colorize(line, fmt.Colors.GREEN) if HAS_ENHANCED_CLI else line)
+            for sym, err in fail:
+                # Only show brief reason, not the full stack trace
+                short_err = str(err).split('\n')[0][:60]
+                line = f"  \u2013 {sym:<6}  {short_err}"
                 print(fmt.colorize(line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else line)
-        print()
+            print(sep)
+            print()
 
     # Aggregate buffered results
     for symbol, result in results_buffer.items():
@@ -2418,7 +2472,7 @@ def main():
         print("Options Screener v1.0.0")
         sys.exit(0)
 
-    WIDTH = 100
+    WIDTH = get_display_width()
 
     if args.help:
         if HAS_ENHANCED_CLI:
@@ -2633,7 +2687,7 @@ def main():
 
         # Done message (Phase 6)
         if HAS_ENHANCED_CLI:
-            WIDTH = 100
+            WIDTH = get_display_width()
             print("\n" + fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL))
             print(fmt.colorize("  \U0001f44b  Done! Happy trading!", fmt.Colors.BRIGHT_GREEN, bold=True))
             print(fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL) + "\n")
