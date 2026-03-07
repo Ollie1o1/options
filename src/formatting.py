@@ -417,8 +417,9 @@ def format_ev(ev: float) -> str:
 
 def format_delta(delta: float, is_call: bool = True) -> str:
     """Format delta value"""
-    sign = "+" if (is_call and delta > 0) or (not is_call and delta < 0) else ""
-    formatted = f"{sign}{delta:.2f}"
+    # Show alignment-aware sign: + when directionally expected, - otherwise
+    aligned = (is_call and delta > 0) or (not is_call and delta < 0)
+    formatted = f"+{abs(delta):.2f}" if aligned else f"{delta:.2f}"
 
     if not supports_color():
         return formatted
