@@ -2301,7 +2301,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             mode=mode,
             market_trend=market_trend,
             volatility_regime=volatility_regime,
-            macro_risk_active=macro_risk_active,
+            macro_risk=macro_risk_active,
             num_tickers=len(tickers)
         )
 
