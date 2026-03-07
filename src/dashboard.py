@@ -156,7 +156,7 @@ def render_ticker_tape():
     tnx = st.session_state.tnx_change_pct
     
     # Determine colors
-    trend_class = "positive" if "Bullish" in trend else ("negative" if "Bearish" in trend else "neutral")
+    trend_class = "positive" if "Bull" in trend else ("negative" if "Bear" in trend else "neutral")
     macro_class = "negative" if macro else "positive"
     macro_text = "RISK ON" if not macro else "RISK OFF"
     tnx_class = "negative" if tnx > 0.025 else "neutral"
@@ -351,7 +351,7 @@ def render_scanner_tab(budget):
                         "expiration": opt["expiration"],
                         "strike": opt["strike"],
                         "type": opt["type"],
-                        "entry_price": opt.get("ask") or opt["lastPrice"],
+                        "entry_price": opt.get("ask") if opt.get("ask") is not None else opt["lastPrice"],
                         "quality_score": opt["quality_score"],
                         "strategy_name": f"Long {opt['type'].capitalize()}"
                     }

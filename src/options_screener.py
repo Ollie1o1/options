@@ -202,6 +202,8 @@ def calculate_probability_of_touch(option_type: Union[str, np.ndarray], S: Union
         T = np.asanyarray(T)
         sigma = np.asanyarray(sigma)
         
+        scalar_input = isinstance(option_type, str) and S.ndim == 0
+
         if isinstance(option_type, str):
             is_call = option_type.lower() == "call"
         else:
@@ -211,18 +213,21 @@ def calculate_probability_of_touch(option_type: Union[str, np.ndarray], S: Union
         # More precise: P(touch) ≈ 2 * N(d2)
         with np.errstate(divide='ignore', invalid='ignore'):
             d2 = (np.log(S / K) - (0.5 * sigma * sigma) * T) / (sigma * np.sqrt(T))
-        
+
+        # Scalar fast-path: avoid boolean indexing on 0-d arrays
+        if scalar_input:
+            is_otm = (K > S) if is_call else (K < S)
+            if is_otm:
+                pot_val = 2 * norm_cdf(float(d2)) if is_call else 2 * (1.0 - norm_cdf(float(d2)))
+                return float(np.clip(pot_val, 0.0, 1.0))
+            return 1.0
+
         pot = np.ones_like(S, dtype=float)
-        
         call_otm = is_call & (K > S)
         put_otm = (~is_call) & (K < S)
-        
         pot[call_otm] = 2 * norm_cdf(d2[call_otm])
         pot[put_otm] = 2 * (1.0 - norm_cdf(d2[put_otm]))
-        
-        if np.isscalar(option_type) and np.isscalar(S):
-            return float(pot)
-        return pot
+        return np.clip(pot, 0.0, 1.0)
     except Exception:
         return None
 
@@ -473,7 +478,11 @@ def calculate_metrics(
             df.loc[mask_mp & ((und - mp).abs() / mp > 0.05), "max_pain_warning"] = "⚠️ FIGHTING MAX PAIN"
         if stock_ret > 0 and sector_ret < -0.015:
             df["macro_warning"] = np.where(df["macro_warning"] != "", df["macro_warning"] + " | FAKE-OUT DIVERGENCE", "FAKE-OUT DIVERGENCE")
-    df["yield_warning"] = "📉 RATES UP" if tnx_change_pct > 0.025 and df["symbol"].isin(["QQQ", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"]).any() else ""
+    RATE_SENSITIVE = {"QQQ", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"}
+    if tnx_change_pct > 0.025:
+        df["yield_warning"] = np.where(df["symbol"].isin(RATE_SENSITIVE), "📉 RATES UP", "")
+    else:
+        df["yield_warning"] = ""
     
     return df
 

@@ -38,29 +38,29 @@ def monte_carlo_pop(
     try:
         if S <= 0 or K <= 0 or T <= 0 or sigma <= 0 or premium <= 0:
             return None, None
-        
-        if random_seed is not None:
-            np.random.seed(random_seed)
-        
+
+        rng = np.random.default_rng(random_seed)
+
         # Time step (daily granularity for touch detection)
         n_steps = max(int(T * 252), 1)  # Trading days
         dt = T / n_steps
-        
+
         # Pre-compute constants
         drift = (r - 0.5 * sigma ** 2) * dt
         diffusion = sigma * np.sqrt(dt)
-        
+
         # Generate random normal samples: shape (n_simulations, n_steps)
-        random_shocks = np.random.standard_normal((n_simulations, n_steps))
-        
-        # Initialize price paths
-        prices = np.zeros((n_simulations, n_steps + 1))
-        prices[:, 0] = S
-        
-        # Simulate GBM paths
-        for t in range(1, n_steps + 1):
-            prices[:, t] = prices[:, t - 1] * np.exp(drift + diffusion * random_shocks[:, t - 1])
-        
+        random_shocks = rng.standard_normal((n_simulations, n_steps))
+
+        # Vectorized GBM: cumulative log-returns then exponentiate
+        log_returns = drift + diffusion * random_shocks  # (n_simulations, n_steps)
+        cum_log_returns = np.cumsum(log_returns, axis=1)  # cumulative sum along steps
+        # Prepend zeros for t=0 column, then compute prices
+        cum_log_returns_full = np.concatenate(
+            [np.zeros((n_simulations, 1)), cum_log_returns], axis=1
+        )
+        prices = S * np.exp(cum_log_returns_full)  # (n_simulations, n_steps+1)
+
         # Final prices at expiration
         final_prices = prices[:, -1]
         
@@ -109,13 +109,12 @@ def monte_carlo_expected_value(
         if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
             return None
         
-        if random_seed is not None:
-            np.random.seed(random_seed)
-        
+        rng = np.random.default_rng(random_seed)
+
         # Simulate final stock prices
         drift = (r - 0.5 * sigma ** 2) * T
         diffusion = sigma * np.sqrt(T)
-        random_shocks = np.random.standard_normal(n_simulations)
+        random_shocks = rng.standard_normal(n_simulations)
         
         final_prices = S * np.exp(drift + diffusion * random_shocks)
         
