@@ -83,6 +83,24 @@ from .filters import (
 )
 from .paper_manager import PaperManager
 
+# Enhanced CLI modules
+try:
+    from . import formatting as fmt
+    from .trade_analysis import (
+        generate_trade_thesis,
+        calculate_entry_exit_levels,
+        calculate_confidence_score,
+        categorize_by_strategy,
+        assess_risk_factors,
+        format_trade_plan
+    )
+    from tqdm import tqdm
+    HAS_ENHANCED_CLI = True
+except ImportError as e:
+    HAS_ENHANCED_CLI = False
+    print(f"Enhanced CLI features unavailable: {e}")
+    print("Install with: pip install colorama tqdm")
+
 # Optional imports (relative to this package)
 try:
     from .simulation import monte_carlo_pop
@@ -1163,6 +1181,116 @@ def format_mechanics_row(row: pd.Series) -> str:
     parts.append(f"Cost: {format_money(cost)}")
 
     return " | ".join(parts)
+
+
+def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "Discovery",
+                            market_trend: str = "Unknown", volatility_regime: str = "Unknown",
+                            macro_risk: bool = False, num_tickers: int = 0):
+    """
+    Print an executive summary with top picks and key warnings.
+
+    Args:
+        df_picks: DataFrame with all options
+        config: Configuration dictionary
+        mode: Scan mode
+        market_trend: Market trend (Bullish/Bearish/Sideways)
+        volatility_regime: VIX regime (Low/Normal/High)
+        macro_risk: Whether macro risk is active
+        num_tickers: Number of tickers scanned
+    """
+    if df_picks.empty:
+        return
+
+    if not HAS_ENHANCED_CLI:
+        # Fallback to simple summary
+        print(f"\n{'='*80}")
+        print(f"  SUMMARY: Found {len(df_picks)} opportunities")
+        print(f"{'='*80}\n")
+        return
+
+    # Use new formatting
+    width = config.get('display', {}).get('terminal_width', 100)
+
+    print("\n" + fmt.draw_box("⚡ EXECUTIVE SUMMARY", width, double=True))
+
+    # Market Context
+    vix = get_vix_level()
+    vix_str = f"{vix:.1f}" if vix else "N/A"
+
+    context_parts = []
+    if mode in ["Discovery", "Budget"]:
+        context_parts.append(f"{mode} Scan ({num_tickers} tickers)")
+    else:
+        context_parts.append(mode)
+
+    print(f"\n{fmt.format_header('📊 MARKET CONTEXT', '')}")
+    trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (
+        fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW
+    )
+    vol_color = fmt.Colors.GREEN if volatility_regime == "Low" else (
+        fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW
+    )
+
+    print(f"   Trend: {fmt.colorize(market_trend, trend_color, bold=True)} | "
+          f"VIX: {fmt.colorize(vix_str, vol_color)} ({volatility_regime}) | "
+          f"Risk: {fmt.colorize('HIGH', fmt.Colors.RED, bold=True) if macro_risk else fmt.colorize('LOW', fmt.Colors.GREEN)}")
+
+    # Top 3 Opportunities
+    print(f"\n{fmt.format_header('🏆 TOP 3 OPPORTUNITIES', '')}")
+
+    top3 = df_picks.nlargest(3, 'quality_score')
+
+    for i, (_, row) in enumerate(top3.iterrows(), 1):
+        symbol = row.get('symbol', 'N/A')
+        strike = row.get('strike', 0)
+        opt_type = row.get('type', 'call').upper()
+        premium = row.get('premium', 0)
+        pop = row.get('prob_profit', 0)
+        rr = row.get('rr_ratio', 0)
+        ev = row.get('ev_per_contract', 0)
+        quality = row.get('quality_score', 0)
+
+        stars, _ = fmt.format_quality_score(quality)
+
+        # Box for each pick
+        print(fmt.draw_separator(width - 4, fmt.BoxChars.HORIZONTAL))
+        print(f"{fmt.BoxChars.VERTICAL} {i}. {symbol} ${strike} {opt_type} @ ${premium:.2f} • "
+              f"{fmt.format_pop(pop)} PoP • {fmt.format_rr(rr)} RR • {fmt.format_ev(ev)} EV • {stars}")
+
+        # Thesis
+        thesis = generate_trade_thesis(row) if HAS_ENHANCED_CLI else "Standard setup"
+        print(f"{fmt.BoxChars.VERTICAL}    💡 {thesis}")
+
+        # Entry/Exit
+        if config.get('display', {}).get('show_entry_exit_levels', True):
+            levels = calculate_entry_exit_levels(row, config)
+            print(f"{fmt.BoxChars.VERTICAL}    📍 Entry: ≤${levels['entry_price']:.2f} | "
+                  f"Target: ${levels['profit_target']:.2f} (+50%) | "
+                  f"Stop: ${levels['stop_loss']:.2f} (-25%)")
+
+    print(fmt.draw_separator(width - 4, fmt.BoxChars.HORIZONTAL))
+
+    # Warnings
+    print(f"\n{fmt.format_header('⚠️  WATCH OUT', '')}")
+
+    high_spread = df_picks[df_picks['spread_pct'] > 0.20]
+    if not high_spread.empty:
+        print(fmt.format_warning(f"{len(high_spread)} options with spreads >20% - use limit orders!"))
+
+    neg_ev = df_picks[df_picks['ev_per_contract'] < 0]
+    if not neg_ev.empty:
+        print(fmt.format_warning(f"{len(neg_ev)} trades have negative expected value"))
+
+    earnings = df_picks[df_picks.get('Earnings Play', 'NO') == 'YES']
+    if not earnings.empty:
+        print(fmt.format_warning(f"{len(earnings)} earnings plays - IV crush risk post-announcement"))
+
+    low_liquid = df_picks[(df_picks['volume'] < 100) | (df_picks['openInterest'] < 100)]
+    if not low_liquid.empty:
+        print(fmt.format_warning(f"{len(low_liquid)} low-liquidity options - execution risk"))
+
+    print("\n" + fmt.draw_separator(width, fmt.BoxChars.D_HORIZONTAL))
+    print()
 
 
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown"):

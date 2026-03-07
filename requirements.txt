@@ -8,3 +8,5 @@ streamlit>=1.28.0
 watchdog>=3.0.0
 plotly>=5.0.0
 scipy
+colorama>=0.4.6
+tqdm>=4.65.0

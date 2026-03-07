@@ -101,5 +101,25 @@
     "profit_target_multiplier_short": 0.5,
     "stop_loss_multiplier_long": 0.5,
     "stop_loss_multiplier_short": 1.5
+  },
+  "display": {
+    "use_colors": true,
+    "use_emojis": true,
+    "default_mode": "enhanced",
+    "picks_per_category": 15,
+    "show_executive_summary": true,
+    "show_trade_thesis": true,
+    "show_entry_exit_levels": true,
+    "show_confidence_score": true,
+    "categorization": "strategy",
+    "min_confidence_threshold": 0.5,
+    "terminal_width": 100
+  },
+  "entry_exit_rules": {
+    "entry_improvement_pct": 0.05,
+    "profit_target_pct": 0.50,
+    "stop_loss_pct": 0.25,
+    "trailing_stop_enabled": false,
+    "position_risk_pct": 0.02
   }
 }
