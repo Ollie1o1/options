@@ -649,15 +649,28 @@ def calculate_metrics(
             warning_mask = mask & df["strike"].isin(warning_strikes)
             df.loc[warning_mask, "oi_wall_warning"] = "LIMITED DOWNSIDE"
 
-    # IV Skew
-    df["iv_skew"] = np.nan
-    for (exp, strike), group in df.groupby(["expiration", "strike"]):
-        if len(group) == 2:
-            call_iv = group[group["type"] == "call"]["impliedVolatility"].values
-            put_iv = group[group["type"] == "put"]["impliedVolatility"].values
-            if len(call_iv) > 0 and len(put_iv) > 0:
-                df.loc[group.index, "iv_skew"] = put_iv[0] - call_iv[0]
-    df["iv_skew"] = df["iv_skew"].ffill().bfill().fillna(0.0)
+    # IV Skew — 25-delta risk reversal (standard vol surface signal)
+    # Finds the call and put closest to 0.25 abs_delta per expiration,
+    # then computes skew = Put_25Δ_IV − Call_25Δ_IV.
+    # Positive = market paying more for downside protection (fear/hedging demand).
+    # Negative = call skew (momentum/squeeze regime).
+    df["iv_skew"] = 0.0
+    try:
+        for exp, exp_grp in df.groupby("expiration"):
+            calls_exp = exp_grp[exp_grp["type"] == "call"]
+            puts_exp  = exp_grp[exp_grp["type"] == "put"]
+            if calls_exp.empty or puts_exp.empty:
+                continue
+            call_25d = calls_exp.iloc[(calls_exp["abs_delta"] - 0.25).abs().argsort()[:1]]
+            put_25d  = puts_exp.iloc[(puts_exp["abs_delta"] - 0.25).abs().argsort()[:1]]
+            if call_25d.empty or put_25d.empty:
+                continue
+            skew_val = (float(put_25d["impliedVolatility"].iloc[0])
+                        - float(call_25d["impliedVolatility"].iloc[0]))
+            df.loc[exp_grp.index, "iv_skew"] = skew_val
+    except Exception:
+        pass
+    df["iv_skew"] = df["iv_skew"].fillna(0.0)
 
     # IV Skew Directional Alignment
     # Positive skew (put IV > call IV) = market hedging downside → favour puts
@@ -712,6 +725,13 @@ def calculate_metrics(
                 0.6 * df.loc[mc_valid, "pop_sim"].astype(float)
                 + 0.4 * df.loc[mc_valid, "prob_profit"]
             ).clip(0.0, 1.0)
+
+    # For Premium Selling, flip PoP to reflect the SELLER's perspective.
+    # calculate_probability_of_profit() returns the BUYER's PoP (P option expires ITM).
+    # Seller profits when that same option expires worthless, so seller's PoP = 1 − buyer's PoP.
+    # e.g. OTM put buyer: 30% PoP → seller: 70% PoP (which is what we want to score highly).
+    if mode == "Premium Selling":
+        df["prob_profit"] = (1.0 - df["prob_profit"]).clip(0.0, 1.0)
 
     # Theoretical value and P(ITM) using market IV (for display/reference)
     d1, d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
@@ -839,6 +859,13 @@ def calculate_scores(
         w = {k: weights.get(k, 0.0) for k in ["pop", "return_on_risk", "iv_rank", "liquidity", "theta", "ev", "trader_pref"]}
         w_sum = sum(w.values()) or 1.0
         df["quality_score"] = (w["pop"]*pop_score + w["return_on_risk"]*ror_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score) / w_sum
+        try:
+            _cdf = pd.DataFrame({"PoP": w["pop"]*pop_score, "RoR": w["return_on_risk"]*ror_score,
+                                  "IV rank": w["iv_rank"]*iv_rank_score, "Liq": w["liquidity"]*liquidity,
+                                  "Theta": w["theta"]*theta_score, "EV": w["ev"]*ev_score}, index=df.index)
+            df["score_drivers"] = _cdf.apply(lambda r: " · ".join(r.nlargest(3).index.tolist()), axis=1)
+        except Exception:
+            df["score_drivers"] = ""
     else:
         # PCR score
         pcr_vals = pd.to_numeric(df.get("pcr", pd.Series(np.nan, index=df.index)), errors="coerce")
@@ -880,6 +907,16 @@ def calculate_scores(
             + w["skew_align"]*skew_align_score + w["gamma_theta"]*gamma_theta_score
             + w["pcr"]*pcr_score + w["gex"]*gex_score + w["oi_change"]*oi_change_score
         ) / w_sum
+        try:
+            _cdf = pd.DataFrame({
+                "PoP": w["pop"]*pop_score, "EV": w["ev"]*ev_score,
+                "RR": w["rr"]*rr_score, "IV edge": w["iv_edge"]*iv_edge_score,
+                "Liq": w["liquidity"]*liquidity, "Theta": w["theta"]*theta_score,
+                "Mom": w["momentum"]*momentum_score, "Skew": w["skew_align"]*skew_align_score,
+            }, index=df.index)
+            df["score_drivers"] = _cdf.apply(lambda r: " · ".join(r.nlargest(3).index.tolist()), axis=1)
+        except Exception:
+            df["score_drivers"] = ""
 
     # Adjustments
     df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
@@ -1401,13 +1438,17 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
         sentiment_str = sentiment
     parts.append(f"Sentiment: {sentiment_str}")
 
-    # Quality Score
+    # Quality Score + leading drivers
     quality = row.get('quality_score', 0.0)
+    drivers = row.get("score_drivers", "")
     if HAS_ENHANCED_CLI:
         stars, q_color = fmt.format_quality_score(quality)
-        parts.append(f"Quality: {fmt.colorize(f'{quality:.2f}', q_color)} {stars}")
+        q_str = f"Quality: {fmt.colorize(f'{quality:.2f}', q_color)} {stars}"
+        if drivers:
+            q_str += f"  {fmt.colorize(f'[{drivers}]', fmt.Colors.DIM)}"
+        parts.append(q_str)
     else:
-        parts.append(f"Quality: {quality:.2f}")
+        parts.append(f"Quality: {quality:.2f}" + (f"  [{drivers}]" if drivers else ""))
 
     # Earnings Play
     if row.get("Earnings Play") == "YES":

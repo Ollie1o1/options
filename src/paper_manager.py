@@ -19,6 +19,12 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
+def _is_short_position(strategy_name: str) -> bool:
+    """Detect if a trade is a short/credit position (profits from premium decay)."""
+    s = (strategy_name or "").lower()
+    return any(k in s for k in ("short", "credit", "covered", "cash-secured", "cash secured", "naked", "iron condor", "sell"))
+
+
 class PaperManager:
     """Manages paper trades stored in a SQLite database."""
     
@@ -193,8 +199,13 @@ class PaperManager:
                         current_price = float(hist["Close"].iloc[-1])
 
                 if current_price is not None and not np.isnan(current_price) and current_price > 0:
-                    # Raw market P&L (used for TP/SL trigger)
-                    pnl_raw = (current_price - entry_price) / entry_price
+                    # Raw market P&L — flip sign for short/credit positions
+                    # (seller profits when option loses value)
+                    is_short = _is_short_position(row["strategy_name"] or "")
+                    if is_short:
+                        pnl_raw = (entry_price - current_price) / entry_price
+                    else:
+                        pnl_raw = (current_price - entry_price) / entry_price
                     hit_tp = pnl_raw >= tp
                     hit_sl = pnl_raw <= sl
                     hit_time = (0 < dte <= time_exit_dte)

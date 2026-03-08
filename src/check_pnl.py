@@ -257,9 +257,10 @@ def view_portfolio():
         print(_c("  No open positions.", fmt.Colors.DIM if HAS_FMT and fmt else ""))
     else:
         # Header row
+        today_dt = date.today()
         hdr = (
             f"  {'Ticker':<7} {'Type':<5} {'Strike':>8} {'Expiry':<12}"
-            f" {'DTE':>4} {'Opened':<11} {'Entry $':>8} {'Live $':>8}"
+            f" {'DTE':>4} {'Opened':<11} {'Held':>5} {'Entry $':>8} {'Live $':>8}"
             f" {'P/L $':>10} {'P/L %':>7}"
         )
         sep = "  " + "\u2500" * (width - 2)
@@ -284,6 +285,12 @@ def view_portfolio():
             entry_price = float(r["entry_price"])
             dte         = _dte(expiry)
             short       = _is_short(r["strategy_name"] or "")
+            try:
+                entry_dt  = datetime.strptime(r["date"][:10], "%Y-%m-%d").date()
+                days_held = (today_dt - entry_dt).days
+            except Exception:
+                days_held = 0
+            held_str = f"{days_held}d"
 
             live_price = _fetch_live_price(ticker, expiry, strike, r["type"])
 
@@ -332,7 +339,7 @@ def view_portfolio():
 
             print(
                 f"  {ticker:<7} {type_str} {strike:>8.2f} {expiry:<12}"
-                f" {dte_str} {opened:<11} ${entry_price:>6.2f} {live_str:>8}"
+                f" {dte_str} {opened:<11} {held_str:>5} ${entry_price:>6.2f} {live_str:>8}"
                 f" {usd_str} {pct_str}"
             )
 
@@ -357,6 +364,22 @@ def view_portfolio():
             print(fmt.colorize(summary, pc, bold=True))
         else:
             print(summary)
+
+        # Concentration warning — flag if any ticker > 40% of total invested capital
+        if total_cost_usd > 0:
+            ticker_exp: dict = {}
+            for r in open_trades:
+                t = r["ticker"]
+                ticker_exp[t] = ticker_exp.get(t, 0.0) + float(r["entry_price"]) * 100
+            hot = {t: v / total_cost_usd for t, v in ticker_exp.items() if v / total_cost_usd > 0.40}
+            if hot:
+                conc_msg = "  ⚠  Concentration risk: " + ", ".join(
+                    f"{t} {pct:.0%} of book" for t, pct in sorted(hot.items(), key=lambda x: -x[1])
+                )
+                if HAS_FMT and fmt:
+                    print(fmt.colorize(conc_msg, fmt.Colors.YELLOW, bold=True))
+                else:
+                    print(conc_msg)
 
         _print_portfolio_greeks(open_trades, width)
 
@@ -438,17 +461,75 @@ def view_portfolio():
             print("  " + "-" * (width - 2))
 
         n = len(closed_trades)
-        win_rate = wins / n * 100 if n > 0 else 0.0
+        win_rate_pct = wins / n * 100 if n > 0 else 0.0
         sign = "+" if closed_pnl_usd >= 0 else "-"
         closed_summary = (
             f"  Realized P/L: {sign}${abs(closed_pnl_usd):.2f}"
-            f"   Win Rate: {win_rate:.0f}% ({wins}/{n} trades)"
+            f"   Win Rate: {win_rate_pct:.0f}% ({wins}/{n} trades)"
         )
         if HAS_FMT and fmt:
             pc = fmt.Colors.GREEN if closed_pnl_usd >= 0 else fmt.Colors.RED
             print(fmt.colorize(closed_summary, pc, bold=True))
         else:
             print(closed_summary)
+
+        # ── Enhanced Performance Analytics ─────────────────────────────────
+        if n >= 2:
+            returns = [float(r["pnl_pct"]) for r in closed_trades if r["pnl_pct"] is not None]
+            winning_r = [x for x in returns if x > 0]
+            losing_r  = [x for x in returns if x <= 0]
+            avg_win  = sum(winning_r) / len(winning_r) if winning_r else 0.0
+            avg_loss = sum(losing_r)  / len(losing_r)  if losing_r  else 0.0
+            wr = len(winning_r) / len(returns)
+            pf = sum(winning_r) / abs(sum(losing_r)) if losing_r else float("inf")
+            expectancy = wr * avg_win + (1 - wr) * avg_loss
+
+            # Max drawdown on cumulative return sequence
+            cum, peak, max_dd = 0.0, 0.0, 0.0
+            for ret in returns:
+                cum += ret
+                peak = max(peak, cum)
+                max_dd = max(max_dd, peak - cum)
+
+            pf_str = f"{pf:.2f}x" if pf != float("inf") else "∞"
+            analytics = (
+                f"  Profit Factor: {pf_str}   Expectancy: {expectancy:+.1%}/trade"
+                f"   Max Drawdown: -{max_dd:.1%}"
+                f"   Avg Win: {avg_win:+.1%}  Avg Loss: {avg_loss:+.1%}"
+            )
+            if HAS_FMT and fmt:
+                pf_color = fmt.Colors.GREEN if pf > 1.5 else (fmt.Colors.YELLOW if pf > 1.0 else fmt.Colors.RED)
+                print(fmt.colorize(analytics, pf_color))
+            else:
+                print(analytics)
+
+            # Per-strategy breakdown (only if > 1 strategy present)
+            from collections import defaultdict
+            strat_map: dict = defaultdict(list)
+            for r in closed_trades:
+                if r["pnl_pct"] is not None:
+                    strat = (r["strategy_name"] or "OTHER").split(":")[0].strip()[:22]
+                    strat_map[strat].append(float(r["pnl_pct"]))
+            if len(strat_map) > 1:
+                print()
+                strat_hdr = "  BY STRATEGY"
+                if HAS_FMT and fmt:
+                    print(fmt.colorize(strat_hdr, fmt.Colors.BRIGHT_CYAN))
+                else:
+                    print(strat_hdr)
+                for strat, rets in sorted(strat_map.items(), key=lambda x: -sum(x[1])):
+                    sw = len([x for x in rets if x > 0])
+                    sn = len(rets)
+                    avg = sum(rets) / sn
+                    spf_val = sum(x for x in rets if x > 0)
+                    spl_val = abs(sum(x for x in rets if x <= 0))
+                    spf = f"{spf_val/spl_val:.2f}x" if spl_val > 0 else "∞"
+                    line = f"    {strat:<24} {sw}/{sn} wins  avg {avg:+.1%}  PF {spf}"
+                    if HAS_FMT and fmt:
+                        lc = fmt.Colors.GREEN if avg > 0 else fmt.Colors.RED
+                        print(fmt.colorize(line, lc))
+                    else:
+                        print(line)
 
     # ── Roll Alerts ────────────────────────────────────────────────────────────
     roll_candidates = []
