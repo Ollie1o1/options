@@ -4,6 +4,7 @@ Trade analysis utilities for generating actionable trading insights.
 Provides trade thesis generation, entry/exit level calculations, and risk assessment.
 """
 
+import math
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
@@ -439,6 +440,255 @@ def format_trade_plan(row: pd.Series, config: Dict, include_sizing: bool = False
     return "\n".join(lines)
 
 
+def explain_quality_score(row: pd.Series) -> str:
+    """
+    Generate a one-line explanation of top quality score drivers.
+    Shows top 3 positive (green) and top 2 negative (red) contributors.
+
+    Args:
+        row: DataFrame row with score component columns
+
+    Returns:
+        Formatted string like '+ PoP · EV · Trend     - Spread · Theta'
+    """
+    try:
+        from . import formatting as fmt
+        HAS_FMT = fmt.supports_color()
+    except ImportError:
+        HAS_FMT = False
+        fmt = None
+
+    # (column, short label, weight) — only columns saved on the DataFrame
+    score_labels = [
+        ('prob_profit',        'PoP',      1.0),
+        ('ev_score',           'EV',       1.0),
+        ('rr_ratio',           'RR',       0.8),   # raw ratio, normalized below
+        ('liquidity_score',    'Liquidity', 0.7),
+        ('momentum_score',     'Momentum', 0.6),
+        ('iv_rank_score',      'IV Rank',  0.7),
+        ('em_realism_score',   'EM Real',  0.6),
+        ('theta_score',        'Theta',    0.5),
+        ('spread_score',       'Spread',   0.4),
+        ('catalyst_score',     'Catalyst', 0.5),
+        ('iv_advantage_score', 'IV Edge',  0.4),
+    ]
+
+    positives = []
+    negatives = []
+
+    for col, label, weight in score_labels:
+        val = row.get(col, None)
+        if val is None:
+            continue
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(val):
+            continue
+        # Normalize rr_ratio (raw 0-5+ range) to 0-1
+        if col == 'rr_ratio':
+            val = float(np.clip((val - 0.5) / 3.5, 0.0, 1.0))
+
+        weighted = val * weight
+        if val >= 0.60:
+            positives.append((weighted, label))
+        elif val < 0.40:
+            negatives.append((weighted, label))
+
+    positives.sort(reverse=True)
+    negatives.sort()  # lowest weighted first = most negative drivers
+
+    pos_labels = [lbl for _, lbl in positives[:3]]
+    neg_labels = [lbl for _, lbl in negatives[:2]]
+
+    parts = []
+    if pos_labels:
+        pos_str = ' \u00b7 '.join(pos_labels)
+        if HAS_FMT and fmt:
+            parts.append(fmt.colorize(f"+ {pos_str}", fmt.Colors.GREEN))
+        else:
+            parts.append(f"+ {pos_str}")
+    if neg_labels:
+        neg_str = ' \u00b7 '.join(neg_labels)
+        if HAS_FMT and fmt:
+            parts.append(fmt.colorize(f"\u2212 {neg_str}", fmt.Colors.RED))
+        else:
+            parts.append(f"- {neg_str}")
+
+    return "     ".join(parts) if parts else ""
+
+
+def format_risk_alerts(row: pd.Series) -> str:
+    """
+    Generate a risk alert line flagging blowup patterns.
+    Returns empty string when no alerts fire (no visual noise).
+
+    Args:
+        row: DataFrame row with option data
+
+    Returns:
+        Formatted alert string, or empty string if no alerts
+    """
+    try:
+        from . import formatting as fmt
+        HAS_FMT = fmt.supports_color()
+    except ImportError:
+        HAS_FMT = False
+        fmt = None
+
+    try:
+        dte = float(row.get('T_years', 0) or 0) * 365
+        delta = abs(float(row.get('delta', 0) or 0))
+        spread_pct = float(row.get('spread_pct', 0) or 0)
+        volume = float(row.get('volume', 0) or 0)
+        oi = float(row.get('openInterest', 0) or 0)
+        theta = float(row.get('theta', 0) or 0)
+        premium = float(row.get('premium', 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+
+    alerts = []
+
+    if row.get('Earnings Play', 'NO') == 'YES' and dte < 21:
+        alerts.append(('red', 'EARNINGS IN DTE WINDOW'))
+
+    if dte < 7 and delta > 0.45:
+        alerts.append(('red', 'GAMMA TRAP'))
+
+    if spread_pct > 0.25:
+        alerts.append(('yellow', 'WIDE SPREAD'))
+
+    if volume < 50 and oi < 100:
+        alerts.append(('yellow', 'LOW LIQUIDITY'))
+
+    if premium > 0 and theta != 0 and dte < 14:
+        daily_bleed_pct = abs(theta) / premium * 100
+        if daily_bleed_pct > 5.0:
+            alerts.append(('dim', 'THETA BURN'))
+
+    if not alerts:
+        return ""
+
+    parts = []
+    for severity, text in alerts:
+        if HAS_FMT and fmt:
+            if severity == 'red':
+                parts.append(f"\U0001f534 {fmt.colorize(text, fmt.Colors.BRIGHT_RED, bold=True)}")
+            elif severity == 'yellow':
+                parts.append(f"\U0001f7e0 {fmt.colorize(text, fmt.Colors.YELLOW)}")
+            else:
+                parts.append(f"\U0001f538 {fmt.colorize(text, fmt.Colors.DIM)}")
+        else:
+            emoji = "\U0001f534" if severity == 'red' else ("\U0001f7e0" if severity == 'yellow' else "\U0001f538")
+            parts.append(f"{emoji} {text}")
+
+    alert_body = "  ".join(parts)
+    if HAS_FMT and fmt:
+        prefix = fmt.colorize("  \u21b3 Alerts: ", fmt.Colors.DIM)
+    else:
+        prefix = "  \u21b3 Alerts: "
+    return prefix + alert_body
+
+
+def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
+    """
+    Build a scenario P/L matrix showing option price at various stock moves and time horizons.
+    Uses Black-Scholes pricing for each cell. Only renders if width >= 80.
+
+    Args:
+        row: DataFrame row with option data
+        rfr: Risk-free rate
+        width: Terminal width
+
+    Returns:
+        Formatted scenario table string, or empty string if width < 80
+    """
+    if width < 80:
+        return ""
+
+    try:
+        from .utils import bs_price
+    except ImportError:
+        return ""
+
+    try:
+        from . import formatting as fmt
+        HAS_FMT = fmt.supports_color()
+    except ImportError:
+        HAS_FMT = False
+        fmt = None
+
+    try:
+        S = float(row.get('underlying', 0) or 0)
+        K = float(row.get('strike', 0) or 0)
+        T = float(row.get('T_years', 0) or 0)
+        sigma = float(row.get('impliedVolatility', 0.30) or 0.30)
+        opt_type = str(row.get('type', 'call')).lower()
+        entry_price = float(row.get('premium', 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return ""
+
+    stop_loss = entry_price * 0.75  # -25% stop
+    week = 1.0 / 52.0
+    moves = [-0.10, -0.05, 0.0, 0.05, 0.10]
+    time_horizons = [
+        ("Today", T),
+        ("1 week", max(T - week, 1.0 / 365)),
+        ("2 weeks", max(T - 2 * week, 1.0 / 365)),
+    ]
+
+    indent = "  "
+    col_w = 11
+
+    hdr_parts = [f"{'Move':<12}"]
+    for t_label, _ in time_horizons:
+        hdr_parts.append(f"\u2502  {t_label:<{col_w - 2}}")
+    hdr_line = indent + "".join(hdr_parts)
+    sep_line = indent + "\u2500" * min(len(hdr_line) - len(indent) + 2, width - len(indent))
+
+    lines = []
+    sp_str = f"${S:.2f}"
+    title = f"{indent}Stock Price Scenarios (current: {sp_str})"
+    if HAS_FMT and fmt:
+        lines.append(fmt.colorize(title, fmt.Colors.DIM + fmt.Colors.BOLD))
+        lines.append(fmt.colorize(hdr_line, fmt.Colors.DIM))
+        lines.append(fmt.colorize(sep_line, fmt.Colors.DIM))
+    else:
+        lines.append(title)
+        lines.append(hdr_line)
+        lines.append(sep_line)
+
+    for move_pct in moves:
+        S_new = S * (1.0 + move_pct)
+        move_label = f"{move_pct:+.0%}  ${S_new:.0f}"
+        row_parts = [f"{move_label:<12}"]
+        for _, T_new in time_horizons:
+            try:
+                price = float(bs_price(opt_type, S_new, K, T_new, rfr, sigma))
+                price = max(0.0, price)
+            except Exception:
+                price = 0.0
+            cell_str = f"${price:.2f}"
+            if HAS_FMT and fmt:
+                if price > entry_price:
+                    colored = fmt.colorize(cell_str, fmt.Colors.GREEN)
+                elif price < stop_loss and entry_price > 0:
+                    colored = fmt.colorize(cell_str, fmt.Colors.RED)
+                else:
+                    colored = fmt.colorize(cell_str, fmt.Colors.YELLOW)
+                # pad after color (ANSI codes are invisible, add spaces separately)
+                row_parts.append(f"\u2502  {colored}  ")
+            else:
+                row_parts.append(f"\u2502  {cell_str:<{col_w - 2}}")
+        lines.append(indent + "".join(row_parts))
+
+    return "\n".join(lines)
+
+
 __all__ = [
     'generate_trade_thesis',
     'calculate_entry_exit_levels',
@@ -447,4 +697,7 @@ __all__ = [
     'get_position_sizing_recommendation',
     'assess_risk_factors',
     'format_trade_plan',
+    'explain_quality_score',
+    'format_risk_alerts',
+    'build_scenario_table',
 ]

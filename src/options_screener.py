@@ -97,7 +97,10 @@ try:
         calculate_confidence_score,
         categorize_by_strategy,
         assess_risk_factors,
-        format_trade_plan
+        format_trade_plan,
+        explain_quality_score,
+        format_risk_alerts,
+        build_scenario_table,
     )
     from tqdm import tqdm
     HAS_ENHANCED_CLI = True
@@ -1115,17 +1118,30 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     """Formats the second detail row for the screener report (analysis)."""
     parts = []
 
-    # IV context
+    # IV context — visual bar or plain fallback
     iv = row.get("impliedVolatility", pd.NA)
     if pd.notna(iv) and math.isfinite(iv):
-        rel = "\u2248" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
-        parts.append(f"IV: {format_pct(iv)} ({rel} median)")
+        if HAS_ENHANCED_CLI:
+            iv_pct = row.get("iv_percentile_30", row.get("iv_percentile", 0.5)) or 0.5
+            hv = row.get("hv_30d", 0) or 0
+            parts.append(fmt.format_iv_rank_bar(iv_pct, hv, float(iv)))
+        else:
+            rel = "\u2248" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
+            parts.append(f"IV: {format_pct(iv)} ({rel} median)")
 
-    # Probability of Profit
+    # Probability of Profit — dual PoP/PoT when prob_touch is available
     pop = row.get("prob_profit", pd.NA)
     if pd.notna(pop) and math.isfinite(pop):
-        pop_str = fmt.format_pop(float(pop)) if HAS_ENHANCED_CLI else format_pct(pop)
-        parts.append(f"PoP: {pop_str}")
+        if HAS_ENHANCED_CLI:
+            pop_str = fmt.format_pop(float(pop))
+            prob_touch = row.get("prob_touch", None)
+            if prob_touch is not None and pd.notna(prob_touch) and float(prob_touch) > 0:
+                pot_str = fmt.format_pop(float(prob_touch))
+                parts.append(f"PoP(exp): {pop_str}  PoT(touch): {pot_str}")
+            else:
+                parts.append(f"PoP: {pop_str}")
+        else:
+            parts.append(f"PoP: {format_pct(pop)}")
 
     # Risk/Reward or Return on Risk
     if mode == "Premium Selling":
@@ -1255,7 +1271,124 @@ def format_mechanics_row(row: pd.Series) -> str:
     else:
         parts.append(f"Cost: {format_money(cost)}")
 
+    # Theta acceleration warning
+    theta_val = row.get("theta", pd.NA)
+    premium_val = row.get("premium", 0.0) or 0.0
+    dte_val = float(row.get("T_years", 0) or 0) * 365
+    if pd.notna(theta_val) and math.isfinite(float(theta_val)) and premium_val > 0:
+        daily_bleed = abs(float(theta_val))
+        daily_bleed_pct = daily_bleed / premium_val * 100
+        bleed_str = f"\u0398 bleed: -${daily_bleed:.2f}/day ({daily_bleed_pct:.1f}%/day)"
+        if HAS_ENHANCED_CLI:
+            if dte_val < 14 and daily_bleed_pct > 5:
+                bleed_str += " " + fmt.colorize("\u26a0 ACCELERATING", fmt.Colors.BRIGHT_RED)
+            elif daily_bleed_pct > 2:
+                bleed_str += " " + fmt.colorize("HIGH DECAY", fmt.Colors.YELLOW)
+        else:
+            if dte_val < 14 and daily_bleed_pct > 5:
+                bleed_str += " \u26a0 ACCELERATING"
+            elif daily_bleed_pct > 2:
+                bleed_str += " HIGH DECAY"
+        parts.append(bleed_str)
+
     return " | ".join(parts)
+
+
+def _format_breakeven_line(row: pd.Series, arrow: str) -> str:
+    """Format a breakeven vs expected-move ratio line for a single pick."""
+    try:
+        breakeven = row.get('breakeven', None)
+        spot = float(row.get('underlying', 0) or 0)
+        required_move = row.get('required_move', None)
+        expected_move = row.get('expected_move', None)
+
+        if breakeven is None or required_move is None or expected_move is None:
+            return ""
+
+        breakeven = float(breakeven)
+        required_move = float(required_move)
+        expected_move = float(expected_move)
+
+        if spot <= 0 or expected_move <= 0:
+            return ""
+
+        req_pct = required_move / spot * 100
+        em_pct = expected_move / spot * 100
+        em_ratio = required_move / expected_move
+
+        opt_type = str(row.get('type', 'call')).lower()
+        sign = "+" if opt_type == 'call' else "-"
+
+        if em_ratio < 0.75:
+            label, color = "ACHIEVABLE", fmt.Colors.GREEN if HAS_ENHANCED_CLI else None
+        elif em_ratio < 1.0:
+            label, color = "FAIR", fmt.Colors.YELLOW if HAS_ENHANCED_CLI else None
+        elif em_ratio < 1.5:
+            label, color = "STRETCHED", fmt.Colors.YELLOW if HAS_ENHANCED_CLI else None
+        else:
+            label, color = "UNLIKELY", fmt.Colors.RED if HAS_ENHANCED_CLI else None
+
+        body = (
+            f"BE: ${breakeven:.2f} | Needs {sign}${required_move:.2f} ({sign}{req_pct:.1f}%)"
+            f"  1\u03c3 EM: ${expected_move:.2f} ({em_pct:.1f}%)  \u2192  {em_ratio:.1f}\u00d7 EM"
+        )
+        prefix_sym = "\u26a0 " if em_ratio >= 1.0 else ""
+        if HAS_ENHANCED_CLI and color:
+            label_str = fmt.colorize(f"{prefix_sym}{label}", color)
+        else:
+            label_str = f"{prefix_sym}{label}"
+
+        be_label = fmt.colorize("BE:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "BE:"
+        full_line = f"BE: ${breakeven:.2f} | Needs {sign}${required_move:.2f} ({sign}{req_pct:.1f}%)  1\u03c3 EM: ${expected_move:.2f} ({em_pct:.1f}%)  \u2192  {em_ratio:.1f}\u00d7 EM  {label_str}"
+        be_dim = fmt.colorize("Breakevn: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Breakevn: "
+        return f"    {arrow} {be_dim}{full_line[4:]}"  # strip leading "BE: " and use dim label
+    except Exception:
+        return ""
+
+
+def _print_strategy_panel(df_picks: pd.DataFrame, width: int) -> None:
+    """Print strategy classification mix panel before the bucket breakdown."""
+    if not HAS_ENHANCED_CLI or df_picks.empty:
+        return
+    try:
+        df_cat = categorize_by_strategy(df_picks)
+    except Exception:
+        return
+
+    counts = df_cat['strategy_category'].value_counts()
+    con_count = counts.get('CONSERVATIVE', 0)
+    bal_count = counts.get('BALANCED', 0)
+    agg_count = counts.get('AGGRESSIVE', 0)
+
+    con_str = fmt.colorize(f"{con_count} Conservative", fmt.Colors.GREEN) if con_count else fmt.colorize("0 Conservative", fmt.Colors.DIM)
+    bal_str = fmt.colorize(f"{bal_count} Balanced", fmt.Colors.YELLOW) if bal_count else fmt.colorize("0 Balanced", fmt.Colors.DIM)
+    agg_str = fmt.colorize(f"{agg_count} Aggressive", fmt.Colors.RED) if agg_count else fmt.colorize("0 Aggressive", fmt.Colors.DIM)
+
+    print(fmt.draw_separator(width))
+    print(f"  Strategy Mix: {con_str}  {bal_str}  {agg_str}")
+
+    # Best pick per category
+    for cat, color in [('CONSERVATIVE', fmt.Colors.GREEN), ('AGGRESSIVE', fmt.Colors.RED)]:
+        sub = df_cat[df_cat['strategy_category'] == cat]
+        if sub.empty:
+            continue
+        best = sub.loc[sub['quality_score'].idxmax()]
+        sym = best.get('symbol', 'N/A')
+        strike = best.get('strike', 0)
+        opt_type = str(best.get('type', 'call')).upper()
+        quality = best.get('quality_score', 0)
+        pop = best.get('prob_profit', 0)
+        rr = best.get('rr_ratio', 0)
+        stars, _ = fmt.format_quality_score(quality)
+        thesis = generate_trade_thesis(best) if HAS_ENHANCED_CLI else ""
+        thesis_short = thesis.split('|')[0].strip()[:40] if thesis else ""
+        label = fmt.colorize(f"Best {cat.capitalize()}:", color)
+        pop_str = fmt.format_pop(float(pop))
+        rr_str = fmt.format_rr(float(rr))
+        print(f"  {label} {sym} {opt_type} ${strike:.0f}  {stars}  PoP {pop_str}  RR {rr_str}  \"{thesis_short}\"")
+
+    print(fmt.draw_separator(width))
+    print()
 
 
 def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "Discovery",
@@ -1423,6 +1556,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     else:
         print("=" * WIDTH)
 
+    # ── Strategy Classification Panel (Improvement 8) ───────────────────────
+    _print_strategy_panel(df_picks, WIDTH)
+
     # ── Buckets ──────────────────────────────────────────────────────────────
     for bucket in ["LOW", "MEDIUM", "HIGH"]:
         sub = df_picks[df_picks["price_bucket"] == bucket]
@@ -1500,16 +1636,29 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 else:
                     print(f"  {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
 
+            arrow = fmt.colorize("\u21b3", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u21b3"
+
+            # Risk alerts (Improvement 7) — before detail rows
+            if HAS_ENHANCED_CLI:
+                alerts_line = format_risk_alerts(r)
+                if alerts_line:
+                    print(alerts_line)
+
             # Detail rows
             mechanics_line = format_mechanics_row(r)
             analysis_line = format_analysis_row(r, chain_iv_median, mode)
-            arrow = fmt.colorize("\u21b3", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u21b3"
             mech_label = fmt.colorize("Mechanics:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Mechanics:"
             anal_label = fmt.colorize("Analysis: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Analysis: "
             print(f"    {arrow} {mech_label} {mechanics_line}")
             print(f"    {arrow} {anal_label} {analysis_line}")
 
-            # Trade plan (thesis + entry/exit) — Phase 3
+            # Breakeven vs expected move (Improvement 2)
+            if HAS_ENHANCED_CLI:
+                be_line = _format_breakeven_line(r, arrow)
+                if be_line:
+                    print(be_line)
+
+            # Trade plan (thesis + entry/exit)
             if HAS_ENHANCED_CLI:
                 thesis = generate_trade_thesis(r)
                 thesis_label = fmt.colorize("Thesis:   ", fmt.Colors.BRIGHT_CYAN)
@@ -1528,9 +1677,21 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 conf_str = fmt.colorize(f"{conf_label} ({conf_score:.0%})", conf_color, bold=True)
                 print(f"    {arrow} {fmt.colorize('Entry:    ', fmt.Colors.DIM)} {entry_str}  |  Target: {target_str}  |  Stop: {stop_str}")
                 print(f"         Breakeven: ${levels['breakeven']:.2f}  |  Max Loss: ${levels['max_loss']:.0f}  |  Confidence: {conf_str}")
+
+                # Quality score breakdown (Improvement 4)
+                qscore_line = explain_quality_score(r)
+                if qscore_line:
+                    score_label = fmt.colorize("Score:    ", fmt.Colors.DIM)
+                    print(f"         {score_label}{qscore_line}")
+
                 if risks and risks != ["Standard risks apply"]:
                     risk_parts = [fmt.colorize(ri, fmt.Colors.BRIGHT_RED) for ri in risks[:2]]
                     print(f"         Risks: {' | '.join(risk_parts)}")
+
+                # Scenario P/L matrix (Improvement 6)
+                scenario = build_scenario_table(r, rfr, WIDTH)
+                if scenario:
+                    print(scenario)
 
             # Institutional metrics
             if "short_interest" in r and pd.notna(r["short_interest"]):
