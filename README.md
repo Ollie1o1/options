@@ -1,152 +1,234 @@
-# Options Screener - Professional Edition
+# Options Screener — Professional Edition
 
-A comprehensive Python-based options screening tool designed to identify high-probability trading opportunities by layering advanced analytics, institutional-level metrics, and dynamic safety filters. **Now with a professional Streamlit web dashboard and automated Paper Trading!**
+A Python-based options screening tool that identifies high-probability trading opportunities through advanced analytics, institutional-level metrics, and dynamic safety filters — delivered through a fully color-coded, professional terminal interface.
 
-## 🎯 Core Philosophy: Hunting for Alignment
+## Core Philosophy: Hunting for Alignment
 
-This is not just a tool that finds options with high volume. It's an intelligent screener built on a core philosophy of **Alignment**. A high-quality trade occurs when multiple independent factors align:
+A high-quality trade occurs when multiple independent factors align simultaneously:
 
-1.  **Action:** The market is interested (high volume, tight spreads).
-2.  **Edge:** The probabilities are in your favor (IV vs. HV, seasonality, risk/reward).
-3.  **Structure:** The trade is not positioned against a major technical barrier (support/resistance, OI Walls).
-4.  **Trend:** The trade is aligned with the underlying stock's momentum and the broader market context.
+1. **Action** — The market is interested: high volume, tight spreads, unusual flow.
+2. **Edge** — The probabilities favour you: IV vs. HV, seasonality, risk/reward.
+3. **Structure** — The trade is not fighting a technical barrier: support/resistance, OI walls.
+4. **Trend** — The trade aligns with the stock's momentum and broader market context.
 
-This screener finds opportunities where these forces align, giving you a statistical edge. Consistency comes from saying "No" to good volume on a bad chart.
+The screener finds opportunities where all four forces converge. Consistency comes from saying "no" to good volume on a bad chart.
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
-- Python 3.7 or higher
-- pip (Python package manager)
+
+- Python 3.9+
+- pip
 
 ### Installation
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/Ollie1o1/options.git
-    cd options
-    ```
-
-2.  **(Recommended) Create and activate a virtual environment:**
-    ```bash
-    python -m venv env
-    
-    # On Windows:
-    env\Scripts\activate
-    
-    # On macOS/Linux:
-    source env/bin/activate
-    ```
-
-3.  **Install required dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-### Usage
-
-#### 🖥️ CLI Mode (Terminal Interface)
-
-**Run the screener in terminal mode:**
 ```bash
-python -m src.options_screener
+git clone https://github.com/Ollie1o1/options.git
+cd options
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-> **Important:** The screener must be run as a module using `-m` because it uses relative imports.
+### Run
 
-The script will guide you through interactive prompts. On startup, it will automatically check for any Take Profit or Stop Loss hits in your Paper Portfolio.
-
-#### 🌐 Web Dashboard
-
-**Launch the Streamlit web interface:**
 ```bash
+# Interactive CLI
+python -m src.options_screener
+
+# Streamlit dashboard
 python -m src.options_screener --ui
 ```
 
-Your browser will open a professional dashboard featuring:
-- **Real-time market context** (SPY trend, VIX regime, macro indicators).
-- **Options Scanner**: High-performance vectorized Greeks and scoring.
-- **Paper Portfolio**: Track forward-tests with real-time P/L and automated exit rules.
-- **Visualizer**: Payoff diagrams and quality radar charts.
+> The screener must be run as a module (`-m`) because it uses relative imports.
 
 ---
 
-## 📊 Features Deep Dive
+## CLI Reference
 
-### 1. High-Performance Analytics
--   **Vectorized Engine:** Completely refactored math core using **NumPy** and **SciPy** for batch processing of entire options chains at 100x speed vs legacy row-by-row logic.
--   **Intelligent Caching:** Implemented `requests-cache` with a 15-minute expiry to minimize network latency and respect data provider limits.
--   **Multi-Factor Scoring:** Dynamic algorithm combining Greeks, Probability of Profit (PoP), Expected Value (EV), and Trend Alignment.
+```
+python -m src.options_screener [OPTIONS]
 
-### 2. Forward Testing & Paper Trading (NEW)
--   **One-Click Logging:** Instantly log setups to a local paper portfolio directly from the CLI or Web Dashboard.
--   **Automated Position Tracking:** The system fetches real-time quotes for open positions every time you start the app.
--   **Exit Rule Enforcement:** Automatically "closes" trades when Take Profit or Stop Loss thresholds are hit.
--   **Performance Summaries:** Tracks Win Rate, Total P/L, and Average Return over time.
+Options:
+  --no-color      Disable all ANSI color output (useful for logging to file)
+  -h, --help      Show help and exit
+  --version       Show version string and exit
+  --close-trades  Update the trade log with closing prices and realized P/L
+  --ui            Launch the Streamlit web dashboard
+```
+
+### Scan Modes
+
+| Input | Mode | Description |
+|---|---|---|
+| `AAPL` (any ticker) | Single-stock | Deep analysis of one symbol |
+| `ALL` | Budget scan | Multi-ticker scan within a dollar budget per contract |
+| `DISCOVER` | Discovery | Scan the top 100 most-liquid tickers, no budget limit |
+| `SELL` | Premium Selling | Short put candidates ranked by return-on-risk |
+| `SPREADS` | Credit Spreads | Bull Put and Bear Call spread opportunities |
+| `IRON` | Iron Condors | Delta-neutral range-bound strategies |
+| `PORTFOLIO` | Portfolio | View P/L on open paper trades |
 
 ---
 
-## 🗂️ Project Structure
+## Terminal Output
+
+The CLI renders a fully color-coded, responsive interface that adapts to your terminal width (60–120 chars):
+
+**Startup**
+- Double-box banner with current date/time
+- Color-coded mode menu: yellow index, bold white command, dim description
+- Market context: trend (green/red/yellow), VIX regime, macro risk warning
+
+**Scan progress**
+- Single-line tqdm bar that updates in place — no noise from third-party libraries
+- Clean per-ticker summary after completion: `✓ AAPL  12 contract(s)`
+
+**Report — per pick**
+```
+  🐋 CALL   262.50  2026-03-20   $4.03   31.0%    1494    1095   +0.38   OTM  ★★★☆☆
+    ↳ Mechanics: Vol: 1095 OI: 1494 | Spread: 3.7% | Delta: +0.38 | Greeks: Γ … | Cost: $402.50
+    ↳ Analysis:  IV: 31.0% (below median) | PoP: 55.2% | RR: 1.4x | EV: $18 | Sentiment: Bullish
+    ↳ Thesis:    High probability (>65%) • Trend aligned | ⚠ Wide spread - use limits
+    ↳ Entry:     ≤$3.95  |  Target: $5.93 (+50%)  |  Stop: $2.96 (-25%)
+         Breakeven: $266.45  |  Max Loss: $395  |  Confidence: HIGH (87%)
+         Risks: High time decay - monitor closely
+```
+
+**Executive Summary** — printed after all bucket picks, showing top 3 opportunities with entry levels and portfolio warnings (wide spreads, negative EV, earnings risk, low liquidity).
+
+---
+
+## Analytics Engine
+
+### Scoring
+
+Each contract is scored across 13 weighted factors:
+
+| Factor | What it measures |
+|---|---|
+| Probability of Profit | Blended Black-Scholes + Monte Carlo PoP |
+| Expected Move Realism | How achievable the breakeven move is vs. 1σ EM |
+| Risk/Reward | Payoff at 0.75× EM target vs. premium paid |
+| Momentum | RSI, 5-day return, ATR trend |
+| IV Rank (mode-aware) | IV percentile vs. 30-day range; buyers rewarded for low IV |
+| IV vs. HV Edge | HV-adjusted EV — positive means options are cheap vs. realised vol |
+| Liquidity | Volume + open interest, rank-normalised |
+| Catalyst | Earnings proximity bonus/penalty |
+| Theta Efficiency | Time decay pressure relative to delta |
+| Skew Alignment | Put/call IV skew directional bias |
+| Gamma/Theta Ratio | Explosive payoff potential per unit of daily bleed |
+| Trader Profile | Liquidity-weighted for day traders; DTE-weighted for swing |
+| Expected Value | HV-adjusted BS value minus market price minus spread cost |
+
+Scores are then adjusted for trend alignment (+0.15), decay risk (−0.20), gamma squeeze setup (+0.25), OI wall (−0.10), macro risk (−0.10), and seasonality.
+
+### Greeks
+
+All Greeks are computed analytically via Black-Scholes (vectorized NumPy):
+delta, gamma, vega, theta, rho — calculated per contract across the full chain in a single batch.
+
+### Monte Carlo
+
+Probability of Profit is blended: 60% Monte Carlo simulation (captures path-dependency and jump risk) + 40% analytical PoP, when simulation data is available.
+
+### Trade Plan Generation
+
+For each pick, the screener generates:
+- **Thesis** — plain-English explanation of why the trade ranks highly
+- **Entry price** — bid-to-mid improvement based on spread width
+- **Profit target and stop loss** — from `exit_rules` in `config.json`
+- **Breakeven and max loss**
+- **Confidence score** — penalises wide spreads, low liquidity, short DTE; rewards unusual flow
+- **Risk list** — liquidity, spread, time decay, IV crush, earnings, EV, OI walls, macro
+
+---
+
+## Paper Trading
+
+Log any pick directly from the CLI and track it forward:
+
+- Positions auto-update on every launch (fetches live quotes)
+- Take Profit and Stop Loss thresholds enforced from `config.json`
+- Win rate, total P/L, and average return tracked over time
+- Close expired positions with `--close-trades`
+
+---
+
+## Project Structure
 
 ```
 options/
 ├── src/
-│   ├── options_screener.py    # Core engine & CLI entrypoint
-│   ├── dashboard.py            # Streamlit web interface
-│   ├── data_fetching.py        # Optimized API wrappers with caching
-│   ├── paper_manager.py        # Forward testing & portfolio logic
-│   ├── filters.py              # Configuration-driven filtering
-│   ├── utils.py                # Vectorized math & formatting helpers
-│   ├── simulation.py           # Monte Carlo probability engine
-│   └── ...
-├── config.json                 # Centralized thresholds & exit rules
-└── requirements.txt            # Project dependencies
+│   ├── options_screener.py   # CLI entrypoint, scan engine, report printing
+│   ├── formatting.py         # ANSI colors, box drawing, metric formatters
+│   ├── trade_analysis.py     # Thesis generation, entry/exit levels, confidence
+│   ├── data_fetching.py      # yfinance wrappers, caching, market context
+│   ├── filters.py            # Configuration-driven chain filtering
+│   ├── scoring.py            # Composite quality score components
+│   ├── simulation.py         # Monte Carlo PoP / PoT engine
+│   ├── paper_manager.py      # Paper trade logging and position tracking
+│   ├── dashboard.py          # Streamlit web interface
+│   ├── backtest_screener.py  # Historical backtest runner
+│   └── utils.py              # Vectorized BS math, formatting helpers
+├── config.json               # All thresholds, weights, and exit rules
+└── requirements.txt
 ```
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
-### Filtering Thresholds & Exit Rules
-All "magic numbers" are externalized in `config.json`:
+`config.json` controls filters, scoring weights, and exit rules:
 
 ```json
 {
   "filters": {
     "min_volume": 50,
+    "min_open_interest": 10,
     "max_bid_ask_spread_pct": 0.40,
     "delta_min": 0.15,
-    "delta_max": 0.35
+    "delta_max": 0.35,
+    "min_days_to_expiration": 7,
+    "max_days_to_expiration": 45
   },
   "exit_rules": {
     "take_profit": 0.50,
     "stop_loss": -0.25
+  },
+  "composite_weights": {
+    "pop": 0.20,
+    "em_realism": 0.10,
+    "rr": 0.12,
+    "liquidity": 0.12,
+    "ev": 0.10
   }
 }
 ```
 
 ---
 
-## 🛣️ Roadmap
+## Roadmap
 
-- [x] High-performance vectorized math core
-- [x] Intelligent request caching (15m expiry)
-- [x] **Forward Testing & Paper Trading manager**
-- [x] Streamlit dashboard with integrated Portfolio tracking
-- [ ] Strategy backtesting UI improvements
-- [ ] Real-time Email/SMS alerts
-- [ ] Multi-leg spread support in Paper Manager
-
----
-
-## ⚠️ Disclaimer
-
-This tool is for educational and informational purposes only and does not constitute financial advice. Options trading involves substantial risk. Always perform your own due diligence.
+- [x] Vectorized Black-Scholes Greeks engine
+- [x] Monte Carlo PoP blending
+- [x] HV-adjusted expected value
+- [x] Paper trading with automated exit tracking
+- [x] Streamlit dashboard
+- [x] Full color CLI — responsive width, trade plan per pick, executive summary
+- [x] Credit spread and iron condor screeners
+- [ ] Real-time alerts (email/SMS)
+- [ ] Multi-leg spread support in paper manager
+- [ ] Backtesting UI improvements
 
 ---
 
-## 📄 License
+## Disclaimer
 
-This project is for personal use. Not licensed for commercial distribution.
+For educational and informational purposes only. Not financial advice. Options trading involves substantial risk of loss. Always do your own research.
+
+## License
+
+Personal use only. Not licensed for commercial distribution.
