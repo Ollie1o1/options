@@ -415,6 +415,73 @@ def format_ev(ev: float) -> str:
     return format_money(ev, threshold_positive=10)
 
 
+def format_iv_rank_bar(iv_pct: float, hv: float, iv: float, width: int = 20) -> str:
+    """
+    Format IV percentile as a visual bar with HV/IV ratio and regime label.
+
+    Args:
+        iv_pct: IV percentile (0.0-1.0)
+        hv: Historical volatility (0.0-1.0, e.g. 0.28 = 28%)
+        iv: Implied volatility (0.0-1.0, e.g. 0.31 = 31%)
+        width: Bar character width
+
+    Returns:
+        Formatted IV rank bar string
+    """
+    try:
+        iv_pct = max(0.0, min(1.0, float(iv_pct) if iv_pct is not None else 0.5))
+    except (TypeError, ValueError):
+        iv_pct = 0.5
+
+    filled = int(round(iv_pct * width))
+    empty = width - filled
+    bar = '\u2588' * filled + '\u2591' * empty
+    pct_label = f"{iv_pct * 100:.0f}%ile"
+
+    # Regime
+    if iv_pct >= 0.90:
+        regime = "EXTREME"
+        regime_color = Colors.RED
+        regime_bold = True
+    elif iv_pct >= 0.70:
+        regime = "HIGH"
+        regime_color = Colors.BRIGHT_RED
+        regime_bold = False
+    elif iv_pct >= 0.20:
+        regime = "NORMAL"
+        regime_color = Colors.YELLOW
+        regime_bold = False
+    else:
+        regime = "LOW"
+        regime_color = Colors.BRIGHT_GREEN
+        regime_bold = False
+
+    # HV/IV ratio and cheap/rich label
+    ratio_str = ""
+    cheap_rich = ""
+    try:
+        hv_f = float(hv) if hv else 0.0
+        iv_f = float(iv) if iv else 0.0
+        if hv_f > 0 and iv_f > 0:
+            ratio = iv_f / hv_f
+            ratio_str = f"  HV:{hv_f*100:.0f}% IV:{iv_f*100:.0f}% ratio:{ratio:.2f}"
+            if ratio < 0.90:
+                cheap_rich = "  " + (colorize("CHEAP", Colors.GREEN) if supports_color() else "CHEAP")
+            elif ratio > 1.20:
+                cheap_rich = "  " + (colorize("RICH", Colors.RED) if supports_color() else "RICH")
+    except (TypeError, ValueError):
+        pass
+
+    if supports_color():
+        bar_str = colorize(bar, regime_color)
+        regime_str = colorize(f"[{regime}]", regime_color, bold=regime_bold)
+    else:
+        bar_str = bar
+        regime_str = f"[{regime}]"
+
+    return f"IV: {bar_str} {pct_label}{ratio_str}  {regime_str}{cheap_rich}"
+
+
 def format_delta(delta: float, is_call: bool = True) -> str:
     """Format delta value"""
     # Show alignment-aware sign: + when directionally expected, - otherwise
@@ -458,4 +525,5 @@ __all__ = [
     'format_rr',
     'format_ev',
     'format_delta',
+    'format_iv_rank_bar',
 ]
