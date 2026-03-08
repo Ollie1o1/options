@@ -124,6 +124,13 @@ try:
 except ImportError:
     HAS_VISUALIZATION = False
 
+try:
+    from .vol_analytics import print_vol_cone, print_iv_surface, classify_vol_regime, print_regime_summary
+    from .backtester import print_paper_trade_ic
+    HAS_VOL_ANALYTICS = True
+except ImportError:
+    HAS_VOL_ANALYTICS = False
+
 
 
 
@@ -2943,6 +2950,18 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         elif verbose:
             print("\nNo suitable options found.")
 
+        # Vol analytics for single-ticker scans
+        if verbose and HAS_VOL_ANALYTICS and len(tickers) == 1:
+            try:
+                _ticker_sym = tickers[0]
+                _current_iv = float(picks["impliedVolatility"].median()) if not picks.empty and "impliedVolatility" in picks.columns else None
+                _current_price = underlying_price if underlying_price and underlying_price > 0 else None
+                print_vol_cone(_ticker_sym, current_iv=_current_iv, width=WIDTH)
+                print_iv_surface(_ticker_sym, spot=_current_price, width=WIDTH)
+                print_regime_summary(_ticker_sym, current_iv=_current_iv, width=WIDTH)
+            except Exception:
+                pass
+
     # Phase 4: Executive Summary
     if verbose and HAS_ENHANCED_CLI and not picks.empty:
         print_executive_summary(
@@ -3144,6 +3163,13 @@ def main():
         print("=" * WIDTH)
 
     print(fmt.colorize("  Note: For personal/informational use only. Review data provider terms.", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "  Note: For personal/informational use only. Review data provider terms.")
+
+    # ── Regime Dashboard ─────────────────────────────────────────────────────
+    try:
+        from .regime_dashboard import print_regime_dashboard
+        print_regime_dashboard(WIDTH)
+    except Exception:
+        pass
 
     # ── Market Hours Check ───────────────────────────────────────────────────
     is_open, mkt_msg = _check_market_hours()
