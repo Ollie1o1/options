@@ -10,8 +10,14 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
+
+# Realistic execution cost constants
+COMMISSION_PER_CONTRACT = 0.65   # $ per contract per leg (retail ~$0.65, e.g. Tastytrade/TDA)
+SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half spread)
+# Round-trip friction per share = entry slippage + exit slippage + 2 commissions
+_FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
 class PaperManager:
     """Manages paper trades stored in a SQLite database."""
@@ -135,6 +141,7 @@ class PaperManager:
         exit_rules = config.get("exit_rules", {"take_profit": 0.50, "stop_loss": -0.25})
         tp = exit_rules.get("take_profit", 0.50)
         sl = exit_rules.get("stop_loss", -0.25)
+        time_exit_dte = exit_rules.get("time_exit_dte", 21)  # close at ≤21 DTE regardless
 
         # Fetch open trades
         with self._get_connection() as conn:
@@ -145,6 +152,7 @@ class PaperManager:
         if not open_trades:
             return
 
+        today = date.today()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         closed_this_run = []
 
@@ -156,6 +164,13 @@ class PaperManager:
             strike      = row["strike"]
             option_type = row["type"]
             entry_price = row["entry_price"]
+
+            # Time-based exit: close if DTE ≤ time_exit_dte (avoids gamma risk near expiry)
+            try:
+                exp_date = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+            except Exception:
+                dte = 999
 
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
             if not symbol:
@@ -178,20 +193,35 @@ class PaperManager:
                         current_price = float(hist["Close"].iloc[-1])
 
                 if current_price is not None and not np.isnan(current_price) and current_price > 0:
-                    pnl_pct = (current_price - entry_price) / entry_price
-                    hit_tp = pnl_pct >= tp
-                    hit_sl = pnl_pct <= sl
+                    # Raw market P&L (used for TP/SL trigger)
+                    pnl_raw = (current_price - entry_price) / entry_price
+                    hit_tp = pnl_raw >= tp
+                    hit_sl = pnl_raw <= sl
+                    hit_time = (0 < dte <= time_exit_dte)
 
-                    if hit_tp or hit_sl:
-                        reason = "Take Profit" if hit_tp else "Stop Loss"
-                        closed_this_run.append(f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} ({pnl_pct:+.1%})")
+                    if hit_tp or hit_sl or hit_time:
+                        if hit_tp:
+                            reason = "Take Profit"
+                        elif hit_sl:
+                            reason = "Stop Loss"
+                        else:
+                            reason = f"Time Exit ({dte}d to expiry)"
+
+                        # Realistic P&L: subtract round-trip slippage + commissions
+                        friction_fraction = _FRICTION_PER_SHARE / entry_price if entry_price > 0 else 0.0
+                        pnl_realistic = pnl_raw - friction_fraction
+
+                        closed_this_run.append(
+                            f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} "
+                            f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
+                        )
                         update_query = """
                         UPDATE trades
                         SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?
                         WHERE entry_id=?
                         """
                         with self._get_connection() as conn:
-                            conn.execute(update_query, (current_price, now, pnl_pct, entry_id))
+                            conn.execute(update_query, (current_price, now, pnl_realistic, entry_id))
             except Exception:
                 pass
 
@@ -199,6 +229,7 @@ class PaperManager:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")
             for msg in closed_this_run:
                 print(f"    \u2713 {msg}")
+            print(f"    [costs: ${SLIPPAGE_PER_SHARE:.2f}/share slippage ×2 + ${COMMISSION_PER_CONTRACT:.2f}/contract commissions ×2]")
 
     def get_all_trades(self) -> pd.DataFrame:
         """Returns all trades as a pandas DataFrame."""

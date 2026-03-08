@@ -24,6 +24,12 @@ except ImportError:
     HAS_FMT = False
     fmt = None
 
+try:
+    from .utils import bs_delta, bs_gamma, bs_vega
+    HAS_BS = True
+except ImportError:
+    HAS_BS = False
+
 DB_PATH = "paper_trades.db"
 
 
@@ -85,6 +91,124 @@ def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str
 def _is_short(strategy_name: str) -> bool:
     s = (strategy_name or "").lower()
     return any(k in s for k in ("short", "credit", "covered", "cash secured", "naked"))
+
+
+def _print_portfolio_greeks(open_trades: list, width: int):
+    """
+    Compute and display aggregate portfolio Greeks for open positions.
+    Uses current stock prices from yfinance and a 25% IV estimate as fallback.
+    Signs: long calls = +Δ, short calls = -Δ, long puts = -Δ, short puts = +Δ.
+    """
+    if not open_trades or not HAS_BS or not HAS_YF:
+        return
+
+    # Batch-fetch unique stock prices (fast, 1 call per ticker)
+    unique_tickers = list({r["ticker"] for r in open_trades})
+    stock_prices: dict = {}
+    import warnings
+    for ticker in unique_tickers:
+        try:
+            tkr = yf.Ticker(ticker)
+            p = getattr(tkr.fast_info, "last_price", None)
+            if p and float(p) > 0:
+                stock_prices[ticker] = float(p)
+        except Exception:
+            pass
+
+    rfr = 0.045  # ~current risk-free rate
+    now_dt = datetime.now()
+    net_delta = 0.0
+    net_gamma_dollar = 0.0   # $ P&L per 1% stock move across the book
+    net_vega = 0.0           # $ P&L per 1% IV rise across the book
+    counted = 0
+
+    for r in open_trades:
+        ticker = r["ticker"]
+        S = stock_prices.get(ticker)
+        if S is None:
+            continue
+        K = float(r["strike"])
+        opt_type = r["type"].lower()
+        try:
+            exp_dt = datetime.strptime(r["expiration"][:10], "%Y-%m-%d")
+            T = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / 365)
+        except Exception:
+            continue
+
+        sigma = 0.25  # fallback IV (25%)
+        is_short = _is_short(r["strategy_name"] or "")
+        sign = -1.0 if is_short else 1.0
+
+        try:
+            delta = float(bs_delta(opt_type, S, K, T, rfr, sigma))
+            gamma = float(bs_gamma(S, K, T, rfr, sigma))
+            vega  = float(bs_vega(S, K, T, rfr, sigma))   # already per 1% IV per share
+            net_delta       += sign * delta
+            # dollar gamma: $ gain per 1% stock move = 0.5 × gamma × (S×0.01)² × 100 shares
+            net_gamma_dollar += sign * 0.5 * gamma * (S * 0.01) ** 2 * 100
+            net_vega        += sign * vega * 100   # per contract (×100 shares)
+            counted += 1
+        except Exception:
+            pass
+
+    if counted == 0:
+        return
+
+    # ── Display ────────────────────────────────────────────────────────────────
+    print()
+    sep = "  " + "\u2500" * (width - 2)
+    header = "  PORTFOLIO GREEKS  (IV est. 25%  |  long=+  short=−)"
+    if HAS_FMT and fmt:
+        print(fmt.colorize(header, fmt.Colors.BRIGHT_CYAN, bold=True))
+        print(fmt.colorize(sep, fmt.Colors.DIM))
+    else:
+        print(header)
+        print("  " + "-" * (width - 2))
+
+    # Delta
+    delta_color = (fmt.Colors.GREEN if net_delta > 0.10 else
+                   fmt.Colors.RED if net_delta < -0.10 else fmt.Colors.YELLOW) if HAS_FMT and fmt else ""
+    delta_label = f"  Net Δ (directional): {net_delta:+.2f} contracts"
+    delta_hint  = ("  → book is net LONG (profits if market rises)" if net_delta > 0.10 else
+                   "  → book is net SHORT (profits if market falls)" if net_delta < -0.10 else
+                   "  → roughly delta-neutral")
+    if HAS_FMT and fmt:
+        print(fmt.colorize(delta_label, delta_color))
+        print(fmt.colorize(delta_hint, fmt.Colors.DIM))
+    else:
+        print(delta_label)
+        print(delta_hint)
+
+    # Gamma ($ per 1% stock move)
+    gd = net_gamma_dollar
+    gcolor = (fmt.Colors.GREEN if gd > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
+    gamma_label = f"  Net Γ ($ per 1% stock move): {gd:+.2f}"
+    gamma_hint  = ("  → long gamma: profits accelerate with big moves" if gd > 0 else
+                   "  → short gamma: losses accelerate with big moves — watch carefully")
+    if HAS_FMT and fmt:
+        print(fmt.colorize(gamma_label, gcolor))
+        print(fmt.colorize(gamma_hint, fmt.Colors.DIM))
+    else:
+        print(gamma_label)
+        print(gamma_hint)
+
+    # Vega ($ per 1% IV rise)
+    vc = (fmt.Colors.GREEN if net_vega > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
+    vega_label = f"  Net Vega ($ per 1% IV rise): {net_vega:+.2f}"
+    vega_hint  = ("  → long vega: profits if IV expands" if net_vega > 0 else
+                  "  → short vega: profits if IV contracts (premium selling)")
+    if HAS_FMT and fmt:
+        print(fmt.colorize(vega_label, vc))
+        print(fmt.colorize(vega_hint, fmt.Colors.DIM))
+    else:
+        print(vega_label)
+        print(vega_hint)
+
+    note = f"  Computed from {counted}/{len(open_trades)} positions with live stock prices."
+    if HAS_FMT and fmt:
+        print(fmt.colorize(note, fmt.Colors.DIM))
+    else:
+        print(note)
 
 
 def view_portfolio():
@@ -233,6 +357,8 @@ def view_portfolio():
             print(fmt.colorize(summary, pc, bold=True))
         else:
             print(summary)
+
+        _print_portfolio_greeks(open_trades, width)
 
     # ── Closed Positions ───────────────────────────────────────────────────────
     print()
