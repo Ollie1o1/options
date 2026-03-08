@@ -119,65 +119,62 @@ class PaperManager:
             open_trades = cursor.fetchall()
 
         if not open_trades:
-            print("No open positions to update.")
             return
 
-        print(f"Updating {len(open_trades)} open positions...")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+        closed_this_run = []
+
+        import warnings
         for row in open_trades:
-            entry_id = row["entry_id"]
-            ticker = row["ticker"]
-            expiration = row["expiration"]
-            strike = row["strike"]
+            entry_id    = row["entry_id"]
+            ticker      = row["ticker"]
+            expiration  = row["expiration"]
+            strike      = row["strike"]
             option_type = row["type"]
             entry_price = row["entry_price"]
-            
+
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
             if not symbol:
                 continue
-                
+
             try:
                 tkr = yf.Ticker(symbol)
                 current_price = None
-                
+
                 try:
                     current_price = getattr(tkr.fast_info, "last_price", None)
                 except Exception:
                     pass
-                
+
                 if current_price is None or np.isnan(current_price) or current_price <= 0:
-                    hist = tkr.history(period="1d")
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        hist = tkr.history(period="1d")
                     if not hist.empty:
                         current_price = float(hist["Close"].iloc[-1])
-                
-                if current_price is None or np.isnan(current_price) or current_price <= 0:
-                    info = tkr.info
-                    current_price = info.get("regularMarketPrice") or info.get("lastPrice")
-                
+
                 if current_price is not None and not np.isnan(current_price) and current_price > 0:
                     pnl_pct = (current_price - entry_price) / entry_price
-                    
                     hit_tp = pnl_pct >= tp
                     hit_sl = pnl_pct <= sl
-                    
+
                     if hit_tp or hit_sl:
                         reason = "Take Profit" if hit_tp else "Stop Loss"
-                        print(f"  - {reason} hit for {symbol}: {pnl_pct:.1%}")
-                        
+                        closed_this_run.append(f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} ({pnl_pct:+.1%})")
                         update_query = """
-                        UPDATE trades 
-                        SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=? 
+                        UPDATE trades
+                        SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?
                         WHERE entry_id=?
                         """
                         with self._get_connection() as conn:
                             conn.execute(update_query, (current_price, now, pnl_pct, entry_id))
-                    else:
-                        print(f"  - {symbol} remains OPEN: {pnl_pct:.1%}")
-                else:
-                    print(f"  - ⚠️ Could not fetch price for {symbol}")
-            except Exception as e:
-                print(f"  - ⚠️ Error updating {symbol}: {e}")
+            except Exception:
+                pass
+
+        if closed_this_run:
+            print(f"  Auto-closed {len(closed_this_run)} position(s):")
+            for msg in closed_this_run:
+                print(f"    \u2713 {msg}")
 
     def get_all_trades(self) -> pd.DataFrame:
         """Returns all trades as a pandas DataFrame."""

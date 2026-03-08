@@ -1,187 +1,338 @@
 #!/usr/bin/env python3
 """
-Check Unrealized P/L for Active Options Trades
-Reads from trades_log/entries.csv and fetches current market prices.
+Portfolio viewer — reads open and closed paper trades from paper_trades.db
+and displays a clean P/L summary with live price fetching.
 """
 
 import os
-import sys
-import pandas as pd
-import yfinance as yf
-from datetime import datetime
+import sqlite3
+import shutil
+from datetime import datetime, date
 from typing import Optional
 
+try:
+    import yfinance as yf
+    HAS_YF = True
+except ImportError:
+    HAS_YF = False
 
-def generate_occ_symbol(symbol: str, expiration: str, option_type: str, strike: float) -> str:
-    """
-    Generate OCC-compliant option symbol for yfinance.
-    Format: TICKER + YYMMDD + C/P + STRIKE (8 digits, padded)
-    
-    Example: AAPL251219C00220000
-    """
+try:
+    from . import formatting as fmt
+    HAS_FMT = fmt.supports_color()
+except ImportError:
+    HAS_FMT = False
+    fmt = None
+
+DB_PATH = "paper_trades.db"
+
+
+def _width() -> int:
     try:
-        # Parse expiration date
-        exp_date = pd.to_datetime(expiration)
-        date_str = exp_date.strftime('%y%m%d')
-        
-        # Format option type
-        opt_type = 'C' if option_type.lower() == 'call' else 'P'
-        
-        # Format strike (multiply by 1000 and pad to 8 digits)
-        strike_int = int(float(strike) * 1000)
-        strike_str = f"{strike_int:08d}"
-        
-        # Combine
-        occ_symbol = f"{symbol.upper()}{date_str}{opt_type}{strike_str}"
-        return occ_symbol
-    except Exception as e:
-        print(f"  ⚠️  Error generating OCC symbol for {symbol}: {e}")
+        return max(80, min(shutil.get_terminal_size(fallback=(100, 24)).columns, 120))
+    except Exception:
+        return 100
+
+
+def _c(text: str, color: str = "", bold: bool = False) -> str:
+    if HAS_FMT and fmt and color:
+        return fmt.colorize(str(text), color, bold=bold)
+    return str(text)
+
+
+def _dte(expiration: str) -> int:
+    try:
+        exp = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
+        return (exp - date.today()).days
+    except Exception:
+        return 0
+
+
+def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str) -> Optional[float]:
+    """Fetch live option price via OCC symbol. Returns None on failure."""
+    if not HAS_YF:
         return None
-
-
-def get_current_price(occ_symbol: str) -> Optional[float]:
-    """
-    Fetch current market price for an option using yfinance.
-    """
     try:
-        ticker = yf.Ticker(occ_symbol)
-        
-        # Try fast_info first
+        from pandas import to_datetime
+        exp = to_datetime(expiration)
+        date_str = exp.strftime("%y%m%d")
+        otype = "C" if opt_type.lower() == "call" else "P"
+        strike_str = f"{int(float(strike) * 1000):08d}"
+        occ = f"{ticker.upper()}{date_str}{otype}{strike_str}"
+
+        tkr = yf.Ticker(occ)
+
         try:
-            fast_info = getattr(ticker, 'fast_info', None)
-            if fast_info:
-                price = getattr(fast_info, 'last_price', None)
-                if price and price > 0:
-                    return float(price)
+            price = getattr(tkr.fast_info, "last_price", None)
+            if price and float(price) > 0:
+                return float(price)
         except Exception:
             pass
-        
-        # Fallback to history
-        hist = ticker.history(period='1d')
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            hist = tkr.history(period="1d")
         if not hist.empty:
-            return float(hist['Close'].iloc[-1])
-        
-        return None
-    except Exception as e:
-        return None
+            p = float(hist["Close"].iloc[-1])
+            if p > 0:
+                return p
+    except Exception:
+        pass
+    return None
+
+
+def _is_short(strategy_name: str) -> bool:
+    s = (strategy_name or "").lower()
+    return any(k in s for k in ("short", "credit", "covered", "cash secured", "naked"))
 
 
 def view_portfolio():
-    log_file = "trades_log/entries.csv"
-    
-    # Check if file exists
-    if not os.path.exists(log_file):
-        print("❌ No trade log found at 'trades_log/entries.csv'")
-        print("   Run the screener first to log some trades.")
+    """Display paper portfolio from paper_trades.db."""
+    width = _width()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if not os.path.exists(DB_PATH):
+        print("\n  No paper_trades.db found. Log some trades first.\n")
         return
-    
-    # Load trades
+
     try:
-        df = pd.read_csv(log_file)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        all_rows = conn.execute("SELECT * FROM trades ORDER BY date DESC").fetchall()
+        conn.close()
     except Exception as e:
-        print(f"❌ Error reading trade log: {e}")
+        print(f"\n  Error reading database: {e}\n")
         return
-    
-    # Filter for open trades
-    open_trades = df[df['status'] == 'OPEN'].copy()
-    
-    if open_trades.empty:
-        print("✓ No open trades found.")
-        print("  All positions are closed or no trades have been logged yet.")
-        # Still show activity summary even if no open trades
-    
-    # === TRADE ACTIVITY SUMMARY ===
-    print("\n" + "=" * 80)
-    print("  TRADE ACTIVITY SUMMARY")
-    print("=" * 80)
-    
-    # Extract date from timestamp
-    if 'timestamp' in df.columns:
-        # Handle potential parsing errors gracefully
-        try:
-            df['date'] = pd.to_datetime(df['timestamp']).dt.date
-            daily_counts = df.groupby('date').size().sort_index(ascending=False)
-            
-            print(f"  {'Date':<15} {'Trades Taken':<15}")
-            print("  " + "-" * 30)
-            
-            for date, count in daily_counts.items():
-                print(f"  {str(date):<15} {count:<15}")
-                
-        except Exception as e:
-            print(f"  ⚠️  Could not parse dates for summary: {e}")
+
+    # ── Header ─────────────────────────────────────────────────────────────────
+    print()
+    if HAS_FMT and fmt:
+        print(fmt.draw_box(f"PAPER PORTFOLIO  \u2014  {now_str}", width, double=True))
     else:
-        print("  ⚠️  Timestamp column missing in log.")
-        
-    print("=" * 80 + "\n")
+        print("=" * width)
+        print(f"  PAPER PORTFOLIO  \u2014  {now_str}")
+        print("=" * width)
 
-    if open_trades.empty:
+    if not all_rows:
+        print("\n  No trades logged yet.\n")
         return
 
-    print("=" * 120)
-    print("  UNREALIZED P/L TRACKER - Active Options Positions")
-    print("=" * 120)
-    print(f"\n  Found {len(open_trades)} open position(s)\n")
-    
-    # Table header
-    print(f"  {'Symbol':<10} {'Type':<5} {'Strike':<8} {'Exp':<12} {'Entry $':<10} {'Current $':<10} {'P/L $':<12} {'P/L %':<10}")
-    print("  " + "-" * 118)
-    
-    total_pnl = 0.0
-    successful_fetches = 0
-    
-    for idx, trade in open_trades.iterrows():
-        symbol = trade['symbol']
-        exp = trade['expiration']
-        opt_type = trade['type']
-        strike = float(trade['strike'])
-        entry_premium = float(trade['entry_premium'])
-        mode = trade.get('mode', '')
-        
-        # Generate OCC symbol
-        occ_symbol = generate_occ_symbol(symbol, exp, opt_type, strike)
-        if not occ_symbol:
-            print(f"  {symbol:<10} {opt_type.upper():<5} {strike:<8.2f} {exp:<12} {'N/A':<10} {'N/A':<10} {'ERROR':<12} {'N/A':<10}")
-            continue
-        
-        # Fetch current price
-        current_price = get_current_price(occ_symbol)
-        
-        if current_price is None:
-            print(f"  {symbol:<10} {opt_type.upper():<5} {strike:<8.2f} {exp:<12} ${entry_premium:<9.2f} {'N/A':<10} {'ERROR':<12} {'N/A':<10}")
-            continue
-        
-        # Calculate P/L
-        # For Long positions: profit = (current - entry) * 100
-        # For Premium Selling (short): profit = (entry - current) * 100
-        if 'premium selling' in mode.lower() or 'credit' in mode.lower():
-            # Short position
-            pnl_per_share = entry_premium - current_price
+    open_trades  = [r for r in all_rows if r["status"] == "OPEN"]
+    closed_trades = [r for r in all_rows if r["status"] == "CLOSED"]
+
+    # ── Open Positions ─────────────────────────────────────────────────────────
+    print()
+    if HAS_FMT and fmt:
+        print(fmt.format_header("  OPEN POSITIONS", ""))
+    else:
+        print("  OPEN POSITIONS")
+    print()
+
+    if not open_trades:
+        print(_c("  No open positions.", fmt.Colors.DIM if HAS_FMT and fmt else ""))
+    else:
+        # Header row
+        hdr = (
+            f"  {'Ticker':<7} {'Type':<5} {'Strike':>8} {'Expiry':<12}"
+            f" {'DTE':>4} {'Opened':<11} {'Entry $':>8} {'Live $':>8}"
+            f" {'P/L $':>10} {'P/L %':>7}"
+        )
+        sep = "  " + "\u2500" * (width - 2)
+
+        if HAS_FMT and fmt:
+            print(fmt.colorize(hdr, fmt.Colors.BOLD))
+            print(fmt.colorize(sep, fmt.Colors.DIM))
         else:
-            # Long position (default)
-            pnl_per_share = current_price - entry_premium
-        
-        pnl_dollars = pnl_per_share * 100  # Per contract
-        pnl_percent = (pnl_per_share / entry_premium) * 100 if entry_premium > 0 else 0.0
-        
-        total_pnl += pnl_dollars
-        successful_fetches += 1
-        
-        # Format P/L with color indicators
-        pnl_sign = "+" if pnl_dollars >= 0 else ""
-        pct_sign = "+" if pnl_percent >= 0 else ""
-        
-        print(f"  {symbol:<10} {opt_type.upper():<5} {strike:<8.2f} {exp:<12} "
-              f"${entry_premium:<9.2f} ${current_price:<9.2f} "
-              f"{pnl_sign}${pnl_dollars:<11.2f} {pct_sign}{pnl_percent:<9.1f}%")
-    
-    # Summary
-    print("  " + "-" * 118)
-    total_sign = "+" if total_pnl >= 0 else ""
-    status_emoji = "🟢" if total_pnl >= 0 else "🔴"
-    print(f"\n  {status_emoji} TOTAL UNREALIZED P/L: {total_sign}${total_pnl:.2f}")
-    print(f"  📊 Successfully fetched {successful_fetches}/{len(open_trades)} positions")
-    print("\n" + "=" * 120)
+            print(hdr)
+            print("  " + "-" * (width - 2))
+
+        total_pnl_usd   = 0.0
+        total_cost_usd  = 0.0
+        fetched_count   = 0
+
+        for r in open_trades:
+            ticker      = r["ticker"]
+            opt_type    = r["type"].upper()
+            strike      = float(r["strike"])
+            expiry      = r["expiration"][:10]
+            opened      = r["date"][:10]
+            entry_price = float(r["entry_price"])
+            dte         = _dte(expiry)
+            short       = _is_short(r["strategy_name"] or "")
+
+            live_price = _fetch_live_price(ticker, expiry, strike, r["type"])
+
+            # Type column
+            if HAS_FMT and fmt:
+                tc = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
+                type_str = fmt.colorize(f"{opt_type:<5}", tc)
+            else:
+                type_str = f"{opt_type:<5}"
+
+            # DTE column
+            if HAS_FMT and fmt:
+                dc = fmt.Colors.BRIGHT_RED if dte < 7 else (fmt.Colors.YELLOW if dte < 14 else fmt.Colors.WHITE)
+                dte_str = fmt.colorize(f"{max(dte,0):>4}", dc)
+            else:
+                dte_str = f"{max(dte,0):>4}"
+
+            if live_price is not None and live_price > 0:
+                pnl_per = (entry_price - live_price) if short else (live_price - entry_price)
+                pnl_usd = pnl_per * 100
+                pnl_pct = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
+                total_pnl_usd  += pnl_usd
+                total_cost_usd += entry_price * 100
+                fetched_count  += 1
+
+                sign = "+" if pnl_usd >= 0 else ""
+                raw_usd = f"{sign}${abs(pnl_usd):.2f}"
+                raw_pct = f"{sign}{abs(pnl_pct):.1f}%"
+                if pnl_usd < 0:
+                    raw_usd = f"-${abs(pnl_usd):.2f}"
+                    raw_pct = f"-{abs(pnl_pct):.1f}%"
+
+                live_str = f"${live_price:.2f}"
+
+                if HAS_FMT and fmt:
+                    pc = fmt.Colors.GREEN if pnl_usd >= 0 else fmt.Colors.RED
+                    usd_str = fmt.colorize(f"{raw_usd:>10}", pc)
+                    pct_str = fmt.colorize(f"{raw_pct:>7}", pc)
+                else:
+                    usd_str = f"{raw_usd:>10}"
+                    pct_str = f"{raw_pct:>7}"
+            else:
+                live_str = _c(f"{'—':>8}", fmt.Colors.DIM if HAS_FMT and fmt else "")
+                usd_str  = _c(f"{'—':>10}", fmt.Colors.DIM if HAS_FMT and fmt else "")
+                pct_str  = _c(f"{'—':>7}", fmt.Colors.DIM if HAS_FMT and fmt else "")
+
+            print(
+                f"  {ticker:<7} {type_str} {strike:>8.2f} {expiry:<12}"
+                f" {dte_str} {opened:<11} ${entry_price:>6.2f} {live_str:>8}"
+                f" {usd_str} {pct_str}"
+            )
+
+        # Open totals
+        if HAS_FMT and fmt:
+            print(fmt.colorize(sep, fmt.Colors.DIM))
+        else:
+            print("  " + "-" * (width - 2))
+
+        if total_cost_usd > 0:
+            total_pct = total_pnl_usd / total_cost_usd * 100
+        else:
+            total_pct = 0.0
+        sign = "+" if total_pnl_usd >= 0 else ""
+        raw_total = f"{sign}${abs(total_pnl_usd):.2f}  ({sign}{abs(total_pct):.1f}%)"
+        if total_pnl_usd < 0:
+            raw_total = f"-${abs(total_pnl_usd):.2f}  (-{abs(total_pct):.1f}%)"
+        fetch_note = f"[{fetched_count}/{len(open_trades)} live prices]"
+        summary = f"  Unrealized P/L: {raw_total}   {fetch_note}"
+        if HAS_FMT and fmt:
+            pc = fmt.Colors.GREEN if total_pnl_usd >= 0 else fmt.Colors.RED
+            print(fmt.colorize(summary, pc, bold=True))
+        else:
+            print(summary)
+
+    # ── Closed Positions ───────────────────────────────────────────────────────
+    print()
+    if HAS_FMT and fmt:
+        print(fmt.format_header("  CLOSED POSITIONS", ""))
+    else:
+        print("  CLOSED POSITIONS")
+    print()
+
+    if not closed_trades:
+        print(_c("  No closed trades yet.", fmt.Colors.DIM if HAS_FMT and fmt else ""))
+    else:
+        hdr = (
+            f"  {'Ticker':<7} {'Type':<5} {'Strike':>8} {'Expiry':<12}"
+            f" {'Opened':<11} {'Closed':<11} {'Entry $':>8} {'Exit $':>8}"
+            f" {'P/L $':>10} {'P/L %':>7} {'Result'}"
+        )
+        sep = "  " + "\u2500" * (width - 2)
+
+        if HAS_FMT and fmt:
+            print(fmt.colorize(hdr, fmt.Colors.BOLD))
+            print(fmt.colorize(sep, fmt.Colors.DIM))
+        else:
+            print(hdr)
+            print("  " + "-" * (width - 2))
+
+        closed_pnl_usd = 0.0
+        wins = 0
+
+        for r in closed_trades:
+            ticker      = r["ticker"]
+            opt_type    = r["type"].upper()
+            strike      = float(r["strike"])
+            expiry      = r["expiration"][:10]
+            opened      = r["date"][:10]
+            closed_date = (r["exit_date"] or "")[:10] or "—"
+            entry_price = float(r["entry_price"])
+            exit_price  = float(r["exit_price"]) if r["exit_price"] else 0.0
+            pnl_ratio   = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
+            pnl_usd     = pnl_ratio * entry_price * 100
+            pnl_pct     = pnl_ratio * 100
+            won         = pnl_usd > 0
+            if won:
+                wins += 1
+            closed_pnl_usd += pnl_usd
+
+            sign = "+" if pnl_usd >= 0 else ""
+            raw_usd = f"{sign}${abs(pnl_usd):.2f}"
+            raw_pct = f"{sign}{abs(pnl_pct):.1f}%"
+            if pnl_usd < 0:
+                raw_usd = f"-${abs(pnl_usd):.2f}"
+                raw_pct = f"-{abs(pnl_pct):.1f}%"
+            result  = "WIN " if won else "LOSS"
+
+            if HAS_FMT and fmt:
+                tc = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
+                type_str   = fmt.colorize(f"{opt_type:<5}", tc)
+                pc         = fmt.Colors.GREEN if won else fmt.Colors.RED
+                usd_str    = fmt.colorize(f"{raw_usd:>10}", pc)
+                pct_str    = fmt.colorize(f"{raw_pct:>7}", pc)
+                result_str = fmt.colorize(result, pc, bold=True)
+            else:
+                type_str   = f"{opt_type:<5}"
+                usd_str    = f"{raw_usd:>10}"
+                pct_str    = f"{raw_pct:>7}"
+                result_str = result
+
+            print(
+                f"  {ticker:<7} {type_str} {strike:>8.2f} {expiry:<12}"
+                f" {opened:<11} {closed_date:<11} ${entry_price:>6.2f} ${exit_price:>6.2f}"
+                f" {usd_str} {pct_str}  {result_str}"
+            )
+
+        if HAS_FMT and fmt:
+            print(fmt.colorize(sep, fmt.Colors.DIM))
+        else:
+            print("  " + "-" * (width - 2))
+
+        n = len(closed_trades)
+        win_rate = wins / n * 100 if n > 0 else 0.0
+        sign = "+" if closed_pnl_usd >= 0 else "-"
+        closed_summary = (
+            f"  Realized P/L: {sign}${abs(closed_pnl_usd):.2f}"
+            f"   Win Rate: {win_rate:.0f}% ({wins}/{n} trades)"
+        )
+        if HAS_FMT and fmt:
+            pc = fmt.Colors.GREEN if closed_pnl_usd >= 0 else fmt.Colors.RED
+            print(fmt.colorize(closed_summary, pc, bold=True))
+        else:
+            print(closed_summary)
+
+    # ── Footer ─────────────────────────────────────────────────────────────────
+    print()
+    note = "  Live prices may be unavailable outside market hours or for expired contracts."
+    if HAS_FMT and fmt:
+        print(fmt.draw_separator(width))
+        print(fmt.colorize(note, fmt.Colors.DIM))
+    else:
+        print("-" * width)
+        print(note)
+    print()
 
 
 if __name__ == "__main__":

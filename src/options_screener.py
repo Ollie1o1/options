@@ -2680,10 +2680,8 @@ def main():
     print(fmt.colorize("  Note: For personal/informational use only. Review data provider terms.", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "  Note: For personal/informational use only. Review data provider terms.")
     print()
 
-    # Initialize PaperManager
+    # Initialize PaperManager and silently auto-close any TP/SL hits
     pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
-    init_msg = "Checking existing paper trade positions..."
-    print(fmt.colorize(f"  {init_msg}", fmt.Colors.DIM) if HAS_ENHANCED_CLI else f"  {init_msg}")
     pm.update_positions()
 
     # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
