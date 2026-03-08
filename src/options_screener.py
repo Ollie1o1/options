@@ -135,6 +135,53 @@ def get_display_width() -> int:
         return 100
 
 
+_WATCHLIST_PATH = "watchlist.json"
+
+
+def load_watchlist() -> list:
+    """Load personal watchlist from JSON file."""
+    try:
+        with open(_WATCHLIST_PATH, "r") as f:
+            data = json.load(f)
+            return [t.upper() for t in data if isinstance(t, str)]
+    except Exception:
+        return []
+
+
+def save_watchlist(tickers: list) -> None:
+    """Save personal watchlist to JSON file."""
+    with open(_WATCHLIST_PATH, "w") as f:
+        json.dump(tickers, f)
+
+
+def add_to_watchlist(ticker: str) -> None:
+    """Add ticker to watchlist (deduplicates)."""
+    wl = load_watchlist()
+    ticker = ticker.upper()
+    if ticker not in wl:
+        wl.append(ticker)
+        save_watchlist(wl)
+        msg = f"Added {ticker} to watchlist ({len(wl)} ticker(s) total)."
+        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+    else:
+        msg = f"{ticker} is already in your watchlist."
+        print(fmt.colorize(f"  {msg}", fmt.Colors.DIM) if HAS_ENHANCED_CLI else f"  {msg}")
+
+
+def remove_from_watchlist(ticker: str) -> None:
+    """Remove ticker from watchlist."""
+    wl = load_watchlist()
+    ticker = ticker.upper()
+    if ticker in wl:
+        wl.remove(ticker)
+        save_watchlist(wl)
+        msg = f"Removed {ticker} from watchlist ({len(wl)} ticker(s) remaining)."
+        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+    else:
+        msg = f"{ticker} not found in watchlist."
+        print(fmt.colorize(f"  {msg}", fmt.Colors.DIM) if HAS_ENHANCED_CLI else f"  {msg}")
+
+
 @contextlib.contextmanager
 def _suppress_scan_noise():
     """Suppress noisy third-party logging/warnings during parallel scan."""
@@ -1501,6 +1548,64 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     print()
 
 
+def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
+    """Print a prominent callout box for the single best pick by quality_score."""
+    if df_picks.empty or len(df_picks) < 3:
+        return
+    if not HAS_ENHANCED_CLI:
+        return
+
+    top = df_picks.nlargest(1, "quality_score").iloc[0]
+    if top.get("quality_score", 0) < 0.75:
+        return
+
+    total = len(df_picks)
+    sym = top.get("symbol", "N/A")
+    opt_type = str(top.get("type", "CALL")).upper()
+    strike = top.get("strike", 0)
+    exp = str(pd.to_datetime(top.get("expiration", "")).date())
+    pop = float(top.get("prob_profit", 0) or 0)
+    rr = float(top.get("rr_ratio", 0) or 0)
+    ev_raw = top.get("ev_per_contract", None)
+    ev = float(ev_raw) if (ev_raw is not None and pd.notna(ev_raw) and math.isfinite(float(ev_raw))) else 0.0
+    quality = float(top.get("quality_score", 0))
+    stars, _ = fmt.format_quality_score(quality)
+    thesis = generate_trade_thesis(top) if HAS_ENHANCED_CLI else ""
+    thesis_short = thesis.split("|")[0].strip()[:55] if thesis else ""
+    pop_str = fmt.format_pop(pop)
+    rr_str = fmt.format_rr(rr)
+    ev_str = fmt.format_ev(ev)
+
+    line1 = f"BEST SETUP  \u2014  {sym} {opt_type} ${strike:.0f}  exp {exp}   #1/{total}"
+    line2 = f"PoP {pop_str}  RR {rr_str}  EV {ev_str}  {stars}  Score {quality:.2f}"
+    line3 = f'"{thesis_short}"' if thesis_short else ""
+
+    # Build box manually with double-border
+    inner_w = width - 4  # 2 chars each side: ╔ + space ... space + ╗
+    def pad(s):
+        # strip ANSI for length measurement
+        import re
+        plain = re.sub(r'\033\[[0-9;]*m', '', s)
+        pad_len = max(0, inner_w - len(plain))
+        return s + " " * pad_len
+
+    border_h = fmt.BoxChars.D_HORIZONTAL * (width - 2)
+    top_border = fmt.colorize(fmt.BoxChars.D_TOP_LEFT + border_h + fmt.BoxChars.D_TOP_RIGHT, fmt.Colors.BRIGHT_GREEN)
+    bot_border = fmt.colorize(fmt.BoxChars.D_BOTTOM_LEFT + border_h + fmt.BoxChars.D_BOTTOM_RIGHT, fmt.Colors.BRIGHT_GREEN)
+    v = fmt.colorize(fmt.BoxChars.D_VERTICAL, fmt.Colors.BRIGHT_GREEN)
+
+    lines_to_print = [line1, line2]
+    if line3:
+        lines_to_print.append(line3)
+
+    print(top_border)
+    for ln in lines_to_print:
+        colored_ln = fmt.colorize(ln, fmt.Colors.BRIGHT_GREEN, bold=(ln == line1))
+        print(f"{v}  {pad(colored_ln)}{v}")
+    print(bot_border)
+    print()
+
+
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
@@ -1559,6 +1664,13 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     # ── Strategy Classification Panel (Improvement 8) ───────────────────────
     _print_strategy_panel(df_picks, WIDTH)
 
+    # ── Best Setup Callout ────────────────────────────────────────────────────
+    print_best_setup_callout(df_picks, WIDTH)
+
+    # ── Rank all picks by quality_score ──────────────────────────────────────
+    df_picks = df_picks.copy()
+    df_picks["_rank"] = df_picks["quality_score"].rank(ascending=False, method="first").astype(int)
+
     # ── Buckets ──────────────────────────────────────────────────────────────
     for bucket in ["LOW", "MEDIUM", "HIGH"]:
         sub = df_picks[df_picks["price_bucket"] == bucket]
@@ -1586,9 +1698,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
         # Column headers
         if is_multi:
-            hdr = f"  {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+            hdr = f"  {'Rk':<4} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
         else:
-            hdr = f"  {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+            hdr = f"  {'Rk':<4} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
         print(fmt.colorize(hdr, fmt.Colors.BOLD + fmt.Colors.UNDERLINE) if HAS_ENHANCED_CLI else hdr)
 
         if HAS_ENHANCED_CLI:
@@ -1609,8 +1721,10 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             vol = int(r.get("volume", 0))
             delta = r.get("delta", 0.0)
             quality = r.get("quality_score", 0.0)
+            rank = int(r.get("_rank", 0))
 
             if HAS_ENHANCED_CLI:
+                rank_str = fmt.colorize(f"#{rank:<2}", fmt.Colors.DIM)
                 sym_str = fmt.colorize(f"{r['symbol']:<6}", fmt.Colors.BRIGHT_WHITE, bold=True)
                 type_color = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
                 type_str = fmt.colorize(f"{opt_type:<5}", type_color)
@@ -1627,14 +1741,15 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 mon_str = fmt.colorize(f"{moneyness:<4}", mon_color)
                 stars, _ = fmt.format_quality_score(quality)
                 if is_multi:
-                    print(f"  {sym_str} {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
+                    print(f"  {rank_str} {sym_str} {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
                 else:
-                    print(f"  {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
+                    print(f"  {rank_str} {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
             else:
+                rank_plain = f"#{rank:<2}"
                 if is_multi:
-                    print(f"  {r['symbol']:<6} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
+                    print(f"  {rank_plain} {r['symbol']:<6} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
                 else:
-                    print(f"  {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
+                    print(f"  {rank_plain} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
 
             arrow = fmt.colorize("\u21b3", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u21b3"
 
@@ -2300,6 +2415,23 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             print(f"  Fetching data for {len(tickers)} ticker(s)...")
             print(f"{'='*WIDTH}\n")
 
+    # ── Pre-scan active filter summary ───────────────────────────────────────
+    if verbose:
+        _fc = config.get("filters", {})
+        _d_min = _fc.get("delta_min", 0.15)
+        _d_max = _fc.get("delta_max", 0.35)
+        _spread_cap = _fc.get("max_bid_ask_spread_pct", 0.40)
+        _min_vol = _fc.get("min_volume", 50)
+        _iv_pct_min = _fc.get("min_iv_percentile", 20)
+        _filter_line = (
+            f"  Filters  DTE: {min_dte}\u2013{max_dte}d"
+            f"  |  \u0394: {_d_min:.2f}\u2013{_d_max:.2f}"
+            f"  |  Spread \u2264{_spread_cap*100:.0f}%"
+            f"  |  Vol \u2265{_min_vol}"
+            f"  |  IV%ile \u2265{_iv_pct_min}"
+        )
+        print(fmt.colorize(_filter_line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else _filter_line)
+
     # Use ThreadPoolExecutor for parallel processing
     # Limit to 8 workers to avoid rate limiting
     max_workers = min(8, len(tickers))
@@ -2685,16 +2817,19 @@ def main():
     pm.update_positions()
 
     # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
+    _wl = load_watchlist()
+    _wl_desc = f"Scan your {len(_wl)} saved ticker(s)" if _wl else "(empty \u2014 type ADD AAPL to begin)"
     if HAS_ENHANCED_CLI:
         print("\n" + fmt.draw_separator(WIDTH))
         modes = [
             ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
             ("2", "ALL",       "Budget-based multi-stock scan"),
-            ("3", "DISCOVER",  "Top 100 most-traded tickers — no budget limit"),
-            ("4", "SELL",      "Premium Selling — income via short puts"),
+            ("3", "DISCOVER",  "Top 100 most-traded tickers \u2014 no budget limit"),
+            ("4", "SELL",      "Premium Selling \u2014 income via short puts"),
             ("5", "SPREADS",   "Credit Spread analysis"),
-            ("6", "IRON",      "Iron Condor analysis — range-bound"),
+            ("6", "IRON",      "Iron Condor analysis \u2014 range-bound"),
             ("7", "PORTFOLIO", "View open position P/L"),
+            ("8", "MY LIST",   _wl_desc),
         ]
         for num, cmd, desc in modes:
             n = fmt.colorize(f"[{num}]", fmt.Colors.BRIGHT_YELLOW)
@@ -2711,22 +2846,55 @@ def main():
         print("  [5] SPREADS    \u2014 Credit Spread analysis")
         print("  [6] IRON       \u2014 Iron Condor analysis")
         print("  [7] PORTFOLIO  \u2014 View open position P/L")
+        print(f"  [8] MY LIST    \u2014 {_wl_desc}")
     print()
 
-    symbol_input = prompt_input("Enter stock ticker or command", "DISCOVER").upper()
+    symbol_input = prompt_input("Enter number, ticker, or command (default: 3)", "3").upper()
+
+    # ── Watchlist commands ────────────────────────────────────────────────────
+    if symbol_input.startswith("ADD "):
+        add_to_watchlist(symbol_input[4:].strip())
+        sys.exit(0)
+    if symbol_input.startswith("REMOVE "):
+        remove_from_watchlist(symbol_input[7:].strip())
+        sys.exit(0)
+    if symbol_input in ("SHOW LIST", "SHOW"):
+        wl_cur = load_watchlist()
+        if wl_cur:
+            print(f"  Your watchlist ({len(wl_cur)} tickers): " + ", ".join(wl_cur))
+        else:
+            print("  Watchlist is empty. Type ADD AAPL to begin.")
+        sys.exit(0)
+
+    # ── Number → command mapping ──────────────────────────────────────────────
+    _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
+                "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST"}
+    if symbol_input in _num_map:
+        symbol_input = _num_map[symbol_input]
 
     if symbol_input == "PORTFOLIO":
         from .check_pnl import view_portfolio
         view_portfolio()
         sys.exit(0)
 
+    # ── MY LIST mode ──────────────────────────────────────────────────────────
+    is_my_list_mode = (symbol_input in ("MY LIST", "MYLIST"))
+    if is_my_list_mode:
+        _wl_tickers = load_watchlist()
+        if not _wl_tickers:
+            print("  Your watchlist is empty. Type ADD AAPL to add a ticker first.")
+            sys.exit(0)
+        symbol_input = "DISCOVER"  # reuse discovery flow with custom ticker list
+
     is_budget_mode = (symbol_input == "ALL")
-    is_discovery_mode = (symbol_input == "DISCOVER" or symbol_input == "")
+    is_discovery_mode = (symbol_input in ("DISCOVER", "")) or is_my_list_mode
+    is_ticker_mode = (symbol_input == "TICKER")  # user chose [1] — will prompt for symbol
     is_premium_selling_mode = (symbol_input == "SELL")
     is_credit_spread_mode = (symbol_input == "SPREADS")
     is_iron_condor_mode = (symbol_input == "IRON")
 
-    if is_discovery_mode: mode = "Discovery scan"
+    if is_my_list_mode: mode = "Discovery scan"
+    elif is_discovery_mode: mode = "Discovery scan"
     elif is_budget_mode: mode = "Budget scan"
     elif is_premium_selling_mode: mode = "Premium Selling"
     elif is_credit_spread_mode: mode = "Credit Spreads"
@@ -2736,7 +2904,10 @@ def main():
     budget = None
     tickers = []
 
-    if is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
+    if is_my_list_mode:
+        tickers = _wl_tickers
+        print(f"  Scanning your watchlist: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+    elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
         tickers = prompt_for_tickers()
         print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     elif is_budget_mode:
@@ -2750,6 +2921,11 @@ def main():
             default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
             tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
             tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+    elif is_ticker_mode:
+        ticker_sym = prompt_input("Enter stock ticker symbol", "AAPL").upper()
+        if not ticker_sym.isalnum():
+            print("Please enter a valid alphanumeric ticker."); sys.exit(1)
+        tickers = [ticker_sym]
     else:
         if not symbol_input.isalnum():
             print("Please enter a valid alphanumeric ticker."); sys.exit(1)
@@ -2791,68 +2967,79 @@ def main():
     profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
     trader_profile = "day" if profile_choice == "2" else "swing"
 
-    try:
-        scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct)
-        if scan_results is None: sys.exit(0)
+    _is_single_stock = (mode == "Single-stock")
+    _repeat_count = 0
 
-        picks = scan_results['picks']
-        rfr = scan_results['rfr']
-        chain_iv_median = scan_results['chain_iv_median']
-        
-        # === PAPER TRADING INTERACTIVE PROMPT ===
-        if not picks.empty and mode != "Credit Spreads" and mode != "Iron Condor":
-            pt_choice = prompt_input("Would you like to paper trade the top 5 picks? (y/n)", "n").lower()
-            if pt_choice == "y":
-                top_5_pt = picks.sort_values("quality_score", ascending=False).head(5)
-                today_str = datetime.now().strftime("%Y-%m-%d")
-                for _, row in top_5_pt.iterrows():
+    try:
+        while True:
+            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct)
+            if scan_results is None: sys.exit(0)
+
+            picks = scan_results['picks']
+            rfr = scan_results['rfr']
+            chain_iv_median = scan_results['chain_iv_median']
+
+            # ── Scan-another shortcut (single-stock only) ──────────────────
+            if _is_single_stock and _repeat_count < 5:
+                _another = prompt_input("Scan another ticker? (enter symbol or Enter to continue)", "").upper().strip()
+                if _another and _another.isalnum() and 1 <= len(_another) <= 6:
+                    tickers = [_another]
+                    _repeat_count += 1
+                    continue  # loop back, skip post-scan prompts
+
+            # ── Collapsed post-scan prompt ─────────────────────────────────
+            if not picks.empty:
+                if HAS_ENHANCED_CLI:
+                    save_label = fmt.colorize("Save/Export?", fmt.Colors.BRIGHT_CYAN)
+                    p_opt = fmt.colorize("[P]", fmt.Colors.BRIGHT_YELLOW) + " Paper trade top pick"
+                    c_opt = fmt.colorize("[C]", fmt.Colors.BRIGHT_YELLOW) + " CSV"
+                    l_opt = fmt.colorize("[L]", fmt.Colors.BRIGHT_YELLOW) + " Log trades"
+                    skip_opt = fmt.colorize("[Enter]", fmt.Colors.DIM) + " Skip"
+                    print(f"\n  {save_label}  {p_opt}  \u00b7  {c_opt}  \u00b7  {l_opt}  \u00b7  {skip_opt}")
+                else:
+                    print("\n  Save/Export?  [P] Paper trade top pick  [C] CSV  [L] Log trades  [Enter] Skip")
+                save_choice = prompt_input("", "").strip().upper()
+
+                if save_choice == "P" and mode not in ("Credit Spreads", "Iron Condor"):
+                    top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
+                    today_str = datetime.now().strftime("%Y-%m-%d")
                     trade_dict = {
                         "date": today_str,
-                        "ticker": row["symbol"],
-                        "expiration": row["expiration"],
-                        "strike": row["strike"],
-                        "type": str(row["type"]).capitalize(),
-                        "entry_price": safe_float(row.get("ask") or None, row["lastPrice"]),
-                        "quality_score": row["quality_score"],
-                        "strategy_name": f"Long {str(row['type']).capitalize()}"
+                        "ticker": top_pick_row["symbol"],
+                        "expiration": top_pick_row["expiration"],
+                        "strike": top_pick_row["strike"],
+                        "type": str(top_pick_row["type"]).capitalize(),
+                        "entry_price": safe_float(top_pick_row.get("ask") or None, top_pick_row["lastPrice"]),
+                        "quality_score": top_pick_row["quality_score"],
+                        "strategy_name": f"Long {str(top_pick_row['type']).capitalize()}"
                     }
                     pm.log_trade(trade_dict)
-                msg = f"Logged {len(top_5_pt)} paper trades."
-                print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \u2705 Successfully {msg}")
+                    msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
+                    print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
 
-        export_choice = prompt_input("Export results to CSV? (y/n)", "n").lower()
-        if export_choice == "y":
-            csv_file = export_to_csv(picks, mode, budget)
-            if csv_file:
-                msg = f"Results exported to: {csv_file}"
-                print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
+                elif save_choice == "C":
+                    csv_file = export_to_csv(picks, mode, budget)
+                    if csv_file:
+                        msg = f"Results exported to: {csv_file}"
+                        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
 
-        if HAS_VISUALIZATION:
-            viz_choice = prompt_input("Generate visualization charts? (y/n)", "n").lower()
-            if viz_choice == "y":
-                create_visualizations(picks, mode, output_dir="reports")
+                elif save_choice == "L":
+                    picks_to_log = select_trades_to_log(picks)
+                    if not picks_to_log.empty:
+                        log_trade_entry(picks_to_log, mode)
+                        msg = f"Logged {len(picks_to_log)} trades."
+                        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
 
-        log_choice = prompt_input("Log trades for P/L tracking? (y/n)", "n").lower()
-        if log_choice == "y":
-            mode_choice = prompt_input("Log (A)ll or (S)elect specific?", "s").lower()
-            if mode_choice == "s":
-                picks_to_log = select_trades_to_log(picks)
-                if not picks_to_log.empty:
-                    log_trade_entry(picks_to_log, mode)
-                    msg = f"Logged {len(picks_to_log)} trades."
-                    print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
+            # Done message
+            if HAS_ENHANCED_CLI:
+                WIDTH = get_display_width()
+                print("\n" + fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL))
+                print(fmt.colorize("  \U0001f44b  Done! Happy trading!", fmt.Colors.BRIGHT_GREEN, bold=True))
+                print(fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL) + "\n")
             else:
-                log_trade_entry(picks, mode)
+                print("\n\U0001f44b Done! Happy trading!\n")
+            break
 
-        # Done message (Phase 6)
-        if HAS_ENHANCED_CLI:
-            WIDTH = get_display_width()
-            print("\n" + fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL))
-            print(fmt.colorize("  \U0001f44b  Done! Happy trading!", fmt.Colors.BRIGHT_GREEN, bold=True))
-            print(fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL) + "\n")
-        else:
-            print("\n\U0001f44b Done! Happy trading!\n")
-        
     except KeyboardInterrupt: print("\nCancelled.")
     except Exception as e:
         print(f"Error: {e}")
