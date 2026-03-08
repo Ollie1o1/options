@@ -950,7 +950,7 @@ def enrich_and_score(
     df["exp_dt"] = pd.to_datetime(df["expiration"], errors="coerce", utc=True)
     df = df[df["exp_dt"].notna()].copy()
     df["T_years"] = (df["exp_dt"] - now).dt.total_seconds() / (365.0 * 24 * 3600)
-    df = df[(df["T_years"] > min_dte / 365.0) & (df["T_years"] < max_dte / 365.0)].copy()
+    df = df[(df["T_years"] >= min_dte / 365.0) & (df["T_years"] <= max_dte / 365.0)].copy()
 
     for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility", "underlying"]:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
