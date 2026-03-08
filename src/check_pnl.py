@@ -30,6 +30,13 @@ try:
 except ImportError:
     HAS_BS = False
 
+try:
+    from .stress_test import print_stress_test
+    from .backtester import print_paper_trade_ic
+    HAS_STRESS = True
+except ImportError:
+    HAS_STRESS = False
+
 DB_PATH = "paper_trades.db"
 
 
@@ -383,6 +390,13 @@ def view_portfolio():
 
         _print_portfolio_greeks(open_trades, width)
 
+        # Stress test
+        if HAS_STRESS and open_trades:
+            try:
+                print_stress_test(open_trades, width=width)
+            except Exception:
+                pass
+
     # ── Closed Positions ───────────────────────────────────────────────────────
     print()
     if HAS_FMT and fmt:
@@ -530,6 +544,13 @@ def view_portfolio():
                         print(fmt.colorize(line, lc))
                     else:
                         print(line)
+
+        # Paper trade IC analysis
+        if HAS_STRESS and len(closed_trades) >= 5:
+            try:
+                print_paper_trade_ic(DB_PATH, width=width)
+            except Exception:
+                pass
 
     # ── Roll Alerts ────────────────────────────────────────────────────────────
     roll_candidates = []
