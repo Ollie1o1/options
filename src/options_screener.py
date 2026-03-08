@@ -606,8 +606,11 @@ def calculate_metrics(
     # Theoretical value and P(ITM) using market IV (for display/reference)
     d1, d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     p_itm = np.where(is_call, norm_cdf(d2), norm_cdf(-d2))
+    disc = np.exp(-risk_free_rate * T_vals)
     with np.errstate(divide='ignore', invalid='ignore'):
-        theo_payoff = np.where(is_call, S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(d1) - K_vals * norm_cdf(d2), K_vals * norm_cdf(-d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-d1))
+        theo_payoff = np.where(is_call,
+            S_vals * norm_cdf(d1) - K_vals * disc * norm_cdf(d2),
+            K_vals * disc * norm_cdf(-d2) - S_vals * norm_cdf(-d1))
     df["p_itm"], df["theo_value"] = p_itm, theo_payoff
 
     # HV-adjusted EV: BS(realized_vol) - market_price
@@ -617,8 +620,8 @@ def calculate_metrics(
     hv_d1, hv_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, hv_arr)
     with np.errstate(divide='ignore', invalid='ignore'):
         hv_payoff = np.where(is_call,
-            S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(hv_d1) - K_vals * norm_cdf(hv_d2),
-            K_vals * norm_cdf(-hv_d2) - S_vals * np.exp(risk_free_rate * T_vals) * norm_cdf(-hv_d1))
+            S_vals * norm_cdf(hv_d1) - K_vals * disc * norm_cdf(hv_d2),
+            K_vals * disc * norm_cdf(-hv_d2) - S_vals * norm_cdf(-hv_d1))
     df["ev_per_contract"] = 100.0 * (hv_payoff - prem_vals) - (100.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
 
     # Warnings
@@ -755,7 +758,7 @@ def calculate_scores(
     df.loc[df["oi_wall_warning"] != "", "quality_score"] -= 0.10
     df["squeeze_play"] = (df["is_squeezing"] == True) & (df["Unusual_Whale"] == True)
     df.loc[df["squeeze_play"], "quality_score"] += 0.25
-    if df["macro_warning"].str.contains("MACRO RISK").any(): df["quality_score"] -= 0.10
+    df.loc[df["macro_warning"].str.contains("MACRO RISK", na=False), "quality_score"] -= 0.10
     
     # Save components
     df["quality_score"] = df["quality_score"].clip(0, 1)

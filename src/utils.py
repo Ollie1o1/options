@@ -195,12 +195,14 @@ def format_money(x: Any) -> str:
         return "-"
 
 def determine_moneyness(row: Any) -> str:
-    """Determine if option is ITM or OTM based on strike vs underlying."""
+    """Determine if option is ITM, ATM, or OTM based on strike vs underlying."""
     try:
         strike = float(row["strike"])
         underlying = float(row["underlying"])
         opt_type = str(row["type"]).lower()
-        
+
+        if underlying > 0 and abs(strike - underlying) / underlying <= 0.015:
+            return "ATM"
         if opt_type == "call":
             return "ITM" if strike < underlying else "OTM"
         else:  # put
