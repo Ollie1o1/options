@@ -886,7 +886,7 @@ def calculate_scores(
     # Reward earnings plays where IV is actually underpriced vs realized vol
     if "Earnings Play" in df.columns and "is_underpriced" in df.columns:
         df.loc[(df["Earnings Play"] == "YES") & (df["is_underpriced"] == True), "quality_score"] += 0.08
-    df.loc[df["Trend_Aligned"] == True, "quality_score"] += 0.15
+    df.loc[df["Trend_Aligned"] == True, "quality_score"] += 0.05
     df.loc[df["decay_warning"] == True, "quality_score"] -= 0.20
     df.loc[df["sr_warning"] != "", "quality_score"] -= 0.10
     if "seasonal_win_rate" in df.columns:
@@ -3010,6 +3010,37 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _check_market_hours() -> tuple:
+    """
+    Returns (is_open: bool, message: str) in US Eastern time.
+    Options are liquid 09:30–16:00 ET, Mon–Fri. Outside this window,
+    yfinance data is stale and bid-ask spreads are unreliable.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        et_zone = ZoneInfo("America/New_York")
+        now_et = datetime.now(et_zone)
+    except Exception:
+        # Fallback: rough UTC-4 (EDT) — acceptable for a warning-only check
+        now_et = datetime.now(timezone(timedelta(hours=-4)))
+
+    weekday = now_et.weekday()  # 0=Mon … 6=Sun
+    hhmm = now_et.hour * 100 + now_et.minute
+    time_str = now_et.strftime("%H:%M ET")
+
+    if weekday >= 5:
+        day_name = "Saturday" if weekday == 5 else "Sunday"
+        return False, f"Markets closed — it's {day_name} ({time_str}). Data is stale."
+
+    if hhmm < 930:
+        return False, f"Pre-market ({time_str}). Options open at 09:30 ET — bid/ask spreads not reliable yet."
+
+    if hhmm >= 1600:
+        return False, f"After-hours ({time_str}). Options closed at 16:00 ET — quotes are stale."
+
+    return True, f"Market open ({time_str})"
+
+
 def main():
     # ── CLI argument parsing (Phase 7) ───────────────────────────────────────
     parser = argparse.ArgumentParser(add_help=False)
@@ -3072,6 +3103,16 @@ def main():
         print("=" * WIDTH)
 
     print(fmt.colorize("  Note: For personal/informational use only. Review data provider terms.", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "  Note: For personal/informational use only. Review data provider terms.")
+
+    # ── Market Hours Check ───────────────────────────────────────────────────
+    is_open, mkt_msg = _check_market_hours()
+    if not is_open:
+        if HAS_ENHANCED_CLI:
+            print(fmt.format_warning(mkt_msg))
+            print(fmt.colorize("  Quotes are 15+ min delayed. Use results for planning, not live execution.", fmt.Colors.DIM))
+        else:
+            print(f"⚠  {mkt_msg}")
+            print("  Quotes are 15+ min delayed. Use results for planning, not live execution.")
     print()
 
     # Initialize PaperManager and silently auto-close any TP/SL hits
