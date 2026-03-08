@@ -163,16 +163,53 @@ def bs_rho(option_type, S, K, T, r, sigma):
             option_type = np.asanyarray(option_type)
             rho = np.empty_like(d2, dtype=float)
             is_call = np.char.lower(option_type.astype(str)) == "call"
-            
+
             def _get(v, mask): return v[mask] if isinstance(v, np.ndarray) else v
-            
+
             if np.any(is_call):
                 rho[is_call] = _get(K, is_call) * _get(T, is_call) * np.exp(-_get(r, is_call) * _get(T, is_call)) * norm.cdf(d2[is_call]) / 100.0
-            
+
             if np.any(~is_call):
                 rho[~is_call] = -_get(K, ~is_call) * _get(T, ~is_call) * np.exp(-_get(r, ~is_call) * _get(T, ~is_call)) * norm.cdf(-d2[~is_call]) / 100.0
-                
+
             return rho
+
+
+def bs_charm(option_type, S, K, T, r, sigma):
+    """
+    Black-Scholes charm (dDelta/dTime) — daily delta decay.
+    Negative for calls (delta decays toward 0), positive for puts.
+    """
+    d1, d2 = _d1d2(S, K, T, r, sigma)
+    if d1 is None:
+        return 0.0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        charm_raw = -norm.pdf(d1) * (2 * r * T - d2 * sigma * np.sqrt(T)) / (2 * T * sigma * np.sqrt(T))
+    if isinstance(option_type, str):
+        if option_type.lower() == "call":
+            return charm_raw / 365.0
+        else:
+            return (-charm_raw) / 365.0
+    else:
+        option_type = np.asanyarray(option_type)
+        is_call = np.char.lower(option_type.astype(str)) == "call"
+        charm = np.where(is_call, charm_raw, -charm_raw)
+        return charm / 365.0
+
+
+def bs_vanna(S, K, T, r, sigma):
+    """
+    Black-Scholes vanna (dDelta/dVol = dVega/dSpot).
+    Vanna = -n(d1) * d2 / sigma
+    Positive vanna: delta increases as IV rises.
+    """
+    d1, d2 = _d1d2(S, K, T, r, sigma)
+    if d1 is None:
+        return 0.0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        vanna = -norm.pdf(d1) * d2 / np.maximum(sigma, 1e-9)
+    return vanna
+
 
 # --- Formatting Helpers ---
 
@@ -222,6 +259,8 @@ __all__ = [
     "bs_vega",
     "bs_theta",
     "bs_rho",
+    "bs_charm",
+    "bs_vanna",
     "_d1d2",
     "format_pct",
     "format_money",

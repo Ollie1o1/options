@@ -7,6 +7,7 @@ and displays a clean P/L summary with live price fetching.
 import os
 import sqlite3
 import shutil
+import pandas as pd
 from datetime import datetime, date
 from typing import Optional
 
@@ -322,6 +323,33 @@ def view_portfolio():
             print(fmt.colorize(closed_summary, pc, bold=True))
         else:
             print(closed_summary)
+
+    # ── Roll Alerts ────────────────────────────────────────────────────────────
+    roll_candidates = []
+    today = date.today()
+    for r in open_trades:
+        try:
+            exp_date = datetime.strptime(r["expiration"][:10], "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+            pnl_pct_val = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
+            if 0 < dte <= 21 and pnl_pct_val > 0.25:
+                roll_candidates.append((r["ticker"], r["type"], float(r["strike"]), exp_date, dte, pnl_pct_val))
+        except Exception:
+            continue
+
+    if roll_candidates:
+        print()
+        roll_header = "  ROLL ALERTS \u2014 Consider rolling these positions:"
+        if HAS_FMT and fmt:
+            print(fmt.colorize(roll_header, fmt.Colors.YELLOW, bold=True))
+        else:
+            print(roll_header)
+        for ticker, opt_type, strike, exp, dte, pnl in roll_candidates:
+            line = f"  \u2192 {ticker} {str(opt_type).upper()} ${strike} exp {exp} | DTE: {dte}d | P/L: {pnl:.0%} \u2014 consider rolling"
+            if HAS_FMT and fmt:
+                print(fmt.colorize(line, fmt.Colors.YELLOW))
+            else:
+                print(line)
 
     # ── Footer ─────────────────────────────────────────────────────────────────
     print()

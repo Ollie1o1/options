@@ -415,9 +415,18 @@ def get_iv_rank_percentile_from_history(hist: pd.DataFrame, current_iv: float) -
         return None, None, None, None
 
 def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
-    """Fetch short interest from fast_info or info (non-blocking preferred)."""
+    """Fetch short interest (shortPercentOfFloat) from ticker info."""
     try:
-        return None 
+        info = ticker.info or {}
+        si = info.get("shortPercentOfFloat", None)
+        if si is None:
+            return None
+        si = float(si)
+        if not (0 <= si <= 200):
+            return None
+        if si > 1:
+            si = si / 100.0
+        return si
     except Exception:
         return None
 
@@ -566,6 +575,78 @@ def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.Data
 
     return sub_frames
 
+def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[datetime], df_chain: pd.DataFrame, underlying: float) -> Optional[dict]:
+    """
+    Compare the market-implied earnings move (ATM straddle / underlying)
+    with the stock's historical earnings actual moves (last 8 quarters).
+    Returns dict with implied_move_pct, hist_avg_move, hist_beat_rate, is_cheap.
+    """
+    if earnings_date is None or df_chain.empty or underlying <= 0:
+        return None
+    try:
+        df_chain = df_chain.copy()
+        df_chain["exp_dt"] = pd.to_datetime(df_chain["expiration"], errors="coerce", utc=True)
+        try:
+            earnings_dt = pd.Timestamp(earnings_date).tz_localize("UTC") if earnings_date.tzinfo is None else pd.Timestamp(earnings_date).tz_convert("UTC")
+        except Exception:
+            earnings_dt = pd.Timestamp(earnings_date, tz="UTC")
+        post_earnings_exps = df_chain[df_chain["exp_dt"] > earnings_dt]["expiration"].unique()
+        if len(post_earnings_exps) == 0:
+            return None
+        nearest_exp = sorted(post_earnings_exps)[0]
+
+        exp_df = df_chain[df_chain["expiration"] == nearest_exp].copy()
+        exp_df["strike_dist"] = (exp_df["strike"] - underlying).abs()
+        atm_strike = exp_df.loc[exp_df["strike_dist"].idxmin(), "strike"]
+
+        atm_call = exp_df[(exp_df["strike"] == atm_strike) & (exp_df["type"] == "call")]
+        atm_put = exp_df[(exp_df["strike"] == atm_strike) & (exp_df["type"] == "put")]
+
+        if atm_call.empty or atm_put.empty:
+            return None
+
+        call_mid = (atm_call.iloc[0]["bid"] + atm_call.iloc[0]["ask"]) / 2
+        put_mid = (atm_put.iloc[0]["bid"] + atm_put.iloc[0]["ask"]) / 2
+
+        if call_mid <= 0 or put_mid <= 0:
+            return None
+
+        implied_move_pct = (call_mid + put_mid) / underlying
+
+        hist_moves = []
+        try:
+            earn_dates = tkr.get_earnings_dates(limit=16)
+            if earn_dates is not None and not earn_dates.empty:
+                earn_dates = earn_dates.dropna(subset=["EPS Actual"])
+                hist = tkr.history(period="3y", interval="1d")
+                if not hist.empty:
+                    for earn_dt in earn_dates.index[:8]:
+                        earn_date_loc = hist.index.searchsorted(earn_dt)
+                        if earn_date_loc > 0 and earn_date_loc < len(hist):
+                            pre_price = float(hist["Close"].iloc[earn_date_loc - 1])
+                            post_price = float(hist["Close"].iloc[min(earn_date_loc + 1, len(hist) - 1)])
+                            if pre_price > 0:
+                                hist_moves.append(abs(post_price / pre_price - 1.0))
+        except Exception:
+            pass
+
+        if not hist_moves:
+            return {"implied_move_pct": implied_move_pct, "hist_avg_move": None, "hist_beat_rate": None, "is_cheap": None}
+
+        hist_avg = sum(hist_moves) / len(hist_moves)
+        beat_rate = sum(1 for m in hist_moves if m > implied_move_pct) / len(hist_moves)
+        is_cheap = hist_avg > implied_move_pct
+
+        return {
+            "implied_move_pct": implied_move_pct,
+            "hist_avg_move": hist_avg,
+            "hist_beat_rate": beat_rate,
+            "is_cheap": is_cheap
+        }
+    except Exception:
+        return None
+
+
 @retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
 def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     """
@@ -607,6 +688,18 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     sector_perf = get_sector_performance(symbol)
     short_interest = get_short_interest(tkr)
 
+    # Next ex-dividend date
+    next_ex_div = None
+    try:
+        divs = tkr.dividends
+        if divs is not None and not divs.empty:
+            future_divs = divs[divs.index > pd.Timestamp.now(tz='UTC')]
+            next_ex_div = future_divs.index[0].date() if not future_divs.empty else None
+        else:
+            next_ex_div = None
+    except Exception:
+        next_ex_div = None
+
     # 4. Fetch Options Chains
     try:
         expirations = tkr.options
@@ -635,7 +728,10 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         raise RuntimeError(f"No options data frames fetched for {symbol}.")
 
     df = pd.concat(frames, ignore_index=True)
-    
+
+    # Compute earnings move analysis now that chain is available
+    earnings_move_data = calculate_implied_earnings_move(tkr, earnings_date, df, underlying)
+
     # 5. Enrich DataFrame with Context
     df["underlying"] = underlying
     df["hv_30d"] = hv_30d
@@ -698,15 +794,18 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         "history_df": hist,
         "context": {
             "hv": hv_30d,
+            "hv_ewma": hv_ewma,
             "iv_rank": iv_rank_30,
             "iv_percentile": iv_pct_30,
             "earnings_date": earnings_date,
+            "earnings_move_data": earnings_move_data,
             "sentiment_score": sentiment_score,
             "seasonal_win_rate": seasonal_win_rate,
             "term_structure_spread": term_structure_spread,
             "sector_perf": sector_perf,
             "rvol": rvol,
             "short_interest": short_interest,
+            "next_ex_div": next_ex_div,
             "vwap": vwap,
             "fib_50": fib_50,
             "fib_618": fib_618

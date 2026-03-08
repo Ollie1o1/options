@@ -95,6 +95,30 @@ class PaperManager:
             
         print(f"Logged {trade_dict['type'].upper()} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
 
+    def log_spread(self, spread_dict: dict) -> None:
+        """
+        Log a multi-leg spread (credit spread, calendar, etc.) as a single paper trade.
+        spread_dict keys: date, ticker, expiration, short_strike, long_strike, type,
+                          net_credit, max_profit, max_loss, quality_score
+        """
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO trades (date, ticker, expiration, strike, type, entry_price, quality_score, strategy_name, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+        """, (
+            spread_dict.get("date", datetime.now().strftime("%Y-%m-%d")),
+            spread_dict.get("ticker", ""),
+            spread_dict.get("expiration", ""),
+            spread_dict.get("short_strike", 0),
+            spread_dict.get("type", "Spread"),
+            spread_dict.get("net_credit", 0),
+            spread_dict.get("quality_score", 0.5),
+            f"SPREAD:{spread_dict.get('long_strike', 0)}:{spread_dict.get('max_profit', 0):.2f}:{spread_dict.get('max_loss', 0):.2f}"
+        ))
+        conn.commit()
+        conn.close()
+
     def _get_option_symbol(self, ticker: str, expiration: str, strike: float, option_type: str) -> str:
         """Generates a yfinance-compatible option symbol."""
         try:

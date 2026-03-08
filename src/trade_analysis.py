@@ -284,30 +284,36 @@ def categorize_by_strategy(df: pd.DataFrame) -> pd.DataFrame:
 def get_position_sizing_recommendation(row: pd.Series, account_size: float,
                                        risk_per_trade: float = 0.02) -> Dict:
     """
-    Calculate recommended position size based on account size and risk tolerance.
-
-    Args:
-        row: DataFrame row containing option data
-        account_size: Total account size in dollars
-        risk_per_trade: Percentage of account to risk per trade (default 2%)
-
-    Returns:
-        Dictionary with position sizing recommendations
+    Calculate recommended position size using Kelly Criterion blended with fixed-fraction.
+    Kelly fraction = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
+    Blended: 50% Kelly + 50% fixed (2% risk) — "half-Kelly" for safety.
     """
     max_loss = row.get('premium', 0) * 100  # Cost per contract
-    risk_amount = account_size * risk_per_trade
-
     if max_loss <= 0:
-        return {
-            'contracts': 0,
-            'total_cost': 0,
-            'percent_of_account': 0
-        }
+        return {'contracts': 0, 'total_cost': 0, 'percent_of_account': 0}
 
-    # Calculate number of contracts based on risk
+    # Estimate win rate from PoP, avg_win from profit target, avg_loss from stop
+    pop = float(row.get('prob_profit', 0.5) or 0.5)
+    tp_pct = 0.50   # +50% profit target
+    sl_pct = 0.25   # -25% stop loss
+    avg_win = max_loss * tp_pct   # dollar gain at profit target
+    avg_loss = max_loss * sl_pct  # dollar loss at stop
+
+    # Kelly fraction
+    if avg_win > 0:
+        kelly_f = (pop * avg_win - (1 - pop) * avg_loss) / avg_win
+        kelly_f = max(0.0, min(kelly_f, 0.25))  # cap at 25%
+    else:
+        kelly_f = 0.0
+
+    # Fixed fraction
+    fixed_f = risk_per_trade
+
+    # Half-Kelly blend
+    blended_f = 0.5 * kelly_f + 0.5 * fixed_f
+    risk_amount = account_size * blended_f
+
     contracts = int(risk_amount / max_loss)
-
-    # Ensure at least 1 contract if affordable
     if contracts == 0 and max_loss < account_size:
         contracts = 1
 
@@ -318,7 +324,9 @@ def get_position_sizing_recommendation(row: pd.Series, account_size: float,
         'contracts': contracts,
         'total_cost': total_cost,
         'percent_of_account': pct_of_account,
-        'risk_amount': risk_amount
+        'risk_amount': risk_amount,
+        'kelly_fraction': kelly_f,
+        'blended_fraction': blended_f
     }
 
 
@@ -566,6 +574,9 @@ def format_risk_alerts(row: pd.Series) -> str:
         daily_bleed_pct = abs(theta) / premium * 100
         if daily_bleed_pct > 5.0:
             alerts.append(('dim', 'THETA BURN'))
+
+    if row.get("div_warning"):
+        alerts.append(('yellow', f'EARLY EXERCISE RISK ({row["div_warning"]})'))
 
     if not alerts:
         return ""
