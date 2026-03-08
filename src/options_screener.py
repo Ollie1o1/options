@@ -76,6 +76,8 @@ from .utils import (
     bs_vega,
     bs_theta,
     bs_rho,
+    bs_charm,
+    bs_vanna,
     _d1d2,
     format_pct,
     format_money,
@@ -180,6 +182,33 @@ def remove_from_watchlist(ticker: str) -> None:
     else:
         msg = f"{ticker} not found in watchlist."
         print(fmt.colorize(f"  {msg}", fmt.Colors.DIM) if HAS_ENHANCED_CLI else f"  {msg}")
+
+
+_OI_SNAPSHOT_PATH = ".oi_snapshot.json"
+
+
+def load_oi_snapshot() -> dict:
+    """Load previous OI snapshot {symbol_strike_expiry_type: oi}."""
+    try:
+        with open(_OI_SNAPSHOT_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_oi_snapshot(df_picks: pd.DataFrame) -> None:
+    """Save current OI values keyed by symbol+strike+expiry+type."""
+    if df_picks.empty:
+        return
+    snapshot = {}
+    for _, row in df_picks.iterrows():
+        key = f"{row.get('symbol','')}_{row.get('strike','')}_{row.get('expiration','')}_{row.get('type','')}"
+        snapshot[key] = int(row.get("openInterest", 0))
+    try:
+        with open(_OI_SNAPSHOT_PATH, "w") as f:
+            json.dump(snapshot, f)
+    except Exception:
+        pass
 
 
 @contextlib.contextmanager
@@ -400,7 +429,10 @@ def calculate_metrics(
     sentiment_score: Optional[float],
     macro_risk_active: bool,
     sector_perf: Dict,
-    tnx_change_pct: float
+    tnx_change_pct: float,
+    short_interest: Optional[float] = None,
+    next_ex_div: Optional[object] = None,
+    earnings_move_data: Optional[dict] = None,
 ) -> pd.DataFrame:
     """Calculates all objective mathematical metrics and merges external data."""
     
@@ -462,6 +494,84 @@ def calculate_metrics(
     df["vega"] = bs_vega(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     df["theta"] = bs_theta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     df["rho"] = bs_rho(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    df["charm"] = bs_charm(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    df["vanna"] = bs_vanna(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+
+    # --- PCR per Expiration ---
+    is_call = np.char.lower(types_vals.astype(str)) == "call"
+    try:
+        pcr_map = {}
+        for exp, grp in df.groupby("expiration"):
+            call_vol = grp.loc[grp["type"] == "call", "volume"].sum()
+            put_vol = grp.loc[grp["type"] == "put", "volume"].sum()
+            pcr_val = float(put_vol) / float(call_vol) if call_vol > 0 else np.nan
+            pcr_map[exp] = pcr_val
+        df["pcr"] = df["expiration"].map(pcr_map)
+        def _pcr_signal(v):
+            if pd.isna(v):
+                return ""
+            if v > 1.5:
+                return "HEAVY HEDGING"
+            if v < 0.5:
+                return "BULLISH FLOW"
+            return ""
+        df["pcr_signal"] = df["pcr"].apply(_pcr_signal)
+    except Exception:
+        df["pcr"] = np.nan
+        df["pcr_signal"] = ""
+
+    # --- GEX (Gamma Exposure) by Strike ---
+    try:
+        gex_per_contract = df["gamma"].values * df["openInterest"].values * 100.0 * S_vals ** 2
+        df["gex"] = np.where(is_call, gex_per_contract, -gex_per_contract)
+        gex_by_strike = df.groupby("strike")["gex"].sum().sort_index()
+        cumulative_gex = gex_by_strike.cumsum()
+        negative_strikes = cumulative_gex[cumulative_gex < 0]
+        gex_flip = float(negative_strikes.index[0]) if not negative_strikes.empty else None
+        df["gex_flip_price"] = gex_flip
+    except Exception:
+        df["gex"] = 0.0
+        df["gex_flip_price"] = None
+
+    # --- OI Change (Day-over-Day) ---
+    _oi_prev = load_oi_snapshot()
+    if _oi_prev:
+        def _oi_delta(row):
+            key = f"{row.get('symbol','')}_{row.get('strike','')}_{row.get('expiration','')}_{row.get('type','')}"
+            prev = _oi_prev.get(key)
+            if prev is not None:
+                return int(row.get("openInterest", 0)) - prev
+            return 0
+        df["oi_change"] = df.apply(_oi_delta, axis=1)
+    else:
+        df["oi_change"] = 0
+
+    # --- Short Interest ---
+    df["short_interest"] = short_interest if short_interest is not None else pd.NA
+
+    # --- Dividend Warning ---
+    df["div_warning"] = ""
+    if next_ex_div is not None:
+        for idx, row in df.iterrows():
+            if row.get("type") == "call" and row.get("abs_delta", 0) > 0.70:
+                try:
+                    exp_date = row["exp_dt"].replace(tzinfo=None).date()
+                    if exp_date >= next_ex_div:
+                        df.at[idx, "div_warning"] = f"EX-DIV {next_ex_div}"
+                except Exception:
+                    pass
+
+    # --- Earnings Implied Move vs Historical ---
+    df["implied_earnings_move"] = pd.NA
+    df["hist_earnings_move"] = pd.NA
+    df["earnings_beat_rate"] = pd.NA
+    df["earnings_iv_cheap"] = pd.NA
+    if earnings_move_data:
+        emd = earnings_move_data
+        df["implied_earnings_move"] = emd.get("implied_move_pct")
+        df["hist_earnings_move"] = emd.get("hist_avg_move")
+        df["earnings_beat_rate"] = emd.get("hist_beat_rate")
+        df["earnings_iv_cheap"] = emd.get("is_cheap")
 
     # --- ADVANCED METRICS ---
     df["expected_move"] = calculate_expected_move(S_vals, IV_vals, T_vals)
@@ -616,7 +726,9 @@ def calculate_metrics(
     # HV-adjusted EV: BS(realized_vol) - market_price
     # Positive = options cheap vs realized vol (edge for buyers)
     # Negative = options expensive vs realized vol (edge for sellers)
-    hv_arr = np.maximum(df["hv_30d"].fillna(df["impliedVolatility"]).values, 1e-9)
+    # Prefer EWMA vol for EV (more responsive to recent moves); fall back to 30d HV then IV
+    hv_for_ev = df["hv_ewma"] if "hv_ewma" in df.columns else df["hv_30d"]
+    hv_arr = np.maximum(hv_for_ev.fillna(df["hv_30d"]).fillna(df["impliedVolatility"]).values, 1e-9)
     hv_d1, hv_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, hv_arr)
     with np.errstate(divide='ignore', invalid='ignore'):
         hv_payoff = np.where(is_call,
@@ -728,10 +840,34 @@ def calculate_scores(
         w_sum = sum(w.values()) or 1.0
         df["quality_score"] = (w["pop"]*pop_score + w["return_on_risk"]*ror_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score) / w_sum
     else:
+        # PCR score
+        pcr_vals = pd.to_numeric(df.get("pcr", pd.Series(np.nan, index=df.index)), errors="coerce")
+        is_call_series = df["type"].str.lower() == "call"
+        pcr_score_call = (1 - np.clip(pcr_vals / 2.0, 0, 1)).fillna(0.5)
+        pcr_score_put = np.clip(pcr_vals / 2.0, 0, 1).fillna(0.5)
+        pcr_score = pd.Series(np.where(is_call_series, pcr_score_call, pcr_score_put), index=df.index)
+
+        # GEX score
+        gex_flip = pd.to_numeric(df.get("gex_flip_price", pd.Series(np.nan, index=df.index)), errors="coerce")
+        underlying_s = pd.to_numeric(df.get("underlying", pd.Series(0.0, index=df.index)), errors="coerce")
+        gex_flip_valid = gex_flip.notna()
+        gex_score_call = pd.Series(0.5, index=df.index)
+        gex_score_put = pd.Series(0.5, index=df.index)
+        gex_score_call[gex_flip_valid & (gex_flip > underlying_s)] = 0.7
+        gex_score_call[gex_flip_valid & (gex_flip <= underlying_s)] = 0.3
+        gex_score_put[gex_flip_valid & (gex_flip < underlying_s)] = 0.7
+        gex_score_put[gex_flip_valid & (gex_flip >= underlying_s)] = 0.3
+        gex_score = pd.Series(np.where(is_call_series, gex_score_call, gex_score_put), index=df.index)
+
+        # OI change score
+        oi_chg = pd.to_numeric(df.get("oi_change", pd.Series(0, index=df.index)), errors="coerce").fillna(0)
+        oi_change_score = rank_norm(oi_chg)
+
         dw = {
             "pop": 0.20, "em_realism": 0.10, "rr": 0.12, "momentum": 0.08,
             "iv_rank": 0.07, "liquidity": 0.12, "catalyst": 0.04, "theta": 0.08,
-            "ev": 0.10, "trader_pref": 0.07, "iv_edge": 0.08, "skew_align": 0.05, "gamma_theta": 0.04
+            "ev": 0.10, "trader_pref": 0.07, "iv_edge": 0.08, "skew_align": 0.05,
+            "gamma_theta": 0.04, "pcr": 0.05, "gex": 0.04, "oi_change": 0.04
         }
         cw = config.get("composite_weights", {}) or {}
         w = {k: cw.get(k, dw[k]) for k in dw}
@@ -742,6 +878,7 @@ def calculate_scores(
             + w["catalyst"]*catalyst_score + w["theta"]*theta_score + w["ev"]*ev_score
             + w["trader_pref"]*trader_pref_score + w["iv_edge"]*iv_edge_score
             + w["skew_align"]*skew_align_score + w["gamma_theta"]*gamma_theta_score
+            + w["pcr"]*pcr_score + w["gex"]*gex_score + w["oi_change"]*oi_change_score
         ) / w_sum
 
     # Adjustments
@@ -759,7 +896,20 @@ def calculate_scores(
     df["squeeze_play"] = (df["is_squeezing"] == True) & (df["Unusual_Whale"] == True)
     df.loc[df["squeeze_play"], "quality_score"] += 0.25
     df.loc[df["macro_warning"].str.contains("MACRO RISK", na=False), "quality_score"] -= 0.10
-    
+
+    # Short interest squeeze potential
+    if "short_interest" in df.columns:
+        df.loc[pd.to_numeric(df["short_interest"], errors="coerce").fillna(0) > 0.20, "quality_score"] += 0.05
+
+    # Dividend early exercise warning
+    if "div_warning" in df.columns:
+        df.loc[df["div_warning"] != "", "quality_score"] -= 0.08
+
+    # Earnings implied move: if IV is cheap vs historical, boost earnings plays
+    if "earnings_iv_cheap" in df.columns:
+        df.loc[(df["Earnings Play"] == "YES") & (df["earnings_iv_cheap"] == True), "quality_score"] += 0.06
+        df.loc[(df["Earnings Play"] == "YES") & (df["earnings_iv_cheap"] == False), "quality_score"] -= 0.06
+
     # Save components
     df["quality_score"] = df["quality_score"].clip(0, 1)
     df["ev_score"] = ev_score
@@ -790,6 +940,10 @@ def enrich_and_score(
     macro_risk_active: bool = False,
     sector_perf: Dict = {},
     tnx_change_pct: float = 0.0,
+    short_interest: Optional[float] = None,
+    next_ex_div: Optional[object] = None,
+    earnings_move_data: Optional[dict] = None,
+    hv_ewma: Optional[float] = None,
 ) -> pd.DataFrame:
     # Prepare
     now = datetime.now(timezone.utc)
@@ -845,8 +999,17 @@ def enrich_and_score(
     ov_iv_m = df["impliedVolatility"].median(skipna=True)
     df["impliedVolatility"] = df["impliedVolatility"].fillna(ov_iv_m if pd.notna(ov_iv_m) else 0.25)
 
+    # Attach EWMA vol column if provided
+    if hv_ewma is not None and "hv_ewma" not in df.columns:
+        df["hv_ewma"] = hv_ewma
+
     # 1. Call Helper: Metrics
-    df = calculate_metrics(df, risk_free_rate, earnings_date, config, iv_rank, iv_percentile, sentiment_score, macro_risk_active, sector_perf, tnx_change_pct)
+    df = calculate_metrics(
+        df, risk_free_rate, earnings_date, config, iv_rank, iv_percentile,
+        sentiment_score, macro_risk_active, sector_perf, tnx_change_pct,
+        short_interest=short_interest, next_ex_div=next_ex_div,
+        earnings_move_data=earnings_move_data,
+    )
 
     # 2. Call Helper: Scores
     df = calculate_scores(df, config, vix_regime_weights, trader_profile, mode, min_dte, max_dte)
@@ -1210,6 +1373,19 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
         ev_str = fmt.format_ev(float(ev)) if HAS_ENHANCED_CLI else f"${float(ev):.0f}"
         parts.append(f"EV: {ev_str}")
 
+    # PCR per expiry
+    pcr = row.get("pcr", pd.NA)
+    if pd.notna(pcr):
+        pcr_signal = row.get("pcr_signal", "")
+        pcr_str = f"PCR: {float(pcr):.2f}"
+        if pcr_signal:
+            pcr_str += f" ({pcr_signal})"
+        if HAS_ENHANCED_CLI and pcr_signal:
+            pcr_color = fmt.Colors.RED if pcr_signal == "HEAVY HEDGING" else (fmt.Colors.GREEN if pcr_signal == "BULLISH FLOW" else fmt.Colors.DIM)
+            parts.append(fmt.colorize(pcr_str, pcr_color))
+        else:
+            parts.append(pcr_str)
+
     # Momentum
     rsi = row.get("rsi_14", pd.NA)
     ret5 = row.get("ret_5d", pd.NA)
@@ -1237,6 +1413,39 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
     if row.get("Earnings Play") == "YES":
         underpriced_status = "Underpriced" if row.get("is_underpriced") else "Overpriced"
         parts.append(f"Earnings: YES ({underpriced_status})")
+
+    # Earnings implied move vs historical
+    if row.get("Earnings Play") == "YES" and pd.notna(row.get("implied_earnings_move")):
+        try:
+            imp = float(row["implied_earnings_move"])
+            hist = row.get("hist_earnings_move")
+            beat = row.get("earnings_beat_rate")
+            cheap = row.get("earnings_iv_cheap")
+            move_str = f"Implied Move: \u00b1{imp:.1%}"
+            if hist is not None and pd.notna(hist):
+                move_str += f" | Hist Avg: \u00b1{float(hist):.1%}"
+            if beat is not None and pd.notna(beat):
+                move_str += f" | Beat Rate: {float(beat):.0%}"
+            if cheap is not None and pd.notna(cheap):
+                label = "CHEAP" if cheap else "RICH"
+                if HAS_ENHANCED_CLI:
+                    color = fmt.Colors.GREEN if cheap else fmt.Colors.RED
+                    move_str += f" | IV {fmt.colorize(label, color)}"
+                else:
+                    move_str += f" | IV {label}"
+            parts.append(move_str)
+        except Exception:
+            pass
+
+    # Term structure
+    tss = row.get("term_structure_spread", None)
+    if tss is not None and pd.notna(tss):
+        ts_label = "CONTANGO" if tss > 0.02 else ("BACKWARDATION" if tss < -0.02 else "FLAT")
+        if HAS_ENHANCED_CLI:
+            ts_color = fmt.Colors.GREEN if tss > 0.02 else (fmt.Colors.RED if tss < -0.02 else fmt.Colors.DIM)
+            parts.append(f"Term: {fmt.colorize(ts_label, ts_color)} ({tss:+.1%})")
+        else:
+            parts.append(f"Term: {ts_label} ({tss:+.1%})")
 
     # Stock Price and DTE
     stock_price = row.get('underlying', 0.0)
@@ -1313,6 +1522,25 @@ def format_mechanics_row(row: pd.Series) -> str:
     if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
         greeks_str = f"Greeks: \u0393 {gamma:.3f}, V {vega:.2f}, \u0398 {theta:.2f}"
         parts.append(fmt.colorize(greeks_str, fmt.Colors.DIM) if HAS_ENHANCED_CLI else greeks_str)
+
+    # Charm and Vanna
+    charm = row.get("charm", None)
+    vanna = row.get("vanna", None)
+    if charm is not None and pd.notna(charm) and abs(float(charm)) > 0.001:
+        parts.append(f"Charm: {float(charm):.4f}/d")
+    if vanna is not None and pd.notna(vanna) and abs(float(vanna)) > 0.01:
+        parts.append(f"Vanna: {float(vanna):.3f}")
+
+    # OI change
+    oi_chg = int(row.get("oi_change", 0) or 0)
+    if oi_chg != 0:
+        sign = "+" if oi_chg > 0 else ""
+        oi_chg_str = f"OI \u0394: {sign}{oi_chg}"
+        if HAS_ENHANCED_CLI:
+            chg_color = fmt.Colors.GREEN if oi_chg > 0 else fmt.Colors.RED
+            parts.append(fmt.colorize(oi_chg_str, chg_color))
+        else:
+            parts.append(oi_chg_str)
 
     # Cost
     cost = row.get('premium', 0.0) * 100
@@ -1823,6 +2051,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
             print("")  # Newline
 
+    # Save OI snapshot for next run
+    save_oi_snapshot(df_picks)
+
 
 def print_spreads_report(df_spreads: pd.DataFrame):
     """Prints a report of the vertical spreads found."""
@@ -2276,13 +2507,17 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
 
         # Unpack context
         hv = context.get("hv")
+        hv_ewma = context.get("hv_ewma")
         iv_rank = context.get("iv_rank")
         iv_percentile = context.get("iv_percentile")
         earnings_date = context.get("earnings_date")
+        earnings_move_data = context.get("earnings_move_data")
         sentiment_score = context.get("sentiment_score")
         seasonal_win_rate = context.get("seasonal_win_rate")
         term_structure_spread = context.get("term_structure_spread")
         sector_perf = context.get("sector_perf", {})
+        short_interest = context.get("short_interest")
+        next_ex_div = context.get("next_ex_div")
         
         # Build context log
         context_log = []
@@ -2310,7 +2545,11 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
             term_structure_spread=term_structure_spread,
             macro_risk_active=macro_risk_active,
             sector_perf=sector_perf,
-            tnx_change_pct=tnx_change_pct
+            tnx_change_pct=tnx_change_pct,
+            short_interest=short_interest,
+            next_ex_div=next_ex_div,
+            earnings_move_data=earnings_move_data,
+            hv_ewma=hv_ewma,
         )
 
         if df_scored.empty:
@@ -2586,6 +2825,26 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     underlying_price = 0.0
     if not picks.empty and "underlying" in picks.columns:
         underlying_price = picks.iloc[0]["underlying"]
+
+    # Concentration warning across scan results
+    if verbose and not picks.empty and len(picks) >= 5:
+        call_count = (picks["type"].str.lower() == "call").sum()
+        put_count = (picks["type"].str.lower() == "put").sum()
+        total = len(picks)
+        if call_count / total > 0.80:
+            msg = f"Concentration warning: {call_count}/{total} picks are CALLS \u2014 portfolio skews heavily bullish"
+            print(fmt.colorize(f"  \u26a0\ufe0f  {msg}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0\ufe0f  {msg}")
+        elif put_count / total > 0.80:
+            msg = f"Concentration warning: {put_count}/{total} picks are PUTS \u2014 portfolio skews heavily bearish"
+            print(fmt.colorize(f"  \u26a0\ufe0f  {msg}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0\ufe0f  {msg}")
+        if "symbol" in picks.columns:
+            symbol_counts = picks["symbol"].value_counts()
+            if not symbol_counts.empty:
+                dominant = symbol_counts.index[0]
+                dominant_count = symbol_counts.iloc[0]
+                if dominant_count >= 5:
+                    msg = f"Concentration warning: {dominant_count} picks from {dominant} \u2014 consider diversifying"
+                    print(fmt.colorize(f"  \u26a0\ufe0f  {msg}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0\ufe0f  {msg}")
 
     # Generate Final Reports
     if mode == "Budget scan":
