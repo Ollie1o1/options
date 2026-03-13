@@ -107,31 +107,32 @@ def print_ranked_table(df: pd.DataFrame, top_n: int = 20) -> None:
         from rich import box  # noqa: PLC0415
         from rich.text import Text  # noqa: PLC0415
 
-        console = Console()
+        console = Console(width=160, highlight=False)
         table = Table(
             title="[bold cyan]AI-Enhanced Options Ranking[/bold cyan]",
             box=box.ROUNDED,
             show_lines=True,
             header_style="bold magenta",
+            expand=False,
         )
 
-        for col, justify in [
-            ("Rank",    "right"),
-            ("Symbol",  "left"),
-            ("Type",    "center"),
-            ("Strike",  "right"),
-            ("Expiry",  "center"),
-            ("DTE",     "right"),
-            ("Premium", "right"),
-            ("IV%",     "right"),
-            ("PoP%",    "right"),
-            ("Tech",    "right"),
-            ("AI",      "right"),
-            ("Final",   "right"),
-            ("Catalyst","center"),
-            ("Flags / Reasoning", "left"),
+        for col, justify, min_w in [
+            ("Rank",    "right",  4),
+            ("Symbol",  "left",   6),
+            ("Type",    "center", 4),
+            ("Strike",  "right",  7),
+            ("Expiry",  "center", 10),
+            ("DTE",     "right",  4),
+            ("Premium", "right",  8),
+            ("IV%",     "right",  6),
+            ("PoP%",    "right",  5),
+            ("Tech",    "right",  5),
+            ("AI",      "right",  5),
+            ("Final",   "right",  5),
+            ("Catalyst","center", 8),
+            ("Flags / Reasoning", "left", 30),
         ]:
-            table.add_column(col, justify=justify)
+            table.add_column(col, justify=justify, min_width=min_w, no_wrap=(col != "Flags / Reasoning"))
 
         now = datetime.now(timezone.utc)
 
