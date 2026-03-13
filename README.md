@@ -225,6 +225,80 @@ options/
 
 ---
 
+---
+
+## AI-Enhanced Scoring Layer
+
+The `ai_rank.py` wrapper adds an AI scoring layer on top of the technical screener.
+It batches candidates and sends them to Claude for qualitative analysis, then
+combines the AI score with the screener's `quality_score` into a single ranked list.
+
+### Setup
+
+1. Install the extra dependencies (already in `requirements.txt`):
+   ```bash
+   pip install anthropic rich
+   ```
+
+2. Export your Anthropic API key:
+   ```bash
+   export ANTHROPIC_API_KEY=sk-ant-...   # macOS / Linux
+   set  ANTHROPIC_API_KEY=sk-ant-...     # Windows CMD
+   $env:ANTHROPIC_API_KEY="sk-ant-..."   # Windows PowerShell
+   ```
+
+### Usage
+
+```bash
+# Score and rank candidates for one or more tickers
+python ai_rank.py AAPL TSLA NVDA
+
+# Premium Selling mode, custom DTE window
+python ai_rank.py --mode "Premium Selling" --dte-min 14 --dte-max 45 SPY QQQ
+
+# Skip AI — rank by technical quality_score only (no API key needed)
+python ai_rank.py AAPL --no-ai
+
+# Increase AI weight to 50 % and save results
+python ai_rank.py SPY --ai-weight 0.5 --output ranked.csv
+
+# All options
+python ai_rank.py --help
+```
+
+### How it works
+
+| Step | Module | Description |
+|------|--------|-------------|
+| 1 | `src/options_screener.py` | Technical scan — Greeks, PoP, IV rank, EV, warnings |
+| 2 | `src/ai_scorer.py` | Batches candidates → Claude API → `ai_score` (0–100) + reasoning + flags |
+| 3 | `src/ranking.py` | Weighted merge: `final_score = 0.70 × quality_score + 0.30 × (ai_score / 100)` |
+| 4 | `src/ranking.py` | Ranked table via `rich` (or plain text fallback) |
+
+### Configuration
+
+Edit `src/config_ai.py` to change:
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `model` | `claude-sonnet-4-6` | Claude model used for scoring |
+| `ai_weight` | `0.30` | AI score contribution to `final_score` |
+| `technical_weight` | `0.70` | `quality_score` contribution |
+| `batch_size` | `5` | Candidates per API call (cost control) |
+| `temperature` | `0.1` | Lower = more consistent scores |
+| `fields_to_include` | (list) | Candidate fields forwarded to the AI |
+
+### New files
+
+```
+ai_rank.py            CLI wrapper — entry point
+src/ai_scorer.py      AIScorer class — batched Claude API scoring
+src/ranking.py        combine_scores(), print_ranked_table(), to_csv(), to_json()
+src/config_ai.py      AI configuration constants
+```
+
+---
+
 ## Disclaimer
 
 For educational and informational purposes only. Not financial advice. Options trading involves substantial risk of loss. Always do your own research.
