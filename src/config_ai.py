@@ -48,18 +48,12 @@ AI_CONFIG: dict = {
         "divergence_flag_threshold": 0.20,
     },
 
-    # ── Fields sent to AI ─────────────────────────────────────────────────────
+    # ── Fields sent to AI (keep only what the narrative does NOT already cover) ──
     "fields_to_include": [
         "symbol", "type", "strike", "expiration", "underlying",
-        "premium", "impliedVolatility", "iv_rank", "iv_percentile",
-        "hv_30d", "iv_vs_hv",
-        "delta", "theta",
-        "prob_profit", "pop_sim", "ev_per_contract", "rr_ratio",
-        "quality_score", "score_drivers",
-        "earnings_date", "Earnings Play",
-        "sentiment_tag", "Trend_Aligned", "Moneyness",
-        "spread_pct", "volume", "openInterest", "rvol",
-        "rsi_14", "ret_5d", "short_interest",
-        "macro_warning", "sr_warning", "decay_warning", "event_flag",
+        "premium", "iv_rank", "delta",
+        "prob_profit", "ev_per_contract", "rr_ratio",
+        "Earnings Play", "Trend_Aligned",
+        "macro_warning", "sr_warning", "decay_warning",
     ],
 }

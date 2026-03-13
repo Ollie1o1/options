@@ -3128,8 +3128,15 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
             print("  AI ANALYSIS  —  grading top picks…")
             print(f"{'─'*width}")
 
-        # Limit to top 15 by quality_score to keep API calls fast
-        candidates = picks.sort_values("quality_score", ascending=False).head(15).copy()
+        # Sort by quality_score, take top 15, pre-filter obvious rejects
+        _sorted = picks.sort_values("quality_score", ascending=False).head(15)
+        _min_score = 0.38  # don't waste tokens on clearly below-average picks
+        candidates = _sorted[_sorted["quality_score"] >= _min_score].copy()
+        _prefiltered_count = len(_sorted) - len(candidates)
+        if candidates.empty:
+            # All picks below threshold — just score the top 5 anyway
+            candidates = _sorted.head(5).copy()
+            _prefiltered_count = 0
 
         vix_map = {"Low": "low", "Normal": "normal", "High": "high",
                    "low": "low", "normal": "normal", "high": "high"}
@@ -3176,7 +3183,7 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
                     return letter
             return "F"
 
-        header = f"  {'#':<3} {'Ticker':<6} {'Type':<5} {'Strike':>7} {'Exp':<12} {'Grade':<6} {'AI':>4} {'Tech':>5} {'Final':>6} {'Catalyst':<9} Reasoning"
+        header = f"  {'#':<3} {'Ticker':<6} {'Type':<5} {'Strike':>7} {'DTE':>4} {'Grade':<6} {'AI':>4} {'Tech':>5} {'Final':>6} {'Cat':<7} Reasoning"
         sep = "  " + "─" * (width - 4)
         if has_cli:
             import src.formatting as _fmt
@@ -3185,6 +3192,14 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
         else:
             print(header)
             print(sep)
+
+        if _prefiltered_count > 0:
+            pf_msg = f"  ℹ  {_prefiltered_count} low-quality pick(s) pre-filtered (score < {_min_score:.0%}) — not sent to AI."
+            if has_cli:
+                import src.formatting as _fmt
+                print(_fmt.colorize(pf_msg, _fmt.Colors.DIM))
+            else:
+                print(pf_msg)
 
         top_rec = None
         scored_count = 0
@@ -3200,13 +3215,23 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
             cat = str(row.get("catalyst_risk", "medium"))[:6]
             reason_raw = str(row.get("ai_reasoning", ""))
             reason = ("(not scored)" if is_default else reason_raw[:60])
-            line = (f"  #{rank_n:<2} {row['symbol']:<6} {str(row['type']).upper():<5} "
-                    f"{row['strike']:>7.1f} {str(row['expiration'])[:10]:<12} "
-                    f"{grade:<6} {'–':>4} {tech_s:>5.1f} {final_s:>6.3f} {cat:<9} {reason}"
-                    if is_default else
-                    f"  #{rank_n:<2} {row['symbol']:<6} {str(row['type']).upper():<5} "
-                    f"{row['strike']:>7.1f} {str(row['expiration'])[:10]:<12} "
-                    f"{grade:<6} {ai_s:>4.0f} {tech_s:>5.1f} {final_s:>6.3f} {cat:<9} {reason}")
+            # Compute DTE
+            try:
+                from datetime import date as _date
+                exp_str = str(row.get("expiration", ""))[:10]
+                dte_val = (pd.Timestamp(exp_str).date() - _date.today()).days
+                dte_str = f"{dte_val}d"
+            except Exception:
+                dte_str = "  ?"
+
+            if is_default:
+                line = (f"  #{rank_n:<2} {row['symbol']:<6} {str(row['type']).upper():<5} "
+                        f"{row['strike']:>7.1f} {dte_str:>4} {grade:<6} {'–':>4} {tech_s:>5.1f} "
+                        f"{final_s:>6.3f} {cat:<7} {reason}")
+            else:
+                line = (f"  #{rank_n:<2} {row['symbol']:<6} {str(row['type']).upper():<5} "
+                        f"{row['strike']:>7.1f} {dte_str:>4} {grade:<6} {ai_s:>4.0f} {tech_s:>5.1f} "
+                        f"{final_s:>6.3f} {cat:<7} {reason_raw[:90]}")
             if has_cli:
                 import src.formatting as _fmt
                 if is_default:
@@ -3273,6 +3298,19 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
                     print(f"  {rec_reason}")
                 if scored_count < len(ranked.head(10)):
                     print(f"  ℹ  {scored_count}/{min(10, len(ranked))} picks scored by AI — others shown by technical rank.")
+
+        # Market context note when majority of picks are poor quality
+        if scored_count > 0:
+            f_count = sum(1 for _, row in ranked.head(10).iterrows()
+                         if float(row.get("ai_score", 50)) < 40
+                         and not (float(row.get("ai_score", 50)) == 50.0 and float(row.get("ai_confidence", 5.0)) == 5.0))
+            if scored_count >= 3 and f_count / scored_count >= 0.6:
+                note = "  ⚠  Most picks scored F/D — current conditions favour SELLERS not buyers. Consider credit spreads or iron condors instead."
+                if has_cli:
+                    import src.formatting as _fmt
+                    print(_fmt.colorize(note, _fmt.Colors.YELLOW))
+                else:
+                    print(note)
 
         print(f"\n{'─'*width}\n")
         return ranked

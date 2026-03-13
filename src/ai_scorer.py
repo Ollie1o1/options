@@ -46,56 +46,20 @@ _load_dotenv()
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
-You are an expert options trader and quantitative analyst. You receive options candidates \
-from a professional technical screener and evaluate each trade setup.
-
-Scoring guidelines (0-100):
-  80-100  Exceptional - strong edge, clear catalyst-free runway, favorable vol regime
-  60-79   Good - solid thesis, manageable risk
-  40-59   Average - mixed signals, some risks
-  20-39   Weak - unfavorable conditions, poor risk/reward
-  0-19    Avoid - multiple red flags
-
-For each candidate evaluate:
-1. Vol regime: is IV cheap or expensive vs realized? Does this favor buyers or sellers?
-2. Catalyst risk: any earnings, macro events, or news that could gap the stock before expiry?
-3. Trend/momentum: does the option direction align with price action?
-4. Probability and risk/reward: is the PoP justified by the premium?
-5. Screener warnings: treat macro_warning, sr_warning, decay_warning as serious flags.
-
-The "narrative_context" field in each candidate already interprets the raw numbers -
-use it as your primary reference, then verify against the raw metrics.
-
-Provide ai_confidence (0-10): 10 = strong consistent evidence; 1 = limited data.
-Keep reasoning concise (1-2 sentences). Use short uppercase flag strings."""
+Options trade scorer. Score 0-100: 80+=exceptional 60-79=good 40-59=avg 20-39=weak <20=avoid.
+Evaluate: vol regime(IV vs HV), catalyst risk, trend alignment, PoP/RR quality, screener warnings.
+narrative_context is pre-computed — use it as primary input.
+reasoning: ≤12 words. flags: ≤3 SHORT_CAPS. confidence: 0-10."""
 
 
 _TICKER_CONTEXT_PROMPT = """\
-You are an expert options market analyst. Analyze this ticker's current market conditions \
-and provide a structured assessment that will inform individual option contract scoring.
-
-Respond in JSON: {"regime": "SELLER_EDGE|BUYER_EDGE|NEUTRAL", "catalyst_risk": "low|medium|high", \
-"directional_bias": "bullish|bearish|neutral", "key_risks": ["risk1", "risk2"], \
-"summary": "2-3 sentence market overview", "confidence": <1-10>}"""
+Analyze ticker conditions. JSON only, no prose:
+{"regime":"SELLER_EDGE|BUYER_EDGE|NEUTRAL","catalyst_risk":"low|medium|high","directional_bias":"bullish|bearish|neutral","key_risks":["r1"],"summary":"≤20 words","confidence":1-10}"""
 
 
 # ── JSON schema for contract scoring ──────────────────────────────────────────
 
-_JSON_SCHEMA = """\
-Respond with ONLY a JSON object in exactly this format:
-{
-  "scores": [
-    {
-      "id": "<candidate id>",
-      "ai_score": <0-100>,
-      "reasoning": "<1-2 sentences>",
-      "flags": ["FLAG1", "FLAG2"],
-      "catalyst_risk": "<low|medium|high>",
-      "iv_justified": <true|false>,
-      "ai_confidence": <0-10>
-    }
-  ]
-}"""
+_JSON_SCHEMA = 'JSON only: {"scores":[{"id":"<id>","ai_score":0-100,"reasoning":"≤12 words","flags":["F"],"catalyst_risk":"low|medium|high","iv_justified":true,"ai_confidence":0-10}]}'
 
 # Tool schema for Anthropic provider
 _SCORING_TOOL: dict[str, Any] = {
@@ -130,94 +94,69 @@ _SCORING_TOOL: dict[str, Any] = {
 # ── Narrative context enrichment ───────────────────────────────────────────────
 
 def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
-    """Translate raw metric values into a human-readable narrative string."""
+    """Compact key:value context — ~3x fewer tokens than prose version."""
     thr = cfg.get("narrative_thresholds", {})
-    parts: list[str] = []
+    kv: list[str] = []
 
-    # IV rank interpretation
     iv_rank = c.get("iv_rank")
     if iv_rank is not None:
         if iv_rank >= thr.get("iv_rank_high", 0.70):
-            parts.append(f"IV is at {iv_rank:.0%} percentile -- EXPENSIVE vs history, favors premium sellers.")
+            kv.append(f"IV:{iv_rank:.0%}(EXPENSIVE-sell)")
         elif iv_rank <= thr.get("iv_rank_low", 0.30):
-            parts.append(f"IV is at {iv_rank:.0%} percentile -- CHEAP vs history, favors option buyers.")
+            kv.append(f"IV:{iv_rank:.0%}(cheap-buy)")
         else:
-            parts.append(f"IV is at {iv_rank:.0%} percentile -- neutral regime.")
+            kv.append(f"IV:{iv_rank:.0%}(neutral)")
 
-    # IV vs HV (seller/buyer edge)
     iv_vs_hv = c.get("iv_vs_hv")
     if iv_vs_hv is not None:
         if iv_vs_hv >= thr.get("iv_vs_hv_rich", 0.05):
-            parts.append(f"IV exceeds realized HV by {iv_vs_hv:.1%} -- clear seller edge.")
+            kv.append(f"IVvHV:+{iv_vs_hv:.1%}(seller-edge)")
         elif iv_vs_hv <= thr.get("iv_vs_hv_cheap", -0.05):
-            parts.append(f"IV is {abs(iv_vs_hv):.1%} BELOW realized HV -- option is cheap vs realized vol, buyer edge.")
-        else:
-            parts.append(f"IV and HV are close ({iv_vs_hv:+.1%} spread) -- no strong vol edge.")
+            kv.append(f"IVvHV:{iv_vs_hv:.1%}(buyer-edge)")
 
-    # PoP interpretation
     pop = c.get("pop_sim") or c.get("prob_profit")
     if pop is not None:
-        if pop >= thr.get("pop_strong", 0.65):
-            parts.append(f"PoP {pop:.0%} -- high probability trade.")
-        elif pop <= thr.get("pop_weak", 0.45):
-            parts.append(f"PoP {pop:.0%} -- below even-odds, requires strong directional conviction.")
-        else:
-            parts.append(f"PoP {pop:.0%} -- moderate probability.")
+        label = "HIGH" if pop >= thr.get("pop_strong", 0.65) else ("LOW" if pop <= thr.get("pop_weak", 0.45) else "MED")
+        kv.append(f"PoP:{pop:.0%}({label})")
 
-    # Risk/Reward
     rr = c.get("rr_ratio")
     if rr is not None:
-        if rr >= thr.get("rr_good", 1.5):
-            parts.append(f"RR {rr:.1f}x -- favorable risk/reward.")
-        elif rr <= thr.get("rr_poor", 0.75):
-            parts.append(f"RR {rr:.1f}x -- unfavorable; premium is large relative to potential gain.")
+        label = "OK" if rr >= thr.get("rr_good", 1.5) else ("POOR" if rr <= thr.get("rr_poor", 0.75) else "fair")
+        kv.append(f"RR:{rr:.1f}x({label})")
 
-    # Earnings risk
-    earnings_play = c.get("Earnings Play") or c.get("event_flag", "")
-    earnings_date = c.get("earnings_date")
-    if str(earnings_play).upper() == "YES" or "EARNINGS" in str(earnings_play).upper():
-        parts.append(f"EARNINGS NEARBY ({earnings_date}) -- elevated gap risk; IV may crush post-event.")
-
-    # Volume / unusual flow
-    rvol = c.get("rvol")
-    if rvol and float(rvol) >= thr.get("rvol_unusual", 1.5):
-        parts.append(f"RVOL {rvol:.1f}x -- unusual volume; potential institutional interest.")
-
-    # Theta decay pressure
     theta = c.get("theta")
     premium = c.get("premium")
     if theta and premium and float(premium) > 0:
-        daily_bleed_pct = abs(float(theta)) / float(premium)
-        if daily_bleed_pct >= thr.get("theta_decay_high", 0.05):
-            parts.append(f"High theta burn: {daily_bleed_pct:.1%}/day of premium -- time is working against buyer.")
+        bleed = abs(float(theta)) / float(premium)
+        if bleed >= thr.get("theta_decay_high", 0.05):
+            kv.append(f"theta:{bleed:.1%}/day(HIGH)")
 
-    # Spread width
     spread = c.get("spread_pct")
     if spread and float(spread) >= thr.get("spread_wide", 0.15):
-        parts.append(f"Spread is {spread:.1%} -- wide; slippage will be significant, use limit orders.")
+        kv.append(f"spread:{spread:.0%}(WIDE)")
 
-    # Score drivers (what the technical model liked)
-    drivers = c.get("score_drivers")
-    if drivers:
-        parts.append(f"Technical score driven by: {drivers}.")
+    rvol = c.get("rvol")
+    if rvol and float(rvol) >= thr.get("rvol_unusual", 1.5):
+        kv.append(f"rvol:{rvol:.1f}x(unusual)")
 
-    # Active warnings
+    if str(c.get("Earnings Play", "")).upper() == "YES":
+        kv.append("EARNINGS(gap-risk)")
+
     warnings = []
     if c.get("macro_warning"):
-        warnings.append(str(c["macro_warning"]))
+        warnings.append("MACRO")
     if c.get("sr_warning"):
-        warnings.append(str(c["sr_warning"]))
+        warnings.append("SR")
     if c.get("decay_warning"):
-        warnings.append("High decay pressure")
+        warnings.append("DECAY")
     if warnings:
-        parts.append("Screener warnings: " + "; ".join(warnings) + ".")
+        kv.append("WARN:" + "+".join(warnings))
 
-    # News headlines
     headlines = c.get("_news_headlines", [])
     if headlines:
-        parts.append("Recent news: " + " | ".join(f'"{h}"' for h in headlines[:3]))
+        kv.append("news:" + "|".join(f'"{h[:40]}"' for h in headlines[:2]))
 
-    return " ".join(parts) if parts else "Insufficient data for narrative context."
+    return " ".join(kv) if kv else "no-context"
 
 
 # ── Public class ───────────────────────────────────────────────────────────────
@@ -521,30 +460,56 @@ class AIScorer:
         for c in batch:
             narrative = _enrich_candidate_context(c, self.config)
             ticker_ctx = c.get("_ticker_context", {})
-            lines = [f"Candidate ID: {c['_id']}"]
-            if ticker_ctx:
-                lines.append(f"  [Ticker Analysis] Regime: {ticker_ctx.get('regime','N/A')} | "
-                             f"Catalyst risk: {ticker_ctx.get('catalyst_risk','N/A')} | "
-                             f"Bias: {ticker_ctx.get('directional_bias','N/A')}")
-                summary = ticker_ctx.get("summary")
-                if summary:
-                    lines.append(f"  [Ticker Summary] {summary}")
-            lines.append(f"  [Context] {narrative}")
-            for k, v in c.items():
-                if k.startswith("_"):
-                    continue
-                if v is None:
-                    lines.append(f"  {k}: N/A")
-                elif isinstance(v, float):
-                    lines.append(f"  {k}: {v:.4f}")
-                else:
-                    lines.append(f"  {k}: {v}")
-            blocks.append("\n".join(lines))
 
-        body = "\n\n---\n\n".join(blocks)
-        schema = f"\n\n{_JSON_SCHEMA}" if include_schema else \
-            "\n\nCall the score_options_batch tool with your analysis."
-        return f"Score the following {len(batch)} option candidate(s).\n\n{body}{schema}"
+            # Header: contract identity on one line
+            sym   = c.get("symbol", "?")
+            ctype = str(c.get("type", "?")).upper()
+            strike = c.get("strike", "?")
+            exp    = str(c.get("expiration", "?"))[:10]
+            udly   = c.get("underlying")
+            prem   = c.get("premium")
+            iv_r   = c.get("iv_rank")
+            delta  = c.get("delta")
+            pop    = c.get("prob_profit")
+            ev     = c.get("ev_per_contract")
+            rr     = c.get("rr_ratio")
+            trend  = c.get("Trend_Aligned")
+            earn   = c.get("Earnings Play", "NO")
+
+            raw = (
+                f"udly:{udly:.1f}" if udly else ""
+            )
+            raw_parts = []
+            if udly is not None:   raw_parts.append(f"udly:{float(udly):.1f}")
+            if prem is not None:   raw_parts.append(f"prem:{float(prem):.2f}")
+            if iv_r is not None:   raw_parts.append(f"iv_rank:{float(iv_r):.0%}")
+            if delta is not None:  raw_parts.append(f"delta:{float(delta):.2f}")
+            if pop is not None:    raw_parts.append(f"PoP:{float(pop):.0%}")
+            if ev is not None:     raw_parts.append(f"EV:{float(ev):.0f}")
+            if rr is not None:     raw_parts.append(f"RR:{float(rr):.1f}x")
+            if trend is not None:  raw_parts.append(f"trend:{'Y' if trend else 'N'}")
+            raw_parts.append(f"earn:{earn}")
+
+            # Ticker context (one line)
+            ctx_line = ""
+            if ticker_ctx:
+                ctx_line = (f"\n  ctx: regime={ticker_ctx.get('regime','?')} "
+                            f"cat={ticker_ctx.get('catalyst_risk','?')} "
+                            f"bias={ticker_ctx.get('directional_bias','?')} "
+                            f"summary=\"{str(ticker_ctx.get('summary',''))[:60]}\"")
+
+            block = (
+                f"ID:{c['_id']} {sym} {ctype} ${strike} exp:{exp}\n"
+                f"  {' '.join(raw_parts)}\n"
+                f"  narrative: {narrative}"
+                + ctx_line
+            )
+            blocks.append(block)
+
+        body = "\n---\n".join(blocks)
+        schema = f"\n{_JSON_SCHEMA}" if include_schema else \
+            "\nCall the score_options_batch tool with your analysis."
+        return f"Score {len(batch)} option(s):\n{body}{schema}"
 
     def _extract_candidates(
         self,
