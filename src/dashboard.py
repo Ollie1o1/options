@@ -464,18 +464,31 @@ def render_scanner_tab(budget):
             # Action Buttons
             if st.session_state.selected_option is not None:
                 opt = st.session_state.selected_option
-                if st.button(f"📝 Paper Trade {opt['symbol']} ${opt['strike']} {opt['type'].upper()}"):
-                    trade_dict = {
-                        "ticker": opt["symbol"],
-                        "expiration": opt["expiration"],
-                        "strike": opt["strike"],
-                        "type": opt["type"],
-                        "entry_price": opt.get("ask") if opt.get("ask") is not None else opt["lastPrice"],
-                        "quality_score": opt["quality_score"],
-                        "strategy_name": f"Long {opt['type'].capitalize()}"
-                    }
-                    pm.log_trade(trade_dict)
-                    st.success(f"Logged paper trade for {opt['symbol']}")
+                btn_col, csv_col = st.columns([1, 1])
+                with btn_col:
+                    if st.button(f"📝 Paper Trade {opt['symbol']} ${opt['strike']} {opt['type'].upper()}"):
+                        entry_px = (opt.get("ask") if opt.get("ask") is not None
+                                    else opt.get("lastPrice") or opt.get("premium", 0.0))
+                        trade_dict = {
+                            "ticker": opt["symbol"],
+                            "expiration": opt["expiration"],
+                            "strike": opt["strike"],
+                            "type": opt["type"],
+                            "entry_price": float(entry_px) if entry_px else 0.0,
+                            "quality_score": opt["quality_score"],
+                            "strategy_name": f"Long {opt['type'].capitalize()}"
+                        }
+                        pm.log_trade(trade_dict)
+                        st.success(f"Logged paper trade for {opt['symbol']}")
+                with csv_col:
+                    export_df = (st.session_state.ai_results
+                                 if st.session_state.ai_results is not None and not st.session_state.ai_results.empty
+                                 else picks_df)
+                    csv_bytes = export_df.to_csv(index=False).encode()
+                    ts = datetime.now().strftime("%Y%m%d_%H%M")
+                    st.download_button("⬇️ Export CSV", data=csv_bytes,
+                                       file_name=f"options_picks_{ts}.csv",
+                                       mime="text/csv")
         else:
             st.warning("No results found. Try adjusting filters.")
     else:
