@@ -3150,6 +3150,23 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
         ai_df = scorer.score_candidates(candidates, ticker_contexts=ticker_contexts)
         ranked = combine_scores(candidates, ai_df, vix_regime=vix_regime)
 
+        # ── Detect all-neutral-default results (AI scoring failed for all batches) ──
+        all_neutral = (
+            "ai_score" in ranked.columns
+            and (ranked["ai_score"] == 50).all()
+            and "ai_confidence" in ranked.columns
+            and (ranked["ai_confidence"] == 5.0).all()
+        )
+        if all_neutral:
+            msg = "AI models unavailable right now (rate-limited). Showing technical ranking only."
+            if has_cli:
+                import src.formatting as _fmt
+                print(_fmt.format_warning(msg))
+            else:
+                print(f"\n  ⚠  {msg}")
+            print()
+            return ranked  # still return ranked so paper trade / CSV can use it
+
         # ── Print compact grading table ────────────────────────────────────
         GRADE_MAP = [(90, "A+"), (80, "A"), (70, "B+"), (60, "B"), (50, "C"), (40, "D"), (0, "F")]
 
@@ -3159,7 +3176,7 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
                     return letter
             return "F"
 
-        header = f"  {'#':<3} {'Ticker':<6} {'Type':<5} {'Strike':>7} {'Exp':<12} {'Grade':<6} {'AI':>4} {'Tech':>5} {'Final':>6} {'Catalyst':<9} Reasoning (AI/Tech both 0-100)"
+        header = f"  {'#':<3} {'Ticker':<6} {'Type':<5} {'Strike':>7} {'Exp':<12} {'Grade':<6} {'AI':>4} {'Tech':>5} {'Final':>6} {'Catalyst':<9} Reasoning"
         sep = "  " + "─" * (width - 4)
         if has_cli:
             import src.formatting as _fmt
@@ -3170,27 +3187,48 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
             print(sep)
 
         top_rec = None
+        scored_count = 0
         for i, row in ranked.head(10).iterrows():
             ai_s = float(row.get("ai_score", 50))
+            ai_conf = float(row.get("ai_confidence", 5.0))
             tech_s = float(row.get("quality_score", 0)) * 100   # normalize 0-1 → 0-100
             final_s = float(row.get("final_score", 0))
             rank_n = int(row.get("rank", 0))
-            grade = _grade(ai_s)
+            # Mark unscored rows (neutral default) clearly rather than showing fake C/50
+            is_default = (ai_s == 50.0 and ai_conf == 5.0)
+            grade = "–" if is_default else _grade(ai_s)
             cat = str(row.get("catalyst_risk", "medium"))[:6]
-            reason = str(row.get("ai_reasoning", ""))[:55]
+            reason_raw = str(row.get("ai_reasoning", ""))
+            reason = ("(not scored)" if is_default else reason_raw[:60])
             line = (f"  #{rank_n:<2} {row['symbol']:<6} {str(row['type']).upper():<5} "
+                    f"{row['strike']:>7.1f} {str(row['expiration'])[:10]:<12} "
+                    f"{grade:<6} {'–':>4} {tech_s:>5.1f} {final_s:>6.3f} {cat:<9} {reason}"
+                    if is_default else
+                    f"  #{rank_n:<2} {row['symbol']:<6} {str(row['type']).upper():<5} "
                     f"{row['strike']:>7.1f} {str(row['expiration'])[:10]:<12} "
                     f"{grade:<6} {ai_s:>4.0f} {tech_s:>5.1f} {final_s:>6.3f} {cat:<9} {reason}")
             if has_cli:
                 import src.formatting as _fmt
-                color = (_fmt.Colors.BRIGHT_GREEN if ai_s >= 70
-                         else _fmt.Colors.YELLOW if ai_s >= 50
-                         else _fmt.Colors.RED)
+                if is_default:
+                    color = _fmt.Colors.DIM
+                elif ai_s >= 70:
+                    color = _fmt.Colors.BRIGHT_GREEN
+                elif ai_s >= 50:
+                    color = _fmt.Colors.YELLOW
+                else:
+                    color = _fmt.Colors.RED
                 print(_fmt.colorize(line, color))
             else:
                 print(line)
-            if top_rec is None:
+            if top_rec is None and not is_default:
                 top_rec = row
+                scored_count += 1
+            elif not is_default:
+                scored_count += 1
+
+        # Fall back to tech-top if every visible row was a default
+        if top_rec is None:
+            top_rec = ranked.head(1).iloc[0] if not ranked.empty else None
 
         # ── Top recommendation callout ─────────────────────────────────────
         if top_rec is not None:
@@ -3200,14 +3238,24 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
             rec_strike = top_rec["strike"]
             rec_exp = str(top_rec["expiration"])[:10]
             rec_ai = float(top_rec.get("ai_score", 50))
+            rec_conf = float(top_rec.get("ai_confidence", 5.0))
             rec_reason = str(top_rec.get("ai_reasoning", "")).strip()
             rec_flags = top_rec.get("ai_flags", "")
+            has_real_score = not (rec_ai == 50.0 and rec_conf == 5.0)
+
+            # Only show AI score details when the model actually graded this pick
+            if has_real_score:
+                ai_detail = f"  |  AI Score: {rec_ai:.0f}  |  Grade: {_grade(rec_ai)}"
+            else:
+                ai_detail = "  |  (tech-ranked — AI score pending)"
+                rec_reason = ""
+                rec_flags = ""
 
             if has_cli:
                 import src.formatting as _fmt
                 print("  " + _fmt.draw_separator(width - 4, "-"))
                 lbl = _fmt.colorize("  TOP RECOMMENDATION", _fmt.Colors.BRIGHT_YELLOW, bold=True)
-                rec_line = f"{rec_sym} {rec_type} ${rec_strike:.0f} exp {rec_exp}  |  AI Score: {rec_ai:.0f}  |  Grade: {_grade(rec_ai)}"
+                rec_line = f"{rec_sym} {rec_type} ${rec_strike:.0f} exp {rec_exp}{ai_detail}"
                 print(f"{lbl}: {_fmt.colorize(rec_line, _fmt.Colors.BRIGHT_WHITE, bold=True)}")
                 if rec_reason:
                     print(f"  {_fmt.colorize(rec_reason, _fmt.Colors.DIM)}")
@@ -3215,11 +3263,16 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
                     flags_display = rec_flags if isinstance(rec_flags, str) else ", ".join(rec_flags)
                     if flags_display.strip():
                         print(f"  {_fmt.colorize('Flags: ' + flags_display, _fmt.Colors.YELLOW)}")
+                if scored_count < len(ranked.head(10)):
+                    partial_msg = f"  ℹ  {scored_count}/{min(10, len(ranked))} picks scored by AI — others shown by technical rank."
+                    print(_fmt.colorize(partial_msg, _fmt.Colors.DIM))
             else:
                 print(f"  {'─'*(width-4)}")
-                print(f"  TOP RECOMMENDATION: {rec_sym} {rec_type} ${rec_strike:.0f} exp {rec_exp}  |  AI: {rec_ai:.0f}  |  {_grade(rec_ai)}")
+                print(f"  TOP RECOMMENDATION: {rec_sym} {rec_type} ${rec_strike:.0f} exp {rec_exp}{ai_detail}")
                 if rec_reason:
                     print(f"  {rec_reason}")
+                if scored_count < len(ranked.head(10)):
+                    print(f"  ℹ  {scored_count}/{min(10, len(ranked))} picks scored by AI — others shown by technical rank.")
 
         print(f"\n{'─'*width}\n")
         return ranked

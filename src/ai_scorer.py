@@ -589,7 +589,51 @@ class AIScorer:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _extract_partial_scores(text: str) -> list[dict]:
+    """Scan text at every brace depth and collect every complete, valid JSON
+    object that contains both 'id' and 'ai_score' keys.
+
+    Score objects are nested inside {"scores": [...]}, so they never return
+    to depth-0; we must scan at all nesting levels.
+    """
+    scores: list[dict] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        # Try to find the matching closing brace for this opening brace
+        depth = 0
+        start = i
+        end = -1
+        for j in range(i, n):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end == -1:
+            # This opening brace has no matching close (truncated envelope).
+            # Skip it and keep scanning — inner objects may still be complete.
+            i += 1
+            continue
+        candidate = text[start : end + 1]
+        try:
+            obj = json.loads(candidate)
+            # Only keep score-leaf objects (have ai_score + id, not the "scores" envelope)
+            if isinstance(obj, dict) and "ai_score" in obj and "id" in obj:
+                scores.append(obj)
+        except json.JSONDecodeError:
+            pass
+        i = end + 1
+    return scores
+
+
 def _parse_json_response(raw: str) -> list[dict]:
+    """Parse AI scoring response, with partial-JSON recovery for truncated responses."""
     text = raw.strip()
     if text.startswith("```"):
         text = "\n".join(l for l in text.splitlines() if not l.startswith("```")).strip()
@@ -597,11 +641,29 @@ def _parse_json_response(raw: str) -> list[dict]:
     end   = text.rfind("}") + 1
     if start == -1 or end == 0:
         raise ValueError(f"No JSON object in response: {raw[:200]}")
-    parsed = json.loads(text[start:end])
-    scores = parsed.get("scores", [])
-    if not isinstance(scores, list):
-        raise ValueError(f"Expected 'scores' list, got: {type(scores)}")
-    return scores
+
+    # Happy path: complete, valid JSON
+    try:
+        parsed = json.loads(text[start:end])
+        scores = parsed.get("scores", [])
+        if not isinstance(scores, list):
+            raise ValueError(f"Expected 'scores' list, got: {type(scores)}")
+        return scores
+    except json.JSONDecodeError:
+        pass
+
+    # Recovery path: response was truncated mid-JSON.
+    # Walk the text and extract every complete score object we can.
+    recovered = _extract_partial_scores(text)
+    if recovered:
+        logger.warning(
+            "AI response truncated — recovered %d/%s complete score object(s). "
+            "Consider increasing max_tokens or reducing batch_size.",
+            len(recovered), "?"
+        )
+        return recovered
+
+    raise ValueError(f"No JSON object in response: {raw[:200]}")
 
 def _parse_json_single(raw: str) -> dict:
     text = raw.strip()

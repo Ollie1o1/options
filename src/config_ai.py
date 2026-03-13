@@ -4,8 +4,8 @@ AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
     "model": "nvidia/nemotron-3-super-120b-a12b:free",
-    "fallback_model": "meta-llama/llama-3.3-70b-instruct:free",   # used after 2 failed retries
-    "second_fallback_model": "google/gemma-3-12b-it:free",        # used after 3 failed retries
+    "fallback_model": "meta-llama/llama-3.3-70b-instruct:free",       # used after 2 failed retries
+    "second_fallback_model": "mistralai/mistral-7b-instruct:free",    # used after 3 failed retries (supports system prompts)
     "api_key_env": "OPENROUTER_API_KEY",
 
     # ── Scoring Weights ───────────────────────────────────────────────────────
@@ -27,8 +27,8 @@ AI_CONFIG: dict = {
     "news_enabled": True,           # inject top-3 news headlines into prompt
 
     # ── API Call Settings ─────────────────────────────────────────────────────
-    "batch_size": 5,
-    "max_tokens": 2048,
+    "batch_size": 3,     # smaller batches = shorter responses = less truncation risk
+    "max_tokens": 4096,  # enough room for 3 candidates with full reasoning
     "temperature": 0.1,
     "timeout": 60,
 
