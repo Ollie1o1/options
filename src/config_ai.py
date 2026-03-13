@@ -6,30 +6,25 @@ or change the weighting between technical and AI scores.
 
 AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
-    # "anthropic" is the default.  To use OpenAI instead, swap the values of
-    # "provider", "model", and "api_key_env" then update ai_scorer.py's
-    # _get_client() to instantiate openai.OpenAI(api_key=...) and adjust the
-    # messages.create call to the Chat Completions format.
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-6",          # Model used for scoring
-    "api_key_env": "ANTHROPIC_API_KEY",    # Name of the env var holding the key
+    # "openrouter" uses the OpenAI-compatible API at openrouter.ai (supports
+    # free models).  Switch to "anthropic" if you have an Anthropic key.
+    "provider": "openrouter",
+    "model": "meta-llama/llama-3.3-70b-instruct:free",
+    "api_key_env": "OPENROUTER_API_KEY",   # name of the env var holding the key
 
     # ── Scoring Weights ───────────────────────────────────────────────────────
     # final_score = technical_weight * quality_score
     #             + ai_weight        * (ai_score / 100)
-    # Both weights should sum to 1.0 for a [0, 1] final_score.
-    "ai_weight": 0.30,           # How much the AI score contributes
-    "technical_weight": 0.70,    # How much the screener quality_score contributes
+    "ai_weight": 0.30,
+    "technical_weight": 0.70,
 
     # ── API Call Settings ─────────────────────────────────────────────────────
-    "batch_size": 5,      # Candidates per API request (reduces cost vs 1 call each)
-    "max_tokens": 2048,   # Upper bound on response length
-    "temperature": 0.1,   # Low = consistent, deterministic scoring
-    "timeout": 60,        # Seconds before a request is considered timed-out
+    "batch_size": 5,      # candidates per API request
+    "max_tokens": 2048,
+    "temperature": 0.1,
+    "timeout": 60,
 
     # ── Fields sent to AI ─────────────────────────────────────────────────────
-    # Only columns present in the picks DataFrame are forwarded.
-    # Trim this list to cut token usage; expand it for richer context.
     "fields_to_include": [
         "symbol", "type", "strike", "expiration", "underlying",
         "premium", "impliedVolatility", "iv_rank", "iv_percentile",
