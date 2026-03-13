@@ -142,6 +142,14 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
     if str(c.get("Earnings Play", "")).upper() == "YES":
         kv.append("EARNINGS(gap-risk)")
 
+    be_dist = c.get("be_dist_pct")
+    if be_dist is not None:
+        kv.append(f"BE-dist:{float(be_dist):.1f}%")
+
+    ann_ret = c.get("annualized_return")
+    if ann_ret is not None and float(ann_ret) > 0:
+        kv.append(f"ann-yield:{float(ann_ret):.0%}")
+
     warnings = []
     if c.get("macro_warning"):
         warnings.append("MACRO")
@@ -149,6 +157,8 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
         warnings.append("SR")
     if c.get("decay_warning"):
         warnings.append("DECAY")
+    if c.get("gamma_ramp"):
+        warnings.append("GAMMA-RAMP")
     if warnings:
         kv.append("WARN:" + "+".join(warnings))
 
@@ -311,7 +321,27 @@ class AIScorer:
             lines.append(f"Relative volume: {rvol:.2f}x")
         if short_int:
             lines.append(f"Short interest: {short_int:.1%}")
-        if headlines:
+        # Prefer structured news_data when available (multi-source, with sentiment + analyst changes)
+        news_data = ctx.get("news_data")
+        if news_data is not None and hasattr(news_data, "top_headlines"):
+            enriched_headlines = news_data.top_headlines[:3]
+            if enriched_headlines:
+                lines.append("Recent headlines: " + " | ".join(f'"{h}"' for h in enriched_headlines))
+            if getattr(news_data, "has_negative_catalyst", False):
+                lines.append("CATALYST RISK flagged in recent news")
+            if getattr(news_data, "has_positive_catalyst", False):
+                lines.append("POSITIVE CATALYST detected in recent news")
+            if getattr(news_data, "unusual_news_volume", False):
+                lines.append("UNUSUAL NEWS VOLUME in last 24h")
+            analyst_changes = getattr(news_data, "analyst_changes", [])
+            if analyst_changes:
+                ac_strs = []
+                for ac in analyst_changes[:3]:
+                    grade_str = f"{ac.from_grade}→{ac.to_grade}" if ac.from_grade and ac.to_grade else (ac.to_grade or ac.action)
+                    pt_str = f" PT:${ac.price_target:.0f}" if ac.price_target else ""
+                    ac_strs.append(f"{ac.firm} {ac.action.upper()} {grade_str}{pt_str}")
+                lines.append("Analyst changes (30d): " + " | ".join(ac_strs))
+        elif headlines:
             lines.append("Recent headlines: " + " | ".join(f'"{h}"' for h in headlines[:3]))
 
         prompt = "\n".join(lines) + "\n\nProvide your ticker-level assessment."

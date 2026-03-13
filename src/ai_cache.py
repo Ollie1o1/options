@@ -51,10 +51,12 @@ def _make_fingerprint(row: dict[str, Any]) -> str:
     symbol = str(row.get("symbol", "")).upper()
     opt_type = str(row.get("type", "")).lower()
     strike = row.get("strike", 0) or 0
-    strike_bucket = round(round(float(strike) / 5) * 5, 2)
+    # Bucket to nearest $5 — use int arithmetic to avoid float rounding issues
+    strike_bucket = int(round(float(strike) / 5)) * 5
     expiry = str(row.get("expiration", ""))[:10]
     iv_rank = row.get("iv_rank", 0.5) or 0.5
-    iv_bucket = round(round(float(iv_rank) / 0.05) * 0.05, 2)
+    # Bucket IV rank to nearest 0.05 — round to int step first, then scale back
+    iv_bucket = round(round(float(iv_rank) * 20) / 20, 2)
     trade_date = _trade_date()
     return f"{symbol}|{opt_type}|{strike_bucket}|{expiry}|{iv_bucket}|{trade_date}"
 
