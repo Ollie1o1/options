@@ -19,6 +19,16 @@ from typing import Optional, Any
 import math
 
 _DB_PATH = Path(__file__).resolve().parent.parent / ".ai_score_cache.db"
+
+
+def _safe_json_loads(value: str, default):
+    """Parse JSON string, returning default on any error."""
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return default
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS ai_scores (
     fingerprint   TEXT PRIMARY KEY,
@@ -78,7 +88,7 @@ class AIScoreCache:
             "id": str(row.get("_id", "")),
             "ai_score": float(r["ai_score"]),
             "reasoning": r["reasoning"] or "",
-            "flags": json.loads(r["flags"] or "[]"),
+            "flags": _safe_json_loads(r["flags"], []),
             "catalyst_risk": r["catalyst_risk"] or "medium",
             "iv_justified": bool(r["iv_justified"]),
             "ai_confidence": float(r["ai_confidence"] or 5.0),

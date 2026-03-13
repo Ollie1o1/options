@@ -299,7 +299,7 @@ def render_sidebar():
         with st.spinner("Scanning Market..."):
             if scan_mode != "Single-stock":
                 tickers = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
-                           "META", "NFLX", "JPM", "GS", "V", "MA", "AMD", "INTC", "PYPL", "SQ"][:num_tickers]
+                           "META", "NFLX", "JPM", "GS", "V", "MA", "COIN", "INTC", "PYPL", "SQ"][:num_tickers]
 
             logger = setup_logging()
             try:
@@ -398,7 +398,7 @@ def render_scanner_tab(budget):
                         <span><b>Exp:</b> {best['expiration']}</span>
                         <span><b>Prem:</b> ${best['premium']:.2f}</span>
                         <span><b>PoP:</b> {best['prob_profit']:.1%}</span>
-                        <span><b>Score:</b> {best['quality_score']:.1f}{ai_badge}</span>
+                        <span><b>Score:</b> {best['quality_score'] * 100:.1f}{ai_badge}</span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -421,7 +421,7 @@ def render_scanner_tab(budget):
             }
             sort_col = 'final_score' if (has_ai and 'final_score' in picks_df.columns) else 'quality_score'
             column_config = {
-                "Tech Score": st.column_config.NumberColumn("Tech Score", format="%.1f"),
+                "Tech Score": st.column_config.NumberColumn("Tech Score (0-100)", format="%.1f"),
                 "AI Score": st.column_config.NumberColumn("AI Score", format="%.0f"),
                 "Final": st.column_config.ProgressColumn("Final Score", format="%.2f", min_value=0, max_value=1),
                 "PoP": st.column_config.ProgressColumn("Prob. Profit", format="%.2f", min_value=0, max_value=1),
@@ -431,6 +431,9 @@ def render_scanner_tab(budget):
             def render_df(df, key_suffix):
                 cols = [c for c in common_cols if c in df.columns]
                 d = df[cols].copy()
+                # Normalize quality_score 0-1 → 0-100 for display parity with AI Score
+                if "quality_score" in d.columns:
+                    d["quality_score"] = (d["quality_score"] * 100).round(1)
                 d.rename(columns=col_rename, inplace=True)
                 sc = col_rename.get(sort_col, sort_col)
                 if sc in d.columns:
@@ -467,7 +470,8 @@ def render_scanner_tab(budget):
                 btn_col, csv_col = st.columns([1, 1])
                 with btn_col:
                     if st.button(f"📝 Paper Trade {opt['symbol']} ${opt['strike']} {opt['type'].upper()}"):
-                        entry_px = (opt.get("ask") if opt.get("ask") is not None
+                        ask_val = opt.get("ask")
+                        entry_px = (ask_val if (ask_val is not None and float(ask_val) > 0)
                                     else opt.get("lastPrice") or opt.get("premium", 0.0))
                         trade_dict = {
                             "ticker": opt["symbol"],
@@ -565,7 +569,8 @@ def render_paper_portfolio_tab():
         df_paper = pm.get_all_trades()
         open_count = len(df_paper[df_paper["status"] == "OPEN"])
         closed_df = df_paper[df_paper["status"] == "CLOSED"]
-        total_pnl_usd = ((closed_df["exit_price"] - closed_df["entry_price"]) * 100).sum() if not closed_df.empty else 0.0
+        # pnl_pct is already sign-corrected for short/credit positions by update_positions()
+        total_pnl_usd = (closed_df["pnl_pct"] * closed_df["entry_price"] * 100).sum() if not closed_df.empty else 0.0
         
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total PnL ($)", f"${total_pnl_usd:,.2f}")
