@@ -142,6 +142,21 @@ def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
     except Exception:
         return None
 
+def get_news_headlines(ticker: yf.Ticker, max_headlines: int = 3) -> list:
+    """Return up to max_headlines recent news titles for a ticker."""
+    try:
+        news = ticker.news
+        if not news:
+            return []
+        titles = []
+        for item in news[:max_headlines]:
+            title = item.get("title") or item.get("content", {}).get("title", "")
+            if title:
+                titles.append(title.strip())
+        return titles[:max_headlines]
+    except Exception:
+        return []
+
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
     key = f"{ticker.ticker}:seasonality"
@@ -684,6 +699,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     # 3. Fetch Other Data (Earnings, Sentiment, Seasonality)
     earnings_date = get_next_earnings_date(tkr)
     sentiment_score = get_sentiment(tkr)
+    news_headlines = get_news_headlines(tkr)
     seasonal_win_rate = check_seasonality(tkr)
     sector_perf = get_sector_performance(symbol)
     short_interest = get_short_interest(tkr)
@@ -800,6 +816,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "earnings_date": earnings_date,
             "earnings_move_data": earnings_move_data,
             "sentiment_score": sentiment_score,
+            "news_headlines": news_headlines,
             "seasonal_win_rate": seasonal_win_rate,
             "term_structure_spread": term_structure_spread,
             "sector_perf": sector_perf,
