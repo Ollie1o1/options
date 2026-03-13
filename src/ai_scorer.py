@@ -332,7 +332,7 @@ class AIScorer:
     def _score_ticker_context(self, symbol: str, ctx: dict, df: pd.DataFrame) -> dict:
         """Run a lightweight ticker-level analysis and return a summary dict."""
         underlying = None
-        sym_rows = df[df.get("symbol", pd.Series(dtype=str)) == symbol] if "symbol" in df.columns else pd.DataFrame()
+        sym_rows = df[df["symbol"] == symbol] if "symbol" in df.columns else pd.DataFrame()
         if not sym_rows.empty and "underlying" in sym_rows.columns:
             underlying = float(sym_rows["underlying"].iloc[0])
 

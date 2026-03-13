@@ -197,7 +197,12 @@ def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
                 if hasattr(cal, "index") and len(cal.index) > 0:
                     dt = cal.index[0]
                     if not isinstance(dt, datetime):
-                        dt = datetime.fromtimestamp(dt.timestamp())
+                        # date objects have no .timestamp(); use combine instead
+                        import datetime as _dt_mod
+                        if isinstance(dt, _dt_mod.date):
+                            dt = datetime.combine(dt, datetime.min.time())
+                        else:
+                            dt = datetime.fromtimestamp(float(dt))
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     return dt

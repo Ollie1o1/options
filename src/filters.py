@@ -72,7 +72,7 @@ def categorize_by_premium(df: pd.DataFrame, budget: Optional[float] = None) -> p
     # Calculate contract cost
     df["contract_cost"] = df["premium"] * 100
     
-    if budget is not None:
+    if budget is not None and budget > 0:
         # Budget mode: categorize based on % of budget
         # LOW: 0-33% of budget, MEDIUM: 33-66%, HIGH: 66-100%
         def cat_budget(cost):
@@ -113,10 +113,14 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
         
         if diversify_tickers and "symbol" in sub.columns:
             # Try to get diverse tickers in budget mode
-            sub = sub.sort_values(
-                by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
-                ascending=[False, True, False, False, True],
-            )
+            _sort_cols = ["quality_score", "spread_pct", "volume", "openInterest", "T_years"]
+            _sort_asc  = [False,           True,         False,   False,          True]
+            _present   = [(c, a) for c, a in zip(_sort_cols, _sort_asc) if c in sub.columns]
+            if _present:
+                sub = sub.sort_values(
+                    by=[c for c, _ in _present],
+                    ascending=[a for _, a in _present],
+                )
             
             # Pick best from each ticker, then fill remaining slots
             selected = []
@@ -149,10 +153,14 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
             picks.append(pd.DataFrame(selected))
         else:
             # Standard sorting for single-stock mode
-            sub = sub.sort_values(
-                by=["quality_score", "spread_pct", "volume", "openInterest", "T_years"],
-                ascending=[False, True, False, False, True],
-            )
+            _sort_cols = ["quality_score", "spread_pct", "volume", "openInterest", "T_years"]
+            _sort_asc  = [False,           True,         False,   False,          True]
+            _present   = [(c, a) for c, a in zip(_sort_cols, _sort_asc) if c in sub.columns]
+            if _present:
+                sub = sub.sort_values(
+                    by=[c for c, _ in _present],
+                    ascending=[a for _, a in _present],
+                )
             picks.append(sub.head(per_bucket))
     
     if not picks:

@@ -463,7 +463,8 @@ def calculate_metrics(
 
     # --- Earnings Volatility Logic ---
     df["Earnings Play"] = "NO"
-    if earnings_date:
+    _now_utc = datetime.now(timezone.utc)
+    if earnings_date and earnings_date > _now_utc:   # only flag future earnings
         df.loc[(df["exp_dt"] > earnings_date), "Earnings Play"] = "YES"
 
     df["is_underpriced"] = False
@@ -3158,7 +3159,7 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
                     return letter
             return "F"
 
-        header = f"  {'#':<3} {'Ticker':<6} {'Type':<5} {'Strike':>7} {'Exp':<12} {'Grade':<6} {'AI':>4} {'Tech':>5} {'Final':>6} {'Catalyst':<9} Reasoning"
+        header = f"  {'#':<3} {'Ticker':<6} {'Type':<5} {'Strike':>7} {'Exp':<12} {'Grade':<6} {'AI':>4} {'Tech':>5} {'Final':>6} {'Catalyst':<9} Reasoning (AI/Tech both 0-100)"
         sep = "  " + "─" * (width - 4)
         if has_cli:
             import src.formatting as _fmt
@@ -3171,7 +3172,7 @@ def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: i
         top_rec = None
         for i, row in ranked.head(10).iterrows():
             ai_s = float(row.get("ai_score", 50))
-            tech_s = float(row.get("quality_score", 0))
+            tech_s = float(row.get("quality_score", 0)) * 100   # normalize 0-1 → 0-100
             final_s = float(row.get("final_score", 0))
             rank_n = int(row.get("rank", 0))
             grade = _grade(ai_s)
@@ -3421,6 +3422,8 @@ def main():
     elif is_budget_mode:
         try:
             budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
+            if budget <= 0:
+                print("Budget must be greater than 0."); sys.exit(1)
         except Exception:
             print("Invalid budget amount."); sys.exit(1)
         scan_type = prompt_input("Enter 1 for TARGETED or 2 for DISCOVERY", "1")
