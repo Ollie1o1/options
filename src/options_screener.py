@@ -3103,6 +3103,141 @@ def _check_market_hours() -> tuple:
     return True, f"Market open ({time_str})"
 
 
+def _run_ai_analysis_cli(picks: "pd.DataFrame", volatility_regime: str, width: int, has_cli: bool) -> "Optional[pd.DataFrame]":
+    """Run AI scoring on top picks and print a compact grading table.
+
+    Returns the ranked DataFrame (with AI columns) so the caller can use
+    the AI-top pick for paper-trading / CSV export, or None on failure.
+    """
+    try:
+        from .ai_scorer import AIScorer
+        from .ranking import combine_scores
+        from .config_ai import AI_CONFIG
+    except Exception:
+        return None
+
+    try:
+        if has_cli:
+            import src.formatting as _fmt
+            print("\n" + _fmt.draw_separator(width))
+            print(_fmt.colorize("  🤖  AI ANALYSIS  —  grading top picks…", _fmt.Colors.BRIGHT_CYAN, bold=True))
+            print(_fmt.draw_separator(width))
+        else:
+            print(f"\n{'─'*width}")
+            print("  AI ANALYSIS  —  grading top picks…")
+            print(f"{'─'*width}")
+
+        # Limit to top 15 by quality_score to keep API calls fast
+        candidates = picks.sort_values("quality_score", ascending=False).head(15).copy()
+
+        vix_map = {"Low": "low", "Normal": "normal", "High": "high",
+                   "low": "low", "normal": "normal", "high": "high"}
+        vix_regime = vix_map.get(str(volatility_regime), "normal")
+
+        # Fetch ticker contexts (two-pass) — one request per unique symbol
+        ticker_contexts: dict = {}
+        if AI_CONFIG.get("two_pass_enabled", True):
+            from .data_fetching import fetch_options_yfinance
+            for sym in candidates["symbol"].unique():
+                try:
+                    r = fetch_options_yfinance(sym, max_expiries=2)
+                    ticker_contexts[sym] = r.get("context", {})
+                except Exception:
+                    pass
+
+        scorer = AIScorer()
+        ai_df = scorer.score_candidates(candidates, ticker_contexts=ticker_contexts)
+        ranked = combine_scores(candidates, ai_df, vix_regime=vix_regime)
+
+        # ── Print compact grading table ────────────────────────────────────
+        GRADE_MAP = [(90, "A+"), (80, "A"), (70, "B+"), (60, "B"), (50, "C"), (40, "D"), (0, "F")]
+
+        def _grade(score: float) -> str:
+            for threshold, letter in GRADE_MAP:
+                if score >= threshold:
+                    return letter
+            return "F"
+
+        header = f"  {'#':<3} {'Ticker':<6} {'Type':<5} {'Strike':>7} {'Exp':<12} {'Grade':<6} {'AI':>4} {'Tech':>5} {'Final':>6} {'Catalyst':<9} Reasoning"
+        sep = "  " + "─" * (width - 4)
+        if has_cli:
+            import src.formatting as _fmt
+            print(_fmt.colorize(header, _fmt.Colors.BRIGHT_WHITE, bold=True))
+            print(sep)
+        else:
+            print(header)
+            print(sep)
+
+        top_rec = None
+        for i, row in ranked.head(10).iterrows():
+            ai_s = float(row.get("ai_score", 50))
+            tech_s = float(row.get("quality_score", 0))
+            final_s = float(row.get("final_score", 0))
+            rank_n = int(row.get("rank", 0))
+            grade = _grade(ai_s)
+            cat = str(row.get("catalyst_risk", "medium"))[:6]
+            reason = str(row.get("ai_reasoning", ""))[:55]
+            line = (f"  #{rank_n:<2} {row['symbol']:<6} {str(row['type']).upper():<5} "
+                    f"{row['strike']:>7.1f} {str(row['expiration'])[:10]:<12} "
+                    f"{grade:<6} {ai_s:>4.0f} {tech_s:>5.1f} {final_s:>6.3f} {cat:<9} {reason}")
+            if has_cli:
+                import src.formatting as _fmt
+                color = (_fmt.Colors.BRIGHT_GREEN if ai_s >= 70
+                         else _fmt.Colors.YELLOW if ai_s >= 50
+                         else _fmt.Colors.RED)
+                print(_fmt.colorize(line, color))
+            else:
+                print(line)
+            if top_rec is None:
+                top_rec = row
+
+        # ── Top recommendation callout ─────────────────────────────────────
+        if top_rec is not None:
+            print()
+            rec_sym = top_rec["symbol"]
+            rec_type = str(top_rec["type"]).upper()
+            rec_strike = top_rec["strike"]
+            rec_exp = str(top_rec["expiration"])[:10]
+            rec_ai = float(top_rec.get("ai_score", 50))
+            rec_reason = str(top_rec.get("ai_reasoning", "")).strip()
+            rec_flags = top_rec.get("ai_flags", "")
+
+            if has_cli:
+                import src.formatting as _fmt
+                print("  " + _fmt.draw_separator(width - 4, "-"))
+                lbl = _fmt.colorize("  TOP RECOMMENDATION", _fmt.Colors.BRIGHT_YELLOW, bold=True)
+                rec_line = f"{rec_sym} {rec_type} ${rec_strike:.0f} exp {rec_exp}  |  AI Score: {rec_ai:.0f}  |  Grade: {_grade(rec_ai)}"
+                print(f"{lbl}: {_fmt.colorize(rec_line, _fmt.Colors.BRIGHT_WHITE, bold=True)}")
+                if rec_reason:
+                    print(f"  {_fmt.colorize(rec_reason, _fmt.Colors.DIM)}")
+                if rec_flags:
+                    flags_display = rec_flags if isinstance(rec_flags, str) else ", ".join(rec_flags)
+                    if flags_display.strip():
+                        print(f"  {_fmt.colorize('Flags: ' + flags_display, _fmt.Colors.YELLOW)}")
+            else:
+                print(f"  {'─'*(width-4)}")
+                print(f"  TOP RECOMMENDATION: {rec_sym} {rec_type} ${rec_strike:.0f} exp {rec_exp}  |  AI: {rec_ai:.0f}  |  {_grade(rec_ai)}")
+                if rec_reason:
+                    print(f"  {rec_reason}")
+
+        print(f"\n{'─'*width}\n")
+        return ranked
+
+    except KeyboardInterrupt:
+        print("\n  [AI analysis skipped]")
+        return None
+    except Exception as exc:
+        if has_cli:
+            try:
+                import src.formatting as _fmt
+                print(_fmt.format_warning(f"AI analysis unavailable: {exc}"))
+            except Exception:
+                print(f"  ⚠  AI analysis unavailable: {exc}")
+        else:
+            print(f"  ⚠  AI analysis unavailable: {exc}")
+        return None
+
+
 def main():
     # ── CLI argument parsing (Phase 7) ───────────────────────────────────────
     parser = argparse.ArgumentParser(add_help=False)
@@ -3111,6 +3246,7 @@ def main():
     parser.add_argument("--version", action="store_true", help="Show version and exit")
     parser.add_argument("--close-trades", action="store_true", help="Update trade log with closing P/L")
     parser.add_argument("--ui", action="store_true", help="Launch Streamlit dashboard")
+    parser.add_argument("--no-ai", action="store_true", help="Skip AI analysis after scan")
     args, _ = parser.parse_known_args()
 
     if args.no_color and HAS_ENHANCED_CLI:
@@ -3351,6 +3487,11 @@ def main():
             rfr = scan_results['rfr']
             chain_iv_median = scan_results['chain_iv_median']
 
+            # ── AI Analysis ────────────────────────────────────────────────
+            _ai_ranked = None
+            if not picks.empty and not getattr(args, 'no_ai', False):
+                _ai_ranked = _run_ai_analysis_cli(picks, volatility_regime, WIDTH, HAS_ENHANCED_CLI)
+
             # ── Scan-another shortcut (single-stock only) ──────────────────
             if _is_single_stock and _repeat_count < 5:
                 _another = prompt_input("Scan another ticker? (enter symbol or Enter to continue)", "").upper().strip()
@@ -3373,7 +3514,13 @@ def main():
                 save_choice = prompt_input("", "").strip().upper()
 
                 if save_choice == "P" and mode not in ("Credit Spreads", "Iron Condor"):
-                    top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
+                    # Use AI-ranked top pick when available, otherwise fall back to quality_score
+                    if _ai_ranked is not None and not _ai_ranked.empty and "final_score" in _ai_ranked.columns:
+                        top_pick_row = picks.loc[_ai_ranked.sort_values("final_score", ascending=False).index[0]] \
+                            if _ai_ranked.sort_values("final_score", ascending=False).index[0] in picks.index \
+                            else picks.sort_values("quality_score", ascending=False).iloc[0]
+                    else:
+                        top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
                     today_str = datetime.now().strftime("%Y-%m-%d")
                     trade_dict = {
                         "date": today_str,
@@ -3381,7 +3528,11 @@ def main():
                         "expiration": top_pick_row["expiration"],
                         "strike": top_pick_row["strike"],
                         "type": str(top_pick_row["type"]).capitalize(),
-                        "entry_price": safe_float(top_pick_row.get("ask") or None, top_pick_row["lastPrice"]),
+                        "entry_price": (
+                            safe_float(top_pick_row.get("ask") or None)
+                            or safe_float(top_pick_row.get("lastPrice"))
+                            or safe_float(top_pick_row.get("premium"), 0.0)
+                        ),
                         "quality_score": top_pick_row["quality_score"],
                         "strategy_name": f"Long {str(top_pick_row['type']).capitalize()}"
                     }
@@ -3390,7 +3541,8 @@ def main():
                     print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
 
                 elif save_choice == "C":
-                    csv_file = export_to_csv(picks, mode, budget)
+                    export_df = _ai_ranked if (_ai_ranked is not None and not _ai_ranked.empty) else picks
+                    csv_file = export_to_csv(export_df, mode, budget)
                     if csv_file:
                         msg = f"Results exported to: {csv_file}"
                         print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
