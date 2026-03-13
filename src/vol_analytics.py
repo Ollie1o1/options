@@ -335,7 +335,8 @@ def print_iv_surface(ticker: str, spot: Optional[float] = None, width: int = 90)
         print(header)
     print(_sep(width))
 
-    col_hdr = f"  {'Expiry':<12}  {'DTE':>5}  {'ATM IV':>7}  {'25\u0394 Skew':>9}  {'Structure'}"
+    _skew_col = "25\u0394 Skew"
+    col_hdr = f"  {'Expiry':<12}  {'DTE':>5}  {'ATM IV':>7}  {_skew_col:>9}  {'Structure'}"
     if HAS_FMT and fmt:
         print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
     else:

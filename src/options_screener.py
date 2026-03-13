@@ -440,6 +440,7 @@ def calculate_metrics(
     short_interest: Optional[float] = None,
     next_ex_div: Optional[object] = None,
     earnings_move_data: Optional[dict] = None,
+    mode: str = "Single-stock",
 ) -> pd.DataFrame:
     """Calculates all objective mathematical metrics and merges external data."""
     
@@ -1052,7 +1053,7 @@ def enrich_and_score(
         df, risk_free_rate, earnings_date, config, iv_rank, iv_percentile,
         sentiment_score, macro_risk_active, sector_perf, tnx_change_pct,
         short_interest=short_interest, next_ex_div=next_ex_div,
-        earnings_move_data=earnings_move_data,
+        earnings_move_data=earnings_move_data, mode=mode,
     )
 
     # 2. Call Helper: Scores
@@ -2187,7 +2188,8 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
         print("  IRON CONDOR REPORT (RANGE-BOUND STRATEGIES)")
         print("=" * WIDTH)
 
-    hdr = f"  {'Symbol':<7} {'Exp':<12} {'Put Wing':<18} {'Call Wing':<18} {'Credit':<10} {'Max Risk':<10} {'RoR':<8} {'Net \u0394':<8} Score"
+    _delta_hdr = "Net \u0394"
+    hdr = f"  {'Symbol':<7} {'Exp':<12} {'Put Wing':<18} {'Call Wing':<18} {'Credit':<10} {'Max Risk':<10} {'RoR':<8} {_delta_hdr:<8} Score"
     print(fmt.colorize(hdr, fmt.Colors.BOLD) if HAS_ENHANCED_CLI else hdr)
     print(("  " + fmt.draw_separator(WIDTH - 2)) if HAS_ENHANCED_CLI else ("  " + "-" * (WIDTH - 2)))
 

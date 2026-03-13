@@ -22,8 +22,16 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import io
 
 import pandas as pd
+
+# Reconfigure stdout/stderr to UTF-8 on Windows so unicode symbols (✓, ★, Δ…)
+# don't crash when the terminal is set to a legacy code page (e.g. CP1252).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 # ── Lazy import helpers (so --help works without heavy deps loaded) ─────────────
@@ -97,9 +105,9 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--expiries",
         type=int,
-        default=4,
+        default=8,
         metavar="N",
-        help="Max expiration dates to fetch per ticker (default: 4)",
+        help="Max expiration dates to fetch per ticker (default: 8)",
     )
     scan.add_argument(
         "--profile",
@@ -176,16 +184,14 @@ def main() -> None:
     # ── Fetch market context ───────────────────────────────────────────────────
     run_scan, get_market_context = _import_screener()
 
-    ctx: dict = {}
+    market_trend      = "Unknown"
+    volatility_regime = "Unknown"
+    macro_risk        = False
+    tnx_change        = 0.0
     try:
-        ctx = get_market_context() or {}
+        market_trend, volatility_regime, macro_risk, tnx_change = get_market_context()
     except Exception:
         pass
-
-    market_trend      = ctx.get("market_trend", "Unknown")
-    volatility_regime = ctx.get("volatility_regime", "Unknown")
-    macro_risk        = ctx.get("macro_risk_active", False)
-    tnx_change        = ctx.get("tnx_change_pct", 0.0)
 
     # ── Run the technical screener ─────────────────────────────────────────────
     tickers_display = ", ".join(args.tickers)
