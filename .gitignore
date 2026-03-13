@@ -23,6 +23,7 @@ trades_log/
 *.jsonl
 *.sqlite
 *.db
+.ai_score_cache.db
 
 # Redundant test files
 test_*.py
