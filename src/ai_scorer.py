@@ -451,12 +451,21 @@ class AIScorer:
             return response.choices[0].message.content or ""
 
     def _score_batch_with_retry(self, batch: list[dict], batch_num: int = 1) -> list[dict]:
-        """Score with exponential backoff; switches to fallback model after attempt 2."""
+        """Score with exponential backoff; switches to fallback models on failure."""
         max_retries = 4
         delay = 5
         fallback = self.config.get("fallback_model")
+        second_fallback = self.config.get("second_fallback_model")
+
+        def _pick_model(attempt: int) -> str:
+            if attempt <= 2:
+                return self.config["model"]
+            if attempt == 3:
+                return fallback or self.config["model"]
+            return second_fallback or fallback or self.config["model"]
+
         for attempt in range(1, max_retries + 1):
-            use_model = self.config["model"] if attempt <= 2 else fallback or self.config["model"]
+            use_model = _pick_model(attempt)
             try:
                 return self._score_batch(batch, model=use_model)
             except Exception as exc:
