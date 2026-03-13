@@ -3,8 +3,9 @@
 AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
-    "model": "meta-llama/llama-3.3-70b-instruct:free",
-    "fallback_model": "google/gemma-3-12b-it:free",   # used after 2 failed retries
+    "model": "nvidia/nemotron-3-super-120b-a12b:free",
+    "fallback_model": "meta-llama/llama-3.3-70b-instruct:free",   # used after 2 failed retries
+    "second_fallback_model": "google/gemma-3-12b-it:free",        # used after 3 failed retries
     "api_key_env": "OPENROUTER_API_KEY",
 
     # ── Scoring Weights ───────────────────────────────────────────────────────

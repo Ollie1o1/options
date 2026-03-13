@@ -23,6 +23,16 @@ from src.options_screener import run_scan, load_config, get_market_context, setu
 from src.filters import categorize_by_premium, pick_top_per_bucket
 from src.paper_manager import PaperManager
 
+# AI scoring imports (graceful degradation if unavailable)
+_AI_AVAILABLE = False
+try:
+    from src.ai_scorer import AIScorer
+    from src.ranking import combine_scores
+    from src.config_ai import AI_CONFIG
+    _AI_AVAILABLE = True
+except Exception:
+    pass
+
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Options Terminal",
@@ -124,6 +134,12 @@ if 'market_context_loaded' not in st.session_state:
 
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
+
+if 'ai_results' not in st.session_state:
+    st.session_state.ai_results = None
+
+if 'ai_status' not in st.session_state:
+    st.session_state.ai_status = None  # None | "ok" | "error" | "disabled"
 
 if 'selected_option' not in st.session_state:
     st.session_state.selected_option = None
@@ -245,22 +261,46 @@ def render_sidebar():
     # 3. Weights
     with st.sidebar.expander("ALGO WEIGHTS", expanded=False):
         default_weights = config.get('composite_weights', {})
-        
+
         w_pop = st.slider("PoP", 0.0, 1.0, default_weights.get('pop', 0.18))
         w_liq = st.slider("Liquidity", 0.0, 1.0, default_weights.get('liquidity', 0.15))
         w_rr = st.slider("Risk/Reward", 0.0, 1.0, default_weights.get('rr', 0.15))
-        
+
         custom_weights = default_weights.copy()
         custom_weights.update({'pop': w_pop, 'liquidity': w_liq, 'rr': w_rr})
+
+    # 4. AI Settings
+    ai_enabled = False
+    ai_weight_override = None
+    with st.sidebar.expander("AI SCORING", expanded=True):
+        if _AI_AVAILABLE:
+            ai_enabled = st.toggle("Enable AI Analysis", value=True)
+            if ai_enabled:
+                default_ai_weight = AI_CONFIG.get("ai_weight", 0.30)
+                ai_weight_override = st.slider(
+                    "AI Weight", 0.05, 0.80, float(default_ai_weight), step=0.05,
+                    help="How much the AI score influences the final rank"
+                )
+                model_name = AI_CONFIG.get("model", "").split("/")[-1]
+                st.caption(f"Model: {model_name}")
+            # Show last AI run status
+            if st.session_state.ai_status == "ok":
+                st.success("AI: Active", icon="✅")
+            elif st.session_state.ai_status == "error":
+                st.warning("AI: Unavailable (tech-only)", icon="⚠️")
+            elif st.session_state.ai_status == "disabled":
+                st.info("AI: Disabled", icon="ℹ️")
+        else:
+            st.caption("AI module not installed")
 
     # Run Button
     st.sidebar.divider()
     if st.sidebar.button("🚀 RUN SCANNER", type="primary", use_container_width=True):
         with st.spinner("Scanning Market..."):
             if scan_mode != "Single-stock":
-                tickers = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL", 
+                tickers = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
                            "META", "NFLX", "JPM", "GS", "V", "MA", "AMD", "INTC", "PYPL", "SQ"][:num_tickers]
-            
+
             logger = setup_logging()
             try:
                 results = run_scan(
@@ -280,10 +320,48 @@ def render_sidebar():
                     custom_weights=custom_weights
                 )
                 st.session_state.scan_results = results
-                st.success("Scan Complete")
+                st.session_state.ai_results = None
             except Exception as e:
                 st.error(f"Scan Failed: {e}")
-    
+                return budget
+
+        # AI Scoring — runs automatically after technical scan
+        if ai_enabled and _AI_AVAILABLE and st.session_state.scan_results:
+            picks = st.session_state.scan_results.get("picks", pd.DataFrame())
+            if not picks.empty:
+                with st.spinner("Running AI analysis..."):
+                    try:
+                        vix_regime_map = {"Low": "low", "Normal": "normal", "High": "high"}
+                        vix_regime = vix_regime_map.get(str(st.session_state.volatility_regime), "normal")
+                        ai_cfg = {"ai_weight": ai_weight_override} if ai_weight_override is not None else None
+                        scorer = AIScorer(config=ai_cfg)
+                        ticker_contexts: dict = {}
+                        if AI_CONFIG.get("two_pass_enabled", True):
+                            from src.data_fetching import fetch_options_yfinance
+                            for sym in picks["symbol"].unique():
+                                try:
+                                    r = fetch_options_yfinance(sym, max_expiries=2)
+                                    ticker_contexts[sym] = r.get("context", {})
+                                except Exception:
+                                    pass
+                        ai_df = scorer.score_candidates(picks, ticker_contexts=ticker_contexts)
+                        kwargs = {}
+                        if ai_weight_override is not None:
+                            kwargs["ai_weight"] = ai_weight_override
+                            kwargs["technical_weight"] = 1.0 - ai_weight_override
+                        ranked = combine_scores(picks, ai_df, vix_regime=vix_regime, **kwargs)
+                        st.session_state.ai_results = ranked
+                        st.session_state.ai_status = "ok"
+                    except Exception as e:
+                        st.session_state.ai_status = "error"
+                        logger.warning("AI scoring failed: %s", e)
+            else:
+                st.session_state.ai_status = "disabled"
+        elif not ai_enabled:
+            st.session_state.ai_status = "disabled"
+
+        st.success("Scan Complete")
+
     return budget
 
 # --- SCANNER TAB CONTENT ---
@@ -291,13 +369,28 @@ def render_scanner_tab(budget):
     if st.session_state.scan_results:
         results = st.session_state.scan_results
         picks_df = results.get('picks', pd.DataFrame())
-        
+
+        # Merge AI scores onto picks_df if available
+        ai_ranked = st.session_state.ai_results
+        has_ai = ai_ranked is not None and not ai_ranked.empty
+
         if not picks_df.empty:
-            picks_df = categorize_by_premium(picks_df, budget=budget) 
+            picks_df = categorize_by_premium(picks_df, budget=budget)
             top_picks_df = pick_top_per_bucket(picks_df, per_bucket=3, diversify_tickers=True)
-            
+
+            # Merge AI columns into display frames when available
+            ai_merge_cols = ['symbol', 'type', 'strike', 'expiration', 'ai_score', 'ai_confidence',
+                             'final_score', 'catalyst_risk', 'ai_reasoning', 'ai_flags', 'rank']
+            if has_ai:
+                ai_sub = ai_ranked[[c for c in ai_merge_cols if c in ai_ranked.columns]].copy()
+                picks_df = picks_df.merge(ai_sub, on=['symbol', 'type', 'strike', 'expiration'], how='left')
+                top_picks_df = top_picks_df.merge(ai_sub, on=['symbol', 'type', 'strike', 'expiration'], how='left')
+
             if not top_picks_df.empty:
                 best = top_picks_df.iloc[0]
+                ai_badge = ""
+                if has_ai and pd.notna(best.get('ai_score')):
+                    ai_badge = f"<span style='color:#58a6ff'> | AI: {best['ai_score']:.0f}</span>"
                 st.markdown(f"""
                 <div style="padding: 1rem; background-color: #1f2937; border-radius: 0.5rem; border: 1px solid #374151; margin-bottom: 1rem;">
                     <h3 style="margin: 0; color: #fbbf24;">🏆 Top Pick: {best['symbol']} {best['type'].upper()} ${best['strike']}</h3>
@@ -305,33 +398,59 @@ def render_scanner_tab(budget):
                         <span><b>Exp:</b> {best['expiration']}</span>
                         <span><b>Prem:</b> ${best['premium']:.2f}</span>
                         <span><b>PoP:</b> {best['prob_profit']:.1%}</span>
-                        <span><b>Score:</b> {best['quality_score']:.1f}</span>
+                        <span><b>Score:</b> {best['quality_score']:.1f}{ai_badge}</span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
 
             subtab_names = ["🏆 Top Picks", "🟢 Low Premium", "🟡 Medium Premium", "🔴 High Premium", "📋 All Results"]
             subtabs = st.tabs(subtab_names)
-            
-            common_cols = ['symbol', 'type', 'strike', 'expiration', 'premium', 'prob_profit', 'quality_score', 'impliedVolatility', 'delta', 'volume', 'openInterest', 'price_bucket']
+
+            base_cols = ['symbol', 'type', 'strike', 'expiration', 'premium', 'prob_profit',
+                         'quality_score', 'impliedVolatility', 'delta', 'volume', 'openInterest', 'price_bucket']
+            ai_display_cols = ['ai_score', 'ai_confidence', 'final_score', 'catalyst_risk'] if has_ai else []
+            common_cols = base_cols + [c for c in ai_display_cols if c in picks_df.columns]
+
+            col_rename = {
+                'symbol': 'Ticker', 'type': 'Type', 'strike': 'Strike', 'expiration': 'Exp',
+                'premium': 'Price', 'prob_profit': 'PoP', 'quality_score': 'Tech Score',
+                'impliedVolatility': 'IV', 'delta': 'Delta', 'volume': 'Vol',
+                'openInterest': 'OI', 'price_bucket': 'Bucket',
+                'ai_score': 'AI Score', 'ai_confidence': 'AI Conf', 'final_score': 'Final',
+                'catalyst_risk': 'Catalyst'
+            }
+            sort_col = 'final_score' if (has_ai and 'final_score' in picks_df.columns) else 'quality_score'
             column_config = {
-                "Score": st.column_config.ProgressColumn("Quality Score", format="%.1f", min_value=0, max_value=100),
+                "Tech Score": st.column_config.NumberColumn("Tech Score", format="%.1f"),
+                "AI Score": st.column_config.NumberColumn("AI Score", format="%.0f"),
+                "Final": st.column_config.ProgressColumn("Final Score", format="%.2f", min_value=0, max_value=1),
                 "PoP": st.column_config.ProgressColumn("Prob. Profit", format="%.2f", min_value=0, max_value=1),
-                "Price": st.column_config.NumberColumn("Price", format="$%.2f")
+                "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
             }
 
             def render_df(df, key_suffix):
                 cols = [c for c in common_cols if c in df.columns]
                 d = df[cols].copy()
-                d.rename(columns={'symbol': 'Ticker', 'type': 'Type', 'strike': 'Strike', 'expiration': 'Exp', 'premium': 'Price', 'prob_profit': 'PoP', 'quality_score': 'Score', 'impliedVolatility': 'IV', 'delta': 'Delta', 'volume': 'Vol', 'openInterest': 'OI', 'price_bucket': 'Bucket'}, inplace=True)
-                if 'Score' in d.columns: d = d.sort_values('Score', ascending=False)
-
-                event = st.dataframe(d, use_container_width=True, hide_index=True, column_config=column_config, selection_mode="single-row", on_select="rerun", height=400, key=f"df_{key_suffix}")
-                
+                d.rename(columns=col_rename, inplace=True)
+                sc = col_rename.get(sort_col, sort_col)
+                if sc in d.columns:
+                    d = d.sort_values(sc, ascending=False)
+                event = st.dataframe(d, use_container_width=True, hide_index=True,
+                                     column_config=column_config, selection_mode="single-row",
+                                     on_select="rerun", height=400, key=f"df_{key_suffix}")
                 if len(event.selection['rows']) > 0:
                     selected_row_idx = event.selection['rows'][0]
                     selected_row_data = d.iloc[selected_row_idx]
-                    mask = ((picks_df['symbol'] == selected_row_data['Ticker']) & (picks_df['type'] == selected_row_data['Type']) & (picks_df['strike'] == selected_row_data['Strike']) & (picks_df['expiration'] == selected_row_data['Exp']))
+                    ticker_col = col_rename.get('symbol', 'symbol')
+                    type_col = col_rename.get('type', 'type')
+                    strike_col = col_rename.get('strike', 'strike')
+                    exp_col = col_rename.get('expiration', 'expiration')
+                    mask = (
+                        (picks_df['symbol'] == selected_row_data[ticker_col]) &
+                        (picks_df['type'] == selected_row_data[type_col]) &
+                        (picks_df['strike'] == selected_row_data[strike_col]) &
+                        (picks_df['expiration'] == selected_row_data[exp_col])
+                    )
                     match = picks_df[mask]
                     if not match.empty:
                         st.session_state.selected_option = match.iloc[0]
@@ -341,7 +460,7 @@ def render_scanner_tab(budget):
             with subtabs[2]: render_df(picks_df[picks_df['price_bucket'] == 'MEDIUM'], "med")
             with subtabs[3]: render_df(picks_df[picks_df['price_bucket'] == 'HIGH'], "high")
             with subtabs[4]: render_df(picks_df, "all")
-            
+
             # Action Buttons
             if st.session_state.selected_option is not None:
                 opt = st.session_state.selected_option
@@ -383,6 +502,35 @@ def render_visualizer_tab():
             fig_radar = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself', line_color='#58a6ff'))
             fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), template="plotly_dark", height=400)
             st.plotly_chart(fig_radar, use_container_width=True)
+
+        # AI Reasoning Panel
+        ai_ranked = st.session_state.ai_results
+        if ai_ranked is not None and not ai_ranked.empty:
+            st.markdown("### 🤖 AI Analysis")
+            mask = (
+                (ai_ranked['symbol'] == opt['symbol']) &
+                (ai_ranked['type'] == opt['type']) &
+                (ai_ranked['strike'] == opt['strike']) &
+                (ai_ranked['expiration'] == opt['expiration'])
+            )
+            ai_row = ai_ranked[mask]
+            if not ai_row.empty:
+                row = ai_row.iloc[0]
+                a1, a2, a3, a4 = st.columns(4)
+                a1.metric("AI Score", f"{row.get('ai_score', 0):.0f}/100")
+                a2.metric("Confidence", f"{row.get('ai_confidence', 0):.1f}/10")
+                a3.metric("Catalyst Risk", str(row.get('catalyst_risk', 'medium')).upper())
+                a4.metric("Final Score", f"{row.get('final_score', 0):.3f}")
+
+                reasoning = row.get('ai_reasoning', '')
+                if reasoning:
+                    st.markdown(f"> {reasoning}")
+                flags = row.get('ai_flags', '')
+                if flags:
+                    flag_list = flags if isinstance(flags, list) else str(flags).split(',')
+                    st.markdown(" ".join([f"`{f.strip()}`" for f in flag_list if f.strip()]))
+            else:
+                st.caption("No AI data for this contract.")
     else:
         st.info("Select a row in the Scanner tab to view analysis.")
 
