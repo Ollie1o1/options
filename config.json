@@ -53,7 +53,9 @@
     "max_days_to_expiration_iron": 60,
     "delta_min": 0.20,
     "delta_max": 0.45,
-    "min_iv_percentile": 25
+    "min_iv_percentile": 25,
+    "premium_selling_delta_min": 0.15,
+    "premium_selling_delta_max": 0.40
   },
   "moneyness_band": 0.15,
   "max_expirations": 4,
@@ -95,7 +97,10 @@
     "trader_pref": 0.05,
     "iv_edge": 0.09,
     "skew_align": 0.04,
-    "gamma_theta": 0.03
+    "gamma_theta": 0.03,
+    "pcr": 0.03,
+    "gex": 0.02,
+    "oi_change": 0.02
   },
   "backtest": {
     "profit_target_multiplier_long": 1.5,

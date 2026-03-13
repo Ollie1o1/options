@@ -52,8 +52,9 @@ AI_CONFIG: dict = {
     "fields_to_include": [
         "symbol", "type", "strike", "expiration", "underlying",
         "premium", "iv_rank", "delta",
-        "prob_profit", "ev_per_contract", "rr_ratio",
+        "prob_profit", "pop_sim", "ev_per_contract", "rr_ratio",
+        "be_dist_pct", "annualized_return",
         "Earnings Play", "Trend_Aligned",
-        "macro_warning", "sr_warning", "decay_warning",
+        "macro_warning", "sr_warning", "decay_warning", "gamma_ramp",
     ],
 }

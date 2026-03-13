@@ -300,15 +300,17 @@ def calculate_probability_of_profit(option_type: Union[str, np.ndarray], S: Unio
         T = np.asanyarray(T)
         sigma = np.asanyarray(sigma)
         premium = np.asanyarray(premium)
-        
+        # Clip T to 1 hour minimum to prevent division-by-zero on expiration day
+        T = np.maximum(T, 1.0 / (365.0 * 24.0))
+
         if isinstance(option_type, str):
             is_call = option_type.lower() == "call"
         else:
             is_call = np.char.lower(np.asanyarray(option_type).astype(str)) == "call"
-            
+
         # Break-even point
         breakeven = np.where(is_call, K + premium, K - premium)
-        
+
         # Probability that stock will be beyond break-even
         with np.errstate(divide='ignore', invalid='ignore'):
             d = (np.log(S / breakeven) - (0.5 * sigma * sigma) * T) / (sigma * np.sqrt(T))
@@ -343,7 +345,9 @@ def calculate_probability_of_touch(option_type: Union[str, np.ndarray], S: Union
         K = np.asanyarray(K)
         T = np.asanyarray(T)
         sigma = np.asanyarray(sigma)
-        
+        # Clip T to 1 hour minimum to prevent division-by-zero on expiration day
+        T = np.maximum(T, 1.0 / (365.0 * 24.0))
+
         scalar_input = isinstance(option_type, str) and S.ndim == 0
 
         if isinstance(option_type, str):
@@ -702,6 +706,43 @@ def calculate_metrics(
     df["spread_flag"] = "OK"
     df.loc[df["spread_pct"] > 0.10, "spread_flag"] = "WIDE"
     df.loc[df["spread_pct"] > 0.20, "spread_flag"] = "VERY_WIDE"
+
+    # --- Vega Dollar Exposure ---
+    # Dollar P&L change per 1 volatility point (1%) move in IV, per contract (100 shares).
+    # A vega_dollar of $50 means IV moving +1% adds $50 to the position value.
+    df["vega_dollar"] = np.abs(df["vega"].values) * 100.0
+
+    # --- Gamma Ramp Warning ---
+    # Near-expiry ATM/NTM options see explosive gamma — position delta can flip violently.
+    # Flag when: DTE < 7, gamma > 0.04, and option is not deep OTM (abs_delta > 0.20).
+    dte_vals_flag = df["T_years"].values * 365.0
+    df["gamma_ramp"] = (
+        (dte_vals_flag < 7) &
+        (df["gamma"].values > 0.04) &
+        (df["abs_delta"].values > 0.20)
+    )
+
+    # --- Breakeven Distance % ---
+    # What % move in the underlying is required to reach breakeven at expiration.
+    # Low = more achievable; >1x expected move = structurally difficult.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        be_dist = np.where(
+            df["underlying"].values > 0,
+            df["required_move"].values / df["underlying"].values * 100.0,
+            np.nan
+        )
+    df["be_dist_pct"] = np.where(np.isfinite(be_dist), be_dist, np.nan)
+
+    # --- Annualized Return (premium selling context) ---
+    # Annualizes the premium collected relative to the strike price.
+    # Standard metric for cash-secured puts / covered calls: (premium/strike) * (365/DTE).
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ann_ret = np.where(
+            (df["strike"].values > 0) & (df["T_years"].values > 0),
+            (df["premium"].values / df["strike"].values) * (1.0 / df["T_years"].values),
+            np.nan
+        )
+    df["annualized_return"] = np.where(np.isfinite(ann_ret), ann_ret, np.nan)
     
     # External data
     df["iv_rank"] = iv_rank if iv_rank is not None else pd.NA
@@ -812,7 +853,7 @@ def calculate_scores(
     # Base features
     vol_n, oi_n = rank_norm(df["volume"].fillna(0)), rank_norm(df["openInterest"].fillna(0))
     sp_cap = config.get("spread_score_cap", 0.25)
-    sp = df["spread_pct"].replace([pd.NA, pd.NaT], float("inf")).clip(lower=0, upper=sp_cap)
+    sp = pd.to_numeric(df["spread_pct"], errors="coerce").fillna(float("inf")).clip(lower=0, upper=sp_cap)
     spread_score = 1.0 - (sp / sp_cap)
     d_target = config.get("target_delta", 0.40)
     delta_quality = (1.0 - (df["abs_delta"] - d_target).abs() / max(d_target, 1e-6)).clip(0, 1)
@@ -835,7 +876,12 @@ def calculate_scores(
     atr_score = rank_norm(pd.to_numeric(df.get("atr_trend", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0))
     momentum_score = 0.4 * ret_score.fillna(0.5) + 0.3 * rsi_score.fillna(0.5) + 0.3 * atr_score.fillna(0.5)
     
-    iv_pct_series = pd.to_numeric(df.get("iv_percentile_30", df.get("iv_percentile", pd.Series(np.nan, index=df.index))), errors="coerce")
+    # Blend 30-day and 90-day IV percentile for a more stable IV rank signal.
+    # 90-day context prevents over-reacting to short-term vol spikes.
+    iv_pct_30 = pd.to_numeric(df.get("iv_percentile_30", df.get("iv_percentile", pd.Series(np.nan, index=df.index))), errors="coerce")
+    iv_pct_90 = pd.to_numeric(df.get("iv_percentile_90", pd.Series(np.nan, index=df.index)), errors="coerce")
+    # Where 90-day is available, blend 60/40 (30d/90d); otherwise fall back to 30d alone
+    iv_pct_series = iv_pct_30.where(iv_pct_90.isna(), 0.6 * iv_pct_30 + 0.4 * iv_pct_90)
     iv_rank_score = iv_pct_series.clip(0, 1).fillna(0.5) if mode == "Premium Selling" else (1.0 - iv_pct_series.clip(0, 1)).fillna(0.5)
     catalyst_score = pd.Series(0.3, index=df.index).mask(df["event_flag"] == "EARNINGS_NEARBY", 0.8)
     dte_norm = ((df["T_years"] * 365.0 - min_dte) / max(1, (max_dte - min_dte))).clip(0, 1)
@@ -934,12 +980,15 @@ def calculate_scores(
         df.loc[(df["Earnings Play"] == "YES") & (df["is_underpriced"] == True), "quality_score"] += 0.08
     df.loc[df["Trend_Aligned"] == True, "quality_score"] += 0.05
     df.loc[df["decay_warning"] == True, "quality_score"] -= 0.20
+    # Gamma ramp: near-expiry gamma explosion is a structural risk — penalise hard
+    if "gamma_ramp" in df.columns:
+        df.loc[df["gamma_ramp"] == True, "quality_score"] -= 0.15
     df.loc[df["sr_warning"] != "", "quality_score"] -= 0.10
     if "seasonal_win_rate" in df.columns:
         df.loc[df["seasonal_win_rate"] >= 0.8, "quality_score"] += 0.10
         df.loc[df["seasonal_win_rate"] <= 0.2, "quality_score"] -= 0.10
     df.loc[df["oi_wall_warning"] != "", "quality_score"] -= 0.10
-    df["squeeze_play"] = (df["is_squeezing"] == True) & (df["Unusual_Whale"] == True)
+    df["squeeze_play"] = (df.get("is_squeezing", pd.Series(False, index=df.index)) == True) & (df.get("Unusual_Whale", pd.Series(False, index=df.index)) == True)
     df.loc[df["squeeze_play"], "quality_score"] += 0.25
     df.loc[df["macro_warning"].str.contains("MACRO RISK", na=False), "quality_score"] -= 0.10
 
@@ -990,7 +1039,12 @@ def enrich_and_score(
     next_ex_div: Optional[object] = None,
     earnings_move_data: Optional[dict] = None,
     hv_ewma: Optional[float] = None,
+    news_data=None,
 ) -> pd.DataFrame:
+    # Use richer multi-source news sentiment when available
+    if news_data is not None and hasattr(news_data, "aggregate_sentiment"):
+        sentiment_score = news_data.aggregate_sentiment
+
     # Prepare
     now = datetime.now(timezone.utc)
     df["exp_dt"] = pd.to_datetime(df["expiration"], errors="coerce", utc=True)
@@ -1061,7 +1115,12 @@ def enrich_and_score(
     df = calculate_scores(df, config, vix_regime_weights, trader_profile, mode, min_dte, max_dte)
 
     # Final Filters
-    d_min, d_max = (0.20, 0.40) if mode == "Premium Selling" else (fc.get("delta_min", 0.15), fc.get("delta_max", 0.35))
+    if mode == "Premium Selling":
+        d_min = fc.get("premium_selling_delta_min", 0.15)
+        d_max = fc.get("premium_selling_delta_max", 0.40)
+    else:
+        d_min = fc.get("delta_min", 0.15)
+        d_max = fc.get("delta_max", 0.35)
     df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
     if mode != "Premium Selling": df = df[df["rr_ratio"] >= 0.25].copy()
 
@@ -1497,10 +1556,14 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
         else:
             parts.append(f"Term: {ts_label} ({tss:+.1%})")
 
-    # Stock Price and DTE
+    # Stock Price, DTE, and breakeven distance
     stock_price = row.get('underlying', 0.0)
     dte = int(row.get('T_years', 0) * 365)
-    parts.append(f"Stock: {format_money(stock_price)} | DTE: {dte}d")
+    be_dist = row.get('be_dist_pct', pd.NA)
+    stock_dte_str = f"Stock: {format_money(stock_price)} | DTE: {dte}d"
+    if pd.notna(be_dist) and math.isfinite(float(be_dist)):
+        stock_dte_str += f" | BE move: {float(be_dist):.1f}%"
+    parts.append(stock_dte_str)
 
     # --- Seasonality ---
     if pd.notna(row.get("seasonal_win_rate")):
@@ -1509,6 +1572,9 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
         parts.append(f"{current_month_name} Hist: {win_rate:.0%}")
 
     # --- Warnings & Squeeze ---
+    if row.get("gamma_ramp"):
+        w = fmt.colorize("GAMMA RAMP", fmt.Colors.BRIGHT_RED, bold=True) if HAS_ENHANCED_CLI else "GAMMA RAMP"
+        parts.append(w)
     if row.get("decay_warning"):
         w = fmt.format_warning("HIGH DECAY RISK") if HAS_ENHANCED_CLI else "HIGH DECAY RISK"
         parts.append(w)
@@ -1569,9 +1635,17 @@ def format_mechanics_row(row: pd.Series) -> str:
     gamma = row.get("gamma", pd.NA)
     vega = row.get("vega", pd.NA)
     theta = row.get("theta", pd.NA)
+    vega_dollar = row.get("vega_dollar", pd.NA)
     if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
-        greeks_str = f"Greeks: \u0393 {gamma:.3f}, V {vega:.2f}, \u0398 {theta:.2f}"
+        vd_str = f" V$: ${float(vega_dollar):.0f}" if pd.notna(vega_dollar) else ""
+        greeks_str = f"Greeks: \u0393 {gamma:.3f}, V {vega:.2f}, \u0398 {theta:.2f}{vd_str}"
         parts.append(fmt.colorize(greeks_str, fmt.Colors.DIM) if HAS_ENHANCED_CLI else greeks_str)
+
+    # Annualized return — particularly relevant for premium sellers
+    ann_ret = row.get("annualized_return", pd.NA)
+    if pd.notna(ann_ret) and math.isfinite(float(ann_ret)) and float(ann_ret) > 0:
+        ann_str = f"Ann.Yield: {float(ann_ret):.1%}"
+        parts.append(fmt.colorize(ann_str, fmt.Colors.DIM) if HAS_ENHANCED_CLI else ann_str)
 
     # Charm and Vanna
     charm = row.get("charm", None)
@@ -2105,6 +2179,37 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     save_oi_snapshot(df_picks)
 
 
+def print_news_panel(news_map: dict, picks_df: pd.DataFrame, width: int = 100) -> None:
+    """Print a consolidated news & events panel for all tickers in picks_df."""
+    if not news_map:
+        return
+    # Only show news for tickers that actually have picks
+    symbols = picks_df["symbol"].unique().tolist() if "symbol" in picks_df.columns else []
+    shown = [sym for sym in symbols if sym in news_map and news_map[sym] is not None]
+    if not shown:
+        return
+
+    try:
+        from .news_fetcher import format_news_panel
+    except Exception:
+        return
+
+    use_color = HAS_ENHANCED_CLI
+    print()
+    if HAS_ENHANCED_CLI:
+        print(fmt.draw_separator(width))
+    else:
+        print("=" * width)
+    print("  NEWS & EVENTS DIGEST")
+
+    for sym in shown[:6]:  # cap at 6 tickers for output length
+        nd = news_map[sym]
+        if nd is None:
+            continue
+        panel = format_news_panel(nd, width=width, use_color=use_color)
+        print(panel)
+
+
 def print_spreads_report(df_spreads: pd.DataFrame):
     """Prints a report of the vertical spreads found."""
     if df_spreads.empty:
@@ -2569,7 +2674,8 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
         sector_perf = context.get("sector_perf", {})
         short_interest = context.get("short_interest")
         next_ex_div = context.get("next_ex_div")
-        
+        news_data = context.get("news_data")
+
         # Build context log
         context_log = []
         if hv: context_log.append(f"HV (30d): {hv:.2%}")
@@ -2577,6 +2683,7 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
         if earnings_date: context_log.append(f"Earnings: {earnings_date.strftime('%Y-%m-%d')}")
         if context.get("rvol"): context_log.append(f"RVOL: {context['rvol']:.2f}x")
         result['context_log'] = context_log
+        result['news_data'] = news_data
 
         # Enrich and Score
         df_scored = enrich_and_score(
@@ -2601,6 +2708,7 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
             next_ex_div=next_ex_div,
             earnings_move_data=earnings_move_data,
             hv_ewma=hv_ewma,
+            news_data=news_data,
         )
 
         if df_scored.empty:
@@ -2806,7 +2914,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             print(sep)
             print()
 
-    # Aggregate buffered results
+    # Aggregate buffered results — also collect news_data per ticker
+    news_map: Dict[str, Any] = {}
     for symbol, result in results_buffer.items():
         if result.get('success'):
             if result.get('history') is not None:
@@ -2818,6 +2927,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             condors = result.get('iron_condors')
             if isinstance(condors, pd.DataFrame) and not condors.empty:
                 all_iron_condors.append(condors)
+        if result.get('news_data') is not None:
+            news_map[symbol] = result['news_data']
 
     # --- Portfolio Protection: Correlation Warning ---
     if verbose and len(ticker_histories) > 1:
@@ -2976,6 +3087,10 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             macro_risk=macro_risk_active,
             num_tickers=len(tickers)
         )
+
+    # Phase 5: News & Events digest — shown after picks so it doesn't interrupt the report flow
+    if verbose and news_map and not picks.empty:
+        print_news_panel(news_map, picks, width=WIDTH)
 
     top_pick = None
     if not picks.empty:

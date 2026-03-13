@@ -9,6 +9,7 @@ import math
 import logging
 import random
 import functools
+import warnings
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -19,8 +20,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 from finvizfinance.screener.performance import Performance
 
+logger = logging.getLogger(__name__)
+
+try:
+    from .news_fetcher import fetch_news_and_events, NewsData
+    _HAS_NEWS_FETCHER = True
+except Exception:
+    _HAS_NEWS_FETCHER = False
+
+# Suppress noisy third-party library output at startup
+warnings.filterwarnings("ignore")
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+logging.getLogger("requests").setLevel(logging.CRITICAL)
+logging.getLogger("peewee").setLevel(logging.CRITICAL)
+
 # Install intelligent request caching (15-minute expiry)
-requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+try:
+    requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+except Exception:
+    pass  # Cache unavailable; requests proceed uncached
 
 # In-memory caches
 _HV_CACHE: Dict[str, float] = {}
@@ -423,7 +442,8 @@ def get_iv_rank_percentile_from_history(hist: pd.DataFrame, current_iv: float) -
             iv_min = rolling_vol.min()
             iv_max = rolling_vol.max()
             if iv_max - iv_min <= 0:
-                return None, None
+                # Flat volatility history — neutral signal rather than missing data
+                return 0.5, 0.5
             iv_rank = (current_iv - iv_min) / (iv_max - iv_min)
             iv_percentile = (rolling_vol < current_iv).sum() / len(rolling_vol)
             return float(iv_rank), float(iv_percentile)
@@ -568,7 +588,7 @@ def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.Data
         # Wrap ticker.option_chain in try/except to handle invalid/empty expirations gracefully
         oc = tkr.option_chain(exp)
     except Exception as e:
-        print(f"⚠️ Warning: Could not fetch options for {symbol} on {exp}: {e}")
+        logger.debug("Could not fetch options for %s on %s: %s", symbol, exp, e)
         return []
 
     sub_frames = []
@@ -707,6 +727,17 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     news_headlines = get_news_headlines(tkr)
     seasonal_win_rate = check_seasonality(tkr)
     sector_perf = get_sector_performance(symbol)
+
+    # Rich news + analyst data (multi-source aggregation)
+    news_data = None
+    if _HAS_NEWS_FETCHER:
+        try:
+            news_data = fetch_news_and_events(symbol, ticker_obj=tkr, max_age_hours=72, max_headlines=5)
+            # Keep news_headlines in sync so AI context is consistent
+            if news_data and news_data.top_headlines:
+                news_headlines = news_data.top_headlines
+        except Exception:
+            pass
     short_interest = get_short_interest(tkr)
 
     # Next ex-dividend date
@@ -830,6 +861,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "next_ex_div": next_ex_div,
             "vwap": vwap,
             "fib_50": fib_50,
-            "fib_618": fib_618
+            "fib_618": fib_618,
+            "news_data": news_data,
         }
     }
