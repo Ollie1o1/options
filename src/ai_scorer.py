@@ -183,7 +183,7 @@ class AIScorer:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config: dict[str, Any] = {**AI_CONFIG, **(config or {})}
-        self._client = None
+        self._clients: dict[str, Any] = {}   # keyed by api_key_env name
         self._cache = None
         if self.config.get("cache_enabled", True):
             try:
@@ -360,14 +360,21 @@ class AIScorer:
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
-    def _get_client(self):
-        if self._client is not None:
-            return self._client
+    def _key_env_for_model(self, model: str) -> str:
+        """Return the env-var name that holds the API key for *model*."""
+        model_key_map = self.config.get("model_key_map", {})
+        return model_key_map.get(model, self.config["api_key_env"])
+
+    def _get_client(self, key_env: str = None):
+        """Return (and cache) an OpenAI/Anthropic client for the given key env var."""
         provider = self.config.get("provider", "openrouter")
-        api_key = os.environ.get(self.config["api_key_env"])
+        env_name = key_env or self.config["api_key_env"]
+        if env_name in self._clients:
+            return self._clients[env_name]
+        api_key = os.environ.get(env_name)
         if not api_key:
             raise EnvironmentError(
-                f"API key not found. Set {self.config['api_key_env']!r} in your .env file.\n"
+                f"API key not found. Set {env_name!r} in your .env file.\n"
                 "See .env.example for the format."
             )
         if provider == "anthropic":
@@ -375,13 +382,13 @@ class AIScorer:
                 import anthropic
             except ImportError as exc:
                 raise ImportError("Run:  pip install anthropic") from exc
-            self._client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic(api_key=api_key)
         else:
             try:
                 import openai
             except ImportError as exc:
                 raise ImportError("Run:  pip install openai") from exc
-            self._client = openai.OpenAI(
+            client = openai.OpenAI(
                 api_key=api_key,
                 base_url="https://openrouter.ai/api/v1",
                 default_headers={
@@ -389,14 +396,15 @@ class AIScorer:
                     "X-Title": "Options Screener AI Ranking",
                 },
             )
-        return self._client
+        self._clients[env_name] = client
+        return client
 
     def _chat_complete(self, system: str, user: str, max_tokens: int = None, model: str = None) -> str:
         """Generic chat completion (OpenAI-compatible path)."""
-        client = self._get_client()
         provider = self.config.get("provider", "openrouter")
         use_model = model or self.config["model"]
         use_max_tokens = max_tokens or self.config["max_tokens"]
+        client = self._get_client(self._key_env_for_model(use_model))
 
         if provider == "anthropic":
             response = client.messages.create(
@@ -421,17 +429,20 @@ class AIScorer:
 
     def _score_batch_with_retry(self, batch: list[dict], batch_num: int = 1) -> list[dict]:
         """Score with exponential backoff; switches to fallback models on failure."""
-        max_retries = 4
+        max_retries = 5
         delay = 5
-        fallback = self.config.get("fallback_model")
+        fallback        = self.config.get("fallback_model")
         second_fallback = self.config.get("second_fallback_model")
+        third_fallback  = self.config.get("third_fallback_model")
 
         def _pick_model(attempt: int) -> str:
             if attempt <= 2:
                 return self.config["model"]
             if attempt == 3:
                 return fallback or self.config["model"]
-            return second_fallback or fallback or self.config["model"]
+            if attempt == 4:
+                return second_fallback or fallback or self.config["model"]
+            return third_fallback or second_fallback or fallback or self.config["model"]
 
         for attempt in range(1, max_retries + 1):
             use_model = _pick_model(attempt)
@@ -468,9 +479,9 @@ class AIScorer:
         return _parse_json_response(raw)
 
     def _score_batch_anthropic(self, batch: list[dict], model: str = None) -> list[dict]:
-        client = self._get_client()
-        prompt = self._build_prompt(batch, include_schema=False)
         use_model = model or self.config["model"]
+        client = self._get_client(self._key_env_for_model(use_model))
+        prompt = self._build_prompt(batch, include_schema=False)
         response = client.messages.create(
             model=use_model,
             max_tokens=self.config["max_tokens"],
