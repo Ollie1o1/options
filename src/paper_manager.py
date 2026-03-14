@@ -178,6 +178,13 @@ class PaperManager:
             except Exception:
                 dte = 999
 
+            # Days held — don't time-exit a trade logged today or yesterday
+            try:
+                trade_date = datetime.strptime(str(row["date"])[:10], "%Y-%m-%d").date()
+                days_held = (today - trade_date).days
+            except Exception:
+                days_held = 999
+
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
             if not symbol:
                 continue
@@ -208,7 +215,8 @@ class PaperManager:
                         pnl_raw = (current_price - entry_price) / entry_price
                     hit_tp = pnl_raw >= tp
                     hit_sl = pnl_raw <= sl
-                    hit_time = (0 < dte <= time_exit_dte)
+                    # Time exit needs at least 3 days held to avoid closing freshly-logged trades
+                    hit_time = (0 < dte <= time_exit_dte) and days_held >= 3
 
                     if hit_tp or hit_sl or hit_time:
                         if hit_tp:
