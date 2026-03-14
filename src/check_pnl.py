@@ -175,43 +175,30 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     # Delta
     delta_color = (fmt.Colors.GREEN if net_delta > 0.10 else
                    fmt.Colors.RED if net_delta < -0.10 else fmt.Colors.YELLOW) if HAS_FMT and fmt else ""
-    delta_label = f"  Net Δ (directional): {net_delta:+.2f} contracts"
-    delta_hint  = ("  → book is net LONG (profits if market rises)" if net_delta > 0.10 else
-                   "  → book is net SHORT (profits if market falls)" if net_delta < -0.10 else
-                   "  → roughly delta-neutral")
+    delta_label = f"  Net Δ: {net_delta:+.2f}"
     if HAS_FMT and fmt:
         print(fmt.colorize(delta_label, delta_color))
-        print(fmt.colorize(delta_hint, fmt.Colors.DIM))
     else:
         print(delta_label)
-        print(delta_hint)
 
     # Gamma ($ per 1% stock move)
     gd = net_gamma_dollar
     gcolor = (fmt.Colors.GREEN if gd > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
-    gamma_label = f"  Net Γ ($ per 1% stock move): {gd:+.2f}"
-    gamma_hint  = ("  → long gamma: profits accelerate with big moves" if gd > 0 else
-                   "  → short gamma: losses accelerate with big moves — watch carefully")
+    gamma_label = f"  Net Γ ($/1% move): {gd:+.2f}"
     if HAS_FMT and fmt:
         print(fmt.colorize(gamma_label, gcolor))
-        print(fmt.colorize(gamma_hint, fmt.Colors.DIM))
     else:
         print(gamma_label)
-        print(gamma_hint)
 
     # Vega ($ per 1% IV rise)
     vc = (fmt.Colors.GREEN if net_vega > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
-    vega_label = f"  Net Vega ($ per 1% IV rise): {net_vega:+.2f}"
-    vega_hint  = ("  → long vega: profits if IV expands" if net_vega > 0 else
-                  "  → short vega: profits if IV contracts (premium selling)")
+    vega_label = f"  Net Vega ($/1% IV): {net_vega:+.2f}"
     if HAS_FMT and fmt:
         print(fmt.colorize(vega_label, vc))
-        print(fmt.colorize(vega_hint, fmt.Colors.DIM))
     else:
         print(vega_label)
-        print(vega_hint)
 
-    note = f"  Computed from {counted}/{len(open_trades)} positions with live stock prices."
+    note = f"  [{counted}/{len(open_trades)} positions, IV est. 25%]"
     if HAS_FMT and fmt:
         print(fmt.colorize(note, fmt.Colors.DIM))
     else:
@@ -390,8 +377,8 @@ def view_portfolio():
 
         _print_portfolio_greeks(open_trades, width)
 
-        # Stress test
-        if HAS_STRESS and open_trades:
+        # Stress test — only meaningful with 3+ positions
+        if HAS_STRESS and len(open_trades) >= 3:
             try:
                 print_stress_test(open_trades, width=width)
             except Exception:
