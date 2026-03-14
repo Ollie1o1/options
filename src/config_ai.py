@@ -3,10 +3,22 @@
 AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
-    "model": "nvidia/nemotron-3-super-120b-a12b:free",
-    "fallback_model": "meta-llama/llama-3.3-70b-instruct:free",       # used after 2 failed retries
-    "second_fallback_model": "mistralai/mistral-7b-instruct:free",    # used after 3 failed retries (supports system prompts)
-    "api_key_env": "OPENROUTER_API_KEY",
+    "model": "arcee-ai/trinity-large-preview:free",
+    "fallback_model": "openrouter/hunter-alpha",                       # used after 2 failed retries
+    "second_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free", # used after 3 failed retries
+    "third_fallback_model": "meta-llama/llama-3.3-70b-instruct:free",  # used after 4 failed retries
+    "api_key_env": "OPENROUTER_ARCEE_KEY",
+
+    # ── Per-model API key overrides ───────────────────────────────────────────
+    # Maps model id → env var name for models that use a different key.
+    # Models NOT listed here fall back to "api_key_env".
+    "model_key_map": {
+        "arcee-ai/trinity-large-preview:free":  "OPENROUTER_ARCEE_KEY",
+        "openrouter/hunter-alpha":              "OPENROUTER_HUNTER_KEY",
+        "nvidia/nemotron-3-super-120b-a12b:free": "OPENROUTER_API_KEY",
+        "meta-llama/llama-3.3-70b-instruct:free": "OPENROUTER_API_KEY",
+        "mistralai/mistral-7b-instruct:free":   "OPENROUTER_API_KEY",
+    },
 
     # ── Scoring Weights ───────────────────────────────────────────────────────
     "ai_weight": 0.30,

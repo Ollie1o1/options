@@ -3701,16 +3701,17 @@ def main():
             if not picks.empty and not getattr(args, 'no_ai', False):
                 _ai_ranked = _run_ai_analysis_cli(picks, volatility_regime, WIDTH, HAS_ENHANCED_CLI)
 
-            # ── Scan-another shortcut (single-stock only) ──────────────────
-            if _is_single_stock and _repeat_count < 5:
-                _another = prompt_input("Scan another ticker? (enter symbol or Enter to continue)", "").upper().strip()
-                if _another and _another.isalnum() and 1 <= len(_another) <= 6:
-                    tickers = [_another]
-                    _repeat_count += 1
-                    continue  # loop back, skip post-scan prompts
+            # Pull spread/condor results for the save menu
+            _credit_spreads = scan_results.get('credit_spreads', pd.DataFrame())
+            _iron_condors   = scan_results.get('iron_condors',   pd.DataFrame())
+            _has_results = (
+                not picks.empty
+                or (isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty)
+                or (isinstance(_iron_condors,   pd.DataFrame) and not _iron_condors.empty)
+            )
 
-            # ── Collapsed post-scan prompt ─────────────────────────────────
-            if not picks.empty:
+            # ── Collapsed post-scan prompt (always shown BEFORE scan-another) ──
+            if _has_results:
                 if HAS_ENHANCED_CLI:
                     save_label = fmt.colorize("Save/Export?", fmt.Colors.BRIGHT_CYAN)
                     p_opt = fmt.colorize("[P]", fmt.Colors.BRIGHT_YELLOW) + " Paper trade top pick"
@@ -3720,48 +3721,73 @@ def main():
                     print(f"\n  {save_label}  {p_opt}  \u00b7  {c_opt}  \u00b7  {l_opt}  \u00b7  {skip_opt}")
                 else:
                     print("\n  Save/Export?  [P] Paper trade top pick  [C] CSV  [L] Log trades  [Enter] Skip")
-                save_choice = prompt_input("", "").strip().upper()
+                save_choice = prompt_input("Choice", "").strip().upper()
 
-                if save_choice == "P" and mode not in ("Credit Spreads", "Iron Condor"):
-                    # Use AI-ranked top pick when available, otherwise fall back to quality_score
-                    if _ai_ranked is not None and not _ai_ranked.empty and "final_score" in _ai_ranked.columns:
-                        top_pick_row = picks.loc[_ai_ranked.sort_values("final_score", ascending=False).index[0]] \
-                            if _ai_ranked.sort_values("final_score", ascending=False).index[0] in picks.index \
-                            else picks.sort_values("quality_score", ascending=False).iloc[0]
-                    else:
-                        top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
-                    today_str = datetime.now().strftime("%Y-%m-%d")
-                    trade_dict = {
-                        "date": today_str,
-                        "ticker": top_pick_row["symbol"],
-                        "expiration": top_pick_row["expiration"],
-                        "strike": top_pick_row["strike"],
-                        "type": str(top_pick_row["type"]).capitalize(),
-                        "entry_price": (
-                            safe_float(top_pick_row.get("ask") or None)
-                            or safe_float(top_pick_row.get("lastPrice"))
-                            or safe_float(top_pick_row.get("premium"), 0.0)
-                        ),
-                        "quality_score": top_pick_row["quality_score"],
-                        "strategy_name": f"Long {str(top_pick_row['type']).capitalize()}"
-                    }
-                    pm.log_trade(trade_dict)
-                    msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
-                    print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                if save_choice == "P":
+                    if mode in ("Credit Spreads", "Iron Condor"):
+                        msg = "Paper trading for spreads/condors is not supported — use [L] Log trades instead."
+                        print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  \u26a0  {msg}")
+                    elif not picks.empty:
+                        # Use AI-ranked top pick when available, otherwise fall back to quality_score
+                        if _ai_ranked is not None and not _ai_ranked.empty and "final_score" in _ai_ranked.columns:
+                            _best_idx = _ai_ranked.sort_values("final_score", ascending=False).index[0]
+                            top_pick_row = picks.loc[_best_idx] if _best_idx in picks.index \
+                                else picks.sort_values("quality_score", ascending=False).iloc[0]
+                        else:
+                            top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
+                        today_str = datetime.now().strftime("%Y-%m-%d")
+                        trade_dict = {
+                            "date": today_str,
+                            "ticker": top_pick_row["symbol"],
+                            "expiration": top_pick_row["expiration"],
+                            "strike": top_pick_row["strike"],
+                            "type": str(top_pick_row["type"]).capitalize(),
+                            "entry_price": (
+                                safe_float(top_pick_row.get("ask") or None)
+                                or safe_float(top_pick_row.get("lastPrice"))
+                                or safe_float(top_pick_row.get("premium"), 0.0)
+                            ),
+                            "quality_score": top_pick_row["quality_score"],
+                            "strategy_name": f"Long {str(top_pick_row['type']).capitalize()}"
+                        }
+                        pm.log_trade(trade_dict)
+                        msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
+                        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
 
                 elif save_choice == "C":
-                    export_df = _ai_ranked if (_ai_ranked is not None and not _ai_ranked.empty) else picks
+                    # Export best available data: AI-ranked picks > raw picks > spreads > condors
+                    if _ai_ranked is not None and not _ai_ranked.empty:
+                        export_df = _ai_ranked
+                    elif not picks.empty:
+                        export_df = picks
+                    elif isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty:
+                        export_df = _credit_spreads
+                    else:
+                        export_df = _iron_condors
                     csv_file = export_to_csv(export_df, mode, budget)
                     if csv_file:
                         msg = f"Results exported to: {csv_file}"
                         print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
 
                 elif save_choice == "L":
-                    picks_to_log = select_trades_to_log(picks)
-                    if not picks_to_log.empty:
-                        log_trade_entry(picks_to_log, mode)
-                        msg = f"Logged {len(picks_to_log)} trades."
-                        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
+                    log_src = picks if not picks.empty else (
+                        _credit_spreads if isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty
+                        else _iron_condors
+                    )
+                    if isinstance(log_src, pd.DataFrame) and not log_src.empty:
+                        picks_to_log = select_trades_to_log(log_src)
+                        if not picks_to_log.empty:
+                            log_trade_entry(picks_to_log, mode)
+                            msg = f"Logged {len(picks_to_log)} trades."
+                            print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
+
+            # ── Scan-another shortcut (single-stock only, AFTER save menu) ──
+            if _is_single_stock and _repeat_count < 5:
+                _another = prompt_input("Scan another ticker? (enter symbol or Enter to quit)", "").upper().strip()
+                if _another and _another.isalnum() and 1 <= len(_another) <= 6:
+                    tickers = [_another]
+                    _repeat_count += 1
+                    continue  # loop back
 
             # Done message
             if HAS_ENHANCED_CLI:
