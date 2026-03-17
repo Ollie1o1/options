@@ -690,6 +690,16 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
         except Exception:
             pass
 
+    spearman_ic = float("nan")
+    spearman_ic_pvalue = float("nan")
+    if HAS_SCIPY and HAS_NP:
+        try:
+            sp_val, sp_pval = scipy_stats.spearmanr(scores, returns)
+            spearman_ic = float(sp_val)
+            spearman_ic_pvalue = float(sp_pval)
+        except Exception:
+            pass
+
     # Quintile breakdown
     by_quintile = {}
     if HAS_PD and n >= 5:
@@ -740,6 +750,8 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
         "ic": ic,
         "ic_pvalue": ic_pvalue,
         "significant": significant,
+        "spearman_ic": spearman_ic,
+        "spearman_ic_pvalue": spearman_ic_pvalue,
         "by_quintile": by_quintile,
         "verdict": verdict,
         "component_ic": component_ic,
@@ -976,6 +988,18 @@ def print_paper_trade_ic(db_path: str = DEFAULT_DB_PATH, width: int = 90) -> Non
             print(fmt.colorize(ic_line, color))
         else:
             print(ic_line)
+
+    sp_ic = ic_data.get("spearman_ic")
+    sp_pval = ic_data.get("spearman_ic_pvalue")
+    if sp_ic is not None and not (isinstance(sp_ic, float) and math.isnan(sp_ic)):
+        sp_pval_f = float(sp_pval) if sp_pval is not None else 1.0
+        stars = "**" if sp_pval_f < 0.01 else ("*" if sp_pval_f < 0.05 else "")
+        sp_line = f"  IC (Spearman rank):              {sp_ic:.3f}{stars}   p-value: {sp_pval_f:.4f}"
+        if HAS_FMT and fmt:
+            color = _ic_color(sp_ic, sp_pval_f)
+            print(fmt.colorize(sp_line, color))
+        else:
+            print(sp_line)
 
     by_quintile = ic_data.get("by_quintile", {})
     if by_quintile:

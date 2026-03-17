@@ -212,6 +212,9 @@ def load_config(config_path: str = "config.json") -> Dict:
         return default_config
 
 
+_IC_WEIGHTS_CACHE: dict | None = None
+
+
 def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.json") -> Dict:
     """Blend config composite weights with IC-derived weights from paper trade analysis.
 
@@ -219,13 +222,17 @@ def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.j
     where ic_weight is the raw IC value (floored at 0) normalized to sum to 1.
     Returns plain config weights on any failure.
     """
+    global _IC_WEIGHTS_CACHE
+    if _IC_WEIGHTS_CACHE is not None:
+        return _IC_WEIGHTS_CACHE
     base_weights = config.get("composite_weights", {}) or {}
     try:
         with open(cache_path, "r") as f:
             cache = json.load(f)
         component_ic = cache.get("component_ic", {})
         if not component_ic:
-            return base_weights
+            _IC_WEIGHTS_CACHE = base_weights
+            return _IC_WEIGHTS_CACHE
         # Map component_ic keys (e.g. "pop_score") to weight keys (e.g. "pop")
         key_map = {
             "pop_score": "pop", "ev_score": "ev", "rr_score": "rr",
@@ -238,16 +245,24 @@ def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.j
             if ic_raw is not None and isinstance(ic_raw, (int, float)):
                 ic_vals[w_key] = max(0.0, float(ic_raw))
         if not ic_vals:
-            return base_weights
+            _IC_WEIGHTS_CACHE = base_weights
+            return _IC_WEIGHTS_CACHE
         ic_total = sum(ic_vals.values()) or 1.0
         blended = dict(base_weights)
         for w_key, ic_raw in ic_vals.items():
             if w_key in blended:
                 ic_norm = ic_raw / ic_total
                 blended[w_key] = 0.7 * float(blended[w_key]) + 0.3 * ic_norm
-        return blended
+        _IC_WEIGHTS_CACHE = blended
+        return _IC_WEIGHTS_CACHE
     except Exception:
-        return base_weights
+        _IC_WEIGHTS_CACHE = base_weights
+        return _IC_WEIGHTS_CACHE
+
+
+def _invalidate_ic_weights_cache() -> None:
+    global _IC_WEIGHTS_CACHE
+    _IC_WEIGHTS_CACHE = None
 
 
 

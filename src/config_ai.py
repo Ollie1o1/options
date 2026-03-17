@@ -42,7 +42,7 @@ AI_CONFIG: dict = {
 
     # ── API Call Settings ─────────────────────────────────────────────────────
     "batch_size": 3,     # smaller batches = shorter responses = less truncation risk
-    "max_tokens": 4096,  # enough room for 3 candidates with full reasoning
+    "max_tokens": 2048,  # enough room for 3 candidates at ~600 tokens each with margin
     "temperature": 0.1,
     "timeout": 60,
 

@@ -103,13 +103,17 @@ def combine_scores(
         df.loc[tech_higher_mask, "divergence_adjusted"] = True
 
     # AI>TECH: AI bullish, quant bearish -> boost final_score symmetrically
+    # Only boost when AI is sufficiently confident (>= 7.0 / 10)
+    high_conf_mask = df["ai_confidence"].fillna(5.0) >= 7.0
     ai_higher_mask = df["divergence_direction"] == "AI>TECH"
     if ai_higher_mask.any():
-        boost = df.loc[ai_higher_mask, "score_divergence"] * boost_factor
-        df.loc[ai_higher_mask, "final_score"] += boost
-        df.loc[ai_higher_mask, "ai_weight_used"] = (
-            df.loc[ai_higher_mask, "ai_weight_used"] + boost
-        ).clip(0, 0.55)
+        boost_mask = ai_higher_mask & high_conf_mask
+        if boost_mask.any():
+            boost = df.loc[boost_mask, "score_divergence"] * boost_factor
+            df.loc[boost_mask, "final_score"] += boost
+            df.loc[boost_mask, "ai_weight_used"] = (
+                df.loc[boost_mask, "ai_weight_used"] + boost
+            ).clip(0, 0.55)
         df.loc[ai_higher_mask, "divergence_adjusted"] = True
 
     df["final_score"] = df["final_score"].clip(0, 1).round(4)

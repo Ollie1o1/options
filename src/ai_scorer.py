@@ -299,6 +299,12 @@ class AIScorer:
 
     def _score_ticker_context(self, symbol: str, ctx: dict, df: pd.DataFrame) -> dict:
         """Run a lightweight ticker-level analysis and return a summary dict."""
+        # Fast path: return cached result without any processing
+        if self._cache:
+            cached = self._cache.get_ticker_context(symbol)
+            if cached:
+                return cached
+
         underlying = None
         sym_rows = df[df["symbol"] == symbol] if "symbol" in df.columns else pd.DataFrame()
         if not sym_rows.empty and "underlying" in sym_rows.columns:
@@ -390,11 +396,6 @@ class AIScorer:
             lines.append(f"Market cap: ${mc_b:.1f}B")
 
         prompt = "\n".join(lines) + "\n\nProvide your ticker-level assessment."
-
-        if self._cache:
-            cached = self._cache.get_ticker_context(symbol)
-            if cached:
-                return cached
 
         try:
             raw = self._chat_complete(

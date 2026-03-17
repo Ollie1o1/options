@@ -101,12 +101,15 @@ def _get_ticker_contexts(picks: pd.DataFrame, max_expiries: int = 4) -> dict[str
     This function is kept as a fallback for cases where pre-fetched contexts are
     unavailable (e.g. direct invocation without run_scan).
     """
-    from src.data_fetching import fetch_options_yfinance
+    from src.data_fetching import fetch_options_yfinance, _CHAIN_CACHE
     contexts: dict[str, dict] = {}
     if "symbol" not in picks.columns:
         return contexts
     for symbol in picks["symbol"].unique():
         try:
+            if symbol in _CHAIN_CACHE:
+                contexts[symbol] = _CHAIN_CACHE[symbol].get("context", {})
+                continue
             result = fetch_options_yfinance(symbol, max_expiries=min(max_expiries, 2))
             contexts[symbol] = result.get("context", {})
         except Exception as e:
@@ -182,6 +185,8 @@ def main() -> None:
             with open("ic_weights_cache.json", "w") as _f:
                 _json.dump({"component_ic": component_ic, "generated": str(_dt.now())}, _f, indent=2)
             print(f"ic_weights_cache.json written. component_ic: {component_ic}")
+            from src.options_screener import _invalidate_ic_weights_cache
+            _invalidate_ic_weights_cache()
         except Exception as _we:
             print(f"Warning: could not write ic_weights_cache.json: {_we}")
         config = load_config()

@@ -499,7 +499,7 @@ def fetch_news_and_events(
         futures = {executor.submit(fn): name for name, fn in fetch_fns}
         for future in as_completed(futures, timeout=10):
             try:
-                items = future.result(timeout=0)
+                items = future.result()
                 if items:
                     all_items.extend(items)
             except Exception:
