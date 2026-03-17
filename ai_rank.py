@@ -24,6 +24,7 @@ import argparse
 import logging
 import sys
 import io
+import time
 
 import pandas as pd
 
@@ -143,8 +144,23 @@ def _portfolio_check(ranked: pd.DataFrame, scorer) -> None:
         "Focus on concentration, correlation, and catalyst risks."
     )
 
-    try:
-        raw = scorer._chat_complete(system=system, user=prompt, max_tokens=400)
+    raw = None
+    last_exc = None
+    for attempt in range(3):
+        try:
+            raw = scorer._chat_complete(system=system, user=prompt, max_tokens=400)
+            break
+        except Exception as e:
+            last_exc = e
+            err_str = str(e).lower()
+            if any(kw in err_str for kw in ("rate limit", "429", "too many requests", "quota")):
+                sleep_secs = min(5 * (2 ** attempt), 30)
+            else:
+                sleep_secs = 1
+            if attempt < 2:
+                time.sleep(sleep_secs)
+
+    if raw is not None:
         print()
         print("=" * 70)
         print("  PORTFOLIO COHERENCE CHECK")
@@ -152,8 +168,8 @@ def _portfolio_check(ranked: pd.DataFrame, scorer) -> None:
         print(raw.strip())
         print("=" * 70)
         print()
-    except Exception as e:
-        print(f"\n[portfolio-check] Failed: {e}")
+    else:
+        print(f"\n[portfolio-check] Failed after 3 attempts: {last_exc}")
 
 
 def main() -> None:
