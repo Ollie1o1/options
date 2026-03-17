@@ -1,12 +1,4 @@
 {
-  "weights": {
-    "ev_score": 0.30,
-    "liquidity": 0.20,
-    "iv_advantage": 0.15,
-    "pop": 0.15,
-    "spread": 0.10,
-    "delta_quality": 0.10
-  },
   "vix_regimes": {
     "low": {
       "threshold": 15,

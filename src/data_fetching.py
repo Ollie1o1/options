@@ -695,14 +695,14 @@ def get_vix_level() -> Optional[float]:
 
 def determine_vix_regime(vix_level: Optional[float], config: Dict) -> Tuple[str, Dict]:
     if vix_level is None:
-        return "normal", config.get("weights", {})
+        return "normal", config.get("composite_weights", {})
     vix_regimes = config.get("vix_regimes", {})
     if vix_level < vix_regimes.get("low", {}).get("threshold", 15):
-        return "low", vix_regimes.get("low", {}).get("weights", config.get("weights", {}))
+        return "low", vix_regimes.get("low", {}).get("weights", config.get("composite_weights", {}))
     elif vix_level > vix_regimes.get("high", {}).get("threshold", 25):
-        return "high", vix_regimes.get("high", {}).get("weights", config.get("weights", {}))
+        return "high", vix_regimes.get("high", {}).get("weights", config.get("composite_weights", {}))
     else:
-        return "normal", vix_regimes.get("normal", {}).get("weights", config.get("weights", {}))
+        return "normal", vix_regimes.get("normal", {}).get("weights", config.get("composite_weights", {}))
 
 # --- New / Refactored Calculation Functions (Using Cached History) ---
 

@@ -246,15 +246,7 @@ def _suppress_scan_noise():
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults."""
     default_config = {
-        "weights": {
-            "ev_score": 0.30,
-            "liquidity": 0.20,
-            "iv_advantage": 0.15,
-            "pop": 0.15,
-            "spread": 0.10,
-            "delta_quality": 0.10
-        },
-        # New composite quality score weights (can be overridden in config.json)
+        # Composite quality score weights (can be overridden in config.json)
         "composite_weights": {
             "pop": 0.18,
             "em_realism": 0.12,
