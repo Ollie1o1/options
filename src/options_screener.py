@@ -212,6 +212,42 @@ def load_config(config_path: str = "config.json") -> Dict:
         return default_config
 
 
+def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.json") -> Dict:
+    """Blend config composite weights with IC-derived weights from paper trade analysis.
+
+    Blending formula: final_weight = 0.7 * config_weight + 0.3 * ic_weight
+    where ic_weight is the raw IC value (floored at 0) normalized to sum to 1.
+    Returns plain config weights on any failure.
+    """
+    base_weights = config.get("composite_weights", {}) or {}
+    try:
+        with open(cache_path, "r") as f:
+            cache = json.load(f)
+        component_ic = cache.get("component_ic", {})
+        if not component_ic:
+            return base_weights
+        # Map component_ic keys (e.g. "pop_score") to weight keys (e.g. "pop")
+        key_map = {
+            "pop_score": "pop", "ev_score": "ev", "rr_score": "rr",
+            "liquidity_score": "liquidity", "momentum_score": "momentum",
+            "iv_rank_score": "iv_rank", "theta_score": "theta",
+        }
+        ic_vals = {}
+        for ic_key, w_key in key_map.items():
+            ic_raw = component_ic.get(ic_key)
+            if ic_raw is not None and isinstance(ic_raw, (int, float)):
+                ic_vals[w_key] = max(0.0, float(ic_raw))
+        if not ic_vals:
+            return base_weights
+        ic_total = sum(ic_vals.values()) or 1.0
+        blended = dict(base_weights)
+        for w_key, ic_raw in ic_vals.items():
+            if w_key in blended:
+                ic_norm = ic_raw / ic_total
+                blended[w_key] = 0.7 * float(blended[w_key]) + 0.3 * ic_norm
+        return blended
+    except Exception:
+        return base_weights
 
 
 
@@ -693,6 +729,37 @@ def calculate_metrics(
             K_vals * disc * norm_cdf(-hv_d2) - S_vals * norm_cdf(-hv_d1))
     df["ev_per_contract"] = 100.0 * (hv_payoff - prem_vals) - (100.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
 
+    # Earnings-adjusted EV for earnings plays
+    df["ev_earnings"] = pd.NA
+    _earn_mask_ev = df.get("Earnings Play", pd.Series("NO", index=df.index)) == "YES"
+    if _earn_mask_ev.any():
+        try:
+            emd_hist = pd.to_numeric(
+                df.get("hist_earnings_move", pd.Series(np.nan, index=df.index)), errors="coerce"
+            )
+            emd_impl = pd.to_numeric(
+                df.get("implied_earnings_move", pd.Series(np.nan, index=df.index)), errors="coerce"
+            )
+            eff_sigma = emd_hist.where(emd_hist.notna(), emd_impl * 1.2)
+            valid_sigma = _earn_mask_ev & eff_sigma.notna() & (eff_sigma > 0)
+            if valid_sigma.any():
+                ev_sig_full = np.where(
+                    valid_sigma.values,
+                    np.maximum(eff_sigma.fillna(0).values, 1e-9),
+                    hv_arr,
+                )
+                ev_d1, ev_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, ev_sig_full)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ev_earn_payoff = np.where(
+                        is_call,
+                        S_vals * norm_cdf(ev_d1) - K_vals * disc * norm_cdf(ev_d2),
+                        K_vals * disc * norm_cdf(-ev_d2) - S_vals * norm_cdf(-ev_d1),
+                    )
+                ev_earn_raw = 100.0 * (ev_earn_payoff - prem_vals)
+                df.loc[valid_sigma, "ev_earnings"] = ev_earn_raw[valid_sigma.values]
+        except Exception as _ev_exc:
+            logging.getLogger(__name__).warning("ev_earnings computation failed: %s", _ev_exc)
+
     # Warnings
     df["Theta_Burn_Rate"] = np.where(df["premium"] > 0, np.abs(df["theta"].values) / df["premium"].values, 0.0)
     df["decay_warning"] = df["Theta_Burn_Rate"] > 0.06
@@ -752,6 +819,21 @@ def calculate_scores(
     # Smooth linear mapping [0.5 → 0, 4.0 → 1] instead of hard step thresholds
     rr_score = np.clip((rr_raw - 0.5) / 3.5, 0.0, 1.0)
     ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
+    # Blend ev_score with ev_earnings_score for earnings plays (Improvement 6)
+    if "ev_earnings" in df.columns and "Earnings Play" in df.columns:
+        try:
+            _earn_play_mask = df["Earnings Play"] == "YES"
+            _ev_earn_num = pd.to_numeric(df["ev_earnings"], errors="coerce")
+            _ev_earn_valid = _earn_play_mask & _ev_earn_num.notna()
+            if _ev_earn_valid.any():
+                ev_earnings_score = rank_norm(_ev_earn_num.fillna(df["ev_per_contract"].median()))
+                ev_score = ev_score.copy()
+                ev_score.loc[_ev_earn_valid] = (
+                    0.5 * ev_score.loc[_ev_earn_valid]
+                    + 0.5 * ev_earnings_score.loc[_ev_earn_valid]
+                )
+        except Exception:
+            pass
     em_realism_score = pd.to_numeric(df["em_realism_score"], errors='coerce').fillna(0.5).clip(0, 1)
     theta_raw = df["theta_decay_pressure"].replace([pd.NA, pd.NaT], np.nan)
     theta_score = (1.0 - rank_norm(theta_raw.fillna(theta_raw.median()))).clip(0, 1)
@@ -832,13 +914,24 @@ def calculate_scores(
         oi_chg = pd.to_numeric(df.get("oi_change", pd.Series(0, index=df.index)), errors="coerce").fillna(0)
         oi_change_score = rank_norm(oi_chg)
 
+        # Sentiment score: bullish sentiment helps calls, hurts puts
+        raw_sent = pd.to_numeric(
+            df.get("sentiment_score", pd.Series(0.0, index=df.index)), errors="coerce"
+        ).fillna(0.0).clip(-1.0, 1.0)
+        sent_call = ((raw_sent + 0.5) / 1.0).clip(0, 1)
+        sent_put = ((0.5 - raw_sent) / 1.0).clip(0, 1)
+        sentiment_score_component = pd.Series(
+            np.where(is_call_series, sent_call, sent_put), index=df.index
+        )
+
         dw = {
             "pop": 0.20, "em_realism": 0.10, "rr": 0.12, "momentum": 0.08,
             "iv_rank": 0.07, "liquidity": 0.12, "catalyst": 0.04, "theta": 0.08,
-            "ev": 0.10, "trader_pref": 0.07, "iv_edge": 0.08, "skew_align": 0.05,
-            "gamma_theta": 0.04, "pcr": 0.05, "gex": 0.04, "oi_change": 0.04
+            "ev": 0.06, "trader_pref": 0.07, "iv_edge": 0.08, "skew_align": 0.05,
+            "gamma_theta": 0.04, "pcr": 0.05, "gex": 0.04, "oi_change": 0.04,
+            "sentiment": 0.04,
         }
-        cw = config.get("composite_weights", {}) or {}
+        cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
         w_sum = sum(w.values()) or 1.0
         df["quality_score"] = (
@@ -848,6 +941,7 @@ def calculate_scores(
             + w["trader_pref"]*trader_pref_score + w["iv_edge"]*iv_edge_score
             + w["skew_align"]*skew_align_score + w["gamma_theta"]*gamma_theta_score
             + w["pcr"]*pcr_score + w["gex"]*gex_score + w["oi_change"]*oi_change_score
+            + w["sentiment"]*sentiment_score_component
         ) / w_sum
         try:
             _cdf = pd.DataFrame({
@@ -855,6 +949,7 @@ def calculate_scores(
                 "RR": w["rr"]*rr_score, "IV edge": w["iv_edge"]*iv_edge_score,
                 "Liq": w["liquidity"]*liquidity, "Theta": w["theta"]*theta_score,
                 "Mom": w["momentum"]*momentum_score, "Skew": w["skew_align"]*skew_align_score,
+                "Sent": w["sentiment"]*sentiment_score_component,
             }, index=df.index)
             df["score_drivers"] = _cdf.apply(lambda r: " · ".join(r.nlargest(3).index.tolist()), axis=1)
         except Exception:
@@ -1381,7 +1476,7 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
             "theta_decay_pressure", "theta_score",
             "prob_touch", "pot_sim", "p_itm",
             "max_loss", "breakeven", "rr_ratio", "return_on_risk",
-            "theo_value", "ev_per_contract", "ev_score",
+            "theo_value", "ev_per_contract", "ev_earnings", "ev_score",
             "liquidity_score", "momentum_score", "iv_rank_score", "catalyst_score",
             "ret_5d", "rsi_14", "atr_trend",
             "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket",
@@ -1929,7 +2024,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             sep = fmt.draw_separator(WIDTH) if HAS_ENHANCED_CLI else "-" * WIDTH
             print(sep)
             for sym, n in ok:
-                line = f"  \u2713 {sym:<6}  {n} contract(s)"
+                cov_str = ""
+                try:
+                    from .data_fetching import iv_history_coverage as _iv_cov
+                    _cov = _iv_cov(sym)
+                    cov_str = f"  IV: {_cov['days']}d ({_cov['confidence']})"
+                except Exception:
+                    pass
+                line = f"  \u2713 {sym:<6}  {n} contract(s){cov_str}"
                 print(fmt.colorize(line, fmt.Colors.GREEN) if HAS_ENHANCED_CLI else line)
             for sym, err in fail:
                 # Only show brief reason, not the full stack trace

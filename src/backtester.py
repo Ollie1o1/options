@@ -637,11 +637,18 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
         "by_quintile": {},
         "verdict": "Insufficient trades for IC analysis (need >= 10 closed)",
     }
+    _COMPONENT_COLS = [
+        "pop_score", "ev_score", "rr_score", "liquidity_score",
+        "momentum_score", "iv_rank_score", "theta_score",
+    ]
+    empty_result["component_ic"] = {}
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT quality_score, pnl_pct FROM trades WHERE status='CLOSED' "
+            "SELECT quality_score, pnl_pct, pop_score, ev_score, rr_score, "
+            "liquidity_score, momentum_score, iv_rank_score, theta_score "
+            "FROM trades WHERE status='CLOSED' "
             "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
         ).fetchall()
         conn.close()
@@ -708,6 +715,26 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
     else:
         verdict = "IC could not be computed (scipy unavailable)"
 
+    # Per-component IC
+    component_ic: dict = {}
+    if HAS_SCIPY and HAS_NP and HAS_PD:
+        try:
+            full_df = pd.DataFrame(
+                [{k: (float(r[k]) if r[k] is not None else float("nan")) for k in list(r.keys())} for r in rows]
+            )
+            for col in _COMPONENT_COLS:
+                if col not in full_df.columns:
+                    continue
+                try:
+                    sub = full_df[[col, "pnl_pct"]].dropna()
+                    if len(sub) >= 10:
+                        comp_ic_val, _ = scipy_stats.pearsonr(sub[col].values, sub["pnl_pct"].values)
+                        component_ic[col] = float(comp_ic_val)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     return {
         "n_trades": n,
         "ic": ic,
@@ -715,6 +742,7 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
         "significant": significant,
         "by_quintile": by_quintile,
         "verdict": verdict,
+        "component_ic": component_ic,
     }
 
 

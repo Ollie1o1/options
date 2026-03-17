@@ -85,14 +85,15 @@
     "liquidity": 0.12,
     "catalyst": 0.03,
     "theta": 0.07,
-    "ev": 0.14,
+    "ev": 0.10,
     "trader_pref": 0.05,
     "iv_edge": 0.09,
     "skew_align": 0.04,
     "gamma_theta": 0.03,
     "pcr": 0.03,
     "gex": 0.02,
-    "oi_change": 0.02
+    "oi_change": 0.02,
+    "sentiment": 0.04
   },
   "backtest": {
     "profit_target_multiplier_long": 1.5,

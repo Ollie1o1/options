@@ -84,6 +84,8 @@ def _build_parser() -> argparse.ArgumentParser:
     out = p.add_argument_group("output")
     out.add_argument("--output",  metavar="FILE", help="Save ranked results to CSV")
     out.add_argument("--json",    metavar="FILE", help="Save ranked results to JSON")
+    out.add_argument("--update-weights", action="store_true",
+                     help="Run paper trade IC analysis, write ic_weights_cache.json, and exit")
     out.add_argument("--quiet",   action="store_true",
                      help="Suppress screener verbose output")
     out.add_argument("--verbose", action="store_true",
@@ -164,6 +166,28 @@ def main() -> None:
 
     log_level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
+
+    if args.update_weights:
+        import json as _json
+        from datetime import datetime as _dt
+        try:
+            from src.backtester import run_paper_trade_ic
+            from src.options_screener import load_config, load_ic_adjusted_weights
+        except ImportError as _e:
+            print(f"Import error: {_e}")
+            sys.exit(1)
+        ic_data = run_paper_trade_ic()
+        component_ic = ic_data.get("component_ic", {})
+        try:
+            with open("ic_weights_cache.json", "w") as _f:
+                _json.dump({"component_ic": component_ic, "generated": str(_dt.now())}, _f, indent=2)
+            print(f"ic_weights_cache.json written. component_ic: {component_ic}")
+        except Exception as _we:
+            print(f"Warning: could not write ic_weights_cache.json: {_we}")
+        config = load_config()
+        adj = load_ic_adjusted_weights(config)
+        print("Adjusted composite weights:", adj)
+        sys.exit(0)
 
     run_scan, get_market_context = _import_screener()
 
@@ -277,6 +301,7 @@ def _rank_without_ai(picks: pd.DataFrame) -> pd.DataFrame:
     df["score_divergence"]    = 0.0
     df["divergence_flag"]     = False
     df["divergence_direction"] = "---"
+    df["divergence_adjusted"] = False
     df["final_score"]   = df["quality_score"].fillna(0)
     df["ai_weight_used"] = 0.0
     df["rank"] = df["final_score"].rank(ascending=False, method="min").astype(int)

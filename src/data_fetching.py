@@ -476,6 +476,29 @@ def _load_iv_history(ticker: str, db_path: str) -> List[float]:
     except Exception:
         return []
 
+
+def iv_history_coverage(ticker: str) -> Dict[str, Any]:
+    """Return coverage stats for ticker's IV history in iv_cache.db."""
+    try:
+        db_path = _get_iv_db_path()
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT COUNT(*) FROM iv_history WHERE ticker=?", (ticker,)
+        ).fetchone()
+        conn.close()
+        days = int(row[0]) if row else 0
+        if days >= 252:
+            confidence = "High"
+        elif days >= 30:
+            confidence = "Medium"
+        else:
+            confidence = "Low"
+        return {"ticker": ticker, "days": days, "confidence": confidence}
+    except Exception as e:
+        logger.warning("iv_history_coverage failed for %s: %s", ticker, e)
+        return {"ticker": ticker, "days": 0, "confidence": "Low"}
+
+
 # --- Retry Decorator ---
 def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)):
     def decorator(func):
@@ -1287,6 +1310,12 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = None, None, None, None
     iv_confidence = "Low"
     if median_iv and pd.notna(median_iv) and median_iv > 0:
+        try:
+            _iv_db = _get_iv_db_path()
+            _iv_date = datetime.now().strftime("%Y-%m-%d")
+            _upsert_iv(symbol, _iv_date, float(median_iv), _iv_db)
+        except Exception as _uiv_exc:
+            logger.warning("IV upsert failed for %s: %s", symbol, _uiv_exc)
         iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, iv_confidence = get_iv_rank_percentile_from_history(
             hist, median_iv, ticker=symbol
         )

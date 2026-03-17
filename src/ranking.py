@@ -90,11 +90,35 @@ def combine_scores(
     df.loc[ai_higher,  "divergence_direction"] = "AI>TECH"
     df.loc[tech_higher, "divergence_direction"] = "TECH>AI"
 
+    # Divergence adjustments
+    df["divergence_adjusted"] = False
+
+    # TECH>AI: quant bullish, AI bearish -> penalise final_score
+    tech_higher_mask = df["divergence_direction"] == "TECH>AI"
+    if tech_higher_mask.any():
+        penalty = df.loc[tech_higher_mask, "score_divergence"] * 0.15
+        df.loc[tech_higher_mask, "final_score"] -= penalty
+        df.loc[tech_higher_mask, "divergence_adjusted"] = True
+
+    # AI>TECH: AI bullish, quant bearish -> boost ai_weight_used slightly and recompute
+    ai_higher_mask = df["divergence_direction"] == "AI>TECH"
+    if ai_higher_mask.any():
+        boost = df.loc[ai_higher_mask, "score_divergence"] * 0.10
+        df.loc[ai_higher_mask, "ai_weight_used"] = (df.loc[ai_higher_mask, "ai_weight_used"] + boost).clip(0, 0.55)
+        for idx in df.loc[ai_higher_mask].index:
+            aw = float(df.at[idx, "ai_weight_used"])
+            tw = 1.0 - aw
+            df.at[idx, "final_score"] = tw * float(tech[idx]) + aw * float(ai_norm[idx])
+        df.loc[ai_higher_mask, "divergence_adjusted"] = True
+
+    df["final_score"] = df["final_score"].clip(0, 1).round(4)
+
     # Override for AI-skipped rows
     if "ai_skipped" in df.columns:
         mask = df["ai_skipped"].fillna(False).astype(bool)
         df.loc[mask, "divergence_flag"] = False
         df.loc[mask, "divergence_direction"] = "---"
+        df.loc[mask, "divergence_adjusted"] = False
         df.loc[mask, "ai_weight_used"] = 0.0
         df.loc[mask, "final_score"] = tech[mask].values
 
@@ -214,8 +238,10 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
         row_style = "bold" if is_div else ""
         div_text = Text(div_dir, style=_DIV_STYLE.get(div_dir, "white"))
 
+        is_adjusted = bool(row.get("divergence_adjusted", False))
+        rank_str = str(int(row.get("rank", 0))) + ("*" if is_adjusted else "")
         table.add_row(
-            str(int(row.get("rank", 0))),
+            rank_str,
             str(row.get("symbol", "")),
             str(row.get("type", "")).upper(),
             f"${float(row.get('strike', 0)):.1f}",

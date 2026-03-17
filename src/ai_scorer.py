@@ -46,15 +46,20 @@ _load_dotenv()
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
-Options trade scorer. Score 0-100: 80+=exceptional 60-79=good 40-59=avg 20-39=weak <20=avoid.
-Evaluate: vol regime(IV vs HV), catalyst risk, trend alignment, PoP/RR quality, screener warnings.
-narrative_context is pre-computed — use it as primary input.
-reasoning: ≤12 words. flags: ≤3 SHORT_CAPS. confidence: 0-10."""
+Score 0-100: 80+=multi-signal+low catalyst risk; 60-79=good+manageable; 40-59=neutral/mixed; <40=avoid.
+Weight in order: (1)IV justified vs upcoming events+realized vol (2)Catalyst timing vs expiry window \
+(3)Trend/momentum alignment with trade direction (4)Breakeven realism vs 1\u03c3 expected move.
+reasoning: ONE concrete sentence \u2014 primary reason only, not a list.
+Flag iv_justified:false when iv_rank>0.70 AND no earnings within 21d of expiry.
+confidence:0-10. flags:\u22643 SHORT_CAPS."""
 
 
 _TICKER_CONTEXT_PROMPT = """\
-Analyze ticker conditions. JSON only, no prose:
-{"regime":"SELLER_EDGE|BUYER_EDGE|NEUTRAL","catalyst_risk":"low|medium|high","directional_bias":"bullish|bearish|neutral","key_risks":["r1"],"summary":"≤20 words","confidence":1-10}"""
+Analyze ticker conditions. Flag term_structure:"BACKWARDATION" when front-month IV > back-month IV \
+\u2014 this shifts edge: sellers edge in contango, buyers edge in backwardation.
+JSON only: {"regime":"SELLER_EDGE|BUYER_EDGE|NEUTRAL","catalyst_risk":"low|medium|high",\
+"directional_bias":"bullish|bearish|neutral","term_structure":"CONTANGO|BACKWARDATION|FLAT",\
+"key_risks":["r1"],"summary":"\u226420 words","confidence":1-10}"""
 
 
 # ── JSON schema for contract scoring ──────────────────────────────────────────

@@ -19,10 +19,19 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
+    3: [
+        "ALTER TABLE trades ADD COLUMN pop_score REAL",
+        "ALTER TABLE trades ADD COLUMN ev_score REAL",
+        "ALTER TABLE trades ADD COLUMN rr_score REAL",
+        "ALTER TABLE trades ADD COLUMN liquidity_score REAL",
+        "ALTER TABLE trades ADD COLUMN momentum_score REAL",
+        "ALTER TABLE trades ADD COLUMN iv_rank_score REAL",
+        "ALTER TABLE trades ADD COLUMN theta_score REAL",
+    ],
 }
 
 def _is_short_position(strategy_name: str) -> bool:
