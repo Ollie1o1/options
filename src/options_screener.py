@@ -2679,7 +2679,8 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
         df_chain = data_result["df"]
         history_df = data_result["history_df"]
         context = data_result["context"]
-        
+        result['context'] = context
+
         # Cache history for correlation check
         if history_df is not None and not history_df.empty:
             result['history'] = history_df
@@ -2953,6 +2954,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         if result.get('news_data') is not None:
             news_map[symbol] = result['news_data']
 
+    ticker_contexts: dict = {}
+    for symbol, result in results_buffer.items():
+        if result.get("success") and result.get("context"):
+            ticker_contexts[symbol] = result["context"]
+
     # --- Portfolio Protection: Correlation Warning ---
     if verbose and len(ticker_histories) > 1:
         print("\n🔎 Checking Portfolio Correlation...")
@@ -3154,6 +3160,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         'rfr': rfr,
         'chain_iv_median': chain_iv_median,
         'timestamp': datetime.now().isoformat(),
+        'ticker_contexts': ticker_contexts,
         'market_context': {
             'vix_level': vix_level,
             'vix_regime': vix_regime,

@@ -92,7 +92,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _get_ticker_contexts(picks: pd.DataFrame, max_expiries: int = 4) -> dict[str, dict]:
-    """Fetch lightweight ticker context for two-pass AI analysis."""
+    """Fetch lightweight ticker context for two-pass AI analysis.
+
+    Deprecated: ticker_contexts are now threaded through run_scan() return value.
+    This function is kept as a fallback for cases where pre-fetched contexts are
+    unavailable (e.g. direct invocation without run_scan).
+    """
     from src.data_fetching import fetch_options_yfinance
     contexts: dict[str, dict] = {}
     if "symbol" not in picks.columns:
@@ -215,10 +220,10 @@ def main() -> None:
         try:
             scorer = AIScorer(config=ai_config_override or None)
 
-            # Fetch ticker contexts for two-pass analysis
-            ticker_contexts: dict = {}
+            # Use pre-fetched ticker contexts from run_scan (avoids double fetch)
+            ticker_contexts: dict = results.get("ticker_contexts", {})
             from src.config_ai import AI_CONFIG
-            if AI_CONFIG.get("two_pass_enabled", True):
+            if not ticker_contexts and AI_CONFIG.get("two_pass_enabled", True):
                 print("  Fetching ticker context for two-pass analysis...")
                 ticker_contexts = _get_ticker_contexts(picks, max_expiries=args.expiries)
 

@@ -335,15 +335,7 @@ def render_sidebar():
                         vix_regime = vix_regime_map.get(str(st.session_state.volatility_regime), "normal")
                         ai_cfg = {"ai_weight": ai_weight_override} if ai_weight_override is not None else None
                         scorer = AIScorer(config=ai_cfg)
-                        ticker_contexts: dict = {}
-                        if AI_CONFIG.get("two_pass_enabled", True):
-                            from src.data_fetching import fetch_options_yfinance
-                            for sym in picks["symbol"].unique():
-                                try:
-                                    r = fetch_options_yfinance(sym, max_expiries=2)
-                                    ticker_contexts[sym] = r.get("context", {})
-                                except Exception:
-                                    pass
+                        ticker_contexts = st.session_state.scan_results.get("ticker_contexts", {})
                         ai_df = scorer.score_candidates(picks, ticker_contexts=ticker_contexts)
                         kwargs = {}
                         if ai_weight_override is not None:
