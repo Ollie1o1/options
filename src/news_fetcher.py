@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
@@ -384,6 +385,31 @@ def _fetch_alpha_vantage(symbol: str, api_key: str, max_age_hours: int = 72) -> 
     return items
 
 
+# ── Polygon news helper ────────────────────────────────────────────────────────
+
+def _fetch_polygon_news_items(symbol: str, client, max_age_hours: int = 72) -> List[NewsItem]:
+    """Fetch and convert Polygon.io news items for *symbol*."""
+    items: List[NewsItem] = []
+    try:
+        raw_poly = client.get_news(symbol, limit=10, max_age_hours=max_age_hours)
+        if raw_poly:
+            for pi in raw_poly:
+                headline = _sanitize(pi.headline)
+                if not headline:
+                    continue
+                items.append(NewsItem(
+                    headline=headline,
+                    source=f"Polygon/{pi.publisher}",
+                    published=pi.published_utc,
+                    sentiment=pi.sentiment,
+                    url=pi.url,
+                    relevance=1.2,   # slightly higher priority in sort
+                ))
+    except Exception as exc:
+        logger.debug("Polygon news fetch failed for %s: %s", symbol, exc)
+    return items
+
+
 # ── Aggregation ────────────────────────────────────────────────────────────────
 
 def _deduplicate(items: List[NewsItem]) -> List[NewsItem]:
@@ -440,43 +466,36 @@ def fetch_news_and_events(
         fetched_at=datetime.now(timezone.utc),
     )
 
-    # 1. Yahoo Finance RSS
-    yf_items = _fetch_yf_rss(symbol, max_age_hours=max_age_hours)
-
-    # 2. Finviz news
-    fv_items = _fetch_finviz_news(symbol, max_age_hours=max_age_hours)
-
-    # 3. Alpha Vantage (optional)
-    av_items: List[NewsItem] = []
+    # Build concurrent fetch list
+    fetch_fns = [
+        ("yf_rss", lambda: _fetch_yf_rss(symbol, max_age_hours=max_age_hours)),
+        ("finviz", lambda: _fetch_finviz_news(symbol, max_age_hours=max_age_hours)),
+    ]
     av_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
     if av_key:
-        av_items = _fetch_alpha_vantage(symbol, av_key, max_age_hours=max_age_hours)
-
-    # 4. Polygon.io (optional) — ticker-filtered, high-quality source
-    polygon_items: List[NewsItem] = []
+        fetch_fns.append(("alpha_vantage", lambda: _fetch_alpha_vantage(symbol, av_key, max_age_hours=max_age_hours)))
+    # Polygon concurrent fetch
     try:
-        from src.polygon_client import PolygonClient
-        _poly = PolygonClient()
+        from src.polygon_client import PolygonClient as _PC
+        _poly = _PC()
         if _poly._enabled:
-            raw_poly = _poly.get_news(symbol, limit=10, max_age_hours=max_age_hours)
-            if raw_poly:
-                for pi in raw_poly:
-                    headline = _sanitize(pi.headline)
-                    if not headline:
-                        continue
-                    polygon_items.append(NewsItem(
-                        headline=headline,
-                        source=f"Polygon/{pi.publisher}",
-                        published=pi.published_utc,
-                        sentiment=pi.sentiment,
-                        url=pi.url,
-                        relevance=1.2,   # slightly higher priority in sort
-                    ))
-    except Exception as _poly_exc:
-        logger.debug("Polygon news fetch failed for %s: %s", symbol, _poly_exc)
+            fetch_fns.append(("polygon", lambda: _fetch_polygon_news_items(symbol, _poly, max_age_hours)))
+    except Exception:
+        pass
+
+    all_items: List[NewsItem] = []
+    with ThreadPoolExecutor(max_workers=len(fetch_fns)) as executor:
+        futures = {executor.submit(fn): name for name, fn in fetch_fns}
+        for future in as_completed(futures, timeout=10):
+            try:
+                items = future.result(timeout=0)
+                if items:
+                    all_items.extend(items)
+            except Exception:
+                pass
 
     # Merge, deduplicate, sort newest-first (Polygon items get relevance boost)
-    all_items = _deduplicate(polygon_items + yf_items + fv_items + av_items)
+    all_items = _deduplicate(all_items)
     all_items.sort(key=lambda x: (x.published, x.relevance), reverse=True)
 
     result.items = all_items[:max_headlines]
