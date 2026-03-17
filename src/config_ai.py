@@ -80,6 +80,28 @@ AI_CONFIG: dict = {
 }
 
 
+def resolve_api_key_env(model_id: str, config: dict) -> str:
+    """Return the env-var name holding the API key for *model_id*.
+
+    Priority:
+    1. Explicit ``model_key_map`` entry in *config*.
+    2. Prefix-based lookup (arcee-ai/, openrouter/, anthropic/).
+    3. Fallback to ``config["api_key_env"]``.
+    """
+    explicit = config.get("model_key_map", {})
+    if model_id in explicit:
+        return explicit[model_id]
+    prefix_map = {
+        "arcee-ai/": "OPENROUTER_ARCEE_KEY",
+        "openrouter/": "OPENROUTER_HUNTER_KEY",
+        "anthropic/": "ANTHROPIC_API_KEY",
+    }
+    for prefix, env_var in prefix_map.items():
+        if model_id.startswith(prefix):
+            return env_var
+    return config.get("api_key_env", "OPENROUTER_API_KEY")
+
+
 def validate_ai_config(cfg: dict) -> None:
     """Raise ValueError with a clear message if any config value is out of range."""
     aw = cfg.get("ai_weight", 0)

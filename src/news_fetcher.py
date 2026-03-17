@@ -24,6 +24,13 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from email.utils import parsedate_to_datetime
 
+_NEWS_CACHE: dict = {}
+
+
+def _news_cache_key(symbol: str) -> str:
+    hour = datetime.utcnow().strftime("%Y%m%d%H")
+    return f"{symbol.upper()}:{hour}"
+
 import requests
 
 try:
@@ -461,6 +468,10 @@ def fetch_news_and_events(
     -------
     NewsData — always a valid object, never raises.
     """
+    key = _news_cache_key(symbol)
+    if key in _NEWS_CACHE:
+        return _NEWS_CACHE[key]
+
     result = NewsData(
         symbol=symbol,
         fetched_at=datetime.now(timezone.utc),
@@ -520,6 +531,7 @@ def fetch_news_and_events(
     recent_count = sum(1 for it in all_items if it.published >= recent_cutoff)
     result.unusual_news_volume = recent_count > 5
 
+    _NEWS_CACHE[key] = result
     return result
 
 

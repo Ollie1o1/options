@@ -193,6 +193,9 @@ class AIScorer:
         self.config: dict[str, Any] = {**AI_CONFIG, **(config or {})}
         self._clients: dict[str, Any] = {}   # keyed by api_key_env name
         self._cache = None
+        self._api_call_count = 0
+        self._api_token_estimate = 0
+        self._session_warnings_issued: set = set()
         if self.config.get("cache_enabled", True):
             try:
                 from src.ai_cache import AIScoreCache
@@ -281,6 +284,9 @@ class AIScorer:
             all_results.extend(results)
             if i < len(batches) - 1:
                 time.sleep(0.5)
+
+        if self._api_call_count > 0:
+            logger.info("Session: %d API calls, ~%d tokens estimated", self._api_call_count, self._api_token_estimate)
 
         return self._results_to_df(df, all_results)
 
@@ -396,8 +402,29 @@ class AIScorer:
 
     def _key_env_for_model(self, model: str) -> str:
         """Return the env-var name that holds the API key for *model*."""
-        model_key_map = self.config.get("model_key_map", {})
-        return model_key_map.get(model, self.config["api_key_env"])
+        from src.config_ai import resolve_api_key_env
+        return resolve_api_key_env(model, self.config)
+
+    def safe_chat_complete(self, system: str, user: str, max_tokens: int = 400) -> Optional[str]:
+        """Chat completion with fallback model chain. Returns None on all-retries-exhausted."""
+        models = [
+            self.config["model"],
+            self.config.get("fallback_model"),
+            self.config.get("second_fallback_model"),
+            self.config.get("third_fallback_model"),
+        ]
+        models = [m for m in models if m]
+        last_exc = None
+        for model in models:
+            for attempt in range(2):
+                try:
+                    return self._chat_complete(system=system, user=user, max_tokens=max_tokens, model=model)
+                except Exception as e:
+                    last_exc = e
+                    is_rate_limit = "429" in str(e) or "rate" in str(e).lower()
+                    time.sleep(5 * (2 ** attempt) if is_rate_limit else 1)
+        logger.warning("safe_chat_complete failed after all models: %s", last_exc)
+        return None
 
     def _get_client(self, key_env: str = None):
         """Return (and cache) an OpenAI/Anthropic client for the given key env var."""
@@ -481,7 +508,13 @@ class AIScorer:
         for attempt in range(1, max_retries + 1):
             use_model = _pick_model(attempt)
             try:
-                return self._score_batch(batch, model=use_model)
+                result = self._score_batch(batch, model=use_model)
+                self._api_call_count += 1
+                estimated_tokens = len(batch) * self.config.get("max_tokens", 2048)
+                self._api_token_estimate += estimated_tokens
+                if self._api_call_count % 10 == 0:
+                    print(f"  [ai_scorer] {self._api_call_count} API calls this session, ~{self._api_token_estimate:,} tokens estimated")
+                return result
             except Exception as exc:
                 is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower()
                 if attempt < max_retries:

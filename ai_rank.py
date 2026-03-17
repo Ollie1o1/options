@@ -144,21 +144,7 @@ def _portfolio_check(ranked: pd.DataFrame, scorer) -> None:
         "Focus on concentration, correlation, and catalyst risks."
     )
 
-    raw = None
-    last_exc = None
-    for attempt in range(3):
-        try:
-            raw = scorer._chat_complete(system=system, user=prompt, max_tokens=400)
-            break
-        except Exception as e:
-            last_exc = e
-            err_str = str(e).lower()
-            if any(kw in err_str for kw in ("rate limit", "429", "too many requests", "quota")):
-                sleep_secs = min(5 * (2 ** attempt), 30)
-            else:
-                sleep_secs = 1
-            if attempt < 2:
-                time.sleep(sleep_secs)
+    raw = scorer.safe_chat_complete(system=system, user=prompt, max_tokens=400)
 
     if raw is not None:
         print()
@@ -169,7 +155,7 @@ def _portfolio_check(ranked: pd.DataFrame, scorer) -> None:
         print("=" * 70)
         print()
     else:
-        print(f"\n[portfolio-check] Failed after 3 attempts: {last_exc}")
+        print("\n[portfolio-check] Failed — all models exhausted.")
 
 
 def main() -> None:
