@@ -193,7 +193,18 @@ def run_backtest(
             "combined": {},
         }
 
+    import json as _json
     import warnings
+    # Load config for spread cost
+    _config: dict = {}
+    try:
+        _cfg_path = str(_PROJECT_ROOT / "config.json")
+        with open(_cfg_path) as _f:
+            _config = _json.load(_f)
+    except Exception:
+        pass
+    spread_cost_per_side = _config.get("backtest", {}).get("spread_cost_per_side", 0.07)
+
     all_ticker_results = []
 
     # Fetch VIX history once for regime tagging
@@ -314,13 +325,14 @@ def run_backtest(
                              + 0.2 * abs_rsi_momentum)
                     score = max(0.0, min(1.0, score))
 
-                    # BS entry pricing
+                    # BS entry pricing (with bid-ask spread cost)
                     T_entry = dte / 365.0
                     sigma = max(hv, 0.05)
                     K = _find_30d_otm_strike(direction, S, sigma, T_entry, risk_free, target_delta=0.30)
-                    entry_price = _bs_option_price(direction, S, K, T_entry, risk_free, sigma)
-                    if entry_price <= 0.001:
+                    entry_price_gross = _bs_option_price(direction, S, K, T_entry, risk_free, sigma)
+                    if entry_price_gross <= 0.001:
                         continue
+                    entry_price = entry_price_gross * (1 + spread_cost_per_side)
 
                     # Exit at day i+exit_dte
                     exit_idx = min(i + exit_dte, len(close_arr) - 1)
@@ -347,8 +359,10 @@ def run_backtest(
                             actual_exit_price = px_j
                             break
 
-                    pnl_per_share = actual_exit_price - entry_price  # long option
+                    exit_price_after_costs = actual_exit_price * (1 - spread_cost_per_side)
+                    pnl_per_share = exit_price_after_costs - entry_price  # long option after costs
                     pnl_pct = pnl_per_share / entry_price
+                    pnl_pct_gross = (actual_exit_price - entry_price_gross) / entry_price_gross
 
                     # VIX regime for this trade day
                     vix_val = 20.0  # default "Normal"
@@ -367,6 +381,7 @@ def run_backtest(
                         "entry_price": entry_price,
                         "exit_price": actual_exit_price,
                         "pnl_pct": pnl_pct,
+                        "pnl_pct_gross": pnl_pct_gross,
                         "win": pnl_pct > 0,
                         "vix_level": vix_val,
                         "vix_regime": _classify_vix_regime(vix_val),
@@ -382,6 +397,7 @@ def run_backtest(
             n_trades = len(trades_df)
             win_rate = float(trades_df["win"].mean())
             avg_return = float(trades_df["pnl_pct"].mean())
+            avg_return_gross = float(trades_df["pnl_pct_gross"].mean()) if "pnl_pct_gross" in trades_df.columns else avg_return
 
             # Sharpe (annualised, assuming ~12 trades/year roughly)
             ret_std = float(trades_df["pnl_pct"].std())
@@ -452,6 +468,7 @@ def run_backtest(
                 "n_trades": n_trades,
                 "win_rate": win_rate,
                 "avg_return": avg_return,
+                "avg_return_gross": avg_return_gross,
                 "sharpe": sharpe,
                 "ic": ic,
                 "ic_pvalue": ic_pvalue,
@@ -472,6 +489,7 @@ def run_backtest(
         "exit_dte": exit_dte,
         "tp": tp,
         "sl": sl,
+        "spread_cost_per_side": spread_cost_per_side,
     }
 
 
@@ -737,6 +755,7 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
     dte = results.get("dte", 30)
     exit_dte = results.get("exit_dte", 21)
     lookback = results.get("lookback_days", 252)
+    spread_cost = results.get("spread_cost_per_side", 0.07)
 
     print()
     header = (
@@ -793,6 +812,24 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
         else:
             print(row)
 
+    print(_sep(width))
+
+    # Gross vs after-cost summary
+    all_gross = [r.get("avg_return_gross", r.get("avg_return", 0.0)) for r in ticker_results]
+    all_net = [r.get("avg_return", 0.0) for r in ticker_results]
+    if all_gross and all_net:
+        avg_gross = sum(all_gross) / len(all_gross)
+        avg_net = sum(all_net) / len(all_net)
+        cost_line = (
+            f"  Spread cost ({spread_cost*100:.0f}% per side):  "
+            f"Gross avg return: {avg_gross*100:+.1f}%  |  "
+            f"After-cost avg return: {avg_net*100:+.1f}%  |  "
+            f"Cost drag: {(avg_gross - avg_net)*100:.1f}%"
+        )
+        if HAS_FMT and fmt:
+            print(fmt.colorize(cost_line, fmt.Colors.YELLOW))
+        else:
+            print(cost_line)
     print(_sep(width))
 
     # Combined quintile analysis

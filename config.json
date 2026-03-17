@@ -98,7 +98,8 @@
     "profit_target_multiplier_long": 1.5,
     "profit_target_multiplier_short": 0.5,
     "stop_loss_multiplier_long": 0.5,
-    "stop_loss_multiplier_short": 1.5
+    "stop_loss_multiplier_short": 1.5,
+    "spread_cost_per_side": 0.07
   },
   "display": {
     "use_colors": true,
