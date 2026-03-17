@@ -415,7 +415,7 @@ def format_ev(ev: float) -> str:
     return format_money(ev, threshold_positive=10)
 
 
-def format_iv_rank_bar(iv_pct: float, hv: float, iv: float, width: int = 20) -> str:
+def format_iv_rank_bar(iv_pct: float, hv: float, iv: float, width: int = 20, iv_confidence: str = "") -> str:
     """
     Format IV percentile as a visual bar with HV/IV ratio and regime label.
 
@@ -479,7 +479,11 @@ def format_iv_rank_bar(iv_pct: float, hv: float, iv: float, width: int = 20) -> 
         bar_str = bar
         regime_str = f"[{regime}]"
 
-    return f"IV: {bar_str} {pct_label}{ratio_str}  {regime_str}{cheap_rich}"
+    conf_suffix = ""
+    if iv_confidence == "Low":
+        conf_suffix = "  ⚠ Low Conf" if not supports_color() else "  " + colorize("⚠ Low Conf", Colors.DIM)
+
+    return f"IV: {bar_str} {pct_label}{ratio_str}  {regime_str}{cheap_rich}{conf_suffix}"
 
 
 def format_delta(delta: float, is_call: bool = True) -> str:

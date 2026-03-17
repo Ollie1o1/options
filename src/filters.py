@@ -168,8 +168,40 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
     out = pd.concat(picks, ignore_index=True)
     return out
 
+def filter_iv_smile_outliers(
+    df: pd.DataFrame,
+    iv_threshold: float = 0.30,
+    min_volume: int = 10,
+) -> pd.DataFrame:
+    """Remove bad-print IV outliers from the options chain.
+
+    For each expiration group, computes the median IV and flags rows where:
+      - abs(iv - median_iv) / median_iv > iv_threshold  AND
+      - volume < min_volume
+
+    Low-volume rows whose IV deviates more than `iv_threshold` (30% by default)
+    from the expiration median are treated as bad prints and dropped.
+    """
+    if df.empty or "impliedVolatility" not in df.columns:
+        return df
+
+    iv = pd.to_numeric(df["impliedVolatility"], errors="coerce")
+    median_iv = df.groupby("expiration")["impliedVolatility"].transform("median")
+    median_iv = pd.to_numeric(median_iv, errors="coerce")
+    vol = pd.to_numeric(df["volume"] if "volume" in df.columns else 0, errors="coerce").fillna(0)
+
+    safe_median = median_iv.replace(0, np.nan)
+    outlier = (
+        ((iv - median_iv).abs() / safe_median > iv_threshold)
+        & (vol < min_volume)
+    ).fillna(False)
+
+    return df[~outlier].copy()
+
+
 __all__ = [
     "categorize_by_premium",
+    "filter_iv_smile_outliers",
     "pick_top_per_bucket",
     "filter_options",
 ]
