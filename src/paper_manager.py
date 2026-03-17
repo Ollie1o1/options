@@ -13,11 +13,17 @@ import yfinance as yf
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
 
-# Realistic execution cost constants
+# Realistic execution cost constants (deprecated fallbacks — use config.json paper_trading section)
 COMMISSION_PER_CONTRACT = 0.65   # $ per contract per leg (retail ~$0.65, e.g. Tastytrade/TDA)
 SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half spread)
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
+
+_SCHEMA_VERSION = 2
+_MIGRATIONS = {
+    1: [],
+    2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
+}
 
 def _is_short_position(strategy_name: str) -> bool:
     """Detect if a trade is a short/credit position (profits from premium decay)."""
@@ -31,6 +37,17 @@ class PaperManager:
     def __init__(self, db_path: str = "paper_trades.db", config_path: str = "config.json"):
         self.db_path = db_path
         self.config_path = config_path
+        # Load friction costs from config (fall back to module-level constants)
+        try:
+            with open(config_path, 'r') as f:
+                _cfg = json.load(f)
+            _pt = _cfg.get("paper_trading", {})
+            self._commission_per_contract = float(_pt.get("commission_per_contract", COMMISSION_PER_CONTRACT))
+            self._slippage_per_share = float(_pt.get("slippage_per_share", SLIPPAGE_PER_SHARE))
+        except Exception:
+            self._commission_per_contract = COMMISSION_PER_CONTRACT
+            self._slippage_per_share = SLIPPAGE_PER_SHARE
+        self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
         self._init_db()
 
     def _get_connection(self):
@@ -53,11 +70,28 @@ class PaperManager:
             status TEXT,
             exit_price REAL,
             exit_date TEXT,
-            pnl_pct REAL
+            pnl_pct REAL,
+            pnl_usd REAL
         )
         """
         with self._get_connection() as conn:
             conn.execute(query)
+        self._migrate_db()
+
+    def _migrate_db(self):
+        """Apply incremental schema migrations up to _SCHEMA_VERSION."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA user_version")
+            current_version = cur.fetchone()[0]
+            for ver in range(current_version + 1, _SCHEMA_VERSION + 1):
+                for sql in _MIGRATIONS.get(ver, []):
+                    try:
+                        cur.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass  # column may already exist
+                cur.execute(f"PRAGMA user_version = {ver}")
+            conn.commit()
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads configuration for exit rules."""
@@ -205,6 +239,17 @@ class PaperManager:
                     if not hist.empty:
                         current_price = float(hist["Close"].iloc[-1])
 
+                if current_price is None or np.isnan(current_price) or current_price <= 0:
+                    try:
+                        from .utils import bs_price
+                        underlying_tkr = yf.Ticker(ticker)
+                        S = getattr(underlying_tkr.fast_info, "last_price", None)
+                        if S and float(S) > 0:
+                            T = max((datetime.strptime(expiration[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1/365)
+                            current_price = float(bs_price(option_type, float(S), float(strike), T, 0.045, 0.30))
+                    except Exception:
+                        pass
+
                 if current_price is not None and not np.isnan(current_price) and current_price > 0:
                     # Raw market P&L — flip sign for short/credit positions
                     # (seller profits when option loses value)
@@ -227,7 +272,7 @@ class PaperManager:
                             reason = f"Time Exit ({dte}d to expiry)"
 
                         # Realistic P&L: subtract round-trip slippage + commissions
-                        friction_fraction = _FRICTION_PER_SHARE / entry_price if entry_price > 0 else 0.0
+                        friction_fraction = self._friction_per_share / entry_price if entry_price > 0 else 0.0
                         pnl_realistic = pnl_raw - friction_fraction
 
                         closed_this_run.append(
@@ -248,7 +293,97 @@ class PaperManager:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")
             for msg in closed_this_run:
                 print(f"    \u2713 {msg}")
-            print(f"    [costs: ${SLIPPAGE_PER_SHARE:.2f}/share slippage ×2 + ${COMMISSION_PER_CONTRACT:.2f}/contract commissions ×2]")
+            print(f"    [costs: ${self._slippage_per_share:.2f}/share slippage ×2 + ${self._commission_per_contract:.2f}/contract commissions ×2]")
+
+    def get_correlated_open_positions(
+        self,
+        ticker: str,
+        lookback_days: int = 60,
+        correlation_threshold: float = 0.80,
+    ) -> List[Dict]:
+        """Return open positions whose underlying is highly correlated with `ticker`.
+
+        Fetches `lookback_days` of daily closes via yfinance for `ticker` and each
+        distinct ticker in OPEN trades, then computes Pearson correlation of daily
+        returns.  Returns a list of dicts with keys "ticker" and "correlation" for
+        any pair where abs(correlation) > correlation_threshold.
+        """
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT ticker FROM trades WHERE status='OPEN'"
+                ).fetchall()
+        except Exception:
+            return []
+
+        open_tickers = [r[0] for r in rows if r[0] and r[0].upper() != ticker.upper()]
+        if not open_tickers:
+            return []
+
+        period = f"{lookback_days}d"
+        try:
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                ref_hist = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
+            if ref_hist.empty:
+                return []
+            ref_close = ref_hist["Close"].squeeze()
+            ref_returns = ref_close.pct_change().dropna()
+        except Exception:
+            return []
+
+        correlated = []
+        for ot in open_tickers:
+            try:
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore")
+                    other_hist = yf.download(ot, period=period, interval="1d", progress=False, auto_adjust=True)
+                if other_hist.empty:
+                    continue
+                other_close = other_hist["Close"].squeeze()
+                other_returns = other_close.pct_change().dropna()
+                combined = pd.concat([ref_returns, other_returns], axis=1, join="inner").dropna()
+                if len(combined) < 10:
+                    continue
+                corr = float(combined.iloc[:, 0].corr(combined.iloc[:, 1]))
+                if abs(corr) > correlation_threshold:
+                    correlated.append({"ticker": ot, "correlation": corr})
+            except Exception:
+                continue
+
+        return correlated
+
+    def get_position_size_with_correlation(
+        self,
+        ticker: str,
+        base_blended_fraction: float,
+    ) -> Tuple[float, str]:
+        """Return an (adjusted_fraction, reason_string) pair.
+
+        Loads correlation_threshold from config (default 0.80).  If any open
+        position is highly correlated with `ticker`, halves the fraction
+        (reduction factor from config, default 0.50).
+        """
+        try:
+            config = self._load_config()
+            threshold = config.get("correlation_threshold", 0.80)
+            reduction = config.get("correlation_size_reduction", 0.50)
+            if not config.get("correlation_aware_sizing", True):
+                return base_blended_fraction, ""
+        except Exception:
+            threshold, reduction = 0.80, 0.50
+
+        correlated = self.get_correlated_open_positions(ticker, correlation_threshold=threshold)
+        if not correlated:
+            return base_blended_fraction, ""
+
+        top = max(correlated, key=lambda x: abs(x["correlation"]))
+        reason = (
+            f"Correlation-adjusted: {top['ticker']} r={top['correlation']:.2f} "
+            f"→ size reduced by {(1-reduction)*100:.0f}%"
+        )
+        return base_blended_fraction * reduction, reason
 
     def get_all_trades(self) -> pd.DataFrame:
         """Returns all trades as a pandas DataFrame."""
