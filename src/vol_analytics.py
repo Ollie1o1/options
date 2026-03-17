@@ -5,6 +5,7 @@ All functions degrade gracefully when data is unavailable.
 """
 
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from datetime import datetime, date
 
@@ -202,6 +203,82 @@ def print_vol_cone(ticker: str, current_iv: Optional[float] = None, width: int =
     print()
 
 
+def _fetch_single_expiry(tkr, exp_str: str, spot: float, rfr: float, today) -> Optional[dict]:
+    """Fetch and process a single expiry for the IV surface. Returns a row dict or None."""
+    import warnings
+    try:
+        exp_date = datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
+        dte = (exp_date - today).days
+        if dte < 1:
+            return None
+        T = dte / 365.0
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            chain = tkr.option_chain(exp_str)
+        calls_df = chain.calls
+        puts_df = chain.puts
+        if calls_df.empty or puts_df.empty:
+            return None
+
+        # ATM IV: option with strike closest to spot
+        calls_df = calls_df.dropna(subset=["impliedVolatility", "strike"])
+        puts_df = puts_df.dropna(subset=["impliedVolatility", "strike"])
+
+        atm_call_idx = (calls_df["strike"] - spot).abs().idxmin()
+        atm_iv = float(calls_df.loc[atm_call_idx, "impliedVolatility"])
+
+        # 25-delta call and put
+        call_25d_iv = None
+        put_25d_iv = None
+
+        if HAS_UTILS and len(calls_df) >= 3:
+            best_diff = float("inf")
+            for _, row in calls_df.iterrows():
+                K = float(row["strike"])
+                sigma = float(row["impliedVolatility"])
+                if sigma <= 0 or K <= 0:
+                    continue
+                try:
+                    d = abs(float(bs_delta("call", spot, K, T, rfr, sigma)))
+                    diff = abs(d - 0.25)
+                    if diff < best_diff:
+                        best_diff = diff
+                        call_25d_iv = sigma
+                except Exception:
+                    continue
+
+        if HAS_UTILS and len(puts_df) >= 3:
+            best_diff = float("inf")
+            for _, row in puts_df.iterrows():
+                K = float(row["strike"])
+                sigma = float(row["impliedVolatility"])
+                if sigma <= 0 or K <= 0:
+                    continue
+                try:
+                    d = abs(float(bs_delta("put", spot, K, T, rfr, sigma)))
+                    diff = abs(d - 0.25)
+                    if diff < best_diff:
+                        best_diff = diff
+                        put_25d_iv = sigma
+                except Exception:
+                    continue
+
+        skew_25d = (put_25d_iv - call_25d_iv) if (put_25d_iv is not None and call_25d_iv is not None) else None
+
+        return {
+            "expiration": exp_str[:10],
+            "dte": dte,
+            "strike_atm": float(calls_df.loc[atm_call_idx, "strike"]),
+            "atm_iv": atm_iv,
+            "call_25d_iv": call_25d_iv,
+            "put_25d_iv": put_25d_iv,
+            "skew_25d": skew_25d,
+        }
+    except Exception:
+        return None
+
+
 def compute_iv_surface(ticker: str) -> Optional["pd.DataFrame"]:
     """
     Fetch current options chain via yfinance for all available expirations.
@@ -235,86 +312,29 @@ def compute_iv_surface(ticker: str) -> Optional["pd.DataFrame"]:
             return None
 
         today = date.today()
-        rows = []
         rfr = 0.045
 
-        import warnings
-        for exp_str in expirations[:10]:  # limit to first 10 expirations
-            try:
-                exp_date = datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
-                dte = (exp_date - today).days
-                if dte < 1:
-                    continue
-                T = dte / 365.0
-
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    chain = tkr.option_chain(exp_str)
-                calls_df = chain.calls
-                puts_df = chain.puts
-                if calls_df.empty or puts_df.empty:
-                    continue
-
-                # ATM IV: option with strike closest to spot
-                calls_df = calls_df.dropna(subset=["impliedVolatility", "strike"])
-                puts_df = puts_df.dropna(subset=["impliedVolatility", "strike"])
-
-                atm_call_idx = (calls_df["strike"] - spot).abs().idxmin()
-                atm_iv = float(calls_df.loc[atm_call_idx, "impliedVolatility"])
-
-                # 25-delta call and put
-                call_25d_iv = None
-                put_25d_iv = None
-
-                if HAS_UTILS and len(calls_df) >= 3:
-                    best_diff = float("inf")
-                    for _, row in calls_df.iterrows():
-                        K = float(row["strike"])
-                        sigma = float(row["impliedVolatility"])
-                        if sigma <= 0 or K <= 0:
-                            continue
-                        try:
-                            d = abs(float(bs_delta("call", spot, K, T, rfr, sigma)))
-                            diff = abs(d - 0.25)
-                            if diff < best_diff:
-                                best_diff = diff
-                                call_25d_iv = sigma
-                        except Exception:
-                            continue
-
-                if HAS_UTILS and len(puts_df) >= 3:
-                    best_diff = float("inf")
-                    for _, row in puts_df.iterrows():
-                        K = float(row["strike"])
-                        sigma = float(row["impliedVolatility"])
-                        if sigma <= 0 or K <= 0:
-                            continue
-                        try:
-                            d = abs(float(bs_delta("put", spot, K, T, rfr, sigma)))
-                            diff = abs(d - 0.25)
-                            if diff < best_diff:
-                                best_diff = diff
-                                put_25d_iv = sigma
-                        except Exception:
-                            continue
-
-                skew_25d = (put_25d_iv - call_25d_iv) if (put_25d_iv is not None and call_25d_iv is not None) else None
-
-                rows.append({
-                    "expiration": exp_str[:10],
-                    "dte": dte,
-                    "strike_atm": float(calls_df.loc[atm_call_idx, "strike"]),
-                    "atm_iv": atm_iv,
-                    "call_25d_iv": call_25d_iv,
-                    "put_25d_iv": put_25d_iv,
-                    "skew_25d": skew_25d,
-                })
-            except Exception:
-                continue
+        # Fetch expirations concurrently (limit to first 10)
+        target_exps = [e for e in expirations[:10]]
+        rows = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(_fetch_single_expiry, tkr, exp_str, spot, rfr, today): exp_str
+                for exp_str in target_exps
+            }
+            for future in as_completed(futures, timeout=15):
+                try:
+                    row = future.result(timeout=0)
+                    if row is not None:
+                        rows.append(row)
+                except Exception:
+                    pass
 
         if not rows:
             return None
-        return pd.DataFrame(rows)
+        # Sort by DTE so term structure is in order
+        df = pd.DataFrame(rows)
+        return df.sort_values("dte").reset_index(drop=True)
     except Exception:
         return None
 
