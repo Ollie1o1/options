@@ -260,7 +260,8 @@ def main() -> None:
 
 def _rank_without_ai(picks: pd.DataFrame) -> pd.DataFrame:
     df = picks.copy()
-    df["ai_score"]      = 50.0
+    df["ai_score"]      = None
+    df["ai_skipped"]    = True
     df["ai_reasoning"]  = ""
     df["ai_flags"]      = ""
     df["catalyst_risk"] = "medium"

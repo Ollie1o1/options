@@ -90,6 +90,14 @@ def combine_scores(
     df.loc[ai_higher,  "divergence_direction"] = "AI>TECH"
     df.loc[tech_higher, "divergence_direction"] = "TECH>AI"
 
+    # Override for AI-skipped rows
+    if "ai_skipped" in df.columns:
+        mask = df["ai_skipped"].fillna(False).astype(bool)
+        df.loc[mask, "divergence_flag"] = False
+        df.loc[mask, "divergence_direction"] = "---"
+        df.loc[mask, "ai_weight_used"] = 0.0
+        df.loc[mask, "final_score"] = tech[mask].values
+
     df["rank"] = df["final_score"].rank(ascending=False, method="min").astype(int)
     return df.sort_values("rank")
 

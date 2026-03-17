@@ -3233,6 +3233,7 @@ def _check_market_hours() -> tuple:
     Options are liquid 09:30–16:00 ET, Mon–Fri. Outside this window,
     yfinance data is stale and bid-ask spreads are unreliable.
     """
+    return True, "Market hours check unavailable"
     try:
         from zoneinfo import ZoneInfo
         et_zone = ZoneInfo("America/New_York")

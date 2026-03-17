@@ -20,9 +20,13 @@ Important limitations:
 """
 
 import math
+import pathlib
 import sqlite3
 import sys
 from typing import Optional, List, Dict, Any
+
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+DEFAULT_DB_PATH = str(_PROJECT_ROOT / "paper_trades.db")
 
 try:
     import numpy as np
@@ -601,7 +605,7 @@ def print_regime_report(results: Dict[str, Any], width: int = 90) -> None:
 
 # ─── Paper trade IC ─────────────────────────────────────────────────────────────
 
-def run_paper_trade_ic(db_path: str = "paper_trades.db") -> dict:
+def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
     """
     Compute IC between quality_score and realized pnl_pct from paper trades DB.
     Reads paper_trades.db via sqlite3.
@@ -875,7 +879,7 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
         print_regime_report(results, width=width)
 
 
-def print_paper_trade_ic(db_path: str = "paper_trades.db", width: int = 90) -> None:
+def print_paper_trade_ic(db_path: str = DEFAULT_DB_PATH, width: int = 90) -> None:
     """
     Print IC analysis of paper trades from paper_trades.db.
     Shows per-quintile breakdown and verdict.

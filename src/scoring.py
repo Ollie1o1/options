@@ -7,7 +7,6 @@ without importing the CLI ``main`` entrypoint.
 
 from .options_screener import (
     enrich_and_score,
-    rationale_row,
     print_report,
     export_to_csv,
     log_picks_json,
@@ -16,7 +15,6 @@ from .options_screener import (
 
 __all__ = [
     "enrich_and_score",
-    "rationale_row",
     "print_report",
     "export_to_csv",
     "log_picks_json",
