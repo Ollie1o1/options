@@ -49,6 +49,13 @@ _MOMENTUM_CACHE: Dict[str, Tuple] = {}
 _IV_RANK_CACHE: Dict[str, Tuple] = {}
 _SENTIMENT_CACHE: Dict[str, float] = {}
 _SEASONALITY_CACHE: Dict[str, float] = {}
+_CHAIN_CACHE: dict = {}
+
+
+def clear_chain_cache() -> None:
+    """Clear the in-session options chain cache."""
+    _CHAIN_CACHE.clear()
+
 
 # --- Abstract Data Provider ---
 
@@ -1160,6 +1167,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     Fetch options data and all related context using a Single-Fetch architecture.
     Returns a dictionary with 'df' (options chain) and 'context' (all derived metrics).
     """
+    if symbol in _CHAIN_CACHE:
+        return _CHAIN_CACHE[symbol]
+
     try:
         tkr = yf.Ticker(symbol)
     except (ValueError, TypeError) as e:
@@ -1359,7 +1369,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         logger.debug("Polygon enrichment failed for %s: %s", symbol, _poly_exc)
 
     # Return structured result
-    return {
+    result = {
         "df": df,
         "history_df": hist,
         "context": {
@@ -1387,6 +1397,8 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "market_cap": market_cap,
         }
     }
+    _CHAIN_CACHE[symbol] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
