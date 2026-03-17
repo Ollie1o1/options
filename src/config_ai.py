@@ -23,6 +23,8 @@ AI_CONFIG: dict = {
     # ── Scoring Weights ───────────────────────────────────────────────────────
     "ai_weight": 0.30,
     "technical_weight": 0.70,
+    "divergence_penalty_factor": 0.15,
+    "divergence_boost_factor":   0.10,
 
     # ── Dynamic weight multipliers by VIX regime ──────────────────────────────
     # final ai_weight = base_ai_weight * regime_mult * confidence_mult * liquidity_adj
@@ -121,5 +123,14 @@ def validate_ai_config(cfg: dict) -> None:
     temp = cfg.get("temperature", 0)
     if not (0.0 <= temp <= 2.0):
         raise ValueError(f"temperature must be in [0.0, 2.0], got {temp}")
+    fields = cfg.get("fields_to_include", [])
+    if not isinstance(fields, list) or len(fields) == 0:
+        raise ValueError(f"fields_to_include must be a non-empty list, got: {fields!r}")
+    pf = cfg.get("divergence_penalty_factor", 0.15)
+    if not (0.0 <= pf <= 0.5):
+        raise ValueError(f"divergence_penalty_factor must be in [0.0, 0.5], got {pf}")
+    bf = cfg.get("divergence_boost_factor", 0.10)
+    if not (0.0 <= bf <= 0.5):
+        raise ValueError(f"divergence_boost_factor must be in [0.0, 0.5], got {bf}")
 
 validate_ai_config(AI_CONFIG)

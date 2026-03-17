@@ -391,6 +391,11 @@ class AIScorer:
 
         prompt = "\n".join(lines) + "\n\nProvide your ticker-level assessment."
 
+        if self._cache:
+            cached = self._cache.get_ticker_context(symbol)
+            if cached:
+                return cached
+
         try:
             raw = self._chat_complete(
                 system=_TICKER_CONTEXT_PROMPT,
@@ -398,7 +403,10 @@ class AIScorer:
                 max_tokens=512,
             )
             parsed = _parse_json_single(raw)
-            return parsed if isinstance(parsed, dict) else {}
+            result = parsed if isinstance(parsed, dict) else {}
+            if result and self._cache:
+                self._cache.set_ticker_context(symbol, result)
+            return result
         except Exception as e:
             logger.warning("Ticker context parse failed for %s: %s", symbol, e)
             return {}
@@ -409,6 +417,14 @@ class AIScorer:
         """Return the env-var name that holds the API key for *model*."""
         from src.config_ai import resolve_api_key_env
         return resolve_api_key_env(model, self.config)
+
+    def get_session_stats(self) -> dict:
+        """Return a summary of this session's API and cache usage."""
+        return {
+            "api_calls":        self._api_call_count,
+            "estimated_tokens": self._api_token_estimate,
+            "cache_hits_today": self._cache.stats()["today"] if self._cache else 0,
+        }
 
     def safe_chat_complete(self, system: str, user: str, max_tokens: int = 400) -> Optional[str]:
         """Chat completion with fallback model chain. Returns None on all-retries-exhausted."""
@@ -589,9 +605,6 @@ class AIScorer:
             trend  = c.get("Trend_Aligned")
             earn   = c.get("Earnings Play", "NO")
 
-            raw = (
-                f"udly:{udly:.1f}" if udly else ""
-            )
             raw_parts = []
             if udly is not None:   raw_parts.append(f"udly:{float(udly):.1f}")
             if prem is not None:   raw_parts.append(f"prem:{float(prem):.2f}")

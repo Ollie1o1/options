@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS ai_scores (
 );
 """
 
+_TICKER_CTX_DDL = """
+CREATE TABLE IF NOT EXISTS ticker_contexts (
+    fingerprint  TEXT PRIMARY KEY,
+    context_json TEXT,
+    trade_date   TEXT,
+    scored_at    TEXT
+);
+"""
+
 def _trade_date() -> str:
     """Return today's date string in UTC."""
     return date.today().isoformat()
@@ -74,6 +83,7 @@ class AIScoreCache:
     def _init_db(self) -> None:
         with self._conn() as conn:
             conn.execute(_TABLE_DDL)
+            conn.execute(_TICKER_CTX_DDL)
 
     def get(self, row: dict[str, Any]) -> Optional[dict]:
         fp = _make_fingerprint(row)
@@ -117,6 +127,27 @@ class AIScoreCache:
                     today,
                     now,
                 ),
+            )
+
+    def get_ticker_context(self, symbol: str) -> Optional[dict]:
+        fp = f"ticker_ctx:{symbol.upper()}:{_trade_date()}"
+        with self._conn() as conn:
+            r = conn.execute(
+                "SELECT context_json FROM ticker_contexts WHERE fingerprint=?", (fp,)
+            ).fetchone()
+        if r is None:
+            return None
+        return _safe_json_loads(r["context_json"], None)
+
+    def set_ticker_context(self, symbol: str, ctx: dict) -> None:
+        fp = f"ticker_ctx:{symbol.upper()}:{_trade_date()}"
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO ticker_contexts
+                   (fingerprint, context_json, trade_date, scored_at)
+                   VALUES (?, ?, ?, ?)""",
+                (fp, json.dumps(ctx), _trade_date(), now),
             )
 
     def clear_stale(self) -> int:

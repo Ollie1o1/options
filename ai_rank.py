@@ -262,6 +262,14 @@ def main() -> None:
 
             ranked = combine_scores(picks, ai_df, vix_regime=vix_regime, **kwargs)
 
+            if args.verbose:
+                _stats = scorer.get_session_stats()
+                print(
+                    f"  [session] {_stats['api_calls']} API calls · "
+                    f"~{_stats['estimated_tokens']:,} tokens · "
+                    f"{_stats['cache_hits_today']} cache hits"
+                )
+
             # Show cache stats if cache is active
             if scorer._cache:
                 stats = scorer._cache.stats()

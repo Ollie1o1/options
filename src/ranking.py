@@ -92,23 +92,24 @@ def combine_scores(
 
     # Divergence adjustments
     df["divergence_adjusted"] = False
+    penalty_factor = cfg.get("divergence_penalty_factor", 0.15)
+    boost_factor   = cfg.get("divergence_boost_factor",   0.10)
 
     # TECH>AI: quant bullish, AI bearish -> penalise final_score
     tech_higher_mask = df["divergence_direction"] == "TECH>AI"
     if tech_higher_mask.any():
-        penalty = df.loc[tech_higher_mask, "score_divergence"] * 0.15
+        penalty = df.loc[tech_higher_mask, "score_divergence"] * penalty_factor
         df.loc[tech_higher_mask, "final_score"] -= penalty
         df.loc[tech_higher_mask, "divergence_adjusted"] = True
 
-    # AI>TECH: AI bullish, quant bearish -> boost ai_weight_used slightly and recompute
+    # AI>TECH: AI bullish, quant bearish -> boost final_score symmetrically
     ai_higher_mask = df["divergence_direction"] == "AI>TECH"
     if ai_higher_mask.any():
-        boost = df.loc[ai_higher_mask, "score_divergence"] * 0.10
-        df.loc[ai_higher_mask, "ai_weight_used"] = (df.loc[ai_higher_mask, "ai_weight_used"] + boost).clip(0, 0.55)
-        for idx in df.loc[ai_higher_mask].index:
-            aw = float(df.at[idx, "ai_weight_used"])
-            tw = 1.0 - aw
-            df.at[idx, "final_score"] = tw * float(tech[idx]) + aw * float(ai_norm[idx])
+        boost = df.loc[ai_higher_mask, "score_divergence"] * boost_factor
+        df.loc[ai_higher_mask, "final_score"] += boost
+        df.loc[ai_higher_mask, "ai_weight_used"] = (
+            df.loc[ai_higher_mask, "ai_weight_used"] + boost
+        ).clip(0, 0.55)
         df.loc[ai_higher_mask, "divergence_adjusted"] = True
 
     df["final_score"] = df["final_score"].clip(0, 1).round(4)
