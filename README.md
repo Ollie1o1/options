@@ -206,8 +206,15 @@ To change model at any time, edit the `model` field in `src/config_ai.py`. The `
 2. Create a `.env` file in the project root (it is gitignored — never committed):
    ```
    OPENROUTER_API_KEY=sk-or-v1-your-key-here
+
+   # Optional: per-model keys for specialised models
+   # OPENROUTER_ARCEE_KEY=sk-or-v1-...
+   # OPENROUTER_HUNTER_KEY=sk-or-v1-...
+
+   # Optional: Polygon.io for higher-quality news, VWAP, unusual flow
+   # POLYGON_API_KEY=your_polygon_key_here
    ```
-   See `.env.example` for the template.
+   See `.env.example` for the full template.
 
 3. That's it. The screener loads the key automatically via `python-dotenv`.
 
@@ -502,30 +509,40 @@ Key levers:
 options/
 ├── ai_rank.py                # AI-enhanced entry point — runs screener + AI scoring
 ├── options_screener.py       # Thin wrapper for backward compatibility
+├── backtest_screener.py      # Backtester entry point
 ├── config.json               # Screener thresholds, weights, and exit rules
 ├── requirements.txt
+├── requirements-dev.txt      # Dev dependencies (pytest, pytest-cov)
 ├── .env                      # Your API keys (gitignored — never committed)
 ├── .env.example              # Template showing required env vars
 ├── README.md
 └── src/
     ├── options_screener.py   # Core scan engine, report printing, spread finders
-    ├── data_fetching.py      # yfinance single-fetch, technical indicators, news headlines
-    ├── filters.py            # Chain filtering, premium bucketing, top-N selection
+    ├── data_fetching.py      # yfinance single-fetch, technical indicators, in-session chain cache
+    ├── filters.py            # Chain filtering, IV smile outlier removal, premium bucketing
     ├── scoring.py            # Composite quality score re-exports
+    ├── risk_engine.py        # OI wall detection, gamma ramp flags, structural risk checks
     ├── utils.py              # Vectorised Black-Scholes Greeks (NumPy/SciPy)
     ├── simulation.py         # Monte Carlo PoP / PoT (Merton Jump Diffusion GBM)
     ├── formatting.py         # ANSI colours, box drawing, metric formatters
     ├── trade_analysis.py     # Thesis generation, entry/exit levels, confidence
-    ├── paper_manager.py      # SQLite paper trade logging and position tracking
+    ├── paper_manager.py      # SQLite paper trade logging, schema migration, BS fallback pricing
+    ├── news_fetcher.py       # Concurrent multi-source news (yfinance, Finviz, Alpha Vantage, Polygon)
+    ├── macro_analyzer.py     # Macro risk gating (10Y yield, VIX, DXY, credit spreads)
+    ├── portfolio_risk.py     # Portfolio VaR, correlation analysis, position sizing
+    ├── polygon_client.py     # Polygon.io integration (news, VWAP, unusual options flow)
     ├── dashboard.py          # Streamlit web interface
-    ├── vol_analytics.py      # Volatility cone, IV surface, regime classification
-    ├── backtester.py         # Walk-forward backtester with realistic costs
+    ├── vol_analytics.py      # Volatility cone, concurrent IV surface, regime classification
+    ├── backtester.py         # Walk-forward backtester with spread cost simulation
     ├── stress_test.py        # Scenario P/L analysis
     ├── regime_dashboard.py   # Market regime visualisation
+    ├── calc_expected_move.py # Implied expected move calculator
+    ├── check_pnl.py          # Standalone P/L analysis helper
+    ├── visualize_results.py  # Matplotlib charts for scan results
     ├── ai_scorer.py          # Two-pass AI scoring with retry, fallback, narrative context
     ├── ai_cache.py           # Same-day SQLite cache for AI scores
     ├── ranking.py            # combine_scores(), print_ranked_table(), divergence flags
-    └── config_ai.py          # AI layer configuration (model, weights, thresholds)
+    └── config_ai.py          # AI layer configuration (model, weights, thresholds, validation)
 ```
 
 ---
@@ -535,20 +552,26 @@ options/
 - [x] Vectorised Black-Scholes Greeks engine
 - [x] Monte Carlo PoP blending (Merton Jump Diffusion)
 - [x] HV-adjusted expected value
-- [x] Paper trading with automated exit tracking
+- [x] Paper trading with automated exit tracking, schema migration, BS fallback pricing
 - [x] Streamlit dashboard
 - [x] Full colour CLI — responsive width, trade plan per pick, executive summary
 - [x] Credit spread and iron condor screeners
-- [x] Volatility analytics — cone, IV surface, regime dashboard
-- [x] Walk-forward backtester with realistic slippage and commissions
+- [x] Volatility analytics — cone, concurrent IV surface, regime dashboard
+- [x] Walk-forward backtester with realistic slippage, commissions, and spread cost simulation
 - [x] AI scoring and ranking layer (two-pass, dynamic weights, divergence detection)
 - [x] Same-day AI score cache (SQLite)
 - [x] Narrative context enrichment (IV/HV edge, PoP, RR, theta burn, warnings)
 - [x] Portfolio coherence check (`--portfolio-check`)
+- [x] Polygon.io integration — ticker-filtered news, real-time VWAP, unusual options flow
+- [x] Multi-source concurrent news fetcher (yfinance RSS, Finviz, Alpha Vantage, Polygon)
+- [x] Macro risk gating (10Y yield, VIX regime, DXY, credit spreads)
+- [x] Portfolio VaR and correlation analysis
+- [x] OI wall and gamma ramp structural risk checks
+- [x] In-session options chain cache (eliminates redundant yfinance fetches)
+- [x] Config validation at module load (catches bad config.json / config_ai.py values early)
 - [ ] Real-time alerts (email / SMS)
 - [ ] Multi-leg spread support in paper manager
 - [ ] Backtesting UI improvements
-- [ ] Live news API integration (replace yfinance headlines)
 
 ---
 
