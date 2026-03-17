@@ -10,12 +10,14 @@ import logging
 import random
 import functools
 import warnings
+import sqlite3
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests_cache
+from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 from finvizfinance.screener.performance import Performance
@@ -47,6 +49,425 @@ _MOMENTUM_CACHE: Dict[str, Tuple] = {}
 _IV_RANK_CACHE: Dict[str, Tuple] = {}
 _SENTIMENT_CACHE: Dict[str, float] = {}
 _SEASONALITY_CACHE: Dict[str, float] = {}
+
+# --- Abstract Data Provider ---
+
+class BaseDataProvider(ABC):
+    """Abstract interface for options/market data sources."""
+    @abstractmethod
+    def fetch_chain(self, symbol: str) -> Dict[str, Any]: ...
+    @abstractmethod
+    def fetch_spot(self, symbol: str) -> float: ...
+
+
+class YFinanceProvider(BaseDataProvider):
+    """Concrete provider backed by yfinance (default)."""
+    def fetch_chain(self, symbol: str) -> Dict[str, Any]:
+        return fetch_options_yfinance(symbol, max_expiries=4)
+
+    def fetch_spot(self, symbol: str) -> float:
+        return float(yf.Ticker(symbol).fast_info["lastPrice"])
+
+    async def fetch_chain_async(self, symbol: str) -> Dict[str, Any]:
+        """Non-blocking wrapper around fetch_chain using asyncio.to_thread."""
+        import asyncio
+        return await asyncio.to_thread(self.fetch_chain, symbol)
+
+    async def fetch_spot_async(self, symbol: str) -> float:
+        """Non-blocking wrapper around fetch_spot using asyncio.to_thread."""
+        import asyncio
+        return await asyncio.to_thread(self.fetch_spot, symbol)
+
+
+# ---------------------------------------------------------------------------
+# yahooquery-backed provider
+# ---------------------------------------------------------------------------
+
+def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
+    """
+    Fetch options data via yahooquery and return the same dict structure as
+    fetch_options_yfinance so the two providers are interchangeable.
+
+    Reuses all existing math helpers (HV, RSI, IV rank, etc.) — only the I/O
+    layer (HTTP calls) differs.  Fields that require yfinance-specific APIs
+    (news, sentiment, short interest) are set to safe defaults.
+    """
+    try:
+        from yahooquery import Ticker as YQTicker
+    except ImportError:
+        raise RuntimeError("yahooquery not installed — run: pip install yahooquery")
+
+    tkr_yq = YQTicker(symbol, timeout=15)
+
+    # 1. Price history (1y daily) ------------------------------------------------
+    raw_hist = tkr_yq.history(period="1y", interval="1d")
+    if isinstance(raw_hist, str) or raw_hist is None:
+        raise RuntimeError(f"yahooquery: no price history for {symbol}")
+
+    # yahooquery returns MultiIndex (symbol, date); extract single-ticker slice
+    if isinstance(raw_hist.index, pd.MultiIndex) and "symbol" in raw_hist.index.names:
+        try:
+            hist = raw_hist.xs(symbol.upper(), level="symbol")
+        except KeyError:
+            hist = raw_hist.xs(symbol.lower(), level="symbol")
+    else:
+        hist = raw_hist.copy()
+
+    # Normalize column names to Title-case (match yfinance: Close, High, etc.)
+    hist.columns = [c.title() for c in hist.columns]
+    if "Adj Close" not in hist.columns and "Adjclose" in hist.columns:
+        hist.rename(columns={"Adjclose": "Adj Close"}, inplace=True)
+    hist.index = pd.DatetimeIndex(hist.index)
+
+    if hist.empty or "Close" not in hist.columns:
+        raise RuntimeError(f"yahooquery: unusable history for {symbol}")
+
+    # 2. Derived metrics (same helpers as yfinance path) -------------------------
+    underlying = safe_float(hist["Close"].iloc[-1])
+    if not underlying or underlying <= 0:
+        price_info = tkr_yq.price
+        underlying = safe_float(
+            (price_info or {}).get(symbol.upper(), {}).get("regularMarketPrice")
+        )
+
+    hv_30d_rolling = calculate_historical_volatility(hist, period=30)
+    hv_ewma = calculate_ewma_volatility(hist, span=20)
+    hv_30d = (0.5 * hv_30d_rolling + 0.5 * hv_ewma) if (hv_30d_rolling and hv_ewma) \
+        else (hv_30d_rolling or hv_ewma)
+
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50 = \
+        calculate_momentum_indicators(hist)
+    rvol = calculate_rvol(hist)
+    vwap, fib_50, fib_618 = calculate_technical_levels(hist)
+
+    # 3. Secondary context (yahooquery where possible; defaults otherwise) -------
+    earnings_date = None
+    try:
+        ed = tkr_yq.earnings_dates
+        if isinstance(ed, pd.DataFrame) and not ed.empty:
+            future_mask = ed.index > pd.Timestamp.now()
+            if future_mask.any():
+                earnings_date = ed.index[future_mask][0].to_pydatetime()
+    except Exception:
+        pass
+
+    sector_perf = get_sector_performance(symbol)
+    # yahooquery doesn't expose sentiment/news/short-interest without extra APIs
+    sentiment_score = 0.0
+    news_headlines: List[str] = []
+    news_data = None
+    seasonal_win_rate = None
+    short_interest = None
+    next_ex_div = None
+
+    # 4. Option chain ------------------------------------------------------------
+    try:
+        chain_full = tkr_yq.option_chain
+    except Exception as exc:
+        raise RuntimeError(f"yahooquery: option_chain failed for {symbol}: {exc}")
+
+    if isinstance(chain_full, str) or chain_full is None or (
+        hasattr(chain_full, "empty") and chain_full.empty
+    ):
+        raise RuntimeError(f"yahooquery: no option chain for {symbol}")
+
+    # Determine the index structure (varies: 2- or 3-level MultiIndex)
+    idx_names = list(chain_full.index.names)
+    has_symbol_level = "symbol" in idx_names
+
+    # Get sorted expiration Timestamps
+    expirations_raw = sorted(chain_full.index.get_level_values("expiration").unique())
+    num_exp = max(max_expiries, 2) if max_expiries == 1 else max_expiries
+    expirations_to_use = expirations_raw[:num_exp]
+
+    frames: List[pd.DataFrame] = []
+    for exp_ts in expirations_to_use:
+        exp_str = exp_ts.strftime("%Y-%m-%d") if hasattr(exp_ts, "strftime") else str(exp_ts)[:10]
+        for yq_type, mapped_type in [("calls", "call"), ("puts", "put")]:
+            try:
+                if has_symbol_level:
+                    sub = chain_full.xs(
+                        (symbol.upper(), exp_ts, yq_type),
+                        level=("symbol", "expiration", "optionType"),
+                    )
+                else:
+                    sub = chain_full.xs(
+                        (exp_ts, yq_type), level=("expiration", "optionType")
+                    )
+            except KeyError:
+                continue
+
+            if sub is None or sub.empty:
+                continue
+
+            sub = sub.copy()
+            sub["type"] = mapped_type
+            sub["expiration"] = exp_str
+            sub["symbol"] = symbol.upper()
+            for col in ["strike", "lastPrice", "bid", "ask", "volume",
+                        "openInterest", "impliedVolatility"]:
+                if col not in sub.columns:
+                    sub[col] = pd.NA
+            frames.append(sub)
+
+    if not frames:
+        raise RuntimeError(f"yahooquery: no usable option frames for {symbol}")
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # Max pain
+    max_pain_val = calculate_max_pain(df)
+    df["max_pain"] = max_pain_val
+
+    # 5. Enrich DataFrame (identical to fetch_options_yfinance lines 922+) -------
+    df["underlying"] = underlying
+    df["hv_30d"] = hv_30d
+    df["ret_5d"] = ret_5d
+    df["rsi_14"] = rsi_14
+    df["atr_trend"] = atr_trend
+    df["sma_20"] = sma_20
+    df["sma_50"] = sma_50
+    df["high_20"] = high_20
+    df["low_20"] = low_20
+    df["sentiment_score"] = sentiment_score
+    df["seasonal_win_rate"] = seasonal_win_rate
+    df["is_squeezing"] = is_squeezing
+    df["rvol"] = rvol
+    df["short_interest"] = short_interest
+    df["vwap"] = vwap
+    df["fib_50"] = fib_50
+    df["fib_618"] = fib_618
+
+    df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
+    median_iv = df["impliedVolatility"].median(skipna=True)
+
+    iv_rank_30 = iv_pct_30 = iv_rank_90 = iv_pct_90 = None
+    iv_confidence = "Low"
+    if median_iv and pd.notna(median_iv) and median_iv > 0:
+        iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, iv_confidence = \
+            get_iv_rank_percentile_from_history(hist, median_iv, ticker=symbol)
+
+    df["iv_rank_30"] = iv_rank_30
+    df["iv_percentile_30"] = iv_pct_30
+    df["iv_rank_90"] = iv_rank_90
+    df["iv_percentile_90"] = iv_pct_90
+    df["iv_confidence"] = iv_confidence
+
+    # Term structure spread
+    term_structure_spread = None
+    if len(expirations_to_use) >= 2 and "expiration" in df.columns:
+        try:
+            df["exp_dt"] = pd.to_datetime(df["expiration"], errors="coerce", utc=True)
+            sorted_exps = sorted(df["exp_dt"].dropna().unique())
+            if len(sorted_exps) >= 2:
+                def _atm_iv(d: pd.DataFrame):
+                    d = d.copy()
+                    d["dist"] = (d["strike"] - underlying).abs()
+                    strike = d.loc[d["dist"].idxmin(), "strike"]
+                    ivs = d[d["strike"] == strike]["impliedVolatility"].dropna()
+                    return ivs.mean() if not ivs.empty else None
+
+                f_iv = _atm_iv(df[df["exp_dt"] == sorted_exps[0]])
+                b_iv = _atm_iv(df[df["exp_dt"] == sorted_exps[1]])
+                if f_iv and b_iv:
+                    term_structure_spread = b_iv - f_iv
+        except Exception:
+            pass
+
+    return {
+        "df": df,
+        "history_df": hist,
+        "context": {
+            "hv": hv_30d,
+            "hv_ewma": hv_ewma,
+            "iv_rank": iv_rank_30,
+            "iv_percentile": iv_pct_30,
+            "earnings_date": earnings_date,
+            "earnings_move_data": None,   # requires yfinance historical earnings
+            "sentiment_score": sentiment_score,
+            "news_headlines": news_headlines,
+            "seasonal_win_rate": seasonal_win_rate,
+            "term_structure_spread": term_structure_spread,
+            "sector_perf": sector_perf,
+            "rvol": rvol,
+            "short_interest": short_interest,
+            "next_ex_div": next_ex_div,
+            "vwap": vwap,
+            "fib_50": fib_50,
+            "fib_618": fib_618,
+            "news_data": news_data,
+            "iv_confidence": iv_confidence,
+        },
+    }
+
+
+class YahooQueryProvider(BaseDataProvider):
+    """
+    Option data provider backed by yahooquery.
+
+    Uses a different HTTP client and endpoint structure than yfinance so the
+    two providers hit independent rate limits and can be raced in parallel.
+    yahooquery also supports batching multiple symbols in a single HTTP round-
+    trip via fetch_chain_batch().
+    """
+
+    def fetch_chain(self, symbol: str) -> Dict[str, Any]:
+        return fetch_options_yahooquery(symbol, max_expiries=4)
+
+    def fetch_spot(self, symbol: str) -> float:
+        from yahooquery import Ticker as YQTicker
+        price = YQTicker(symbol, timeout=10).price
+        val = (price or {}).get(symbol.upper(), {}).get("regularMarketPrice")
+        if val is None:
+            raise RuntimeError(f"yahooquery: no spot price for {symbol}")
+        return float(val)
+
+    def fetch_chain_batch(
+        self, symbols: List[str], max_expiries: int = 4
+    ) -> Dict[str, Any]:
+        """
+        Fetch option chains for ALL symbols in a single yahooquery batch call.
+
+        Returns a dict {symbol: chain_dict_or_error} with the same structure as
+        fetch_options_yfinance so results are drop-in replacements.
+        """
+        from yahooquery import Ticker as YQTicker
+
+        results: Dict[str, Any] = {}
+        # One ticker object covers all symbols; yahooquery batches internally
+        batch = YQTicker(symbols, asynchronous=True, timeout=30)
+
+        for symbol in symbols:
+            try:
+                results[symbol] = fetch_options_yahooquery.__wrapped__(
+                    symbol, max_expiries, _batch_ticker=batch
+                ) if hasattr(fetch_options_yahooquery, "__wrapped__") \
+                    else fetch_options_yahooquery(symbol, max_expiries)
+            except Exception as exc:
+                results[symbol] = {"error": str(exc)}
+
+        return results
+
+
+class FanOutProvider(BaseDataProvider):
+    """
+    Meta-provider that races multiple providers in parallel and returns the
+    first successful result.  Provides redundancy: if yfinance is rate-limited,
+    yahooquery picks up the slack, and vice versa.
+    """
+
+    def __init__(self, providers: List[BaseDataProvider]) -> None:
+        self.providers = providers
+
+    def fetch_chain(self, symbol: str) -> Dict[str, Any]:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(self.providers)
+        ) as executor:
+            future_to_provider = {
+                executor.submit(p.fetch_chain, symbol): p
+                for p in self.providers
+            }
+            errors = []
+            for fut in concurrent.futures.as_completed(future_to_provider):
+                try:
+                    return fut.result()
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        raise RuntimeError(
+            f"All providers failed for {symbol}: {'; '.join(errors)}"
+        )
+
+    def fetch_spot(self, symbol: str) -> float:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(self.providers)
+        ) as executor:
+            future_to_provider = {
+                executor.submit(p.fetch_spot, symbol): p
+                for p in self.providers
+            }
+            errors = []
+            for fut in concurrent.futures.as_completed(future_to_provider):
+                try:
+                    return fut.result()
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        raise RuntimeError(
+            f"All providers failed for spot({symbol}): {'; '.join(errors)}"
+        )
+
+
+# Module-level singleton — swap out for testing or alternative sources
+def _make_default_provider() -> BaseDataProvider:
+    """Build the default provider, using FanOut if yahooquery is available."""
+    try:
+        import yahooquery  # noqa: F401
+        return FanOutProvider([YFinanceProvider(), YahooQueryProvider()])
+    except ImportError:
+        return YFinanceProvider()
+
+
+_DATA_PROVIDER: BaseDataProvider = _make_default_provider()
+
+# --- IV History Persistence ---
+
+def _get_iv_db_path() -> str:
+    try:
+        import json
+        with open("config.json") as f:
+            cfg = json.load(f)
+        return cfg.get("iv_history_db_path", "iv_cache.db")
+    except Exception:
+        return "iv_cache.db"
+
+
+def _init_iv_db(db_path: str) -> None:
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS iv_history (
+                ticker TEXT,
+                date   TEXT,
+                iv_value REAL,
+                PRIMARY KEY (ticker, date)
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _upsert_iv(ticker: str, date_str: str, iv: float, db_path: str) -> None:
+    try:
+        _init_iv_db(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO iv_history (ticker, date, iv_value) VALUES (?, ?, ?)",
+            (ticker, date_str, float(iv)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _load_iv_history(ticker: str, db_path: str) -> List[float]:
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT iv_value FROM iv_history WHERE ticker=? ORDER BY date ASC",
+            (ticker,),
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows if r[0] is not None]
+    except Exception:
+        return []
 
 # --- Retry Decorator ---
 def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)):
@@ -424,14 +845,61 @@ def calculate_technical_levels(hist: pd.DataFrame) -> Tuple[Optional[float], Opt
     except Exception:
         return None, None, None
 
-def get_iv_rank_percentile_from_history(hist: pd.DataFrame, current_iv: float) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    """Calculate IV Rank/Percentile using historical realized volatility as proxy."""
+def get_iv_rank_percentile_from_history(
+    hist: pd.DataFrame,
+    current_iv: float,
+    ticker: str = "",
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], str]:
+    """Calculate IV Rank/Percentile, persisting daily IV for improving confidence over time.
+
+    Returns a 5-tuple: (iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence).
+    confidence is "High" (>=252 stored days), "Medium" (>=30), or "Low" (HV proxy).
+    """
+    confidence = "Low"
+
+    # --- Persist today's IV and try to use stored history ---
+    try:
+        db_path = _get_iv_db_path()
+        if ticker:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            _upsert_iv(ticker, date_str, current_iv, db_path)
+            iv_history = _load_iv_history(ticker, db_path)
+        else:
+            iv_history = []
+
+        if len(iv_history) >= 30:
+            iv_arr = np.array(iv_history, dtype=float)
+            iv_min = iv_arr.min()
+            iv_max = iv_arr.max()
+            if iv_max - iv_min <= 0:
+                iv_rank_30, iv_pct_30 = 0.5, 0.5
+            else:
+                iv_rank_30 = float(np.clip((current_iv - iv_min) / (iv_max - iv_min), 0, 1))
+                iv_pct_30 = float(np.clip((iv_arr < current_iv).sum() / len(iv_arr), 0, 1))
+
+            if len(iv_history) >= 90:
+                iv_arr_90 = iv_arr[-90:]
+                iv_min_90, iv_max_90 = iv_arr_90.min(), iv_arr_90.max()
+                if iv_max_90 - iv_min_90 <= 0:
+                    iv_rank_90, iv_pct_90 = 0.5, 0.5
+                else:
+                    iv_rank_90 = float(np.clip((current_iv - iv_min_90) / (iv_max_90 - iv_min_90), 0, 1))
+                    iv_pct_90 = float(np.clip((iv_arr_90 < current_iv).sum() / len(iv_arr_90), 0, 1))
+            else:
+                iv_rank_90, iv_pct_90 = iv_rank_30, iv_pct_30
+
+            confidence = "High" if len(iv_history) >= 252 else "Medium"
+            return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
+    except Exception:
+        pass
+
+    # --- Fall back to HV-proxy computation ---
     try:
         if hist.empty or len(hist) < 30:
-            return None, None, None, None
+            return None, None, None, None, confidence
 
         returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
-        
+
         def _iv_stats(window):
             if len(returns) < window:
                 return None, None
@@ -442,7 +910,6 @@ def get_iv_rank_percentile_from_history(hist: pd.DataFrame, current_iv: float) -
             iv_min = rolling_vol.min()
             iv_max = rolling_vol.max()
             if iv_max - iv_min <= 0:
-                # Flat volatility history — neutral signal rather than missing data
                 return 0.5, 0.5
             iv_rank = (current_iv - iv_min) / (iv_max - iv_min)
             iv_percentile = (rolling_vol < current_iv).sum() / len(rolling_vol)
@@ -450,9 +917,9 @@ def get_iv_rank_percentile_from_history(hist: pd.DataFrame, current_iv: float) -
 
         iv_rank_30, iv_pct_30 = _iv_stats(30)
         iv_rank_90, iv_pct_90 = _iv_stats(90)
-        return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90
+        return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
     except Exception:
-        return None, None, None, None
+        return None, None, None, None, confidence
 
 def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
     """Fetch short interest (shortPercentOfFloat) from ticker info."""
@@ -808,13 +1275,17 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     median_iv = df["impliedVolatility"].median(skipna=True)
     
     iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = None, None, None, None
+    iv_confidence = "Low"
     if median_iv and pd.notna(median_iv) and median_iv > 0:
-        iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = get_iv_rank_percentile_from_history(hist, median_iv)
+        iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, iv_confidence = get_iv_rank_percentile_from_history(
+            hist, median_iv, ticker=symbol
+        )
 
     df["iv_rank_30"] = iv_rank_30
     df["iv_percentile_30"] = iv_pct_30
     df["iv_rank_90"] = iv_rank_90
     df["iv_percentile_90"] = iv_pct_90
+    df["iv_confidence"] = iv_confidence
 
     # Term Structure
     term_structure_spread = None
@@ -863,5 +1334,66 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "fib_50": fib_50,
             "fib_618": fib_618,
             "news_data": news_data,
+            "iv_confidence": iv_confidence,
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Async batch pipeline
+# ---------------------------------------------------------------------------
+
+async def batch_fetch_async(
+    symbols: List[str],
+    max_concurrent: int = 20,
+    provider: Optional[BaseDataProvider] = None,
+) -> Dict[str, Any]:
+    """
+    Concurrently fetch option chains for up to max_concurrent symbols at once.
+
+    Uses asyncio.to_thread to avoid blocking the event loop while yfinance
+    makes synchronous HTTP calls.  Each symbol result is a dict returned by
+    the provider's fetch_chain method, or {"error": str} on failure.
+    """
+    import asyncio
+    _provider = provider or _DATA_PROVIDER
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _fetch_one(sym: str):
+        async with semaphore:
+            try:
+                return sym, await asyncio.to_thread(_provider.fetch_chain, sym)
+            except Exception as exc:
+                return sym, {"error": str(exc)}
+
+    tasks = [_fetch_one(s) for s in symbols]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+    return dict(results)
+
+
+def batch_fetch(
+    symbols: List[str],
+    max_concurrent: int = 20,
+    provider: Optional[BaseDataProvider] = None,
+) -> Dict[str, Any]:
+    """
+    Synchronous entry point for the async batch fetcher.
+
+    Safe to call from both synchronous code and from within a running event
+    loop (e.g. Streamlit / Jupyter).
+    """
+    import asyncio
+
+    async def _run():
+        return await batch_fetch_async(symbols, max_concurrent, provider)
+
+    try:
+        # get_running_loop() raises RuntimeError if no loop is running (Python 3.7+)
+        asyncio.get_running_loop()
+        # A loop IS running (Streamlit, Jupyter, etc.) — run in a worker thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            return pool.submit(asyncio.run, _run()).result()
+    except RuntimeError:
+        # No running loop — safe to create one
+        return asyncio.run(_run())

@@ -85,6 +85,7 @@ from .utils import (
 )
 from .filters import (
     filter_options,
+    filter_iv_smile_outliers,
     categorize_by_premium,
     pick_top_per_bucket
 )
@@ -630,37 +631,10 @@ def calculate_metrics(
         df["iv_vs_hv"] = 0.0
         df["iv_hv_ratio"] = 1.0
     
-    # --- OI Wall Detection (Optimized) ---
-    df["oi_wall_warning"] = ""
-
-    # Find max OI strikes per expiration and type using vectorized groupby
-    max_oi_idx = df.groupby(["expiration", "type"])["openInterest"].idxmax()
-
-    for (expiry, opt_type), idx in max_oi_idx.items():
-        if pd.isna(idx):
-            continue
-
-        wall_strike = df.loc[idx, "strike"]
-
-        # Get all strikes for this expiration and type, sorted
-        mask = (df["expiration"] == expiry) & (df["type"] == opt_type)
-        strikes_sorted = df.loc[mask, "strike"].sort_values().unique()
-
-        # Find adjacent strike to the wall
-        wall_pos = np.searchsorted(strikes_sorted, wall_strike)
-
-        if opt_type == "call":
-            # For calls, warn at wall and one strike below
-            adjacent_strike = strikes_sorted[wall_pos - 1] if wall_pos > 0 else None
-            warning_strikes = [wall_strike] + ([adjacent_strike] if adjacent_strike is not None else [])
-            warning_mask = mask & df["strike"].isin(warning_strikes)
-            df.loc[warning_mask, "oi_wall_warning"] = "LIMITED UPSIDE"
-        else:  # put
-            # For puts, warn at wall and one strike above
-            adjacent_strike = strikes_sorted[wall_pos + 1] if wall_pos < len(strikes_sorted) - 1 else None
-            warning_strikes = [wall_strike] + ([adjacent_strike] if adjacent_strike is not None else [])
-            warning_mask = mask & df["strike"].isin(warning_strikes)
-            df.loc[warning_mask, "oi_wall_warning"] = "LIMITED DOWNSIDE"
+    # --- Risk Checks (OI wall + gamma ramp, delegated to risk_engine) ---
+    from .risk_engine import run_risk_checks
+    current_price_scalar = float(S_vals[0]) if len(S_vals) > 0 else 0.0
+    df = run_risk_checks(df, current_price=current_price_scalar, config=config)
 
     # IV Skew — 25-delta risk reversal (standard vol surface signal)
     # Finds the call and put closest to 0.25 abs_delta per expiration,
@@ -711,16 +685,6 @@ def calculate_metrics(
     # Dollar P&L change per 1 volatility point (1%) move in IV, per contract (100 shares).
     # A vega_dollar of $50 means IV moving +1% adds $50 to the position value.
     df["vega_dollar"] = np.abs(df["vega"].values) * 100.0
-
-    # --- Gamma Ramp Warning ---
-    # Near-expiry ATM/NTM options see explosive gamma — position delta can flip violently.
-    # Flag when: DTE < 7, gamma > 0.04, and option is not deep OTM (abs_delta > 0.20).
-    dte_vals_flag = df["T_years"].values * 365.0
-    df["gamma_ramp"] = (
-        (dte_vals_flag < 7) &
-        (df["gamma"].values > 0.04) &
-        (df["abs_delta"].values > 0.20)
-    )
 
     # --- Breakeven Distance % ---
     # What % move in the underlying is required to reach breakeven at expiration.
@@ -1005,6 +969,39 @@ def calculate_scores(
         df.loc[(df["Earnings Play"] == "YES") & (df["earnings_iv_cheap"] == True), "quality_score"] += 0.06
         df.loc[(df["Earnings Play"] == "YES") & (df["earnings_iv_cheap"] == False), "quality_score"] -= 0.06
 
+    # --- Charm / Vanna Greek Adjustments ---
+    greek_adj = config.get("greek_adjustments", {})
+
+    # Charm penalty: near-expiry OTM options with rapid delta decay
+    charm_thresh  = greek_adj.get("charm_penalty_threshold", -0.05)
+    charm_penalty = greek_adj.get("charm_penalty_value", -0.05)
+    if "charm" in df.columns and "dte" not in df.columns:
+        df["dte"] = df["T_years"] * 365.0
+    if "charm" in df.columns:
+        charm_mask = (df["dte"] < 7) & (pd.to_numeric(df["charm"], errors="coerce").fillna(0) < charm_thresh)
+        df.loc[charm_mask, "quality_score"] += charm_penalty
+
+    # Vanna reward: positive vanna in rising IV environment
+    vanna_iv_min = greek_adj.get("vanna_reward_iv_rank_min", 0.50)
+    vanna_reward  = greek_adj.get("vanna_reward_value", 0.03)
+    if "vanna" in df.columns:
+        iv_rank_col = df.get("iv_rank_30", pd.Series(np.nan, index=df.index))
+        vanna_mask = (
+            (pd.to_numeric(df["vanna"], errors="coerce").fillna(0) > 0)
+            & (pd.to_numeric(iv_rank_col, errors="coerce").fillna(0) > vanna_iv_min)
+        )
+        df.loc[vanna_mask, "quality_score"] += vanna_reward
+
+    # Macro event penalty
+    try:
+        from .macro_analyzer import get_macro_penalty
+        _macro_pen, _macro_active, _macro_desc = get_macro_penalty(config)
+        if _macro_active and _macro_pen != 0.0:
+            df["quality_score"] += _macro_pen
+            df["macro_event_flag"] = _macro_desc
+    except Exception:
+        pass
+
     # Save components
     df["quality_score"] = df["quality_score"].clip(0, 1)
     df["ev_score"] = ev_score
@@ -1091,6 +1088,14 @@ def enrich_and_score(
     df["openInterest"] = pd.to_numeric(df["openInterest"], errors='coerce').fillna(0)
     df = df[(df["volume"] >= fc.get("min_volume", 50)) | (df["openInterest"] >= fc.get("min_open_interest", 10))].copy()
 
+    if df.empty: return df
+
+    # IV Smile Outlier Filter: remove bad-print IV rows before enrichment
+    df = filter_iv_smile_outliers(
+        df,
+        iv_threshold=config.get("iv_outlier_threshold", 0.30),
+        min_volume=config.get("iv_outlier_min_volume", 10),
+    )
     if df.empty: return df
 
     df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors='coerce')
@@ -1442,7 +1447,8 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
         if HAS_ENHANCED_CLI:
             iv_pct = row.get("iv_percentile_30", row.get("iv_percentile", 0.5)) or 0.5
             hv = row.get("hv_30d", 0) or 0
-            parts.append(fmt.format_iv_rank_bar(iv_pct, hv, float(iv)))
+            iv_conf = row.get("iv_confidence", "")
+            parts.append(fmt.format_iv_rank_bar(iv_pct, hv, float(iv), iv_confidence=iv_conf))
         else:
             rel = "\u2248" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
             parts.append(f"IV: {format_pct(iv)} ({rel} median)")
@@ -1844,6 +1850,23 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     print(f"   Trend: {fmt.colorize(market_trend, trend_color, bold=True)} | "
           f"VIX: {fmt.colorize(vix_str, vol_color)} ({volatility_regime}) | "
           f"Risk: {fmt.colorize('HIGH', fmt.Colors.RED, bold=True) if macro_risk else fmt.colorize('LOW', fmt.Colors.GREEN)}")
+
+    # Portfolio VaR
+    try:
+        from .portfolio_risk import RiskAggregator
+        _agg = RiskAggregator(config=config)
+        _var_data = _agg.calculate_portfolio_var(
+            confidence=config.get("var_confidence", 0.95),
+            n_simulations=config.get("var_n_simulations", 10_000),
+        )
+        if _var_data["n_positions"] > 0:
+            print(f"\n{fmt.format_header('📉 PORTFOLIO RISK (OPEN POSITIONS)', '')}")
+            print(f"   {_var_data['n_positions']} open position(s)  |  "
+                  f"{int(config.get('var_confidence', 0.95) * 100)}% 1-day VaR: ${_var_data['var_95']:,.0f}  |  "
+                  f"CVaR: ${_var_data['cvar_95']:,.0f}  |  "
+                  f"Expected P&L: ${_var_data['mean_pnl']:+,.0f}")
+    except Exception:
+        pass
 
     # Top 3 Opportunities
     print(f"\n{fmt.format_header('🏆 TOP 3 OPPORTUNITIES', '')}")
@@ -2987,6 +3010,22 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     underlying_price = 0.0
     if not picks.empty and "underlying" in picks.columns:
         underlying_price = picks.iloc[0]["underlying"]
+
+    # --- Portfolio GEX Gate ---
+    try:
+        from .portfolio_risk import RiskAggregator
+        _risk = RiskAggregator(config=config)
+        _risk_off, _risk_reason = _risk.is_risk_off_required(config)
+        if _risk_off and verbose:
+            _warn_msg = f"RISK-OFF MODE: {_risk_reason}"
+            if HAS_ENHANCED_CLI:
+                print(fmt.format_warning(_warn_msg))
+            else:
+                print(f"  ⚠️  {_warn_msg}")
+        if _risk_off and not picks.empty and "abs_delta" in picks.columns:
+            picks = picks[picks["abs_delta"] < 0.30].copy()
+    except Exception:
+        pass
 
     # Concentration warning across scan results
     if verbose and not picks.empty and len(picks) >= 5:

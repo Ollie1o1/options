@@ -63,6 +63,21 @@ except ImportError:
     HAS_UTILS = False
 
 
+def _classify_vix_regime(vix_level: float) -> str:
+    """Map a VIX level to a regime label."""
+    if vix_level < 15:
+        return "Low"
+    if vix_level < 25:
+        return "Normal"
+    return "High"
+
+
+def _calculate_mdd(series: "pd.Series") -> float:
+    """Maximum drawdown of a cumulative P&L series."""
+    cum = series.cumsum()
+    return float((cum.cummax() - cum).max())
+
+
 def _c(text: str, color: str = "", bold: bool = False) -> str:
     if HAS_FMT and fmt and color:
         return fmt.colorize(str(text), color, bold=bold)
@@ -177,6 +192,17 @@ def run_backtest(
     import warnings
     all_ticker_results = []
 
+    # Fetch VIX history once for regime tagging
+    vix_hist: "Optional[pd.Series]" = None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _vix_raw = yf.Ticker("^VIX").history(period="2y")["Close"]
+        if not _vix_raw.empty:
+            vix_hist = _vix_raw
+    except Exception:
+        pass
+
     for ticker in tickers:
         try:
             tkr = yf.Ticker(ticker)
@@ -227,6 +253,28 @@ def run_backtest(
             hv_rank_arr = signals_df["hv_rank"].values
             rsi_arr = signals_df["rsi_14"].values
             ret5_arr = signals_df["ret_5d"].values
+
+            # Align VIX to signals_df dates for regime tagging.
+            # Strip timezone info and normalize both indices to midnight dates so
+            # reindex works correctly regardless of yfinance tz conventions.
+            vix_aligned: "Optional[pd.Series]" = None
+            if vix_hist is not None and HAS_PD:
+                try:
+                    vix_copy = vix_hist.copy()
+                    if hasattr(vix_copy.index, "tz") and vix_copy.index.tz is not None:
+                        vix_copy.index = vix_copy.index.tz_localize(None)
+                    vix_copy.index = vix_copy.index.normalize()
+                    # Deduplicate normalized dates (keep last close if duplicates)
+                    vix_copy = vix_copy[~vix_copy.index.duplicated(keep="last")]
+
+                    sig_idx = signals_df.index
+                    if hasattr(sig_idx, "tz") and sig_idx.tz is not None:
+                        sig_idx = sig_idx.tz_localize(None)
+                    sig_idx = sig_idx.normalize()
+
+                    vix_aligned = vix_copy.reindex(sig_idx, method="nearest")
+                except Exception:
+                    pass
 
             for i in range(len(signals_df) - exit_dte - 2):
                 try:
@@ -298,6 +346,16 @@ def run_backtest(
                     pnl_per_share = actual_exit_price - entry_price  # long option
                     pnl_pct = pnl_per_share / entry_price
 
+                    # VIX regime for this trade day
+                    vix_val = 20.0  # default "Normal"
+                    if vix_aligned is not None:
+                        try:
+                            vix_val = float(vix_aligned.iloc[i])
+                            if math.isnan(vix_val):
+                                vix_val = 20.0
+                        except Exception:
+                            pass
+
                     trades.append({
                         "day": i,
                         "direction": direction,
@@ -306,6 +364,8 @@ def run_backtest(
                         "exit_price": actual_exit_price,
                         "pnl_pct": pnl_pct,
                         "win": pnl_pct > 0,
+                        "vix_level": vix_val,
+                        "vix_regime": _classify_vix_regime(vix_val),
                     })
                 except Exception:
                     continue
@@ -375,6 +435,14 @@ def run_backtest(
             loss_sum = float(abs(trades_df.loc[trades_df["pnl_pct"] <= 0, "pnl_pct"].sum()))
             profit_factor = wins_sum / loss_sum if loss_sum > 0 else float("inf")
 
+            # Regime summary
+            regime_summary = {}
+            if "vix_regime" in trades_df.columns:
+                try:
+                    regime_summary = build_regime_summary(trades_df)
+                except Exception:
+                    pass
+
             all_ticker_results.append({
                 "ticker": ticker,
                 "n_trades": n_trades,
@@ -387,6 +455,7 @@ def run_backtest(
                 "optimal_threshold": optimal_threshold,
                 "max_drawdown": max_drawdown,
                 "profit_factor": profit_factor,
+                "regime_summary": regime_summary,
             })
 
         except Exception as e:
@@ -400,6 +469,134 @@ def run_backtest(
         "tp": tp,
         "sl": sl,
     }
+
+
+# ─── Regime analysis ─────────────────────────────────────────────────────────────
+
+def build_regime_summary(trades_df: "pd.DataFrame") -> Dict[str, Any]:
+    """
+    Compute per-VIX-regime performance statistics from a trades DataFrame.
+
+    Requires a 'vix_regime' column with values "Low", "Normal", or "High".
+    Returns a nested dict keyed by regime name.
+    """
+    if not HAS_PD or trades_df.empty or "vix_regime" not in trades_df.columns:
+        return {}
+
+    summary: Dict[str, Any] = {}
+    for regime in ["Low", "Normal", "High"]:
+        sub = trades_df[trades_df["vix_regime"] == regime]
+        if sub.empty:
+            continue
+        n = len(sub)
+        win_rate = float(sub["win"].mean())
+        avg_return = float(sub["pnl_pct"].mean())
+
+        ret_std = float(sub["pnl_pct"].std())
+        sharpe = (avg_return / ret_std * math.sqrt(n)) if ret_std > 0 else 0.0
+
+        wins_sum = float(sub.loc[sub["pnl_pct"] > 0, "pnl_pct"].sum())
+        loss_sum = float(abs(sub.loc[sub["pnl_pct"] <= 0, "pnl_pct"].sum()))
+        profit_factor = wins_sum / loss_sum if loss_sum > 0 else float("inf")
+
+        max_drawdown = _calculate_mdd(sub["pnl_pct"])
+
+        summary[regime] = {
+            "n_trades": n,
+            "win_rate": win_rate,
+            "avg_return": avg_return,
+            "sharpe": sharpe,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown,
+        }
+    return summary
+
+
+def print_regime_report(results: Dict[str, Any], width: int = 90) -> None:
+    """
+    Print a 4-column regime performance table:
+      Regime | Trades | Win% | Sharpe | PF | MDD
+    Aggregates across all tickers in results.
+    """
+    if not HAS_PD:
+        return
+
+    ticker_results = [r for r in results.get("results", []) if "error" not in r]
+    if not ticker_results:
+        return
+
+    # Aggregate across tickers
+    combined: Dict[str, Dict] = {}
+    for r in ticker_results:
+        rs = r.get("regime_summary", {})
+        for regime, data in rs.items():
+            if regime not in combined:
+                combined[regime] = {
+                    "n_trades": 0,
+                    "wins": 0,
+                    "total_ret": 0.0,
+                    "sharpe_sum": 0.0,
+                    "pf_sum": 0.0,
+                    "mdd_sum": 0.0,
+                    "count": 0,
+                }
+            n = data["n_trades"]
+            combined[regime]["n_trades"] += n
+            combined[regime]["wins"] += round(data["win_rate"] * n)
+            combined[regime]["total_ret"] += data["avg_return"] * n
+            combined[regime]["sharpe_sum"] += data["sharpe"]
+            pf = data["profit_factor"]
+            combined[regime]["pf_sum"] += pf if math.isfinite(pf) else 0.0
+            combined[regime]["mdd_sum"] += data["max_drawdown"]
+            combined[regime]["count"] += 1
+
+    if not combined:
+        return
+
+    print()
+    hdr = "  VIX REGIME PERFORMANCE BREAKDOWN"
+    if HAS_FMT and fmt:
+        print(fmt.colorize(hdr, fmt.Colors.BRIGHT_CYAN, bold=True))
+    else:
+        print(hdr)
+    print(_sep(width))
+
+    col_hdr = (
+        f"  {'Regime':<8}  {'Trades':>6}  {'Win%':>5}  {'Sharpe':>7}"
+        f"  {'PF':>5}  {'MDD':>7}"
+    )
+    if HAS_FMT and fmt:
+        print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
+    else:
+        print(col_hdr)
+
+    for regime in ["Low", "Normal", "High"]:
+        if regime not in combined:
+            continue
+        d = combined[regime]
+        n = d["n_trades"]
+        if n == 0:
+            continue
+        wr = d["wins"] / n
+        avg_r = d["total_ret"] / n
+        cnt = d["count"]
+        avg_sharpe = d["sharpe_sum"] / cnt if cnt > 0 else 0.0
+        avg_pf = d["pf_sum"] / cnt if cnt > 0 else 0.0
+        avg_mdd = d["mdd_sum"] / cnt if cnt > 0 else 0.0
+
+        pf_str = f"{avg_pf:.2f}" if math.isfinite(avg_pf) else "  inf"
+        row = (
+            f"  {regime:<8}  {n:>6}  {wr*100:>4.0f}%  {avg_sharpe:>7.2f}"
+            f"  {pf_str:>5}  {avg_mdd*100:>6.1f}%"
+        )
+        if HAS_FMT and fmt:
+            color = fmt.Colors.GREEN if avg_r > 0 else fmt.Colors.RED
+            print(fmt.colorize(row, color))
+        else:
+            print(row)
+
+    print(_sep(width))
+    print()
 
 
 # ─── Paper trade IC ─────────────────────────────────────────────────────────────
@@ -671,6 +868,11 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
         else:
             print(thr_line)
     print()
+
+    # Regime breakdown
+    any_regime = any(r.get("regime_summary") for r in ticker_results)
+    if any_regime:
+        print_regime_report(results, width=width)
 
 
 def print_paper_trade_ic(db_path: str = "paper_trades.db", width: int = 90) -> None:

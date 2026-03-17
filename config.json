@@ -127,5 +127,25 @@
     "stop_loss_pct": 0.25,
     "trailing_stop_enabled": false,
     "position_risk_pct": 0.02
-  }
+  },
+  "iv_history_db_path": "iv_cache.db",
+  "iv_outlier_threshold": 0.30,
+  "iv_outlier_min_volume": 10,
+  "greek_adjustments": {
+    "charm_penalty_threshold": -0.05,
+    "charm_penalty_value": -0.05,
+    "vanna_reward_iv_rank_min": 0.50,
+    "vanna_reward_value": 0.03
+  },
+  "correlation_threshold": 0.80,
+  "correlation_size_reduction": 0.50,
+  "correlation_aware_sizing": true,
+  "portfolio_gex_limit": 50000.0,
+  "var_confidence": 0.95,
+  "var_n_simulations": 10000,
+  "var_jump_intensity": 2.0,
+  "var_jump_mean": -0.02,
+  "var_jump_vol": 0.04,
+  "macro_penalty": -0.15,
+  "macro_event_window_hours": 48
 }
