@@ -55,6 +55,8 @@ pip install -r requirements.txt
 
 The technical screener works out of the box — no API keys needed (uses Yahoo Finance). The AI layer requires an OpenRouter or Anthropic API key (see [Setup](#setup)).
 
+**Optional — Polygon.io enrichment:** Set `POLYGON_API_KEY` in your `.env` file to enable higher-quality ticker-filtered news, real-time VWAP, and unusual options flow detection. Free API keys are available at [polygon.io/dashboard/signup](https://polygon.io/dashboard/signup). The screener runs identically without this key.
+
 ---
 
 ## Quick Start

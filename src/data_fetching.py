@@ -1311,6 +1311,53 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         except Exception:
             pass
 
+    # ── Polygon.io enrichment (opt-in, silent no-op when key absent) ────────────
+    unusual_options_flow = None
+    company_description = None
+    market_cap = None
+    try:
+        from src.polygon_client import PolygonClient
+        _poly = PolygonClient()
+        if _poly._enabled:
+            logger.debug("Polygon enrichment: fetching data for %s", symbol)
+
+            # VWAP override from Polygon snapshot (more accurate than computed)
+            snap = _poly.get_snapshot(symbol)
+            if snap:
+                try:
+                    poly_vwap = snap["ticker"]["day"]["vw"]
+                    if poly_vwap and float(poly_vwap) > 0:
+                        vwap = float(poly_vwap)
+                        logger.debug("Polygon enrichment: VWAP overridden to %.4f for %s", vwap, symbol)
+                except Exception:
+                    pass
+
+            # Unusual options flow
+            import time as _time
+            _time.sleep(0.2)
+            poly_cfg = {}
+            try:
+                from src.config_ai import AI_CONFIG
+                poly_cfg = AI_CONFIG.get("polygon", {})
+            except Exception:
+                pass
+            min_prem = poly_cfg.get("unusual_flow_min_premium", 10_000)
+            unusual_options_flow = _poly.get_unusual_options_flow(symbol, min_premium=min_prem)
+
+            # Company description and market cap
+            _time.sleep(0.2)
+            details = _poly.get_ticker_details(symbol)
+            if details:
+                company_description = details.get("description", "")
+                raw_mc = details.get("market_cap")
+                if raw_mc:
+                    try:
+                        market_cap = float(raw_mc)
+                    except Exception:
+                        pass
+    except Exception as _poly_exc:
+        logger.debug("Polygon enrichment failed for %s: %s", symbol, _poly_exc)
+
     # Return structured result
     return {
         "df": df,
@@ -1335,6 +1382,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "fib_618": fib_618,
             "news_data": news_data,
             "iv_confidence": iv_confidence,
+            "unusual_options_flow": unusual_options_flow,
+            "company_description": company_description,
+            "market_cap": market_cap,
         }
     }
 

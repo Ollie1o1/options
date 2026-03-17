@@ -452,9 +452,32 @@ def fetch_news_and_events(
     if av_key:
         av_items = _fetch_alpha_vantage(symbol, av_key, max_age_hours=max_age_hours)
 
-    # Merge, deduplicate, sort newest-first
-    all_items = _deduplicate(yf_items + fv_items + av_items)
-    all_items.sort(key=lambda x: x.published, reverse=True)
+    # 4. Polygon.io (optional) — ticker-filtered, high-quality source
+    polygon_items: List[NewsItem] = []
+    try:
+        from src.polygon_client import PolygonClient
+        _poly = PolygonClient()
+        if _poly._enabled:
+            raw_poly = _poly.get_news(symbol, limit=10, max_age_hours=max_age_hours)
+            if raw_poly:
+                for pi in raw_poly:
+                    headline = _sanitize(pi.headline)
+                    if not headline:
+                        continue
+                    polygon_items.append(NewsItem(
+                        headline=headline,
+                        source=f"Polygon/{pi.publisher}",
+                        published=pi.published_utc,
+                        sentiment=pi.sentiment,
+                        url=pi.url,
+                        relevance=1.2,   # slightly higher priority in sort
+                    ))
+    except Exception as _poly_exc:
+        logger.debug("Polygon news fetch failed for %s: %s", symbol, _poly_exc)
+
+    # Merge, deduplicate, sort newest-first (Polygon items get relevance boost)
+    all_items = _deduplicate(polygon_items + yf_items + fv_items + av_items)
+    all_items.sort(key=lambda x: (x.published, x.relevance), reverse=True)
 
     result.items = all_items[:max_headlines]
 

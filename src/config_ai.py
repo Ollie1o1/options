@@ -60,6 +60,14 @@ AI_CONFIG: dict = {
         "divergence_flag_threshold": 0.20,
     },
 
+    # ── Polygon.io enrichment settings ───────────────────────────────────────────
+    "polygon": {
+        "enabled": True,
+        "news_limit": 10,
+        "unusual_flow_min_premium": 25_000,
+        "news_max_age_hours": 48,
+    },
+
     # ── Fields sent to AI (keep only what the narrative does NOT already cover) ──
     "fields_to_include": [
         "symbol", "type", "strike", "expiration", "underlying",

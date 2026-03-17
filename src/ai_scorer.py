@@ -166,6 +166,14 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
     if headlines:
         kv.append("news:" + "|".join(f'"{h[:40]}"' for h in headlines[:2]))
 
+    unusual_flow = c.get("_unusual_flow")
+    if unusual_flow:
+        try:
+            n_contracts = len(unusual_flow) if isinstance(unusual_flow, list) else int(unusual_flow)
+            kv.append(f"unusual-flow:{n_contracts}contracts")
+        except Exception:
+            pass
+
     return " ".join(kv) if kv else "no-context"
 
 
@@ -343,6 +351,32 @@ class AIScorer:
                 lines.append("Analyst changes (30d): " + " | ".join(ac_strs))
         elif headlines:
             lines.append("Recent headlines: " + " | ".join(f'"{h}"' for h in headlines[:3]))
+
+        # Unusual options flow (from Polygon, when available)
+        unusual_flow = ctx.get("unusual_options_flow")
+        if unusual_flow:
+            flow_parts = []
+            for contract in unusual_flow[:3]:
+                det = contract.get("details") or {}
+                day = contract.get("day") or {}
+                ctype = det.get("contract_type", "?").upper()
+                strike = det.get("strike_price", "?")
+                exp = det.get("expiration_date", "?")
+                vol = day.get("volume", "?")
+                dv = contract.get("_dollar_volume", 0)
+                dv_k = f"${dv/1000:.0f}K" if dv else ""
+                flow_parts.append(f"{ctype} {strike} {exp} vol={vol} {dv_k}")
+            lines.append("Unusual options flow: " + " | ".join(flow_parts))
+
+        # Company description (from Polygon, when available)
+        company_desc = ctx.get("company_description", "")
+        if company_desc:
+            lines.append(f"Company: {company_desc[:200]}")
+
+        market_cap = ctx.get("market_cap")
+        if market_cap:
+            mc_b = market_cap / 1e9
+            lines.append(f"Market cap: ${mc_b:.1f}B")
 
         prompt = "\n".join(lines) + "\n\nProvide your ticker-level assessment."
 
