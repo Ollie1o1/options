@@ -27,6 +27,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from src.config_ai import AI_CONFIG
+from src.prompts import scoring_system_prompt, ticker_context_prompt, json_schema_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -43,28 +44,7 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
-# ── System prompt ──────────────────────────────────────────────────────────────
-
-_SYSTEM_PROMPT = """\
-Score 0-100: 80+=multi-signal+low catalyst risk; 60-79=good+manageable; 40-59=neutral/mixed; <40=avoid.
-Weight in order: (1)IV justified vs upcoming events+realized vol (2)Catalyst timing vs expiry window \
-(3)Trend/momentum alignment with trade direction (4)Breakeven realism vs 1\u03c3 expected move.
-reasoning: ONE concrete sentence \u2014 primary reason only, not a list.
-Flag iv_justified:false when iv_rank>0.70 AND no earnings within 21d of expiry.
-confidence:0-10. flags:\u22643 SHORT_CAPS."""
-
-
-_TICKER_CONTEXT_PROMPT = """\
-Analyze ticker conditions. Flag term_structure:"BACKWARDATION" when front-month IV > back-month IV \
-\u2014 this shifts edge: sellers edge in contango, buyers edge in backwardation.
-JSON only: {"regime":"SELLER_EDGE|BUYER_EDGE|NEUTRAL","catalyst_risk":"low|medium|high",\
-"directional_bias":"bullish|bearish|neutral","term_structure":"CONTANGO|BACKWARDATION|FLAT",\
-"key_risks":["r1"],"summary":"\u226420 words","confidence":1-10}"""
-
-
 # ── JSON schema for contract scoring ──────────────────────────────────────────
-
-_JSON_SCHEMA = 'JSON only: {"scores":[{"id":"<id>","ai_score":0-100,"reasoning":"≤12 words","flags":["F"],"catalyst_risk":"low|medium|high","iv_justified":true,"ai_confidence":0-10}]}'
 
 # Tool schema for Anthropic provider
 _SCORING_TOOL: dict[str, Any] = {
@@ -196,10 +176,13 @@ class AIScorer:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config: dict[str, Any] = {**AI_CONFIG, **(config or {})}
+        from src.config_validator import validate_ai_config
+        validate_ai_config(self.config)
         self._clients: dict[str, Any] = {}   # keyed by api_key_env name
         self._cache = None
         self._api_call_count = 0
         self._api_token_estimate = 0
+        self._api_retry_count = 0
         self._session_warnings_issued: set = set()
         if self.config.get("cache_enabled", True):
             try:
@@ -399,7 +382,7 @@ class AIScorer:
 
         try:
             raw = self._chat_complete(
-                system=_TICKER_CONTEXT_PROMPT,
+                system=ticker_context_prompt(),
                 user=prompt,
                 max_tokens=512,
             )
@@ -423,6 +406,7 @@ class AIScorer:
         """Return a summary of this session's API and cache usage."""
         return {
             "api_calls":        self._api_call_count,
+            "api_retries":      self._api_retry_count,
             "estimated_tokens": self._api_token_estimate,
             "cache_hits_today": self._cache.stats()["today"] if self._cache else 0,
         }
@@ -545,6 +529,7 @@ class AIScorer:
                         print(f"  [ai_scorer] batch {batch_num} rate-limited on {label} model, retrying in {delay}s...")
                     else:
                         print(f"  [ai_scorer] batch {batch_num} error (attempt {attempt}): {exc}")
+                    self._api_retry_count += 1
                     time.sleep(delay if is_rate_limit else 1)
                     delay = min(delay * 2, 60)
                 else:
@@ -561,7 +546,7 @@ class AIScorer:
     def _score_batch_openai(self, batch: list[dict], model: str = None) -> list[dict]:
         prompt = self._build_prompt(batch)
         raw = self._chat_complete(
-            system=_SYSTEM_PROMPT,
+            system=scoring_system_prompt(),
             user=prompt,
             model=model,
         )
@@ -575,7 +560,7 @@ class AIScorer:
             model=use_model,
             max_tokens=self.config["max_tokens"],
             temperature=self.config["temperature"],
-            system=_SYSTEM_PROMPT,
+            system=scoring_system_prompt(),
             tools=[_SCORING_TOOL],
             tool_choice={"type": "any"},
             messages=[{"role": "user", "content": prompt}],
@@ -634,7 +619,7 @@ class AIScorer:
             blocks.append(block)
 
         body = "\n---\n".join(blocks)
-        schema = f"\n{_JSON_SCHEMA}" if include_schema else \
+        schema = f"\n{json_schema_instruction()}" if include_schema else \
             "\nCall the score_options_batch tool with your analysis."
         return f"Score {len(batch)} option(s):\n{body}{schema}"
 

@@ -327,7 +327,7 @@ def render_sidebar():
 
         # AI Scoring — runs automatically after technical scan
         if ai_enabled and _AI_AVAILABLE and st.session_state.scan_results:
-            picks = st.session_state.scan_results.get("picks", pd.DataFrame())
+            picks = st.session_state.scan_results.picks
             if not picks.empty:
                 with st.spinner("Running AI analysis..."):
                     try:
@@ -335,7 +335,7 @@ def render_sidebar():
                         vix_regime = vix_regime_map.get(str(st.session_state.volatility_regime), "normal")
                         ai_cfg = {"ai_weight": ai_weight_override} if ai_weight_override is not None else None
                         scorer = AIScorer(config=ai_cfg)
-                        ticker_contexts = st.session_state.scan_results.get("ticker_contexts", {})
+                        ticker_contexts = st.session_state.scan_results.ticker_contexts
                         ai_df = scorer.score_candidates(picks, ticker_contexts=ticker_contexts)
                         kwargs = {}
                         if ai_weight_override is not None:
@@ -360,7 +360,7 @@ def render_sidebar():
 def render_scanner_tab(budget):
     if st.session_state.scan_results:
         results = st.session_state.scan_results
-        picks_df = results.get('picks', pd.DataFrame())
+        picks_df = results.picks
 
         # Merge AI scores onto picks_df if available
         ai_ranked = st.session_state.ai_results
@@ -455,6 +455,31 @@ def render_scanner_tab(budget):
             with subtabs[2]: render_df(picks_df[picks_df['price_bucket'] == 'MEDIUM'], "med")
             with subtabs[3]: render_df(picks_df[picks_df['price_bucket'] == 'HIGH'], "high")
             with subtabs[4]: render_df(picks_df, "all")
+
+            # AI Ticker Regime Summary (from Pass 1 ticker analysis)
+            ticker_contexts = results.ticker_contexts
+            regime_rows = []
+            for ticker, ctx in ticker_contexts.items():
+                regime = ctx.get("regime")
+                cat = ctx.get("catalyst_risk")
+                bias = ctx.get("directional_bias")
+                summary = ctx.get("summary")
+                if all(v is not None for v in [regime, cat, bias, summary]):
+                    regime_rows.append({
+                        "Ticker": ticker,
+                        "Regime": regime,
+                        "Catalyst Risk": cat,
+                        "Directional Bias": bias,
+                        "Summary": summary,
+                    })
+            with st.expander("AI Ticker Regime Summary"):
+                if regime_rows:
+                    st.dataframe(
+                        pd.DataFrame(regime_rows).set_index("Ticker"),
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("Run with AI enabled to see ticker regime analysis.")
 
             # Action Buttons
             if st.session_state.selected_option is not None:

@@ -10,6 +10,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -330,36 +331,46 @@ class PaperManager:
             return []
 
         period = f"{lookback_days}d"
-        try:
+
+        all_tickers = [ticker] + open_tickers
+
+        def _fetch_returns(sym: str):
             import warnings as _w
             with _w.catch_warnings():
                 _w.simplefilter("ignore")
-                ref_hist = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
-            if ref_hist.empty:
-                return []
-            ref_close = ref_hist["Close"].squeeze()
-            ref_returns = ref_close.pct_change().dropna()
+                hist = yf.download(sym, period=period, interval="1d", progress=False, auto_adjust=True)
+            if hist.empty:
+                return sym, None
+            close = hist["Close"].squeeze()
+            return sym, close.pct_change().dropna()
+
+        # Parallel download — capped at 8 workers to avoid rate-limiting
+        hist_map: dict = {}
+        try:
+            with ThreadPoolExecutor(max_workers=min(len(all_tickers), 8)) as exe:
+                futures = {exe.submit(_fetch_returns, sym): sym for sym in all_tickers}
+                for fut in as_completed(futures):
+                    sym, returns = fut.result()
+                    if returns is not None:
+                        hist_map[sym] = returns
         except Exception:
+            return []
+
+        ref_returns = hist_map.get(ticker)
+        if ref_returns is None:
             return []
 
         correlated = []
         for ot in open_tickers:
-            try:
-                with _w.catch_warnings():
-                    _w.simplefilter("ignore")
-                    other_hist = yf.download(ot, period=period, interval="1d", progress=False, auto_adjust=True)
-                if other_hist.empty:
-                    continue
-                other_close = other_hist["Close"].squeeze()
-                other_returns = other_close.pct_change().dropna()
-                combined = pd.concat([ref_returns, other_returns], axis=1, join="inner").dropna()
-                if len(combined) < 10:
-                    continue
-                corr = float(combined.iloc[:, 0].corr(combined.iloc[:, 1]))
-                if abs(corr) > correlation_threshold:
-                    correlated.append({"ticker": ot, "correlation": corr})
-            except Exception:
+            other_returns = hist_map.get(ot)
+            if other_returns is None:
                 continue
+            combined = pd.concat([ref_returns, other_returns], axis=1, join="inner").dropna()
+            if len(combined) < 10:
+                continue
+            corr = float(combined.iloc[:, 0].corr(combined.iloc[:, 1]))
+            if abs(corr) > correlation_threshold:
+                correlated.append({"ticker": ot, "correlation": corr})
 
         return correlated
 

@@ -7,6 +7,7 @@ known high-impact macro events (FOMC, CPI, NFP) and returns a quality-score
 penalty when active.
 """
 
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -53,6 +54,14 @@ _DEFAULT_EVENTS: List[Dict] = [
 ]
 
 
+_staleness_warned = False
+
+
+def _load_events_from_config(config: dict) -> list:
+    """Return macro events from config override or fall back to _DEFAULT_EVENTS."""
+    return config.get("macro_events") or _DEFAULT_EVENTS
+
+
 def check_macro_event_window(
     config: Optional[Dict] = None,
     window_hours: Optional[int] = None,
@@ -69,7 +78,7 @@ def check_macro_event_window(
     if window_hours is None:
         window_hours = int(cfg.get("macro_event_window_hours", 48))
 
-    events = cfg.get("macro_events") or _DEFAULT_EVENTS
+    events = _load_events_from_config(cfg)
 
     now = datetime.now(tz=timezone.utc)
     window = timedelta(hours=window_hours)
@@ -86,6 +95,24 @@ def check_macro_event_window(
                 return True, event["name"], event["date"]
         except Exception:
             continue
+
+    global _staleness_warned
+    if not _staleness_warned and events:
+        dates = []
+        for e in events:
+            try:
+                dates.append(datetime.strptime(e["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc))
+            except Exception:
+                pass
+        if dates:
+            most_recent = max(dates)
+            if (now - most_recent) > timedelta(days=60):
+                logging.getLogger(__name__).warning(
+                    "Macro event calendar may be stale — most recent event is %s. "
+                    "Update _DEFAULT_EVENTS in macro_analyzer.py for accurate gating.",
+                    most_recent.strftime("%Y-%m-%d"),
+                )
+                _staleness_warned = True
 
     return False, None, None
 

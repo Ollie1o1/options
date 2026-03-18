@@ -94,6 +94,28 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def score_and_rank(
+    picks: pd.DataFrame,
+    ticker_contexts: dict,
+    vix_regime: str,
+    ai_weight: float | None = None,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """Core AI scoring pipeline — no argparse dependency."""
+    AIScorer, combine_scores, _, _, _ = _import_ai()
+    scorer = AIScorer(config={"ai_weight": ai_weight} if ai_weight is not None else None)
+    ai_df = scorer.score_candidates(picks, ticker_contexts=ticker_contexts)
+    kwargs: dict = {}
+    if ai_weight is not None:
+        kwargs["ai_weight"] = ai_weight
+        kwargs["technical_weight"] = 1.0 - ai_weight
+    ranked = combine_scores(picks, ai_df, vix_regime=vix_regime, **kwargs)
+    if verbose:
+        stats = scorer.get_session_stats()
+        print(f"  [session] {stats['api_calls']} API calls · {stats['api_retries']} retries · ~{stats['estimated_tokens']:,} tokens · {stats['cache_hits_today']} cache hits")
+    return ranked
+
+
 def _get_ticker_contexts(picks: pd.DataFrame, max_expiries: int = 4) -> dict[str, dict]:
     """Fetch lightweight ticker context for two-pass AI analysis.
 
@@ -223,7 +245,7 @@ def main() -> None:
         verbose=not args.quiet,
     )
 
-    picks: pd.DataFrame = results.get("picks", pd.DataFrame())
+    picks: pd.DataFrame = results.picks
 
     if picks.empty:
         print("\nNo candidates found - nothing to rank.")
@@ -252,7 +274,7 @@ def main() -> None:
             scorer = AIScorer(config=ai_config_override or None)
 
             # Use pre-fetched ticker contexts from run_scan (avoids double fetch)
-            ticker_contexts: dict = results.get("ticker_contexts", {})
+            ticker_contexts: dict = results.ticker_contexts
             from src.config_ai import AI_CONFIG
             if not ticker_contexts and AI_CONFIG.get("two_pass_enabled", True):
                 print("  Fetching ticker context for two-pass analysis...")
@@ -271,6 +293,7 @@ def main() -> None:
                 _stats = scorer.get_session_stats()
                 print(
                     f"  [session] {_stats['api_calls']} API calls · "
+                    f"{_stats['api_retries']} retries · "
                     f"~{_stats['estimated_tokens']:,} tokens · "
                     f"{_stats['cache_hits_today']} cache hits"
                 )

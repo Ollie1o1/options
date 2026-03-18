@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict, Union, Any
 from dataclasses import dataclass
+from .types import ScanResult
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 import functools
@@ -2268,26 +2269,26 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     if not picks.empty and "impliedVolatility" in picks.columns:
         chain_iv_median = picks["impliedVolatility"].median()
 
-    return {
-        'picks': picks,
-        'spreads': pd.DataFrame(),
-        'credit_spreads': credit_spreads_df,
-        'iron_condors': iron_condors_df,
-        'top_pick': top_pick,
-        'underlying_price': underlying_price,
-        'rfr': rfr,
-        'chain_iv_median': chain_iv_median,
-        'timestamp': datetime.now().isoformat(),
-        'ticker_contexts': ticker_contexts,
-        'market_context': {
+    return ScanResult(
+        picks=picks,
+        spreads=pd.DataFrame(),
+        credit_spreads=credit_spreads_df,
+        iron_condors=iron_condors_df,
+        top_pick=top_pick,
+        underlying_price=underlying_price,
+        rfr=rfr,
+        chain_iv_median=chain_iv_median,
+        timestamp=datetime.now().isoformat(),
+        ticker_contexts=ticker_contexts,
+        market_context={
             'vix_level': vix_level,
             'vix_regime': vix_regime,
             'market_trend': market_trend,
             'volatility_regime': volatility_regime,
             'macro_risk_active': macro_risk_active,
             'tnx_change_pct': tnx_change_pct
-        }
-    }
+        },
+    )
 
 def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -2384,13 +2385,13 @@ def _check_market_hours() -> tuple:
     return True, f"Market open ({time_str})"
 
 
-def _run_ai_for_cli(picks: "pd.DataFrame", volatility_regime: str, width: int) -> "Optional[pd.DataFrame]":
+def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: bool = True) -> "Optional[pd.DataFrame]":
     """Thin wrapper: delegates to ai_rank pipeline so CLI and ai_rank.py share one code path."""
     try:
-        from src.ai_scorer import AIScorer
-        from src.ranking import combine_scores, print_ranked_table
+        from ai_rank import score_and_rank
+        from src.ranking import print_ranked_table
         from src.config_ai import AI_CONFIG
-        from src.data_fetching import fetch_options_yfinance
+        from src.data_fetching import _CHAIN_CACHE
 
         vix_map = {"Low": "low", "Normal": "normal", "High": "high"}
         vix_regime = vix_map.get(str(volatility_regime), "normal")
@@ -2403,16 +2404,12 @@ def _run_ai_for_cli(picks: "pd.DataFrame", volatility_regime: str, width: int) -
         ticker_contexts = {}
         if AI_CONFIG.get("two_pass_enabled", True):
             for sym in candidates["symbol"].unique():
-                try:
-                    r = fetch_options_yfinance(sym, max_expiries=2)
-                    ticker_contexts[sym] = r.get("context", {})
-                except Exception:
-                    pass
+                if sym in _CHAIN_CACHE:
+                    ticker_contexts[sym] = _CHAIN_CACHE[sym].get("context", {})
 
-        scorer = AIScorer()
-        ai_df = scorer.score_candidates(candidates, ticker_contexts=ticker_contexts)
-        ranked = combine_scores(candidates, ai_df, vix_regime=vix_regime)
-        print_ranked_table(ranked, top_n=10)
+        ranked = score_and_rank(candidates, ticker_contexts, vix_regime)
+        if verbose:
+            print_ranked_table(ranked, top_n=10)
         return ranked
     except Exception as exc:
         print(f"  AI scoring unavailable: {exc}")
@@ -2665,18 +2662,18 @@ def main():
             scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct)
             if scan_results is None: sys.exit(0)
 
-            picks = scan_results['picks']
-            rfr = scan_results['rfr']
-            chain_iv_median = scan_results['chain_iv_median']
+            picks = scan_results.picks
+            rfr = scan_results.rfr
+            chain_iv_median = scan_results.chain_iv_median
 
             # ── AI Analysis ────────────────────────────────────────────────
             _ai_ranked = None
             if not picks.empty and not getattr(args, 'no_ai', False):
-                _ai_ranked = _run_ai_for_cli(picks, volatility_regime, WIDTH)
+                _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True)
 
             # Pull spread/condor results for the save menu
-            _credit_spreads = scan_results.get('credit_spreads', pd.DataFrame())
-            _iron_condors   = scan_results.get('iron_condors',   pd.DataFrame())
+            _credit_spreads = scan_results.credit_spreads
+            _iron_condors   = scan_results.iron_condors
             _has_results = (
                 not picks.empty
                 or (isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty)

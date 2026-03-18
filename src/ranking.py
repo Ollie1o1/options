@@ -51,6 +51,8 @@ def combine_scores(
     df = picks_df.copy()
     ai_cols = ["ai_score", "ai_reasoning", "ai_flags", "catalyst_risk", "iv_justified", "ai_confidence"]
     present = [c for c in ai_cols if c in ai_df.columns]
+    df = df.reset_index(drop=True)
+    ai_df = ai_df.reset_index(drop=True)
     df = df.join(ai_df[present])
 
     # Fill missing AI columns
