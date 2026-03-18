@@ -287,7 +287,7 @@ def run_backtest(
                         sig_idx = sig_idx.tz_localize(None)
                     sig_idx = sig_idx.normalize()
 
-                    vix_aligned = vix_copy.reindex(sig_idx, method="nearest")
+                    vix_aligned = vix_copy.reindex(sig_idx, method="ffill", limit=5)
                 except Exception:
                     pass
 

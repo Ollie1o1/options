@@ -516,7 +516,7 @@ class AIScorer:
             try:
                 result = self._score_batch(batch, model=use_model)
                 self._api_call_count += 1
-                estimated_tokens = len(batch) * self.config.get("max_tokens", 2048)
+                estimated_tokens = len(batch) * 600  # ~600 tokens avg per candidate (actual output, not max_tokens budget)
                 self._api_token_estimate += estimated_tokens
                 if self._api_call_count % 10 == 0:
                     print(f"  [ai_scorer] {self._api_call_count} API calls this session, ~{self._api_token_estimate:,} tokens estimated")

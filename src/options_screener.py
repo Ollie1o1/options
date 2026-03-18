@@ -2396,10 +2396,7 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
         vix_map = {"Low": "low", "Normal": "normal", "High": "high"}
         vix_regime = vix_map.get(str(volatility_regime), "normal")
 
-        candidates = picks.sort_values("quality_score", ascending=False).head(15)
-        candidates = candidates[candidates["quality_score"] >= 0.38].copy()
-        if candidates.empty:
-            candidates = picks.head(5).copy()
+        candidates = picks.sort_values("quality_score", ascending=False).head(20).copy()
 
         ticker_contexts = {}
         if AI_CONFIG.get("two_pass_enabled", True):

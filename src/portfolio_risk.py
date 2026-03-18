@@ -20,6 +20,8 @@ from .data_fetching import get_risk_free_rate
 
 logger = logging.getLogger(__name__)
 
+_IV_CACHE: dict = {}
+
 
 class RiskAggregator:
     """Aggregate portfolio Greeks, GEX, and VaR across open paper trades."""
@@ -76,6 +78,9 @@ class RiskAggregator:
         opt_type: str,
     ) -> Optional[float]:
         """Fetch implied volatility from the option chain; fallback 0.30."""
+        cache_key = f"{ticker}:{str(expiration)[:10]}:{strike:.2f}:{opt_type}"
+        if cache_key in _IV_CACHE:
+            return _IV_CACHE[cache_key]
         try:
             tkr = yf.Ticker(ticker)
             exps = tkr.options
@@ -92,6 +97,7 @@ class RiskAggregator:
             row = tbl.iloc[(tbl["strike"] - strike).abs().argsort()[:1]]
             iv = safe_float(row["impliedVolatility"].iloc[0])
             if iv and 0.01 < iv < 10.0:
+                _IV_CACHE[cache_key] = iv
                 return iv
         except Exception:
             pass
@@ -230,6 +236,10 @@ class RiskAggregator:
             "n_positions": 0,
             "pnl_distribution": np.array([]),
         }
+
+        trades = self._load_open_trades()
+        if not trades:
+            return empty
 
         if rfr is None:
             rfr = get_risk_free_rate()
