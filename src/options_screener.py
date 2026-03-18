@@ -1986,9 +1986,18 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     results_buffer: Dict[str, Any] = {}
 
-    # Phase 1 — Pre-fetch all chains in parallel via batch_fetch
+    # Phase 1 — Pre-fetch all chains in parallel (ThreadPoolExecutor, respects max_expiries)
+    def _fetch_one(sym: str):
+        try:
+            return sym, fetch_options_yfinance(sym, max_expiries)
+        except Exception as exc:
+            return sym, {"error": str(exc)}
+
+    raw_results: Dict[str, Any] = {}
     with _suppress_scan_noise():
-        raw_results = batch_fetch(tickers, max_concurrent=min(len(tickers), 8))
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as executor:
+            for sym, result in executor.map(_fetch_one, tickers):
+                raw_results[sym] = result
 
     # Phase 2 — Score each fetched result (with optional tqdm progress bar)
     if HAS_ENHANCED_CLI and verbose:
