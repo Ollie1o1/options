@@ -605,10 +605,12 @@ class AIScorer:
             # Ticker context (one line)
             ctx_line = ""
             if ticker_ctx:
+                # Cap ctx_line to avoid inflating prompt beyond max_tokens budget
                 ctx_line = (f"\n  ctx: regime={ticker_ctx.get('regime','?')} "
                             f"cat={ticker_ctx.get('catalyst_risk','?')} "
                             f"bias={ticker_ctx.get('directional_bias','?')} "
-                            f"summary=\"{str(ticker_ctx.get('summary',''))[:60]}\"")
+                            f"summary=\"{str(ticker_ctx.get('summary',''))[:80]}\"")
+                ctx_line = ctx_line[:200]
 
             block = (
                 f"ID:{c['_id']} {sym} {ctype} ${strike} exp:{exp}\n"

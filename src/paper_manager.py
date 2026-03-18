@@ -207,6 +207,34 @@ class PaperManager:
         closed_this_run = []
 
         import warnings
+
+        # Batch-fetch spot prices for all unique underlying tickers
+        unique_tickers = list({row["ticker"] for row in open_trades})
+        spot_cache: Dict[str, float] = {}
+
+        def _fetch_spot(t: str) -> Tuple[str, Optional[float]]:
+            try:
+                tkr = yf.Ticker(t)
+                s = getattr(tkr.fast_info, "last_price", None)
+                if s and float(s) > 0:
+                    return t, float(s)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    hist = tkr.history(period="5d")
+                if not hist.empty:
+                    val = float(hist["Close"].iloc[-1])
+                    if val > 0:
+                        return t, val
+            except Exception:
+                pass
+            return t, None
+
+        max_workers = min(len(unique_tickers), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for ticker, spot in ex.map(_fetch_spot, unique_tickers):
+                if spot is not None:
+                    spot_cache[ticker] = spot
+
         for row in open_trades:
             entry_id    = row["entry_id"]
             ticker      = row["ticker"]
@@ -228,6 +256,9 @@ class PaperManager:
                 days_held = (today - trade_date).days
             except Exception:
                 days_held = 999
+
+            if ticker not in spot_cache:
+                continue
 
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
             if not symbol:
@@ -252,9 +283,8 @@ class PaperManager:
                 if current_price is None or np.isnan(current_price) or current_price <= 0:
                     try:
                         from .utils import bs_price
-                        underlying_tkr = yf.Ticker(ticker)
-                        S = getattr(underlying_tkr.fast_info, "last_price", None)
-                        if S and float(S) > 0:
+                        S = spot_cache.get(ticker)
+                        if S:
                             T = max((datetime.strptime(expiration[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1/365)
                             current_price = float(bs_price(option_type, float(S), float(strike), T, 0.045, 0.30))
                     except Exception:

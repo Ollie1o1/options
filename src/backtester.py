@@ -218,6 +218,19 @@ def run_backtest(
     except Exception:
         pass
 
+    # Normalise VIX once so per-ticker reindex needs no tz/dedup work
+    vix_hist_normalized: "Optional[pd.Series]" = None
+    if vix_hist is not None and HAS_PD:
+        try:
+            vix_n = vix_hist.copy()
+            if hasattr(vix_n.index, "tz") and vix_n.index.tz is not None:
+                vix_n.index = vix_n.index.tz_localize(None)
+            vix_n.index = vix_n.index.normalize()
+            vix_n = vix_n[~vix_n.index.duplicated(keep="last")]
+            vix_hist_normalized = vix_n
+        except Exception:
+            pass
+
     for ticker in tickers:
         try:
             tkr = yf.Ticker(ticker)
@@ -269,25 +282,15 @@ def run_backtest(
             rsi_arr = signals_df["rsi_14"].values
             ret5_arr = signals_df["ret_5d"].values
 
-            # Align VIX to signals_df dates for regime tagging.
-            # Strip timezone info and normalize both indices to midnight dates so
-            # reindex works correctly regardless of yfinance tz conventions.
+            # Align pre-normalised VIX to signals_df dates for regime tagging.
             vix_aligned: "Optional[pd.Series]" = None
-            if vix_hist is not None and HAS_PD:
+            if vix_hist_normalized is not None and HAS_PD:
                 try:
-                    vix_copy = vix_hist.copy()
-                    if hasattr(vix_copy.index, "tz") and vix_copy.index.tz is not None:
-                        vix_copy.index = vix_copy.index.tz_localize(None)
-                    vix_copy.index = vix_copy.index.normalize()
-                    # Deduplicate normalized dates (keep last close if duplicates)
-                    vix_copy = vix_copy[~vix_copy.index.duplicated(keep="last")]
-
                     sig_idx = signals_df.index
                     if hasattr(sig_idx, "tz") and sig_idx.tz is not None:
                         sig_idx = sig_idx.tz_localize(None)
                     sig_idx = sig_idx.normalize()
-
-                    vix_aligned = vix_copy.reindex(sig_idx, method="ffill", limit=5)
+                    vix_aligned = vix_hist_normalized.reindex(sig_idx, method="ffill", limit=5)
                 except Exception:
                     pass
 

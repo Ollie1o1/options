@@ -381,10 +381,12 @@ class FanOutProvider(BaseDataProvider):
                 try:
                     return fut.result()
                 except Exception as exc:
-                    errors.append(str(exc))
+                    prov = future_to_provider[fut]
+                    errors.append((type(prov).__name__, str(exc)))
 
         raise RuntimeError(
-            f"All providers failed for {symbol}: {'; '.join(errors)}"
+            f"All providers failed for {symbol}: " +
+            "; ".join(f"{name}: {err}" for name, err in errors)
         )
 
     def fetch_spot(self, symbol: str) -> float:
@@ -402,10 +404,12 @@ class FanOutProvider(BaseDataProvider):
                 try:
                     return fut.result()
                 except Exception as exc:
-                    errors.append(str(exc))
+                    prov = future_to_provider[fut]
+                    errors.append((type(prov).__name__, str(exc)))
 
         raise RuntimeError(
-            f"All providers failed for spot({symbol}): {'; '.join(errors)}"
+            f"All providers failed for spot({symbol}): " +
+            "; ".join(f"{name}: {err}" for name, err in errors)
         )
 
 

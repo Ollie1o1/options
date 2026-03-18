@@ -1,5 +1,7 @@
 """AI scorer configuration."""
 
+import logging
+
 AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
@@ -82,6 +84,10 @@ AI_CONFIG: dict = {
 }
 
 
+logger = logging.getLogger(__name__)
+_warned_models: set = set()
+
+
 def resolve_api_key_env(model_id: str, config: dict) -> str:
     """Return the env-var name holding the API key for *model_id*.
 
@@ -101,6 +107,15 @@ def resolve_api_key_env(model_id: str, config: dict) -> str:
     for prefix, env_var in prefix_map.items():
         if model_id.startswith(prefix):
             return env_var
-    return config.get("api_key_env", "OPENROUTER_API_KEY")
+    fallback_env = config.get("api_key_env", "OPENROUTER_API_KEY")
+    if model_id not in _warned_models:
+        _warned_models.add(model_id)
+        logger.warning(
+            "Model '%s' not in model_key_map and no prefix match — "
+            "falling back to default key env '%s'. "
+            "Add an explicit entry to model_key_map to silence this warning.",
+            model_id, fallback_env,
+        )
+    return fallback_env
 
 
