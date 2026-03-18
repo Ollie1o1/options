@@ -1967,6 +1967,22 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         )
         print(fmt.colorize(_filter_line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else _filter_line)
 
+    # IV history coverage summary — print once before fetching starts
+    if verbose:
+        try:
+            from .data_fetching import iv_history_coverage as _iv_cov
+            _cov_parts = []
+            for _sym in tickers:
+                try:
+                    _cov = _iv_cov(_sym)
+                    _cov_parts.append(f"{_sym}: {_cov['days']}d ({_cov['confidence']})")
+                except Exception:
+                    pass
+            if _cov_parts:
+                _cov_line = "  IV history: " + "  |  ".join(_cov_parts)
+                print(fmt.colorize(_cov_line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else _cov_line)
+        except Exception:
+            pass
 
     # Use ThreadPoolExecutor for parallel processing
     # Limit to 8 workers to avoid rate limiting
