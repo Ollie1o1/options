@@ -371,8 +371,14 @@ class PaperManager:
                 hist = yf.download(sym, period=period, interval="1d", progress=False, auto_adjust=True)
             if hist.empty:
                 return sym, None
-            close = hist["Close"].squeeze()
-            return sym, close.pct_change().dropna()
+            close_col = hist["Close"]
+            if isinstance(close_col, pd.DataFrame):
+                # MultiIndex result — take first column
+                close_col = close_col.iloc[:, 0]
+            close_col = close_col.dropna()
+            if not isinstance(close_col, pd.Series) or len(close_col) < 5:
+                return sym, None
+            return sym, close_col.pct_change().dropna()
 
         # Parallel download — capped at 8 workers to avoid rate-limiting
         hist_map: dict = {}

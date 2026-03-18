@@ -1984,59 +1984,44 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         except Exception:
             pass
 
-    # Use ThreadPoolExecutor for parallel processing
-    # Limit to 8 workers to avoid rate limiting
-    max_workers = min(8, len(tickers))
-
     results_buffer: Dict[str, Any] = {}
 
+    # Phase 1 — Pre-fetch all chains in parallel via batch_fetch
     with _suppress_scan_noise():
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_symbol = {
-                executor.submit(
-                    process_ticker,
-                    symbol,
-                    mode,
-                    max_expiries,
-                    min_dte,
-                    max_dte,
-                    rfr,
-                    config,
-                    vix_weights,
-                    trader_profile,
-                    budget,
-                    macro_risk_active,
-                    tnx_change_pct
-                ): symbol
-                for symbol in tickers
+        raw_results = batch_fetch(tickers, max_concurrent=min(len(tickers), 8))
+
+    # Phase 2 — Score each fetched result (with optional tqdm progress bar)
+    if HAS_ENHANCED_CLI and verbose:
+        bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
+        score_iter = tqdm(
+            tickers,
+            total=len(tickers),
+            desc="  Scanning",
+            unit="",
+            leave=False,
+            dynamic_ncols=True,
+            bar_format=bar_fmt,
+            file=sys.stderr,
+        )
+    else:
+        score_iter = tickers
+
+    for symbol in score_iter:
+        data_result = raw_results.get(symbol)
+        if data_result is None or "error" in data_result:
+            err_msg = (data_result or {}).get("error", "fetch returned no data")
+            results_buffer[symbol] = {
+                'success': False, 'error': err_msg,
+                'context_log': [], 'picks': [],
+                'credit_spreads': [], 'iron_condors': pd.DataFrame(),
+                'history': None
             }
-
-            if HAS_ENHANCED_CLI and verbose:
-                bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
-                futures_iter = tqdm(
-                    as_completed(future_to_symbol),
-                    total=len(tickers),
-                    desc="  Scanning",
-                    unit="",
-                    leave=False,
-                    dynamic_ncols=True,
-                    bar_format=bar_fmt,
-                    file=sys.stderr,
-                )
-            else:
-                futures_iter = as_completed(future_to_symbol)
-
-            for future in futures_iter:
-                symbol = future_to_symbol[future]
-                try:
-                    results_buffer[symbol] = future.result()
-                except Exception as e:
-                    results_buffer[symbol] = {
-                        'success': False, 'error': str(e),
-                        'context_log': [], 'picks': [],
-                        'credit_spreads': [], 'iron_condors': pd.DataFrame(),
-                        'history': None
-                    }
+            continue
+        results_buffer[symbol] = _score_fetched_data(
+            symbol, data_result, mode, min_dte, max_dte,
+            rfr, config, vix_weights, trader_profile,
+            budget, macro_risk_active, tnx_change_pct
+        )
 
 
     # Print per-ticker summary after all futures complete

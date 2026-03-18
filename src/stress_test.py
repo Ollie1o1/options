@@ -12,6 +12,7 @@ Note: This uses an approximation, not full Black-Scholes repricing.
 """
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Dict, Any
 
 try:
@@ -76,15 +77,21 @@ def _fetch_stock_prices(tickers: List[str]) -> Dict[str, float]:
     prices: Dict[str, float] = {}
     if not HAS_YF:
         return prices
-    import warnings
-    for ticker in set(tickers):
+
+    def _fetch_one(ticker: str):
         try:
             tkr = yf.Ticker(ticker)
             p = getattr(tkr.fast_info, "last_price", None)
             if p and float(p) > 0:
-                prices[ticker] = float(p)
+                return ticker, float(p)
         except Exception:
             pass
+        return ticker, None
+
+    with ThreadPoolExecutor(max_workers=min(len(set(tickers)), 8)) as executor:
+        for ticker, price in executor.map(_fetch_one, set(tickers)):
+            if price is not None:
+                prices[ticker] = price
     return prices
 
 

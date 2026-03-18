@@ -20,7 +20,9 @@ from .data_fetching import get_risk_free_rate
 
 logger = logging.getLogger(__name__)
 
-_IV_CACHE: dict = {}
+import time as _time
+_IV_CACHE: dict = {}          # {key: (iv_value, timestamp)}
+_IV_CACHE_TTL = 900           # 15 minutes
 
 
 class RiskAggregator:
@@ -79,8 +81,11 @@ class RiskAggregator:
     ) -> Optional[float]:
         """Fetch implied volatility from the option chain; fallback 0.30."""
         cache_key = f"{ticker}:{str(expiration)[:10]}:{strike:.2f}:{opt_type}"
-        if cache_key in _IV_CACHE:
-            return _IV_CACHE[cache_key]
+        cached = _IV_CACHE.get(cache_key)
+        if cached is not None:
+            iv_val, ts = cached
+            if _time.monotonic() - ts < _IV_CACHE_TTL:
+                return iv_val
         try:
             tkr = yf.Ticker(ticker)
             exps = tkr.options
@@ -97,7 +102,7 @@ class RiskAggregator:
             row = tbl.iloc[(tbl["strike"] - strike).abs().argsort()[:1]]
             iv = safe_float(row["impliedVolatility"].iloc[0])
             if iv and 0.01 < iv < 10.0:
-                _IV_CACHE[cache_key] = iv
+                _IV_CACHE[cache_key] = (iv, _time.monotonic())
                 return iv
         except Exception:
             pass
