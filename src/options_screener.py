@@ -21,6 +21,7 @@ import json
 import logging
 import uuid
 import time
+import threading as _threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict, Union, Any
 from dataclasses import dataclass
@@ -214,6 +215,53 @@ def load_config(config_path: str = "config.json") -> Dict:
 
 
 _IC_WEIGHTS_CACHE: dict | None = None
+_IC_RECALIB_RUNNING: bool = False
+_IC_RECALIB_LOCK = _threading.Lock()
+_CACHE_MAX_AGE_DAYS = 7
+
+
+def _maybe_trigger_recalib(cache_path: str) -> None:
+    """Fire-and-forget: recalibrate IC weights in background if cache is stale and ≥30 closed trades exist."""
+    global _IC_RECALIB_RUNNING
+    if _IC_RECALIB_RUNNING:
+        return
+    cache_stale = True
+    try:
+        mtime = os.path.getmtime(cache_path)
+        cache_stale = (time.time() - mtime) > (_CACHE_MAX_AGE_DAYS * 86400)
+    except OSError:
+        cache_stale = True
+    if not cache_stale:
+        return
+
+    def _run():
+        global _IC_RECALIB_RUNNING, _IC_WEIGHTS_CACHE
+        with _IC_RECALIB_LOCK:
+            _IC_RECALIB_RUNNING = True
+            try:
+                import sqlite3 as _sqlite3
+                with _sqlite3.connect("paper_trades.db") as _conn:
+                    n = _conn.execute(
+                        "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL"
+                    ).fetchone()[0]
+                if n < 30:
+                    return
+                from .backtester import run_paper_trade_ic
+                ic_data = run_paper_trade_ic()
+                if ic_data.get("n_trades", 0) >= 30:
+                    with open(cache_path, "w") as _f:
+                        json.dump(ic_data, _f, indent=2)
+                    _IC_WEIGHTS_CACHE = None  # invalidate in-memory cache so next call re-reads
+                    logging.getLogger(__name__).info(
+                        "IC weights auto-recalibrated from %d trades", ic_data["n_trades"]
+                    )
+            except Exception as _e:
+                logging.getLogger(__name__).debug("IC auto-recalib failed: %s", _e)
+            finally:
+                _IC_RECALIB_RUNNING = False
+
+    t = _threading.Thread(target=_run, daemon=True)
+    t.start()
 
 
 def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.json") -> Dict:
@@ -226,6 +274,7 @@ def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.j
     global _IC_WEIGHTS_CACHE
     if _IC_WEIGHTS_CACHE is not None:
         return _IC_WEIGHTS_CACHE
+    _maybe_trigger_recalib(cache_path)
     base_weights = config.get("composite_weights", {}) or {}
     try:
         with open(cache_path, "r") as f:

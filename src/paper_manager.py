@@ -185,6 +185,25 @@ class PaperManager:
         except Exception:
             return ""
 
+    def _get_spread_slippage(self, ticker: str, expiration: str, strike: float, option_type: str, entry_price: float) -> float:
+        """Return per-share slippage as 30% of the bid-ask spread width, capped at $0.50 and floored at self._slippage_per_share."""
+        try:
+            symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
+            if not symbol:
+                return self._slippage_per_share
+            tkr = yf.Ticker(symbol)
+            bid = getattr(tkr.fast_info, "bid", None)
+            ask = getattr(tkr.fast_info, "ask", None)
+            if bid is None or ask is None:
+                # fallback: use 10% of entry price as spread estimate
+                spread = entry_price * 0.10
+            else:
+                spread = max(0.0, float(ask) - float(bid))
+            slippage = spread * 0.30
+            return max(self._slippage_per_share, min(slippage, 0.50))
+        except Exception:
+            return self._slippage_per_share
+
     def update_positions(self):
         """Updates all OPEN positions using SQLite and checks exit rules."""
         config = self._load_config()
@@ -260,6 +279,56 @@ class PaperManager:
             if ticker not in spot_cache:
                 continue
 
+            # Spread P&L: detect and handle spread rows before single-leg symbol fetch
+            strategy_name = row["strategy_name"] or ""
+            if strategy_name.startswith("SPREAD:"):
+                try:
+                    parts = strategy_name.split(":")
+                    long_strike = float(parts[1])
+                    max_profit = float(parts[2])
+                    max_loss = float(parts[3])
+                    spot = spot_cache.get(ticker)
+                    if spot is None:
+                        continue
+                    spread_width = abs(long_strike - float(strike))
+                    low_k = min(float(strike), float(long_strike))
+                    high_k = max(float(strike), float(long_strike))
+                    if spread_width > 0:
+                        intrinsic_frac = max(0.0, min(1.0, (spot - low_k) / spread_width))
+                    else:
+                        intrinsic_frac = 0.5
+                    # For a short credit spread: loses when intrinsic_frac → 1
+                    current_value = float(max_loss) * intrinsic_frac   # cost to close (positive = loss)
+                    net_credit = float(max_profit)
+                    if net_credit > 0:
+                        pnl_raw = (net_credit - current_value) / net_credit
+                    else:
+                        continue
+                    hit_tp = pnl_raw >= tp
+                    hit_sl = pnl_raw <= sl
+                    hit_time = (0 < dte <= time_exit_dte) and days_held >= 3
+                    if hit_tp or hit_sl or hit_time:
+                        if hit_tp:
+                            reason = "Take Profit"
+                        elif hit_sl:
+                            reason = "Stop Loss"
+                        else:
+                            reason = f"Time Exit ({dte}d to expiry)"
+                        friction_fraction = self._friction_per_share / entry_price if entry_price > 0 else 0.0
+                        pnl_realistic = pnl_raw - friction_fraction
+                        closed_this_run.append(
+                            f"{ticker} SPREAD ${strike:.0f}/{long_strike:.0f} → {reason} "
+                            f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
+                        )
+                        with self._get_connection() as conn:
+                            conn.execute(
+                                "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=? WHERE entry_id=?",
+                                (current_value, now, pnl_realistic, entry_id),
+                            )
+                except Exception:
+                    pass
+                continue
+
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
             if not symbol:
                 continue
@@ -311,8 +380,10 @@ class PaperManager:
                         else:
                             reason = f"Time Exit ({dte}d to expiry)"
 
-                        # Realistic P&L: subtract round-trip slippage + commissions
-                        friction_fraction = self._friction_per_share / entry_price if entry_price > 0 else 0.0
+                        # Realistic P&L: proportional slippage (30% of bid-ask) + commissions
+                        _slip = self._get_spread_slippage(ticker, expiration, strike, option_type, entry_price)
+                        _friction = (2 * _slip) + (2 * self._commission_per_contract / 100.0)
+                        friction_fraction = _friction / entry_price if entry_price > 0 else 0.0
                         pnl_realistic = pnl_raw - friction_fraction
 
                         closed_this_run.append(

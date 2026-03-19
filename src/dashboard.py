@@ -144,6 +144,9 @@ if 'ai_status' not in st.session_state:
 if 'selected_option' not in st.session_state:
     st.session_state.selected_option = None
 
+if 'scan_params_hash' not in st.session_state:
+    st.session_state.scan_params_hash = None
+
 # --- GLOBAL CONFIG & MANAGERS ---
 config = load_config("config.json")
 pm = PaperManager(config_path="config.json")
@@ -294,36 +297,44 @@ def render_sidebar():
             st.caption("AI module not installed")
 
     # Run Button
+    import hashlib as _hashlib
+    _params_str = f"{scan_mode}|{sorted(tickers)}|{budget}|{max_expiries}|{min_dte}|{max_dte}|{sorted(custom_weights.items())}"
+    _new_hash = _hashlib.md5(_params_str.encode()).hexdigest()
+
     st.sidebar.divider()
     if st.sidebar.button("🚀 RUN SCANNER", type="primary", use_container_width=True):
-        with st.spinner("Scanning Market..."):
-            if scan_mode != "Single-stock":
-                tickers = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
-                           "META", "NFLX", "JPM", "GS", "V", "MA", "COIN", "INTC", "PYPL", "SQ"][:num_tickers]
+        if _new_hash != st.session_state.scan_params_hash:
+            with st.spinner("Scanning Market..."):
+                if scan_mode != "Single-stock":
+                    tickers = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
+                               "META", "NFLX", "JPM", "GS", "V", "MA", "COIN", "INTC", "PYPL", "SQ"][:num_tickers]
 
-            logger = setup_logging()
-            try:
-                results = run_scan(
-                    mode=scan_mode,
-                    tickers=tickers,
-                    budget=budget,
-                    max_expiries=max_expiries,
-                    min_dte=min_dte,
-                    max_dte=max_dte,
-                    trader_profile="swing",
-                    logger=logger,
-                    market_trend=st.session_state.market_trend,
-                    volatility_regime=st.session_state.volatility_regime,
-                    macro_risk_active=st.session_state.macro_risk_active,
-                    tnx_change_pct=st.session_state.tnx_change_pct,
-                    verbose=False,
-                    custom_weights=custom_weights
-                )
-                st.session_state.scan_results = results
-                st.session_state.ai_results = None
-            except Exception as e:
-                st.error(f"Scan Failed: {e}")
-                return budget
+                logger = setup_logging()
+                try:
+                    results = run_scan(
+                        mode=scan_mode,
+                        tickers=tickers,
+                        budget=budget,
+                        max_expiries=max_expiries,
+                        min_dte=min_dte,
+                        max_dte=max_dte,
+                        trader_profile="swing",
+                        logger=logger,
+                        market_trend=st.session_state.market_trend,
+                        volatility_regime=st.session_state.volatility_regime,
+                        macro_risk_active=st.session_state.macro_risk_active,
+                        tnx_change_pct=st.session_state.tnx_change_pct,
+                        verbose=False,
+                        custom_weights=custom_weights
+                    )
+                    st.session_state.scan_results = results
+                    st.session_state.ai_results = None
+                except Exception as e:
+                    st.error(f"Scan Failed: {e}")
+                    return budget
+            st.session_state.scan_params_hash = _new_hash
+        else:
+            st.info("Params unchanged — showing cached results.")
 
         # AI Scoring — runs automatically after technical scan
         if ai_enabled and _AI_AVAILABLE and st.session_state.scan_results:
@@ -353,6 +364,13 @@ def render_sidebar():
             st.session_state.ai_status = "disabled"
 
         st.success("Scan Complete")
+
+    if st.sidebar.button("🗑️ Clear Cache", use_container_width=True):
+        st.session_state.scan_params_hash = None
+        st.session_state.scan_results = None
+        st.session_state.ai_results = None
+        st.session_state.ai_status = None
+        st.rerun()
 
     return budget
 
