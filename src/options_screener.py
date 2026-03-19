@@ -1418,54 +1418,66 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def normalize_spreads_for_ranking(spreads_df: pd.DataFrame, mode: str = "Credit Spreads") -> pd.DataFrame:
-    """Normalize credit spread rows to be compatible with single-leg picks format for unified AI ranking."""
+    """
+    Convert credit spread candidates into a picks-compatible DataFrame row format
+    so they can be scored alongside single-leg options.
+
+    Maps spread fields to the closest equivalent single-leg fields:
+    - premium -> net_credit (the credit received is the "premium" analog)
+    - prob_profit -> estimated from net_credit / spread_width (P(expire worthless))
+    - delta -> short_strike delta (already computed in the source data)
+    - rr_ratio -> max_profit / max_loss
+    - quality_score -> existing quality_score from find_credit_spreads
+    """
     if spreads_df.empty:
         return pd.DataFrame()
-    try:
-        top = spreads_df.head(5).copy()
-        rows = []
-        for _, row in top.iterrows():
-            norm = {
-                "symbol": row.get("symbol", ""),
-                "type": row.get("type", "Credit Spread"),
-                "strike": row.get("short_strike", 0),
-                "expiration": row.get("expiration", ""),
-                "premium": row.get("net_credit", 0),
-                "underlying": row.get("underlying", 0) if "underlying" in row.index else 0,
-                "quality_score": row.get("quality_score", 0.5),
-                "prob_profit": row.get("prob_profit", 0.6) if "prob_profit" in row.index else 0.6,
-                "pop_sim": row.get("pop_sim", 0.6) if "pop_sim" in row.index else 0.6,
-                "ev_per_contract": row.get("max_profit", 0),
-                "rr_ratio": (row.get("max_profit", 0) / (row.get("max_loss", 1) or 1)) if row.get("max_loss", 0) > 0 else 0,
-                "T_years": row.get("T_years", 0.1) if "T_years" in row.index else 0.1,
-                "abs_delta": row.get("abs_delta", 0.25) if "abs_delta" in row.index else 0.25,
-                "iv_rank": row.get("iv_rank", 0.5) if "iv_rank" in row.index else 0.5,
-                "impliedVolatility": row.get("impliedVolatility", 0.3) if "impliedVolatility" in row.index else 0.3,
-                "delta": row.get("delta", -0.25) if "delta" in row.index else -0.25,
-                "volume": row.get("volume", 0) if "volume" in row.index else 0,
-                "openInterest": row.get("openInterest", 0) if "openInterest" in row.index else 0,
-                "spread_pct": row.get("spread_pct", 0.1) if "spread_pct" in row.index else 0.1,
-                "_is_spread": True,
-                "_spread_type": str(row.get("type", "Credit Spread")),
-            }
-            rows.append(norm)
-        if not rows:
-            return pd.DataFrame()
-        result = pd.DataFrame(rows)
-        # Fill missing numeric columns with safe defaults
-        for col in ["hv_30d", "iv_vs_hv", "theta", "gamma", "vega", "rho",
-                    "iv_rank_30", "iv_percentile_30", "iv_rank_90", "iv_percentile_90",
-                    "be_dist_pct", "annualized_return", "option_rvol", "vrp_mean",
-                    "gamma_pin_dist_pct", "max_gamma_strike", "iv_skew_rank"]:
-            if col not in result.columns:
-                result[col] = 0.0
-        for col in ["Earnings Play", "Trend_Aligned", "macro_warning", "sr_warning",
-                    "decay_warning", "gamma_ramp", "vrp_regime", "crush_confidence"]:
-            if col not in result.columns:
-                result[col] = "" if col not in ("Trend_Aligned", "decay_warning", "gamma_ramp") else False
-        return result
-    except Exception:
+
+    rows = []
+    for _, row in spreads_df.head(5).iterrows():
+        net_credit = float(row.get("net_credit", 0) or 0)
+        max_profit = float(row.get("max_profit", 0) or 0)
+        max_loss = float(row.get("max_loss", 1) or 1)
+        spread_width = abs(float(row.get("short_strike", 0)) - float(row.get("long_strike", 0)))
+
+        # Probability of max profit: net_credit / spread_width (breakeven-based PoP proxy)
+        pop_proxy = (net_credit / spread_width) if spread_width > 0 else 0.5
+        pop_proxy = min(max(pop_proxy + 0.5, 0.3), 0.9)  # shift: credit/(width) is P(ITM at exp), flip
+
+        rr = (max_profit / 100) / net_credit if net_credit > 0 else 0.0
+
+        normalized = {
+            "symbol": row.get("symbol", ""),
+            "type": f"{row.get('type', 'spread').upper()} SPREAD",
+            "strike": row.get("short_strike", 0),
+            "expiration": row.get("expiration", ""),
+            "premium": net_credit,
+            "underlying": row.get("underlying", 0) if "underlying" in row else 0,
+            "prob_profit": pop_proxy,
+            "rr_ratio": rr,
+            "quality_score": float(row.get("quality_score", 0.5)),
+            "impliedVolatility": 0.0,  # not meaningful for spreads
+            "delta": 0.0,
+            "volume": 0,
+            "openInterest": 0,
+            "ev_per_contract": max_profit / 100 * pop_proxy - net_credit * (1 - pop_proxy),
+            "spread_pct": 0.05,  # spreads have defined risk, treat as tight
+            "_is_spread": True,
+            "_spread_type": row.get("type", ""),
+            "_max_profit": max_profit,
+            "_max_loss": max_loss,
+        }
+        rows.append(normalized)
+
+    if not rows:
         return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    # Fill required columns with safe defaults so enrich_and_score doesn't error
+    for col in ["T_years", "abs_delta", "iv_rank", "iv_percentile_30", "hv_30d",
+                "iv_skew_rank", "option_rvol", "gamma_pin_dist_pct", "vrp_mean"]:
+        if col not in result.columns:
+            result[col] = 0.0
+    return result
 
 
 def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
