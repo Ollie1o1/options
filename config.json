@@ -91,9 +91,12 @@
     "skew_align": 0.04,
     "gamma_theta": 0.03,
     "pcr": 0.03,
-    "gex": 0.02,
-    "oi_change": 0.02,
-    "sentiment": 0.04
+    "gex": 0.03,
+    "oi_change": 0.03,
+    "sentiment": 0.02,
+    "option_rvol": 0.05,
+    "vrp": 0.06,
+    "gamma_pin": 0.04
   },
   "backtest": {
     "profit_target_multiplier_long": 1.5,

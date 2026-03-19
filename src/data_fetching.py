@@ -468,6 +468,111 @@ def _upsert_iv(ticker: str, date_str: str, iv: float, db_path: str) -> None:
         pass
 
 
+def _init_skew_db(db_path: str) -> None:
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS skew_history (
+                ticker TEXT,
+                date   TEXT,
+                skew_value REAL,
+                PRIMARY KEY (ticker, date)
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _upsert_skew(ticker: str, date_str: str, skew: float, db_path: str) -> None:
+    try:
+        _init_skew_db(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO skew_history (ticker, date, skew_value) VALUES (?, ?, ?)",
+            (ticker, date_str, float(skew)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _load_skew_history(ticker: str, db_path: str) -> List[float]:
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT skew_value FROM skew_history WHERE ticker=? ORDER BY date ASC",
+            (ticker,),
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows if r[0] is not None]
+    except Exception:
+        return []
+
+
+def get_skew_percentile(ticker: str, current_skew: float) -> float:
+    """Upsert today's skew and return the historical percentile rank (0.5 if <10 rows)."""
+    try:
+        db_path = _get_iv_db_path()
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        _upsert_skew(ticker, date_str, current_skew, db_path)
+        history = _load_skew_history(ticker, db_path)
+        if len(history) < 10:
+            return 0.5
+        arr = np.array(history, dtype=float)
+        return float(np.clip((arr < current_skew).sum() / len(arr), 0.0, 1.0))
+    except Exception:
+        return 0.5
+
+
+def calculate_vrp(
+    hist: pd.DataFrame,
+    current_iv: float,
+    lookback_periods: int = 12,
+) -> Dict[str, Any]:
+    """Compute Volatility Risk Premium (IV - Realized Vol) statistics.
+
+    Returns a dict with vrp_mean, vrp_std, vrp_percentile, vrp_regime.
+    Falls back to a safe default dict on error or <60 rows of history.
+    """
+    default: Dict[str, Any] = {
+        "vrp_mean": 0.0, "vrp_std": 0.0, "vrp_percentile": 0.5, "vrp_regime": "UNKNOWN",
+    }
+    try:
+        if hist.empty or len(hist) < 60:
+            return default
+        returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+        if len(returns) < 30:
+            return default
+        rolling_rv = returns.rolling(window=30).std().dropna() * np.sqrt(252)
+        if len(rolling_rv) < lookback_periods:
+            return default
+        current_rv = float(rolling_rv.iloc[-1])
+        if current_rv <= 0:
+            return default
+        iv_hv_ratio = np.clip(current_iv / current_rv, 0.5, 3.0)
+        hist_ivs = rolling_rv * iv_hv_ratio
+        vrp_series = hist_ivs - rolling_rv
+        recent_vrp = vrp_series.iloc[-lookback_periods:]
+        vrp_mean = float(recent_vrp.mean())
+        vrp_std = float(recent_vrp.std()) if len(recent_vrp) > 1 else 0.0
+        vrp_current = current_iv - current_rv
+        vrp_pctile = float(np.clip((vrp_series < vrp_current).sum() / len(vrp_series), 0.0, 1.0))
+        if vrp_mean >= 0.05:
+            regime = "HIGH_PREMIUM"
+        elif vrp_mean >= 0.01:
+            regime = "NORMAL"
+        elif vrp_mean >= -0.02:
+            regime = "FAIR"
+        else:
+            regime = "CHEAP"
+        return {"vrp_mean": vrp_mean, "vrp_std": vrp_std, "vrp_percentile": vrp_pctile, "vrp_regime": regime}
+    except Exception:
+        return default
+
+
 def _load_iv_history(ticker: str, db_path: str) -> List[float]:
     try:
         conn = sqlite3.connect(db_path)
@@ -1152,9 +1257,49 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
         if call_mid <= 0 or put_mid <= 0:
             return None
 
-        implied_move_pct = (call_mid + put_mid) / underlying
+        straddle = call_mid + put_mid
+
+        # OTM strangle blending for a more accurate implied move estimate
+        strangle = None
+        try:
+            sorted_strikes = sorted(exp_df["strike"].unique())
+            atm_idx = sorted_strikes.index(atm_strike) if atm_strike in sorted_strikes else None
+            if atm_idx is not None:
+                otm_call_strike = sorted_strikes[atm_idx + 1] if atm_idx + 1 < len(sorted_strikes) else None
+                otm_put_strike = sorted_strikes[atm_idx - 1] if atm_idx - 1 >= 0 else None
+                if otm_call_strike and otm_put_strike:
+                    otm_call = exp_df[(exp_df["strike"] == otm_call_strike) & (exp_df["type"] == "call")]
+                    otm_put = exp_df[(exp_df["strike"] == otm_put_strike) & (exp_df["type"] == "put")]
+                    if not otm_call.empty and not otm_put.empty:
+                        oc_mid = (otm_call.iloc[0]["bid"] + otm_call.iloc[0]["ask"]) / 2
+                        op_mid = (otm_put.iloc[0]["bid"] + otm_put.iloc[0]["ask"]) / 2
+                        if oc_mid > 0 and op_mid > 0:
+                            strangle = oc_mid + op_mid
+        except Exception:
+            strangle = None
+
+        if strangle is not None:
+            implied_move_pct = ((straddle + strangle) / 2) / underlying
+        else:
+            implied_move_pct = straddle / underlying
+
+        # Get ATM IV for crush prediction
+        atm_iv_val = None
+        try:
+            call_iv = float(atm_call.iloc[0].get("impliedVolatility", 0) or 0)
+            put_iv = float(atm_put.iloc[0].get("impliedVolatility", 0) or 0)
+            if call_iv > 0 and put_iv > 0:
+                atm_iv_val = (call_iv + put_iv) / 2
+            elif call_iv > 0:
+                atm_iv_val = call_iv
+            elif put_iv > 0:
+                atm_iv_val = put_iv
+        except Exception:
+            pass
 
         hist_moves = []
+        predicted_iv_crush = None
+        crush_confidence = ""
         try:
             earn_dates = tkr.get_earnings_dates(limit=16)
             if earn_dates is not None and not earn_dates.empty:
@@ -1168,11 +1313,25 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
                             post_price = float(hist["Close"].iloc[min(earn_date_loc + 1, len(hist) - 1)])
                             if pre_price > 0:
                                 hist_moves.append(abs(post_price / pre_price - 1.0))
+                    # IV crush prediction using 3y history
+                    if atm_iv_val and atm_iv_val > 0 and len(hist) >= 60:
+                        crush_confidence = "high" if len(hist) >= 252 else "medium"
+                        post_returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+                        if len(post_returns) >= 30:
+                            post_event_hv = float(post_returns.iloc[-30:].std() * np.sqrt(252))
+                            predicted_iv_crush = max(0.0, atm_iv_val - post_event_hv)
         except Exception:
             pass
 
         if not hist_moves:
-            return {"implied_move_pct": implied_move_pct, "hist_avg_move": None, "hist_beat_rate": None, "is_cheap": None}
+            return {
+                "implied_move_pct": implied_move_pct,
+                "hist_avg_move": None,
+                "hist_beat_rate": None,
+                "is_cheap": None,
+                "predicted_iv_crush": predicted_iv_crush,
+                "crush_confidence": crush_confidence,
+            }
 
         hist_avg = sum(hist_moves) / len(hist_moves)
         beat_rate = sum(1 for m in hist_moves if m > implied_move_pct) / len(hist_moves)
@@ -1182,7 +1341,9 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
             "implied_move_pct": implied_move_pct,
             "hist_avg_move": hist_avg,
             "hist_beat_rate": beat_rate,
-            "is_cheap": is_cheap
+            "is_cheap": is_cheap,
+            "predicted_iv_crush": predicted_iv_crush,
+            "crush_confidence": crush_confidence,
         }
     except Exception:
         return None
@@ -1285,6 +1446,12 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
 
     df = pd.concat(frames, ignore_index=True)
 
+    # Option RVOL: contract-level volume relative to OI-normalized baseline
+    _oi_vals = pd.to_numeric(df["openInterest"], errors="coerce").fillna(1)
+    _vol_vals = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+    _baseline = (_oi_vals / 30.0).clip(lower=1.0)
+    df["option_rvol"] = (_vol_vals / _baseline).clip(upper=50.0)
+
     # Compute earnings move analysis now that chain is available
     earnings_move_data = calculate_implied_earnings_move(tkr, earnings_date, df, underlying)
 
@@ -1310,7 +1477,11 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     # IV Rank Calculation
     df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
     median_iv = df["impliedVolatility"].median(skipna=True)
-    
+
+    # VRP: Volatility Risk Premium computation
+    _vrp_iv = float(median_iv) if pd.notna(median_iv) and median_iv > 0 else (hv_30d or 0.25)
+    vrp_data = calculate_vrp(hist, _vrp_iv)
+
     iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = None, None, None, None
     iv_confidence = "Low"
     if median_iv and pd.notna(median_iv) and median_iv > 0:
@@ -1353,6 +1524,20 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
                     term_structure_spread = b_iv - f_iv
         except Exception:
             pass
+
+    # IV skew percentile rank
+    try:
+        if "iv_skew" in df.columns:
+            avg_skew = float(df["iv_skew"].replace(0.0, np.nan).median(skipna=True))
+            if not math.isnan(avg_skew):
+                skew_pctile = get_skew_percentile(symbol, avg_skew)
+                df["iv_skew_rank"] = skew_pctile
+            else:
+                df["iv_skew_rank"] = 0.5
+        else:
+            df["iv_skew_rank"] = 0.5
+    except Exception:
+        df["iv_skew_rank"] = 0.5
 
     # ── Polygon.io enrichment (opt-in, silent no-op when key absent) ────────────
     unusual_options_flow = None
@@ -1428,6 +1613,8 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "unusual_options_flow": unusual_options_flow,
             "company_description": company_description,
             "market_cap": market_cap,
+            "iv_skew_rank": float(df["iv_skew_rank"].iloc[0]) if "iv_skew_rank" in df.columns and not df.empty else 0.5,
+            "vrp_data": vrp_data,
         }
     }
     _CHAIN_CACHE[symbol] = result

@@ -247,10 +247,16 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
 
         is_adjusted = bool(row.get("divergence_adjusted", False))
         rank_str = str(int(row.get("rank", 0))) + ("*" if is_adjusted else "")
+        type_raw = str(row.get("type", "")).upper()
+        if bool(row.get("_is_spread", False)):
+            type_display = f"[SPREAD] {str(row.get('_spread_type', '')).upper()}"
+        else:
+            type_display = type_raw
+
         table.add_row(
             rank_str,
             str(row.get("symbol", "")),
-            str(row.get("type", "")).upper(),
+            type_display,
             f"${float(row.get('strike', 0)):.1f}",
             str(row.get("expiration", ""))[:10],
             dte,

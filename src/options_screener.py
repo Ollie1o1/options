@@ -518,9 +518,30 @@ def calculate_metrics(
         negative_strikes = cumulative_gex[cumulative_gex < 0]
         gex_flip = float(negative_strikes.index[0]) if not negative_strikes.empty else None
         df["gex_flip_price"] = gex_flip
+        # Max gamma strike pinning
+        try:
+            gex_by_strike_abs = df.groupby("strike")["gex"].apply(lambda x: x.abs().sum())
+            max_gamma_strike = float(gex_by_strike_abs.idxmax()) if not gex_by_strike_abs.empty else None
+            df["max_gamma_strike"] = max_gamma_strike
+            _price_scalar = float(S_vals[0]) if len(S_vals) > 0 else 0.0
+            if max_gamma_strike and _price_scalar > 0:
+                df["gamma_pin_dist_pct"] = abs(max_gamma_strike - _price_scalar) / _price_scalar * 100
+            else:
+                df["gamma_pin_dist_pct"] = pd.NA
+        except Exception:
+            df["max_gamma_strike"] = pd.NA
+            df["gamma_pin_dist_pct"] = pd.NA
     except Exception:
         df["gex"] = 0.0
         df["gex_flip_price"] = None
+        df["max_gamma_strike"] = pd.NA
+        df["gamma_pin_dist_pct"] = pd.NA
+
+    # --- Option RVOL unusual activity flag ---
+    if "option_rvol" in df.columns:
+        df["unusual_options_activity"] = df["option_rvol"] > 5.0
+    else:
+        df["unusual_options_activity"] = False
 
     # --- OI Change (Day-over-Day) ---
     _oi_prev = load_oi_snapshot()
@@ -561,6 +582,13 @@ def calculate_metrics(
         df["hist_earnings_move"] = emd.get("hist_avg_move")
         df["earnings_beat_rate"] = emd.get("hist_beat_rate")
         df["earnings_iv_cheap"] = emd.get("is_cheap")
+
+    # --- Earnings IV Crush Prediction ---
+    df["predicted_iv_crush"] = pd.NA
+    df["crush_confidence"] = ""
+    if earnings_move_data:
+        df["predicted_iv_crush"] = earnings_move_data.get("predicted_iv_crush")
+        df["crush_confidence"] = earnings_move_data.get("crush_confidence", "")
 
     # --- ADVANCED METRICS ---
     df["expected_move"] = calculate_expected_move(S_vals, IV_vals, T_vals)
@@ -940,12 +968,53 @@ def calculate_scores(
             np.where(is_call_series, sent_call, sent_put), index=df.index
         )
 
+        # Option RVOL score: unusual contract-level volume relative to OI baseline
+        option_rvol_score = rank_norm(
+            pd.to_numeric(df.get("option_rvol", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        ).clip(0, 1)
+        df["option_rvol_score"] = option_rvol_score
+
+        # Skew combined score: blend directional alignment with percentile rank
+        iv_skew_rank_vals = pd.to_numeric(
+            df.get("iv_skew_rank", pd.Series(0.5, index=df.index)), errors="coerce"
+        ).fillna(0.5)
+        skew_rank_score = pd.Series(
+            np.where(is_call_series, 1.0 - iv_skew_rank_vals, iv_skew_rank_vals),
+            index=df.index,
+        ).clip(0, 1)
+        skew_combined_score = (0.5 * skew_align_score + 0.5 * skew_rank_score).clip(0, 1)
+
+        # VRP score: rewards options where IV premium matches the trading mode
+        vrp_vals = pd.to_numeric(
+            df.get("vrp_mean", pd.Series(0.0, index=df.index)), errors="coerce"
+        ).fillna(0.0)
+        if mode == "Premium Selling":
+            vrp_score = ((vrp_vals.clip(-0.10, 0.15) + 0.10) / 0.25).clip(0, 1)
+        else:
+            vrp_score = (((-vrp_vals).clip(-0.10, 0.15) + 0.10) / 0.25).clip(0, 1)
+        df["vrp_score"] = vrp_score
+
+        # Gamma pin score: rewards near-expiry contracts near max gamma strike
+        gamma_pin_dist = pd.to_numeric(
+            df.get("gamma_pin_dist_pct", pd.Series(100.0, index=df.index)), errors="coerce"
+        ).fillna(100.0)
+        dte_arr = df["T_years"].values * 365.0
+        gamma_pin_score = pd.Series(
+            np.where(
+                dte_arr <= 14,
+                np.clip(1.0 - (gamma_pin_dist.values / 10.0), 0.0, 1.0),
+                0.5,
+            ),
+            index=df.index,
+        )
+        df["gamma_pin_score"] = gamma_pin_score
+
         dw = {
             "pop": 0.20, "em_realism": 0.10, "rr": 0.12, "momentum": 0.08,
             "iv_rank": 0.07, "liquidity": 0.12, "catalyst": 0.04, "theta": 0.08,
             "ev": 0.06, "trader_pref": 0.07, "iv_edge": 0.08, "skew_align": 0.05,
-            "gamma_theta": 0.04, "pcr": 0.05, "gex": 0.04, "oi_change": 0.04,
-            "sentiment": 0.04,
+            "gamma_theta": 0.04, "pcr": 0.03, "gex": 0.03, "oi_change": 0.03,
+            "sentiment": 0.02, "option_rvol": 0.05, "vrp": 0.06, "gamma_pin": 0.04,
         }
         cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
@@ -955,16 +1024,17 @@ def calculate_scores(
             + w["momentum"]*momentum_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity
             + w["catalyst"]*catalyst_score + w["theta"]*theta_score + w["ev"]*ev_score
             + w["trader_pref"]*trader_pref_score + w["iv_edge"]*iv_edge_score
-            + w["skew_align"]*skew_align_score + w["gamma_theta"]*gamma_theta_score
+            + w["skew_align"]*skew_combined_score + w["gamma_theta"]*gamma_theta_score
             + w["pcr"]*pcr_score + w["gex"]*gex_score + w["oi_change"]*oi_change_score
-            + w["sentiment"]*sentiment_score_component
+            + w["sentiment"]*sentiment_score_component + w["option_rvol"]*option_rvol_score
+            + w["vrp"]*vrp_score + w["gamma_pin"]*gamma_pin_score
         ) / w_sum
         try:
             _cdf = pd.DataFrame({
                 "PoP": w["pop"]*pop_score, "EV": w["ev"]*ev_score,
                 "RR": w["rr"]*rr_score, "IV edge": w["iv_edge"]*iv_edge_score,
                 "Liq": w["liquidity"]*liquidity, "Theta": w["theta"]*theta_score,
-                "Mom": w["momentum"]*momentum_score, "Skew": w["skew_align"]*skew_align_score,
+                "Mom": w["momentum"]*momentum_score, "Skew": w["skew_align"]*skew_combined_score,
                 "Sent": w["sentiment"]*sentiment_score_component,
             }, index=df.index)
             df["score_drivers"] = _cdf.apply(lambda r: " · ".join(r.nlargest(3).index.tolist()), axis=1)
@@ -1036,8 +1106,16 @@ def calculate_scores(
     except Exception:
         pass
 
-    # Save components
     df["quality_score"] = df["quality_score"].clip(0, 1)
+
+    # Earnings IV crush penalty: reduce score for earnings plays where post-event HV will be lower
+    if "predicted_iv_crush" in df.columns and "Earnings Play" in df.columns:
+        _crush_vals = pd.to_numeric(df["predicted_iv_crush"], errors="coerce").fillna(0.0)
+        _earn_mask = df["Earnings Play"] == "YES"
+        crush_penalty = (_crush_vals * 0.8).clip(0, 0.15)
+        df.loc[_earn_mask, "quality_score"] -= crush_penalty[_earn_mask]
+
+    # Save components
     df["ev_score"] = ev_score
     df["spread_pct"] = df["spread_pct"].replace([float("inf"), -float("inf")], pd.NA)
     df["liquidity_score"], df["delta_quality"], df["iv_quality"] = liquidity, delta_quality, iv_quality
@@ -1070,6 +1148,7 @@ def enrich_and_score(
     next_ex_div: Optional[object] = None,
     earnings_move_data: Optional[dict] = None,
     hv_ewma: Optional[float] = None,
+    vrp_data: dict = None,
     news_data=None,
 ) -> pd.DataFrame:
     # Use richer multi-source news sentiment when available
@@ -1141,6 +1220,14 @@ def enrich_and_score(
     # Attach EWMA vol column if provided
     if hv_ewma is not None and "hv_ewma" not in df.columns:
         df["hv_ewma"] = hv_ewma
+
+    # Attach VRP data
+    if vrp_data:
+        df["vrp_mean"] = vrp_data.get("vrp_mean", 0.0)
+        df["vrp_regime"] = vrp_data.get("vrp_regime", "UNKNOWN")
+    else:
+        df["vrp_mean"] = 0.0
+        df["vrp_regime"] = "UNKNOWN"
 
     # 1. Call Helper: Metrics
     df = calculate_metrics(
@@ -1328,6 +1415,57 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
                 })
 
     return pd.DataFrame(spreads).sort_values(by="quality_score", ascending=False) if spreads else pd.DataFrame()
+
+
+def normalize_spreads_for_ranking(spreads_df: pd.DataFrame, mode: str = "Credit Spreads") -> pd.DataFrame:
+    """Normalize credit spread rows to be compatible with single-leg picks format for unified AI ranking."""
+    if spreads_df.empty:
+        return pd.DataFrame()
+    try:
+        top = spreads_df.head(5).copy()
+        rows = []
+        for _, row in top.iterrows():
+            norm = {
+                "symbol": row.get("symbol", ""),
+                "type": row.get("type", "Credit Spread"),
+                "strike": row.get("short_strike", 0),
+                "expiration": row.get("expiration", ""),
+                "premium": row.get("net_credit", 0),
+                "underlying": row.get("underlying", 0) if "underlying" in row.index else 0,
+                "quality_score": row.get("quality_score", 0.5),
+                "prob_profit": row.get("prob_profit", 0.6) if "prob_profit" in row.index else 0.6,
+                "pop_sim": row.get("pop_sim", 0.6) if "pop_sim" in row.index else 0.6,
+                "ev_per_contract": row.get("max_profit", 0),
+                "rr_ratio": (row.get("max_profit", 0) / (row.get("max_loss", 1) or 1)) if row.get("max_loss", 0) > 0 else 0,
+                "T_years": row.get("T_years", 0.1) if "T_years" in row.index else 0.1,
+                "abs_delta": row.get("abs_delta", 0.25) if "abs_delta" in row.index else 0.25,
+                "iv_rank": row.get("iv_rank", 0.5) if "iv_rank" in row.index else 0.5,
+                "impliedVolatility": row.get("impliedVolatility", 0.3) if "impliedVolatility" in row.index else 0.3,
+                "delta": row.get("delta", -0.25) if "delta" in row.index else -0.25,
+                "volume": row.get("volume", 0) if "volume" in row.index else 0,
+                "openInterest": row.get("openInterest", 0) if "openInterest" in row.index else 0,
+                "spread_pct": row.get("spread_pct", 0.1) if "spread_pct" in row.index else 0.1,
+                "_is_spread": True,
+                "_spread_type": str(row.get("type", "Credit Spread")),
+            }
+            rows.append(norm)
+        if not rows:
+            return pd.DataFrame()
+        result = pd.DataFrame(rows)
+        # Fill missing numeric columns with safe defaults
+        for col in ["hv_30d", "iv_vs_hv", "theta", "gamma", "vega", "rho",
+                    "iv_rank_30", "iv_percentile_30", "iv_rank_90", "iv_percentile_90",
+                    "be_dist_pct", "annualized_return", "option_rvol", "vrp_mean",
+                    "gamma_pin_dist_pct", "max_gamma_strike", "iv_skew_rank"]:
+            if col not in result.columns:
+                result[col] = 0.0
+        for col in ["Earnings Play", "Trend_Aligned", "macro_warning", "sr_warning",
+                    "decay_warning", "gamma_ramp", "vrp_regime", "crush_confidence"]:
+            if col not in result.columns:
+                result[col] = "" if col not in ("Trend_Aligned", "decay_warning", "gamma_ramp") else False
+        return result
+    except Exception:
+        return pd.DataFrame()
 
 
 def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
@@ -1807,6 +1945,7 @@ def _score_fetched_data(
         short_interest = context.get("short_interest")
         next_ex_div = context.get("next_ex_div")
         news_data = context.get("news_data")
+        vrp_data = context.get("vrp_data", {})
 
         context_log = []
         if hv: context_log.append(f"HV (30d): {hv:.2%}")
@@ -1838,6 +1977,7 @@ def _score_fetched_data(
             next_ex_div=next_ex_div,
             earnings_move_data=earnings_move_data,
             hv_ewma=hv_ewma,
+            vrp_data=vrp_data,
             news_data=news_data,
         )
 
@@ -1967,26 +2107,9 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         )
         print(fmt.colorize(_filter_line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else _filter_line)
 
-    # IV history coverage summary — print once before fetching starts
-    if verbose:
-        try:
-            from .data_fetching import iv_history_coverage as _iv_cov
-            _cov_parts = []
-            for _sym in tickers:
-                try:
-                    _cov = _iv_cov(_sym)
-                    _cov_parts.append(f"{_sym}: {_cov['days']}d ({_cov['confidence']})")
-                except Exception:
-                    pass
-            if _cov_parts:
-                _cov_line = "  IV history: " + "  |  ".join(_cov_parts)
-                print(fmt.colorize(_cov_line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else _cov_line)
-        except Exception:
-            pass
-
     results_buffer: Dict[str, Any] = {}
 
-    # Phase 1 — Pre-fetch all chains in parallel (ThreadPoolExecutor, respects max_expiries)
+    # Phase 1 — Pre-fetch all chains in parallel with a progress bar
     def _fetch_one(sym: str):
         try:
             return sym, fetch_options_yfinance(sym, max_expiries)
@@ -1996,26 +2119,25 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     raw_results: Dict[str, Any] = {}
     with _suppress_scan_noise():
         with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as executor:
-            for sym, result in executor.map(_fetch_one, tickers):
-                raw_results[sym] = result
+            _future_map = {executor.submit(_fetch_one, sym): sym for sym in tickers}
+            if HAS_ENHANCED_CLI and verbose:
+                bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
+                _pbar = tqdm(
+                    total=len(tickers), desc="  Fetching", unit="",
+                    leave=False, dynamic_ncols=True, bar_format=bar_fmt, file=sys.stderr,
+                )
+            else:
+                _pbar = None
+            for _fut in as_completed(_future_map):
+                _sym, _res = _fut.result()
+                raw_results[_sym] = _res
+                if _pbar is not None:
+                    _pbar.update(1)
+            if _pbar is not None:
+                _pbar.close()
 
-    # Phase 2 — Score each fetched result (with optional tqdm progress bar)
-    if HAS_ENHANCED_CLI and verbose:
-        bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
-        score_iter = tqdm(
-            tickers,
-            total=len(tickers),
-            desc="  Scanning",
-            unit="",
-            leave=False,
-            dynamic_ncols=True,
-            bar_format=bar_fmt,
-            file=sys.stderr,
-        )
-    else:
-        score_iter = tickers
-
-    for symbol in score_iter:
+    # Phase 2 — Score each fetched result
+    for symbol in tickers:
         data_result = raw_results.get(symbol)
         if data_result is None or "error" in data_result:
             err_msg = (data_result or {}).get("error", "fetch returned no data")
@@ -2141,7 +2263,16 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     
     if all_iron_condors:
         iron_condors_df = pd.concat(all_iron_condors, ignore_index=True)
-    
+
+    # Inject credit spreads into picks pool for unified AI ranking
+    if not credit_spreads_df.empty and mode not in ("Credit Spreads", "Iron Condor"):
+        try:
+            spread_picks = normalize_spreads_for_ranking(credit_spreads_df, mode)
+            if not spread_picks.empty:
+                picks = pd.concat([picks, spread_picks], ignore_index=True)
+        except Exception:
+            pass
+
     underlying_price = 0.0
     if not picks.empty and "underlying" in picks.columns:
         underlying_price = picks.iloc[0]["underlying"]

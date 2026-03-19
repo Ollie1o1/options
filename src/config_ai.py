@@ -80,6 +80,8 @@ AI_CONFIG: dict = {
         "be_dist_pct", "annualized_return",
         "Earnings Play", "Trend_Aligned",
         "macro_warning", "sr_warning", "decay_warning", "gamma_ramp",
+        "option_rvol", "iv_skew_rank", "vrp_mean", "vrp_regime",
+        "predicted_iv_crush", "crush_confidence", "max_gamma_strike", "gamma_pin_dist_pct",
     ],
 }
 

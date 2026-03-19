@@ -124,6 +124,10 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
     if rvol and float(rvol) >= thr.get("rvol_unusual", 1.5):
         kv.append(f"rvol:{rvol:.1f}x(unusual)")
 
+    opt_rvol = c.get("option_rvol")
+    if opt_rvol is not None and float(opt_rvol) >= 3.0:
+        kv.append(f"opt-rvol:{float(opt_rvol):.1f}x(CONTRACT-unusual)")
+
     if str(c.get("Earnings Play", "")).upper() == "YES":
         kv.append("EARNINGS(gap-risk)")
 
@@ -158,6 +162,33 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
             kv.append(f"unusual-flow:{n_contracts}contracts")
         except Exception:
             pass
+
+    iv_skew_rank = c.get("iv_skew_rank")
+    if iv_skew_rank is not None:
+        if float(iv_skew_rank) >= 0.80:
+            kv.append(f"skew-rank:{float(iv_skew_rank):.0%}(ELEVATED-fear)")
+        elif float(iv_skew_rank) <= 0.20:
+            kv.append(f"skew-rank:{float(iv_skew_rank):.0%}(DEPRESSED-complacency)")
+
+    vrp_regime = c.get("vrp_regime")
+    vrp_mean = c.get("vrp_mean")
+    if vrp_regime and vrp_regime != "UNKNOWN":
+        vrp_str = f"{float(vrp_mean)*100:+.1f}%" if vrp_mean is not None else ""
+        kv.append(f"VRP:{vrp_regime}{vrp_str}")
+
+    predicted_crush = c.get("predicted_iv_crush")
+    crush_conf = c.get("crush_confidence", "")
+    if predicted_crush is not None and float(predicted_crush) > 0.05:
+        kv.append(f"IV-crush:{float(predicted_crush)*100:.0f}%pts-predicted({crush_conf})")
+
+    gamma_pin_dist = c.get("gamma_pin_dist_pct")
+    max_gamma_strike = c.get("max_gamma_strike")
+    if gamma_pin_dist is not None and max_gamma_strike is not None:
+        dist_f = float(gamma_pin_dist)
+        if dist_f < 3.0:
+            kv.append(f"gamma-pin:${float(max_gamma_strike):.0f}(NEAR-{dist_f:.1f}%)")
+        elif dist_f < 7.0:
+            kv.append(f"gamma-pin:${float(max_gamma_strike):.0f}({dist_f:.1f}%away)")
 
     return " ".join(kv) if kv else "no-context"
 
