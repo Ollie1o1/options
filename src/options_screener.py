@@ -1127,12 +1127,13 @@ def calculate_scores(
         df["max_pain_score"] = max_pain_score
 
         dw = {
-            "pop": 0.20, "em_realism": 0.18, "rr": 0.13, "momentum": 0.10,
-            "iv_rank": 0.05, "liquidity": 0.10, "catalyst": 0.02, "theta": 0.07,
-            "ev": 0.08, "trader_pref": 0.04, "iv_edge": 0.09, "skew_align": 0.04,
-            "gamma_theta": 0.03, "pcr": 0.02, "gex": 0.03, "oi_change": 0.02,
-            "sentiment": 0.02, "option_rvol": 0.04, "vrp": 0.05, "gamma_pin": 0.03,
-            "max_pain": 0.04,
+            # Research-backed defaults (iv_rank raised 0.05→0.18, em_realism reduced 0.18→0.04)
+            "pop": 0.22, "em_realism": 0.04, "rr": 0.11, "momentum": 0.05,
+            "iv_rank": 0.18, "liquidity": 0.09, "catalyst": 0.01, "theta": 0.07,
+            "ev": 0.05, "trader_pref": 0.02, "iv_edge": 0.08, "skew_align": 0.03,
+            "gamma_theta": 0.01, "pcr": 0.01, "gex": 0.01, "oi_change": 0.01,
+            "sentiment": 0.01, "option_rvol": 0.02, "vrp": 0.06, "gamma_pin": 0.01,
+            "max_pain": 0.01,
         }
         cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
