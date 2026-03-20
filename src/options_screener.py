@@ -586,6 +586,16 @@ def calculate_metrics(
         df["max_gamma_strike"] = pd.NA
         df["gamma_pin_dist_pct"] = pd.NA
 
+    # Max pain distance from current price
+    if "max_pain_strike" not in df.columns:
+        df["max_pain_strike"] = pd.NA
+    _mp_price_scalar = float(S_vals[0]) if len(S_vals) > 0 else 0.0
+    if df["max_pain_strike"].notna().any() and _mp_price_scalar > 0:
+        _mp_val = pd.to_numeric(df["max_pain_strike"], errors="coerce")
+        df["max_pain_dist_pct"] = ((_mp_val - _mp_price_scalar) / _mp_price_scalar * 100).abs()
+    else:
+        df["max_pain_dist_pct"] = pd.NA
+
     # --- Option RVOL unusual activity flag ---
     if "option_rvol" in df.columns:
         df["unusual_options_activity"] = df["option_rvol"] > 5.0
@@ -887,7 +897,8 @@ def calculate_scores(
     trader_profile: str,
     mode: str,
     min_dte: int,
-    max_dte: int
+    max_dte: int,
+    sector_etf: Optional[str] = None,
 ) -> pd.DataFrame:
     """Calculates subjective quality scores using normalization and weights."""
     
@@ -932,11 +943,33 @@ def calculate_scores(
     theta_score = (1.0 - rank_norm(theta_raw.fillna(theta_raw.median()))).clip(0, 1)
     theta_score = theta_score.where((df["T_years"] * 365.0) > 7, theta_score * 0.7)
     
-    ret_score = rank_norm(pd.to_numeric(df.get("ret_5d", pd.Series(0.0, index=df.index)), errors='coerce').fillna(0.0))
-    rsi_vals = pd.to_numeric(df.get("rsi_14", pd.Series(np.nan, index=df.index)), errors="coerce")
-    rsi_score = (1.0 - (abs((rsi_vals - 50.0) / 50.0))).clip(0, 1)
-    atr_score = rank_norm(pd.to_numeric(df.get("atr_trend", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0))
-    momentum_score = 0.4 * ret_score.fillna(0.5) + 0.3 * rsi_score.fillna(0.5) + 0.3 * atr_score.fillna(0.5)
+    # Multi-timeframe momentum confluence (replaces simple momentum_score)
+    ret5 = pd.to_numeric(df.get("ret_5d", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+    rsi_vals = pd.to_numeric(df.get("rsi_14", pd.Series(50.0, index=df.index)), errors="coerce").fillna(50.0)
+    price_vs_sma20 = (df.get("underlying", pd.Series(0.0, index=df.index)).values /
+                      df.get("sma_20", pd.Series(1.0, index=df.index)).replace(0, np.nan).values) - 1.0
+    price_vs_vwap = (df.get("underlying", pd.Series(0.0, index=df.index)).values /
+                     df.get("vwap", pd.Series(1.0, index=df.index)).replace(0, np.nan).values) - 1.0
+
+    is_call_mom = df["type"].str.lower() == "call"
+
+    # Each signal returns 1 (aligned) or 0 (not aligned) for the option's direction
+    # For calls: want momentum UP, RSI not overbought, price above SMA/VWAP
+    # For puts: want momentum DOWN, RSI not oversold, price below SMA/VWAP
+    sig_ret5 = np.where(is_call_mom, (ret5 > 0).astype(float), (ret5 < 0).astype(float))
+    sig_rsi  = np.where(is_call_mom,
+                        np.clip(1.0 - (rsi_vals - 50.0).clip(0, 30) / 30.0, 0.0, 1.0),  # calls: penalize overbought RSI>50
+                        np.clip(1.0 - (50.0 - rsi_vals).clip(0, 30) / 30.0, 0.0, 1.0))  # puts: penalize oversold RSI<50
+    sig_sma  = np.where(is_call_mom, (price_vs_sma20 > 0).astype(float), (price_vs_sma20 < 0).astype(float))
+    sig_vwap = np.where(is_call_mom, (price_vs_vwap > 0).astype(float), (price_vs_vwap < 0).astype(float))
+
+    # Weighted confluence: RSI matters most (35%), ret5 (30%), SMA (20%), VWAP (15%)
+    momentum_score = pd.Series(
+        0.30 * sig_ret5 + 0.35 * sig_rsi + 0.20 * sig_sma + 0.15 * sig_vwap,
+        index=df.index
+    ).clip(0, 1)
+    df["momentum_score"] = momentum_score
+    df["momentum_confluence"] = momentum_score
     
     # Blend 30-day and 90-day IV percentile for a more stable IV rank signal.
     # 90-day context prevents over-reacting to short-term vol spikes.
@@ -1058,12 +1091,19 @@ def calculate_scores(
         )
         df["gamma_pin_score"] = gamma_pin_score
 
+        # Max pain score: near max pain is favorable for the market structure (sellers get paid)
+        # Score high if within 3%, drop off linearly to 0.3 at 10%+
+        max_pain_dist = pd.to_numeric(df.get("max_pain_dist_pct", pd.Series(pd.NA, index=df.index)), errors="coerce").fillna(10.0)
+        max_pain_score = pd.Series(np.clip(1.0 - (max_pain_dist.values / 8.0), 0.3, 1.0), index=df.index)
+        df["max_pain_score"] = max_pain_score
+
         dw = {
-            "pop": 0.20, "em_realism": 0.10, "rr": 0.12, "momentum": 0.08,
-            "iv_rank": 0.07, "liquidity": 0.12, "catalyst": 0.04, "theta": 0.08,
-            "ev": 0.06, "trader_pref": 0.07, "iv_edge": 0.08, "skew_align": 0.05,
-            "gamma_theta": 0.04, "pcr": 0.03, "gex": 0.03, "oi_change": 0.03,
-            "sentiment": 0.02, "option_rvol": 0.05, "vrp": 0.06, "gamma_pin": 0.04,
+            "pop": 0.20, "em_realism": 0.18, "rr": 0.13, "momentum": 0.10,
+            "iv_rank": 0.05, "liquidity": 0.10, "catalyst": 0.02, "theta": 0.07,
+            "ev": 0.08, "trader_pref": 0.04, "iv_edge": 0.09, "skew_align": 0.04,
+            "gamma_theta": 0.03, "pcr": 0.02, "gex": 0.03, "oi_change": 0.02,
+            "sentiment": 0.02, "option_rvol": 0.04, "vrp": 0.05, "gamma_pin": 0.03,
+            "max_pain": 0.04,
         }
         cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
@@ -1077,6 +1117,7 @@ def calculate_scores(
             + w["pcr"]*pcr_score + w["gex"]*gex_score + w["oi_change"]*oi_change_score
             + w["sentiment"]*sentiment_score_component + w["option_rvol"]*option_rvol_score
             + w["vrp"]*vrp_score + w["gamma_pin"]*gamma_pin_score
+            + w["max_pain"]*max_pain_score
         ) / w_sum
         try:
             _cdf = pd.DataFrame({
@@ -1145,10 +1186,10 @@ def calculate_scores(
         )
         df.loc[vanna_mask, "quality_score"] += vanna_reward
 
-    # Macro event penalty
+    # Macro event penalty (sector-aware)
     try:
         from .macro_analyzer import get_macro_penalty
-        _macro_pen, _macro_active, _macro_desc = get_macro_penalty(config)
+        _macro_pen, _macro_active, _macro_desc = get_macro_penalty(config, sector_etf=sector_etf)
         if _macro_active and _macro_pen != 0.0:
             df["quality_score"] += _macro_pen
             df["macro_event_flag"] = _macro_desc
@@ -1163,6 +1204,18 @@ def calculate_scores(
         _earn_mask = df["Earnings Play"] == "YES"
         crush_penalty = (_crush_vals * 0.8).clip(0, 0.15)
         df.loc[_earn_mask, "quality_score"] -= crush_penalty[_earn_mask]
+
+    # Catastrophic risk gate: if 3+ structural risks overlap, hard-cap quality_score
+    _risk_flags = pd.DataFrame({
+        "gamma_ramp":       df.get("gamma_ramp", pd.Series(False, index=df.index)).astype(bool),
+        "decay_warning":    df.get("decay_warning", pd.Series(False, index=df.index)).astype(bool),
+        "earnings_nearby":  (df.get("event_flag", pd.Series("", index=df.index)) == "EARNINGS_NEARBY"),
+        "macro_risk":       df.get("macro_warning", pd.Series("", index=df.index)).str.contains("MACRO RISK", na=False),
+        "sr_warning":       df.get("sr_warning", pd.Series("", index=df.index)) != "",
+    }).astype(int)
+    _risk_count = _risk_flags.sum(axis=1)
+    df.loc[_risk_count >= 3, "quality_score"] = df.loc[_risk_count >= 3, "quality_score"].clip(upper=0.40)
+    df["risk_flag_count"] = _risk_count
 
     # Save components
     df["ev_score"] = ev_score
@@ -1287,7 +1340,8 @@ def enrich_and_score(
     )
 
     # 2. Call Helper: Scores
-    df = calculate_scores(df, config, vix_regime_weights, trader_profile, mode, min_dte, max_dte)
+    _sector_etf = sector_perf.get("sector_etf") if sector_perf else None
+    df = calculate_scores(df, config, vix_regime_weights, trader_profile, mode, min_dte, max_dte, sector_etf=_sector_etf)
 
     # Final Filters
     if mode == "Premium Selling":
@@ -2106,13 +2160,26 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     if verbose:
         print("\nLoading configuration...")
     config = load_config("config.json")
-    
+
     # Merge custom weights if provided (from UI)
     if custom_weights:
         config['composite_weights'].update(custom_weights)
-    
+
     if verbose:
         print("✓ Configuration loaded")
+
+    # === SECTOR RELATIVE STRENGTH ===
+    sector_ctx = None
+    if config.get("sector_analysis", {}).get("enabled", True):
+        try:
+            from .sector_analyzer import SectorAnalyzer
+            sector_ctx = SectorAnalyzer().get_sector_context()
+            if verbose and sector_ctx.top_sectors:
+                print(f"  Sector leaders: {', '.join(sector_ctx.top_sectors)}")
+                if sector_ctx.mean_reversion_setups:
+                    print(f"  Mean-reversion setups: {', '.join(sector_ctx.mean_reversion_setups)}")
+        except Exception as _sa_exc:
+            logger.warning("SectorAnalyzer failed: %s", _sa_exc)
 
     # === FETCH VIX FOR ADAPTIVE WEIGHTING ===
     if verbose:
@@ -2137,6 +2204,13 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     # Collect data from all tickers (PARALLEL PROCESSING)
     tickers = list(set(tickers))  # Deduplicate tickers
+
+    # Discovery scan: sort tickers in top-3 RS sectors to the front of the queue
+    if mode == "Discovery scan" and sector_ctx and sector_ctx.top_sectors:
+        from .data_fetching import SECTOR_MAP as _SM
+        _top_set = set(sector_ctx.top_sectors)
+        tickers = sorted(tickers, key=lambda s: 0 if _SM.get(s.upper()) in _top_set else 1)
+
     all_picks = []
     all_credit_spreads = []
     all_iron_condors = []
@@ -2488,7 +2562,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             'market_trend': market_trend,
             'volatility_regime': volatility_regime,
             'macro_risk_active': macro_risk_active,
-            'tnx_change_pct': tnx_change_pct
+            'tnx_change_pct': tnx_change_pct,
+            'sector_ctx': sector_ctx,
         },
     )
 
@@ -2587,7 +2662,7 @@ def _check_market_hours() -> tuple:
     return True, f"Market open ({time_str})"
 
 
-def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: bool = True) -> "Optional[pd.DataFrame]":
+def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: bool = True, sector_ctx=None) -> "Optional[pd.DataFrame]":
     """Thin wrapper: delegates to ai_rank pipeline so CLI and ai_rank.py share one code path."""
     try:
         from ai_rank import score_and_rank
@@ -2606,7 +2681,7 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
                 if sym in _CHAIN_CACHE:
                     ticker_contexts[sym] = _CHAIN_CACHE[sym].get("context", {})
 
-        ranked = score_and_rank(candidates, ticker_contexts, vix_regime)
+        ranked = score_and_rank(candidates, ticker_contexts, vix_regime, sector_ctx=sector_ctx)
         if verbose:
             print_ranked_table(ranked, top_n=10)
         return ranked
@@ -2868,7 +2943,8 @@ def main():
             # ── AI Analysis ────────────────────────────────────────────────
             _ai_ranked = None
             if not picks.empty and not getattr(args, 'no_ai', False):
-                _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True)
+                _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True,
+                                               sector_ctx=scan_results.market_context.get("sector_ctx"))
 
             # Pull spread/condor results for the save menu
             _credit_spreads = scan_results.credit_spreads

@@ -83,14 +83,56 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
     thr = cfg.get("narrative_thresholds", {})
     kv: list[str] = []
 
-    iv_rank = c.get("iv_rank")
-    if iv_rank is not None:
-        if iv_rank >= thr.get("iv_rank_high", 0.70):
-            kv.append(f"IV:{iv_rank:.0%}(EXPENSIVE-sell)")
-        elif iv_rank <= thr.get("iv_rank_low", 0.30):
-            kv.append(f"IV:{iv_rank:.0%}(cheap-buy)")
-        else:
-            kv.append(f"IV:{iv_rank:.0%}(neutral)")
+    # IV numerical precision (number+label with HV gap)
+    iv_rank_val = c.get("iv_rank_30") or c.get("iv_rank")
+    iv_abs = c.get("impliedVolatility")
+    hv_val = c.get("hv_30d")
+    if iv_rank_val is not None:
+        pct = float(iv_rank_val) * 100
+        label = "expensive" if pct > 70 else ("cheap" if pct < 30 else "neutral")
+        iv_str = f"IV:{pct:.0f}%({label})"
+        if iv_abs and hv_val and float(hv_val) > 0:
+            gap = (float(iv_abs) - float(hv_val)) * 100
+            iv_str += f" HV:{float(hv_val)*100:.1f}% gap:{gap:+.1f}pp"
+        kv.append(iv_str)
+
+    # Greek values (delta+gamma+theta as numbers)
+    delta_v = c.get("delta") or c.get("abs_delta")
+    gamma_v = c.get("gamma")
+    theta_v = c.get("theta")
+    greek_parts = []
+    if delta_v is not None: greek_parts.append(f"δ:{float(delta_v):.2f}")
+    if gamma_v is not None: greek_parts.append(f"γ:{float(gamma_v):.4f}")
+    if theta_v is not None: greek_parts.append(f"θ:{float(theta_v):.3f}")
+    if greek_parts:
+        kv.append(" ".join(greek_parts))
+
+    # Term structure as number
+    ts = c.get("term_structure_spread")
+    if ts is not None:
+        ts_f = float(ts) * 100
+        label = "backwd" if ts_f < 0 else "contango"
+        kv.append(f"termstruct:{ts_f:+.1f}pp({label})")
+
+    # Momentum confluence (new from Change 2)
+    mom_conf = c.get("momentum_confluence")
+    if mom_conf is not None:
+        kv.append(f"mom-confluence:{float(mom_conf):.2f}")
+
+    # Risk flag count
+    rfc = c.get("risk_flag_count")
+    if rfc is not None and int(rfc) >= 2:
+        kv.append(f"RISK-FLAGS:{int(rfc)}")
+
+    # Max pain
+    max_pain = c.get("max_pain_strike")
+    mp_dist = c.get("max_pain_dist_pct")
+    if max_pain is not None and mp_dist is not None:
+        mp_dist_f = float(mp_dist)
+        if mp_dist_f < 2.0:
+            kv.append(f"max-pain:${float(max_pain):.0f}(PINNING-{mp_dist_f:.1f}%)")
+        elif mp_dist_f < 5.0:
+            kv.append(f"max-pain:${float(max_pain):.0f}({mp_dist_f:.1f}%away)")
 
     iv_vs_hv = c.get("iv_vs_hv")
     if iv_vs_hv is not None:
@@ -441,6 +483,62 @@ class AIScorer:
             "estimated_tokens": self._api_token_estimate,
             "cache_hits_today": self._cache.stats()["today"] if self._cache else 0,
         }
+
+    def analyze_thematic_sentiment(self, headlines: list) -> dict:
+        """Optional AI Pass 0: sector sentiment from headlines.
+
+        Returns a dict mapping ETF ticker -> sentiment float in [-0.20, +0.20].
+        Returns {} immediately when disabled or on any failure.
+        """
+        import hashlib
+
+        if not self.config.get("thematic_analysis_enabled", False):
+            return {}
+        if not headlines:
+            return {}
+
+        # 30-min in-process cache keyed on MD5 of headlines
+        if not hasattr(self, "_thematic_cache"):
+            self._thematic_cache: dict = {}
+        key = hashlib.md5("|".join(str(h) for h in headlines).encode()).hexdigest()
+        cached = self._thematic_cache.get(key)
+        if cached is not None:
+            ts, val = cached
+            if time.time() - ts < 1800:
+                return val
+
+        etf_to_sector = self.config.get("etf_to_sector", {
+            "XLK": "Technology", "XLF": "Financials", "XLE": "Energy",
+            "XLY": "Consumer Discretionary", "XLP": "Consumer Staples",
+            "XLV": "Health Care", "XLI": "Industrials", "XLB": "Materials",
+            "XLU": "Utilities", "XLRE": "Real Estate", "XLC": "Communication Services",
+        })
+        sector_list = ", ".join(f"{etf}={name}" for etf, name in etf_to_sector.items())
+
+        system_prompt = (
+            "You are a macro analyst. Given news headlines, score each SPDR sector ETF "
+            "with a sentiment float in [-0.20, +0.20] (positive = tailwind, negative = headwind). "
+            f"Sectors: {sector_list}. "
+            "Return ONLY valid JSON like: {\"XLK\": 0.12, \"XLE\": -0.08}. No commentary."
+        )
+        user_prompt = "Headlines:\n" + "\n".join(f"- {h}" for h in headlines[:15])
+
+        try:
+            raw = self.safe_chat_complete(system=system_prompt, user=user_prompt, max_tokens=300)
+            if not raw:
+                return {}
+            # Extract JSON object from response
+            import re
+            m = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
+            if not m:
+                return {}
+            data = json.loads(m.group())
+            result = {k: max(-0.20, min(0.20, float(v))) for k, v in data.items() if k in etf_to_sector}
+            self._thematic_cache[key] = (time.time(), result)
+            return result
+        except Exception as exc:
+            logger.debug("analyze_thematic_sentiment failed: %s", exc)
+            return {}
 
     def safe_chat_complete(self, system: str, user: str, max_tokens: int = 400) -> Optional[str]:
         """Chat completion with fallback model chain. Returns None on all-retries-exhausted."""

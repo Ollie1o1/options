@@ -100,6 +100,7 @@ def score_and_rank(
     vix_regime: str,
     ai_weight: float | None = None,
     verbose: bool = False,
+    sector_ctx=None,
 ) -> pd.DataFrame:
     """Core AI scoring pipeline — no argparse dependency."""
     AIScorer, combine_scores, _, _, _ = _import_ai()
@@ -109,7 +110,7 @@ def score_and_rank(
     if ai_weight is not None:
         kwargs["ai_weight"] = ai_weight
         kwargs["technical_weight"] = 1.0 - ai_weight
-    ranked = combine_scores(picks, ai_df, vix_regime=vix_regime, **kwargs)
+    ranked = combine_scores(picks, ai_df, vix_regime=vix_regime, thematic_context=sector_ctx, **kwargs)
     if verbose:
         stats = scorer.get_session_stats()
         print(f"  [session] {stats['api_calls']} API calls · {stats['api_retries']} retries · ~{stats['estimated_tokens']:,} tokens · {stats['cache_hits_today']} cache hits")
@@ -287,7 +288,8 @@ def main() -> None:
                 kwargs["ai_weight"] = args.ai_weight
                 kwargs["technical_weight"] = 1.0 - args.ai_weight
 
-            ranked = combine_scores(picks, ai_df, vix_regime=vix_regime, **kwargs)
+            ranked = combine_scores(picks, ai_df, vix_regime=vix_regime,
+                                    thematic_context=results.market_context.get("sector_ctx"), **kwargs)
 
             if args.verbose:
                 _stats = scorer.get_session_stats()

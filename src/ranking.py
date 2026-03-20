@@ -29,6 +29,7 @@ def combine_scores(
     ai_weight: Optional[float] = None,
     technical_weight: Optional[float] = None,
     vix_regime: str = "normal",
+    thematic_context=None,
 ) -> pd.DataFrame:
     """Merge AI results into *picks_df* and compute a dynamic weighted *final_score*.
 
@@ -128,6 +129,37 @@ def combine_scores(
         df.loc[mask, "divergence_adjusted"] = False
         df.loc[mask, "ai_weight_used"] = 0.0
         df.loc[mask, "final_score"] = tech[mask].values
+
+    # Thematic multiplier — applied post-scoring so it doesn't distort divergence logic
+    df["thematic_multiplier"] = 1.0
+    df["thematic_edge"] = ""
+
+    if thematic_context is not None:
+        from src.data_fetching import SECTOR_MAP as _SM
+        top_set = set(getattr(thematic_context, "top_sectors", []) or [])
+        bot_set = set(getattr(thematic_context, "bottom_sectors", []) or [])
+        mr_set  = set(getattr(thematic_context, "mean_reversion_setups", []) or [])
+
+        etf_s  = df["symbol"].map(lambda s: _SM.get(str(s).upper()))
+        mult_s = pd.Series(1.0, index=df.index)
+        edge_s = pd.Series("", index=df.index)
+
+        if top_set:
+            m = etf_s.isin(top_set)
+            mult_s[m] = 1.10
+            edge_s[m] = "TAILWIND"
+        if bot_set:
+            m = etf_s.isin(bot_set)
+            mult_s[m] = 0.95
+            edge_s[m] = "HEADWIND"
+        if mr_set:
+            m = etf_s.isin(mr_set)
+            mult_s[m] = (mult_s[m] + 0.03)
+            edge_s[m] = (edge_s[m] + "+MEAN-REV").str.lstrip("+")
+
+        df["thematic_multiplier"] = mult_s.round(3)
+        df["thematic_edge"] = edge_s
+        df["final_score"] = (df["final_score"] * mult_s).clip(0, 1).round(4)
 
     df["rank"] = df["final_score"].rank(ascending=False, method="min").astype(int)
     return df.sort_values("rank")

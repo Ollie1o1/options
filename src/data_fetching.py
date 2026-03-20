@@ -51,6 +51,21 @@ _SENTIMENT_CACHE: Dict[str, float] = {}
 _SEASONALITY_CACHE: Dict[str, float] = {}
 _CHAIN_CACHE: dict = {}
 
+# Module-level sector map — shared by sector_analyzer, ranking, and options_screener
+SECTOR_MAP: Dict[str, str] = {
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMD": "XLK", "INTC": "XLK",
+    "JPM": "XLF", "BAC": "XLF", "WFC": "XLF", "GS": "XLF",
+    "XOM": "XLE", "CVX": "XLE",
+    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY", "MCD": "XLY",
+    "WMT": "XLP", "PG": "XLP", "KO": "XLP",
+    "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV",
+    "BA": "XLI", "CAT": "XLI",
+    "GOOGL": "XLC", "META": "XLC", "NFLX": "XLC",
+    "AMT": "XLRE",
+    "NEE": "XLU",
+    "LIN": "XLB",
+}
+
 
 def clear_chain_cache() -> None:
     """Clear the in-session options chain cache."""
@@ -139,8 +154,13 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
 
     hv_30d_rolling = calculate_historical_volatility(hist, period=30)
     hv_ewma = calculate_ewma_volatility(hist, span=20)
-    hv_30d = (0.5 * hv_30d_rolling + 0.5 * hv_ewma) if (hv_30d_rolling and hv_ewma) \
-        else (hv_30d_rolling or hv_ewma)
+    hv_parkinson = calculate_parkinson_volatility(hist, period=30)
+    if hv_30d_rolling and hv_ewma and hv_parkinson:
+        hv_30d = 0.34 * hv_30d_rolling + 0.33 * hv_ewma + 0.33 * hv_parkinson
+    elif hv_30d_rolling and hv_ewma:
+        hv_30d = 0.5 * hv_30d_rolling + 0.5 * hv_ewma
+    else:
+        hv_30d = hv_30d_rolling or hv_ewma
 
     ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50 = \
         calculate_momentum_indicators(hist)
@@ -287,6 +307,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
         "context": {
             "hv": hv_30d,
             "hv_ewma": hv_ewma,
+            "hv_parkinson": hv_parkinson,
             "iv_rank": iv_rank_30,
             "iv_percentile": iv_pct_30,
             "earnings_date": earnings_date,
@@ -877,6 +898,57 @@ def calculate_ewma_volatility(hist: pd.DataFrame, span: int = 20) -> Optional[fl
     except Exception:
         return None
 
+def calculate_parkinson_volatility(hist: pd.DataFrame, period: int = 30) -> Optional[float]:
+    """Parkinson (1980) high-low range estimator of realized vol.
+    More efficient than close-to-close: uses intraday range to capture
+    moves missed by close-to-close (e.g., intraday spikes that close flat).
+    Factor: 1 / (4 * ln(2)) ≈ 0.3607
+    """
+    try:
+        if hist.empty or "High" not in hist.columns or "Low" not in hist.columns:
+            return None
+        subset = hist.iloc[-period:].copy()
+        log_hl = np.log(subset["High"] / subset["Low"])
+        if (log_hl <= 0).any() or len(log_hl) < 5:
+            return None
+        parkinson_var = (log_hl ** 2).mean() / (4 * math.log(2))
+        return float(math.sqrt(parkinson_var * 252))
+    except Exception:
+        return None
+
+
+def calculate_max_pain(df_chain: pd.DataFrame, underlying: float = 0.0) -> Optional[float]:
+    """
+    Max pain strike: the strike at which total option holder loss is maximized
+    (i.e., market makers/sellers profit most). Near expiry, price tends to pin here.
+
+    For each candidate strike K:
+      call_pain = sum over all call strikes k < K of: (K - k) * call_OI(k)
+      put_pain  = sum over all put strikes k > K of: (k - K) * put_OI(k)
+      total_pain(K) = call_pain + put_pain
+    Max pain = argmin(total_pain)
+    """
+    try:
+        if df_chain.empty or "strike" not in df_chain.columns:
+            return None
+        strikes = sorted(df_chain["strike"].unique())
+        calls = df_chain[df_chain["type"] == "call"].set_index("strike")["openInterest"].fillna(0)
+        puts  = df_chain[df_chain["type"] == "put"].set_index("strike")["openInterest"].fillna(0)
+
+        min_pain = float("inf")
+        max_pain_strike = None
+        for k in strikes:
+            call_pain = sum((k - s) * calls.get(s, 0) for s in strikes if s < k)
+            put_pain  = sum((s - k) * puts.get(s, 0)  for s in strikes if s > k)
+            total = call_pain + put_pain
+            if total < min_pain:
+                min_pain = total
+                max_pain_strike = float(k)
+        return max_pain_strike
+    except Exception:
+        return None
+
+
 def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool, Optional[float]]:
     """Calculate RSI, ATR, SMA-20, SMA-50, etc. from history DataFrame."""
     try:
@@ -1077,19 +1149,6 @@ def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
         return None
 
 def get_sector_performance(ticker_symbol: str) -> Dict:
-    SECTOR_MAP = {
-        "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMD": "XLK", "INTC": "XLK",
-        "JPM": "XLF", "BAC": "XLF", "WFC": "XLF", "GS": "XLF",
-        "XOM": "XLE", "CVX": "XLE",
-        "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY", "MCD": "XLY",
-        "WMT": "XLP", "PG": "XLP", "KO": "XLP",
-        "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV",
-        "BA": "XLI", "CAT": "XLI",
-        "GOOGL": "XLC", "META": "XLC", "NFLX": "XLC",
-        "AMT": "XLRE",
-        "NEE": "XLU",
-        "LIN": "XLB",
-    }
     sector_etf = SECTOR_MAP.get(ticker_symbol, "SPY")
     try:
         tkr = yf.Ticker(ticker_symbol)
@@ -1166,28 +1225,6 @@ def get_market_context() -> Tuple[str, str, bool, float]:
     except Exception:
         return "Unknown", "Unknown", False, 0.0
 
-def calculate_max_pain(chain_df: pd.DataFrame) -> Optional[float]:
-    try:
-        if chain_df.empty:
-            return None
-        relevant = chain_df[chain_df['openInterest'] > 0].copy()
-        if relevant.empty:
-            return None
-        strikes = sorted(relevant['strike'].unique())
-        max_pain_price = None
-        min_total_loss = float('inf')
-        for price_candidate in strikes:
-            calls = relevant[relevant['type'] == 'call']
-            call_loss = (np.maximum(0.0, price_candidate - calls['strike'].values) * calls['openInterest'].values).sum()
-            puts = relevant[relevant['type'] == 'put']
-            put_loss = (np.maximum(0.0, puts['strike'].values - price_candidate) * puts['openInterest'].values).sum()
-            total_loss = call_loss + put_loss
-            if total_loss < min_total_loss:
-                min_total_loss = total_loss
-                max_pain_price = price_candidate
-        return max_pain_price
-    except Exception:
-        return None
 
 def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
     try:
@@ -1377,8 +1414,11 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     underlying = safe_float(hist["Close"].iloc[-1])
     hv_30d_rolling = calculate_historical_volatility(hist, period=30)
     hv_ewma = calculate_ewma_volatility(hist, span=20)
-    # Blend rolling and EWMA vol: rolling gives stability, EWMA gives recency
-    if hv_30d_rolling and hv_ewma:
+    hv_parkinson = calculate_parkinson_volatility(hist, period=30)
+    # Blend rolling, EWMA, and Parkinson vol: rolling gives stability, EWMA gives recency, Parkinson captures intraday range
+    if hv_30d_rolling and hv_ewma and hv_parkinson:
+        hv_30d = 0.34 * hv_30d_rolling + 0.33 * hv_ewma + 0.33 * hv_parkinson
+    elif hv_30d_rolling and hv_ewma:
         hv_30d = 0.5 * hv_30d_rolling + 0.5 * hv_ewma
     else:
         hv_30d = hv_30d_rolling or hv_ewma
@@ -1452,12 +1492,16 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     _baseline = (_oi_vals / 30.0).clip(lower=1.0)
     df["option_rvol"] = (_vol_vals / _baseline).clip(upper=50.0)
 
+    # Max pain calculation
+    max_pain_strike = calculate_max_pain(df, underlying)
+
     # Compute earnings move analysis now that chain is available
     earnings_move_data = calculate_implied_earnings_move(tkr, earnings_date, df, underlying)
 
     # 5. Enrich DataFrame with Context
     df["underlying"] = underlying
     df["hv_30d"] = hv_30d
+    df["max_pain_strike"] = max_pain_strike
     df["ret_5d"] = ret_5d
     df["rsi_14"] = rsi_14
     df["atr_trend"] = atr_trend
@@ -1593,6 +1637,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         "context": {
             "hv": hv_30d,
             "hv_ewma": hv_ewma,
+            "hv_parkinson": hv_parkinson,
             "iv_rank": iv_rank_30,
             "iv_percentile": iv_pct_30,
             "earnings_date": earnings_date,
@@ -1615,6 +1660,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "market_cap": market_cap,
             "iv_skew_rank": float(df["iv_skew_rank"].iloc[0]) if "iv_skew_rank" in df.columns and not df.empty else 0.5,
             "vrp_data": vrp_data,
+            "max_pain_strike": max_pain_strike,
         }
     }
     _CHAIN_CACHE[symbol] = result

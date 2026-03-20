@@ -41,6 +41,15 @@ AI_CONFIG: dict = {
     "confidence_enabled": True,     # AI returns ai_confidence (0-10)
     "two_pass_enabled": True,       # ticker-level context pass before contract scoring
     "news_enabled": True,           # inject top-3 news headlines into prompt
+    "thematic_analysis_enabled": False,   # opt-in: AI Pass 0 sector sentiment (one extra API call per session)
+
+    # ── Sector ETF label map (used by analyze_thematic_sentiment) ─────────────
+    "etf_to_sector": {
+        "XLK": "Technology", "XLF": "Financials", "XLE": "Energy",
+        "XLY": "Consumer Discretionary", "XLP": "Consumer Staples",
+        "XLV": "Health Care", "XLI": "Industrials", "XLB": "Materials",
+        "XLU": "Utilities", "XLRE": "Real Estate", "XLC": "Communication Services",
+    },
 
     # ── API Call Settings ─────────────────────────────────────────────────────
     "batch_size": 3,     # smaller batches = shorter responses = less truncation risk
@@ -82,6 +91,7 @@ AI_CONFIG: dict = {
         "macro_warning", "sr_warning", "decay_warning", "gamma_ramp",
         "option_rvol", "iv_skew_rank", "vrp_mean", "vrp_regime",
         "predicted_iv_crush", "crush_confidence", "max_gamma_strike", "gamma_pin_dist_pct",
+        "momentum_confluence", "risk_flag_count", "max_pain_strike", "max_pain_dist_pct", "hv_parkinson",
     ],
 }
 

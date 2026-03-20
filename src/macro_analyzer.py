@@ -91,6 +91,14 @@ _DEFAULT_EVENTS: List[Dict] = [
 
 _staleness_warned = False
 
+# Per-event sector sensitivity multipliers.
+# Values > 1.0 amplify the base macro penalty for rate-sensitive sectors;
+# values < 1.0 dampen it for defensive sectors.
+SECTOR_SENSITIVITY: Dict[str, Dict[str, float]] = {
+    "CPI":  {"XLK": 1.5, "XLC": 1.5, "XLRE": 1.5, "XLF": 0.5, "XLP": 0.5, "XLV": 0.5},
+    "FOMC": {"XLRE": 1.4, "XLU": 1.4, "XLK": 1.4, "XLF": 0.6},
+}
+
 
 def _load_events_from_config(config: dict) -> list:
     """Return macro events from config override or fall back to _DEFAULT_EVENTS."""
@@ -154,18 +162,25 @@ def check_macro_event_window(
 
 def get_macro_penalty(
     config: Optional[Dict] = None,
+    sector_etf: Optional[str] = None,
 ) -> Tuple[float, bool, Optional[str]]:
     """
     Return (penalty_fraction, is_active, description).
 
     penalty_fraction is config["macro_penalty"] (default -0.15) when a macro
     event is active, otherwise 0.0.
+
+    If *sector_etf* is provided, the base penalty is scaled by
+    SECTOR_SENSITIVITY[event_name][sector_etf] (default 1.0 = no change).
     """
     cfg = config or {}
     penalty = float(cfg.get("macro_penalty", -0.15))
 
     is_active, event_name, event_date = check_macro_event_window(cfg)
     if is_active:
+        if sector_etf and event_name and event_name in SECTOR_SENSITIVITY:
+            multiplier = SECTOR_SENSITIVITY[event_name].get(sector_etf, 1.0)
+            penalty = penalty * multiplier
         desc = f"{event_name} ({event_date})"
         return penalty, True, desc
     return 0.0, False, None

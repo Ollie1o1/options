@@ -77,26 +77,27 @@
     "catalyst": 0.0
   },
   "composite_weights": {
-    "pop": 0.22,
-    "em_realism": 0.10,
-    "rr": 0.15,
-    "momentum": 0.08,
-    "iv_rank": 0.06,
-    "liquidity": 0.12,
-    "catalyst": 0.03,
+    "pop": 0.20,
+    "em_realism": 0.18,
+    "rr": 0.13,
+    "momentum": 0.10,
+    "iv_rank": 0.05,
+    "liquidity": 0.10,
+    "catalyst": 0.02,
     "theta": 0.07,
-    "ev": 0.10,
-    "trader_pref": 0.05,
+    "ev": 0.08,
+    "trader_pref": 0.04,
     "iv_edge": 0.09,
     "skew_align": 0.04,
     "gamma_theta": 0.03,
-    "pcr": 0.03,
+    "pcr": 0.02,
     "gex": 0.03,
-    "oi_change": 0.03,
+    "oi_change": 0.02,
     "sentiment": 0.02,
-    "option_rvol": 0.05,
-    "vrp": 0.06,
-    "gamma_pin": 0.04
+    "option_rvol": 0.04,
+    "vrp": 0.05,
+    "gamma_pin": 0.03,
+    "max_pain": 0.04
   },
   "backtest": {
     "profit_target_multiplier_long": 1.5,
@@ -149,5 +150,8 @@
     "commission_per_contract": 0.65,
     "slippage_per_share": 0.05,
     "default_db_path": "paper_trades.db"
+  },
+  "sector_analysis": {
+    "enabled": true
   }
 }
