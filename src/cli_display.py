@@ -747,9 +747,10 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
         ev = r.get("ev_per_contract", 0) or 0
         spread = (r.get("spread_pct", 0) or 0) * 100
 
-        # Color score
+        # Color score — pad before colorize to keep alignment
         sc_color = fmt.Colors.GREEN if score >= 0.70 else (fmt.Colors.YELLOW if score >= 0.50 else fmt.Colors.RED)
-        score_str = fmt.colorize(f"{score:.2f}", sc_color)
+        score_padded = f"{score:>6.2f}"
+        score_str = fmt.colorize(score_padded, sc_color)
         pop_str = f"{pop*100:>4.0f}%"
         rr_str = f"{rr:>4.1f}x" if rr > 0 else "  n/a"
         ev_str = f"${ev:>+5.0f}" if abs(ev) < 10000 else f"${ev:>+5.0f}"
@@ -759,7 +760,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
         strike_str = f"${strike:.0f}{opt_type}"
 
         line = (
-            f"  {rank_i:>3}  {sym:<5} {strike_str:<8} {exp_str:>8} {score_str:>6} {pop_str:>5}"
+            f"  {rank_i:>3}  {sym:<5} {strike_str:<8} {exp_str:>8} {score_str} {pop_str:>5}"
             f" {rr_str:>5} {iv_pct:>4.0f}% {ev_str:>7} {spread:>4.1f}%"
         )
         if "iv_surface_residual" in rows.columns:
@@ -826,7 +827,8 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
     trend_str = fmt.colorize(market_trend, trend_color, bold=True) if HAS_ENHANCED_CLI else market_trend
     vol_str = fmt.colorize(volatility_regime, vol_color) if HAS_ENHANCED_CLI else volatility_regime
-    print(f"  Trend: {trend_str}  |  Volatility: {vol_str}  |  RFR: {rfr*100:.2f}%  |  Expiries: {num_expiries}  |  DTE: {min_dte}\u2013{max_dte}d  |  Chain IV: {format_pct(chain_iv_median)}")
+    print(f"  Trend: {trend_str}  |  Volatility: {vol_str}  |  RFR: {rfr*100:.2f}%")
+    print(f"  Nearest Expiries: {num_expiries}  |  DTE: {min_dte}\u2013{max_dte}d  |  Chain IV: {format_pct(chain_iv_median)}")
 
     if HAS_ENHANCED_CLI:
         print(fmt.draw_separator(WIDTH))
@@ -900,22 +902,30 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 sym_str = fmt.colorize(f"{r['symbol']:<6}", fmt.Colors.BRIGHT_WHITE, bold=True)
                 type_color = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
                 type_str = fmt.colorize(f"{opt_type:<5}", type_color)
-                exp_str = fmt.colorize(str(exp), fmt.Colors.YELLOW) if dte < 14 else str(exp)
-                prem_str = fmt.format_money(premium)
+                # Pad before colorize to avoid ANSI breaking alignment
+                exp_padded = f"{str(exp):<12}"
+                exp_str = fmt.colorize(exp_padded, fmt.Colors.YELLOW) if dte < 14 else exp_padded
+                prem_padded = f"${premium:.2f}"
+                prem_color = fmt.Colors.GREEN if premium > 0 else fmt.Colors.YELLOW
+                prem_str = fmt.colorize(f"{prem_padded:<9}", prem_color)
                 iv_color = fmt.Colors.GREEN if iv < chain_iv_median * 0.9 else (fmt.Colors.RED if iv > chain_iv_median * 1.2 else fmt.Colors.YELLOW)
                 iv_str = fmt.colorize(f"{format_pct(iv):<8}", iv_color)
                 oi_color = fmt.Colors.GREEN if oi > 500 else (fmt.Colors.YELLOW if oi > 100 else fmt.Colors.RED)
                 oi_str = fmt.colorize(f"{oi:>7}", oi_color)
                 vol_color = fmt.Colors.GREEN if vol > 200 else (fmt.Colors.YELLOW if vol > 50 else fmt.Colors.RED)
                 vol_str = fmt.colorize(f"{vol:>7}", vol_color)
-                delta_str = fmt.format_delta(delta, is_call=(opt_type == "CALL"))
+                # Pad delta before colorize
+                delta_raw = f"{delta:>+7.2f}"
+                d_aligned = (opt_type == "CALL" and delta > 0) or (opt_type != "CALL" and delta < 0)
+                d_color = fmt.Colors.GREEN if d_aligned else fmt.Colors.RED
+                delta_str = fmt.colorize(delta_raw, d_color)
                 mon_color = fmt.Colors.GREEN if moneyness == "ITM" else (fmt.Colors.YELLOW if moneyness == "ATM" else fmt.Colors.DIM)
                 mon_str = fmt.colorize(f"{moneyness:<4}", mon_color)
                 stars, _ = fmt.format_quality_score(quality)
                 if is_multi:
-                    print(f"  {rank_str} {sym_str} {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
+                    print(f"  {rank_str} {sym_str} {whale} {type_str} {strike:>8.2f} {exp_str} {prem_str} {iv_str} {oi_str} {vol_str}  {delta_str}  {mon_str}  {stars}")
                 else:
-                    print(f"  {rank_str} {whale} {type_str} {strike:>8.2f} {exp_str:<12} {prem_str:<9} {iv_str} {oi_str} {vol_str}  {delta_str:>7}  {mon_str}  {stars}")
+                    print(f"  {rank_str} {whale} {type_str} {strike:>8.2f} {exp_str} {prem_str} {iv_str} {oi_str} {vol_str}  {delta_str}  {mon_str}  {stars}")
             else:
                 rank_plain = f"#{rank:<2}"
                 if is_multi:
