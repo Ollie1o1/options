@@ -137,11 +137,30 @@ class PolygonClient:
         """Fetch the current day snapshot for *ticker* (includes VWAP).
 
         Returns the raw Polygon response dict (``ticker`` key contains the data).
+        Requires a paid Polygon plan; returns None on free/basic plans (403).
         """
         if not self._enabled:
             return None
         time.sleep(0.2)
         return self._get(f"/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}")
+
+    def get_prev_close(self, ticker: str) -> Optional[dict]:
+        """Fetch the previous day's OHLCV and VWAP for *ticker*.
+
+        Available on all plan tiers.  Returns the first result dict from the
+        ``/v2/aggs/ticker/{ticker}/prev`` endpoint, or ``None`` on failure.
+
+        Keys: ``T`` (ticker), ``o``, ``h``, ``l``, ``c``, ``v``, ``vw`` (VWAP),
+        ``t`` (unix ms timestamp), ``n`` (trade count).
+        """
+        if not self._enabled:
+            return None
+        time.sleep(0.2)
+        data = self._get(f"/v2/aggs/ticker/{ticker}/prev", params={"adjusted": "true"})
+        if data is None:
+            return None
+        results = data.get("results", [])
+        return results[0] if results else None
 
     def get_options_snapshot(
         self,

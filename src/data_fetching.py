@@ -1672,18 +1672,18 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         if _poly._enabled:
             logger.debug("Polygon enrichment: fetching data for %s", symbol)
 
-            # VWAP override from Polygon snapshot (more accurate than computed)
-            snap = _poly.get_snapshot(symbol)
-            if snap:
+            # VWAP override from Polygon prev-close (snapshot requires higher plan tier)
+            prev = _poly.get_prev_close(symbol)
+            if prev:
                 try:
-                    poly_vwap = snap["ticker"]["day"]["vw"]
+                    poly_vwap = prev.get("vw")
                     if poly_vwap and float(poly_vwap) > 0:
                         vwap = float(poly_vwap)
                         logger.debug("Polygon enrichment: VWAP overridden to %.4f for %s", vwap, symbol)
                 except Exception:
                     pass
 
-            # Unusual options flow
+            # Unusual options flow (requires options plan — silent no-op if 403)
             import time as _time
             _time.sleep(0.2)
             poly_cfg = {}
