@@ -359,6 +359,21 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     df["iv_percentile_90"] = iv_pct_90
     df["iv_confidence"] = iv_confidence
 
+    # IV velocity and trend
+    _yq_iv_trend = "stable"
+    _yq_iv_velocity = 0.0
+    if iv_pct_30 is not None and iv_pct_90 is not None:
+        _diff = float(iv_pct_30) - float(iv_pct_90)
+        if _diff > 0.05:
+            _yq_iv_trend = "expanding"
+            _yq_iv_velocity = _diff
+        elif _diff < -0.05:
+            _yq_iv_trend = "contracting"
+            _yq_iv_velocity = _diff
+    df["iv_trend"] = _yq_iv_trend
+    df["iv_velocity"] = _yq_iv_velocity
+    df["dividend_yield"] = 0.0
+
     # Term structure spread
     term_structure_spread = None
     if len(expirations_to_use) >= 2 and "expiration" in df.columns:
@@ -404,6 +419,9 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
             "fib_618": fib_618,
             "news_data": news_data,
             "iv_confidence": iv_confidence,
+            "iv_trend": _yq_iv_trend,
+            "iv_velocity": _yq_iv_velocity,
+            "dividend_yield": 0.0,
         },
     }
 
@@ -1624,6 +1642,30 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     df["iv_percentile_90"] = iv_pct_90
     df["iv_confidence"] = iv_confidence
 
+    # IV velocity and trend: compare 30-day vs 90-day IV percentile
+    iv_trend = "stable"
+    iv_velocity = 0.0
+    if iv_pct_30 is not None and iv_pct_90 is not None:
+        diff = float(iv_pct_30) - float(iv_pct_90)
+        if diff > 0.05:
+            iv_trend = "expanding"
+            iv_velocity = diff
+        elif diff < -0.05:
+            iv_trend = "contracting"
+            iv_velocity = diff
+    df["iv_trend"] = iv_trend
+    df["iv_velocity"] = iv_velocity
+
+    # Dividend yield from ticker.info
+    dividend_yield = 0.0
+    try:
+        _info = tkr.info or {}
+        _dy = _info.get("dividendYield", 0)
+        dividend_yield = float(_dy) if _dy else 0.0
+    except Exception:
+        dividend_yield = 0.0
+    df["dividend_yield"] = dividend_yield
+
     # Term Structure
     term_structure_spread = None
     if len(expirations_to_scan) >= 2 and 'expiration' in df.columns:
@@ -1740,6 +1782,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "iv_skew_rank": float(df["iv_skew_rank"].iloc[0]) if "iv_skew_rank" in df.columns and not df.empty else 0.5,
             "vrp_data": vrp_data,
             "max_pain_strike": max_pain_strike,
+            "iv_trend": iv_trend,
+            "iv_velocity": iv_velocity,
+            "dividend_yield": dividend_yield,
         }
     }
     _CHAIN_CACHE[symbol] = result

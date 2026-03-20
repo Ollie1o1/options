@@ -36,9 +36,9 @@
     }
   },
   "filters": {
-    "min_volume": 100,
-    "min_open_interest": 50,
-    "max_bid_ask_spread_pct": 0.20,
+    "min_volume": 200,
+    "min_open_interest": 100,
+    "max_bid_ask_spread_pct": 0.15,
     "min_days_to_expiration": 7,
     "max_days_to_expiration": 45,
     "min_days_to_expiration_iron": 30,
@@ -53,7 +53,7 @@
   "max_expirations": 4,
   "default_budget": 750,
   "target_delta": 0.40,
-  "spread_score_cap": 0.25,
+  "spread_score_cap": 0.15,
   "earnings_buffer_days": 5,
   "iv_rank_weight_threshold": 0.5,
   "iv_rank_low_threshold": 0.2,
@@ -77,16 +77,16 @@
     "catalyst": 0.0
   },
   "composite_weights": {
-    "pop": 0.16,
-    "em_realism": 0.01,
+    "pop": 0.13,
+    "em_realism": 0.00,
     "rr": 0.08,
-    "momentum": 0.04,
+    "momentum": 0.05,
     "iv_rank": 0.18,
     "liquidity": 0.06,
-    "catalyst": 0.01,
+    "catalyst": 0.00,
     "theta": 0.05,
     "ev": 0.04,
-    "trader_pref": 0.01,
+    "trader_pref": 0.00,
     "iv_edge": 0.15,
     "skew_align": 0.03,
     "gamma_theta": 0.01,
@@ -95,9 +95,10 @@
     "oi_change": 0.01,
     "sentiment": 0.01,
     "option_rvol": 0.01,
-    "vrp": 0.12,
-    "gamma_pin": 0.00,
-    "max_pain": 0.00
+    "vrp": 0.09,
+    "gamma_pin": 0.02,
+    "max_pain": 0.02,
+    "iv_velocity": 0.04
   },
   "backtest": {
     "profit_target_multiplier_long": 1.5,
@@ -153,5 +154,11 @@
   },
   "sector_analysis": {
     "enabled": true
+  },
+  "watchlists": {
+    "liquid_large_cap": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "JPM", "BAC", "GS", "V", "MA", "XOM", "CVX", "LLY", "UNH", "JNJ", "PG", "KO", "WMT", "COST", "HD", "DIS", "NFLX", "AMD", "INTC", "CRM", "ADBE", "PYPL", "UBER", "COIN", "MSTR", "ARKK"],
+    "sector_etfs": ["XLK", "XLF", "XLE", "XLV", "XLI", "XLC", "XLY", "XLP", "XLRE", "XLU", "XLB", "SMH", "SOXX", "IBB", "GDX", "SLV", "GLD"],
+    "high_iv": ["TSLA", "MSTR", "COIN", "NVDA", "SMCI", "PLTR", "RBLX", "HOOD", "RIVN", "GME"],
+    "income": ["SPY", "QQQ", "AAPL", "MSFT", "JPM", "GS", "KO", "PG", "XOM", "JNJ"]
   }
 }

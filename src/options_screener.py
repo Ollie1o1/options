@@ -471,6 +471,7 @@ def calculate_metrics(
     next_ex_div: Optional[object] = None,
     earnings_move_data: Optional[dict] = None,
     mode: str = "Single-stock",
+    dividend_yield: float = 0.0,
 ) -> pd.DataFrame:
     """Calculates all objective mathematical metrics and merges external data."""
     
@@ -527,14 +528,15 @@ def calculate_metrics(
     IV_vals = np.maximum(1e-9, df["impliedVolatility"].values)
     types_vals = df["type"].values
 
-    df["delta"] = bs_delta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    _q = float(dividend_yield) if dividend_yield else 0.0
+    df["delta"] = bs_delta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals, _q)
     df["abs_delta"] = np.abs(df["delta"].values)
-    df["gamma"] = bs_gamma(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
-    df["vega"] = bs_vega(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
-    df["theta"] = bs_theta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
-    df["rho"] = bs_rho(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
-    df["charm"] = bs_charm(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
-    df["vanna"] = bs_vanna(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+    df["gamma"] = bs_gamma(S_vals, K_vals, T_vals, risk_free_rate, IV_vals, _q)
+    df["vega"] = bs_vega(S_vals, K_vals, T_vals, risk_free_rate, IV_vals, _q)
+    df["theta"] = bs_theta(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals, _q)
+    df["rho"] = bs_rho(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals, _q)
+    df["charm"] = bs_charm(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals, _q)
+    df["vanna"] = bs_vanna(S_vals, K_vals, T_vals, risk_free_rate, IV_vals, _q)
 
     # --- Early Exercise Premium (American vs European put) ---
     # For puts where early exercise is materially valuable, flag the contract.
@@ -1126,14 +1128,31 @@ def calculate_scores(
         max_pain_score = pd.Series(np.clip(1.0 - (max_pain_dist.values / 8.0), 0.3, 1.0), index=df.index)
         df["max_pain_score"] = max_pain_score
 
+        # IV Velocity score: rewards sellers when IV is expanding, buyers when contracting
+        iv_trend_vals = df.get("iv_trend", pd.Series("stable", index=df.index))
+        if not isinstance(iv_trend_vals, pd.Series):
+            iv_trend_vals = pd.Series("stable", index=df.index)
+        is_seller = df["type"].str.lower() == "put"
+        iv_velocity_raw = np.where(
+            iv_trend_vals == "expanding",
+            np.where(is_seller, 1.0, 0.0),
+            np.where(
+                iv_trend_vals == "contracting",
+                np.where(is_seller, 0.0, 1.0),
+                0.5,
+            ),
+        )
+        iv_velocity_score = pd.Series(iv_velocity_raw, index=df.index)
+        df["iv_velocity_score"] = iv_velocity_score
+
         dw = {
-            # IC-optimised defaults: iv_edge(0.15) + vrp(0.12) + iv_rank(0.18) = 45% vol signal
-            "pop": 0.16, "em_realism": 0.01, "rr": 0.08, "momentum": 0.04,
-            "iv_rank": 0.18, "liquidity": 0.06, "catalyst": 0.01, "theta": 0.05,
-            "ev": 0.04, "trader_pref": 0.01, "iv_edge": 0.15, "skew_align": 0.03,
+            # IC-optimised defaults: iv_edge(0.15) + vrp(0.09) + iv_rank(0.18) = 42% vol signal
+            "pop": 0.13, "em_realism": 0.00, "rr": 0.08, "momentum": 0.05,
+            "iv_rank": 0.18, "liquidity": 0.06, "catalyst": 0.00, "theta": 0.05,
+            "ev": 0.04, "trader_pref": 0.00, "iv_edge": 0.15, "skew_align": 0.03,
             "gamma_theta": 0.01, "pcr": 0.01, "gex": 0.01, "oi_change": 0.01,
-            "sentiment": 0.01, "option_rvol": 0.01, "vrp": 0.12, "gamma_pin": 0.00,
-            "max_pain": 0.00,
+            "sentiment": 0.01, "option_rvol": 0.01, "vrp": 0.09, "gamma_pin": 0.02,
+            "max_pain": 0.02, "iv_velocity": 0.04,
         }
         cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
@@ -1147,7 +1166,7 @@ def calculate_scores(
             + w["pcr"]*pcr_score + w["gex"]*gex_score + w["oi_change"]*oi_change_score
             + w["sentiment"]*sentiment_score_component + w["option_rvol"]*option_rvol_score
             + w["vrp"]*vrp_score + w["gamma_pin"]*gamma_pin_score
-            + w["max_pain"]*max_pain_score
+            + w["max_pain"]*max_pain_score + w["iv_velocity"]*iv_velocity_score
         ) / w_sum
         try:
             _cdf = pd.DataFrame({
@@ -1156,13 +1175,32 @@ def calculate_scores(
                 "Liq": w["liquidity"]*liquidity, "Theta": w["theta"]*theta_score,
                 "Mom": w["momentum"]*momentum_score, "Skew": w["skew_align"]*skew_combined_score,
                 "Sent": w["sentiment"]*sentiment_score_component,
+                "VRP": w["vrp"]*vrp_score, "IV vel": w["iv_velocity"]*iv_velocity_score,
             }, index=df.index)
-            df["score_drivers"] = _cdf.apply(lambda r: " · ".join(r.nlargest(3).index.tolist()), axis=1)
+            _neg_cdf = pd.DataFrame({
+                "spread": pd.Series(0.0, index=df.index),
+                "earnings": pd.Series(0.0, index=df.index),
+            }, index=df.index)
+            def _fmt_drivers(row, neg_row):
+                top3 = row.nlargest(3)
+                pos_parts = [f"+{k}({v:.2f})" for k, v in top3.items() if v > 0]
+                neg_parts = [f"-{k}({v:.2f})" for k, v in neg_row.items() if v < 0]
+                parts = pos_parts
+                if neg_parts:
+                    parts = pos_parts + ["|"] + neg_parts[:2]
+                return " ".join(parts)
+            df["score_drivers"] = [
+                _fmt_drivers(_cdf.iloc[i], _neg_cdf.iloc[i]) for i in range(len(_cdf))
+            ]
         except Exception:
             df["score_drivers"] = ""
 
     # Adjustments
     df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
+    if "score_drivers" in df.columns:
+        _earn_nearby_mask = df["event_flag"] == "EARNINGS_NEARBY"
+        for _idx in df.index[_earn_nearby_mask]:
+            df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + " -earnings_nearby(-0.05)"
     # Reward earnings plays where IV is actually underpriced vs realized vol
     if "Earnings Play" in df.columns and "is_underpriced" in df.columns:
         df.loc[(df["Earnings Play"] == "YES") & (df["is_underpriced"] == True), "quality_score"] += 0.08
@@ -1226,6 +1264,19 @@ def calculate_scores(
     except Exception:
         pass
 
+    # Tiered bid-ask spread penalty
+    _spread_pct = pd.to_numeric(df.get("spread_pct", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+    _spread_penalty = pd.Series(0.0, index=df.index)
+    _spread_penalty = _spread_penalty.where(_spread_pct <= 0.05, -0.05)
+    _spread_penalty = _spread_penalty.where(_spread_pct <= 0.10, -0.12)
+    df["quality_score"] += _spread_penalty
+    # Append spread penalty to score_drivers
+    if "score_drivers" in df.columns:
+        _has_spread_penalty = _spread_penalty < 0
+        for _idx in df.index[_has_spread_penalty]:
+            _pen_val = float(_spread_penalty.loc[_idx])
+            df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + f" -spread({_pen_val:.2f})"
+
     df["quality_score"] = df["quality_score"].clip(0, 1)
 
     # Earnings IV crush penalty: reduce score for earnings plays where post-event HV will be lower
@@ -1282,6 +1333,7 @@ def enrich_and_score(
     hv_ewma: Optional[float] = None,
     vrp_data: dict = None,
     news_data=None,
+    dividend_yield: float = 0.0,
 ) -> pd.DataFrame:
     # Use richer multi-source news sentiment when available
     if news_data is not None and hasattr(news_data, "aggregate_sentiment"):
@@ -1362,11 +1414,13 @@ def enrich_and_score(
         df["vrp_regime"] = "UNKNOWN"
 
     # 1. Call Helper: Metrics
+    _div_yield = float(df["dividend_yield"].iloc[0]) if "dividend_yield" in df.columns and not df.empty else dividend_yield
     df = calculate_metrics(
         df, risk_free_rate, earnings_date, config, iv_rank, iv_percentile,
         sentiment_score, macro_risk_active, sector_perf, tnx_change_pct,
         short_interest=short_interest, next_ex_div=next_ex_div,
         earnings_move_data=earnings_move_data, mode=mode,
+        dividend_yield=_div_yield,
     )
 
     # 2. Call Helper: Scores
@@ -2719,6 +2773,75 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
         print(f"  AI scoring unavailable: {exc}")
         return None
 
+
+def run_top_scan(
+    tickers: List[str],
+    top_n: int = 10,
+    mode: str = "Discovery scan",
+    export_csv: bool = False,
+    min_dte: int = 7,
+    max_dte: int = 45,
+    max_expiries: int = 4,
+) -> Optional[pd.DataFrame]:
+    """Fetch and score contracts across all tickers, return top_n sorted by quality_score.
+
+    Groups results into DTE buckets: Short (7-14), Standard (15-30), Swing (31-45).
+    Prints a ranked table and optionally saves a CSV.
+    """
+    from .cli_display import format_dte_bucket, print_top_n_table
+
+    _logger = setup_logging()
+    config = load_config("config.json")
+    rfr = get_risk_free_rate()
+    vix_level = get_vix_level()
+    vix_regime, vix_weights = determine_vix_regime(vix_level, config)
+    market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
+
+    all_rows = []
+    for sym in tickers:
+        try:
+            data = fetch_options_yfinance(sym, max_expiries)
+            result = _score_fetched_data(
+                sym, data, mode, min_dte, max_dte,
+                rfr, config, vix_weights, "swing",
+                None, macro_risk_active, tnx_change_pct,
+            )
+            if result.get("success"):
+                for picks_df in result.get("picks", []):
+                    if not picks_df.empty:
+                        all_rows.append(picks_df)
+        except Exception:
+            continue
+
+    if not all_rows:
+        print("No results from top scan.")
+        return None
+
+    combined = pd.concat(all_rows, ignore_index=True)
+    combined = combined.sort_values("quality_score", ascending=False).reset_index(drop=True)
+    top = combined.head(top_n).copy()
+
+    print_top_n_table(top, top_n)
+
+    if export_csv:
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        fname = f"scan_results_{ts}.csv"
+        export_cols = [
+            "symbol", "type", "strike", "expiration", "T_years",
+            "bid", "ask", "premium", "delta", "impliedVolatility",
+            "iv_rank_30", "prob_profit", "ev_per_contract",
+            "quality_score", "score_drivers",
+        ]
+        export_df = top[[c for c in export_cols if c in top.columns]].copy()
+        if "T_years" in export_df.columns:
+            export_df["DTE"] = (export_df["T_years"] * 365.0).round(0).astype(int)
+            export_df.drop(columns=["T_years"], inplace=True, errors="ignore")
+        export_df.to_csv(fname, index=False)
+        print(f"\nExported {len(export_df)} rows to {fname}")
+
+    return top
+
+
 def main():
     # ── CLI argument parsing (Phase 7) ───────────────────────────────────────
     parser = argparse.ArgumentParser(add_help=False)
@@ -2728,6 +2851,9 @@ def main():
     parser.add_argument("--close-trades", action="store_true", help="Update trade log with closing P/L")
     parser.add_argument("--ui", action="store_true", help="Launch Streamlit dashboard")
     parser.add_argument("--no-ai", action="store_true", help="Skip AI analysis after scan")
+    parser.add_argument("--top", type=int, default=None, metavar="N", help="Run top-N cross-ticker scan and exit")
+    parser.add_argument("--export", type=str, default=None, metavar="FORMAT", help="Export results to file (csv)")
+    parser.add_argument("--watchlist", type=str, default=None, metavar="NAME", help="Use named watchlist from config as ticker input")
     args, _ = parser.parse_known_args()
 
     if args.no_color and HAS_ENHANCED_CLI:
@@ -2751,6 +2877,9 @@ def main():
                 ("--version",      "Show version string and exit"),
                 ("--close-trades", "Update trade log with closing P/L"),
                 ("--ui",           "Launch the Streamlit dashboard"),
+                ("--top N",        "Cross-ticker top-N scan (default 10), grouped by DTE bucket"),
+                ("--export csv",   "Export top scan results to scan_results_YYYYMMDD_HHMM.csv"),
+                ("--watchlist N",  "Use named watchlist from config (liquid_large_cap, sector_etfs, high_iv, income)"),
             ]:
                 print(f"  {fmt.colorize(f'{flag:<18}', fmt.Colors.BRIGHT_YELLOW)} {desc}")
         else:
@@ -2769,6 +2898,31 @@ def main():
         sys.exit(0)
 
     config = load_config("config.json")
+
+    # ── --watchlist: resolve named watchlist tickers from config ─────────────
+    _watchlist_tickers = None
+    if args.watchlist:
+        _wl_name = args.watchlist.lower().replace("-", "_")
+        _wls = config.get("watchlists", {})
+        if _wl_name in _wls:
+            _watchlist_tickers = _wls[_wl_name]
+            print(f"Using watchlist '{_wl_name}': {len(_watchlist_tickers)} tickers")
+        else:
+            _available = list(_wls.keys())
+            print(f"Unknown watchlist '{_wl_name}'. Available: {', '.join(_available)}")
+            sys.exit(1)
+
+    # ── --top N: run cross-ticker top-N scan and exit ─────────────────────────
+    if args.top is not None:
+        _top_n = max(1, args.top)
+        _top_tickers = _watchlist_tickers or config.get("watchlists", {}).get("liquid_large_cap", [
+            "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL",
+            "JPM", "BAC", "GS", "V", "MA", "AMD", "XOM", "CVX",
+        ])
+        _do_export = (args.export or "").lower() == "csv"
+        print(f"\nRunning top-{_top_n} scan across {len(_top_tickers)} tickers...")
+        run_top_scan(_top_tickers, top_n=_top_n, export_csv=_do_export)
+        sys.exit(0)
 
     # ── Startup Banner (Phase 1) ─────────────────────────────────────────────
     now_str = datetime.now().strftime("%a %d %b %Y  %H:%M")
@@ -2893,7 +3047,10 @@ def main():
     budget = None
     tickers = []
 
-    if is_my_list_mode:
+    if _watchlist_tickers and not is_my_list_mode:
+        tickers = _watchlist_tickers
+        print(f"  Using --watchlist tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+    elif is_my_list_mode:
         tickers = _wl_tickers
         print(f"  Scanning your watchlist: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
@@ -2984,6 +3141,21 @@ def main():
                 or (isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty)
                 or (isinstance(_iron_condors,   pd.DataFrame) and not _iron_condors.empty)
             )
+
+            # ── Auto-export if --export csv was passed ──────────────────────
+            if getattr(args, "export", None) and str(args.export).lower() == "csv" and not picks.empty:
+                _ts = datetime.now().strftime("%Y%m%d_%H%M")
+                _auto_fname = f"scan_results_{_ts}.csv"
+                _export_cols = [
+                    "symbol", "type", "strike", "expiration",
+                    "bid", "ask", "premium", "delta", "impliedVolatility",
+                    "iv_rank_30", "prob_profit", "ev_per_contract",
+                    "quality_score", "score_drivers",
+                ]
+                _auto_df = picks[[c for c in _export_cols if c in picks.columns]].copy()
+                _auto_df.to_csv(_auto_fname, index=False)
+                _msg = f"Auto-exported {len(_auto_df)} rows to {_auto_fname}"
+                print(fmt.format_success(_msg) if HAS_ENHANCED_CLI else f"  \u2713 {_msg}")
 
             # ── Collapsed post-scan prompt (always shown BEFORE scan-another) ──
             if _has_results:

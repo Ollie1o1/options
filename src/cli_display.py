@@ -63,6 +63,95 @@ def get_display_width() -> int:
         return 100
 
 
+def format_dte_bucket(dte: float) -> str:
+    """Return DTE bucket name for a given days-to-expiration value."""
+    dte = float(dte)
+    if dte <= 14:
+        return "Short (7-14 DTE)"
+    if dte <= 30:
+        return "Standard (15-30 DTE)"
+    return "Swing (31-45 DTE)"
+
+
+def print_score_breakdown(score_drivers_str: str) -> str:
+    """Format score drivers string into a readable multi-part display."""
+    if not score_drivers_str:
+        return ""
+    parts = str(score_drivers_str).split()
+    pos_parts = [p for p in parts if p.startswith("+") and p != "|"]
+    neg_parts = [p for p in parts if p.startswith("-") and p != "|"]
+    out = ""
+    if pos_parts:
+        out += "  Positives: " + "  ".join(pos_parts)
+    if neg_parts:
+        out += "\n  Negatives: " + "  ".join(neg_parts)
+    return out or score_drivers_str
+
+
+def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
+    """Print a ranked cross-ticker table grouped by DTE bucket."""
+    if contracts.empty:
+        print("No contracts to display.")
+        return
+
+    width = get_display_width()
+    sep = "-" * width
+
+    header = (
+        f"{'Rank':<5} {'Ticker':<7} {'Type':<5} {'Strike':>7} {'Expiry':<12} "
+        f"{'DTE':>4} {'Delta':>6} {'IV%':>6} {'PoP%':>6} {'Prem':>7} "
+        f"{'Score':>7}  Score Drivers"
+    )
+
+    dte_bucket_order = ["Short (7-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"]
+    contracts = contracts.copy()
+    contracts["_dte"] = (contracts["T_years"] * 365.0).round(0) if "T_years" in contracts.columns else 0
+    contracts["_bucket"] = contracts["_dte"].apply(format_dte_bucket)
+
+    rank = 1
+    printed_any = False
+    for bucket in dte_bucket_order:
+        bucket_df = contracts[contracts["_bucket"] == bucket]
+        if bucket_df.empty:
+            continue
+        if HAS_ENHANCED_CLI:
+            try:
+                from . import formatting as fmt
+                print("\n" + fmt.draw_separator(width))
+                print(fmt.colorize(f"  {bucket}", fmt.Colors.BRIGHT_CYAN, bold=True))
+            except Exception:
+                print(f"\n{sep}")
+                print(f"  {bucket}")
+        else:
+            print(f"\n{sep}")
+            print(f"  {bucket}")
+        print(header)
+        print(sep)
+        for _, row in bucket_df.iterrows():
+            dte_val = int(row.get("_dte", 0))
+            iv_pct = row.get("iv_percentile_30", row.get("iv_percentile", 0)) or 0
+            pop = row.get("prob_profit", 0) or 0
+            prem = row.get("premium", 0) or 0
+            delta = row.get("delta", 0) or 0
+            iv = row.get("impliedVolatility", 0) or 0
+            score = row.get("quality_score", 0) or 0
+            drivers = str(row.get("score_drivers", ""))[:30]
+            line = (
+                f"{rank:<5} {str(row.get('symbol','')):<7} {str(row.get('type','')):<5} "
+                f"{row.get('strike', 0):>7.1f} {str(row.get('expiration', '')):<12} "
+                f"{dte_val:>4} {delta:>6.2f} {iv*100:>5.1f}% {pop*100:>5.1f}% "
+                f"${prem:>6.2f} {score:>7.3f}  {drivers}"
+            )
+            print(line)
+            rank += 1
+            printed_any = True
+        print(sep)
+
+    if not printed_any:
+        print("No contracts matched any DTE bucket.")
+    print(f"\nTop {n} contracts shown. Run with --export csv to save full results.")
+
+
 def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> str:
     """Formats the second detail row for the screener report (analysis)."""
     parts = []

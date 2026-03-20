@@ -31,19 +31,20 @@ def norm_pdf(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
 
 # --- Black-Scholes Core ---
 
-def _d1d2(S, K, T, r, sigma):
-    """Compute d1 and d2 for Black-Scholes."""
+def _d1d2(S, K, T, r, sigma, q=0.0):
+    """Compute d1 and d2 for Black-Scholes with optional continuous dividend yield q."""
     S = np.asanyarray(S)
     K = np.asanyarray(K)
     T = np.asanyarray(T)
     r = np.asanyarray(r)
     sigma = np.asanyarray(sigma)
-    
-    # Avoid division by zero and log of zero/negative
+    q = np.asanyarray(q)
+
+    # Merton (1973): replace S with S*exp(-q*T) in d1/d2
     with np.errstate(divide='ignore', invalid='ignore'):
-        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
-    
+
     # Handle scalar results for backward compatibility with 'is None' checks
     if d1.ndim == 0:
         if np.isnan(d1):
@@ -52,107 +53,117 @@ def _d1d2(S, K, T, r, sigma):
 
     return d1, d2
 
-def bs_call(S, K, T, r, sigma):
-    """Black-Scholes call option price."""
-    d1, d2 = _d1d2(S, K, T, r, sigma)
+def bs_call(S, K, T, r, sigma, q=0.0):
+    """Black-Scholes call option price with optional continuous dividend yield q."""
+    d1, d2 = _d1d2(S, K, T, r, sigma, q)
+    q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
-        price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+        price = S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
     return price
 
-def bs_put(S, K, T, r, sigma):
-    """Black-Scholes put option price."""
-    d1, d2 = _d1d2(S, K, T, r, sigma)
+def bs_put(S, K, T, r, sigma, q=0.0):
+    """Black-Scholes put option price with optional continuous dividend yield q."""
+    d1, d2 = _d1d2(S, K, T, r, sigma, q)
+    q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
-        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * np.exp(-q * T) * norm.cdf(-d1)
     return price
 
-def bs_price(option_type, S, K, T, r, sigma):
-    """Black-Scholes theoretical option price."""
+def bs_price(option_type, S, K, T, r, sigma, q=0.0):
+    """Black-Scholes theoretical option price with optional continuous dividend yield q."""
     S_arr = np.asanyarray(S)
     if isinstance(option_type, str):
         if option_type.lower() == "call":
-            return bs_call(S, K, T, r, sigma)
+            return bs_call(S, K, T, r, sigma, q)
         else:
-            return bs_put(S, K, T, r, sigma)
+            return bs_put(S, K, T, r, sigma, q)
     else:
         option_type = np.asanyarray(option_type)
         price = np.empty_like(S_arr, dtype=float)
         is_call = np.char.lower(option_type.astype(str)) == "call"
-        
+
         if np.any(is_call):
-            # Extract scalar or array values for the call legs
             def _get(v, mask): return v[mask] if isinstance(v, np.ndarray) else v
-            price[is_call] = bs_call(_get(S, is_call), _get(K, is_call), _get(T, is_call), _get(r, is_call), _get(sigma, is_call))
-        
+            price[is_call] = bs_call(_get(S, is_call), _get(K, is_call), _get(T, is_call), _get(r, is_call), _get(sigma, is_call), q)
+
         if np.any(~is_call):
             def _get(v, mask): return v[mask] if isinstance(v, np.ndarray) else v
-            price[~is_call] = bs_put(_get(S, ~is_call), _get(K, ~is_call), _get(T, ~is_call), _get(r, ~is_call), _get(sigma, ~is_call))
-            
+            price[~is_call] = bs_put(_get(S, ~is_call), _get(K, ~is_call), _get(T, ~is_call), _get(r, ~is_call), _get(sigma, ~is_call), q)
+
         return price
 
-def bs_delta(option_type, S, K, T, r, sigma):
-    """Black-Scholes delta."""
-    d1, _ = _d1d2(S, K, T, r, sigma)
+def bs_delta(option_type, S, K, T, r, sigma, q=0.0):
+    """Black-Scholes delta with optional continuous dividend yield q."""
+    d1, _ = _d1d2(S, K, T, r, sigma, q)
+    q = np.asanyarray(q)
     if isinstance(option_type, str):
         if option_type.lower() == "call":
-            return norm.cdf(d1)
+            return np.exp(-q * T) * norm.cdf(d1)
         else:
-            return norm.cdf(d1) - 1.0
+            return np.exp(-q * T) * (norm.cdf(d1) - 1.0)
     else:
         option_type = np.asanyarray(option_type)
         delta = np.empty_like(d1, dtype=float)
         is_call = np.char.lower(option_type.astype(str)) == "call"
-        delta[is_call] = norm.cdf(d1[is_call])
-        delta[~is_call] = norm.cdf(d1[~is_call]) - 1.0
+        disc_q = np.exp(-q * np.asanyarray(T))
+        delta[is_call] = disc_q * norm.cdf(d1[is_call]) if np.ndim(disc_q) == 0 else disc_q[is_call] * norm.cdf(d1[is_call])
+        delta[~is_call] = (disc_q * (norm.cdf(d1[~is_call]) - 1.0)) if np.ndim(disc_q) == 0 else disc_q[~is_call] * (norm.cdf(d1[~is_call]) - 1.0)
         return delta
 
-def bs_gamma(S, K, T, r, sigma):
-    """Black-Scholes gamma."""
-    d1, _ = _d1d2(S, K, T, r, sigma)
+def bs_gamma(S, K, T, r, sigma, q=0.0):
+    """Black-Scholes gamma with optional continuous dividend yield q."""
+    d1, _ = _d1d2(S, K, T, r, sigma, q)
+    q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
-        gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+        gamma = np.exp(-q * T) * norm.pdf(d1) / (S * sigma * np.sqrt(T))
     return gamma
 
-def bs_vega(S, K, T, r, sigma):
-    """Black-Scholes vega (per 1% change in IV)."""
-    d1, _ = _d1d2(S, K, T, r, sigma)
+def bs_vega(S, K, T, r, sigma, q=0.0):
+    """Black-Scholes vega (per 1% change in IV) with optional continuous dividend yield q."""
+    d1, _ = _d1d2(S, K, T, r, sigma, q)
+    q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
-        vega = S * norm.pdf(d1) * np.sqrt(T) / 100.0
+        vega = S * np.exp(-q * T) * norm.pdf(d1) * np.sqrt(T) / 100.0
     return vega
 
-def bs_theta(option_type, S, K, T, r, sigma):
-    """Black-Scholes theta (daily)."""
-    d1, d2 = _d1d2(S, K, T, r, sigma)
+def bs_theta(option_type, S, K, T, r, sigma, q=0.0):
+    """Black-Scholes theta (daily) with optional continuous dividend yield q."""
+    d1, d2 = _d1d2(S, K, T, r, sigma, q)
+    q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
-        p1 = -(S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
-        
+        p1 = -(S * np.exp(-q * T) * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
+
         if isinstance(option_type, str):
             if option_type.lower() == "call":
                 p2 = r * K * np.exp(-r * T) * norm.cdf(d2)
-                return (p1 - p2) / 365.0
+                p3 = q * S * np.exp(-q * T) * norm.cdf(d1)
+                return (p1 - p2 + p3) / 365.0
             else:
                 p2 = r * K * np.exp(-r * T) * norm.cdf(-d2)
-                return (p1 + p2) / 365.0
+                p3 = q * S * np.exp(-q * T) * norm.cdf(-d1)
+                return (p1 + p2 - p3) / 365.0
         else:
             option_type = np.asanyarray(option_type)
             theta = np.empty_like(d1, dtype=float)
             is_call = np.char.lower(option_type.astype(str)) == "call"
-            
+
             def _get(v, mask): return v[mask] if isinstance(v, np.ndarray) else v
-            
+
             if np.any(is_call):
                 p2_c = _get(r, is_call) * _get(K, is_call) * np.exp(-_get(r, is_call) * _get(T, is_call)) * norm.cdf(d2[is_call])
-                theta[is_call] = (p1[is_call] - p2_c) / 365.0
-            
+                p3_c = _get(q, is_call) * _get(S, is_call) * np.exp(-_get(q, is_call) * _get(T, is_call)) * norm.cdf(d1[is_call]) if np.ndim(q) > 0 else float(q) * _get(S, is_call) * np.exp(-float(q) * _get(T, is_call)) * norm.cdf(d1[is_call])
+                theta[is_call] = (p1[is_call] - p2_c + p3_c) / 365.0
+
             if np.any(~is_call):
                 p2_p = _get(r, ~is_call) * _get(K, ~is_call) * np.exp(-_get(r, ~is_call) * _get(T, ~is_call)) * norm.cdf(-d2[~is_call])
-                theta[~is_call] = (p1[~is_call] + p2_p) / 365.0
-                
+                p3_p = _get(q, ~is_call) * _get(S, ~is_call) * np.exp(-_get(q, ~is_call) * _get(T, ~is_call)) * norm.cdf(-d1[~is_call]) if np.ndim(q) > 0 else float(q) * _get(S, ~is_call) * np.exp(-float(q) * _get(T, ~is_call)) * norm.cdf(-d1[~is_call])
+                theta[~is_call] = (p1[~is_call] + p2_p - p3_p) / 365.0
+
             return theta
 
-def bs_rho(option_type, S, K, T, r, sigma):
-    """Black-Scholes rho (per 1% change in rates)."""
-    _, d2 = _d1d2(S, K, T, r, sigma)
+def bs_rho(option_type, S, K, T, r, sigma, q=0.0):
+    """Black-Scholes rho (per 1% change in rates) with optional continuous dividend yield q."""
+    _, d2 = _d1d2(S, K, T, r, sigma, q)
     with np.errstate(divide='ignore', invalid='ignore'):
         if isinstance(option_type, str):
             if option_type.lower() == "call":
@@ -175,16 +186,16 @@ def bs_rho(option_type, S, K, T, r, sigma):
             return rho
 
 
-def bs_charm(option_type, S, K, T, r, sigma):
+def bs_charm(option_type, S, K, T, r, sigma, q=0.0):
     """
     Black-Scholes charm (dDelta/dTime) — daily delta decay.
     Negative for calls (delta decays toward 0), positive for puts.
     """
-    d1, d2 = _d1d2(S, K, T, r, sigma)
+    d1, d2 = _d1d2(S, K, T, r, sigma, q)
     if d1 is None:
         return 0.0
     with np.errstate(divide='ignore', invalid='ignore'):
-        charm_raw = -norm.pdf(d1) * (2 * r * T - d2 * sigma * np.sqrt(T)) / (2 * T * sigma * np.sqrt(T))
+        charm_raw = -norm.pdf(d1) * (2 * (r - q) * T - d2 * sigma * np.sqrt(T)) / (2 * T * sigma * np.sqrt(T))
     if isinstance(option_type, str):
         if option_type.lower() == "call":
             return charm_raw / 365.0
@@ -197,13 +208,13 @@ def bs_charm(option_type, S, K, T, r, sigma):
         return charm / 365.0
 
 
-def bs_vanna(S, K, T, r, sigma):
+def bs_vanna(S, K, T, r, sigma, q=0.0):
     """
     Black-Scholes vanna (dDelta/dVol = dVega/dSpot).
     Vanna = -n(d1) * d2 / sigma
     Positive vanna: delta increases as IV rises.
     """
-    d1, d2 = _d1d2(S, K, T, r, sigma)
+    d1, d2 = _d1d2(S, K, T, r, sigma, q)
     if d1 is None:
         return 0.0
     with np.errstate(divide='ignore', invalid='ignore'):

@@ -260,6 +260,11 @@ def render_sidebar():
         min_dte = st.slider("Min DTE", 0, 90, 7)
         max_dte = st.slider("Max DTE", 0, 180, 45)
         max_expiries = st.slider("Max Expiries", 1, 5, 3)
+        dte_bucket_filter = st.selectbox(
+            "DTE Bucket",
+            ["All", "Short (7-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"],
+            index=0,
+        )
         
     # 3. Weights
     with st.sidebar.expander("ALGO WEIGHTS", expanded=False):
@@ -331,7 +336,7 @@ def render_sidebar():
                     st.session_state.ai_results = None
                 except Exception as e:
                     st.error(f"Scan Failed: {e}")
-                    return budget
+                    return budget, dte_bucket_filter
             st.session_state.scan_params_hash = _new_hash
         else:
             st.info("Params unchanged — showing cached results.")
@@ -372,10 +377,10 @@ def render_sidebar():
         st.session_state.ai_status = None
         st.rerun()
 
-    return budget
+    return budget, dte_bucket_filter
 
 # --- SCANNER TAB CONTENT ---
-def render_scanner_tab(budget):
+def render_scanner_tab(budget, dte_bucket_filter="All"):
     if st.session_state.scan_results:
         results = st.session_state.scan_results
         picks_df = results.picks
@@ -383,6 +388,16 @@ def render_scanner_tab(budget):
         # Merge AI scores onto picks_df if available
         ai_ranked = st.session_state.ai_results
         has_ai = ai_ranked is not None and not ai_ranked.empty
+
+        # Apply DTE bucket filter
+        if not picks_df.empty and dte_bucket_filter != "All" and "T_years" in picks_df.columns:
+            _dte_vals = picks_df["T_years"] * 365.0
+            if dte_bucket_filter == "Short (7-14 DTE)":
+                picks_df = picks_df[(_dte_vals >= 7) & (_dte_vals <= 14)].copy()
+            elif dte_bucket_filter == "Standard (15-30 DTE)":
+                picks_df = picks_df[(_dte_vals > 14) & (_dte_vals <= 30)].copy()
+            elif dte_bucket_filter == "Swing (31-45 DTE)":
+                picks_df = picks_df[(_dte_vals > 30) & (_dte_vals <= 45)].copy()
 
         if not picks_df.empty:
             picks_df = categorize_by_premium(picks_df, budget=budget)
@@ -555,6 +570,23 @@ def render_visualizer_tab():
             fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), template="plotly_dark", height=400)
             st.plotly_chart(fig_radar, use_container_width=True)
 
+        # Score Breakdown Panel
+        _sd = opt.get("score_drivers", "")
+        if _sd:
+            st.markdown("### Score Breakdown")
+            _sd_str = str(_sd)
+            _pos = [p for p in _sd_str.split() if p.startswith("+") and p != "|"]
+            _neg = [p for p in _sd_str.split() if p.startswith("-") and p != "|"]
+            _bd_col1, _bd_col2 = st.columns(2)
+            with _bd_col1:
+                st.markdown("**Positives**")
+                for _p in _pos:
+                    st.markdown(f"- `{_p}`")
+            with _bd_col2:
+                st.markdown("**Negatives**")
+                for _n in _neg:
+                    st.markdown(f"- `{_n}`")
+
         # AI Reasoning Panel
         ai_ranked = st.session_state.ai_results
         if ai_ranked is not None and not ai_ranked.empty:
@@ -640,12 +672,12 @@ def render_main():
     tab_scanner, tab_portfolio = st.tabs(["🔍 Options Scanner", "📈 Paper Portfolio"])
     
     with tab_scanner:
-        budget = render_sidebar()
+        budget, dte_bucket_filter = render_sidebar()
         
         # Sub-navigation for Scanner
         s_tab1, s_tab2 = st.tabs(["📋 Results", "📊 Deep Analysis"])
         with s_tab1:
-            render_scanner_tab(budget)
+            render_scanner_tab(budget, dte_bucket_filter)
         with s_tab2:
             render_visualizer_tab()
             
