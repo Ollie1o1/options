@@ -20,7 +20,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -37,6 +37,15 @@ _MIGRATIONS = {
         # Track AI score at entry to measure AI IC vs technical IC separately
         "ALTER TABLE trades ADD COLUMN ai_score REAL",
         "ALTER TABLE trades ADD COLUMN ai_confidence REAL",
+    ],
+    5: [
+        # Store entry Greeks and IV for accurate stress testing and P&L attribution
+        "ALTER TABLE trades ADD COLUMN entry_iv REAL",
+        "ALTER TABLE trades ADD COLUMN entry_delta REAL",
+        "ALTER TABLE trades ADD COLUMN entry_gamma REAL",
+        "ALTER TABLE trades ADD COLUMN entry_vega REAL",
+        "ALTER TABLE trades ADD COLUMN entry_theta REAL",
+        "ALTER TABLE trades ADD COLUMN dividend_yield REAL",
     ],
 }
 
@@ -125,7 +134,7 @@ class PaperManager:
         """
         Logs a new paper trade to the SQLite database.
         Required keys: ticker, expiration, strike, type, entry_price, quality_score, strategy_name
-        Optional keys: ai_score, ai_confidence (stored for IC analysis)
+        Optional keys: ai_score, ai_confidence, entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield
         """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -134,9 +143,20 @@ class PaperManager:
             date, ticker, expiration, strike, type,
             entry_price, quality_score, strategy_name,
             status, exit_price, exit_date, pnl_pct,
-            ai_score, ai_confidence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ai_score, ai_confidence,
+            entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+
+        def _float_or_none(key):
+            v = trade_dict.get(key)
+            if v is None:
+                return None
+            try:
+                fv = float(v)
+                return fv if np.isfinite(fv) else None
+            except (ValueError, TypeError):
+                return None
 
         params = (
             trade_dict.get("date", now),
@@ -153,6 +173,12 @@ class PaperManager:
             None,   # pnl_pct
             trade_dict.get("ai_score"),        # None if not ranked yet
             trade_dict.get("ai_confidence"),   # None if not ranked yet
+            _float_or_none("entry_iv"),
+            _float_or_none("entry_delta"),
+            _float_or_none("entry_gamma"),
+            _float_or_none("entry_vega"),
+            _float_or_none("entry_theta"),
+            _float_or_none("dividend_yield"),
         )
 
         with self._get_connection() as conn:

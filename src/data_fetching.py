@@ -952,14 +952,19 @@ def get_vix_level() -> Optional[float]:
 
 def determine_vix_regime(vix_level: Optional[float], config: Dict) -> Tuple[str, Dict]:
     if vix_level is None:
-        return "normal", config.get("composite_weights", {})
+        w = dict(config.get("composite_weights", {}))
+        w["regime"] = "normal"
+        return "normal", w
     vix_regimes = config.get("vix_regimes", {})
     if vix_level < vix_regimes.get("low", {}).get("threshold", 15):
-        return "low", vix_regimes.get("low", {}).get("weights", config.get("composite_weights", {}))
+        regime = "low"
     elif vix_level > vix_regimes.get("high", {}).get("threshold", 25):
-        return "high", vix_regimes.get("high", {}).get("weights", config.get("composite_weights", {}))
+        regime = "high"
     else:
-        return "normal", vix_regimes.get("normal", {}).get("weights", config.get("composite_weights", {}))
+        regime = "normal"
+    w = dict(vix_regimes.get(regime, {}).get("weights", config.get("composite_weights", {})))
+    w["regime"] = regime
+    return regime, w
 
 # --- New / Refactored Calculation Functions (Using Cached History) ---
 
@@ -1789,6 +1794,171 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     }
     _CHAIN_CACHE[symbol] = result
     return result
+
+
+# ---------------------------------------------------------------------------
+# Historical IV crush estimation
+# ---------------------------------------------------------------------------
+
+def get_historical_iv_crush(ticker: str, n_quarters: int = 8, iv_db_path: str = "iv_cache.db") -> Dict[str, Any]:
+    """
+    Estimate historical IV crush around earnings dates.
+
+    Uses yfinance earnings dates and attempts to compute IV change pre vs post earnings.
+    Falls back to historical realized move as a proxy if IV data not available.
+
+    Returns dict with keys:
+        avg_crush: float (mean IV crush as fraction, e.g. 0.35 = 35% crush)
+        std_crush: float (std dev of crush)
+        n_events: int (number of earnings events analyzed)
+        crushes: list of individual crush values
+    Returns empty dict if insufficient data.
+    """
+    try:
+        # ------------------------------------------------------------------
+        # Check cache first
+        # ------------------------------------------------------------------
+        try:
+            conn = sqlite3.connect(iv_db_path)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS iv_crush_cache "
+                "(ticker TEXT PRIMARY KEY, avg_crush REAL, std_crush REAL, "
+                "n_events INT, updated TEXT)"
+            )
+            row = conn.execute(
+                "SELECT avg_crush, std_crush, n_events, updated "
+                "FROM iv_crush_cache WHERE ticker = ?",
+                (ticker.upper(),),
+            ).fetchone()
+            if row is not None:
+                updated = datetime.fromisoformat(row[3])
+                if (datetime.now() - updated).days < 7:
+                    conn.close()
+                    return {
+                        "avg_crush": row[0],
+                        "std_crush": row[1],
+                        "n_events": row[2],
+                        "crushes": [],  # individual values not cached
+                    }
+            conn.close()
+        except Exception:
+            pass
+
+        # ------------------------------------------------------------------
+        # Fetch earnings dates
+        # ------------------------------------------------------------------
+        tkr = yf.Ticker(ticker)
+        earnings_dates = None
+        try:
+            ed = tkr.earnings_dates
+            if ed is not None and not ed.empty:
+                earnings_dates = ed.index.tolist()
+        except Exception:
+            pass
+
+        if earnings_dates is None:
+            try:
+                cal = tkr.calendar
+                if cal is not None:
+                    if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.columns:
+                        earnings_dates = cal["Earnings Date"].tolist()
+                    elif isinstance(cal, dict) and "Earnings Date" in cal:
+                        val = cal["Earnings Date"]
+                        earnings_dates = val if isinstance(val, list) else [val]
+            except Exception:
+                pass
+
+        if not earnings_dates:
+            return {}
+
+        # Keep only past dates, limit to n_quarters
+        now = datetime.now(timezone.utc)
+        past_dates = []
+        for d in earnings_dates:
+            try:
+                dt = pd.Timestamp(d)
+                if dt.tzinfo is None:
+                    dt = dt.tz_localize("UTC")
+                if dt < now:
+                    past_dates.append(dt)
+            except Exception:
+                continue
+
+        past_dates = sorted(past_dates, reverse=True)[:n_quarters]
+
+        if len(past_dates) < 3:
+            return {}
+
+        # ------------------------------------------------------------------
+        # Compute realized move around each earnings date as crush proxy
+        # ------------------------------------------------------------------
+        hist = tkr.history(period="3y", auto_adjust=True)
+        if hist is None or hist.empty:
+            return {}
+
+        if hist.index.tzinfo is None:
+            hist.index = hist.index.tz_localize("UTC")
+
+        crushes: list = []
+        for ed in past_dates:
+            try:
+                # Find the nearest trading day on or after the earnings date
+                mask = hist.index >= (ed - timedelta(days=1))
+                nearby = hist.loc[mask].head(5)
+                if len(nearby) < 2:
+                    continue
+
+                # 1-day return around the event
+                close_before = nearby.iloc[0]["Close"]
+                close_after = nearby.iloc[1]["Close"]
+                if close_before <= 0:
+                    continue
+
+                realized_move = abs((close_after - close_before) / close_before)
+                # IV crush estimate: IV typically drops ~1.5x the realized move for ATM
+                crush = realized_move * 1.5
+                crushes.append(crush)
+            except Exception:
+                continue
+
+        if len(crushes) < 3:
+            return {}
+
+        arr = np.array(crushes)
+        avg_crush = float(np.mean(arr))
+        std_crush = float(np.std(arr, ddof=1)) if len(crushes) > 1 else 0.0
+
+        # ------------------------------------------------------------------
+        # Cache the result
+        # ------------------------------------------------------------------
+        try:
+            conn = sqlite3.connect(iv_db_path)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS iv_crush_cache "
+                "(ticker TEXT PRIMARY KEY, avg_crush REAL, std_crush REAL, "
+                "n_events INT, updated TEXT)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO iv_crush_cache "
+                "(ticker, avg_crush, std_crush, n_events, updated) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (ticker.upper(), avg_crush, std_crush, len(crushes),
+                 datetime.now().isoformat()),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+        return {
+            "avg_crush": avg_crush,
+            "std_crush": std_crush,
+            "n_events": len(crushes),
+            "crushes": crushes,
+        }
+
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------

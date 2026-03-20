@@ -19,6 +19,7 @@ try:
         generate_trade_thesis, calculate_entry_exit_levels, calculate_confidence_score,
         categorize_by_strategy, assess_risk_factors, format_trade_plan,
         explain_quality_score, format_risk_alerts, build_scenario_table,
+        generate_execution_guidance,
     )
     from tqdm import tqdm
     HAS_ENHANCED_CLI = True
@@ -699,6 +700,84 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
     print()
 
 
+def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> None:
+    """Print a compact side-by-side comparison table of top picks per DTE bucket."""
+    if df_top.empty or not HAS_ENHANCED_CLI:
+        return
+
+    width = get_display_width()
+    is_seller = (mode == "Premium Selling")
+
+    # Select top 5 per DTE bucket
+    df_top = df_top.copy()
+    df_top["_dte"] = (df_top["T_years"] * 365.0).round(0) if "T_years" in df_top.columns else 0
+
+    rows = df_top.sort_values("quality_score", ascending=False).head(10)
+    if rows.empty:
+        return
+
+    print()
+    hdr = "  QUICK COMPARISON  —  Top Picks"
+    print(fmt.colorize(hdr, fmt.Colors.BRIGHT_CYAN, bold=True))
+    sep_line = "  " + "\u2500" * (width - 4)
+    print(fmt.colorize(sep_line, fmt.Colors.DIM))
+
+    # Table header
+    col_hdr = (
+        f"  {'#':>3}  {'Tick':<5} {'Strike':<8} {'Exp':>8} {'Score':>6} {'PoP':>5}"
+        f" {'R/R':>5} {'IV%':>5} {'EV':>7} {'Sprd':>5}"
+    )
+    if "iv_surface_residual" in rows.columns:
+        col_hdr += f" {'SVI':>6}"
+    print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
+    print(fmt.colorize(sep_line, fmt.Colors.DIM))
+
+    for rank_i, (_, r) in enumerate(rows.iterrows(), 1):
+        strike = r.get("strike", 0)
+        opt_type = str(r.get("type", "C"))[0].upper()
+        exp_raw = str(r.get("expiration", ""))[:10]
+        try:
+            exp_str = pd.to_datetime(exp_raw).strftime("%m/%d")
+        except Exception:
+            exp_str = exp_raw[-5:]
+        score = r.get("quality_score", 0)
+        pop = r.get("prob_profit", 0) or 0
+        rr = r.get("rr_ratio", 0) or 0
+        iv_pct = (r.get("iv_percentile_30", r.get("iv_percentile", 0)) or 0) * 100
+        ev = r.get("ev_per_contract", 0) or 0
+        spread = (r.get("spread_pct", 0) or 0) * 100
+
+        # Color score
+        sc_color = fmt.Colors.GREEN if score >= 0.70 else (fmt.Colors.YELLOW if score >= 0.50 else fmt.Colors.RED)
+        score_str = fmt.colorize(f"{score:.2f}", sc_color)
+        pop_str = f"{pop*100:>4.0f}%"
+        rr_str = f"{rr:>4.1f}x" if rr > 0 else "  n/a"
+        ev_str = f"${ev:>+5.0f}" if abs(ev) < 10000 else f"${ev:>+5.0f}"
+
+        # Symbol prefix for multi-ticker
+        sym = str(r.get("symbol", ""))[:5]
+        strike_str = f"${strike:.0f}{opt_type}"
+
+        line = (
+            f"  {rank_i:>3}  {sym:<5} {strike_str:<8} {exp_str:>8} {score_str:>6} {pop_str:>5}"
+            f" {rr_str:>5} {iv_pct:>4.0f}% {ev_str:>7} {spread:>4.1f}%"
+        )
+        if "iv_surface_residual" in rows.columns:
+            resid = r.get("iv_surface_residual", 0) or 0
+            if abs(resid) > 0.15:
+                tag = "CHEAP" if resid < 0 else "RICH"
+                tag_color = fmt.Colors.GREEN if resid < 0 else fmt.Colors.RED
+                tag_padded = f"{tag:>6}"
+                line += f" {fmt.colorize(tag_padded, tag_color)}"
+            else:
+                line += f" {'':>6}"
+
+        print(line)
+
+    print(fmt.colorize(sep_line, fmt.Colors.DIM))
+    print()
+
+
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
@@ -869,8 +948,20 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             # Trade plan (thesis + entry/exit)
             if HAS_ENHANCED_CLI:
                 thesis = generate_trade_thesis(r)
+                # Append IV surface mispricing and crush info to thesis
+                _extra_thesis = []
+                if "iv_surface_residual" in r.index:
+                    resid = r.get("iv_surface_residual", 0) or 0
+                    if resid < -0.15:
+                        _extra_thesis.append(fmt.colorize("CHEAP vs surface", fmt.Colors.GREEN, bold=True))
+                    elif resid > 0.15:
+                        _extra_thesis.append(fmt.colorize("RICH vs surface", fmt.Colors.RED, bold=True))
+                if "avg_iv_crush" in r.index and pd.notna(r.get("avg_iv_crush")):
+                    _extra_thesis.append(f"Avg IV crush: -{r['avg_iv_crush']:.0%} post-earnings")
+                if _extra_thesis:
+                    thesis += " | " + " | ".join(_extra_thesis)
                 thesis_label = fmt.colorize("Thesis:   ", fmt.Colors.BRIGHT_CYAN)
-                thesis_text = fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN)
+                thesis_text = fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN) if not _extra_thesis else thesis
                 print(f"    {arrow} {thesis_label} {thesis_text}")
                 levels = calculate_entry_exit_levels(r, config)
                 tp_pct = config.get("exit_rules", {}).get("take_profit", 0.50)
@@ -885,6 +976,12 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 conf_str = fmt.colorize(f"{conf_label} ({conf_score:.0%})", conf_color, bold=True)
                 print(f"    {arrow} {fmt.colorize('Entry:    ', fmt.Colors.DIM)} {entry_str}  |  Target: {target_str}  |  Stop: {stop_str}")
                 print(f"         Breakeven: ${levels['breakeven']:.2f}  |  Max Loss: ${levels['max_loss']:.0f}  |  Confidence: {conf_str}")
+
+                # Execution guidance
+                exec_guide = generate_execution_guidance(r)
+                if exec_guide:
+                    exec_label = fmt.colorize("Exec:     ", fmt.Colors.DIM)
+                    print(f"         {exec_label}{fmt.colorize(exec_guide, fmt.Colors.YELLOW)}")
 
                 # Quality score breakdown
                 qscore_line = explain_quality_score(r)
@@ -915,6 +1012,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
     # Save OI snapshot for next run
     save_oi_snapshot(df_picks)
+
+    # Compact comparison table for quick-glance ranking
+    print_comparison_table(df_picks, mode)
 
 
 def print_news_panel(news_map: dict, picks_df: pd.DataFrame, width: int = 100) -> None:

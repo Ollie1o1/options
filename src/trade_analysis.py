@@ -700,6 +700,42 @@ def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
     return "\n".join(lines)
 
 
+def generate_execution_guidance(row: pd.Series) -> str:
+    """
+    Generate order execution guidance based on spread width, volume, and OI.
+    Helps traders decide how aggressively to price their limit orders.
+    """
+    spread_pct = float(row.get('spread_pct', 0) or 0)
+    bid = float(row.get('bid', 0) or 0)
+    ask = float(row.get('ask', 0) or 0)
+    mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else float(row.get('premium', 0) or 0)
+    volume = int(row.get('volume', 0) or 0)
+    oi = int(row.get('openInterest', 0) or 0)
+
+    parts = []
+
+    # Limit price guidance based on spread width
+    if spread_pct < 0.03 and mid > 0:
+        parts.append(f"LIMIT @ mid ${mid:.2f} (tight spread, likely fills)")
+    elif spread_pct < 0.08 and bid > 0:
+        limit_px = bid + 0.05
+        parts.append(f"LIMIT @ ${limit_px:.2f} (bid+$0.05, moderate spread)")
+    elif bid > 0:
+        limit_px = bid + 0.10
+        parts.append(f"LIMIT @ ${limit_px:.2f} (wide spread — work the order)")
+    elif mid > 0:
+        parts.append(f"LIMIT @ ${mid:.2f} (no bid data, use mid)")
+
+    # Volume context
+    if volume > 0 and oi > 0:
+        vol_pct = volume / oi * 100
+        parts.append(f"Vol {volume:,} vs OI {oi:,} ({vol_pct:.0f}% of OI)")
+    elif volume > 0:
+        parts.append(f"Vol {volume:,}")
+
+    return " | ".join(parts) if parts else ""
+
+
 __all__ = [
     'generate_trade_thesis',
     'calculate_entry_exit_levels',
@@ -711,4 +747,5 @@ __all__ = [
     'explain_quality_score',
     'format_risk_alerts',
     'build_scenario_table',
+    'generate_execution_guidance',
 ]

@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-Portfolio Greeks-based P&L Stress Test.
+Portfolio P&L Stress Test using full Black-Scholes repricing.
 
-Applies first + second order Greeks approximation (delta-gamma approximation) to
-estimate P&L across stock move and IV shock scenarios.
-
-Note: This uses an approximation, not full Black-Scholes repricing.
-      Results are directionally indicative but will diverge from full repricing
-      for large moves (>20%) where gamma convexity terms are significant.
-      Does not model term structure changes or smile dynamics.
+Applies full BS repricing across stock move and IV shock scenarios.
+Uses stored entry IV from paper trades DB when available (falls back to 25%).
+Delta-gamma approximation is kept as a fallback if BS repricing fails.
 """
 
 import math
@@ -42,7 +38,7 @@ except ImportError:
     fmt = None
 
 try:
-    from .utils import bs_delta, bs_gamma, bs_vega
+    from .utils import bs_delta, bs_gamma, bs_vega, bs_price
     HAS_UTILS = True
 except ImportError:
     HAS_UTILS = False
@@ -139,13 +135,33 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
                 dte_days = 30  # fallback
 
             T = max(dte_days / 365.0, 1.0 / 365)
-            sigma = 0.25  # fallback IV
+
+            # Use stored entry IV if available; fall back to 25%
+            sigma = 0.25
+            stored_iv = trade.get("entry_iv")
+            if stored_iv is not None:
+                try:
+                    sv = float(stored_iv)
+                    if 0.01 < sv < 5.0:
+                        sigma = sv
+                except (ValueError, TypeError):
+                    pass
+
+            div_yield = 0.0
+            stored_q = trade.get("dividend_yield")
+            if stored_q is not None:
+                try:
+                    qv = float(stored_q)
+                    if 0.0 <= qv < 0.20:
+                        div_yield = qv
+                except (ValueError, TypeError):
+                    pass
 
             sign = -1.0 if _is_short_position(strategy_name) else 1.0
 
-            delta = float(bs_delta(opt_type, S, K, T, rfr, sigma))
-            gamma = float(bs_gamma(S, K, T, rfr, sigma))
-            vega = float(bs_vega(S, K, T, rfr, sigma))  # per 1% IV move per share
+            delta = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
+            gamma = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
+            vega = float(bs_vega(S, K, T, rfr, sigma, div_yield))
 
             result.append({
                 "ticker": ticker,
@@ -159,6 +175,9 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
                 "vega": vega,
                 "entry_price": entry_price,
                 "sign": sign,
+                "sigma": sigma,
+                "div_yield": div_yield,
+                "T": T,
             })
         except Exception:
             continue
@@ -210,23 +229,34 @@ def run_stress_test(
             for pos in position_greeks:
                 try:
                     S = pos["S"]
-                    delta = pos["delta"]
-                    gamma = pos["gamma"]
-                    vega = pos["vega"]
                     sign = pos["sign"]
+                    opt_type = pos["type"]
+                    K = pos["strike"]
+                    sigma = pos.get("sigma", 0.25)
+                    T = pos.get("T", 30.0 / 365)
+                    q = pos.get("div_yield", 0.0)
+                    rfr_val = 0.045
 
-                    dS = S * dS_pct
+                    S_new = S * (1.0 + dS_pct)
+                    IV_new = max(sigma + dIV, 0.01)
 
-                    # Delta + Gamma P&L (per share × 100 shares per contract)
-                    pnl_delta = sign * delta * dS * 100
-                    pnl_gamma = sign * 0.5 * gamma * (dS ** 2) * 100
+                    # Full BS repricing (accurate for large moves)
+                    try:
+                        price_base = float(bs_price(opt_type, S, K, T, rfr_val, sigma, q))
+                        price_new = float(bs_price(opt_type, S_new, K, T, rfr_val, IV_new, q))
+                        if math.isnan(price_base) or math.isnan(price_new):
+                            raise ValueError("NaN from BS")
+                        pnl = sign * (price_new - price_base) * 100
+                    except Exception:
+                        # Delta-gamma fallback
+                        dS = S * dS_pct
+                        pnl_delta = sign * pos["delta"] * dS * 100
+                        pnl_gamma = sign * 0.5 * pos["gamma"] * (dS ** 2) * 100
+                        dIV_pp = dIV * 100
+                        pnl_vega = sign * pos["vega"] * dIV_pp * 100
+                        pnl = pnl_delta + pnl_gamma + pnl_vega
 
-                    # Vega P&L: vega is per 1% IV move per share
-                    # dIV is absolute fraction (0.10 = 10 percentage points = 10 one-percent moves)
-                    dIV_pp = dIV * 100  # convert fraction to number of 1% moves
-                    pnl_vega = sign * vega * dIV_pp * 100  # * 100 shares per contract
-
-                    total_pnl += pnl_delta + pnl_gamma + pnl_vega
+                    total_pnl += pnl
                     counted += 1
                 except Exception:
                     continue
@@ -250,8 +280,7 @@ def print_stress_test(
     """
     Print a scenario matrix of portfolio P&L under stock-move x IV-shock scenarios.
 
-    Approximation note: Uses delta-gamma first+second order Greeks approximation.
-    Results are directionally indicative; large moves will deviate from full repricing.
+    Uses full Black-Scholes repricing with stored entry IV when available.
     """
     n_pos = len(open_trades)
     if n_pos == 0:
@@ -263,7 +292,7 @@ def print_stress_test(
         return
 
     print()
-    header = f"  PORTFOLIO STRESS TEST  \u2014  {n_pos} open position(s)  [delta-gamma approx — not full reprice]"
+    header = f"  PORTFOLIO STRESS TEST  \u2014  {n_pos} open position(s)  [full BS repricing]"
     if HAS_FMT and fmt:
         print(fmt.colorize(header, fmt.Colors.BRIGHT_CYAN, bold=True))
     else:
@@ -369,7 +398,7 @@ def print_stress_test(
             else:
                 print(be_line)
 
-    note = "  [Approximation: delta + 0.5*gamma*dS^2 + vega*dIV. Not a substitute for full repricing.]"
+    note = "  [Full Black-Scholes repricing per scenario. Uses stored entry IV when available.]"
     if HAS_FMT and fmt:
         print(fmt.colorize(note, fmt.Colors.DIM))
     else:

@@ -246,7 +246,7 @@ def baw_american_put(
     if T <= 1e-6 or sigma <= 1e-9:
         return intrinsic
 
-    p_euro = float(bs_put(S, K, T, r, sigma))
+    p_euro = float(bs_put(S, K, T, r, sigma, q))
 
     rT = r * T
     exp_rT = math.exp(-rT)
@@ -271,11 +271,11 @@ def baw_american_put(
     # Early exercise is always optimal when no root exists in (0, K) — i.e. f(K) > 0.
 
     def _f(x: float) -> float:
-        d1v, _ = _d1d2(x, K, T, r, sigma)
+        d1v, _ = _d1d2(x, K, T, r, sigma, q)
         if d1v is None:
             return 0.0
         Nd1x = float(norm.cdf(-float(d1v)))
-        ps = float(bs_put(x, K, T, r, sigma))
+        ps = float(bs_put(x, K, T, r, sigma, q))
         return (K - x) - (ps + (1.0 - exp_qT * Nd1x) * x / q2)
 
     # Check boundary at K: if f(K) >= 0, early exercise is optimal for all S < K
@@ -311,7 +311,7 @@ def baw_american_put(
     if S <= S_star:
         return max(intrinsic, p_euro)
 
-    d1_star_val, _ = _d1d2(S_star, K, T, r, sigma)
+    d1_star_val, _ = _d1d2(S_star, K, T, r, sigma, q)
     if d1_star_val is None:
         return p_euro
     Nd1_star = float(norm.cdf(-float(d1_star_val)))
@@ -333,7 +333,7 @@ def baw_american_call(
     import math
     S, K, T, r, sigma, q = float(S), float(K), float(T), float(r), float(sigma), float(q)
 
-    c_euro = float(bs_call(S, K, T, r, sigma))
+    c_euro = float(bs_call(S, K, T, r, sigma, q))
     intrinsic = max(S - K, 0.0)
 
     if q <= 0:
@@ -361,13 +361,13 @@ def baw_american_call(
     S_star = K / max(1.0 - 1.0 / q1, 1e-6)
 
     for _ in range(max_iter):
-        d1_s_val, _ = _d1d2(S_star, K, T, r, sigma)
+        d1_s_val, _ = _d1d2(S_star, K, T, r, sigma, q)
         if d1_s_val is None:
             return c_euro
         d1_s = float(d1_s_val)
 
         Nd1 = float(norm.cdf(d1_s))
-        c_s = float(bs_call(S_star, K, T, r, sigma))
+        c_s = float(bs_call(S_star, K, T, r, sigma, q))
 
         rhs = c_s + (1.0 - exp_qT * Nd1) * S_star / q1
         f = (S_star - K) - rhs
@@ -388,7 +388,7 @@ def baw_american_call(
     if S >= S_star:
         return max(intrinsic, c_euro)
 
-    d1_star_val, _ = _d1d2(S_star, K, T, r, sigma)
+    d1_star_val, _ = _d1d2(S_star, K, T, r, sigma, q)
     if d1_star_val is None:
         return c_euro
     Nd1_star = float(norm.cdf(float(d1_star_val)))
@@ -418,10 +418,10 @@ def early_exercise_premium(
     """
     if option_type.lower() == "call":
         a = baw_american_call(S, K, T, r, sigma, q)
-        e = float(bs_call(S, K, T, r, sigma))
+        e = float(bs_call(S, K, T, r, sigma, q))
     else:
         a = baw_american_put(S, K, T, r, sigma, q)
-        e = float(bs_put(S, K, T, r, sigma))
+        e = float(bs_put(S, K, T, r, sigma, q))
     return max(0.0, a - e)
 
 

@@ -856,6 +856,26 @@ def calculate_metrics(
     # Prefer EWMA vol for EV (more responsive to recent moves); fall back to 30d HV then IV
     hv_for_ev = df["hv_ewma"] if "hv_ewma" in df.columns else df["hv_30d"]
     hv_arr = np.maximum(hv_for_ev.fillna(df["hv_30d"]).fillna(df["impliedVolatility"]).values, 1e-9)
+
+    # Forward-looking adjustment: IV term structure slope signals whether market
+    # expects vol to rise (contango) or fall (backwardation). Adjust HV used for
+    # EV by ±5% based on term structure direction.
+    try:
+        if "expiration" in df.columns and "impliedVolatility" in df.columns:
+            exp_iv_mean = df.groupby("expiration")["impliedVolatility"].transform("mean")
+            exp_dte = (df["T_years"] * 365).fillna(30)
+            # Per-row slope: compare this expiration's avg IV to the chain mean
+            chain_iv_mean = df["impliedVolatility"].mean()
+            ts_signal = np.where(
+                (exp_iv_mean > chain_iv_mean * 1.02) & (exp_dte > 20), 1.05,
+                np.where(
+                    (exp_iv_mean < chain_iv_mean * 0.98) & (exp_dte > 20), 0.95,
+                    1.0
+                )
+            )
+            hv_arr = hv_arr * ts_signal
+    except Exception:
+        pass
     hv_d1, hv_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, hv_arr)
     with np.errstate(divide='ignore', invalid='ignore'):
         hv_payoff = np.where(is_call,
@@ -917,7 +937,14 @@ def calculate_metrics(
         df["yield_warning"] = np.where(df["symbol"].isin(RATE_SENSITIVE), "📉 RATES UP", "")
     else:
         df["yield_warning"] = ""
-    
+
+    # SVI IV surface fitting — detect mispriced contracts vs fitted vol smile
+    try:
+        from .iv_surface import fit_svi_surface
+        df = fit_svi_surface(df)
+    except Exception:
+        df["iv_surface_residual"] = 0.0
+
     return df
 
 
@@ -1145,17 +1172,39 @@ def calculate_scores(
         iv_velocity_score = pd.Series(iv_velocity_raw, index=df.index)
         df["iv_velocity_score"] = iv_velocity_score
 
+        # IV surface mispricing score: rewards buying cheap vs surface, selling rich vs surface
+        resid = df.get("iv_surface_residual", pd.Series(0.0, index=df.index))
+        resid = pd.to_numeric(resid, errors="coerce").fillna(0.0)
+        # For buyers (calls): negative residual = cheap = good → score = clip(-resid * 5, 0, 1)
+        # For sellers (puts in premium selling): positive residual = rich = good
+        is_sell = (mode == "Premium Selling")
+        if is_sell:
+            iv_mispricing_score = pd.Series(np.clip(resid * 5, 0, 1), index=df.index)
+        else:
+            iv_mispricing_score = pd.Series(np.clip(-resid * 5, 0, 1), index=df.index)
+        df["iv_mispricing_score"] = iv_mispricing_score
+
         dw = {
             # IC-optimised defaults: iv_edge(0.15) + vrp(0.09) + iv_rank(0.18) = 42% vol signal
-            "pop": 0.13, "em_realism": 0.00, "rr": 0.08, "momentum": 0.05,
+            "pop": 0.08, "iv_mispricing": 0.05, "rr": 0.08, "momentum": 0.05,
             "iv_rank": 0.18, "liquidity": 0.06, "catalyst": 0.00, "theta": 0.05,
             "ev": 0.04, "trader_pref": 0.00, "iv_edge": 0.15, "skew_align": 0.03,
             "gamma_theta": 0.01, "pcr": 0.01, "gex": 0.01, "oi_change": 0.01,
             "sentiment": 0.01, "option_rvol": 0.01, "vrp": 0.09, "gamma_pin": 0.02,
-            "max_pain": 0.02, "iv_velocity": 0.04,
+            "max_pain": 0.02, "iv_velocity": 0.04, "em_realism": 0.00,
         }
         cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
+
+        # Apply VIX regime multipliers — adjust weights based on current vol environment
+        regime_mults = config.get("vix_regime_multipliers", {}).get(
+            vix_regime_weights.get("regime", "normal") if isinstance(vix_regime_weights, dict) else "normal",
+            {}
+        )
+        for k, mult in regime_mults.items():
+            if k in w:
+                w[k] *= mult
+        # Re-normalize so weights sum to 1.0
         w_sum = sum(w.values()) or 1.0
         df["quality_score"] = (
             w["pop"]*pop_score + w["em_realism"]*em_realism_score + w["rr"]*rr_score
@@ -1167,6 +1216,7 @@ def calculate_scores(
             + w["sentiment"]*sentiment_score_component + w["option_rvol"]*option_rvol_score
             + w["vrp"]*vrp_score + w["gamma_pin"]*gamma_pin_score
             + w["max_pain"]*max_pain_score + w["iv_velocity"]*iv_velocity_score
+            + w["iv_mispricing"]*iv_mispricing_score
         ) / w_sum
         try:
             _cdf = pd.DataFrame({
@@ -1176,6 +1226,7 @@ def calculate_scores(
                 "Mom": w["momentum"]*momentum_score, "Skew": w["skew_align"]*skew_combined_score,
                 "Sent": w["sentiment"]*sentiment_score_component,
                 "VRP": w["vrp"]*vrp_score, "IV vel": w["iv_velocity"]*iv_velocity_score,
+                "SVI": w["iv_mispricing"]*iv_mispricing_score,
             }, index=df.index)
             _neg_cdf = pd.DataFrame({
                 "spread": pd.Series(0.0, index=df.index),
@@ -1195,12 +1246,33 @@ def calculate_scores(
         except Exception:
             df["score_drivers"] = ""
 
-    # Adjustments
-    df.loc[df["event_flag"] == "EARNINGS_NEARBY", "quality_score"] -= 0.05
-    if "score_drivers" in df.columns:
-        _earn_nearby_mask = df["event_flag"] == "EARNINGS_NEARBY"
-        for _idx in df.index[_earn_nearby_mask]:
-            df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + " -earnings_nearby(-0.05)"
+    # Adjustments — earnings penalty scaled by historical IV crush magnitude
+    _earn_nearby_mask = df["event_flag"] == "EARNINGS_NEARBY"
+    if _earn_nearby_mask.any():
+        is_seller = (mode == "Premium Selling")
+        try:
+            from .data_fetching import get_historical_iv_crush
+            _ticker = df["symbol"].iloc[0] if "symbol" in df.columns else ""
+            crush_data = get_historical_iv_crush(_ticker) if _ticker else {}
+        except Exception:
+            crush_data = {}
+        avg_crush = crush_data.get("avg_crush", 0.25)
+        # Buyers: high crush = bigger penalty. Sellers: high crush = opportunity
+        if avg_crush > 0.40:
+            _earn_penalty = -0.15 if not is_seller else 0.05
+        elif avg_crush > 0.25:
+            _earn_penalty = -0.08 if not is_seller else 0.03
+        else:
+            _earn_penalty = -0.03 if not is_seller else 0.01
+        df.loc[_earn_nearby_mask, "quality_score"] += _earn_penalty
+        # Store crush info for thesis display
+        df.loc[_earn_nearby_mask, "avg_iv_crush"] = avg_crush
+        if "score_drivers" in df.columns:
+            crush_str = f" earnings({_earn_penalty:+.2f},crush={avg_crush:.0%})"
+            for _idx in df.index[_earn_nearby_mask]:
+                df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + crush_str
+    elif "score_drivers" in df.columns:
+        pass  # no earnings nearby — no adjustment needed
     # Reward earnings plays where IV is actually underpriced vs realized vol
     if "Earnings Play" in df.columns and "is_underpriced" in df.columns:
         df.loc[(df["Earnings Play"] == "YES") & (df["is_underpriced"] == True), "quality_score"] += 0.08
@@ -3195,7 +3267,13 @@ def main():
                                 or safe_float(top_pick_row.get("premium"), 0.0)
                             ),
                             "quality_score": top_pick_row["quality_score"],
-                            "strategy_name": f"Long {str(top_pick_row['type']).capitalize()}"
+                            "strategy_name": f"Long {str(top_pick_row['type']).capitalize()}",
+                            "entry_iv": top_pick_row.get("impliedVolatility"),
+                            "entry_delta": top_pick_row.get("delta"),
+                            "entry_gamma": top_pick_row.get("gamma"),
+                            "entry_vega": top_pick_row.get("vega"),
+                            "entry_theta": top_pick_row.get("theta"),
+                            "dividend_yield": top_pick_row.get("dividend_yield"),
                         }
                         pm.log_trade(trade_dict)
                         msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"

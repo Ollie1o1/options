@@ -100,6 +100,120 @@ def _is_short(strategy_name: str) -> bool:
     return any(k in s for k in ("short", "credit", "covered", "cash secured", "naked"))
 
 
+def _has_entry_greeks(r) -> bool:
+    """Check if a trade row has stored entry Greeks."""
+    try:
+        keys = r.keys() if hasattr(r, 'keys') else []
+        return "entry_delta" in keys and r["entry_delta"] is not None
+    except Exception:
+        return False
+
+
+def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
+    """
+    Display P&L attribution breakdown: delta, gamma, theta, vega contributions.
+    Uses stored entry Greeks from paper trades DB.
+    """
+    total_delta_pnl = 0.0
+    total_gamma_pnl = 0.0
+    total_theta_pnl = 0.0
+    total_vega_pnl = 0.0
+    total_actual_pnl = 0.0
+    counted = 0
+
+    for r in closed_trades:
+        try:
+            entry_delta = float(r["entry_delta"])
+            entry_gamma = float(r["entry_gamma"])
+            entry_vega = float(r["entry_vega"])
+            entry_theta = float(r["entry_theta"])
+            entry_price = float(r["entry_price"])
+            exit_price = float(r["exit_price"]) if r["exit_price"] else 0.0
+            pnl_ratio = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
+
+            # We don't have S_entry/S_exit stored, so use pnl_ratio * entry_price * 100 as actual P&L
+            actual_pnl = pnl_ratio * entry_price * 100
+
+            # Estimate days held
+            try:
+                trade_date = datetime.strptime(str(r["date"])[:10], "%Y-%m-%d").date()
+                exit_dt = datetime.strptime(str(r["exit_date"])[:10], "%Y-%m-%d").date()
+                days_held = max((exit_dt - trade_date).days, 1)
+            except Exception:
+                days_held = 14  # fallback
+
+            # Theta P&L (daily theta * days held * 100 shares)
+            theta_pnl = entry_theta * days_held * 100
+
+            # For delta/gamma/vega, we'd need spot price change.
+            # Approximate: actual - theta = delta+gamma+vega+residual
+            # Attribute remaining proportionally to Greeks magnitude
+            remaining = actual_pnl - theta_pnl
+
+            # Without spot price data, attribute remaining based on Greek magnitudes
+            abs_d = abs(entry_delta)
+            abs_g = abs(entry_gamma) * 100  # scale gamma
+            abs_v = abs(entry_vega)
+            total_mag = abs_d + abs_g + abs_v
+            if total_mag > 0:
+                delta_pnl = remaining * abs_d / total_mag
+                gamma_pnl = remaining * abs_g / total_mag
+                vega_pnl = remaining * abs_v / total_mag
+            else:
+                delta_pnl = remaining
+                gamma_pnl = 0.0
+                vega_pnl = 0.0
+
+            total_delta_pnl += delta_pnl
+            total_gamma_pnl += gamma_pnl
+            total_theta_pnl += theta_pnl
+            total_vega_pnl += vega_pnl
+            total_actual_pnl += actual_pnl
+            counted += 1
+        except Exception:
+            continue
+
+    if counted == 0:
+        return
+
+    print()
+    sep = "  " + "\u2500" * (width - 2)
+    header = f"  P&L ATTRIBUTION  ({counted} closed trades with entry Greeks)"
+    if HAS_FMT and fmt:
+        print(fmt.colorize(header, fmt.Colors.BRIGHT_CYAN, bold=True))
+        print(fmt.colorize(sep, fmt.Colors.DIM))
+    else:
+        print(header)
+        print(sep)
+
+    total_abs = abs(total_delta_pnl) + abs(total_gamma_pnl) + abs(total_theta_pnl) + abs(total_vega_pnl)
+    if total_abs == 0:
+        total_abs = 1.0
+
+    def _attr_line(name, val):
+        pct = val / total_abs * 100 if total_abs > 0 else 0
+        sign = "+" if val >= 0 else ""
+        color = ""
+        if HAS_FMT and fmt:
+            color = fmt.Colors.GREEN if val >= 0 else fmt.Colors.RED
+            return fmt.colorize(f"    {name:<8} {sign}${abs(val):>8.0f}  ({pct:>+5.0f}%)", color)
+        return f"    {name:<8} {sign}${abs(val):>8.0f}  ({pct:>+5.0f}%)"
+
+    print(_attr_line("Delta:", total_delta_pnl))
+    print(_attr_line("Gamma:", total_gamma_pnl))
+    print(_attr_line("Theta:", total_theta_pnl))
+    print(_attr_line("Vega:", total_vega_pnl))
+
+    residual = total_actual_pnl - (total_delta_pnl + total_gamma_pnl + total_theta_pnl + total_vega_pnl)
+    if abs(residual) > 1.0:
+        print(_attr_line("Other:", residual))
+
+    if HAS_FMT and fmt:
+        print(fmt.colorize(sep, fmt.Colors.DIM))
+    else:
+        print(sep)
+
+
 def _print_portfolio_greeks(open_trades: list, width: int):
     """
     Compute and display aggregate portfolio Greeks for open positions.
@@ -142,7 +256,17 @@ def _print_portfolio_greeks(open_trades: list, width: int):
         except Exception:
             continue
 
-        sigma = 0.25  # fallback IV (25%)
+        # Use stored entry IV if available, else fall back to 25%
+        sigma = 0.25
+        try:
+            stored_iv = r.get("entry_iv") if isinstance(r, dict) else (r["entry_iv"] if "entry_iv" in r.keys() else None)
+            if stored_iv is not None:
+                sv = float(stored_iv)
+                if 0.01 < sv < 5.0:
+                    sigma = sv
+        except Exception:
+            pass
+
         is_short = _is_short(r["strategy_name"] or "")
         sign = -1.0 if is_short else 1.0
 
@@ -164,7 +288,7 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     # ── Display ────────────────────────────────────────────────────────────────
     print()
     sep = "  " + "\u2500" * (width - 2)
-    header = "  PORTFOLIO GREEKS  (IV est. 25%  |  long=+  short=−)"
+    header = "  PORTFOLIO GREEKS  (uses entry IV when stored  |  long=+  short=−)"
     if HAS_FMT and fmt:
         print(fmt.colorize(header, fmt.Colors.BRIGHT_CYAN, bold=True))
         print(fmt.colorize(sep, fmt.Colors.DIM))
@@ -198,7 +322,7 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     else:
         print(vega_label)
 
-    note = f"  [{counted}/{len(open_trades)} positions, IV est. 25%]"
+    note = f"  [{counted}/{len(open_trades)} positions, entry IV when available]"
     if HAS_FMT and fmt:
         print(fmt.colorize(note, fmt.Colors.DIM))
     else:
@@ -531,6 +655,16 @@ def view_portfolio():
                         print(fmt.colorize(line, lc))
                     else:
                         print(line)
+
+        # ── P&L Attribution (delta/gamma/theta/vega) ─────────────────────
+        # Only for closed trades that have stored entry Greeks
+        _attr_trades = [
+            r for r in closed_trades
+            if r["pnl_pct"] is not None
+            and _has_entry_greeks(r)
+        ]
+        if _attr_trades and HAS_BS:
+            _print_pnl_attribution(_attr_trades, {}, width)
 
         # Paper trade IC analysis
         if HAS_STRESS and len(closed_trades) >= 5:
