@@ -53,7 +53,7 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-The technical screener works out of the box — no API keys needed (uses Yahoo Finance). The AI layer requires an OpenRouter or Anthropic API key (see [Setup](#setup)).
+The technical screener works out of the box — no API keys needed (uses Yahoo Finance). The AI layer requires an OpenRouter API key (see [Setup](#setup)).
 
 **Optional — Polygon.io enrichment:** Set `POLYGON_API_KEY` in your `.env` file to enable higher-quality ticker-filtered news, real-time VWAP, and unusual options flow detection. Free API keys are available at [polygon.io/dashboard/signup](https://polygon.io/dashboard/signup). The screener runs identically without this key.
 
@@ -76,6 +76,12 @@ python ai_rank.py AAPL --detail
 
 # Skip AI entirely — technical scores only, no API key needed
 python ai_rank.py AAPL --no-ai
+
+# Paper trade portfolio viewer
+python -m src.check_pnl
+
+# Walk-forward backtest
+python -m src.backtester AAPL SPY NVDA
 ```
 
 ---
@@ -95,6 +101,7 @@ Launch with `python -m src.options_screener` and enter one of these commands at 
 | `SPREADS` | Credit Spreads | Bull Put and Bear Call spread opportunities |
 | `IRON` | Iron Condors | Delta-neutral range-bound strategies |
 | `PORTFOLIO` | Portfolio | View P/L on all open paper trades |
+| `MY LIST` | Watchlist | Scan your personal watchlist (type `ADD AAPL` to build it) |
 
 ### CLI Reference
 
@@ -114,26 +121,38 @@ Options:
 The CLI renders a fully colour-coded, responsive interface that adapts to your terminal width (60–120 chars):
 
 **Startup**
+- Market regime dashboard: VIX level, VIX3M term structure, PCR, SPY momentum, IV premium
 - Double-box banner with current date/time
 - Colour-coded mode menu
-- Market context ticker: trend (Bull/Bear), VIX regime, macro risk flag, 10Y yield change
-
-**Scan progress**
-- Single-line tqdm progress bar — no noise from third-party libraries
-- Clean per-ticker summary after completion: `✓ AAPL  12 contract(s)`
 
 **Report — per pick**
 ```
   CALL   262.50  2026-03-20   $4.03   31.0%    1494    1095   +0.38   OTM  ★★★☆☆
     ↳ Mechanics: Vol: 1095 OI: 1494 | Spread: 3.7% | Delta: +0.38 | Greeks: Γ … | Cost: $402.50
-    ↳ Analysis:  IV: 31.0% (below median) | PoP: 55.2% | RR: 1.4x | EV: $18 | Sentiment: Bullish
-    ↳ Thesis:    High probability (>65%) • Trend aligned | Wide spread - use limits
+    ↳ Analysis:  IV: ██████████████░░░░░░ 72%ile | PoP: 55.2% | RR: 1.4x | EV: $18
+    ↳ Thesis:    High probability (>65%) • Trend aligned | CHEAP vs surface
     ↳ Entry:     <=3.95  |  Target: $5.93 (+50%)  |  Stop: $2.96 (-25%)
          Breakeven: $266.45  |  Max Loss: $395  |  Confidence: HIGH (87%)
-         Risks: High time decay - monitor closely
+         Exec:     LIMIT @ $3.95 (mid-point) | Vol 1095 vs OI 1,494
+         Score:    + PoP +0.14  + RR +0.10  + Vol +0.08
 ```
 
-**Executive Summary** — printed after all picks, showing top 3 opportunities with entry levels and portfolio warnings (concentration, correlation, earnings risk, negative EV).
+**Comparison table** — compact ranked summary after detailed output:
+```
+  QUICK COMPARISON  —  Top Picks
+    #  Tick  Strike        Exp  Score   PoP   R/R   IV%      EV  Sprd    SVI
+    1  AAPL  $215C       04/17   0.82   62%  2.1x   65%  $  +45  5.0%  CHEAP
+    2  MSFT  $400P       04/17   0.71   55%  1.8x   72%  $  +30  8.0%   RICH
+```
+
+**Stress test** — 7×3 scenario matrix with full Black-Scholes repricing:
+```
+  PORTFOLIO STRESS TEST  —  3 open position(s)  [full BS repricing]
+  IV Shock       -20%      -10%       -5%       +0%       +5%      +10%      +20%
+  IV flat       -1,245      -580      -267        +0      +215      +390      +640
+  IV +10%       -1,400      -735      -422      -155       +60      +235      +485
+  IV +20%       -1,555      -890      -577      -310       -95       +80      +330
+```
 
 ---
 
@@ -162,12 +181,12 @@ The AI layer uses [OpenRouter](https://openrouter.ai) by default, which gives yo
 
 These models are free with an OpenRouter account and no credit card required:
 
-| Model | ID for config_ai.py | Quality | Notes |
-|-------|---------------------|---------|-------|
-| **Llama 3.3 70B** (default) | `meta-llama/llama-3.3-70b-instruct:free` | Good | Best free option; rate-limited by upstream providers |
-| Gemma 3 12B (fallback) | `google/gemma-3-12b-it:free` | Decent | Used automatically after 2 Llama failures |
-| DeepSeek R1 (free) | `deepseek/deepseek-r1:free` | Very good | Slower; strong reasoning |
-| Mistral 7B | `mistralai/mistral-7b-instruct:free` | Basic | Fast but weaker at nuanced analysis |
+| Model | ID for config_ai.py | Role | Notes |
+|-------|---------------------|------|-------|
+| **Arcee Trinity** (primary) | `arcee-ai/trinity-large-preview:free` | Primary model | Good reasoning, free |
+| **StepFun 3.5 Flash** | `stepfun/step-3.5-flash:free` | 1st fallback | Fast reasoning model |
+| **Nemotron 120B** | `nvidia/nemotron-3-super-120b-a12b:free` | 2nd fallback | Large model, strong analysis |
+| Llama 3.3 70B | `meta-llama/llama-3.3-70b-instruct:free` | 3rd fallback | Solid general-purpose |
 
 > The free tier is rate-limited. If you hit 429 errors, the screener retries automatically with exponential backoff and switches to the fallback model. For production use, add a small OpenRouter credit balance to lift rate limits.
 
@@ -180,7 +199,6 @@ Adding credit to your OpenRouter account ($5–10 goes a long way) unlocks faste
 | **Claude Sonnet 4.6** | `anthropic/claude-sonnet-4-6` | ~$3/M tok | Best reasoning on options context |
 | GPT-4o | `openai/gpt-4o` | ~$5/M tok | Strong; good at structured JSON output |
 | Claude Haiku 4.5 | `anthropic/claude-haiku-4-5` | ~$0.80/M tok | Fast and cheap; good enough for screening |
-| Llama 3.3 70B (paid) | `meta-llama/llama-3.3-70b-instruct` | ~$0.59/M tok | Same model, no rate limits |
 | DeepSeek V3 | `deepseek/deepseek-chat` | ~$0.27/M tok | Excellent value; strong analyst-style output |
 
 #### Direct Anthropic API
@@ -209,7 +227,8 @@ To change model at any time, edit the `model` field in `src/config_ai.py`. The `
 
    # Optional: per-model keys for specialised models
    # OPENROUTER_ARCEE_KEY=sk-or-v1-...
-   # OPENROUTER_HUNTER_KEY=sk-or-v1-...
+   # OPENROUTER_STEPFUN_KEY=sk-or-v1-...
+   # OPENROUTER_NVIDIA_KEY=sk-or-v1-...
 
    # Optional: Polygon.io for higher-quality news, VWAP, unusual flow
    # POLYGON_API_KEY=your_polygon_key_here
@@ -306,8 +325,9 @@ Tickers
    ▼
 [Technical Screener]
    │  src/options_screener.py
-   │  - Fetches 1-year daily history (single fetch per ticker)
+   │  - Fetches options chains + 1-year daily history per ticker
    │  - Calculates Greeks, PoP, EV, IV rank, HV, momentum, warnings
+   │  - SVI IV surface fitting → mispricing detection
    │  - Scores each contract -> quality_score [0, 1]
    │
    ▼
@@ -323,7 +343,8 @@ Tickers
    │  - Narrative context built per contract (IV rank narrative, seller/buyer
    │    edge, PoP strength, RR quality, theta burn, score drivers, warnings)
    │  - Ticker summary from Pass 1 prepended to each contract prompt
-   │  - Batches candidates (default 5 per API call)
+   │  - Batches candidates (default 3 per API call)
+   │  - Model fallback chain: arcee → stepfun → nvidia → llama
    │  - Returns: ai_score (0-100), ai_confidence (0-10), reasoning, flags,
    │             catalyst_risk, iv_justified
    │  - Results cached in .ai_score_cache.db for the trading day
@@ -340,12 +361,11 @@ Tickers
    │  Divergence flagged when |ai_score/100 - quality_score| > 0.20
    │
    ▼
-[Ranked Table]
-   - Colour-coded rich table (180-char wide):
-     Rank | Symbol | Type | Strike | Expiry | DTE | Premium | IV%
-     PoP% | Tech | AI | Conf | Final | Cat | Div | Flags/Reasoning
-   - Divergence summary block below table for flagged picks
-   - --detail expands full reasoning per row
+[Rich Table]
+   - Summary panel: pick count, avg scores, divergence count, top pick
+   - Colour-coded table: scores, types, DTE, PoP, confidence, catalyst risk
+   - Alternating row stripes, top-3 highlighting
+   - Divergence detail panel for flagged picks
    - Falls back to plain text if rich is not installed
 ```
 
@@ -357,9 +377,9 @@ Tickers
 | **AI** | AI score (0–100). Qualitative — catalyst, IV justification, narrative context |
 | **Conf** | AI confidence in its own score (0–10). Higher = more AI weight applied |
 | **Final** | Weighted blend: `tw × Tech/100 + aw × AI/100`. This is the ranking signal |
-| **Cat** | Catalyst risk: LOW / MED / HIGH. Earnings or macro events near expiry |
+| **Cat** | Catalyst risk: LOW / MED / HI!. Earnings or macro events near expiry |
 | **Div** | Divergence: `AI>TECH` (AI bullish vs quant) or `TECH>AI` (quant bullish vs AI). Highlighted in cyan/magenta |
-| **Flags/Reasoning** | Short flags in normal mode; full 1–2 sentence AI rationale with `--detail` |
+| **Reasoning** | Short flags in normal mode; full 1–2 sentence AI rationale with `--detail` |
 
 **Divergence** is the most actionable signal — when the two models strongly disagree, it's worth reading the reasoning before trading.
 
@@ -369,31 +389,38 @@ Tickers
 
 ### Scoring
 
-Each contract is scored across 13+ weighted factors:
+Each contract is scored across 23 weighted factors including:
 
 | Factor | What it measures |
 |--------|-----------------|
 | Probability of Profit | Blended Black-Scholes + Monte Carlo PoP |
 | Expected Move Realism | How achievable the breakeven is vs. the 1σ expected move |
 | Risk/Reward | Payoff at 0.75× EM target vs. premium paid |
-| Momentum | RSI, 5-day return, ATR trend |
+| Momentum | RSI, 5-day return, ATR trend, confluence scoring |
 | IV Rank | IV percentile vs. 30-day range; buyers rewarded for low IV |
 | IV vs. HV Edge | HV-adjusted EV — positive = options cheap vs. realised vol |
+| IV Mispricing | SVI surface residual — contract rich or cheap vs fitted vol surface |
 | Liquidity | Volume + open interest, rank-normalised |
-| Catalyst | Earnings proximity bonus/penalty |
+| Catalyst | Crush-magnitude-adjusted earnings penalty |
 | Theta Efficiency | Time decay pressure relative to delta |
 | Skew Alignment | Put/call IV skew directional bias |
 | Gamma/Theta Ratio | Explosive payoff potential per unit of daily bleed |
-| Trader Profile | Liquidity-weighted for day traders; DTE-weighted for swing |
 | Expected Value | HV-adjusted BS value minus market price minus spread cost |
 
-Scores are further adjusted for trend alignment (+0.15), decay risk (−0.20), gamma squeeze setup (+0.25), OI wall (−0.10), macro risk (−0.10), and seasonal win rate.
+Scores are further adjusted for trend alignment, decay risk, gamma squeeze setup, OI wall proximity, macro risk, seasonal win rate, and VIX regime multipliers.
 
 **VIX regime adaptation** — scoring weights shift automatically based on the current VIX level (low / normal / high), emphasising different factors in different volatility environments. The AI weight also scales with VIX regime (×0.80 in low VIX, ×1.30 in high VIX).
 
+### Pricing
+
+- **European options** — full Black-Scholes with continuous dividend yield
+- **American options** — Barone-Adesi-Whaley (1987) approximation with dividend yield flow-through
+- **IV surface** — SVI (Stochastic Volatility Inspired) parameterisation per expiry; mispricing = market IV vs fitted surface
+- **Stress test** — full BS repricing across 7×3 stock-move × IV-shock scenarios (delta-gamma fallback for edge cases)
+
 ### Greeks
 
-All Greeks are computed analytically via Black-Scholes, vectorised with NumPy across the full chain in a single batch: delta, gamma, vega, theta, rho, charm, vanna.
+All Greeks are computed analytically via Black-Scholes with continuous dividend yield, vectorised with NumPy across the full chain in a single batch: delta, gamma, vega, theta, rho, charm, vanna.
 
 ### Monte Carlo
 
@@ -402,11 +429,13 @@ Probability of Profit is blended: **60% Monte Carlo** (Merton Jump Diffusion GBM
 ### Trade Plan Generation
 
 For each pick the screener generates:
-- **Thesis** — plain-English explanation of why the trade ranks highly
-- **Entry price** — bid-to-mid improvement based on spread width
+- **Thesis** — plain-English explanation of why the trade ranks highly, with CHEAP/RICH vs surface flags
+- **Entry price** — limit order guidance based on bid-ask spread width
 - **Profit target and stop loss** — from `exit_rules` in `config.json`
 - **Breakeven and max loss**
 - **Confidence score** — penalises wide spreads, low liquidity, short DTE; rewards unusual flow
+- **Execution guidance** — limit price, volume vs OI ratio
+- **Quality score breakdown** — per-component contribution to the composite score
 - **Risk list** — flags wide spreads, negative EV, earnings risk, low liquidity, OI walls, macro
 
 ---
@@ -416,9 +445,13 @@ For each pick the screener generates:
 Log any pick directly from the CLI and track it going forward:
 
 - Positions auto-update on every launch (fetches live quotes via yfinance)
+- Entry IV and Greeks stored per trade (schema v5)
 - Take Profit and Stop Loss thresholds enforced from `config.json`
+- P&L attribution for closed trades (delta/gamma/theta/vega breakdown)
+- Full BS repricing stress test on open portfolio
 - Win rate, total P/L, and average return tracked in a local SQLite database
 - Close expired positions with `python -m src.options_screener --close-trades`
+- View portfolio with `python -m src.check_pnl`
 
 ---
 
@@ -451,6 +484,11 @@ Log any pick directly from the CLI and track it going forward:
     "iv_rank": 0.06,
     "liquidity": 0.12,
     "ev": 0.14
+  },
+  "vix_regime_multipliers": {
+    "low":    { "pop": 1.0, "ev": 1.2, "rr": 1.1 },
+    "normal": { "pop": 1.0, "ev": 1.0, "rr": 1.0 },
+    "high":   { "pop": 1.2, "ev": 0.8, "rr": 1.3 }
   }
 }
 ```
@@ -460,10 +498,19 @@ Log any pick directly from the CLI and track it going forward:
 ```python
 AI_CONFIG = {
     # API provider: "openrouter" (default) or "anthropic"
-    "provider":        "openrouter",
-    "model":           "meta-llama/llama-3.3-70b-instruct:free",
-    "fallback_model":  "google/gemma-3-12b-it:free",   # used after 2 failed retries
-    "api_key_env":     "OPENROUTER_API_KEY",
+    "provider":              "openrouter",
+    "model":                 "arcee-ai/trinity-large-preview:free",
+    "fallback_model":        "stepfun/step-3.5-flash:free",
+    "second_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free",
+    "third_fallback_model":  "meta-llama/llama-3.3-70b-instruct:free",
+    "api_key_env":           "OPENROUTER_ARCEE_KEY",
+
+    # Per-model API key overrides
+    "model_key_map": {
+        "arcee-ai/trinity-large-preview:free":    "OPENROUTER_ARCEE_KEY",
+        "stepfun/step-3.5-flash:free":            "OPENROUTER_STEPFUN_KEY",
+        "nvidia/nemotron-3-super-120b-a12b:free": "OPENROUTER_NVIDIA_KEY",
+    },
 
     # Scoring weights
     "ai_weight":        0.30,
@@ -471,19 +518,19 @@ AI_CONFIG = {
 
     # Dynamic weight multipliers by VIX regime
     "regime_weight_multipliers": {
-        "low":    0.80,   # quant signals dominate in calm markets
+        "low":    0.80,
         "normal": 1.00,
-        "high":   1.30,   # AI catalyst awareness worth more in volatile markets
+        "high":   1.30,
     },
 
     # Feature flags
-    "cache_enabled":      True,   # same-day SQLite score cache
-    "confidence_enabled": True,   # AI returns ai_confidence 0-10
-    "two_pass_enabled":   True,   # ticker-level context before contract scoring
-    "news_enabled":       True,   # inject recent headlines into ticker context
+    "cache_enabled":      True,
+    "confidence_enabled": True,
+    "two_pass_enabled":   True,
+    "news_enabled":       True,
 
     # API call settings
-    "batch_size":   5,
+    "batch_size":   3,
     "max_tokens":   2048,
     "temperature":  0.1,
     "timeout":      60,
@@ -511,64 +558,81 @@ options/
 ├── options_screener.py       # Thin wrapper for backward compatibility
 ├── backtest_screener.py      # Backtester entry point
 ├── config.json               # Screener thresholds, weights, and exit rules
+├── watchlist.json            # Personal ticker list (auto-created by ADD command)
 ├── requirements.txt
-├── requirements-dev.txt      # Dev dependencies (pytest, pytest-cov)
 ├── .env                      # Your API keys (gitignored — never committed)
 ├── .env.example              # Template showing required env vars
 ├── README.md
 └── src/
-    ├── options_screener.py   # Core scan engine, report printing, spread finders
-    ├── data_fetching.py      # yfinance single-fetch, technical indicators, in-session chain cache
+    ├── options_screener.py   # Core scan engine, report printing, spread/condor finders
+    ├── cli_display.py        # Terminal display: per-pick detail, comparison table, report
+    ├── data_fetching.py      # yfinance single-fetch, technical indicators, chain cache
     ├── filters.py            # Chain filtering, IV smile outlier removal, premium bucketing
     ├── scoring.py            # Composite quality score re-exports
-    ├── risk_engine.py        # OI wall detection, gamma ramp flags, structural risk checks
-    ├── utils.py              # Vectorised Black-Scholes Greeks (NumPy/SciPy)
+    ├── trade_analysis.py     # Thesis, entry/exit levels, confidence, execution guidance
+    ├── risk_engine.py        # OI wall detection, gamma ramp flags, structural risk
+    ├── utils.py              # Vectorised BS Greeks + BAW American pricing (NumPy/SciPy)
+    ├── iv_surface.py         # SVI IV surface fitting, mispricing detection
     ├── simulation.py         # Monte Carlo PoP / PoT (Merton Jump Diffusion GBM)
     ├── formatting.py         # ANSI colours, box drawing, metric formatters
-    ├── trade_analysis.py     # Thesis generation, entry/exit levels, confidence
-    ├── paper_manager.py      # SQLite paper trade logging, schema migration, BS fallback pricing
-    ├── news_fetcher.py       # Concurrent multi-source news (yfinance, Finviz, Alpha Vantage, Polygon)
+    ├── stress_test.py        # Full BS repricing scenario P/L matrix
+    ├── paper_manager.py      # SQLite paper trade logging, schema migration (v5)
+    ├── check_pnl.py          # Standalone portfolio P/L viewer with Greeks
+    ├── news_fetcher.py       # Concurrent multi-source news (yfinance, Finviz, Polygon)
     ├── macro_analyzer.py     # Macro risk gating (10Y yield, VIX, DXY, credit spreads)
     ├── portfolio_risk.py     # Portfolio VaR, correlation analysis, position sizing
-    ├── polygon_client.py     # Polygon.io integration (news, VWAP, unusual options flow)
-    ├── dashboard.py          # Streamlit web interface
-    ├── vol_analytics.py      # Volatility cone, concurrent IV surface, regime classification
+    ├── sector_analyzer.py    # Sector-level analysis and rotation signals
+    ├── polygon_client.py     # Polygon.io integration (news, VWAP, unusual flow)
+    ├── vol_analytics.py      # Vol cone, concurrent IV surface, regime classification
+    ├── regime_dashboard.py   # VIX/PCR/SPY market regime dashboard at startup
     ├── backtester.py         # Walk-forward backtester with spread cost simulation
-    ├── stress_test.py        # Scenario P/L analysis
-    ├── regime_dashboard.py   # Market regime visualisation
+    ├── backtest_optimizer.py # Weight optimizer for composite_weights via IC analysis
     ├── calc_expected_move.py # Implied expected move calculator
-    ├── check_pnl.py          # Standalone P/L analysis helper
-    ├── visualize_results.py  # Matplotlib charts for scan results
+    ├── oi_snapshot.py        # OI change tracking between runs
+    ├── watchlist.py          # Watchlist management (ADD/REMOVE commands)
+    ├── visualize_results.py  # Matplotlib/Plotly charts for scan results
+    ├── dashboard.py          # Streamlit web interface
     ├── ai_scorer.py          # Two-pass AI scoring with retry, fallback, narrative context
     ├── ai_cache.py           # Same-day SQLite cache for AI scores
-    ├── ranking.py            # combine_scores(), print_ranked_table(), divergence flags
-    └── config_ai.py          # AI layer configuration (model, weights, thresholds, validation)
+    ├── ranking.py            # combine_scores(), Rich ranked table, divergence detection
+    ├── prompts.py            # AI system/scoring prompt templates
+    ├── config_ai.py          # AI layer configuration (models, weights, thresholds)
+    ├── config_validator.py   # Config.json validation at module load
+    └── types.py              # Shared type definitions and data classes
 ```
 
 ---
 
 ## Roadmap
 
-- [x] Vectorised Black-Scholes Greeks engine
+- [x] Vectorised Black-Scholes Greeks engine with dividend yield
+- [x] Barone-Adesi-Whaley American option pricing
+- [x] SVI IV surface fitting with mispricing detection
 - [x] Monte Carlo PoP blending (Merton Jump Diffusion)
 - [x] HV-adjusted expected value
-- [x] Paper trading with automated exit tracking, schema migration, BS fallback pricing
+- [x] Paper trading with entry IV/Greeks storage, P&L attribution, schema v5
+- [x] Full BS repricing stress test (7×3 scenario matrix)
 - [x] Streamlit dashboard
-- [x] Full colour CLI — responsive width, trade plan per pick, executive summary
+- [x] Full colour CLI — responsive width, trade plan per pick, comparison table
+- [x] Execution guidance (limit price, volume/OI analysis)
+- [x] Quality score breakdown per component
 - [x] Credit spread and iron condor screeners
 - [x] Volatility analytics — cone, concurrent IV surface, regime dashboard
 - [x] Walk-forward backtester with realistic slippage, commissions, and spread cost simulation
 - [x] AI scoring and ranking layer (two-pass, dynamic weights, divergence detection)
+- [x] Rich coloured AI ranking table with summary panel and divergence detail
 - [x] Same-day AI score cache (SQLite)
 - [x] Narrative context enrichment (IV/HV edge, PoP, RR, theta burn, warnings)
 - [x] Portfolio coherence check (`--portfolio-check`)
 - [x] Polygon.io integration — ticker-filtered news, real-time VWAP, unusual options flow
-- [x] Multi-source concurrent news fetcher (yfinance RSS, Finviz, Alpha Vantage, Polygon)
+- [x] Multi-source concurrent news fetcher (yfinance RSS, Finviz, Polygon)
 - [x] Macro risk gating (10Y yield, VIX regime, DXY, credit spreads)
 - [x] Portfolio VaR and correlation analysis
 - [x] OI wall and gamma ramp structural risk checks
 - [x] In-session options chain cache (eliminates redundant yfinance fetches)
-- [x] Config validation at module load (catches bad config.json / config_ai.py values early)
+- [x] VIX regime weight multipliers for scoring and AI weight
+- [x] Historical IV crush estimation per ticker
+- [x] Config validation at module load
 - [ ] Real-time alerts (email / SMS)
 - [ ] Multi-leg spread support in paper manager
 - [ ] Backtesting UI improvements
