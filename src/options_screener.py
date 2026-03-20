@@ -81,6 +81,7 @@ from .utils import (
     bs_rho,
     bs_charm,
     bs_vanna,
+    early_exercise_premium,
     _d1d2,
     format_pct,
     format_money,
@@ -534,6 +535,34 @@ def calculate_metrics(
     df["rho"] = bs_rho(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     df["charm"] = bs_charm(types_vals, S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
     df["vanna"] = bs_vanna(S_vals, K_vals, T_vals, risk_free_rate, IV_vals)
+
+    # --- Early Exercise Premium (American vs European put) ---
+    # For puts where early exercise is materially valuable, flag the contract.
+    # Threshold: early exercise premium > 3% of market premium → flag "EARLY_EX".
+    # This warns that BS Greeks understate true option value for these rows.
+    try:
+        _ee_flag = []
+        for i in df.index:
+            try:
+                _otype = str(df.at[i, "type"]).lower()
+                if _otype != "put":
+                    _ee_flag.append("")
+                    continue
+                _S = float(df.at[i, "underlying"]) if pd.notna(df.at[i, "underlying"]) else None
+                _K = float(df.at[i, "strike"])
+                _T = float(df.at[i, "T_years"])
+                _IV = float(df.at[i, "impliedVolatility"]) if pd.notna(df.at[i, "impliedVolatility"]) else None
+                _prem = float(df.at[i, "premium"]) if pd.notna(df.at[i, "premium"]) else None
+                if _S and _IV and _prem and _T > 0 and _IV > 0:
+                    _ee = early_exercise_premium("put", _S, _K, _T, risk_free_rate, _IV)
+                    _ee_flag.append("EARLY_EX" if _ee > _prem * 0.03 else "")
+                else:
+                    _ee_flag.append("")
+            except Exception:
+                _ee_flag.append("")
+        df["early_exercise_flag"] = _ee_flag
+    except Exception:
+        df["early_exercise_flag"] = ""
 
     # --- PCR per Expiration ---
     is_call = np.char.lower(types_vals.astype(str)) == "call"

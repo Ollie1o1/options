@@ -211,6 +211,209 @@ def bs_vanna(S, K, T, r, sigma):
     return vanna
 
 
+# --- American Option Pricing (Barone-Adesi-Whaley 1987) ---
+
+def baw_american_put(
+    S: float, K: float, T: float, r: float, sigma: float,
+    q: float = 0.0, max_iter: int = 50, tol: float = 1e-6,
+) -> float:
+    """Barone-Adesi-Whaley American put price (scalar).
+
+    Adds the early exercise premium on top of the European BS put price.
+    For OTM puts (screener focus, delta 0.15-0.45), the premium is small but
+    material for ITM puts and near-expiry positions.
+
+    Parameters
+    ----------
+    S, K, T, r, sigma : float  — spot, strike, time-to-expiry (years), rate, IV
+    q : float                  — continuous dividend yield (default 0 = no dividend)
+    """
+    import math
+    S, K, T, r, sigma, q = float(S), float(K), float(T), float(r), float(sigma), float(q)
+
+    intrinsic = max(K - S, 0.0)
+    if T <= 1e-6 or sigma <= 1e-9:
+        return intrinsic
+
+    p_euro = float(bs_put(S, K, T, r, sigma))
+
+    rT = r * T
+    exp_rT = math.exp(-rT)
+    if abs(1.0 - exp_rT) < 1e-9:
+        return p_euro
+
+    M = 2.0 * r / (sigma ** 2 * (1.0 - exp_rT))
+    N = 2.0 * (r - q) / sigma ** 2
+
+    disc = (N - 1.0) ** 2 + 4.0 * M
+    if disc < 0:
+        return p_euro
+
+    q2 = 0.5 * (-(N - 1.0) - math.sqrt(disc))
+    if q2 >= 0:
+        return p_euro   # no finite critical price for this parameter set
+
+    exp_qT = math.exp(-q * T)
+
+    # Find S* via bisection in (epsilon, K).
+    # f(x) = (K - x) - [p(x) + (1 - exp(-qT)*N(-d1(x))) * x / q2]
+    # Early exercise is always optimal when no root exists in (0, K) — i.e. f(K) > 0.
+
+    def _f(x: float) -> float:
+        d1v, _ = _d1d2(x, K, T, r, sigma)
+        if d1v is None:
+            return 0.0
+        Nd1x = float(norm.cdf(-float(d1v)))
+        ps = float(bs_put(x, K, T, r, sigma))
+        return (K - x) - (ps + (1.0 - exp_qT * Nd1x) * x / q2)
+
+    # Check boundary at K: if f(K) >= 0, early exercise is optimal for all S < K
+    try:
+        f_at_K = _f(K * (1.0 - 1e-6))
+    except Exception:
+        f_at_K = 1.0  # conservative: assume early exercise always optimal
+
+    if f_at_K >= 0:
+        # No valid S_star < K — for any S < K, exercise early
+        if S < K:
+            return max(intrinsic, p_euro)
+        return p_euro
+
+    # Bisection search for root in [K*epsilon, K)
+    lo, hi = K * 1e-4, K * (1.0 - 1e-6)
+    if _f(lo) <= 0:
+        return p_euro  # f negative throughout: no early exercise
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        fm = _f(mid)
+        if abs(fm) < tol or (hi - lo) < tol:
+            lo = mid
+            break
+        if fm > 0:
+            lo = mid
+        else:
+            hi = mid
+
+    S_star = lo
+
+    if S <= S_star:
+        return max(intrinsic, p_euro)
+
+    d1_star_val, _ = _d1d2(S_star, K, T, r, sigma)
+    if d1_star_val is None:
+        return p_euro
+    Nd1_star = float(norm.cdf(-float(d1_star_val)))
+
+    A2 = -(S_star / q2) * (1.0 - exp_qT * Nd1_star)
+    american_price = p_euro + A2 * (S / S_star) ** q2
+    return max(american_price, intrinsic)
+
+
+def baw_american_call(
+    S: float, K: float, T: float, r: float, sigma: float,
+    q: float = 0.0, max_iter: int = 50, tol: float = 1e-6,
+) -> float:
+    """Barone-Adesi-Whaley American call price (scalar).
+
+    For non-dividend-paying stocks (q=0), American call = European call.
+    Early exercise becomes relevant only when q > 0.
+    """
+    import math
+    S, K, T, r, sigma, q = float(S), float(K), float(T), float(r), float(sigma), float(q)
+
+    c_euro = float(bs_call(S, K, T, r, sigma))
+    intrinsic = max(S - K, 0.0)
+
+    if q <= 0:
+        return c_euro   # no early exercise for non-dividend-paying calls
+    if T <= 1e-6 or sigma <= 1e-9:
+        return intrinsic
+
+    rT = r * T
+    exp_rT = math.exp(-rT)
+    if abs(1.0 - exp_rT) < 1e-9:
+        return c_euro
+
+    M = 2.0 * r / (sigma ** 2 * (1.0 - exp_rT))
+    N = 2.0 * (r - q) / sigma ** 2
+
+    disc = (N - 1.0) ** 2 + 4.0 * M
+    if disc < 0:
+        return c_euro
+
+    q1 = 0.5 * (-(N - 1.0) + math.sqrt(disc))
+    if q1 <= 0:
+        return c_euro
+
+    exp_qT = math.exp(-q * T)
+    S_star = K / max(1.0 - 1.0 / q1, 1e-6)
+
+    for _ in range(max_iter):
+        d1_s_val, _ = _d1d2(S_star, K, T, r, sigma)
+        if d1_s_val is None:
+            return c_euro
+        d1_s = float(d1_s_val)
+
+        Nd1 = float(norm.cdf(d1_s))
+        c_s = float(bs_call(S_star, K, T, r, sigma))
+
+        rhs = c_s + (1.0 - exp_qT * Nd1) * S_star / q1
+        f = (S_star - K) - rhs
+
+        call_delta = exp_qT * Nd1
+        gamma_s = float(norm.pdf(d1_s)) / max(S_star * sigma * math.sqrt(T), 1e-12)
+        d_rhs = call_delta + (1.0 - exp_qT * Nd1) / q1 + exp_qT * S_star * gamma_s / q1
+        df = 1.0 - d_rhs
+        if abs(df) < 1e-12:
+            break
+
+        S_star_new = max(S_star - f / df, 1e-3)
+        if abs(S_star_new - S_star) < tol:
+            S_star = S_star_new
+            break
+        S_star = S_star_new
+
+    if S >= S_star:
+        return max(intrinsic, c_euro)
+
+    d1_star_val, _ = _d1d2(S_star, K, T, r, sigma)
+    if d1_star_val is None:
+        return c_euro
+    Nd1_star = float(norm.cdf(float(d1_star_val)))
+
+    A1 = (S_star / q1) * (1.0 - exp_qT * Nd1_star)
+    american_price = c_euro + A1 * (S / S_star) ** q1
+    return max(american_price, intrinsic)
+
+
+def american_price(
+    option_type: str, S: float, K: float, T: float, r: float, sigma: float,
+    q: float = 0.0,
+) -> float:
+    """Dispatch to BAW American pricer (put or call)."""
+    if option_type.lower() == "call":
+        return baw_american_call(S, K, T, r, sigma, q)
+    return baw_american_put(S, K, T, r, sigma, q)
+
+
+def early_exercise_premium(
+    option_type: str, S: float, K: float, T: float, r: float, sigma: float,
+    q: float = 0.0,
+) -> float:
+    """Return the early exercise premium: American price - European price.
+
+    Useful for flagging options where European pricing materially understates value.
+    """
+    if option_type.lower() == "call":
+        a = baw_american_call(S, K, T, r, sigma, q)
+        e = float(bs_call(S, K, T, r, sigma))
+    else:
+        a = baw_american_put(S, K, T, r, sigma, q)
+        e = float(bs_put(S, K, T, r, sigma))
+    return max(0.0, a - e)
+
+
 # --- Formatting Helpers ---
 
 def format_pct(x: Any) -> str:
@@ -262,6 +465,10 @@ __all__ = [
     "bs_charm",
     "bs_vanna",
     "_d1d2",
+    "baw_american_put",
+    "baw_american_call",
+    "american_price",
+    "early_exercise_premium",
     "format_pct",
     "format_money",
     "determine_moneyness",

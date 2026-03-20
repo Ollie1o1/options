@@ -52,18 +52,97 @@ _SEASONALITY_CACHE: Dict[str, float] = {}
 _CHAIN_CACHE: dict = {}
 
 # Module-level sector map — shared by sector_analyzer, ranking, and options_screener
+# ~180 major optionable names mapped to their SPDR sector ETF
 SECTOR_MAP: Dict[str, str] = {
+    # ── XLK — Technology ─────────────────────────────────────────────────────
     "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMD": "XLK", "INTC": "XLK",
-    "JPM": "XLF", "BAC": "XLF", "WFC": "XLF", "GS": "XLF",
-    "XOM": "XLE", "CVX": "XLE",
-    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY", "MCD": "XLY",
-    "WMT": "XLP", "PG": "XLP", "KO": "XLP",
-    "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV",
-    "BA": "XLI", "CAT": "XLI",
-    "GOOGL": "XLC", "META": "XLC", "NFLX": "XLC",
-    "AMT": "XLRE",
-    "NEE": "XLU",
-    "LIN": "XLB",
+    "QCOM": "XLK", "AMAT": "XLK", "MU": "XLK", "AVGO": "XLK", "TXN": "XLK",
+    "LRCX": "XLK", "KLAC": "XLK", "MRVL": "XLK", "ON": "XLK", "CSCO": "XLK",
+    "NOW": "XLK", "CRM": "XLK", "ADBE": "XLK", "ORCL": "XLK", "IBM": "XLK",
+    "ACN": "XLK", "INTU": "XLK", "PANW": "XLK", "CRWD": "XLK", "SNOW": "XLK",
+    "DDOG": "XLK", "PLTR": "XLK", "ZS": "XLK", "FTNT": "XLK", "HPQ": "XLK",
+    "HPE": "XLK", "DELL": "XLK", "STX": "XLK", "WDC": "XLK", "CTSH": "XLK",
+    "XLK": "XLK",  # ETF itself maps to itself
+    "QQQ": "XLK",  # Nasdaq-100 is ~50% tech
+
+    # ── XLF — Financials ─────────────────────────────────────────────────────
+    "JPM": "XLF", "BAC": "XLF", "WFC": "XLF", "GS": "XLF", "MS": "XLF",
+    "C": "XLF", "BLK": "XLF", "SCHW": "XLF", "AXP": "XLF", "COF": "XLF",
+    "USB": "XLF", "PNC": "XLF", "TFC": "XLF", "ICE": "XLF", "CME": "XLF",
+    "SPGI": "XLF", "MCO": "XLF", "V": "XLF", "MA": "XLF", "PYPL": "XLF",
+    "FIS": "XLF", "FISV": "XLF", "SQ": "XLF", "ALLY": "XLF", "DFS": "XLF",
+    "MTB": "XLF", "RF": "XLF", "HBAN": "XLF", "KEY": "XLF", "CFG": "XLF",
+    "XLF": "XLF",
+
+    # ── XLE — Energy ──────────────────────────────────────────────────────────
+    "XOM": "XLE", "CVX": "XLE", "COP": "XLE", "EOG": "XLE", "SLB": "XLE",
+    "OXY": "XLE", "PSX": "XLE", "VLO": "XLE", "MPC": "XLE", "HES": "XLE",
+    "DVN": "XLE", "FANG": "XLE", "APA": "XLE", "BKR": "XLE", "HAL": "XLE",
+    "MRO": "XLE", "PXD": "XLE",
+    "XLE": "XLE",
+
+    # ── XLY — Consumer Discretionary ─────────────────────────────────────────
+    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY", "MCD": "XLY", "NKE": "XLY",
+    "SBUX": "XLY", "TGT": "XLY", "LOW": "XLY", "GM": "XLY", "F": "XLY",
+    "BKNG": "XLY", "ABNB": "XLY", "UBER": "XLY", "DRI": "XLY", "YUM": "XLY",
+    "RCL": "XLY", "CCL": "XLY", "MGM": "XLY", "WYNN": "XLY", "LVS": "XLY",
+    "DKNG": "XLY", "ETSY": "XLY", "ROST": "XLY", "TJX": "XLY", "BBY": "XLY",
+    "EXPE": "XLY", "LYFT": "XLY", "DASH": "XLY",
+    "XLY": "XLY",
+
+    # ── XLP — Consumer Staples ────────────────────────────────────────────────
+    "WMT": "XLP", "PG": "XLP", "KO": "XLP", "PEP": "XLP", "COST": "XLP",
+    "PM": "XLP", "MO": "XLP", "CL": "XLP", "KHC": "XLP", "MDLZ": "XLP",
+    "GIS": "XLP", "K": "XLP", "SYY": "XLP", "STZ": "XLP", "TSN": "XLP",
+    "CAG": "XLP", "CPB": "XLP", "HRL": "XLP",
+    "XLP": "XLP",
+
+    # ── XLV — Health Care ────────────────────────────────────────────────────
+    "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV", "MRK": "XLV", "ABBV": "XLV",
+    "LLY": "XLV", "TMO": "XLV", "ABT": "XLV", "BMY": "XLV", "AMGN": "XLV",
+    "GILD": "XLV", "CVS": "XLV", "CI": "XLV", "HUM": "XLV", "ELV": "XLV",
+    "ISRG": "XLV", "DXCM": "XLV", "IDXX": "XLV", "REGN": "XLV", "VRTX": "XLV",
+    "SYK": "XLV", "BSX": "XLV", "MDT": "XLV", "EW": "XLV", "MRNA": "XLV",
+    "BIIB": "XLV", "ILMN": "XLV", "ZBH": "XLV", "BAX": "XLV", "BDX": "XLV",
+    "XLV": "XLV",
+
+    # ── XLI — Industrials ────────────────────────────────────────────────────
+    "BA": "XLI", "CAT": "XLI", "GE": "XLI", "HON": "XLI", "MMM": "XLI",
+    "RTX": "XLI", "UPS": "XLI", "FDX": "XLI", "DE": "XLI", "ETN": "XLI",
+    "LMT": "XLI", "NOC": "XLI", "GD": "XLI", "URI": "XLI", "EMR": "XLI",
+    "PH": "XLI", "IR": "XLI", "CTAS": "XLI", "VRSK": "XLI", "FAST": "XLI",
+    "WM": "XLI", "RSG": "XLI", "CSX": "XLI", "NSC": "XLI", "UNP": "XLI",
+    "DAL": "XLI", "UAL": "XLI", "AAL": "XLI", "LUV": "XLI", "UBER": "XLI",
+    "XLI": "XLI",
+
+    # ── XLB — Materials ──────────────────────────────────────────────────────
+    "LIN": "XLB", "APD": "XLB", "SHW": "XLB", "ECL": "XLB", "FCX": "XLB",
+    "NEM": "XLB", "NUE": "XLB", "CF": "XLB", "MOS": "XLB", "DOW": "XLB",
+    "DD": "XLB", "PPG": "XLB", "ALB": "XLB", "CTVA": "XLB", "CE": "XLB",
+    "IFF": "XLB", "PKG": "XLB", "IP": "XLB",
+    "GDX": "XLB",  # gold miners ETF ≈ materials
+    "XLB": "XLB",
+
+    # ── XLU — Utilities ──────────────────────────────────────────────────────
+    "NEE": "XLU", "DUK": "XLU", "SO": "XLU", "D": "XLU", "EXC": "XLU",
+    "AEP": "XLU", "XEL": "XLU", "ES": "XLU", "ETR": "XLU", "PPL": "XLU",
+    "FE": "XLU", "PCG": "XLU", "AWK": "XLU", "CMS": "XLU", "DTE": "XLU",
+    "WEC": "XLU", "NI": "XLU",
+    "XLU": "XLU",
+
+    # ── XLRE — Real Estate ───────────────────────────────────────────────────
+    "AMT": "XLRE", "PLD": "XLRE", "CCI": "XLRE", "EQIX": "XLRE", "SPG": "XLRE",
+    "PSA": "XLRE", "WELL": "XLRE", "O": "XLRE", "ARE": "XLRE", "AVB": "XLRE",
+    "EQR": "XLRE", "MAA": "XLRE", "UDR": "XLRE", "DLR": "XLRE", "VTR": "XLRE",
+    "NLY": "XLRE", "AGNC": "XLRE", "IRM": "XLRE",
+    "XLRE": "XLRE",
+
+    # ── XLC — Communication Services ─────────────────────────────────────────
+    "GOOGL": "XLC", "GOOG": "XLC", "META": "XLC", "NFLX": "XLC", "DIS": "XLC",
+    "CMCSA": "XLC", "VZ": "XLC", "T": "XLC", "TMUS": "XLC", "CHTR": "XLC",
+    "EA": "XLC", "TTWO": "XLC", "SNAP": "XLC", "PINS": "XLC", "RBLX": "XLC",
+    "MTCH": "XLC", "ZM": "XLC", "PARA": "XLC", "WBD": "XLC", "FOXA": "XLC",
+    "XLC": "XLC",
 }
 
 

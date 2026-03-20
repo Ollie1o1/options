@@ -20,7 +20,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -32,6 +32,11 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN momentum_score REAL",
         "ALTER TABLE trades ADD COLUMN iv_rank_score REAL",
         "ALTER TABLE trades ADD COLUMN theta_score REAL",
+    ],
+    4: [
+        # Track AI score at entry to measure AI IC vs technical IC separately
+        "ALTER TABLE trades ADD COLUMN ai_score REAL",
+        "ALTER TABLE trades ADD COLUMN ai_confidence REAL",
     ],
 }
 
@@ -120,17 +125,19 @@ class PaperManager:
         """
         Logs a new paper trade to the SQLite database.
         Required keys: ticker, expiration, strike, type, entry_price, quality_score, strategy_name
+        Optional keys: ai_score, ai_confidence (stored for IC analysis)
         """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         query = """
         INSERT INTO trades (
-            date, ticker, expiration, strike, type, 
-            entry_price, quality_score, strategy_name, 
-            status, exit_price, exit_date, pnl_pct
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            date, ticker, expiration, strike, type,
+            entry_price, quality_score, strategy_name,
+            status, exit_price, exit_date, pnl_pct,
+            ai_score, ai_confidence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        
+
         params = (
             trade_dict.get("date", now),
             trade_dict["ticker"].upper(),
@@ -141,14 +148,16 @@ class PaperManager:
             float(trade_dict["quality_score"]),
             trade_dict["strategy_name"],
             "OPEN",
-            None, # exit_price
-            "",   # exit_date
-            None  # pnl_pct
+            None,   # exit_price
+            "",     # exit_date
+            None,   # pnl_pct
+            trade_dict.get("ai_score"),        # None if not ranked yet
+            trade_dict.get("ai_confidence"),   # None if not ranked yet
         )
-        
+
         with self._get_connection() as conn:
             conn.execute(query, params)
-            
+
         print(f"Logged {trade_dict['type'].upper()} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
 
     def log_spread(self, spread_dict: dict) -> None:
@@ -351,11 +360,11 @@ class PaperManager:
 
                 if current_price is None or np.isnan(current_price) or current_price <= 0:
                     try:
-                        from .utils import bs_price
+                        from .utils import american_price
                         S = spot_cache.get(ticker)
                         if S:
                             T = max((datetime.strptime(expiration[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1/365)
-                            current_price = float(bs_price(option_type, float(S), float(strike), T, 0.045, 0.30))
+                            current_price = american_price(option_type, float(S), float(strike), T, 0.045, 0.30)
                     except Exception:
                         pass
 
@@ -518,32 +527,123 @@ class PaperManager:
             return pd.read_sql_query("SELECT * FROM trades", conn)
 
     def get_performance_summary(self) -> pd.DataFrame:
-        """Returns a summary of trading performance using SQL aggregations."""
-        queries = {
-            "total_count": "SELECT COUNT(*) FROM trades",
-            "closed_count": "SELECT COUNT(*) FROM trades WHERE status='CLOSED'",
-            "win_count": "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_pct > 0",
-            "avg_pnl": "SELECT AVG(pnl_pct) FROM trades WHERE status='CLOSED'",
-            "sum_pnl": "SELECT SUM(pnl_pct) FROM trades WHERE status='CLOSED'"
-        }
-        
-        results = {}
+        """Returns a summary of trading performance with Sharpe, Sortino, and win rate."""
         with self._get_connection() as conn:
-            for key, q in queries.items():
-                res = conn.execute(q).fetchone()[0]
-                results[key] = res if res is not None else 0
+            total_count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] or 0
+            closed_count = conn.execute("SELECT COUNT(*) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0
+            win_count = conn.execute("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_pct > 0").fetchone()[0] or 0
+            avg_pnl = conn.execute("SELECT AVG(pnl_pct) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0.0
+            sum_pnl = conn.execute("SELECT SUM(pnl_pct) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0.0
 
-        total_closed = results["closed_count"]
-        win_rate = (results["win_count"] / total_closed) if total_closed > 0 else 0
-        
+        win_rate = win_count / closed_count if closed_count > 0 else 0.0
+
+        # Sharpe and Sortino from closed-trade returns (per-trade, not annualized)
+        sharpe_str = "n/a"
+        sortino_str = "n/a"
+        if closed_count >= 5:
+            try:
+                with self._get_connection() as conn:
+                    rows = conn.execute(
+                        "SELECT pnl_pct FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL"
+                    ).fetchall()
+                returns = np.array([r[0] for r in rows], dtype=float)
+                mean_r = np.mean(returns)
+                std_r = np.std(returns, ddof=1)
+                if std_r > 0:
+                    sharpe_str = f"{mean_r / std_r:.3f}"
+                downside = returns[returns < 0]
+                if len(downside) > 1:
+                    sortino_std = np.std(downside, ddof=1)
+                    if sortino_std > 0:
+                        sortino_str = f"{mean_r / sortino_std:.3f}"
+            except Exception:
+                pass
+
         summary = {
-            "Total Trades": [results["total_count"]],
-            "Closed Trades": [total_closed],
+            "Total Trades": [total_count],
+            "Closed Trades": [closed_count],
             "Win Rate": [f"{win_rate:.1%}"],
-            "Total PnL %": [f"{results['sum_pnl']:.1%}"],
-            "Avg Return": [f"{results['avg_pnl']:.1%}"]
+            "Total PnL %": [f"{sum_pnl:.1%}"],
+            "Avg Return": [f"{avg_pnl:.1%}"],
+            "Per-Trade Sharpe": [sharpe_str],
+            "Per-Trade Sortino": [sortino_str],
         }
         return pd.DataFrame(summary)
+
+    def compute_ic(self) -> dict:
+        """Compute Information Coefficient between quality_score and realized pnl_pct.
+
+        IC (Pearson correlation between predicted score and actual P&L) is the key
+        metric for validating whether the model has real edge.
+
+        Interpretation:
+          IC > 0.10, p < 0.05  →  solid edge, model is predictive
+          IC > 0.05, p < 0.20  →  some edge, keep trading to confirm
+          IC > 0, not sig      →  weak positive, need more trades
+          IC ≤ 0               →  no edge detected
+
+        Requires at least 10 closed trades for a meaningful result.
+        """
+        df = self.get_all_trades()
+        closed = df[
+            (df["status"] == "CLOSED")
+            & df["pnl_pct"].notna()
+            & df["quality_score"].notna()
+        ].copy()
+
+        result: dict = {"n": len(closed)}
+
+        if len(closed) < 10:
+            result["message"] = (
+                f"Need at least 10 closed trades for IC (have {len(closed)}). "
+                "Keep paper trading and check back."
+            )
+            return result
+
+        try:
+            from scipy.stats import pearsonr, spearmanr
+        except ImportError:
+            result["message"] = "scipy not installed — pip install scipy"
+            return result
+
+        q_scores = closed["quality_score"].values.astype(float)
+        pnl = closed["pnl_pct"].values.astype(float)
+
+        ic_p, pval_p = pearsonr(q_scores, pnl)
+        ic_s, pval_s = spearmanr(q_scores, pnl)
+
+        if ic_p > 0.10 and pval_p < 0.05:
+            interp = "SOLID EDGE — model is predictive of returns"
+        elif ic_p > 0.05 and pval_p < 0.20:
+            interp = "SOME EDGE — statistically weak, keep trading to confirm"
+        elif ic_p > 0:
+            interp = "WEAK POSITIVE — not yet statistically significant"
+        else:
+            interp = "NO EDGE DETECTED — model is not predictive of returns"
+
+        result.update({
+            "ic_technical_pearson": round(float(ic_p), 4),
+            "p_technical": round(float(pval_p), 4),
+            "ic_technical_spearman": round(float(ic_s), 4),
+            "interpretation": interp,
+        })
+
+        # AI IC if ai_score was recorded at entry
+        if "ai_score" in closed.columns:
+            ai_valid = closed[closed["ai_score"].notna()].copy()
+            if len(ai_valid) >= 10:
+                ai_q = ai_valid["ai_score"].values.astype(float) / 100.0
+                ai_pnl = ai_valid["pnl_pct"].values.astype(float)
+                ai_ic, ai_pval = pearsonr(ai_q, ai_pnl)
+                result["ic_ai_pearson"] = round(float(ai_ic), 4)
+                result["p_ai"] = round(float(ai_pval), 4)
+                result["ai_adds_value"] = bool(ai_ic > ic_p)
+                result["ai_ic_note"] = (
+                    "AI score outperforms technical" if ai_ic > ic_p
+                    else "Technical score outperforms AI"
+                )
+
+        return result
 
 if __name__ == "__main__":
     # Test script with temporary database
