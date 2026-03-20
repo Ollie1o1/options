@@ -167,15 +167,23 @@ def combine_scores(
 
 # ── Rich table output ──────────────────────────────────────────────────────────
 
-_RISK_STYLE    = {"low": "green", "medium": "yellow", "high": "red"}
-_DIV_STYLE     = {"AI>TECH": "cyan", "TECH>AI": "magenta", "---": "dim"}
+_RISK_STYLE    = {"low": "bold green", "medium": "bold yellow", "high": "bold red"}
+_DIV_STYLE     = {"AI>TECH": "bold cyan", "TECH>AI": "bold magenta", "---": "dim white"}
 
 _SCORE_BANDS: list[tuple[float, float, str]] = [
-    (80, 101, "bold green"),
+    (80, 101, "bold bright_green"),
     (60, 80,  "green"),
     (40, 60,  "yellow"),
     (20, 40,  "red"),
     (0,  20,  "bold red"),
+]
+
+_TYPE_STYLE = {"CALL": "bold bright_green", "PUT": "bold bright_red"}
+_CONF_BANDS: list[tuple[float, float, str]] = [
+    (8, 11,  "bold bright_green"),
+    (6, 8,   "green"),
+    (4, 6,   "yellow"),
+    (0, 4,   "dim red"),
 ]
 
 
@@ -184,6 +192,33 @@ def _score_style(score: float) -> str:
         if lo <= score < hi:
             return style
     return "white"
+
+
+def _conf_style(conf: float) -> str:
+    for lo, hi, style in _CONF_BANDS:
+        if lo <= conf < hi:
+            return style
+    return "white"
+
+
+def _dte_style(dte_val: int) -> str:
+    if dte_val <= 7:
+        return "bold red"
+    elif dte_val <= 14:
+        return "yellow"
+    elif dte_val <= 30:
+        return "green"
+    return "dim white"
+
+
+def _pop_style(pop_pct: float) -> str:
+    if pop_pct >= 65:
+        return "bold bright_green"
+    elif pop_pct >= 50:
+        return "green"
+    elif pop_pct >= 40:
+        return "yellow"
+    return "red"
 
 
 def print_ranked_table(
@@ -210,35 +245,67 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
     from rich.table import Table
     from rich import box
     from rich.text import Text
+    from rich.panel import Panel
+    from rich.columns import Columns
 
-    # Print divergence legend
     divergent = df[df["divergence_flag"]] if "divergence_flag" in df.columns else pd.DataFrame()
 
+    # ── Summary header panel ──────────────────────────────────────────────
+    n_picks = len(df)
+    avg_final = df["final_score"].mean() * 100 if "final_score" in df.columns else 0
+    avg_ai = df["ai_score"].mean() if "ai_score" in df.columns else 0
+    avg_tech = df["quality_score"].mean() * 100 if "quality_score" in df.columns else 0
+    n_diverge = len(divergent)
+    top_sym = df.iloc[0].get("symbol", "?") if not df.empty else "?"
+    top_final = df.iloc[0].get("final_score", 0) * 100 if not df.empty else 0
+
+    summary_parts = [
+        f"[bold bright_cyan]{n_picks}[/bold bright_cyan] picks ranked",
+        f"Avg Final: [bold]{avg_final:.1f}[/bold]",
+        f"Avg Tech: [green]{avg_tech:.1f}[/green]",
+        f"Avg AI: [cyan]{avg_ai:.1f}[/cyan]",
+    ]
+    if n_diverge > 0:
+        summary_parts.append(f"[bold yellow]{n_diverge} divergence(s)[/bold yellow]")
+    summary_parts.append(f"Top: [bold bright_green]{top_sym} ({top_final:.1f}%)[/bold bright_green]")
+
+    console.print()
+    console.print(Panel(
+        "  ".join(summary_parts),
+        title="[bold bright_cyan]AI-Enhanced Options Ranking[/bold bright_cyan]",
+        subtitle="[dim]Tech + AI composite scoring with divergence detection[/dim]",
+        border_style="bright_cyan",
+        padding=(0, 2),
+    ))
+
+    # ── Main table ────────────────────────────────────────────────────────
     table = Table(
-        title="[bold cyan]AI-Enhanced Options Ranking[/bold cyan]",
-        box=box.ROUNDED,
-        show_lines=True,
-        header_style="bold magenta",
+        box=box.HEAVY_HEAD,
+        show_lines=False,
+        row_styles=["", "on grey7"],
+        header_style="bold bright_magenta on grey11",
+        border_style="bright_blue",
         expand=False,
+        padding=(0, 1),
     )
 
     cols = [
-        ("Rank",     "right",  4,  True),
+        ("#",        "right",  3,  True),
         ("Symbol",   "left",   6,  True),
         ("Type",     "center", 4,  True),
         ("Strike",   "right",  7,  True),
         ("Expiry",   "center", 10, True),
-        ("DTE",      "right",  4,  True),
-        ("Premium",  "right",  8,  True),
-        ("IV%",      "right",  6,  True),
-        ("PoP%",     "right",  5,  True),
-        ("Tech",     "right",  5,  True),
-        ("AI",       "right",  5,  True),
-        ("Conf",     "right",  4,  True),
+        ("DTE",      "right",  3,  True),
+        ("Prem",     "right",  7,  True),
+        ("IV%",      "right",  5,  True),
+        ("PoP",      "right",  4,  True),
+        ("Tech",     "right",  4,  True),
+        ("AI",       "right",  4,  True),
+        ("Conf",     "right",  3,  True),
         ("Final",    "right",  5,  True),
-        ("Cat",      "center", 5,  True),
-        ("Div",      "center", 8,  True),
-        ("Flags / Reasoning", "left", 35, False),
+        ("Cat",      "center", 4,  True),
+        ("Div",      "center", 7,  True),
+        ("Reasoning", "left",  40, False),
     ]
     for col, justify, min_w, no_wrap in cols:
         table.add_column(col, justify=justify, min_width=min_w, no_wrap=no_wrap)
@@ -262,65 +329,107 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
         else:
             detail = flags or reasoning[:80]
 
-        # Divergence note appended
-        if is_div:
-            detail = f"[DIVERGE:{div_dir}] " + detail
-
-        dte = ""
+        # DTE calculation
+        dte_val = 0
+        dte_str = ""
         exp_dt = row.get("exp_dt")
         if exp_dt is not None and not (isinstance(exp_dt, float) and pd.isna(exp_dt)):
             try:
-                dte = str(max(0, (exp_dt - now).days))
+                dte_val = max(0, (exp_dt - now).days)
+                dte_str = str(dte_val)
+            except Exception:
+                pass
+        if not dte_str and "T_years" in row.index:
+            try:
+                dte_val = max(0, int(float(row["T_years"]) * 365))
+                dte_str = str(dte_val)
             except Exception:
                 pass
 
-        row_style = "bold" if is_div else ""
-        div_text = Text(div_dir, style=_DIV_STYLE.get(div_dir, "white"))
-
         is_adjusted = bool(row.get("divergence_adjusted", False))
-        rank_str = str(int(row.get("rank", 0))) + ("*" if is_adjusted else "")
+        rank_num = int(row.get("rank", 0))
+        rank_style = "bold bright_yellow" if rank_num <= 3 else ("white" if rank_num <= 7 else "dim")
+        rank_str = Text(f"{rank_num}" + ("*" if is_adjusted else ""), style=rank_style)
+
         type_raw = str(row.get("type", "")).upper()
         if bool(row.get("_is_spread", False)):
-            type_display = f"[SPREAD] {str(row.get('_spread_type', '')).upper()}"
+            type_display = Text(str(row.get("_spread_type", "SPR")).upper(), style="bold bright_blue")
         else:
-            type_display = type_raw
+            type_display = Text(type_raw, style=_TYPE_STYLE.get(type_raw, "white"))
+
+        sym_text = Text(str(row.get("symbol", "")), style="bold bright_white")
+
+        # Premium coloring
+        prem_val = float(row.get("premium", 0))
+        prem_text = Text(f"${prem_val:.2f}", style="bright_white")
+
+        # IV coloring
+        iv_val = float(row.get("impliedVolatility", 0)) * 100
+        iv_style = "bright_red" if iv_val > 60 else ("yellow" if iv_val > 35 else "green")
+        iv_text = Text(f"{iv_val:.0f}%", style=iv_style)
+
+        # PoP coloring
+        pop_val = float(row.get("pop_sim", row.get("prob_profit", 0))) * 100
+        pop_text = Text(f"{pop_val:.0f}%", style=_pop_style(pop_val))
+
+        # Divergence styling
+        if is_div:
+            div_text = Text(div_dir, style=_DIV_STYLE.get(div_dir, "white"))
+            detail_text = Text(detail, style="bold")
+        else:
+            div_text = Text("---", style="dim")
+            detail_text = Text(detail, style="dim white" if not detail else "white")
+
+        # Catalyst risk with icon
+        cat_icons = {"low": "LOW", "medium": "MED", "high": "HI!"}
+        cat_display = cat_icons.get(cat_risk, cat_risk[:3].upper())
 
         table.add_row(
             rank_str,
-            str(row.get("symbol", "")),
+            sym_text,
             type_display,
             f"${float(row.get('strike', 0)):.1f}",
             str(row.get("expiration", ""))[:10],
-            dte,
-            f"${float(row.get('premium', 0)):.2f}",
-            f"{float(row.get('impliedVolatility', 0)) * 100:.1f}%",
-            f"{float(row.get('pop_sim', row.get('prob_profit', 0))) * 100:.0f}%",
-            Text(f"{tech_pct:.1f}", style=_score_style(tech_pct)),
-            Text(f"{ai_s:.1f}",    style=_score_style(ai_s)),
-            f"{conf:.1f}",
-            Text(f"{final_pct:.1f}", style=_score_style(final_pct)),
-            Text(cat_risk[:3].upper(), style=_RISK_STYLE.get(cat_risk, "white")),
+            Text(dte_str, style=_dte_style(dte_val)),
+            prem_text,
+            iv_text,
+            pop_text,
+            Text(f"{tech_pct:.0f}", style=_score_style(tech_pct)),
+            Text(f"{ai_s:.0f}",    style=_score_style(ai_s)),
+            Text(f"{conf:.0f}", style=_conf_style(conf)),
+            Text(f"{final_pct:.0f}%", style=_score_style(final_pct)),
+            Text(cat_display, style=_RISK_STYLE.get(cat_risk, "white")),
             div_text,
-            detail,
-            style=row_style,
+            detail_text,
         )
 
     console.print(table)
 
-    # Show divergence summary
+    # ── Divergence detail panel ───────────────────────────────────────────
     if not divergent.empty:
         console.print()
-        console.print("[bold yellow]Score Divergence Detected[/bold yellow] -- these picks scored very differently between AI and technical models:")
+        div_lines = []
         for _, r in divergent.iterrows():
             ai_s   = float(r.get("ai_score", 50))
             tech_s = float(r.get("quality_score", 0)) * 100
             sym    = r.get("symbol", "")
             strike = r.get("strike", "")
-            opt_t  = r.get("type", "")
+            opt_t  = str(r.get("type", "")).upper()
             direction = r.get("divergence_direction", "")
-            reasoning = str(r.get("ai_reasoning", ""))[:120]
-            console.print(f"  [{direction}] {sym} {opt_t} ${strike} -- Tech: {tech_s:.1f} | AI: {ai_s:.1f} -- {reasoning}")
-        console.print()
+            reason = str(r.get("ai_reasoning", ""))[:100]
+            dir_color = "cyan" if direction == "AI>TECH" else "magenta"
+            div_lines.append(
+                f"  [{dir_color}]{direction}[/{dir_color}] "
+                f"[bold]{sym}[/bold] {opt_t} ${strike} "
+                f"-- Tech: [green]{tech_s:.0f}[/green] | AI: [cyan]{ai_s:.0f}[/cyan] "
+                f"-- [dim]{reason}[/dim]"
+            )
+        console.print(Panel(
+            "\n".join(div_lines),
+            title="[bold yellow]Score Divergence Detected[/bold yellow]",
+            border_style="yellow",
+            padding=(0, 1),
+        ))
 
 
 def _plain_table(df: pd.DataFrame) -> None:

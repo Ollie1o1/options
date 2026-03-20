@@ -6,7 +6,7 @@ AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
     "model": "arcee-ai/trinity-large-preview:free",
-    "fallback_model": "openrouter/hunter-alpha",                       # used after 2 failed retries
+    "fallback_model": "stepfun/step-3.5-flash:free",                   # used after 2 failed retries
     "second_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free", # used after 3 failed retries
     "third_fallback_model": "meta-llama/llama-3.3-70b-instruct:free",  # used after 4 failed retries
     "api_key_env": "OPENROUTER_ARCEE_KEY",
@@ -15,11 +15,12 @@ AI_CONFIG: dict = {
     # Maps model id → env var name for models that use a different key.
     # Models NOT listed here fall back to "api_key_env".
     "model_key_map": {
-        "arcee-ai/trinity-large-preview:free":  "OPENROUTER_ARCEE_KEY",
-        "openrouter/hunter-alpha":              "OPENROUTER_HUNTER_KEY",
-        "nvidia/nemotron-3-super-120b-a12b:free": "OPENROUTER_API_KEY",
+        "arcee-ai/trinity-large-preview:free":    "OPENROUTER_ARCEE_KEY",
+        "stepfun/step-3.5-flash:free":            "OPENROUTER_STEPFUN_KEY",
+        "nvidia/nemotron-3-super-120b-a12b:free": "OPENROUTER_NVIDIA_KEY",
+        "openrouter/hunter-alpha":                "OPENROUTER_HUNTER_KEY",
         "meta-llama/llama-3.3-70b-instruct:free": "OPENROUTER_API_KEY",
-        "mistralai/mistral-7b-instruct:free":   "OPENROUTER_API_KEY",
+        "mistralai/mistral-7b-instruct:free":     "OPENROUTER_API_KEY",
     },
 
     # ── Scoring Weights ───────────────────────────────────────────────────────
@@ -112,9 +113,11 @@ def resolve_api_key_env(model_id: str, config: dict) -> str:
     if model_id in explicit:
         return explicit[model_id]
     prefix_map = {
-        "arcee-ai/": "OPENROUTER_ARCEE_KEY",
+        "arcee-ai/":   "OPENROUTER_ARCEE_KEY",
+        "stepfun/":    "OPENROUTER_STEPFUN_KEY",
+        "nvidia/":     "OPENROUTER_NVIDIA_KEY",
         "openrouter/": "OPENROUTER_HUNTER_KEY",
-        "anthropic/": "ANTHROPIC_API_KEY",
+        "anthropic/":  "ANTHROPIC_API_KEY",
     }
     for prefix, env_var in prefix_map.items():
         if model_id.startswith(prefix):
