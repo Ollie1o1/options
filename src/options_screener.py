@@ -3049,6 +3049,22 @@ def main():
         print(fmt.colorize(f"  \u26a0 Config: {_warn}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0 Config: {_warn}")
 
     if not getattr(args, 'no_ai', False):
+        # Ensure .env is loaded before checking for keys
+        _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+        if os.path.isfile(_env_path):
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(dotenv_path=_env_path, override=False)
+            except ImportError:
+                # Manual fallback: parse KEY=VALUE lines
+                with open(_env_path) as _ef:
+                    for _line in _ef:
+                        _line = _line.strip()
+                        if _line and not _line.startswith("#") and "=" in _line:
+                            _k, _, _v = _line.partition("=")
+                            _k, _v = _k.strip(), _v.strip().strip("'\"")
+                            if _k and _v:
+                                os.environ.setdefault(_k, _v)
         _has_any_key = any(
             os.environ.get(k) for k in [
                 "OPENROUTER_API_KEY", "OPENROUTER_ARCEE_KEY",
