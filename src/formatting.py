@@ -113,7 +113,7 @@ def supports_color() -> bool:
             kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
             _COLOR_ENABLED = True
             return True
-        except:
+        except (OSError, AttributeError, ValueError):
             _COLOR_ENABLED = False
             return False
 

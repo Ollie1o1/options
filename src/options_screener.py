@@ -750,8 +750,11 @@ def calculate_metrics(
             put_25d  = puts_exp.iloc[(puts_exp["abs_delta"] - 0.25).abs().argsort()[:1]]
             if call_25d.empty or put_25d.empty:
                 continue
-            skew_val = (float(put_25d["impliedVolatility"].iloc[0])
-                        - float(call_25d["impliedVolatility"].iloc[0]))
+            put_iv = put_25d["impliedVolatility"].iloc[0]
+            call_iv = call_25d["impliedVolatility"].iloc[0]
+            if pd.isna(put_iv) or pd.isna(call_iv):
+                continue
+            skew_val = float(put_iv) - float(call_iv)
             df.loc[exp_grp.index, "iv_skew"] = skew_val
     except Exception:
         pass
@@ -2131,7 +2134,11 @@ def close_trades():
             # Find closest date to expiration
             hist_dates = hist.index.date
             closest_date = min(hist_dates, key=lambda d: abs((d - exp_date).days))
-            exit_price = float(hist[hist.index.date == closest_date]['Close'].iloc[0])
+            filtered = hist[hist.index.date == closest_date]
+            if filtered.empty:
+                print(f"  ⚠️  No matching price for expiry date")
+                continue
+            exit_price = float(filtered['Close'].iloc[0])
             
             # Calculate intrinsic value at expiration
             strike = float(trade['strike'])

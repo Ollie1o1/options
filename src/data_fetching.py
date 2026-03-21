@@ -1022,6 +1022,8 @@ def calculate_ewma_volatility(hist: pd.DataFrame, span: int = 20) -> Optional[fl
         if len(returns) < 5:
             return None
         ewm_var = (returns ** 2).ewm(span=span, adjust=False).mean()
+        if ewm_var.empty:
+            return None
         return float(np.sqrt(ewm_var.iloc[-1] * 252))
     except Exception as exc:
         logger.debug("EWMA vol calculation failed: %s", exc)
