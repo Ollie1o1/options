@@ -2358,7 +2358,7 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
                 "history": None, "success": False, "error": str(e)}
 
 
-def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None):
+def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False):
     # Determine mode booleans for internal logic
     is_budget_mode = (mode == "Budget scan")
     is_discovery_mode = (mode == "Discovery scan")
@@ -2663,7 +2663,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface)
         elif verbose:
             print("\nNo options found within budget.")
 
@@ -2673,7 +2673,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface)
         elif verbose:
             print("\nNo discovery picks found.")
             
@@ -2698,7 +2698,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.sort_values("quality_score", ascending=False)
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
+                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface)
         elif verbose:
             print("\nNo premium selling candidates found.")
 
@@ -2708,7 +2708,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.copy()
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config)
+                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface)
         elif verbose:
             print("\nNo suitable options found.")
 
@@ -2988,6 +2988,7 @@ def main():
     parser.add_argument("--export", type=str, default=None, metavar="FORMAT", help="Export results to file (csv)")
     parser.add_argument("--watchlist", type=str, default=None, metavar="NAME", help="Use named watchlist from config as ticker input")
     parser.add_argument("--no-cache", action="store_true", help="Disable all caching (requests, AI scores, IV history)")
+    parser.add_argument("--surface", action="store_true", help="Show 3D ASCII P&L risk surface for top pick")
     args, _ = parser.parse_known_args()
 
     if args.no_cache:
@@ -3029,6 +3030,7 @@ def main():
                 ("--export csv",   "Export top scan results to scan_results_YYYYMMDD_HHMM.csv"),
                 ("--watchlist N",  "Use named watchlist from config (liquid_large_cap, sector_etfs, high_iv, income)"),
                 ("--no-cache",    "Disable all caching (requests, AI scores, IV history)"),
+                ("--surface",      "Show 3D ASCII P&L risk surface for top pick"),
             ]:
                 print(f"  {fmt.colorize(f'{flag:<18}', fmt.Colors.BRIGHT_YELLOW)} {desc}")
         else:
@@ -3332,7 +3334,8 @@ def main():
 
     try:
         while True:
-            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct)
+            show_surface = getattr(args, 'surface', False)
+            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface)
             if scan_results is None: sys.exit(0)
 
             picks = scan_results.picks

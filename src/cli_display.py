@@ -45,6 +45,12 @@ try:
 except ImportError:
     HAS_VOL_ANALYTICS = False
 
+try:
+    from .visual_surface import print_risk_surface
+    HAS_RISK_SURFACE = True
+except ImportError:
+    HAS_RISK_SURFACE = False
+
 
 def _get_config() -> dict:
     """Lazy import of load_config to avoid circular imports with options_screener."""
@@ -934,7 +940,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
     print()
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
@@ -1206,6 +1212,11 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 print(f"      \u2022 VWAP: ${r['vwap']:.2f}")
 
             print("")  # Newline
+
+    # 3D ASCII risk surface for single-stock top pick
+    if show_surface and HAS_RISK_SURFACE and not is_multi and not df_picks.empty:
+        top_row = df_picks.iloc[0]
+        print_risk_surface(top_row, underlying_price, rfr, WIDTH)
 
     # Save OI snapshot for next run
     save_oi_snapshot(df_picks)

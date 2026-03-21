@@ -147,6 +147,7 @@ Options:
   --no-ai         Skip AI analysis after scan
   --close-trades  Update the trade log with closing prices and realised P/L
   --ui            Launch the Streamlit web dashboard
+  --surface       Show 3D ASCII P&L risk surface for the top pick (single-stock mode)
   -h, --help      Show help and exit
   --version       Show version string and exit
 ```
@@ -627,6 +628,7 @@ options/
     ├── calc_expected_move.py # Implied expected move calculator
     ├── oi_snapshot.py        # OI change tracking between runs
     ├── watchlist.py          # Watchlist management (ADD/REMOVE commands)
+    ├── visual_surface.py     # 3D ASCII risk surface (P&L vs price shock × IV shock)
     ├── visualize_results.py  # Matplotlib/Plotly charts for scan results
     ├── dashboard.py          # Streamlit web interface
     ├── ai_scorer.py          # Two-pass AI scoring with retry, fallback, narrative context
@@ -670,6 +672,7 @@ options/
 - [x] VIX regime weight multipliers for scoring and AI weight
 - [x] Historical IV crush estimation per ticker
 - [x] Config validation at module load
+- [x] 3D ASCII risk surface — full Black-Scholes repricing over price × IV shock grid
 - [ ] Real-time alerts (email / SMS)
 - [ ] Multi-leg spread support in paper manager
 - [ ] Backtesting UI improvements
