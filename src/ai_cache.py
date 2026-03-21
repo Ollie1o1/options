@@ -11,6 +11,7 @@ Usage:
 """
 
 from __future__ import annotations
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone, date
@@ -70,9 +71,18 @@ def _make_fingerprint(row: dict[str, Any]) -> str:
     return f"{symbol}|{opt_type}|{strike_bucket}|{expiry}|{iv_bucket}|{trade_date}"
 
 
+def _make_fingerprint_with_config(row: dict[str, Any], config_hash: str) -> str:
+    base = _make_fingerprint(row)
+    return f"{base}|{config_hash}"
+
+
 class AIScoreCache:
     def __init__(self, db_path: Path = _DB_PATH) -> None:
         self._db = db_path
+        from src.config_ai import AI_CONFIG
+        self._config_hash = hashlib.md5(
+            json.dumps(sorted(AI_CONFIG.items()), default=str).encode()
+        ).hexdigest()[:8]
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -86,7 +96,7 @@ class AIScoreCache:
             conn.execute(_TICKER_CTX_DDL)
 
     def get(self, row: dict[str, Any]) -> Optional[dict]:
-        fp = _make_fingerprint(row)
+        fp = _make_fingerprint_with_config(row, self._config_hash)
         today = _trade_date()
         with self._conn() as conn:
             cur = conn.execute(
@@ -107,7 +117,7 @@ class AIScoreCache:
         }
 
     def set(self, row: dict[str, Any], result: dict) -> None:
-        fp = _make_fingerprint(row)
+        fp = _make_fingerprint_with_config(row, self._config_hash)
         today = _trade_date()
         now = datetime.now(timezone.utc).isoformat()
         with self._conn() as conn:

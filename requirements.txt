@@ -1,3 +1,4 @@
+# For exact version pinning, see requirements-lock.txt
 yfinance>=0.2.66
 pandas>=2.2.3
 numpy>=2.0.0

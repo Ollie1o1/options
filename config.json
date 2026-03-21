@@ -68,6 +68,7 @@
   "default_budget": 750,
   "target_delta": 0.40,
   "spread_score_cap": 0.15,
+  "momentum_weights": {"rsi": 0.35, "ret5d": 0.30, "sma": 0.20, "vwap": 0.15},
   "earnings_buffer_days": 5,
   "iv_rank_weight_threshold": 0.5,
   "iv_rank_low_threshold": 0.2,

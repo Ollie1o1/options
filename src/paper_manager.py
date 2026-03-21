@@ -192,23 +192,22 @@ class PaperManager:
         spread_dict keys: date, ticker, expiration, short_strike, long_strike, type,
                           net_credit, max_profit, max_loss, quality_score
         """
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO trades (date, ticker, expiration, strike, type, entry_price, quality_score, strategy_name, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
-        """, (
-            spread_dict.get("date", datetime.now().strftime("%Y-%m-%d")),
-            spread_dict.get("ticker", ""),
-            spread_dict.get("expiration", ""),
-            spread_dict.get("short_strike", 0),
-            spread_dict.get("type", "Spread"),
-            spread_dict.get("net_credit", 0),
-            spread_dict.get("quality_score", 0.5),
-            f"SPREAD:{spread_dict.get('long_strike', 0)}:{spread_dict.get('max_profit', 0):.2f}:{spread_dict.get('max_loss', 0):.2f}"
-        ))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO trades (date, ticker, expiration, strike, type, entry_price, quality_score, strategy_name, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+            """, (
+                spread_dict.get("date", datetime.now().strftime("%Y-%m-%d")),
+                spread_dict.get("ticker", ""),
+                spread_dict.get("expiration", ""),
+                spread_dict.get("short_strike", 0),
+                spread_dict.get("type", "Spread"),
+                spread_dict.get("net_credit", 0),
+                spread_dict.get("quality_score", 0.5),
+                f"SPREAD:{spread_dict.get('long_strike', 0)}:{spread_dict.get('max_profit', 0):.2f}:{spread_dict.get('max_loss', 0):.2f}"
+            ))
+            conn.commit()
 
     def _get_option_symbol(self, ticker: str, expiration: str, strike: float, option_type: str) -> str:
         """Generates a yfinance-compatible option symbol."""
@@ -546,6 +545,29 @@ class PaperManager:
             f"→ size reduced by {(1-reduction)*100:.0f}%"
         )
         return base_blended_fraction * reduction, reason
+
+    def get_strategy_breakdown(self) -> list[dict]:
+        """Return win/loss/avg P&L grouped by strategy_name."""
+        query = """
+            SELECT strategy_name,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses,
+                   AVG(pnl_pct) as avg_pnl,
+                   SUM(pnl_pct) as total_pnl
+            FROM trades
+            WHERE status = 'CLOSED' AND pnl_pct IS NOT NULL
+            GROUP BY strategy_name
+            ORDER BY total DESC
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute(query).fetchall()
+        return [
+            {"strategy": r[0] or "Unknown", "total": r[1], "wins": r[2],
+             "losses": r[3], "win_rate": r[2] / r[1] if r[1] else 0,
+             "avg_pnl": r[4], "total_pnl": r[5]}
+            for r in rows
+        ]
 
     def get_all_trades(self) -> pd.DataFrame:
         """Returns all trades as a pandas DataFrame."""

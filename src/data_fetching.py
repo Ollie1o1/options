@@ -59,6 +59,9 @@ try:
 except ImportError:
     _yf_session = None  # Let yfinance create its own session
 
+# Global cache bypass flag (set by --no-cache CLI flag)
+_NO_CACHE = False
+
 # In-memory caches
 _HV_CACHE: Dict[str, float] = {}
 _MOMENTUM_CACHE: Dict[str, Tuple] = {}
@@ -270,8 +273,8 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
             future_mask = ed.index > pd.Timestamp.now()
             if future_mask.any():
                 earnings_date = ed.index[future_mask][0].to_pydatetime()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Earnings date fetch failed for %s: %s", symbol, exc)
 
     sector_perf = get_sector_performance(symbol)
     # yahooquery doesn't expose sentiment/news/short-interest without extra APIs
@@ -408,8 +411,8 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
                 b_iv = _atm_iv(df[df["exp_dt"] == sorted_exps[1]])
                 if f_iv and b_iv:
                     term_structure_spread = b_iv - f_iv
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Term structure spread computation failed: %s", exc)
 
     return {
         "df": df,
@@ -584,8 +587,8 @@ def _init_iv_db(db_path: str) -> None:
         """)
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("IV DB init failed: %s", exc)
 
 
 def _upsert_iv(ticker: str, date_str: str, iv: float, db_path: str) -> None:
@@ -598,8 +601,8 @@ def _upsert_iv(ticker: str, date_str: str, iv: float, db_path: str) -> None:
         )
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("IV upsert failed for %s: %s", ticker, exc)
 
 
 def _init_skew_db(db_path: str) -> None:
@@ -615,8 +618,8 @@ def _init_skew_db(db_path: str) -> None:
         """)
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Skew DB init failed: %s", exc)
 
 
 def _upsert_skew(ticker: str, date_str: str, skew: float, db_path: str) -> None:
@@ -629,8 +632,8 @@ def _upsert_skew(ticker: str, date_str: str, skew: float, db_path: str) -> None:
         )
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Skew upsert failed for %s: %s", ticker, exc)
 
 
 def _load_skew_history(ticker: str, db_path: str) -> List[float]:
@@ -642,7 +645,8 @@ def _load_skew_history(ticker: str, db_path: str) -> List[float]:
         ).fetchall()
         conn.close()
         return [r[0] for r in rows if r[0] is not None]
-    except Exception:
+    except Exception as exc:
+        logger.debug("Skew history load failed for %s: %s", ticker, exc)
         return []
 
 
@@ -703,7 +707,8 @@ def calculate_vrp(
         else:
             regime = "CHEAP"
         return {"vrp_mean": vrp_mean, "vrp_std": vrp_std, "vrp_percentile": vrp_pctile, "vrp_regime": regime}
-    except Exception:
+    except Exception as exc:
+        logger.debug("VRP computation failed: %s", exc)
         return default
 
 
@@ -716,7 +721,8 @@ def _load_iv_history(ticker: str, db_path: str) -> List[float]:
         ).fetchall()
         conn.close()
         return [r[0] for r in rows if r[0] is not None]
-    except Exception:
+    except Exception as exc:
+        logger.debug("IV history load failed for %s: %s", ticker, exc)
         return []
 
 
@@ -852,7 +858,8 @@ def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
         score = blob.sentiment.polarity
         _SENTIMENT_CACHE[key] = score
         return score
-    except Exception:
+    except Exception as exc:
+        logger.debug("Sentiment analysis failed: %s", exc)
         return None
 
 def get_news_headlines(ticker: yf.Ticker, max_headlines: int = 3) -> list:
@@ -867,7 +874,8 @@ def get_news_headlines(ticker: yf.Ticker, max_headlines: int = 3) -> list:
             if title:
                 titles.append(title.strip())
         return titles[:max_headlines]
-    except Exception:
+    except Exception as exc:
+        logger.debug("News headlines fetch failed: %s", exc)
         return []
 
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
@@ -888,7 +896,8 @@ def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
         win_rate = wins / total if total > 0 else 0.0
         _SEASONALITY_CACHE[key] = win_rate
         return win_rate
-    except Exception:
+    except Exception as exc:
+        logger.debug("Seasonality check failed for %s: %s", ticker.ticker, exc)
         return None
 
 def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
@@ -996,7 +1005,8 @@ def calculate_historical_volatility(hist: pd.DataFrame, period: int = 30) -> Opt
             return None
         daily_vol = returns.std()
         return daily_vol * math.sqrt(252)
-    except Exception:
+    except Exception as exc:
+        logger.debug("HV calculation failed: %s", exc)
         return None
 
 def calculate_ewma_volatility(hist: pd.DataFrame, span: int = 20) -> Optional[float]:
@@ -1013,7 +1023,8 @@ def calculate_ewma_volatility(hist: pd.DataFrame, span: int = 20) -> Optional[fl
             return None
         ewm_var = (returns ** 2).ewm(span=span, adjust=False).mean()
         return float(np.sqrt(ewm_var.iloc[-1] * 252))
-    except Exception:
+    except Exception as exc:
+        logger.debug("EWMA vol calculation failed: %s", exc)
         return None
 
 def calculate_parkinson_volatility(hist: pd.DataFrame, period: int = 30) -> Optional[float]:
@@ -1187,40 +1198,41 @@ def get_iv_rank_percentile_from_history(
     confidence = "Low"
 
     # --- Persist today's IV and try to use stored history ---
-    try:
-        db_path = _get_iv_db_path()
-        if ticker:
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            _upsert_iv(ticker, date_str, current_iv, db_path)
-            iv_history = _load_iv_history(ticker, db_path)
-        else:
-            iv_history = []
-
-        if len(iv_history) >= 30:
-            iv_arr = np.array(iv_history, dtype=float)
-            iv_min = iv_arr.min()
-            iv_max = iv_arr.max()
-            if iv_max - iv_min <= 0:
-                iv_rank_30, iv_pct_30 = 0.5, 0.5
+    if not _NO_CACHE:
+        try:
+            db_path = _get_iv_db_path()
+            if ticker:
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                _upsert_iv(ticker, date_str, current_iv, db_path)
+                iv_history = _load_iv_history(ticker, db_path)
             else:
-                iv_rank_30 = float(np.clip((current_iv - iv_min) / (iv_max - iv_min), 0, 1))
-                iv_pct_30 = float(np.clip((iv_arr < current_iv).sum() / len(iv_arr), 0, 1))
+                iv_history = []
 
-            if len(iv_history) >= 90:
-                iv_arr_90 = iv_arr[-90:]
-                iv_min_90, iv_max_90 = iv_arr_90.min(), iv_arr_90.max()
-                if iv_max_90 - iv_min_90 <= 0:
-                    iv_rank_90, iv_pct_90 = 0.5, 0.5
+            if len(iv_history) >= 30:
+                iv_arr = np.array(iv_history, dtype=float)
+                iv_min = iv_arr.min()
+                iv_max = iv_arr.max()
+                if iv_max - iv_min <= 0:
+                    iv_rank_30, iv_pct_30 = 0.5, 0.5
                 else:
-                    iv_rank_90 = float(np.clip((current_iv - iv_min_90) / (iv_max_90 - iv_min_90), 0, 1))
-                    iv_pct_90 = float(np.clip((iv_arr_90 < current_iv).sum() / len(iv_arr_90), 0, 1))
-            else:
-                iv_rank_90, iv_pct_90 = iv_rank_30, iv_pct_30
+                    iv_rank_30 = float(np.clip((current_iv - iv_min) / (iv_max - iv_min), 0, 1))
+                    iv_pct_30 = float(np.clip((iv_arr < current_iv).sum() / len(iv_arr), 0, 1))
 
-            confidence = "High" if len(iv_history) >= 252 else "Medium"
-            return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
-    except Exception:
-        pass
+                if len(iv_history) >= 90:
+                    iv_arr_90 = iv_arr[-90:]
+                    iv_min_90, iv_max_90 = iv_arr_90.min(), iv_arr_90.max()
+                    if iv_max_90 - iv_min_90 <= 0:
+                        iv_rank_90, iv_pct_90 = 0.5, 0.5
+                    else:
+                        iv_rank_90 = float(np.clip((current_iv - iv_min_90) / (iv_max_90 - iv_min_90), 0, 1))
+                        iv_pct_90 = float(np.clip((iv_arr_90 < current_iv).sum() / len(iv_arr_90), 0, 1))
+                else:
+                    iv_rank_90, iv_pct_90 = iv_rank_30, iv_pct_30
+
+                confidence = "High" if len(iv_history) >= 252 else "Medium"
+                return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
+        except Exception:
+            pass
 
     # --- Fall back to HV-proxy computation ---
     try:

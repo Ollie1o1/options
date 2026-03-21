@@ -8,7 +8,7 @@ Computes iv_surface_residual: (market_IV - fitted_IV) / fitted_IV.
 Positive = expensive vs fair surface, negative = cheap.
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -51,11 +51,12 @@ def _enforce_constraints(params: np.ndarray) -> np.ndarray:
 
 
 def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
-                       T: float) -> Optional[np.ndarray]:
+                       T: float) -> Tuple[Optional[np.ndarray], float]:
     """
     Fit SVI params for one expiration slice.
 
-    Returns (a, b, rho, sigma, m) or None if fitting fails.
+    Returns (params, fit_quality) where params is (a, b, rho, sigma, m)
+    or None if fitting fails, and fit_quality is in [0, 1].
     """
     market_var = market_iv ** 2 * T
     mean_var = np.mean(market_var)
@@ -82,11 +83,12 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
                        options={"maxiter": 5000, "xatol": 1e-8,
                                 "fatol": 1e-10, "adaptive": True})
         if not res.success and res.fun > mean_var * len(k):
-            return None
+            return None, 0.0
         params = _enforce_constraints(res.x)
-        return params
+        fit_quality = max(0.0, 1.0 - res.fun / max(mean_var * len(k), 1e-10))
+        return params, fit_quality
     except Exception:
-        return None
+        return None, 0.0
 
 
 def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
@@ -100,13 +102,15 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
 
     Returns
     -------
-    DataFrame with added column ``iv_surface_residual``.
+    DataFrame with added columns ``iv_surface_residual`` and ``iv_surface_confidence``.
         residual = (market_IV - fitted_IV) / fitted_IV
         Positive means contract is expensive vs the fitted vol surface.
         Set to 0.0 where fitting is not possible.
+        confidence is the per-expiry fit quality in [0, 1].
     """
     df = df.copy()
     df["iv_surface_residual"] = 0.0
+    df["iv_surface_confidence"] = 0.0
 
     required = {"strike", "underlying", "impliedVolatility", "T_years", "expiration"}
     if not required.issubset(df.columns):
@@ -136,7 +140,7 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
         k = np.log(strikes[valid] / S)
         iv_valid = market_iv[valid]
 
-        params = _fit_single_expiry(k, iv_valid, T)
+        params, fit_quality = _fit_single_expiry(k, iv_valid, T)
         if params is None:
             continue
 
@@ -151,6 +155,7 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
         residuals = np.where(safe, (market_iv - fitted_iv) / fitted_iv, 0.0)
 
         df.loc[idx, "iv_surface_residual"] = residuals
+        df.loc[idx, "iv_surface_confidence"] = fit_quality
 
     return df
 

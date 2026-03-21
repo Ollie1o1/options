@@ -248,7 +248,13 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
     from rich.panel import Panel
     from rich.columns import Columns
 
-    divergent = df[df["divergence_flag"]] if "divergence_flag" in df.columns else pd.DataFrame()
+    if "divergence_flag" in df.columns:
+        try:
+            divergent = df[df["divergence_flag"].fillna(False).astype(bool)]
+        except Exception:
+            divergent = pd.DataFrame()
+    else:
+        divergent = pd.DataFrame()
 
     # ── Summary header panel ──────────────────────────────────────────────
     n_picks = len(df)
@@ -256,8 +262,8 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
     avg_ai = df["ai_score"].mean() if "ai_score" in df.columns else 0
     avg_tech = df["quality_score"].mean() * 100 if "quality_score" in df.columns else 0
     n_diverge = len(divergent)
-    top_sym = df.iloc[0].get("symbol", "?") if not df.empty else "?"
-    top_final = df.iloc[0].get("final_score", 0) * 100 if not df.empty else 0
+    top_sym = str(df.iloc[0]["symbol"]) if (not df.empty and "symbol" in df.columns) else "?"
+    top_final = float(df.iloc[0]["final_score"]) * 100 if (not df.empty and "final_score" in df.columns) else 0
 
     summary_parts = [
         f"[bold bright_cyan]{n_picks}[/bold bright_cyan] picks ranked",

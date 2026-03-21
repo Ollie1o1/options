@@ -730,6 +730,7 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
 
     # Per-component IC
     component_ic: dict = {}
+    component_pvalues: dict = {}
     if HAS_SCIPY and HAS_NP and HAS_PD:
         try:
             full_df = pd.DataFrame(
@@ -741,8 +742,9 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
                 try:
                     sub = full_df[[col, "pnl_pct"]].dropna()
                     if len(sub) >= 10:
-                        comp_ic_val, _ = scipy_stats.pearsonr(sub[col].values, sub["pnl_pct"].values)
+                        comp_ic_val, comp_p = scipy_stats.pearsonr(sub[col].values, sub["pnl_pct"].values)
                         component_ic[col] = float(comp_ic_val)
+                        component_pvalues[col] = float(comp_p)
                 except Exception:
                     pass
         except Exception:
@@ -758,6 +760,7 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
         "by_quintile": by_quintile,
         "verdict": verdict,
         "component_ic": component_ic,
+        "component_pvalues": component_pvalues,
     }
 
 

@@ -9,7 +9,7 @@ from typing import Optional, Dict
 import pandas as pd
 import numpy as np
 
-from .utils import format_pct, format_money, determine_moneyness
+from .utils import format_pct, format_money, determine_moneyness, generate_occ_symbol
 from .data_fetching import get_vix_level
 from .oi_snapshot import save_oi_snapshot
 
@@ -362,10 +362,26 @@ def format_mechanics_lines(row: pd.Series) -> list:
         liq.append(f"Vol: {vol}  OI: {oi}")
 
     sp = row.get("spread_pct", pd.NA)
-    if HAS_ENHANCED_CLI:
-        liq.append(f"Spread: {fmt.format_spread(float(sp) if pd.notna(sp) else 0.0)}")
+    bid = row.get("bid", pd.NA)
+    ask = row.get("ask", pd.NA)
+    sp_val = float(sp) if pd.notna(sp) else 0.0
+    # Spread fill interpretation
+    if sp_val <= 0.03:
+        sp_fill = "tight, should fill at mid"
+    elif sp_val <= 0.08:
+        sp_fill = "moderate, may need patience"
+    elif sp_val <= 0.15:
+        sp_fill = "wide, use limit orders"
     else:
-        liq.append(f"Spread: {format_pct(sp)}")
+        sp_fill = "very wide, fill uncertain"
+    sp_dollar = ""
+    if pd.notna(bid) and pd.notna(ask):
+        sp_dollar = f" (${float(ask) - float(bid):.2f})"
+    if HAS_ENHANCED_CLI:
+        spread_str = f"Spread: {fmt.format_spread(sp_val)}{sp_dollar} — {sp_fill}"
+        liq.append(spread_str)
+    else:
+        liq.append(f"Spread: {format_pct(sp)}{sp_dollar} — {sp_fill}")
 
     oi_chg = int(row.get("oi_change", 0) or 0)
     if oi_chg != 0:
@@ -457,6 +473,98 @@ def format_mechanics_lines(row: pd.Series) -> list:
 def format_mechanics_row(row: pd.Series) -> str:
     """Backward-compat wrapper: returns single pipe-delimited string."""
     return " | ".join(format_mechanics_lines(row)) or ""
+
+
+def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_size: Optional[float] = None) -> None:
+    """Print a broker-ready order ticket block for a single option pick."""
+    if not HAS_ENHANCED_CLI:
+        return
+
+    symbol = str(row.get("symbol", "???"))
+    opt_type = str(row.get("type", "call")).lower()
+    strike = float(row.get("strike", 0))
+    expiry = str(row.get("expiration", ""))[:10]
+    bid = float(row.get("bid", 0) or 0)
+    ask = float(row.get("ask", 0) or 0)
+    premium = float(row.get("premium", 0) or 0)
+
+    occ = generate_occ_symbol(symbol, expiry, strike, opt_type)
+
+    # Human-readable contract description
+    try:
+        exp_dt = datetime.strptime(expiry, "%Y-%m-%d")
+        exp_human = exp_dt.strftime("%b %d %Y")
+    except Exception:
+        exp_human = expiry
+    type_label = "Call" if opt_type.startswith("c") else "Put"
+    desc = f"{symbol} {exp_human} ${strike:.2f} {type_label}"
+
+    # Mid price and spread
+    mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else premium
+    spread_abs = ask - bid if (bid > 0 and ask > 0) else 0
+    spread_pct = spread_abs / mid * 100 if mid > 0 else 0
+
+    if spread_pct <= 3:
+        fill_note = "tight, should fill at mid"
+    elif spread_pct <= 8:
+        fill_note = "moderate, may need patience"
+    elif spread_pct <= 15:
+        fill_note = "wide, use limit orders"
+    else:
+        fill_note = "very wide, fill uncertain"
+
+    # Position sizing
+    max_loss_per = mid * 100
+    risk_pct = 0.02
+    if config:
+        risk_pct = config.get("entry_exit_rules", {}).get("position_risk_pct", 0.02)
+    if account_size and account_size > 0 and max_loss_per > 0:
+        contracts = max(1, int(account_size * risk_pct / max_loss_per))
+        total_cost = mid * 100 * contracts
+        sizing_line = f"Contracts: {contracts}  |  Total cost: ${total_cost:,.0f}  |  Max loss: ${total_cost:,.0f}"
+    else:
+        contracts = 1
+        total_cost = mid * 100
+        sizing_line = f"Cost (1 contract): ${total_cost:,.0f}  |  Max loss: ${total_cost:,.0f}"
+
+    # Entry/exit levels
+    tp_pct = 0.50
+    sl_pct = 0.25
+    if config:
+        tp_pct = config.get("entry_exit_rules", {}).get("profit_target_pct", 0.50)
+        sl_pct = abs(config.get("entry_exit_rules", {}).get("stop_loss_pct", 0.25))
+    target = mid * (1 + tp_pct)
+    stop = mid * (1 - sl_pct)
+
+    # Build box
+    width = get_display_width()
+    inner = width - 6
+    border_color = fmt.Colors.BRIGHT_CYAN
+
+    def pad_line(text: str) -> str:
+        # Strip ANSI for length calculation
+        import re
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        padding = max(0, inner - len(clean))
+        return text + " " * padding
+
+    top_border = fmt.colorize(f"  \u250c\u2500 ORDER TICKET {'─' * (inner - 15)}\u2510", border_color)
+    bot_border = fmt.colorize(f"  \u2514{'─' * inner}\u2518", border_color)
+    v = fmt.colorize("\u2502", border_color)
+
+    lines = [
+        f"  {v} {pad_line(fmt.colorize(f'BUY TO OPEN   {occ}', fmt.Colors.BRIGHT_WHITE, bold=True))} {v}",
+        f"  {v} {pad_line(fmt.colorize(desc, fmt.Colors.DIM))} {v}",
+        f"  {v} {pad_line(f'Limit: ${mid:.2f} (mid)  |  Bid: ${bid:.2f}  Ask: ${ask:.2f}')} {v}",
+        f"  {v} {pad_line(f'Spread: ${spread_abs:.2f} ({spread_pct:.1f}%) — {fill_note}')} {v}",
+        f"  {v} {pad_line(sizing_line)} {v}",
+        f"  {v} {pad_line(f'Target: ${target:.2f} (+{tp_pct:.0%})  |  Stop: ${stop:.2f} (-{sl_pct:.0%})')} {v}",
+    ]
+
+    print(top_border)
+    for line in lines:
+        print(line)
+    print(bot_border)
 
 
 def _format_breakeven_line(row: pd.Series, arrow: str) -> str:
@@ -690,7 +798,10 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
     if not HAS_ENHANCED_CLI:
         return
 
-    top = df_picks.nlargest(1, "quality_score").iloc[0]
+    top_df = df_picks.nlargest(1, "quality_score")
+    if top_df.empty:
+        return
+    top = top_df.iloc[0]
     if top.get("quality_score", 0) < 0.75:
         return
 
@@ -698,7 +809,10 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
     sym = top.get("symbol", "N/A")
     opt_type = str(top.get("type", "CALL")).upper()
     strike = top.get("strike", 0)
-    exp = str(pd.to_datetime(top.get("expiration", "")).date())
+    try:
+        exp = str(pd.to_datetime(top.get("expiration", "")).date())
+    except Exception:
+        exp = str(top.get("expiration", "N/A"))[:10]
     pop = float(top.get("prob_profit", 0) or 0)
     rr = float(top.get("rr_ratio", 0) or 0)
     ev_raw = top.get("ev_per_contract", None)
@@ -843,7 +957,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         unique_tickers = df_picks["symbol"].nunique() if "symbol" in df_picks.columns else 1
         title = f"OPTIONS SCREENER  \u2014  PREMIUM SELLING  ({unique_tickers} Tickers)"
     else:
-        symbol_name = df_picks.iloc[0]['symbol'] if "symbol" in df_picks.columns else "UNKNOWN"
+        symbol_name = df_picks.iloc[0]['symbol'] if ("symbol" in df_picks.columns and not df_picks.empty) else "UNKNOWN"
         title = f"OPTIONS SCREENER  \u2014  {symbol_name}"
 
     print()
@@ -885,6 +999,33 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     # ── Rank all picks by quality_score ──────────────────────────────────────
     df_picks = df_picks.copy()
     df_picks["_rank"] = df_picks["quality_score"].rank(ascending=False, method="first").astype(int)
+    total_picks = len(df_picks)
+
+    # ── Comparison table FIRST for quick scanning ────────────────────────────
+    print_comparison_table(df_picks, mode)
+
+    # ── Order ticket for #1 pick ─────────────────────────────────────────────
+    if HAS_ENHANCED_CLI and not df_picks.empty:
+        top1 = df_picks.sort_values("quality_score", ascending=False).iloc[0]
+        _acct_size = config.get("_account_size") if config else None
+        print_order_ticket(top1, config, account_size=_acct_size)
+
+    # ── Prompt before detailed per-pick output ───────────────────────────────
+    _show_details = True
+    if HAS_ENHANCED_CLI and len(df_picks) > 3:
+        try:
+            _detail_choice = input(fmt.colorize(
+                "\n  Press Enter for detailed analysis, or 'q' to skip > ",
+                fmt.Colors.DIM
+            )).strip().lower()
+            if _detail_choice == "q":
+                _show_details = False
+        except (EOFError, KeyboardInterrupt):
+            _show_details = False
+
+    if not _show_details:
+        save_oi_snapshot(df_picks)
+        return
 
     # ── Buckets ──────────────────────────────────────────────────────────────
     for bucket in ["LOW", "MEDIUM", "HIGH"]:
@@ -913,9 +1054,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
         # Column headers
         if is_multi:
-            hdr = f"  {'Rk':<4} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+            hdr = f"  {'Rank':<8} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
         else:
-            hdr = f"  {'Rk':<4} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+            hdr = f"  {'Rank':<8} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
         print(fmt.colorize(hdr, fmt.Colors.BOLD + fmt.Colors.UNDERLINE) if HAS_ENHANCED_CLI else hdr)
 
         if HAS_ENHANCED_CLI:
@@ -924,22 +1065,28 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             print("  " + "-" * (WIDTH - 2))
 
         for _, r in sub.iterrows():
-            exp = pd.to_datetime(r["expiration"]).date()
+            try:
+                exp = pd.to_datetime(r["expiration"]).date()
+            except Exception:
+                exp = str(r.get("expiration", "N/A"))[:10]
             moneyness = determine_moneyness(r)
-            dte = int(r["T_years"] * 365)
+            dte = int(float(r.get("T_years", 0) or 0) * 365)
             whale = "\U0001f40b" if r.get("high_premium_turnover", False) else "  "
-            opt_type = r["type"].upper()
-            strike = r["strike"]
-            premium = r.get("premium", 0.0)
-            iv = r.get("impliedVolatility", 0.0)
-            oi = int(r.get("openInterest", 0))
-            vol = int(r.get("volume", 0))
-            delta = r.get("delta", 0.0)
-            quality = r.get("quality_score", 0.0)
-            rank = int(r.get("_rank", 0))
+            opt_type = str(r.get("type", "CALL")).upper()
+            strike = float(r.get("strike", 0) or 0)
+            premium = float(r.get("premium", 0) or 0)
+            iv = float(r.get("impliedVolatility", 0) or 0)
+            oi = int(float(r.get("openInterest", 0) or 0))
+            vol = int(float(r.get("volume", 0) or 0))
+            _d = r.get("delta", 0.0)
+            delta = float(_d) if pd.notna(_d) else 0.0
+            _q = r.get("quality_score", 0.0)
+            quality = float(_q) if pd.notna(_q) else 0.0
+            rank = int(float(r.get("_rank", 0) or 0))
 
             if HAS_ENHANCED_CLI:
-                rank_str = fmt.colorize(f"#{rank:<2}", fmt.Colors.DIM)
+                rank_visible = f"#{rank}/{total_picks}"
+                rank_str = fmt.colorize(f"{rank_visible:<8}", fmt.Colors.DIM)
                 sym_str = fmt.colorize(f"{r['symbol']:<6}", fmt.Colors.BRIGHT_WHITE, bold=True)
                 type_color = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
                 type_str = fmt.colorize(f"{opt_type:<5}", type_color)
@@ -968,7 +1115,8 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 else:
                     print(f"  {rank_str} {whale} {type_str} {strike:>8.2f} {exp_str} {prem_str} {iv_str} {oi_str} {vol_str}  {delta_str}  {mon_str}  {stars}")
             else:
-                rank_plain = f"#{rank:<2}"
+                rank_plain = f"#{rank}/{total_picks}"
+                rank_plain = f"{rank_plain:<8}"
                 if is_multi:
                     print(f"  {rank_plain} {r['symbol']:<6} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
                 else:
@@ -1061,9 +1209,6 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
     # Save OI snapshot for next run
     save_oi_snapshot(df_picks)
-
-    # Compact comparison table for quick-glance ranking
-    print_comparison_table(df_picks, mode)
 
 
 def print_news_panel(news_map: dict, picks_df: pd.DataFrame, width: int = 100) -> None:

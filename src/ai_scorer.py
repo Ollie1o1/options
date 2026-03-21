@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -621,6 +622,7 @@ class AIScorer:
         use_max_tokens = max_tokens or self.config["max_tokens"]
         client = self._get_client(self._key_env_for_model(use_model))
 
+        timeout_secs = self.config.get("timeout", 30)
         if provider == "anthropic":
             response = client.messages.create(
                 model=use_model,
@@ -628,8 +630,9 @@ class AIScorer:
                 temperature=self.config["temperature"],
                 system=system,
                 messages=[{"role": "user", "content": user}],
+                timeout=timeout_secs,
             )
-            return response.content[0].text if response.content else ""
+            return response.content[0].text if (response.content and len(response.content) > 0) else ""
         else:
             response = client.chat.completions.create(
                 model=use_model,
@@ -639,6 +642,7 @@ class AIScorer:
                     {"role": "system", "content": system},
                     {"role": "user",   "content": user},
                 ],
+                timeout=timeout_secs,
             )
             return response.choices[0].message.content or ""
 
@@ -760,11 +764,23 @@ class AIScorer:
                             f"summary=\"{str(ticker_ctx.get('summary',''))[:80]}\"")
                 ctx_line = ctx_line[:200]
 
+            # IV surface residual context
+            iv_resid = c.get("iv_surface_residual")
+            iv_surface_line = ""
+            if iv_resid is not None and not (isinstance(iv_resid, float) and math.isnan(iv_resid)):
+                if iv_resid < -0.02:
+                    iv_surface_line = f"\n  IV Surface: CHEAP vs SVI surface (residual: {iv_resid:+.3f})"
+                elif iv_resid > 0.02:
+                    iv_surface_line = f"\n  IV Surface: RICH vs SVI surface (residual: {iv_resid:+.3f})"
+                else:
+                    iv_surface_line = f"\n  IV Surface: Fair vs SVI surface (residual: {iv_resid:+.3f})"
+
             block = (
                 f"ID:{c['_id']} {sym} {ctype} ${strike} exp:{exp}\n"
                 f"  {' '.join(raw_parts)}\n"
                 f"  narrative: {narrative}"
                 + ctx_line
+                + iv_surface_line
             )
             blocks.append(block)
 

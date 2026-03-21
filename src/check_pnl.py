@@ -4,6 +4,7 @@ Portfolio viewer — reads open and closed paper trades from paper_trades.db
 and displays a clean P/L summary with live price fetching.
 """
 
+import logging
 import os
 import sqlite3
 import shutil
@@ -25,7 +26,7 @@ except ImportError:
     fmt = None
 
 try:
-    from .utils import bs_delta, bs_gamma, bs_vega
+    from .utils import bs_delta, bs_gamma, bs_vega, bs_theta
     HAS_BS = True
 except ImportError:
     HAS_BS = False
@@ -241,6 +242,7 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     net_delta = 0.0
     net_gamma_dollar = 0.0   # $ P&L per 1% stock move across the book
     net_vega = 0.0           # $ P&L per 1% IV rise across the book
+    net_theta = 0.0          # $ P&L per day from theta decay
     counted = 0
 
     for r in open_trades:
@@ -274,13 +276,15 @@ def _print_portfolio_greeks(open_trades: list, width: int):
             delta = float(bs_delta(opt_type, S, K, T, rfr, sigma))
             gamma = float(bs_gamma(S, K, T, rfr, sigma))
             vega  = float(bs_vega(S, K, T, rfr, sigma))   # already per 1% IV per share
+            theta = float(bs_theta(opt_type, S, K, T, rfr, sigma))
             net_delta       += sign * delta
             # dollar gamma: $ gain per 1% stock move = 0.5 × gamma × (S×0.01)² × 100 shares
             net_gamma_dollar += sign * 0.5 * gamma * (S * 0.01) ** 2 * 100
             net_vega        += sign * vega * 100   # per contract (×100 shares)
+            net_theta       += sign * theta * 100  # per contract (×100 shares)
             counted += 1
-        except Exception:
-            pass
+        except Exception as _greeks_exc:
+            logging.getLogger(__name__).debug("Greeks computation failed for position: %s", _greeks_exc)
 
     if counted == 0:
         return
@@ -322,6 +326,31 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     else:
         print(vega_label)
 
+    # Theta ($/day)
+    tc = (fmt.Colors.GREEN if net_theta > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
+    theta_label = f"  Net Θ ($/day): {net_theta:+.2f}"
+    if HAS_FMT and fmt:
+        print(fmt.colorize(theta_label, tc))
+    else:
+        print(theta_label)
+
+    # Directional bias warnings
+    warnings_list = []
+    if abs(net_delta) > 0.5:
+        direction = "BULLISH" if net_delta > 0 else "BEARISH"
+        warnings_list.append(f"Strong {direction} bias (net delta: {net_delta:+.2f})")
+    if net_theta < -5.0:
+        warnings_list.append(f"High time decay exposure (net theta: ${net_theta:.2f}/day)")
+    if abs(net_vega) > 1.0:
+        direction = "long" if net_vega > 0 else "short"
+        warnings_list.append(f"Significant {direction} vol exposure (net vega: {net_vega:+.2f})")
+    for w in warnings_list:
+        warn_line = f"  \u26a0 {w}"
+        if HAS_FMT and fmt:
+            print(fmt.colorize(warn_line, fmt.Colors.YELLOW, bold=True))
+        else:
+            print(warn_line)
+
     note = f"  [{counted}/{len(open_trades)} positions, entry IV when available]"
     if HAS_FMT and fmt:
         print(fmt.colorize(note, fmt.Colors.DIM))
@@ -339,10 +368,9 @@ def view_portfolio():
         return
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        all_rows = conn.execute("SELECT * FROM trades ORDER BY date DESC").fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            all_rows = conn.execute("SELECT * FROM trades ORDER BY date DESC").fetchall()
     except Exception as e:
         print(f"\n  Error reading database: {e}\n")
         return
@@ -460,6 +488,48 @@ def view_portfolio():
                 f" {dte_str} {opened:<11} {held_str:>5} ${entry_price:>6.2f} {live_str:>8}"
                 f" {usd_str} {pct_str}"
             )
+
+            # Delta drift sub-line
+            if live_price is not None and live_price > 0 and HAS_BS:
+                try:
+                    exp_dt = datetime.strptime(expiry, "%Y-%m-%d")
+                    now_dt = datetime.now()
+                    T_now = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / 365)
+                    rfr = 0.045
+                    sigma = 0.25
+                    try:
+                        stored_iv = r["entry_iv"] if "entry_iv" in r.keys() else None
+                        if stored_iv is not None:
+                            sv = float(stored_iv)
+                            if 0.01 < sv < 5.0:
+                                sigma = sv
+                    except Exception:
+                        pass
+                    live_underlying = None
+                    try:
+                        tkr_obj = yf.Ticker(ticker)
+                        live_underlying = tkr_obj.fast_info.get("lastPrice") or tkr_obj.fast_info.get("regularMarketPrice")
+                    except Exception:
+                        pass
+                    if live_underlying and live_underlying > 0:
+                        current_delta = float(bs_delta(r["type"].lower(), live_underlying, strike, T_now, rfr, sigma))
+                        entry_delta_val = None
+                        try:
+                            ed = r["entry_delta"] if "entry_delta" in r.keys() else None
+                            if ed is not None:
+                                entry_delta_val = float(ed)
+                        except Exception:
+                            pass
+                        if entry_delta_val is not None:
+                            drift_note = "gamma exposure increasing" if abs(current_delta) > abs(entry_delta_val) else "gamma exposure decreasing"
+                            drift_line = f"    delta: {entry_delta_val:+.2f} \u2192 {current_delta:+.2f}  ({drift_note})"
+                            if HAS_FMT and fmt:
+                                drift_color = fmt.Colors.YELLOW if abs(current_delta - entry_delta_val) > 0.15 else fmt.Colors.DIM
+                                print(fmt.colorize(drift_line, drift_color))
+                            else:
+                                print(drift_line)
+                except Exception:
+                    pass
 
         # Open totals
         if HAS_FMT and fmt:
@@ -655,6 +725,39 @@ def view_portfolio():
                         print(fmt.colorize(line, lc))
                     else:
                         print(line)
+
+        # ── Strategy Breakdown (from DB query) ────────────────────────
+        try:
+            from .paper_manager import PaperManager
+            pm = PaperManager(db_path=DB_PATH)
+            breakdown = pm.get_strategy_breakdown()
+            if breakdown:
+                print()
+                strat_db_hdr = "  STRATEGY BREAKDOWN"
+                if HAS_FMT and fmt:
+                    print(fmt.colorize(strat_db_hdr, fmt.Colors.BRIGHT_CYAN, bold=True))
+                    print(fmt.colorize(sep, fmt.Colors.DIM))
+                else:
+                    print(strat_db_hdr)
+                    print(sep)
+                col_hdr = f"    {'Strategy':<24} {'Trades':>6}  {'Win%':>5}  {'Avg P&L':>9}  {'Total P&L':>10}"
+                if HAS_FMT and fmt:
+                    print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
+                else:
+                    print(col_hdr)
+                for row in breakdown:
+                    wr = row["win_rate"] * 100
+                    avg = row["avg_pnl"] * 100
+                    tot = row["total_pnl"] * 100
+                    strat_name = (row["strategy"] or "Unknown").split(":")[0].strip()[:24]
+                    line = f"    {strat_name:<24} {row['total']:>6}  {wr:>4.0f}%  {avg:>+8.1f}%  {tot:>+9.1f}%"
+                    if HAS_FMT and fmt:
+                        lc = fmt.Colors.GREEN if row["avg_pnl"] > 0 else fmt.Colors.RED
+                        print(fmt.colorize(line, lc))
+                    else:
+                        print(line)
+        except Exception:
+            pass
 
         # ── P&L Attribution (delta/gamma/theta/vega) ─────────────────────
         # Only for closed trades that have stored entry Greeks

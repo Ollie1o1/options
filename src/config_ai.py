@@ -93,6 +93,7 @@ AI_CONFIG: dict = {
         "option_rvol", "iv_skew_rank", "vrp_mean", "vrp_regime",
         "predicted_iv_crush", "crush_confidence", "max_gamma_strike", "gamma_pin_dist_pct",
         "momentum_confluence", "risk_flag_count", "max_pain_strike", "max_pain_dist_pct", "hv_parkinson",
+        "iv_surface_residual",
     ],
 }
 

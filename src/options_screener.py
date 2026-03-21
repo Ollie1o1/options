@@ -116,6 +116,9 @@ except ImportError as e:
     print(f"Enhanced CLI features unavailable: {e}")
     print("Install with: pip install colorama tqdm")
 
+# Scan-level warning counter (incremented in except blocks, reported at end of scan)
+_SCAN_WARNINGS = [0]
+
 # Optional imports (relative to this package)
 try:
     from .simulation import monte_carlo_pop
@@ -290,10 +293,12 @@ def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.j
             "liquidity_score": "liquidity", "momentum_score": "momentum",
             "iv_rank_score": "iv_rank", "theta_score": "theta",
         }
+        component_pvalues = cache.get("component_pvalues", {})
         ic_vals = {}
         for ic_key, w_key in key_map.items():
             ic_raw = component_ic.get(ic_key)
-            if ic_raw is not None and isinstance(ic_raw, (int, float)):
+            p_val = component_pvalues.get(ic_key, 1.0)
+            if ic_raw is not None and isinstance(ic_raw, (int, float)) and p_val < 0.10:
                 ic_vals[w_key] = max(0.0, float(ic_raw))
         if not ic_vals:
             _IC_WEIGHTS_CACHE = base_weights
@@ -874,8 +879,9 @@ def calculate_metrics(
                 )
             )
             hv_arr = hv_arr * ts_signal
-    except Exception:
-        pass
+    except Exception as _ts_exc:
+        _SCAN_WARNINGS[0] += 1
+        logging.getLogger(__name__).debug("IV term structure adjustment failed: %s", _ts_exc)
     hv_d1, hv_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, hv_arr)
     with np.errstate(divide='ignore', invalid='ignore'):
         hv_payoff = np.where(is_call,
@@ -942,8 +948,24 @@ def calculate_metrics(
     try:
         from .iv_surface import fit_svi_surface
         df = fit_svi_surface(df)
-    except Exception:
+    except Exception as _svi_exc:
+        _SCAN_WARNINGS[0] += 1
+        logging.getLogger(__name__).debug("SVI surface fit failed: %s", _svi_exc)
         df["iv_surface_residual"] = 0.0
+        df["iv_surface_confidence"] = 0.0
+
+    # NaN gate: drop contracts where ALL key columns are NaN (no usable data)
+    _nan_key_cols = ["impliedVolatility", "volume", "openInterest"]
+    _nan_present = [c for c in _nan_key_cols if c in df.columns]
+    if _nan_present:
+        _nan_count = df[_nan_present].isna().sum(axis=1)
+        _nan_drop = _nan_count >= len(_nan_present)
+        if _nan_drop.any():
+            logging.getLogger(__name__).info(
+                "NaN gate: dropped %d/%d contracts (all key columns NaN)",
+                _nan_drop.sum(), len(df),
+            )
+            df = df[~_nan_drop].copy()
 
     return df
 
@@ -968,9 +990,12 @@ def calculate_scores(
 
     # Base features
     vol_n, oi_n = rank_norm(df["volume"].fillna(0)), rank_norm(df["openInterest"].fillna(0))
-    sp_cap = config.get("spread_score_cap", 0.25)
-    sp = pd.to_numeric(df["spread_pct"], errors="coerce").fillna(float("inf")).clip(lower=0, upper=sp_cap)
-    spread_score = 1.0 - (sp / sp_cap)
+    sp_cap = max(config.get("spread_score_cap", 0.25), 0.01)
+    sp = pd.to_numeric(df["spread_pct"], errors="coerce").fillna(1.0).clip(lower=0)
+    spread_score = pd.Series(
+        1.0 / (1.0 + np.exp(20.0 * (sp.values / sp_cap - 0.7))),
+        index=df.index,
+    ).clip(0, 1)
     d_target = config.get("target_delta", 0.40)
     delta_quality = (1.0 - (df["abs_delta"] - d_target).abs() / max(d_target, 1e-6)).clip(0, 1)
     iv_n = rank_norm(df["impliedVolatility"].fillna(df["impliedVolatility"].median()))
@@ -994,11 +1019,16 @@ def calculate_scores(
                     0.5 * ev_score.loc[_ev_earn_valid]
                     + 0.5 * ev_earnings_score.loc[_ev_earn_valid]
                 )
-        except Exception:
-            pass
+        except Exception as _ev_blend_exc:
+            _SCAN_WARNINGS[0] += 1
+            logging.getLogger(__name__).debug("Earnings EV blend failed: %s", _ev_blend_exc)
     em_realism_score = pd.to_numeric(df["em_realism_score"], errors='coerce').fillna(0.5).clip(0, 1)
     theta_raw = df["theta_decay_pressure"].replace([pd.NA, pd.NaT], np.nan)
-    theta_score = (1.0 - rank_norm(theta_raw.fillna(theta_raw.median()))).clip(0, 1)
+    theta_ranked = rank_norm(theta_raw.fillna(theta_raw.median()))
+    if mode == "Premium Selling":
+        theta_score = theta_ranked.clip(0, 1)        # fast decay = good for sellers
+    else:
+        theta_score = (1.0 - theta_ranked).clip(0, 1) # fast decay = bad for buyers
     theta_score = theta_score.where((df["T_years"] * 365.0) > 7, theta_score * 0.7)
     
     # Multi-timeframe momentum confluence (replaces simple momentum_score)
@@ -1021,9 +1051,14 @@ def calculate_scores(
     sig_sma  = np.where(is_call_mom, (price_vs_sma20 > 0).astype(float), (price_vs_sma20 < 0).astype(float))
     sig_vwap = np.where(is_call_mom, (price_vs_vwap > 0).astype(float), (price_vs_vwap < 0).astype(float))
 
-    # Weighted confluence: RSI matters most (35%), ret5 (30%), SMA (20%), VWAP (15%)
+    # Weighted confluence: configurable via momentum_weights
+    mw = config.get("momentum_weights", {})
+    w_rsi  = mw.get("rsi", 0.35)
+    w_ret5 = mw.get("ret5d", 0.30)
+    w_sma  = mw.get("sma", 0.20)
+    w_vwap = mw.get("vwap", 0.15)
     momentum_score = pd.Series(
-        0.30 * sig_ret5 + 0.35 * sig_rsi + 0.20 * sig_sma + 0.15 * sig_vwap,
+        w_ret5 * sig_ret5 + w_rsi * sig_rsi + w_sma * sig_sma + w_vwap * sig_vwap,
         index=df.index
     ).clip(0, 1)
     df["momentum_score"] = momentum_score
@@ -1036,6 +1071,10 @@ def calculate_scores(
     # Where 90-day is available, blend 60/40 (30d/90d); otherwise fall back to 30d alone
     iv_pct_series = iv_pct_30.where(iv_pct_90.isna(), 0.6 * iv_pct_30 + 0.4 * iv_pct_90)
     iv_rank_score = iv_pct_series.clip(0, 1).fillna(0.5) if mode == "Premium Selling" else (1.0 - iv_pct_series.clip(0, 1)).fillna(0.5)
+    # Dampen IV rank score by history confidence (Low = 0.5, Medium = 0.8, High = 1.0)
+    iv_conf = df.get("iv_confidence", pd.Series("High", index=df.index))
+    conf_mult = iv_conf.map({"High": 1.0, "Medium": 0.8, "Low": 0.5}).fillna(0.7)
+    iv_rank_score = iv_rank_score * conf_mult
     catalyst_score = pd.Series(0.3, index=df.index).mask(df["event_flag"] == "EARNINGS_NEARBY", 0.8)
     dte_norm = ((df["T_years"] * 365.0 - min_dte) / max(1, (max_dte - min_dte))).clip(0, 1)
     trader_pref_score = (0.6 * liquidity + 0.4 * spread_score) if trader_profile.lower().startswith("day") else (0.5 * delta_quality + 0.5 * dte_norm)
@@ -1182,6 +1221,9 @@ def calculate_scores(
             iv_mispricing_score = pd.Series(np.clip(resid * 5, 0, 1), index=df.index)
         else:
             iv_mispricing_score = pd.Series(np.clip(-resid * 5, 0, 1), index=df.index)
+        # Dampen mispricing score by surface fit confidence
+        surf_conf = pd.to_numeric(df.get("iv_surface_confidence", 1.0), errors="coerce").fillna(0.0)
+        iv_mispricing_score = iv_mispricing_score * surf_conf.clip(0, 1)
         df["iv_mispricing_score"] = iv_mispricing_score
 
         dw = {
@@ -2704,6 +2746,16 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     if not picks.empty and "impliedVolatility" in picks.columns:
         chain_iv_median = picks["impliedVolatility"].median()
 
+    # Post-run warning summary
+    n_scored = len(picks) if not picks.empty else 0
+    if _SCAN_WARNINGS[0] > 0:
+        _warn_msg = f"Scan complete: {n_scored} contracts scored, {_SCAN_WARNINGS[0]} warnings logged (see DEBUG log for details)"
+    else:
+        _warn_msg = f"Scan complete: {n_scored} contracts scored"
+    if verbose:
+        print(f"\n  {_warn_msg}")
+    _SCAN_WARNINGS[0] = 0  # reset for next scan
+
     return ScanResult(
         picks=picks,
         spreads=pd.DataFrame(),
@@ -2795,7 +2847,6 @@ def _check_market_hours() -> tuple:
     Options are liquid 09:30–16:00 ET, Mon–Fri. Outside this window,
     yfinance data is stale and bid-ask spreads are unreliable.
     """
-    return True, "Market hours check unavailable"
     try:
         from zoneinfo import ZoneInfo
         et_zone = ZoneInfo("America/New_York")
@@ -2929,7 +2980,22 @@ def main():
     parser.add_argument("--top", type=int, default=None, metavar="N", help="Run top-N cross-ticker scan and exit")
     parser.add_argument("--export", type=str, default=None, metavar="FORMAT", help="Export results to file (csv)")
     parser.add_argument("--watchlist", type=str, default=None, metavar="NAME", help="Use named watchlist from config as ticker input")
+    parser.add_argument("--no-cache", action="store_true", help="Disable all caching (requests, AI scores, IV history)")
     args, _ = parser.parse_known_args()
+
+    if args.no_cache:
+        try:
+            import requests_cache as _rc
+            _rc.uninstall_cache()
+        except Exception:
+            pass
+        # Disable IV history DB reads (bypass_cache flag on data_fetching)
+        try:
+            from . import data_fetching as _df_mod
+            _df_mod._NO_CACHE = True
+        except Exception:
+            pass
+        logging.getLogger(__name__).info("All caching disabled via --no-cache")
 
     if args.no_color and HAS_ENHANCED_CLI:
         fmt.set_color_enabled(False)
@@ -2955,6 +3021,7 @@ def main():
                 ("--top N",        "Cross-ticker top-N scan (default 10), grouped by DTE bucket"),
                 ("--export csv",   "Export top scan results to scan_results_YYYYMMDD_HHMM.csv"),
                 ("--watchlist N",  "Use named watchlist from config (liquid_large_cap, sector_etfs, high_iv, income)"),
+                ("--no-cache",    "Disable all caching (requests, AI scores, IV history)"),
             ]:
                 print(f"  {fmt.colorize(f'{flag:<18}', fmt.Colors.BRIGHT_YELLOW)} {desc}")
         else:
@@ -2973,6 +3040,25 @@ def main():
         sys.exit(0)
 
     config = load_config("config.json")
+
+    # ── Config validation ─────────────────────────────────────────────────────
+    _cw = config.get("composite_weights", {})
+    _cw_sum = sum(_cw.values()) if _cw else 0
+    if _cw and (_cw_sum > 1.1 or _cw_sum < 0.9):
+        _warn = f"composite_weights sum to {_cw_sum:.2f} (expected ~1.0)"
+        print(fmt.colorize(f"  \u26a0 Config: {_warn}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0 Config: {_warn}")
+
+    if not getattr(args, 'no_ai', False):
+        _has_any_key = any(
+            os.environ.get(k) for k in [
+                "OPENROUTER_API_KEY", "OPENROUTER_ARCEE_KEY",
+                "OPENROUTER_STEPFUN_KEY", "OPENROUTER_NVIDIA_KEY",
+                "ANTHROPIC_API_KEY",
+            ]
+        )
+        if not _has_any_key:
+            _warn = "No AI API keys found in environment. AI scoring will be skipped. Set keys in .env file."
+            print(fmt.colorize(f"  \u26a0 {_warn}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0 {_warn}")
 
     # ── --watchlist: resolve named watchlist tickers from config ─────────────
     _watchlist_tickers = None
@@ -3190,6 +3276,14 @@ def main():
     profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
     trader_profile = "day" if profile_choice == "2" else "swing"
 
+    # Account size for position sizing in order tickets
+    _acct_input = prompt_input("Account size in USD for position sizing (Enter to skip)", "").strip()
+    if _acct_input:
+        try:
+            config["_account_size"] = float(_acct_input)
+        except ValueError:
+            pass
+
     _is_single_stock = (mode == "Single-stock")
     _repeat_count = 0
 
@@ -3281,6 +3375,14 @@ def main():
                         pm.log_trade(trade_dict)
                         msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
                         print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                        # Offer inline portfolio view
+                        _view = prompt_input("View portfolio? (y/n)", "n").strip().lower()
+                        if _view in ("y", "yes"):
+                            try:
+                                from .check_pnl import view_portfolio
+                                view_portfolio()
+                            except Exception as _pnl_exc:
+                                print(f"  Could not load portfolio: {_pnl_exc}")
 
                 elif save_choice == "C":
                     # Export best available data: AI-ranked picks > raw picks > spreads > condors

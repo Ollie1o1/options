@@ -95,6 +95,8 @@ def bs_price(option_type, S, K, T, r, sigma, q=0.0):
 def bs_delta(option_type, S, K, T, r, sigma, q=0.0):
     """Black-Scholes delta with optional continuous dividend yield q."""
     d1, _ = _d1d2(S, K, T, r, sigma, q)
+    if d1 is None:
+        return 0.0
     q = np.asanyarray(q)
     if isinstance(option_type, str):
         if option_type.lower() == "call":
@@ -108,27 +110,33 @@ def bs_delta(option_type, S, K, T, r, sigma, q=0.0):
         disc_q = np.exp(-q * np.asanyarray(T))
         delta[is_call] = disc_q * norm.cdf(d1[is_call]) if np.ndim(disc_q) == 0 else disc_q[is_call] * norm.cdf(d1[is_call])
         delta[~is_call] = (disc_q * (norm.cdf(d1[~is_call]) - 1.0)) if np.ndim(disc_q) == 0 else disc_q[~is_call] * (norm.cdf(d1[~is_call]) - 1.0)
-        return delta
+        return np.nan_to_num(delta, nan=0.0)
 
 def bs_gamma(S, K, T, r, sigma, q=0.0):
     """Black-Scholes gamma with optional continuous dividend yield q."""
     d1, _ = _d1d2(S, K, T, r, sigma, q)
+    if d1 is None:
+        return 0.0
     q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
         gamma = np.exp(-q * T) * norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    return gamma
+    return np.nan_to_num(gamma, nan=0.0)
 
 def bs_vega(S, K, T, r, sigma, q=0.0):
     """Black-Scholes vega (per 1% change in IV) with optional continuous dividend yield q."""
     d1, _ = _d1d2(S, K, T, r, sigma, q)
+    if d1 is None:
+        return 0.0
     q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
         vega = S * np.exp(-q * T) * norm.pdf(d1) * np.sqrt(T) / 100.0
-    return vega
+    return np.nan_to_num(vega, nan=0.0)
 
 def bs_theta(option_type, S, K, T, r, sigma, q=0.0):
     """Black-Scholes theta (daily) with optional continuous dividend yield q."""
     d1, d2 = _d1d2(S, K, T, r, sigma, q)
+    if d1 is None:
+        return 0.0
     q = np.asanyarray(q)
     with np.errstate(divide='ignore', invalid='ignore'):
         p1 = -(S * np.exp(-q * T) * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
@@ -159,11 +167,13 @@ def bs_theta(option_type, S, K, T, r, sigma, q=0.0):
                 p3_p = _get(q, ~is_call) * _get(S, ~is_call) * np.exp(-_get(q, ~is_call) * _get(T, ~is_call)) * norm.cdf(-d1[~is_call]) if np.ndim(q) > 0 else float(q) * _get(S, ~is_call) * np.exp(-float(q) * _get(T, ~is_call)) * norm.cdf(-d1[~is_call])
                 theta[~is_call] = (p1[~is_call] + p2_p - p3_p) / 365.0
 
-            return theta
+            return np.nan_to_num(theta, nan=0.0)
 
 def bs_rho(option_type, S, K, T, r, sigma, q=0.0):
     """Black-Scholes rho (per 1% change in rates) with optional continuous dividend yield q."""
     _, d2 = _d1d2(S, K, T, r, sigma, q)
+    if d2 is None:
+        return 0.0
     with np.errstate(divide='ignore', invalid='ignore'):
         if isinstance(option_type, str):
             if option_type.lower() == "call":
@@ -183,7 +193,7 @@ def bs_rho(option_type, S, K, T, r, sigma, q=0.0):
             if np.any(~is_call):
                 rho[~is_call] = -_get(K, ~is_call) * _get(T, ~is_call) * np.exp(-_get(r, ~is_call) * _get(T, ~is_call)) * norm.cdf(-d2[~is_call]) / 100.0
 
-            return rho
+            return np.nan_to_num(rho, nan=0.0)
 
 
 def bs_charm(option_type, S, K, T, r, sigma, q=0.0):
@@ -461,6 +471,24 @@ def determine_moneyness(row: Any) -> str:
     except (ValueError, TypeError, KeyError):
         return "---"
 
+def generate_occ_symbol(symbol: str, expiry: str, strike: float, opt_type: str) -> str:
+    """Generate standard OCC option symbol (e.g., AAPL250418C00215000).
+
+    Format: SYMBOL(padded to 6) + YYMMDD + C/P + strike*1000 (8 digits zero-padded).
+    """
+    import re
+    from datetime import datetime as _dt
+    sym = re.sub(r'[^A-Z]', '', symbol.upper())[:6]
+    try:
+        dt = _dt.strptime(str(expiry)[:10], "%Y-%m-%d")
+    except ValueError:
+        return f"{sym}?{opt_type[0].upper()}?{strike}"
+    date_str = dt.strftime("%y%m%d")
+    cp = "C" if opt_type.lower().startswith("c") else "P"
+    strike_int = int(round(strike * 1000))
+    return f"{sym}{date_str}{cp}{strike_int:08d}"
+
+
 __all__ = [
     "safe_float",
     "norm_cdf",
@@ -483,4 +511,5 @@ __all__ = [
     "format_pct",
     "format_money",
     "determine_moneyness",
+    "generate_occ_symbol",
 ]

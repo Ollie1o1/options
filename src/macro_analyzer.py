@@ -148,14 +148,24 @@ def check_macro_event_window(
             except Exception:
                 pass
         if dates:
-            most_recent = max(dates)
-            if (now - most_recent) > timedelta(days=60):
+            future_dates = [d for d in dates if d > now]
+            if not future_dates:
                 logging.getLogger(__name__).warning(
-                    "Macro event calendar may be stale — most recent event is %s. "
-                    "Update _DEFAULT_EVENTS in macro_analyzer.py for accurate gating.",
-                    most_recent.strftime("%Y-%m-%d"),
+                    "All macro events are in the past — update _DEFAULT_EVENTS in macro_analyzer.py "
+                    "or add 'macro_events' to config.json"
                 )
+                print("  Warning: All macro events are in the past — update _DEFAULT_EVENTS or add 'macro_events' to config.json")
                 _staleness_warned = True
+            else:
+                most_recent = max(dates)
+                if (now - most_recent) > timedelta(days=60):
+                    logging.getLogger(__name__).warning(
+                        "Macro event calendar may be stale — most recent event is %s. "
+                        "Update _DEFAULT_EVENTS in macro_analyzer.py for accurate gating.",
+                        most_recent.strftime("%Y-%m-%d"),
+                    )
+                    print("  Warning: Macro event calendar may be stale — update _DEFAULT_EVENTS or add 'macro_events' to config.json")
+                    _staleness_warned = True
 
     return False, None, None
 

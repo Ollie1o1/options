@@ -224,6 +224,8 @@ def _fetch_single_expiry(tkr, exp_str: str, spot: float, rfr: float, today) -> O
         # ATM IV: option with strike closest to spot
         calls_df = calls_df.dropna(subset=["impliedVolatility", "strike"])
         puts_df = puts_df.dropna(subset=["impliedVolatility", "strike"])
+        if calls_df.empty or puts_df.empty:
+            return None
 
         atm_call_idx = (calls_df["strike"] - spot).abs().idxmin()
         atm_iv = float(calls_df.loc[atm_call_idx, "impliedVolatility"])

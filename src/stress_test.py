@@ -242,10 +242,10 @@ def run_stress_test(
 
                     # Full BS repricing (accurate for large moves)
                     try:
-                        price_base = float(bs_price(opt_type, S, K, T, rfr_val, sigma, q))
-                        price_new = float(bs_price(opt_type, S_new, K, T, rfr_val, IV_new, q))
-                        if math.isnan(price_base) or math.isnan(price_new):
-                            raise ValueError("NaN from BS")
+                        price_base = float(np.float64(bs_price(opt_type, S, K, T, rfr_val, sigma, q)))
+                        price_new = float(np.float64(bs_price(opt_type, S_new, K, T, rfr_val, IV_new, q)))
+                        if not np.isfinite(price_base) or not np.isfinite(price_new):
+                            raise ValueError("NaN/Inf from BS")
                         pnl = sign * (price_new - price_base) * 100
                     except Exception:
                         # Delta-gamma fallback
