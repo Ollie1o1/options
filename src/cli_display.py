@@ -153,23 +153,25 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     print(f"\nTop {n} contracts shown. Run with --export csv to save full results.")
 
 
-def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> str:
-    """Formats the second detail row for the screener report (analysis)."""
-    parts = []
+def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> list:
+    """Return themed sub-lines for analysis."""
+    INDENT = "         "
+    lines = []
 
-    # IV context — visual bar or plain fallback
+    # --- Line 1: Valuation — IV bar, PoP, RR/RoR, EV, Quality ---
+    val = []
+
     iv = row.get("impliedVolatility", pd.NA)
     if pd.notna(iv) and math.isfinite(iv):
         if HAS_ENHANCED_CLI:
             iv_pct = row.get("iv_percentile_30", row.get("iv_percentile", 0.5)) or 0.5
             hv = row.get("hv_30d", 0) or 0
             iv_conf = row.get("iv_confidence", "")
-            parts.append(fmt.format_iv_rank_bar(iv_pct, hv, float(iv), iv_confidence=iv_conf))
+            val.append(fmt.format_iv_rank_bar(iv_pct, hv, float(iv), iv_confidence=iv_conf))
         else:
             rel = "\u2248" if abs(float(iv) - chain_iv_median) <= 0.02 else ("above" if iv > chain_iv_median else "below")
-            parts.append(f"IV: {format_pct(iv)} ({rel} median)")
+            val.append(f"IV: {format_pct(iv)} ({rel} median)")
 
-    # Probability of Profit — dual PoP/PoT when prob_touch is available
     pop = row.get("prob_profit", pd.NA)
     if pd.notna(pop) and math.isfinite(pop):
         if HAS_ENHANCED_CLI:
@@ -177,30 +179,45 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
             prob_touch = row.get("prob_touch", None)
             if prob_touch is not None and pd.notna(prob_touch) and float(prob_touch) > 0:
                 pot_str = fmt.format_pop(float(prob_touch))
-                parts.append(f"PoP(exp): {pop_str}  PoT(touch): {pot_str}")
+                val.append(f"PoP(exp): {pop_str}  PoT(touch): {pot_str}")
             else:
-                parts.append(f"PoP: {pop_str}")
+                val.append(f"PoP: {pop_str}")
         else:
-            parts.append(f"PoP: {format_pct(pop)}")
+            val.append(f"PoP: {format_pct(pop)}")
 
-    # Risk/Reward or Return on Risk
     if mode == "Premium Selling":
         ror = row.get("return_on_risk", pd.NA)
         if pd.notna(ror):
-            parts.append(f"RoR: {format_pct(ror)}")
+            val.append(f"RoR: {format_pct(ror)}")
     else:
         rr = row.get("rr_ratio", pd.NA)
         if pd.notna(rr):
             rr_str = fmt.format_rr(float(rr)) if HAS_ENHANCED_CLI else f"{float(rr):.1f}x"
-            parts.append(f"RR: {rr_str}")
+            val.append(f"RR: {rr_str}")
 
-    # EV
     ev = row.get("ev_per_contract", pd.NA)
     if pd.notna(ev) and math.isfinite(float(ev)):
         ev_str = fmt.format_ev(float(ev)) if HAS_ENHANCED_CLI else f"${float(ev):.0f}"
-        parts.append(f"EV: {ev_str}")
+        val.append(f"EV: {ev_str}")
 
-    # PCR per expiry
+    quality = row.get('quality_score', 0.0)
+    drivers = row.get("score_drivers", "")
+    if HAS_ENHANCED_CLI:
+        stars, q_color = fmt.format_quality_score(quality)
+        q_str = f"Quality: {fmt.colorize(f'{quality:.2f}', q_color)} {stars}"
+        if drivers:
+            q_str += f"  {fmt.colorize(f'[{drivers}]', fmt.Colors.DIM)}"
+        val.append(q_str)
+    else:
+        val.append(f"Quality: {quality:.2f}" + (f"  [{drivers}]" if drivers else ""))
+
+    if val:
+        label = fmt.colorize("Valuation:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Valuation:"
+        lines.append(f"    \u21b3 {label} {'  '.join(val)}")
+
+    # --- Line 2: Flow & Momentum — PCR, Momentum, Sentiment, Seasonality ---
+    flow = []
+
     pcr = row.get("pcr", pd.NA)
     if pd.notna(pcr):
         pcr_signal = row.get("pcr_signal", "")
@@ -209,193 +226,208 @@ def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> st
             pcr_str += f" ({pcr_signal})"
         if HAS_ENHANCED_CLI and pcr_signal:
             pcr_color = fmt.Colors.RED if pcr_signal == "HEAVY HEDGING" else (fmt.Colors.GREEN if pcr_signal == "BULLISH FLOW" else fmt.Colors.DIM)
-            parts.append(fmt.colorize(pcr_str, pcr_color))
+            flow.append(fmt.colorize(pcr_str, pcr_color))
         else:
-            parts.append(pcr_str)
+            flow.append(pcr_str)
 
-    # Momentum
     rsi = row.get("rsi_14", pd.NA)
     ret5 = row.get("ret_5d", pd.NA)
     if pd.notna(rsi) and pd.notna(ret5):
-        parts.append(f"Momentum: RSI {float(rsi):.0f}, 5d {format_pct(ret5)}")
+        flow.append(f"Momentum: RSI {float(rsi):.0f}, 5d {format_pct(ret5)}")
 
-    # Sentiment
     sentiment = row.get("sentiment_tag", "Neutral")
     if HAS_ENHANCED_CLI:
         s_color = fmt.Colors.GREEN if sentiment == "Bullish" else (fmt.Colors.RED if sentiment == "Bearish" else fmt.Colors.YELLOW)
         sentiment_str = fmt.colorize(sentiment, s_color)
     else:
         sentiment_str = sentiment
-    parts.append(f"Sentiment: {sentiment_str}")
+    flow.append(f"Sentiment: {sentiment_str}")
 
-    # Quality Score + leading drivers
-    quality = row.get('quality_score', 0.0)
-    drivers = row.get("score_drivers", "")
-    if HAS_ENHANCED_CLI:
-        stars, q_color = fmt.format_quality_score(quality)
-        q_str = f"Quality: {fmt.colorize(f'{quality:.2f}', q_color)} {stars}"
-        if drivers:
-            q_str += f"  {fmt.colorize(f'[{drivers}]', fmt.Colors.DIM)}"
-        parts.append(q_str)
-    else:
-        parts.append(f"Quality: {quality:.2f}" + (f"  [{drivers}]" if drivers else ""))
+    if pd.notna(row.get("seasonal_win_rate")):
+        win_rate = row["seasonal_win_rate"]
+        current_month_name = datetime.now().strftime("%b")
+        flow.append(f"{current_month_name} Hist: {win_rate:.0%}")
 
-    # Earnings Play
-    if row.get("Earnings Play") == "YES":
-        underpriced_status = "Underpriced" if row.get("is_underpriced") else "Overpriced"
-        parts.append(f"Earnings: YES ({underpriced_status})")
+    if flow:
+        label = fmt.colorize("Flow:     ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Flow:     "
+        lines.append(f"{INDENT}{label} {'  '.join(flow)}")
 
-    # Earnings implied move vs historical
-    if row.get("Earnings Play") == "YES" and pd.notna(row.get("implied_earnings_move")):
-        try:
-            imp = float(row["implied_earnings_move"])
-            hist = row.get("hist_earnings_move")
-            beat = row.get("earnings_beat_rate")
-            cheap = row.get("earnings_iv_cheap")
-            move_str = f"Implied Move: \u00b1{imp:.1%}"
-            if hist is not None and pd.notna(hist):
-                move_str += f" | Hist Avg: \u00b1{float(hist):.1%}"
-            if beat is not None and pd.notna(beat):
-                move_str += f" | Beat Rate: {float(beat):.0%}"
-            if cheap is not None and pd.notna(cheap):
-                label = "CHEAP" if cheap else "RICH"
-                if HAS_ENHANCED_CLI:
-                    color = fmt.Colors.GREEN if cheap else fmt.Colors.RED
-                    move_str += f" | IV {fmt.colorize(label, color)}"
-                else:
-                    move_str += f" | IV {label}"
-            parts.append(move_str)
-        except Exception:
-            pass
+    # --- Line 3: Context — Stock price, DTE, BE move, Term structure ---
+    ctx = []
 
-    # Term structure
-    tss = row.get("term_structure_spread", None)
-    if tss is not None and pd.notna(tss):
-        ts_label = "CONTANGO" if tss > 0.02 else ("BACKWARDATION" if tss < -0.02 else "FLAT")
-        if HAS_ENHANCED_CLI:
-            ts_color = fmt.Colors.GREEN if tss > 0.02 else (fmt.Colors.RED if tss < -0.02 else fmt.Colors.DIM)
-            parts.append(f"Term: {fmt.colorize(ts_label, ts_color)} ({tss:+.1%})")
-        else:
-            parts.append(f"Term: {ts_label} ({tss:+.1%})")
-
-    # Stock Price, DTE, and breakeven distance
     stock_price = row.get('underlying', 0.0)
     dte = int(row.get('T_years', 0) * 365)
     be_dist = row.get('be_dist_pct', pd.NA)
     stock_dte_str = f"Stock: {format_money(stock_price)} | DTE: {dte}d"
     if pd.notna(be_dist) and math.isfinite(float(be_dist)):
         stock_dte_str += f" | BE move: {float(be_dist):.1f}%"
-    parts.append(stock_dte_str)
+    ctx.append(stock_dte_str)
 
-    # --- Seasonality ---
-    if pd.notna(row.get("seasonal_win_rate")):
-        win_rate = row["seasonal_win_rate"]
-        current_month_name = datetime.now().strftime("%b")
-        parts.append(f"{current_month_name} Hist: {win_rate:.0%}")
+    tss = row.get("term_structure_spread", None)
+    if tss is not None and pd.notna(tss):
+        ts_label = "CONTANGO" if tss > 0.02 else ("BACKWARDATION" if tss < -0.02 else "FLAT")
+        if HAS_ENHANCED_CLI:
+            ts_color = fmt.Colors.GREEN if tss > 0.02 else (fmt.Colors.RED if tss < -0.02 else fmt.Colors.DIM)
+            ctx.append(f"Term: {fmt.colorize(ts_label, ts_color)} ({tss:+.1%})")
+        else:
+            ctx.append(f"Term: {ts_label} ({tss:+.1%})")
 
-    # --- Warnings & Squeeze ---
+    if ctx:
+        label = fmt.colorize("Context:  ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Context:  "
+        lines.append(f"{INDENT}{label} {'  '.join(ctx)}")
+
+    # --- Line 4: Earnings (conditional) ---
+    if row.get("Earnings Play") == "YES":
+        earn = []
+        underpriced_status = "Underpriced" if row.get("is_underpriced") else "Overpriced"
+        earn.append(f"YES ({underpriced_status})")
+
+        if pd.notna(row.get("implied_earnings_move")):
+            try:
+                imp = float(row["implied_earnings_move"])
+                hist = row.get("hist_earnings_move")
+                beat = row.get("earnings_beat_rate")
+                cheap = row.get("earnings_iv_cheap")
+                earn.append(f"Implied Move: \u00b1{imp:.1%}")
+                if hist is not None and pd.notna(hist):
+                    earn.append(f"Hist Avg: \u00b1{float(hist):.1%}")
+                if beat is not None and pd.notna(beat):
+                    earn.append(f"Beat Rate: {float(beat):.0%}")
+                if cheap is not None and pd.notna(cheap):
+                    lbl = "CHEAP" if cheap else "RICH"
+                    if HAS_ENHANCED_CLI:
+                        color = fmt.Colors.GREEN if cheap else fmt.Colors.RED
+                        earn.append(f"IV {fmt.colorize(lbl, color)}")
+                    else:
+                        earn.append(f"IV {lbl}")
+            except Exception:
+                pass
+
+        label = fmt.colorize("Earnings: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Earnings: "
+        lines.append(f"{INDENT}{label} {'  '.join(earn)}")
+
+    # --- Line 5: Warnings (conditional) ---
+    warns = []
     if row.get("gamma_ramp"):
         w = fmt.colorize("GAMMA RAMP", fmt.Colors.BRIGHT_RED, bold=True) if HAS_ENHANCED_CLI else "GAMMA RAMP"
-        parts.append(w)
+        warns.append(w)
     if row.get("decay_warning"):
         w = fmt.format_warning("HIGH DECAY RISK") if HAS_ENHANCED_CLI else "HIGH DECAY RISK"
-        parts.append(w)
+        warns.append(w)
     if row.get("sr_warning"):
         w = fmt.colorize(row["sr_warning"], fmt.Colors.BRIGHT_RED) if HAS_ENHANCED_CLI else row["sr_warning"]
-        parts.append(w)
+        warns.append(w)
     if row.get("oi_wall_warning"):
         w = fmt.colorize(row["oi_wall_warning"], fmt.Colors.BRIGHT_RED) if HAS_ENHANCED_CLI else row["oi_wall_warning"]
-        parts.append(w)
+        warns.append(w)
     if row.get("squeeze_play"):
-        parts.append("\U0001f525 SQUEEZE PLAY")
-
-    # Macro / yield warnings
+        warns.append("\U0001f525 SQUEEZE PLAY")
     if row.get("macro_warning"):
         w = fmt.colorize(row["macro_warning"], fmt.Colors.BRIGHT_RED, bold=True) if HAS_ENHANCED_CLI else row["macro_warning"]
-        parts.append(w)
+        warns.append(w)
     if row.get("max_pain_warning"):
-        parts.append(row["max_pain_warning"])
+        warns.append(row["max_pain_warning"])
     if row.get("yield_warning"):
-        parts.append(row["yield_warning"])
+        warns.append(row["yield_warning"])
     if row.get("high_premium_turnover"):
-        parts.append("\U0001f40b WHALE FLOW")
+        warns.append("\U0001f40b WHALE FLOW")
 
-    return " | ".join(parts)
+    if warns:
+        label = fmt.colorize("\u26a0 Warns:  ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u26a0 Warns:  "
+        lines.append(f"{INDENT}{label} {'  '.join(warns)}")
+
+    return lines
 
 
-def format_mechanics_row(row: pd.Series) -> str:
-    """Formats the first detail row for the screener report (market mechanics)."""
-    parts = []
+def format_analysis_row(row: pd.Series, chain_iv_median: float, mode: str) -> str:
+    """Backward-compat wrapper: returns single pipe-delimited string."""
+    return " | ".join(format_analysis_lines(row, chain_iv_median, mode)) or ""
 
-    # Liquidity
+
+def format_mechanics_lines(row: pd.Series) -> list:
+    """Return themed sub-lines for market mechanics."""
+    INDENT = "         "
+    lines = []
+
+    # --- Line 1: Liquidity & Cost ---
+    liq = []
+
     vol = int(row.get('volume', 0))
     oi = int(row.get('openInterest', 0))
     if HAS_ENHANCED_CLI:
         vol_color = fmt.Colors.GREEN if vol > 200 else (fmt.Colors.YELLOW if vol > 50 else fmt.Colors.RED)
         oi_color = fmt.Colors.GREEN if oi > 500 else (fmt.Colors.YELLOW if oi > 100 else fmt.Colors.RED)
-        parts.append(f"Vol: {fmt.colorize(str(vol), vol_color)} OI: {fmt.colorize(str(oi), oi_color)}")
+        liq.append(f"Vol: {fmt.colorize(str(vol), vol_color)}  OI: {fmt.colorize(str(oi), oi_color)}")
     else:
-        parts.append(f"Vol: {vol} OI: {oi}")
+        liq.append(f"Vol: {vol}  OI: {oi}")
 
-    # Spread
     sp = row.get("spread_pct", pd.NA)
     if HAS_ENHANCED_CLI:
-        parts.append(f"Spread: {fmt.format_spread(float(sp) if pd.notna(sp) else 0.0)}")
+        liq.append(f"Spread: {fmt.format_spread(float(sp) if pd.notna(sp) else 0.0)}")
     else:
-        parts.append(f"Spread: {format_pct(sp)}")
+        liq.append(f"Spread: {format_pct(sp)}")
 
-    # Delta
-    d = row.get("delta", pd.NA)
-    if pd.notna(d) and math.isfinite(d):
-        opt_type = row.get("type", "call")
-        if HAS_ENHANCED_CLI:
-            parts.append(f"Delta: {fmt.format_delta(d, is_call=(opt_type.lower() == 'call'))}")
-        else:
-            parts.append(f"Delta: {d:+.2f}")
-
-    # Greeks
-    gamma = row.get("gamma", pd.NA)
-    vega = row.get("vega", pd.NA)
-    theta = row.get("theta", pd.NA)
-    vega_dollar = row.get("vega_dollar", pd.NA)
-    if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
-        vd_str = f" V$: ${float(vega_dollar):.0f}" if pd.notna(vega_dollar) else ""
-        greeks_str = f"Greeks: \u0393 {gamma:.3f}, V {vega:.2f}, \u0398 {theta:.2f}{vd_str}"
-        parts.append(fmt.colorize(greeks_str, fmt.Colors.DIM) if HAS_ENHANCED_CLI else greeks_str)
-
-    # Annualized return — particularly relevant for premium sellers
-    ann_ret = row.get("annualized_return", pd.NA)
-    if pd.notna(ann_ret) and math.isfinite(float(ann_ret)) and float(ann_ret) > 0:
-        ann_str = f"Ann.Yield: {float(ann_ret):.1%}"
-        parts.append(fmt.colorize(ann_str, fmt.Colors.DIM) if HAS_ENHANCED_CLI else ann_str)
-
-    # Charm and Vanna
-    charm = row.get("charm", None)
-    vanna = row.get("vanna", None)
-    if charm is not None and pd.notna(charm) and abs(float(charm)) > 0.001:
-        parts.append(f"Charm: {float(charm):.4f}/d")
-    if vanna is not None and pd.notna(vanna) and abs(float(vanna)) > 0.01:
-        parts.append(f"Vanna: {float(vanna):.3f}")
-
-    # OI change
     oi_chg = int(row.get("oi_change", 0) or 0)
     if oi_chg != 0:
         sign = "+" if oi_chg > 0 else ""
         oi_chg_str = f"OI \u0394: {sign}{oi_chg}"
         if HAS_ENHANCED_CLI:
             chg_color = fmt.Colors.GREEN if oi_chg > 0 else fmt.Colors.RED
-            parts.append(fmt.colorize(oi_chg_str, chg_color))
+            liq.append(fmt.colorize(oi_chg_str, chg_color))
         else:
-            parts.append(oi_chg_str)
+            liq.append(oi_chg_str)
 
-    # Cost
     cost = row.get('premium', 0.0) * 100
     if HAS_ENHANCED_CLI:
-        parts.append(f"Cost: {fmt.format_money(cost)}")
+        liq.append(f"Cost: {fmt.format_money(cost)}")
     else:
-        parts.append(f"Cost: {format_money(cost)}")
+        liq.append(f"Cost: {format_money(cost)}")
 
-    # Theta acceleration warning
+    if liq:
+        label = fmt.colorize("Liquidity:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Liquidity:"
+        lines.append(f"    \u21b3 {label} {'  '.join(liq)}")
+
+    # --- Line 2: Greeks ---
+    grk = []
+
+    d = row.get("delta", pd.NA)
+    if pd.notna(d) and math.isfinite(d):
+        opt_type = row.get("type", "call")
+        if HAS_ENHANCED_CLI:
+            grk.append(f"\u0394 {fmt.format_delta(d, is_call=(opt_type.lower() == 'call'))}")
+        else:
+            grk.append(f"\u0394 {d:+.2f}")
+
+    gamma = row.get("gamma", pd.NA)
+    vega = row.get("vega", pd.NA)
+    theta = row.get("theta", pd.NA)
+    vega_dollar = row.get("vega_dollar", pd.NA)
+    if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
+        grk.append(f"\u0393 {gamma:.3f}")
+        grk.append(f"V {vega:.2f}")
+        grk.append(f"\u0398 {theta:.2f}")
+        if pd.notna(vega_dollar):
+            grk.append(f"V$: ${float(vega_dollar):.0f}")
+
+    charm = row.get("charm", None)
+    vanna = row.get("vanna", None)
+    if charm is not None and pd.notna(charm) and abs(float(charm)) > 0.001:
+        grk.append(f"Charm: {float(charm):.4f}/d")
+    if vanna is not None and pd.notna(vanna) and abs(float(vanna)) > 0.01:
+        grk.append(f"Vanna: {float(vanna):.3f}")
+
+    if grk:
+        label = fmt.colorize("Greeks:   ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Greeks:   "
+        lines.append(f"{INDENT}{label} {'  '.join(grk)}")
+
+    # --- Line 3: Yield & Decay (conditional) ---
+    yld = []
+
+    ann_ret = row.get("annualized_return", pd.NA)
+    if pd.notna(ann_ret) and math.isfinite(float(ann_ret)) and float(ann_ret) > 0:
+        ann_str = f"Ann: {float(ann_ret):.1%}"
+        yld.append(fmt.colorize(ann_str, fmt.Colors.DIM) if HAS_ENHANCED_CLI else ann_str)
+
     theta_val = row.get("theta", pd.NA)
     premium_val = row.get("premium", 0.0) or 0.0
     dte_val = float(row.get("T_years", 0) or 0) * 365
@@ -413,9 +445,18 @@ def format_mechanics_row(row: pd.Series) -> str:
                 bleed_str += " \u26a0 ACCELERATING"
             elif daily_bleed_pct > 2:
                 bleed_str += " HIGH DECAY"
-        parts.append(bleed_str)
+        yld.append(bleed_str)
 
-    return " | ".join(parts)
+    if yld:
+        label = fmt.colorize("Yield:    ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Yield:    "
+        lines.append(f"{INDENT}{label} {'  '.join(yld)}")
+
+    return lines
+
+
+def format_mechanics_row(row: pd.Series) -> str:
+    """Backward-compat wrapper: returns single pipe-delimited string."""
+    return " | ".join(format_mechanics_lines(row)) or ""
 
 
 def _format_breakeven_line(row: pd.Series, arrow: str) -> str:
@@ -941,13 +982,11 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 if alerts_line:
                     print(alerts_line)
 
-            # Detail rows
-            mechanics_line = format_mechanics_row(r)
-            analysis_line = format_analysis_row(r, chain_iv_median, mode)
-            mech_label = fmt.colorize("Mechanics:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Mechanics:"
-            anal_label = fmt.colorize("Analysis: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Analysis: "
-            print(f"    {arrow} {mech_label} {mechanics_line}")
-            print(f"    {arrow} {anal_label} {analysis_line}")
+            # Detail rows — themed sub-lines
+            for line in format_mechanics_lines(r):
+                print(line)
+            for line in format_analysis_lines(r, chain_iv_median, mode):
+                print(line)
 
             # Breakeven vs expected move
             if HAS_ENHANCED_CLI:

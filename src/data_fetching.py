@@ -38,10 +38,26 @@ logging.getLogger("requests").setLevel(logging.CRITICAL)
 logging.getLogger("peewee").setLevel(logging.CRITICAL)
 
 # Install intelligent request caching (15-minute expiry)
+# Use WAL journal mode to prevent SQLite write-lock contention across runs
 try:
-    requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+    requests_cache.install_cache(
+        'finance_cache', backend='sqlite', expire_after=900,
+        backend_options={'pragmas': {'journal_mode': 'wal'}},
+    )
 except Exception:
-    pass  # Cache unavailable; requests proceed uncached
+    try:
+        # Older requests_cache versions don't support backend_options
+        requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+    except Exception:
+        pass  # Cache unavailable; requests proceed uncached
+
+# Shared curl_cffi session with timeout to prevent yfinance hangs on rate-limited connections
+try:
+    from curl_cffi import requests as _cffi_requests
+    _yf_session = _cffi_requests.Session(impersonate="chrome")
+    _yf_session.timeout = 20  # 20s default for all requests
+except ImportError:
+    _yf_session = None  # Let yfinance create its own session
 
 # In-memory caches
 _HV_CACHE: Dict[str, float] = {}
@@ -167,7 +183,7 @@ class YFinanceProvider(BaseDataProvider):
         return fetch_options_yfinance(symbol, max_expiries=4)
 
     def fetch_spot(self, symbol: str) -> float:
-        return float(yf.Ticker(symbol).fast_info["lastPrice"])
+        return float(yf.Ticker(symbol, session=_yf_session).fast_info["lastPrice"])
 
     async def fetch_chain_async(self, symbol: str) -> Dict[str, Any]:
         """Non-blocking wrapper around fetch_chain using asyncio.to_thread."""
@@ -912,7 +928,7 @@ def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
 def get_risk_free_rate() -> float:
     default_rate = 0.045
     try:
-        tbill = yf.Ticker("^IRX")
+        tbill = yf.Ticker("^IRX", session=_yf_session)
         try:
             fi = getattr(tbill, "fast_info", None)
             if fi:
@@ -932,7 +948,7 @@ def get_risk_free_rate() -> float:
 
 def get_vix_level() -> Optional[float]:
     try:
-        vix = yf.Ticker("^VIX")
+        vix = yf.Ticker("^VIX", session=_yf_session)
         try:
             fi = getattr(vix, "fast_info", None)
             if fi:
@@ -1253,8 +1269,8 @@ def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
 def get_sector_performance(ticker_symbol: str) -> Dict:
     sector_etf = SECTOR_MAP.get(ticker_symbol, "SPY")
     try:
-        tkr = yf.Ticker(ticker_symbol)
-        etf = yf.Ticker(sector_etf)
+        tkr = yf.Ticker(ticker_symbol, session=_yf_session)
+        etf = yf.Ticker(sector_etf, session=_yf_session)
         tkr_hist = tkr.history(period="5d")
         etf_hist = etf.history(period="5d")
         
@@ -1275,7 +1291,7 @@ def get_sector_performance(ticker_symbol: str) -> Dict:
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_macro_risk() -> bool:
     try:
-        eurusd = yf.Ticker("EURUSD=X")
+        eurusd = yf.Ticker("EURUSD=X", session=_yf_session)
         fx_hist = eurusd.history(period="1mo")
         if not fx_hist.empty and len(fx_hist) > 5:
             daily_range = (fx_hist['High'] - fx_hist['Low']) / fx_hist['Open']
@@ -1291,7 +1307,7 @@ def check_macro_risk() -> bool:
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_yield_spike() -> Tuple[bool, float]:
     try:
-        tnx = yf.Ticker("^TNX")
+        tnx = yf.Ticker("^TNX", session=_yf_session)
         tnx_hist = tnx.history(period="5d")
         if not tnx_hist.empty and len(tnx_hist) >= 2:
             tnx_close = tnx_hist['Close']
@@ -1307,14 +1323,14 @@ def get_market_context() -> Tuple[str, str, bool, float]:
     macro_risk_active = False
     tnx_change_pct = 0.0
     try:
-        spy = yf.Ticker("SPY")
+        spy = yf.Ticker("SPY", session=_yf_session)
         spy_hist = spy.history(period="3mo")
         if not spy_hist.empty:
             spy_sma50 = spy_hist['Close'].rolling(window=50).mean().iloc[-1]
             spy_current = spy_hist['Close'].iloc[-1]
             market_trend = "Bull" if spy_current > spy_sma50 else "Bear"
         
-        vix = yf.Ticker("^VIX")
+        vix = yf.Ticker("^VIX", session=_yf_session)
         vix_hist = vix.history(period="5d")
         if not vix_hist.empty:
             vix_current = vix_hist['Close'].iloc[-1]
@@ -1498,7 +1514,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         return _CHAIN_CACHE[symbol]
 
     try:
-        tkr = yf.Ticker(symbol)
+        tkr = yf.Ticker(symbol, session=_yf_session)
     except (ValueError, TypeError) as e:
         raise RuntimeError(f"Failed to initialize ticker {symbol}: {e}")
 
@@ -1847,7 +1863,7 @@ def get_historical_iv_crush(ticker: str, n_quarters: int = 8, iv_db_path: str = 
         # ------------------------------------------------------------------
         # Fetch earnings dates
         # ------------------------------------------------------------------
-        tkr = yf.Ticker(ticker)
+        tkr = yf.Ticker(ticker, session=_yf_session)
         earnings_dates = None
         try:
             ed = tkr.earnings_dates

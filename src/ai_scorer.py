@@ -34,12 +34,29 @@ logger = logging.getLogger(__name__)
 
 # ── Load .env automatically ────────────────────────────────────────────────────
 def _load_dotenv() -> None:
+    env_path = Path(__file__).resolve().parent.parent / ".env"
     try:
         from dotenv import load_dotenv
-        env_path = Path(__file__).resolve().parent.parent / ".env"
         load_dotenv(dotenv_path=env_path, override=False)
+        return
     except ImportError:
         pass
+    # Fallback: parse .env manually when python-dotenv is not installed
+    if env_path.is_file():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            # Strip inline comments (not inside quotes)
+            if "#" in value and not value.startswith(("'", '"')):
+                value = value[:value.index("#")]
+            value = value.strip().strip("'\"")
+            if key and not os.environ.get(key):
+                os.environ[key] = value
 
 _load_dotenv()
 
@@ -332,10 +349,12 @@ class AIScorer:
         for i, batch in enumerate(batches):
             logger.info("Scoring batch %d/%d (%d candidates)...", i + 1, len(batches), len(batch))
             results = self._score_batch_with_retry(batch, batch_num=i + 1)
-            # Write to cache
+            # Write to cache — skip default/fallback results so they get re-scored next run
             if self._cache:
                 cand_map = {c["_id"]: c for c in batch}
                 for r in results:
+                    if r.get("reasoning", "").startswith("Scoring unavailable"):
+                        continue
                     raw = cand_map.get(r.get("id", ""))
                     if raw:
                         try:

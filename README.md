@@ -48,7 +48,7 @@ The screener finds opportunities where all four forces converge. Consistency com
 ```bash
 git clone https://github.com/Ollie1o1/options.git
 cd options
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
@@ -60,6 +60,36 @@ The technical screener works out of the box — no API keys needed (uses Yahoo F
 ---
 
 ## Quick Start
+
+> **Important:** Always run from the project root directory (`cd options`).
+
+### Recommended (works every time)
+
+```bash
+# Activate the venv first, then run normally
+source venv/bin/activate
+python -m src.options_screener
+python ai_rank.py AAPL TSLA NVDA
+```
+
+### Auto-venv launchers (no activation needed)
+
+If you don't want to activate the venv every time, use these launchers — they detect the venv automatically and re-launch under it:
+
+```bash
+# Interactive screener (auto-activates venv)
+python3 run.py
+
+# AI-enhanced ranking (auto-activates venv)
+python3 ai_rank.py AAPL TSLA NVDA
+
+# Package-style entry point (auto-activates venv)
+python3 -m src
+```
+
+> **Why does this matter?** The project has ~30 dependencies (pandas, openai, rich, etc.) installed in the `venv/` directory. If you run `python3 -m src.options_screener` without activating the venv first, Python uses your system interpreter which doesn't have these packages — you'll get missing module errors, no colors in the AI table, and broken API calls. The launchers above handle this automatically.
+
+### All commands
 
 ```bash
 # Interactive technical screener (CLI)
@@ -84,13 +114,15 @@ python -m src.check_pnl
 python -m src.backtester AAPL SPY NVDA
 ```
 
+> Commands in this section assume the venv is activated. If not, either activate it (`source venv/bin/activate`) or use the auto-venv launchers above.
+
 ---
 
 ## The Technical Screener
 
 ### Scan Modes
 
-Launch with `python -m src.options_screener` and enter one of these commands at the prompt:
+Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (auto-venv) and enter one of these commands at the prompt:
 
 | Command | Mode | What it does |
 |---------|------|--------------|
@@ -106,10 +138,13 @@ Launch with `python -m src.options_screener` and enter one of these commands at 
 ### CLI Reference
 
 ```
-python -m src.options_screener [OPTIONS]
+python -m src.options_screener [OPTIONS]    # requires venv active
+python3 run.py [OPTIONS]                   # auto-activates venv
+python3 -m src [OPTIONS]                   # auto-activates venv
 
 Options:
   --no-color      Disable ANSI color output (useful for piping to a log file)
+  --no-ai         Skip AI analysis after scan
   --close-trades  Update the trade log with closing prices and realised P/L
   --ui            Launch the Streamlit web dashboard
   -h, --help      Show help and exit
@@ -235,7 +270,7 @@ To change model at any time, edit the `model` field in `src/config_ai.py`. The `
    ```
    See `.env.example` for the full template.
 
-3. That's it. The screener loads the key automatically via `python-dotenv`.
+3. That's it. The screener loads the key automatically from `.env` at startup (works with or without `python-dotenv` installed).
 
 > If you prefer Anthropic directly, set `ANTHROPIC_API_KEY=sk-ant-...` in `.env` and update `provider` + `api_key_env` in `src/config_ai.py`.
 
@@ -554,6 +589,7 @@ Key levers:
 
 ```
 options/
+├── run.py                    # Auto-venv launcher: python3 run.py (no activation needed)
 ├── ai_rank.py                # AI-enhanced entry point — runs screener + AI scoring
 ├── options_screener.py       # Thin wrapper for backward compatibility
 ├── backtest_screener.py      # Backtester entry point
@@ -564,6 +600,7 @@ options/
 ├── .env.example              # Template showing required env vars
 ├── README.md
 └── src/
+    ├── __main__.py           # Auto-venv launcher for python3 -m src
     ├── options_screener.py   # Core scan engine, report printing, spread/condor finders
     ├── cli_display.py        # Terminal display: per-pick detail, comparison table, report
     ├── data_fetching.py      # yfinance single-fetch, technical indicators, chain cache

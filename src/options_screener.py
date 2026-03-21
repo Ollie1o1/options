@@ -2027,9 +2027,11 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
         colored_prompt = fmt.colorize(prompt, fmt.Colors.BRIGHT_CYAN)
         if default is not None:
             colored_default = fmt.colorize(f"[{default}]", fmt.Colors.DIM)
-            val = input(f"{colored_prompt} {colored_default}: ").strip()
+            sys.stdout.write(f"{colored_prompt} {colored_default}: {fmt.Colors.RESET}")
         else:
-            val = input(f"{colored_prompt}: ").strip()
+            sys.stdout.write(f"{colored_prompt}: {fmt.Colors.RESET}")
+        sys.stdout.flush()
+        val = sys.stdin.readline().strip()
     else:
         sfx = f" [{default}]" if default is not None else ""
         val = input(f"{prompt}{sfx}: ").strip()
@@ -2415,7 +2417,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
                 _pbar = tqdm(
                     total=len(tickers), desc="  Fetching", unit="",
-                    leave=False, dynamic_ncols=True, bar_format=bar_fmt, file=sys.stderr,
+                    leave=False, dynamic_ncols=False, bar_format=bar_fmt, file=sys.stdout,
                 )
             else:
                 _pbar = None
@@ -2426,6 +2428,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                     _pbar.update(1)
             if _pbar is not None:
                 _pbar.close()
+                print(flush=True)  # clean line after bar clears
 
     # Phase 2 — Score each fetched result
     for symbol in tickers:

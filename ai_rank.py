@@ -22,9 +22,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import subprocess
 import sys
 import io
 import time
+
+# Auto-activate venv before importing any third-party packages
+_project_root = os.path.dirname(os.path.abspath(__file__))
+_venv_python = os.path.join(_project_root, "venv", "bin", "python")
+if (
+    os.path.isfile(_venv_python)
+    and sys.prefix == sys.base_prefix
+    and __name__ == "__main__"
+):
+    sys.exit(subprocess.call([_venv_python] + sys.argv, cwd=_project_root))
 
 import pandas as pd
 
