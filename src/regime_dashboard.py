@@ -42,12 +42,26 @@ def _c(text: str, color: str = "", bold: bool = False) -> str:
     return str(text)
 
 
+def _get_session():
+    """Return a timeout-aware session for yfinance calls."""
+    try:
+        from curl_cffi import requests as _cffi
+        s = _cffi.Session(impersonate="chrome")
+        s.timeout = 10
+        return s
+    except ImportError:
+        import requests as _req
+        s = _req.Session()
+        s.request = lambda *a, timeout=10, **kw: _req.Session.request(s, *a, timeout=timeout, **kw)
+        return s
+
+
 def _safe_last_price(ticker_sym: str) -> Optional[float]:
     """Fetch last price for a ticker, returning None on failure."""
     if not HAS_YF:
         return None
     try:
-        tkr = yf.Ticker(ticker_sym)
+        tkr = yf.Ticker(ticker_sym, session=_get_session())
         p = getattr(tkr.fast_info, "last_price", None)
         if p and float(p) > 0:
             return float(p)
@@ -61,7 +75,7 @@ def _safe_hist(ticker_sym: str, period: str = "2mo") -> Optional["pd.Series"]:
     if not HAS_YF or not HAS_PD:
         return None
     try:
-        tkr = yf.Ticker(ticker_sym)
+        tkr = yf.Ticker(ticker_sym, session=_get_session())
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             hist = tkr.history(period=period)
@@ -136,7 +150,7 @@ def fetch_market_regime() -> Dict[str, Any]:
         # SPY aggregate put/call ratio from options chain
         if HAS_YF and HAS_PD:
             try:
-                spy_tkr = yf.Ticker("SPY")
+                spy_tkr = yf.Ticker("SPY", session=_get_session())
                 exps = spy_tkr.options
                 if exps:
                     with warnings.catch_warnings():

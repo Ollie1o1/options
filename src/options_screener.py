@@ -3101,9 +3101,11 @@ def main():
     # ── Regime Dashboard ─────────────────────────────────────────────────────
     try:
         from .regime_dashboard import print_regime_dashboard
+        print("  Loading market data...", end="", flush=True)
         print_regime_dashboard(WIDTH)
+        print("\r" + " " * 30, end="\r")  # clear loading line if dashboard printed nothing
     except Exception:
-        pass
+        print()  # newline after "Loading..." if dashboard fails
 
     # ── Market Hours Check ───────────────────────────────────────────────────
     is_open, mkt_msg = _check_market_hours()
@@ -3118,7 +3120,25 @@ def main():
 
     # Initialize PaperManager and silently auto-close any TP/SL hits
     pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
-    pm.update_positions()
+    try:
+        import threading
+        _update_done = threading.Event()
+        _update_err = [None]
+        def _bg_update():
+            try:
+                pm.update_positions()
+            except Exception as e:
+                _update_err[0] = e
+            finally:
+                _update_done.set()
+        _t = threading.Thread(target=_bg_update, daemon=True)
+        _t.start()
+        if not _update_done.wait(timeout=15):
+            print(fmt.format_warning("Portfolio update timed out — skipping live price refresh") if HAS_ENHANCED_CLI else "⚠ Portfolio update timed out")
+        elif _update_err[0]:
+            pass  # silently ignore update errors
+    except Exception:
+        pass
 
     # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
     _wl = load_watchlist()
