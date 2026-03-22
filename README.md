@@ -147,8 +147,11 @@ Options:
   --no-ai         Skip AI analysis after scan
   --close-trades  Update the trade log with closing prices and realised P/L
   --ui            Launch the Streamlit web dashboard
-  --surface       Show 3D ASCII P&L risk surface for the top pick (single-stock mode)
-  -h, --help      Show help and exit
+  --surface              Show 3D P&L risk surface for the top pick (single-stock mode)
+  --surface-mode M       Render mode: braille (default, hi-res Unicode) or ascii
+  --surface-greek G      Show greek sensitivity surface: delta, gamma, vega, theta
+  --no-contours          Disable contour lines on surface
+  -h, --help             Show help and exit
   --version       Show version string and exit
 ```
 
@@ -180,6 +183,22 @@ The CLI renders a fully colour-coded, responsive interface that adapts to your t
     1  AAPL  $215C       04/17   0.82   62%  2.1x   65%  $  +45  5.0%  CHEAP
     2  MSFT  $400P       04/17   0.71   55%  1.8x   72%  $  +30  8.0%   RICH
 ```
+
+**3D Risk Surface** — high-resolution braille or ASCII surface (activated with `--surface`):
+```
+  3D P&L Risk Surface  —  AAPL $215 CALL
+  Price shock: -25% <- -> +25%   |   IV shock: -50% <- -> +50%
+  P&L range: $-4.50  to  $+18.20
+
+  [Braille-rendered isometric 3D surface with truecolor gradient]
+  [Contour lines: white = breakeven, yellow = iso-value levels]
+
+  Legend: ████████████████████████████████  $-5 to $+18
+```
+
+Supports P&L and Greek sensitivity surfaces (`--surface-greek delta|gamma|vega|theta`).
+Uses Unicode braille characters (2x4 dots per character) for ~8x pixel density vs ASCII.
+Falls back to ASCII shading automatically if the terminal doesn't support Unicode.
 
 **Stress test** — 7×3 scenario matrix with full Black-Scholes repricing:
 ```
@@ -628,7 +647,7 @@ options/
     ├── calc_expected_move.py # Implied expected move calculator
     ├── oi_snapshot.py        # OI change tracking between runs
     ├── watchlist.py          # Watchlist management (ADD/REMOVE commands)
-    ├── visual_surface.py     # 3D ASCII risk surface (P&L vs price shock × IV shock)
+    ├── visual_surface.py     # 3D risk surface: braille/ASCII, P&L + Greek surfaces, contours
     ├── visualize_results.py  # Matplotlib/Plotly charts for scan results
     ├── dashboard.py          # Streamlit web interface
     ├── ai_scorer.py          # Two-pass AI scoring with retry, fallback, narrative context
@@ -672,7 +691,7 @@ options/
 - [x] VIX regime weight multipliers for scoring and AI weight
 - [x] Historical IV crush estimation per ticker
 - [x] Config validation at module load
-- [x] 3D ASCII risk surface — full Black-Scholes repricing over price × IV shock grid
+- [x] 3D risk surface — braille hi-res + ASCII fallback, truecolor gradient, Greek surfaces, contour lines
 - [ ] Real-time alerts (email / SMS)
 - [ ] Multi-leg spread support in paper manager
 - [ ] Backtesting UI improvements

@@ -505,6 +505,19 @@ def format_delta(delta: float, is_call: bool = True) -> str:
         return colorize(formatted, Colors.YELLOW)
 
 
+def supports_truecolor() -> bool:
+    """Detect 24-bit (truecolor) terminal support via COLORTERM env variable."""
+    if not supports_color():
+        return False
+    ct = os.getenv('COLORTERM', '')
+    return ct in ('truecolor', '24bit')
+
+
+def rgb_fg(r: int, g: int, b: int) -> str:
+    """Return ANSI escape sequence for 24-bit foreground color."""
+    return f'\033[38;2;{r};{g};{b}m'
+
+
 __all__ = [
     'Colors',
     'BoxChars',
@@ -530,4 +543,6 @@ __all__ = [
     'format_ev',
     'format_delta',
     'format_iv_rank_bar',
+    'supports_truecolor',
+    'rgb_fg',
 ]

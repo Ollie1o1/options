@@ -940,7 +940,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
     print()
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
@@ -1213,10 +1213,12 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
             print("")  # Newline
 
-    # 3D ASCII risk surface for single-stock top pick
+    # 3D risk surface for single-stock top pick
     if show_surface and HAS_RISK_SURFACE and not is_multi and not df_picks.empty:
         top_row = df_picks.iloc[0]
-        print_risk_surface(top_row, underlying_price, rfr, WIDTH)
+        print_risk_surface(top_row, underlying_price, rfr, WIDTH,
+                           mode=surface_mode, surface_type=surface_type,
+                           show_contours=show_contours)
 
     # Save OI snapshot for next run
     save_oi_snapshot(df_picks)
