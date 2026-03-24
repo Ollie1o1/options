@@ -17,6 +17,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+try:
+    from .data_fetching import get_risk_free_rate as _get_rfr
+    _HAS_RFR = True
+except ImportError:
+    _HAS_RFR = False
+
 # Realistic execution cost constants (deprecated fallbacks — use config.json paper_trading section)
 COMMISSION_PER_CONTRACT = 0.65   # $ per contract per leg (retail ~$0.65, e.g. Tastytrade/TDA)
 SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half spread)
@@ -78,8 +84,10 @@ class PaperManager:
         self._init_db()
 
     def _get_connection(self):
-        """Returns a new sqlite3 connection."""
-        return sqlite3.connect(self.db_path)
+        """Returns a new sqlite3 connection with WAL mode for concurrent access."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
 
     def _init_db(self):
         """Creates the trades table if it doesn't exist."""
@@ -299,6 +307,61 @@ class PaperManager:
             except TimeoutError:
                 logger.warning("Spot price fetch timed out after 30s — proceeding with partial data")
 
+        # Pre-build symbol list and parallel-fetch option prices for non-spread positions
+        _option_fetch_tasks: List[Tuple[int, str, str, str, float, str]] = []
+        for row in open_trades:
+            strategy_name = row["strategy_name"] or ""
+            if strategy_name.startswith("SPREAD:"):
+                continue
+            if row["ticker"] not in spot_cache:
+                continue
+            symbol = self._get_option_symbol(row["ticker"], row["expiration"], row["strike"], row["type"])
+            if symbol:
+                _option_fetch_tasks.append((row["entry_id"], symbol, row["ticker"], row["expiration"], row["strike"], row["type"]))
+
+        option_price_cache: Dict[int, float] = {}
+
+        def _fetch_option_price(task_tuple):
+            entry_id, symbol, ticker, expiration, strike, option_type = task_tuple
+            try:
+                tkr = yf.Ticker(symbol)
+                price = None
+                try:
+                    price = getattr(tkr.fast_info, "last_price", None)
+                except Exception:
+                    pass
+                if price is None or np.isnan(price) or price <= 0:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        hist = tkr.history(period="1d")
+                    if not hist.empty:
+                        price = float(hist["Close"].iloc[-1])
+                if price is None or np.isnan(price) or price <= 0:
+                    try:
+                        from .utils import american_price
+                        S = spot_cache.get(ticker)
+                        if S:
+                            T = max((datetime.strptime(expiration[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1/365)
+                            _rfr = _get_rfr() if _HAS_RFR else 0.045
+                            price = american_price(option_type, float(S), float(strike), T, _rfr, 0.30)
+                    except Exception:
+                        pass
+                if price is not None and not np.isnan(price) and price > 0:
+                    return entry_id, float(price)
+            except Exception as exc:
+                logger.debug("Option price fetch failed for %s: %s", symbol, exc)
+            return entry_id, None
+
+        if _option_fetch_tasks:
+            _opt_workers = min(len(_option_fetch_tasks), 8)
+            with ThreadPoolExecutor(max_workers=_opt_workers) as ex:
+                try:
+                    for eid, price in ex.map(_fetch_option_price, _option_fetch_tasks, timeout=30):
+                        if price is not None:
+                            option_price_cache[eid] = price
+                except TimeoutError:
+                    logger.warning("Option price fetch timed out — proceeding with partial data")
+
         for row in open_trades:
             entry_id    = row["entry_id"]
             ticker      = row["ticker"]
@@ -374,76 +437,47 @@ class PaperManager:
                     logger.debug("Spread P&L calc failed for %s: %s", ticker, exc)
                 continue
 
-            symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
-            if not symbol:
-                continue
+            # Use pre-fetched option price from parallel batch
+            current_price = option_price_cache.get(entry_id)
 
-            try:
-                tkr = yf.Ticker(symbol)
-                current_price = None
+            if current_price is not None:
+                # Raw market P&L — flip sign for short/credit positions
+                # (seller profits when option loses value)
+                is_short = _is_short_position(row["strategy_name"] or "")
+                if is_short:
+                    pnl_raw = (entry_price - current_price) / entry_price
+                else:
+                    pnl_raw = (current_price - entry_price) / entry_price
+                hit_tp = pnl_raw >= tp
+                hit_sl = pnl_raw <= sl
+                # Time exit needs at least 3 days held to avoid closing freshly-logged trades
+                hit_time = (0 < dte <= time_exit_dte) and days_held >= 3
 
-                try:
-                    current_price = getattr(tkr.fast_info, "last_price", None)
-                except Exception as exc:
-                    logger.debug("fast_info lookup failed for %s: %s", symbol, exc)
-
-                if current_price is None or np.isnan(current_price) or current_price <= 0:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        hist = tkr.history(period="1d")
-                    if not hist.empty:
-                        current_price = float(hist["Close"].iloc[-1])
-
-                if current_price is None or np.isnan(current_price) or current_price <= 0:
-                    try:
-                        from .utils import american_price
-                        S = spot_cache.get(ticker)
-                        if S:
-                            T = max((datetime.strptime(expiration[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1/365)
-                            current_price = american_price(option_type, float(S), float(strike), T, 0.045, 0.30)
-                    except Exception as exc:
-                        logger.debug("American price fallback failed for %s: %s", ticker, exc)
-
-                if current_price is not None and not np.isnan(current_price) and current_price > 0:
-                    # Raw market P&L — flip sign for short/credit positions
-                    # (seller profits when option loses value)
-                    is_short = _is_short_position(row["strategy_name"] or "")
-                    if is_short:
-                        pnl_raw = (entry_price - current_price) / entry_price
+                if hit_tp or hit_sl or hit_time:
+                    if hit_tp:
+                        reason = "Take Profit"
+                    elif hit_sl:
+                        reason = "Stop Loss"
                     else:
-                        pnl_raw = (current_price - entry_price) / entry_price
-                    hit_tp = pnl_raw >= tp
-                    hit_sl = pnl_raw <= sl
-                    # Time exit needs at least 3 days held to avoid closing freshly-logged trades
-                    hit_time = (0 < dte <= time_exit_dte) and days_held >= 3
+                        reason = f"Time Exit ({dte}d to expiry)"
 
-                    if hit_tp or hit_sl or hit_time:
-                        if hit_tp:
-                            reason = "Take Profit"
-                        elif hit_sl:
-                            reason = "Stop Loss"
-                        else:
-                            reason = f"Time Exit ({dte}d to expiry)"
+                    # Realistic P&L: proportional slippage (30% of bid-ask) + commissions
+                    _slip = self._get_spread_slippage(ticker, expiration, strike, option_type, entry_price)
+                    _friction = (2 * _slip) + (2 * self._commission_per_contract / 100.0)
+                    friction_fraction = _friction / entry_price if entry_price > 0 else 0.0
+                    pnl_realistic = pnl_raw - friction_fraction
 
-                        # Realistic P&L: proportional slippage (30% of bid-ask) + commissions
-                        _slip = self._get_spread_slippage(ticker, expiration, strike, option_type, entry_price)
-                        _friction = (2 * _slip) + (2 * self._commission_per_contract / 100.0)
-                        friction_fraction = _friction / entry_price if entry_price > 0 else 0.0
-                        pnl_realistic = pnl_raw - friction_fraction
-
-                        closed_this_run.append(
-                            f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} "
-                            f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
-                        )
-                        update_query = """
-                        UPDATE trades
-                        SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?
-                        WHERE entry_id=?
-                        """
-                        with self._get_connection() as conn:
-                            conn.execute(update_query, (current_price, now, pnl_realistic, entry_id))
-            except Exception as exc:
-                logger.warning("Position update failed for %s %s $%.0f: %s", ticker, option_type, strike, exc)
+                    closed_this_run.append(
+                        f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} "
+                        f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
+                    )
+                    update_query = """
+                    UPDATE trades
+                    SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?
+                    WHERE entry_id=?
+                    """
+                    with self._get_connection() as conn:
+                        conn.execute(update_query, (current_price, now, pnl_realistic, entry_id))
 
         if closed_this_run:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")

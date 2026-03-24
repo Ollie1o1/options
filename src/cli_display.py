@@ -889,7 +889,7 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
     print()
 
 
-def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> None:
+def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_by: str = "quality_score", account_size: float = 0.0) -> None:
     """Print a compact side-by-side comparison table of top picks per DTE bucket."""
     if df_top.empty or not HAS_ENHANCED_CLI:
         return
@@ -897,19 +897,42 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
     width = get_display_width()
     is_seller = (mode == "Premium Selling")
 
+    _sort_map = {
+        "q": "quality_score", "quality_score": "quality_score",
+        "i": "iv_percentile_30", "iv": "iv_percentile_30",
+        "s": "spread_pct", "spread": "spread_pct",
+        "d": "T_years", "dte": "T_years",
+        "e": "ev_per_contract", "ev": "ev_per_contract",
+    }
+    sort_col = _sort_map.get(sort_by.lower(), "quality_score")
+    ascending = sort_col == "spread_pct"  # lower spread is better
+
     # Select top 5 per DTE bucket
     df_top = df_top.copy()
     df_top["_dte"] = (df_top["T_years"] * 365.0).round(0) if "T_years" in df_top.columns else 0
 
-    rows = df_top.sort_values("quality_score", ascending=False).head(10)
+    if sort_col in df_top.columns:
+        rows = df_top.sort_values(sort_col, ascending=ascending).head(10)
+    else:
+        rows = df_top.sort_values("quality_score", ascending=False).head(10)
     if rows.empty:
         return
 
+    _sort_label = {"quality_score": "Score", "iv_percentile_30": "IV%", "spread_pct": "Spread", "T_years": "DTE", "ev_per_contract": "EV"}.get(sort_col, "Score")
     print()
-    hdr = "  QUICK COMPARISON  —  Top Picks"
+    hdr = f"  QUICK COMPARISON  —  Top Picks (sorted: {_sort_label})"
     print(fmt.colorize(hdr, fmt.Colors.BRIGHT_CYAN, bold=True))
     sep_line = "  " + "\u2500" * (width - 4)
     print(fmt.colorize(sep_line, fmt.Colors.DIM))
+
+    # Position sizing import
+    _has_sizing = False
+    if account_size > 0:
+        try:
+            from .trade_analysis import get_position_sizing_recommendation
+            _has_sizing = True
+        except ImportError:
+            pass
 
     # Table header
     col_hdr = (
@@ -918,6 +941,8 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
     )
     if "iv_surface_residual" in rows.columns:
         col_hdr += f" {'SVI':>6}"
+    if _has_sizing:
+        col_hdr += f" {'Qty':>4}"
     print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
     print(fmt.colorize(sep_line, fmt.Colors.DIM))
 
@@ -961,10 +986,16 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
                 line += f" {fmt.colorize(tag_padded, tag_color)}"
             else:
                 line += f" {'':>6}"
+        if _has_sizing:
+            sizing = get_position_sizing_recommendation(r, account_size)
+            qty = sizing.get("contracts", 0)
+            line += f" {qty:>4}"
 
         print(line)
 
     print(fmt.colorize(sep_line, fmt.Colors.DIM))
+    sort_hint = "  Sort: [Q]uality  [I]V Rank  [S]pread  [D]TE  [E]V"
+    print(fmt.colorize(sort_hint, fmt.Colors.DIM))
     print()
 
 
@@ -1041,7 +1072,23 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     total_picks = len(df_picks)
 
     # ── Comparison table FIRST for quick scanning ────────────────────────────
-    print_comparison_table(df_picks, mode)
+    _acct = config.get("_account_size", 0) if config else 0
+    print_comparison_table(df_picks, mode, account_size=_acct)
+
+    # Re-sort prompt (interactive, skipped in non-TTY)
+    if HAS_ENHANCED_CLI and len(df_picks) > 1 and sys.stdin.isatty():
+        while True:
+            try:
+                _sort_choice = input(fmt.colorize(
+                    "  Re-sort? Enter key (q/i/s/d/e) or Enter to continue > ",
+                    fmt.Colors.DIM
+                )).strip().lower()
+                if _sort_choice in ("q", "i", "s", "d", "e"):
+                    print_comparison_table(df_picks, mode, sort_by=_sort_choice, account_size=_acct)
+                else:
+                    break
+            except (EOFError, KeyboardInterrupt):
+                break
 
     # ── Order ticket for #1 pick ─────────────────────────────────────────────
     if HAS_ENHANCED_CLI and not df_picks.empty:
@@ -1051,7 +1098,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
     # ── Prompt before detailed per-pick output ───────────────────────────────
     _show_details = True
-    if HAS_ENHANCED_CLI and len(df_picks) > 3:
+    if HAS_ENHANCED_CLI and len(df_picks) > 3 and sys.stdin.isatty():
         try:
             _detail_choice = input(fmt.colorize(
                 "\n  Press Enter for detailed analysis, or 'q' to skip > ",

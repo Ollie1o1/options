@@ -111,6 +111,7 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["iv_surface_residual"] = 0.0
     df["iv_surface_confidence"] = 0.0
+    df["iv_surface_fitted"] = False
 
     required = {"strike", "underlying", "impliedVolatility", "T_years", "expiration"}
     if not required.issubset(df.columns):
@@ -142,6 +143,12 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
 
         params, fit_quality = _fit_single_expiry(k, iv_valid, T)
         if params is None:
+            import logging
+            logging.getLogger(__name__).info(
+                "SVI fit failed for expiry %s (%d valid points, T=%.3f) — residuals set to NaN",
+                exp, valid.sum(), T,
+            )
+            df.loc[idx, "iv_surface_residual"] = np.nan
             continue
 
         a, b, rho, sigma, m = params
@@ -156,6 +163,7 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
 
         df.loc[idx, "iv_surface_residual"] = residuals
         df.loc[idx, "iv_surface_confidence"] = fit_quality
+        df.loc[idx, "iv_surface_fitted"] = True
 
     return df
 

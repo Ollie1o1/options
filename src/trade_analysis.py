@@ -37,10 +37,10 @@ def generate_trade_thesis(row: pd.Series) -> str:
         reasons.append("IV suppressed - volatility expansion play")
 
     if row.get('Unusual_Whale', False):
-        reasons.append("Unusual flow detected 🐋")
+        reasons.append("Unusual flow detected [WHALE]")
 
     if row.get('squeeze_play', False):
-        reasons.append("Gamma squeeze setup 🔥")
+        reasons.append("Gamma squeeze setup [SQUEEZE]")
 
     if row.get('Trend_Aligned', False):
         reasons.append("Trend aligned")
@@ -585,14 +585,14 @@ def format_risk_alerts(row: pd.Series) -> str:
     for severity, text in alerts:
         if HAS_FMT and fmt:
             if severity == 'red':
-                parts.append(f"\U0001f534 {fmt.colorize(text, fmt.Colors.BRIGHT_RED, bold=True)}")
+                parts.append(f"[!] {fmt.colorize(text, fmt.Colors.BRIGHT_RED, bold=True)}")
             elif severity == 'yellow':
-                parts.append(f"\U0001f7e0 {fmt.colorize(text, fmt.Colors.YELLOW)}")
+                parts.append(f"[*] {fmt.colorize(text, fmt.Colors.YELLOW)}")
             else:
-                parts.append(f"\U0001f538 {fmt.colorize(text, fmt.Colors.DIM)}")
+                parts.append(f"[-] {fmt.colorize(text, fmt.Colors.DIM)}")
         else:
-            emoji = "\U0001f534" if severity == 'red' else ("\U0001f7e0" if severity == 'yellow' else "\U0001f538")
-            parts.append(f"{emoji} {text}")
+            marker = "[!]" if severity == 'red' else ("[*]" if severity == 'yellow' else "[-]")
+            parts.append(f"{marker} {text}")
 
     alert_body = "  ".join(parts)
     if HAS_FMT and fmt:

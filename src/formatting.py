@@ -137,6 +137,16 @@ def set_color_enabled(enabled: bool):
     _COLOR_ENABLED = enabled
 
 
+def format_missing(width: int = 0) -> str:
+    """Return a consistent styled 'N/A' string for missing data."""
+    raw = "N/A"
+    if width > 0:
+        raw = f"{raw:>{width}}"
+    if supports_color():
+        return colorize(raw, Colors.DIM)
+    return raw
+
+
 def colorize(text: str, color: str, bold: bool = False) -> str:
     """
     Add color to text if terminal supports it.

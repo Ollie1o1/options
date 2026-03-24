@@ -38,6 +38,12 @@ try:
 except ImportError:
     HAS_STRESS = False
 
+try:
+    from .data_fetching import get_risk_free_rate as _get_rfr
+    HAS_RFR = True
+except ImportError:
+    HAS_RFR = False
+
 DB_PATH = "paper_trades.db"
 
 
@@ -62,8 +68,8 @@ def _dte(expiration: str) -> int:
         return 0
 
 
-def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str) -> Optional[float]:
-    """Fetch live option price via OCC symbol. Returns None on failure."""
+def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str, _retries: int = 2) -> Optional[float]:
+    """Fetch live option price via OCC symbol with retry. Returns None on failure."""
     if not HAS_YF:
         return None
     try:
@@ -92,7 +98,10 @@ def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str
             if p > 0:
                 return p
     except Exception:
-        pass
+        if _retries > 0:
+            import time
+            time.sleep(0.5)
+            return _fetch_live_price(ticker, expiration, strike, opt_type, _retries - 1)
     return None
 
 
@@ -237,7 +246,7 @@ def _print_portfolio_greeks(open_trades: list, width: int):
         except Exception:
             pass
 
-    rfr = 0.045  # ~current risk-free rate
+    rfr = _get_rfr() if HAS_RFR else 0.045
     now_dt = datetime.now()
     net_delta = 0.0
     net_gamma_dollar = 0.0   # $ P&L per 1% stock move across the book
@@ -254,7 +263,7 @@ def _print_portfolio_greeks(open_trades: list, width: int):
         opt_type = r["type"].lower()
         try:
             exp_dt = datetime.strptime(r["expiration"][:10], "%Y-%m-%d")
-            T = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / 365)
+            T = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / (365 * 24))  # floor at 1 hour
         except Exception:
             continue
 
@@ -422,6 +431,18 @@ def view_portfolio():
         total_cost_usd  = 0.0
         fetched_count   = 0
 
+        # Parallel-fetch all live option prices up front
+        from concurrent.futures import ThreadPoolExecutor
+        _live_tasks = [(r["ticker"], r["expiration"][:10], float(r["strike"]), r["type"]) for r in open_trades]
+        _live_prices: dict = {}
+        def _fetch_one(args):
+            return args, _fetch_live_price(*args)
+        if _live_tasks:
+            _workers = min(len(_live_tasks), 8)
+            with ThreadPoolExecutor(max_workers=_workers) as _ex:
+                for key, price in _ex.map(_fetch_one, _live_tasks):
+                    _live_prices[key] = price
+
         for r in open_trades:
             ticker      = r["ticker"]
             opt_type    = r["type"].upper()
@@ -438,7 +459,7 @@ def view_portfolio():
                 days_held = 0
             held_str = f"{days_held}d"
 
-            live_price = _fetch_live_price(ticker, expiry, strike, r["type"])
+            live_price = _live_prices.get((ticker, expiry, strike, r["type"]))
 
             # Type column
             if HAS_FMT and fmt:
@@ -494,8 +515,8 @@ def view_portfolio():
                 try:
                     exp_dt = datetime.strptime(expiry, "%Y-%m-%d")
                     now_dt = datetime.now()
-                    T_now = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / 365)
-                    rfr = 0.045
+                    T_now = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / (365 * 24))  # floor at 1 hour
+                    rfr = _get_rfr() if HAS_RFR else 0.045
                     sigma = 0.25
                     try:
                         stored_iv = r["entry_iv"] if "entry_iv" in r.keys() else None

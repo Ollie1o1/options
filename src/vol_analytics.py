@@ -41,6 +41,12 @@ try:
 except ImportError:
     HAS_UTILS = False
 
+try:
+    from .data_fetching import get_risk_free_rate as _get_rfr
+    HAS_RFR = True
+except ImportError:
+    HAS_RFR = False
+
 
 def _c(text: str, color: str = "", bold: bool = False) -> str:
     """Color helper that degrades gracefully."""
@@ -314,7 +320,7 @@ def compute_iv_surface(ticker: str) -> Optional["pd.DataFrame"]:
             return None
 
         today = date.today()
-        rfr = 0.045
+        rfr = _get_rfr() if HAS_RFR else 0.045
 
         # Fetch expirations concurrently (limit to first 10)
         target_exps = [e for e in expirations[:10]]

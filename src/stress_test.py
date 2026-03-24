@@ -43,6 +43,12 @@ try:
 except ImportError:
     HAS_UTILS = False
 
+try:
+    from .data_fetching import get_risk_free_rate as _get_rfr
+    HAS_RFR = True
+except ImportError:
+    HAS_RFR = False
+
 
 # Stock move and IV shock scenario axes
 STOCK_MOVES = [-0.20, -0.10, -0.05, 0.00, +0.05, +0.10, +0.20]
@@ -75,13 +81,16 @@ def _fetch_stock_prices(tickers: List[str]) -> Dict[str, float]:
         return prices
 
     def _fetch_one(ticker: str):
-        try:
-            tkr = yf.Ticker(ticker)
-            p = getattr(tkr.fast_info, "last_price", None)
-            if p and float(p) > 0:
-                return ticker, float(p)
-        except Exception:
-            pass
+        import time as _time
+        for attempt in range(3):
+            try:
+                tkr = yf.Ticker(ticker)
+                p = getattr(tkr.fast_info, "last_price", None)
+                if p and float(p) > 0:
+                    return ticker, float(p)
+            except Exception:
+                if attempt < 2:
+                    _time.sleep(0.5 * (attempt + 1))
         return ticker, None
 
     with ThreadPoolExecutor(max_workers=min(len(set(tickers)), 8)) as executor:
@@ -112,7 +121,7 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
         tickers = [r["ticker"] for r in open_trades]
         stock_prices = _fetch_stock_prices(tickers)
 
-    rfr = 0.045
+    rfr = _get_rfr() if HAS_RFR else 0.045
     now_dt = datetime.now()
     result = []
 
@@ -134,7 +143,7 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
             except Exception:
                 dte_days = 30  # fallback
 
-            T = max(dte_days / 365.0, 1.0 / 365)
+            T = max(dte_days / 365.0, 1.0 / (365 * 24))  # floor at 1 hour, not 1 day
 
             # Use stored entry IV if available; fall back to 25%
             sigma = 0.25
@@ -235,7 +244,7 @@ def run_stress_test(
                     sigma = pos.get("sigma", 0.25)
                     T = pos.get("T", 30.0 / 365)
                     q = pos.get("div_yield", 0.0)
-                    rfr_val = 0.045
+                    rfr_val = _get_rfr() if HAS_RFR else 0.045
 
                     S_new = S * (1.0 + dS_pct)
                     IV_new = max(sigma + dIV, 0.01)

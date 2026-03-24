@@ -20,6 +20,7 @@ def monte_carlo_pop(
     jump_intensity: float = 2.0,
     jump_mean: float = -0.02,
     jump_vol: float = 0.04,
+    is_short: bool = False,
 ) -> Tuple[Optional[float], Optional[float]]:
     """
     Calculate Probability of Profit (PoP) and Probability of Touch (PoT) using
@@ -28,6 +29,10 @@ def monte_carlo_pop(
     Jump diffusion captures the fat tails and negative skew observed in real equity
     returns, producing more accurate PoP estimates than plain GBM — particularly for
     OTM options where tail risk dominates.
+
+    When is_short=True, the position is a credit/premium-selling trade:
+    the seller profits when the option's intrinsic value at expiry is less than
+    the premium collected.
 
     Default jump parameters (calibrated to US equity average):
         jump_intensity = 2.0   ~2 significant jumps per year
@@ -67,14 +72,25 @@ def monte_carlo_pop(
 
         final_prices = prices[:, -1]
 
-        if option_type.lower() == "call":
-            breakeven = K + premium
-            profitable = final_prices > breakeven
-            touched = np.any(prices >= K, axis=1)
+        if is_short:
+            # Short/credit position: seller profits when intrinsic < premium
+            if option_type.lower() == "call":
+                payoff = np.maximum(final_prices - K, 0)
+                touched = np.any(prices >= K, axis=1)
+            else:
+                payoff = np.maximum(K - final_prices, 0)
+                touched = np.any(prices <= K, axis=1)
+            profitable = payoff < premium
         else:
-            breakeven = K - premium
-            profitable = final_prices < breakeven
-            touched = np.any(prices <= K, axis=1)
+            # Long/debit position: buyer profits when past breakeven
+            if option_type.lower() == "call":
+                breakeven = K + premium
+                profitable = final_prices > breakeven
+                touched = np.any(prices >= K, axis=1)
+            else:
+                breakeven = K - premium
+                profitable = final_prices < breakeven
+                touched = np.any(prices <= K, axis=1)
 
         return float(np.mean(profitable)), float(np.mean(touched))
 

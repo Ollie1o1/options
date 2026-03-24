@@ -821,8 +821,10 @@ def calculate_metrics(
     # Monte Carlo
     if HAS_SIMULATION:
         n_sims = config.get("monte_carlo_simulations", 10000)
+        _short_modes = {"Premium Selling", "Credit Spreads", "Iron Condor"}
+        _is_short_mode = mode in _short_modes
         def _calc_mc_pop(row):
-            pop_sim, pot_sim = monte_carlo_pop(S=safe_float(row["underlying"]), K=safe_float(row["strike"]), T=safe_float(row["T_years"]), sigma=safe_float(row["impliedVolatility"]), r=risk_free_rate, premium=safe_float(row["premium"]), option_type=row["type"], n_simulations=n_sims)
+            pop_sim, pot_sim = monte_carlo_pop(S=safe_float(row["underlying"]), K=safe_float(row["strike"]), T=safe_float(row["T_years"]), sigma=safe_float(row["impliedVolatility"]), r=risk_free_rate, premium=safe_float(row["premium"]), option_type=row["type"], n_simulations=n_sims, is_short=_is_short_mode)
             return pd.Series({"pop_sim": pop_sim, "pot_sim": pot_sim})
         mc_res = df.apply(_calc_mc_pop, axis=1)
         df["pop_sim"], df["pot_sim"] = mc_res["pop_sim"], mc_res["pot_sim"]
@@ -952,8 +954,9 @@ def calculate_metrics(
     except Exception as _svi_exc:
         _SCAN_WARNINGS[0] += 1
         logging.getLogger(__name__).debug("SVI surface fit failed: %s", _svi_exc)
-        df["iv_surface_residual"] = 0.0
+        df["iv_surface_residual"] = np.nan
         df["iv_surface_confidence"] = 0.0
+        df["iv_surface_fitted"] = False
 
     # NaN gate: drop contracts where ALL key columns are NaN (no usable data)
     _nan_key_cols = ["impliedVolatility", "volume", "openInterest"]
@@ -1300,13 +1303,12 @@ def calculate_scores(
         except Exception:
             crush_data = {}
         avg_crush = crush_data.get("avg_crush", 0.25)
+        # Continuous scaling: penalty proportional to crush magnitude
         # Buyers: high crush = bigger penalty. Sellers: high crush = opportunity
-        if avg_crush > 0.40:
-            _earn_penalty = -0.15 if not is_seller else 0.05
-        elif avg_crush > 0.25:
-            _earn_penalty = -0.08 if not is_seller else 0.03
+        if is_seller:
+            _earn_penalty = max(0.01, min(0.08, avg_crush * 0.15))
         else:
-            _earn_penalty = -0.03 if not is_seller else 0.01
+            _earn_penalty = max(-0.15, min(-0.02, -0.05 * (avg_crush / 0.20)))
         df.loc[_earn_nearby_mask, "quality_score"] += _earn_penalty
         # Store crush info for thesis display
         df.loc[_earn_nearby_mask, "avg_iv_crush"] = avg_crush
@@ -1392,7 +1394,7 @@ def calculate_scores(
             _pen_val = float(_spread_penalty.loc[_idx])
             df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + f" -spread({_pen_val:.2f})"
 
-    df["quality_score"] = df["quality_score"].clip(0, 1)
+    df["quality_score"] = df["quality_score"].fillna(0.0).clip(0, 1)
 
     # Earnings IV crush penalty: reduce score for earnings plays where post-event HV will be lower
     if "predicted_iv_crush" in df.columns and "Earnings Play" in df.columns:
@@ -2066,6 +2068,9 @@ def log_picks_json(logger: logging.Logger, picks_df: pd.DataFrame, context: Dict
 
 
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
+    # Non-TTY: return default immediately to avoid hanging in pipes/CI
+    if not sys.stdin.isatty() and default is not None:
+        return default
     if HAS_ENHANCED_CLI:
         colored_prompt = fmt.colorize(prompt, fmt.Colors.BRIGHT_CYAN)
         if default is not None:
@@ -2863,6 +2868,23 @@ def _check_market_hours() -> tuple:
     weekday = now_et.weekday()  # 0=Mon … 6=Sun
     hhmm = now_et.hour * 100 + now_et.minute
     time_str = now_et.strftime("%H:%M ET")
+    date_str = now_et.strftime("%Y-%m-%d")
+
+    # US market holidays (NYSE/CBOE) — update annually
+    _US_MARKET_HOLIDAYS_2026 = {
+        "2026-01-01",  # New Year's Day
+        "2026-01-19",  # MLK Day
+        "2026-02-16",  # Presidents Day
+        "2026-04-03",  # Good Friday
+        "2026-05-25",  # Memorial Day
+        "2026-06-19",  # Juneteenth
+        "2026-07-03",  # Independence Day (observed)
+        "2026-09-07",  # Labor Day
+        "2026-11-26",  # Thanksgiving
+        "2026-12-25",  # Christmas
+    }
+    if date_str in _US_MARKET_HOLIDAYS_2026:
+        return False, f"Markets closed — US market holiday ({time_str}). Data is stale."
 
     if weekday >= 5:
         day_name = "Saturday" if weekday == 5 else "Sunday"
@@ -2990,6 +3012,9 @@ def main():
     parser.add_argument("--surface-mode", choices=["ascii", "braille"], default="braille", help="Surface render mode (default: braille)")
     parser.add_argument("--surface-greek", choices=["delta", "gamma", "vega", "theta"], default=None, help="Show greek sensitivity surface (implies --surface)")
     parser.add_argument("--no-contours", action="store_true", help="Disable contour lines on surface")
+    parser.add_argument("--auto", action="store_true", help="Skip interactive prompts, use config defaults")
+    parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist"], help="Scan mode (skip mode menu)")
+    parser.add_argument("--ticker", type=str, default=None, metavar="SYM", help="Ticker symbol (implies --mode ticker)")
     args, _ = parser.parse_known_args()
 
     if args.no_cache:
@@ -3127,6 +3152,16 @@ def main():
 
     print(fmt.colorize("  Note: For personal/informational use only. Review data provider terms.", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "  Note: For personal/informational use only. Review data provider terms.")
 
+    # ── Config Validation ──────────────────────────────────────────────────
+    try:
+        from .config_validator import validate_core_config
+        _cfg_warnings = validate_core_config(config)
+        if _cfg_warnings:
+            for _cw in _cfg_warnings:
+                print(fmt.format_warning(f"Config: {_cw}") if HAS_ENHANCED_CLI else f"  WARNING: Config: {_cw}")
+    except Exception:
+        pass
+
     # ── Regime Dashboard ─────────────────────────────────────────────────────
     try:
         from .regime_dashboard import print_regime_dashboard
@@ -3202,7 +3237,18 @@ def main():
         print(f"  [8] MY LIST    \u2014 {_wl_desc}")
     print()
 
-    symbol_input = prompt_input("Enter number, ticker, or command (default: 3)", "3").upper()
+    # ── --mode / --ticker CLI bypass ──────────────────────────────────────────
+    _mode_map_cli = {
+        "ticker": "TICKER", "all": "ALL", "discover": "DISCOVER",
+        "sell": "SELL", "spreads": "SPREADS", "iron": "IRON",
+        "portfolio": "PORTFOLIO", "mylist": "MY LIST",
+    }
+    if args.ticker:
+        symbol_input = args.ticker.upper()
+    elif args.mode:
+        symbol_input = _mode_map_cli.get(args.mode.lower(), "DISCOVER")
+    else:
+        symbol_input = prompt_input("Enter number, ticker, or command (default: 3)", "3").upper()
 
     # ── Watchlist commands ────────────────────────────────────────────────────
     if symbol_input.startswith("ADD "):
@@ -3303,11 +3349,6 @@ def main():
     else:
         print(f"\u2713 Market Trend: {market_trend} | Volatility: {volatility_regime}")
 
-    try:
-        max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
-    except Exception:
-        print("Invalid number for expirations."); sys.exit(1)
-
     f_config = config.get("filters", {})
     if is_iron_condor_mode:
         default_min_dte = str(f_config.get("min_days_to_expiration_iron", 30))
@@ -3316,22 +3357,32 @@ def main():
         default_min_dte = str(f_config.get("min_days_to_expiration", 7))
         default_max_dte = str(f_config.get("max_days_to_expiration", 45))
 
-    try:
-        min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
-        max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
-    except Exception:
-        print("Invalid DTE inputs."); sys.exit(1)
-
-    profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
-    trader_profile = "day" if profile_choice == "2" else "swing"
+    if args.auto:
+        max_expiries = config.get("max_expirations", 4)
+        min_dte = int(default_min_dte)
+        max_dte = int(default_max_dte)
+        trader_profile = "swing"
+    else:
+        try:
+            max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
+        except Exception:
+            print("Invalid number for expirations."); sys.exit(1)
+        try:
+            min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
+            max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
+        except Exception:
+            print("Invalid DTE inputs."); sys.exit(1)
+        profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
+        trader_profile = "day" if profile_choice == "2" else "swing"
 
     # Account size for position sizing in order tickets
-    _acct_input = prompt_input("Account size in USD for position sizing (Enter to skip)", "").strip()
-    if _acct_input:
-        try:
-            config["_account_size"] = float(_acct_input)
-        except ValueError:
-            pass
+    if not args.auto:
+        _acct_input = prompt_input("Account size in USD for position sizing (Enter to skip)", "").strip()
+        if _acct_input:
+            try:
+                config["_account_size"] = float(_acct_input)
+            except ValueError:
+                pass
 
     _is_single_stock = (mode == "Single-stock")
     _repeat_count = 0

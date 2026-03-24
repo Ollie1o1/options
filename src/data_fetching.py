@@ -934,8 +934,16 @@ def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
         return None
     return None
 
+_rfr_cache: dict = {"value": None, "ts": 0.0}
+
 def get_risk_free_rate() -> float:
+    """Fetch current risk-free rate from ^IRX (13-week T-bill), cached for 15 min."""
+    import time as _time
+    now = _time.time()
+    if _rfr_cache["value"] is not None and now - _rfr_cache["ts"] < 900:
+        return _rfr_cache["value"]
     default_rate = 0.045
+    rate_result = default_rate
     try:
         tbill = yf.Ticker("^IRX", session=_yf_session)
         try:
@@ -943,17 +951,20 @@ def get_risk_free_rate() -> float:
             if fi:
                 rate = safe_float(getattr(fi, "last_price", None))
                 if rate and rate > 0:
-                    return rate / 100.0
+                    rate_result = rate / 100.0
         except Exception:
             pass
-        hist = tbill.history(period="5d", interval="1d")
-        if not hist.empty:
-            rate = safe_float(hist["Close"].iloc[-1])
-            if rate and rate > 0:
-                return rate / 100.0
+        if rate_result == default_rate:
+            hist = tbill.history(period="5d", interval="1d")
+            if not hist.empty:
+                rate = safe_float(hist["Close"].iloc[-1])
+                if rate and rate > 0:
+                    rate_result = rate / 100.0
     except Exception:
         pass
-    return default_rate
+    _rfr_cache["value"] = rate_result
+    _rfr_cache["ts"] = now
+    return rate_result
 
 def get_vix_level() -> Optional[float]:
     try:
@@ -1212,27 +1223,31 @@ def get_iv_rank_percentile_from_history(
 
             if len(iv_history) >= 30:
                 iv_arr = np.array(iv_history, dtype=float)
-                iv_min = iv_arr.min()
-                iv_max = iv_arr.max()
-                if iv_max - iv_min <= 0:
-                    iv_rank_30, iv_pct_30 = 0.5, 0.5
+                iv_arr = iv_arr[np.isfinite(iv_arr)]
+                if len(iv_arr) < 30:
+                    pass  # fall through to HV-proxy
                 else:
-                    iv_rank_30 = float(np.clip((current_iv - iv_min) / (iv_max - iv_min), 0, 1))
-                    iv_pct_30 = float(np.clip((iv_arr < current_iv).sum() / len(iv_arr), 0, 1))
-
-                if len(iv_history) >= 90:
-                    iv_arr_90 = iv_arr[-90:]
-                    iv_min_90, iv_max_90 = iv_arr_90.min(), iv_arr_90.max()
-                    if iv_max_90 - iv_min_90 <= 0:
-                        iv_rank_90, iv_pct_90 = 0.5, 0.5
+                    iv_min = iv_arr.min()
+                    iv_max = iv_arr.max()
+                    if iv_max - iv_min < 1e-8:
+                        iv_rank_30, iv_pct_30 = 0.5, 0.5
                     else:
-                        iv_rank_90 = float(np.clip((current_iv - iv_min_90) / (iv_max_90 - iv_min_90), 0, 1))
-                        iv_pct_90 = float(np.clip((iv_arr_90 < current_iv).sum() / len(iv_arr_90), 0, 1))
-                else:
-                    iv_rank_90, iv_pct_90 = iv_rank_30, iv_pct_30
+                        iv_rank_30 = float(np.clip((current_iv - iv_min) / (iv_max - iv_min), 0, 1))
+                        iv_pct_30 = float(np.clip((iv_arr < current_iv).sum() / len(iv_arr), 0, 1))
 
-                confidence = "High" if len(iv_history) >= 252 else "Medium"
-                return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
+                    if len(iv_arr) >= 90:
+                        iv_arr_90 = iv_arr[-90:]
+                        iv_min_90, iv_max_90 = iv_arr_90.min(), iv_arr_90.max()
+                        if iv_max_90 - iv_min_90 < 1e-8:
+                            iv_rank_90, iv_pct_90 = 0.5, 0.5
+                        else:
+                            iv_rank_90 = float(np.clip((current_iv - iv_min_90) / (iv_max_90 - iv_min_90), 0, 1))
+                            iv_pct_90 = float(np.clip((iv_arr_90 < current_iv).sum() / len(iv_arr_90), 0, 1))
+                    else:
+                        iv_rank_90, iv_pct_90 = iv_rank_30, iv_pct_30
+
+                    confidence = "High" if len(iv_history) >= 252 else "Medium"
+                    return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
         except Exception:
             pass
 
