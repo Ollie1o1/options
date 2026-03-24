@@ -854,7 +854,10 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
 
         if HAS_FMT and fmt:
             ic_col = _ic_color(ic, ic_pval if not math.isnan(ic_pval) else 1.0)
-            print(fmt.colorize(row, ic_col) if ic_col else print(row))
+            if ic_col:
+                print(fmt.colorize(row, ic_col))
+            else:
+                print(row)
         else:
             print(row)
 

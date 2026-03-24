@@ -318,7 +318,7 @@ def get_position_sizing_recommendation(row: pd.Series, account_size: float,
         contracts = 1
 
     total_cost = max_loss * contracts
-    pct_of_account = (total_cost / account_size) * 100
+    pct_of_account = (total_cost / account_size) * 100 if account_size > 0 else 0
 
     return {
         'contracts': contracts,
@@ -691,8 +691,8 @@ def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
                     colored = fmt.colorize(cell_str, fmt.Colors.RED)
                 else:
                     colored = fmt.colorize(cell_str, fmt.Colors.YELLOW)
-                # pad after color (ANSI codes are invisible, add spaces separately)
-                row_parts.append(f"\u2502  {colored}  ")
+                pad_needed = max(0, col_w - 2 - len(cell_str))
+                row_parts.append(f"\u2502  {colored}{' ' * pad_needed}")
             else:
                 row_parts.append(f"\u2502  {cell_str:<{col_w - 2}}")
         lines.append(indent + "".join(row_parts))

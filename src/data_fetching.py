@@ -368,7 +368,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
 
     iv_rank_30 = iv_pct_30 = iv_rank_90 = iv_pct_90 = None
     iv_confidence = "Low"
-    if median_iv and pd.notna(median_iv) and median_iv > 0:
+    if pd.notna(median_iv) and median_iv > 0:
         iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, iv_confidence = \
             get_iv_rank_percentile_from_history(hist, median_iv, ticker=symbol)
 
@@ -1660,7 +1660,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
 
     iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90 = None, None, None, None
     iv_confidence = "Low"
-    if median_iv and pd.notna(median_iv) and median_iv > 0:
+    if pd.notna(median_iv) and median_iv > 0:
         try:
             _iv_db = _get_iv_db_path()
             _iv_date = datetime.now().strftime("%Y-%m-%d")

@@ -13,6 +13,9 @@ import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Realistic execution cost constants (deprecated fallbacks — use config.json paper_trading section)
 COMMISSION_PER_CONTRACT = 0.65   # $ per contract per leg (retail ~$0.65, e.g. Tastytrade/TDA)
@@ -114,21 +117,26 @@ class PaperManager:
                         cur.execute(sql)
                     except sqlite3.OperationalError:
                         pass  # column may already exist
-                cur.execute(f"PRAGMA user_version = {ver}")
+                cur.execute(f"PRAGMA user_version = {int(ver)}")
             conn.commit()
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads configuration for exit rules."""
+        _default = {
+            "exit_rules": {
+                "take_profit": 0.50,
+                "stop_loss": -0.25
+            }
+        }
         try:
             with open(self.config_path, 'r') as f:
                 return json.load(f)
-        except Exception:
-            return {
-                "exit_rules": {
-                    "take_profit": 0.50,
-                    "stop_loss": -0.25
-                }
-            }
+        except FileNotFoundError:
+            logger.debug("Config file not found at %s — using defaults", self.config_path)
+            return _default
+        except json.JSONDecodeError as exc:
+            logger.warning("Invalid JSON in config %s: %s — using defaults", self.config_path, exc)
+            return _default
 
     def log_trade(self, trade_dict: Dict[str, Any]):
         """
@@ -278,15 +286,18 @@ class PaperManager:
                     val = float(hist["Close"].iloc[-1])
                     if val > 0:
                         return t, val
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Spot fetch failed for %s: %s", t, exc)
             return t, None
 
         max_workers = min(len(unique_tickers), 8)
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for ticker, spot in ex.map(_fetch_spot, unique_tickers):
-                if spot is not None:
-                    spot_cache[ticker] = spot
+            try:
+                for ticker, spot in ex.map(_fetch_spot, unique_tickers, timeout=30):
+                    if spot is not None:
+                        spot_cache[ticker] = spot
+            except TimeoutError:
+                logger.warning("Spot price fetch timed out after 30s — proceeding with partial data")
 
         for row in open_trades:
             entry_id    = row["entry_id"]
@@ -359,8 +370,8 @@ class PaperManager:
                                 "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=? WHERE entry_id=?",
                                 (current_value, now, pnl_realistic, entry_id),
                             )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Spread P&L calc failed for %s: %s", ticker, exc)
                 continue
 
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
@@ -373,8 +384,8 @@ class PaperManager:
 
                 try:
                     current_price = getattr(tkr.fast_info, "last_price", None)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("fast_info lookup failed for %s: %s", symbol, exc)
 
                 if current_price is None or np.isnan(current_price) or current_price <= 0:
                     with warnings.catch_warnings():
@@ -390,8 +401,8 @@ class PaperManager:
                         if S:
                             T = max((datetime.strptime(expiration[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1/365)
                             current_price = american_price(option_type, float(S), float(strike), T, 0.045, 0.30)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("American price fallback failed for %s: %s", ticker, exc)
 
                 if current_price is not None and not np.isnan(current_price) and current_price > 0:
                     # Raw market P&L — flip sign for short/credit positions
@@ -431,8 +442,8 @@ class PaperManager:
                         """
                         with self._get_connection() as conn:
                             conn.execute(update_query, (current_price, now, pnl_realistic, entry_id))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Position update failed for %s %s $%.0f: %s", ticker, option_type, strike, exc)
 
         if closed_this_run:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")
@@ -546,7 +557,7 @@ class PaperManager:
         )
         return base_blended_fraction * reduction, reason
 
-    def get_strategy_breakdown(self) -> list[dict]:
+    def get_strategy_breakdown(self) -> List[Dict]:
         """Return win/loss/avg P&L grouped by strategy_name."""
         query = """
             SELECT strategy_name,
@@ -604,8 +615,8 @@ class PaperManager:
                     sortino_std = np.std(downside, ddof=1)
                     if sortino_std > 0:
                         sortino_str = f"{mean_r / sortino_std:.3f}"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Sharpe/Sortino calculation failed: %s", exc)
 
         summary = {
             "Total Trades": [total_count],

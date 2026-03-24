@@ -481,7 +481,7 @@ def calculate_metrics(
     """Calculates all objective mathematical metrics and merges external data."""
     
     # --- Institutional Flow & Sentiment ---
-    df["Vol_OI_Ratio"] = df["volume"] / df["openInterest"].replace(0, np.nan)
+    df["Vol_OI_Ratio"] = (df["volume"] / df["openInterest"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
     df["Unusual_Whale"] = (df["Vol_OI_Ratio"] > 1.5) & (df["volume"] > 500)
     df["high_premium_turnover"] = (df["premium"] * df["volume"] * 100) > 25000
 
@@ -548,26 +548,18 @@ def calculate_metrics(
     # Threshold: early exercise premium > 3% of market premium → flag "EARLY_EX".
     # This warns that BS Greeks understate true option value for these rows.
     try:
-        _ee_flag = []
-        for i in df.index:
-            try:
-                _otype = str(df.at[i, "type"]).lower()
-                if _otype != "put":
-                    _ee_flag.append("")
-                    continue
-                _S = float(df.at[i, "underlying"]) if pd.notna(df.at[i, "underlying"]) else None
-                _K = float(df.at[i, "strike"])
-                _T = float(df.at[i, "T_years"])
-                _IV = float(df.at[i, "impliedVolatility"]) if pd.notna(df.at[i, "impliedVolatility"]) else None
-                _prem = float(df.at[i, "premium"]) if pd.notna(df.at[i, "premium"]) else None
-                if _S and _IV and _prem and _T > 0 and _IV > 0:
-                    _ee = early_exercise_premium("put", _S, _K, _T, risk_free_rate, _IV)
-                    _ee_flag.append("EARLY_EX" if _ee > _prem * 0.03 else "")
-                else:
-                    _ee_flag.append("")
-            except Exception:
-                _ee_flag.append("")
-        df["early_exercise_flag"] = _ee_flag
+        _put_mask = (df["type"].str.lower() == "put") & df["underlying"].notna() & df["impliedVolatility"].notna() & df["premium"].notna() & (df["T_years"] > 0) & (df["impliedVolatility"] > 0)
+        df["early_exercise_flag"] = ""
+        if _put_mask.any():
+            _ee_func = np.vectorize(
+                lambda S, K, T, IV: early_exercise_premium("put", float(S), float(K), float(T), risk_free_rate, float(IV)),
+                otypes=[float],
+            )
+            _sub = df.loc[_put_mask]
+            _ee_vals = _ee_func(_sub["underlying"].values, _sub["strike"].values, _sub["T_years"].values, _sub["impliedVolatility"].values)
+            df.loc[_put_mask, "early_exercise_flag"] = np.where(
+                _ee_vals > _sub["premium"].values * 0.03, "EARLY_EX", ""
+            )
     except Exception:
         df["early_exercise_flag"] = ""
 
@@ -578,7 +570,7 @@ def calculate_metrics(
         for exp, grp in df.groupby("expiration"):
             call_vol = grp.loc[grp["type"] == "call", "volume"].sum()
             put_vol = grp.loc[grp["type"] == "put", "volume"].sum()
-            pcr_val = float(put_vol) / float(call_vol) if call_vol > 0 else np.nan
+            pcr_val = float(put_vol) / float(call_vol) if pd.notna(call_vol) and call_vol > 0 else np.nan
             pcr_map[exp] = pcr_val
         df["pcr"] = df["expiration"].map(pcr_map)
         def _pcr_signal(v):
@@ -657,14 +649,16 @@ def calculate_metrics(
     # --- Dividend Warning ---
     df["div_warning"] = ""
     if next_ex_div is not None:
-        for idx, row in df.iterrows():
-            if row.get("type") == "call" and row.get("abs_delta", 0) > 0.70:
-                try:
-                    exp_date = row["exp_dt"].replace(tzinfo=None).date()
-                    if exp_date >= next_ex_div:
-                        df.at[idx, "div_warning"] = f"EX-DIV {next_ex_div}"
-                except Exception:
-                    pass
+        try:
+            _exp_dates = df["exp_dt"].dt.tz_localize(None).dt.date
+            _div_mask = (
+                (df["type"] == "call")
+                & (df["abs_delta"] > 0.70)
+                & (_exp_dates >= next_ex_div)
+            )
+            df.loc[_div_mask, "div_warning"] = f"EX-DIV {next_ex_div}"
+        except Exception:
+            pass
 
     # --- Earnings Implied Move vs Historical ---
     df["implied_earnings_move"] = pd.NA
@@ -686,7 +680,10 @@ def calculate_metrics(
         df["crush_confidence"] = earnings_move_data.get("crush_confidence", "")
 
     # --- ADVANCED METRICS ---
-    df["expected_move"] = calculate_expected_move(S_vals, IV_vals, T_vals)
+    _em_result = calculate_expected_move(S_vals, IV_vals, T_vals)
+    if _em_result is None:
+        _em_result = S_vals * IV_vals * np.sqrt(T_vals)
+    df["expected_move"] = _em_result
     is_call = np.char.lower(types_vals.astype(str)) == "call"
 
     # Probability of Profit: breakeven-based formula P(S_T > K+prem) for calls,
@@ -697,7 +694,8 @@ def calculate_metrics(
         pop_arr = 1.0 - df["abs_delta"].values
     df["prob_profit"] = np.clip(pop_arr, 0.0, 1.0)
 
-    df["prob_touch"] = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
+    _pot_result = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
+    df["prob_touch"] = _pot_result if _pot_result is not None else np.nan
     max_loss, breakeven, rr_ratio = calculate_risk_reward(types_vals, prem_vals, S_vals, K_vals, df["expected_move"].values)
     df["max_loss"] = max_loss
     df["breakeven"] = breakeven
@@ -941,7 +939,7 @@ def calculate_metrics(
             df.loc[mask_mp & ((und - mp).abs() / mp > 0.05), "max_pain_warning"] = "⚠️ FIGHTING MAX PAIN"
         if stock_ret > 0 and sector_ret < -0.015:
             df["macro_warning"] = np.where(df["macro_warning"] != "", df["macro_warning"] + " | FAKE-OUT DIVERGENCE", "FAKE-OUT DIVERGENCE")
-    RATE_SENSITIVE = {"QQQ", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"}
+    RATE_SENSITIVE = set(config.get("rate_sensitive_tickers", ["QQQ", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"]))
     if tnx_change_pct > 0.025:
         df["yield_warning"] = np.where(df["symbol"].isin(RATE_SENSITIVE), "📉 RATES UP", "")
     else:

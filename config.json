@@ -171,6 +171,7 @@
   "sector_analysis": {
     "enabled": true
   },
+  "rate_sensitive_tickers": ["QQQ", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"],
   "watchlists": {
     "liquid_large_cap": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "JPM", "BAC", "GS", "V", "MA", "XOM", "CVX", "LLY", "UNH", "JNJ", "PG", "KO", "WMT", "COST", "HD", "DIS", "NFLX", "AMD", "INTC", "CRM", "ADBE", "PYPL", "UBER", "COIN", "MSTR", "ARKK"],
     "sector_etfs": ["XLK", "XLF", "XLE", "XLV", "XLI", "XLC", "XLY", "XLP", "XLRE", "XLU", "XLB", "SMH", "SOXX", "IBB", "GDX", "SLV", "GLD"],

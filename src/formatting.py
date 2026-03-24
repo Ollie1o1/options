@@ -4,7 +4,9 @@ Formatting and display utilities for enhanced CLI output.
 Provides color coding, box drawing, and visual hierarchy.
 """
 
+import math
 import os
+import re
 import sys
 from typing import Optional, Tuple
 
@@ -42,6 +44,14 @@ class Colors:
 
     # Reset
     RESET = '\033[0m'
+
+
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return _ANSI_RE.sub('', text)
 
 
 class BoxChars:
@@ -166,6 +176,9 @@ def format_metric(value: float, good_threshold: float, bad_threshold: float,
     Returns:
         Color-coded formatted string
     """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
+
     formatted = f"{value:{format_spec}}{suffix}"
 
     if not supports_color():
@@ -199,6 +212,8 @@ def format_percentage(value: float, good: float = 60, bad: float = 45,
     Returns:
         Formatted percentage string with color
     """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
     pct = value * 100
     return format_metric(pct, good, bad, higher_is_better, ".1f", "%")
 
@@ -214,6 +229,9 @@ def format_money(value: float, threshold_positive: float = 0) -> str:
     Returns:
         Formatted money string with color
     """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
+
     formatted = f"${abs(value):,.2f}"
 
     if not supports_color():
@@ -389,7 +407,9 @@ def align_columns(data: list, widths: list, separators: str = " ") -> str:
     aligned = []
     for value, width in zip(data, widths):
         str_val = str(value)
-        aligned.append(str_val.ljust(width))
+        visible_len = len(_strip_ansi(str_val))
+        pad = max(0, width - visible_len)
+        aligned.append(str_val + ' ' * pad)
 
     return separators.join(aligned)
 
@@ -402,7 +422,7 @@ def format_pop(pop: float) -> str:
 
 def format_spread(spread: float) -> str:
     """Format bid-ask spread"""
-    return format_percentage(spread, good=0.10, bad=0.20, higher_is_better=False)
+    return format_percentage(spread, good=3, bad=15, higher_is_better=False)
 
 
 def format_rr(rr: float) -> str:
@@ -480,7 +500,7 @@ def format_iv_rank_bar(iv_pct: float, hv: float, iv: float, width: int = 20, iv_
         regime_str = f"[{regime}]"
 
     conf_suffix = ""
-    if iv_confidence == "Low":
+    if str(iv_confidence).strip().lower() == "low":
         conf_suffix = "  ⚠ Low Conf" if not supports_color() else "  " + colorize("⚠ Low Conf", Colors.DIM)
 
     return f"IV: {bar_str} {pct_label}{ratio_str}  {regime_str}{cheap_rich}{conf_suffix}"

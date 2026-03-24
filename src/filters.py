@@ -136,19 +136,14 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
             
             # Second pass: fill remaining slots with next best regardless of ticker
             if len(selected) < per_bucket:
+                _seen = {(s["symbol"], s["strike"], s["expiration"], s["type"]) for s in selected}
                 for _, row in sub.iterrows():
                     if len(selected) >= per_bucket:
                         break
-                    # Check if this exact row is already selected
-                    is_duplicate = any(
-                        (s["symbol"] == row["symbol"] and 
-                         s["strike"] == row["strike"] and 
-                         s["expiration"] == row["expiration"] and
-                         s["type"] == row["type"]) 
-                        for s in selected
-                    )
-                    if not is_duplicate:
+                    _key = (row["symbol"], row["strike"], row["expiration"], row["type"])
+                    if _key not in _seen:
                         selected.append(row)
+                        _seen.add(_key)
             
             picks.append(pd.DataFrame(selected))
         else:

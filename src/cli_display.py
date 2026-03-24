@@ -1,6 +1,7 @@
 """CLI display functions extracted from options_screener.py."""
 
 import math
+import re
 import sys
 import shutil
 from datetime import datetime
@@ -50,6 +51,23 @@ try:
     HAS_RISK_SURFACE = True
 except ImportError:
     HAS_RISK_SURFACE = False
+
+
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return _ANSI_RE.sub('', text)
+
+
+def _vol_color(vol: int) -> str:
+    """Return color code for volume value."""
+    return fmt.Colors.GREEN if vol > 200 else (fmt.Colors.YELLOW if vol > 50 else fmt.Colors.RED)
+
+
+def _oi_color(oi: int) -> str:
+    """Return color code for open interest value."""
+    return fmt.Colors.GREEN if oi > 500 else (fmt.Colors.YELLOW if oi > 100 else fmt.Colors.RED)
 
 
 def _get_config() -> dict:
@@ -361,9 +379,7 @@ def format_mechanics_lines(row: pd.Series) -> list:
     vol = int(row.get('volume', 0))
     oi = int(row.get('openInterest', 0))
     if HAS_ENHANCED_CLI:
-        vol_color = fmt.Colors.GREEN if vol > 200 else (fmt.Colors.YELLOW if vol > 50 else fmt.Colors.RED)
-        oi_color = fmt.Colors.GREEN if oi > 500 else (fmt.Colors.YELLOW if oi > 100 else fmt.Colors.RED)
-        liq.append(f"Vol: {fmt.colorize(str(vol), vol_color)}  OI: {fmt.colorize(str(oi), oi_color)}")
+        liq.append(f"Vol: {fmt.colorize(str(vol), _vol_color(vol))}  OI: {fmt.colorize(str(oi), _oi_color(oi))}")
     else:
         liq.append(f"Vol: {vol}  OI: {oi}")
 
@@ -425,9 +441,24 @@ def format_mechanics_lines(row: pd.Series) -> list:
     theta = row.get("theta", pd.NA)
     vega_dollar = row.get("vega_dollar", pd.NA)
     if pd.notna(gamma) and pd.notna(vega) and pd.notna(theta):
-        grk.append(f"\u0393 {gamma:.3f}")
-        grk.append(f"V {vega:.2f}")
-        grk.append(f"\u0398 {theta:.2f}")
+        if HAS_ENHANCED_CLI:
+            premium = float(row.get("premium", 0) or 0)
+            daily_bleed_pct = abs(float(theta)) / premium * 100 if premium > 0 else 0
+            if daily_bleed_pct > 5:
+                theta_color = fmt.Colors.RED
+            elif daily_bleed_pct > 2:
+                theta_color = fmt.Colors.YELLOW
+            else:
+                theta_color = fmt.Colors.GREEN
+            gamma_color = fmt.Colors.GREEN if gamma > 0.05 else (fmt.Colors.DIM if gamma < 0.01 else fmt.Colors.YELLOW)
+            vega_color = fmt.Colors.CYAN if vega > 0.10 else fmt.Colors.DIM
+            grk.append(fmt.colorize(f"\u0393 {gamma:.3f}", gamma_color))
+            grk.append(fmt.colorize(f"V {vega:.2f}", vega_color))
+            grk.append(fmt.colorize(f"\u0398 {theta:.2f}", theta_color))
+        else:
+            grk.append(f"\u0393 {gamma:.3f}")
+            grk.append(f"V {vega:.2f}")
+            grk.append(f"\u0398 {theta:.2f}")
         if pd.notna(vega_dollar):
             grk.append(f"V$: ${float(vega_dollar):.0f}")
 
@@ -548,9 +579,7 @@ def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_si
     border_color = fmt.Colors.BRIGHT_CYAN
 
     def pad_line(text: str) -> str:
-        # Strip ANSI for length calculation
-        import re
-        clean = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        clean = _strip_ansi(text)
         padding = max(0, inner - len(clean))
         return text + " " * padding
 
@@ -785,9 +814,10 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     if not neg_ev.empty:
         print(fmt.format_warning(f"{len(neg_ev)} trades have negative expected value"))
 
-    earnings = df_picks[df_picks.get('Earnings Play', 'NO') == 'YES']
-    if not earnings.empty:
-        print(fmt.format_warning(f"{len(earnings)} earnings plays - IV crush risk post-announcement"))
+    if 'Earnings Play' in df_picks.columns:
+        earnings = df_picks[df_picks['Earnings Play'] == 'YES']
+        if not earnings.empty:
+            print(fmt.format_warning(f"{len(earnings)} earnings plays - IV crush risk post-announcement"))
 
     low_liquid = df_picks[(df_picks['volume'] < 100) | (df_picks['openInterest'] < 100)]
     if not low_liquid.empty:
@@ -838,9 +868,7 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
     # Build box manually with double-border
     inner_w = width - 4  # 2 chars each side: ╔ + space ... space + ╗
     def pad(s):
-        # strip ANSI for length measurement
-        import re
-        plain = re.sub(r'\033\[[0-9;]*m', '', s)
+        plain = _strip_ansi(s)
         pad_len = max(0, inner_w - len(plain))
         return s + " " * pad_len
 
@@ -885,7 +913,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
 
     # Table header
     col_hdr = (
-        f"  {'#':>3}  {'Tick':<5} {'Strike':<8} {'Exp':>8} {'Score':>6} {'PoP':>5}"
+        f"  {'#':>3}  {'Ticker':<6} {'Strike':<8} {'Exp':>8} {'Score':>6} {'PoP':>5}"
         f" {'R/R':>5} {'IV%':>5} {'EV':>7} {'Sprd':>5}"
     )
     if "iv_surface_residual" in rows.columns:
@@ -914,14 +942,14 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery") -> Non
         score_str = fmt.colorize(score_padded, sc_color)
         pop_str = f"{pop*100:>4.0f}%"
         rr_str = f"{rr:>4.1f}x" if rr > 0 else "  n/a"
-        ev_str = f"${ev:>+5.0f}" if abs(ev) < 10000 else f"${ev:>+5.0f}"
+        ev_str = f"${ev:>+5.0f}" if abs(ev) < 10000 else f"{ev/1000:>+4.0f}k"
 
         # Symbol prefix for multi-ticker
-        sym = str(r.get("symbol", ""))[:5]
+        sym = str(r.get("symbol", ""))[:6]
         strike_str = f"${strike:.0f}{opt_type}"
 
         line = (
-            f"  {rank_i:>3}  {sym:<5} {strike_str:<8} {exp_str:>8} {score_str} {pop_str:>5}"
+            f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8} {score_str} {pop_str:>5}"
             f" {rr_str:>5} {iv_pct:>4.0f}% {ev_str:>7} {spread:>4.1f}%"
         )
         if "iv_surface_residual" in rows.columns:
@@ -949,8 +977,13 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     if config is None:
         config = _get_config()
 
+    if budget is None:
+        budget = 0
+
     WIDTH = get_display_width()
     chain_iv_median = df_picks["impliedVolatility"].median(skipna=True)
+    if pd.isna(chain_iv_median):
+        chain_iv_median = 0.30
     is_multi = mode in ["Budget scan", "Discovery scan", "Premium Selling"]
 
     # ── Header ──────────────────────────────────────────────────────────────
@@ -1060,9 +1093,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
         # Column headers
         if is_multi:
-            hdr = f"  {'Rank':<8} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+            hdr = f"  {'Rank':<8} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
         else:
-            hdr = f"  {'Rank':<8} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>7} {'Vol':>7} {'Delta':>7}  {'Tag':<4}  Quality"
+            hdr = f"  {'Rank':<8} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
         print(fmt.colorize(hdr, fmt.Colors.BOLD + fmt.Colors.UNDERLINE) if HAS_ENHANCED_CLI else hdr)
 
         if HAS_ENHANCED_CLI:
@@ -1104,10 +1137,8 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 prem_str = fmt.colorize(f"{prem_padded:<9}", prem_color)
                 iv_color = fmt.Colors.GREEN if iv < chain_iv_median * 0.9 else (fmt.Colors.RED if iv > chain_iv_median * 1.2 else fmt.Colors.YELLOW)
                 iv_str = fmt.colorize(f"{format_pct(iv):<8}", iv_color)
-                oi_color = fmt.Colors.GREEN if oi > 500 else (fmt.Colors.YELLOW if oi > 100 else fmt.Colors.RED)
-                oi_str = fmt.colorize(f"{oi:>7}", oi_color)
-                vol_color = fmt.Colors.GREEN if vol > 200 else (fmt.Colors.YELLOW if vol > 50 else fmt.Colors.RED)
-                vol_str = fmt.colorize(f"{vol:>7}", vol_color)
+                oi_str = fmt.colorize(f"{oi:>9,}", _oi_color(oi))
+                vol_str = fmt.colorize(f"{vol:>9,}", _vol_color(vol))
                 # Pad delta before colorize
                 delta_raw = f"{delta:>+7.2f}"
                 d_aligned = (opt_type == "CALL" and delta > 0) or (opt_type != "CALL" and delta < 0)
@@ -1124,9 +1155,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 rank_plain = f"#{rank}/{total_picks}"
                 rank_plain = f"{rank_plain:<8}"
                 if is_multi:
-                    print(f"  {rank_plain} {r['symbol']:<6} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
+                    print(f"  {rank_plain} {r['symbol']:<6} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>9,} {vol:>9,} {delta:>+7.2f}  {moneyness:<4}")
                 else:
-                    print(f"  {rank_plain} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>7} {vol:>7} {delta:>+7.2f}  {moneyness:<4}")
+                    print(f"  {rank_plain} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>9,} {vol:>9,} {delta:>+7.2f}  {moneyness:<4}")
 
             arrow = fmt.colorize("\u21b3", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u21b3"
 
@@ -1167,12 +1198,13 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 thesis_text = fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN) if not _extra_thesis else thesis
                 print(f"    {arrow} {thesis_label} {thesis_text}")
                 levels = calculate_entry_exit_levels(r, config)
-                tp_pct = config.get("exit_rules", {}).get("take_profit", 0.50)
-                sl_pct = abs(config.get("exit_rules", {}).get("stop_loss", -0.25))
+                tp_pct = (config.get("entry_exit_rules", {}).get("profit_target_pct")
+                          or config.get("exit_rules", {}).get("take_profit", 0.50))
+                sl_pct = abs(config.get("entry_exit_rules", {}).get("stop_loss_pct")
+                             or config.get("exit_rules", {}).get("stop_loss", -0.25))
                 entry_str = fmt.colorize(f"\u2264${levels['entry_price']:.2f}", fmt.Colors.BRIGHT_WHITE)
                 target_str = fmt.colorize(f"${levels['profit_target']:.2f} (+{tp_pct:.0%})", fmt.Colors.GREEN)
                 stop_str = fmt.colorize(f"${levels['stop_loss']:.2f} (-{sl_pct:.0%})", fmt.Colors.RED)
-                from .trade_analysis import calculate_confidence_score, assess_risk_factors
                 conf_score, conf_label = calculate_confidence_score(r)
                 risks = assess_risk_factors(r)
                 conf_color = fmt.Colors.GREEN if conf_label == "HIGH" else (fmt.Colors.YELLOW if conf_label == "MEDIUM" else fmt.Colors.RED)
@@ -1203,15 +1235,40 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
             # Institutional metrics
             if "short_interest" in r and pd.notna(r["short_interest"]):
-                print(f"      \u2022 Short Interest: {r['short_interest']*100:.2f}%")
+                si_val = r['short_interest'] * 100
+                if HAS_ENHANCED_CLI:
+                    si_color = fmt.Colors.RED if si_val > 20 else (fmt.Colors.YELLOW if si_val > 10 else fmt.Colors.GREEN)
+                    print(f"      \u2022 Short Interest: {fmt.colorize(f'{si_val:.2f}%', si_color)}")
+                else:
+                    print(f"      \u2022 Short Interest: {si_val:.2f}%")
             if "rvol" in r and pd.notna(r["rvol"]):
-                print(f"      \u2022 RVOL: {r['rvol']:.2f}x")
+                rvol_val = r['rvol']
+                if HAS_ENHANCED_CLI:
+                    rvol_color = fmt.Colors.GREEN if rvol_val > 2 else (fmt.Colors.YELLOW if rvol_val > 1.5 else fmt.Colors.DIM)
+                    print(f"      \u2022 RVOL: {fmt.colorize(f'{rvol_val:.2f}x', rvol_color)}")
+                else:
+                    print(f"      \u2022 RVOL: {rvol_val:.2f}x")
             if "gex_flip_price" in r and pd.notna(r["gex_flip_price"]):
-                print(f"      \u2022 GEX Flip: ${r['gex_flip_price']:.2f}")
+                gex_val = r['gex_flip_price']
+                if HAS_ENHANCED_CLI:
+                    spot = float(r.get('underlying', 0) or 0)
+                    gex_color = fmt.Colors.GREEN if spot > gex_val else fmt.Colors.RED
+                    print(f"      \u2022 GEX Flip: {fmt.colorize(f'${gex_val:.2f}', gex_color)}")
+                else:
+                    print(f"      \u2022 GEX Flip: ${gex_val:.2f}")
             if "vwap" in r and pd.notna(r["vwap"]):
-                print(f"      \u2022 VWAP: ${r['vwap']:.2f}")
+                vwap_val = r['vwap']
+                if HAS_ENHANCED_CLI:
+                    spot = float(r.get('underlying', 0) or 0)
+                    vwap_color = fmt.Colors.GREEN if spot > vwap_val else fmt.Colors.RED
+                    print(f"      \u2022 VWAP: {fmt.colorize(f'${vwap_val:.2f}', vwap_color)}")
+                else:
+                    print(f"      \u2022 VWAP: ${vwap_val:.2f}")
 
-            print("")  # Newline
+            if HAS_ENHANCED_CLI:
+                print(fmt.draw_separator(WIDTH, char='·'))
+            else:
+                print("")  # Newline
 
     # 3D risk surface for single-stock top pick
     if show_surface and HAS_RISK_SURFACE and not is_multi and not df_picks.empty:
@@ -1260,25 +1317,51 @@ def print_spreads_report(df_spreads: pd.DataFrame):
     if df_spreads.empty:
         return
 
-    print("\n" + "="*80)
-    print("  VERTICAL SPREADS REPORT")
-    print("="*80)
+    WIDTH = get_display_width()
 
-    print(f"  {'Symbol':<7} {'Type':<12} {'Long Strike':<12} {'Short Strike':<13} {'Expiration':<12} {'Cost':<8} {'Max Profit':<12} {'Risk':<8}")
-    print("  " + "-"*78)
+    if HAS_ENHANCED_CLI:
+        print()
+        print(fmt.draw_box("VERTICAL SPREADS REPORT", WIDTH, double=True))
 
-    for _, row in df_spreads.iterrows():
-        exp = pd.to_datetime(row["expiration"]).date()
-        print(
-            f"  {row['symbol']:<7} "
-            f"{row['type']:<12} "
-            f"{row['long_strike']:>11.2f} "
-            f"{row['short_strike']:>12.2f} "
-            f"{exp} "
-            f"{format_money(row['spread_cost']):<8} "
-            f"{format_money(row['max_profit']):<12} "
-            f"{format_money(row['risk']):<8}"
-        )
+        hdr = f"  {'Symbol':<7} {'Type':<12} {'Long Strike':<12} {'Short Strike':<13} {'Expiration':<12} {'Cost':<10} {'Max Profit':<12} {'Risk':<10}"
+        print(fmt.colorize(hdr, fmt.Colors.BOLD))
+        print("  " + fmt.draw_separator(WIDTH - 2))
+
+        for _, row in df_spreads.iterrows():
+            exp = pd.to_datetime(row["expiration"]).date()
+            cost_str = fmt.format_money(row['spread_cost'])
+            profit_str = fmt.format_money(row['max_profit'])
+            risk_str = fmt.format_money(-abs(row['risk']))
+            print(
+                f"  {row['symbol']:<7} "
+                f"{row['type']:<12} "
+                f"{row['long_strike']:>11.2f} "
+                f"{row['short_strike']:>12.2f} "
+                f"{exp} "
+                f"{cost_str:<10} "
+                f"{profit_str:<12} "
+                f"{risk_str:<10}"
+            )
+    else:
+        print("\n" + "=" * WIDTH)
+        print("  VERTICAL SPREADS REPORT")
+        print("=" * WIDTH)
+
+        print(f"  {'Symbol':<7} {'Type':<12} {'Long Strike':<12} {'Short Strike':<13} {'Expiration':<12} {'Cost':<8} {'Max Profit':<12} {'Risk':<8}")
+        print("  " + "-" * (WIDTH - 2))
+
+        for _, row in df_spreads.iterrows():
+            exp = pd.to_datetime(row["expiration"]).date()
+            print(
+                f"  {row['symbol']:<7} "
+                f"{row['type']:<12} "
+                f"{row['long_strike']:>11.2f} "
+                f"{row['short_strike']:>12.2f} "
+                f"{exp} "
+                f"{format_money(row['spread_cost']):<8} "
+                f"{format_money(row['max_profit']):<12} "
+                f"{format_money(row['risk']):<8}"
+            )
 
 
 def print_credit_spreads_report(df_spreads: pd.DataFrame):
