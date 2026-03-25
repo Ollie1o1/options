@@ -161,8 +161,11 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             remaining = actual_pnl - theta_pnl
 
             # Without spot price data, attribute remaining based on Greek magnitudes
+            # Scale gamma to comparable units: gamma * S * typical_5pct_move
+            # (gamma is per-share per $1 move, so raw value is ~0.001-0.05)
+            S_approx = float(stock_prices.get(r.get("ticker", ""), 100.0))
             abs_d = abs(entry_delta)
-            abs_g = abs(entry_gamma) * 100  # scale gamma
+            abs_g = abs(entry_gamma) * S_approx * 0.05  # 5% move as proxy
             abs_v = abs(entry_vega)
             total_mag = abs_d + abs_g + abs_v
             if total_mag > 0:
@@ -589,6 +592,35 @@ def view_portfolio():
                     print(fmt.colorize(conc_msg, fmt.Colors.YELLOW, bold=True))
                 else:
                     print(conc_msg)
+
+        # Portfolio max loss aggregation (spreads have defined max_loss)
+        total_max_loss = 0.0
+        has_undefined_risk = False
+        for r in open_trades:
+            sn = str(r.get("strategy_name", ""))
+            if sn.startswith("SPREAD:"):
+                try:
+                    parts = sn.split(":")
+                    ml = float(parts[3]) if len(parts) >= 4 else 0.0
+                    total_max_loss += abs(ml) * 100  # per contract
+                except (ValueError, IndexError):
+                    has_undefined_risk = True
+            else:
+                # Single-leg: max loss = entry_price * 100 (for longs) or unlimited (shorts)
+                ep = abs(float(r.get("entry_price", 0)))
+                if _is_short(str(r.get("strategy_name", ""))):
+                    has_undefined_risk = True
+                else:
+                    total_max_loss += ep * 100
+
+        if total_max_loss > 0 or has_undefined_risk:
+            risk_str = f"  Portfolio Max Loss: ${total_max_loss:,.0f}"
+            if has_undefined_risk:
+                risk_str += "  (+ undefined risk from naked short positions)"
+            if HAS_FMT and fmt:
+                print(fmt.colorize(risk_str, fmt.Colors.RED))
+            else:
+                print(risk_str)
 
         _print_portfolio_greeks(open_trades, width)
 

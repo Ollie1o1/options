@@ -168,9 +168,33 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
 
             sign = -1.0 if _is_short_position(strategy_name) else 1.0
 
-            delta = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
-            gamma = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
-            vega = float(bs_vega(S, K, T, rfr, sigma, div_yield))
+            # For spreads: compute Greeks for both legs (short + long)
+            if strategy_name.startswith("SPREAD:"):
+                try:
+                    parts = strategy_name.split(":")
+                    long_strike = float(parts[1])
+                    # Short leg (strike = K, sign = -1)
+                    d_short = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
+                    g_short = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
+                    v_short = float(bs_vega(S, K, T, rfr, sigma, div_yield))
+                    # Long leg (strike = long_strike, sign = +1)
+                    d_long = float(bs_delta(opt_type, S, long_strike, T, rfr, sigma, div_yield))
+                    g_long = float(bs_gamma(S, long_strike, T, rfr, sigma, div_yield))
+                    v_long = float(bs_vega(S, long_strike, T, rfr, sigma, div_yield))
+                    # Net Greeks = short leg * -1 + long leg * +1
+                    delta = -d_short + d_long
+                    gamma = -g_short + g_long
+                    vega = -v_short + v_long
+                    sign = 1.0  # Net sign already baked into the combined Greeks
+                except Exception:
+                    # Fallback to single-leg
+                    delta = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
+                    gamma = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
+                    vega = float(bs_vega(S, K, T, rfr, sigma, div_yield))
+            else:
+                delta = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
+                gamma = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
+                vega = float(bs_vega(S, K, T, rfr, sigma, div_yield))
 
             result.append({
                 "ticker": ticker,
@@ -187,6 +211,8 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
                 "sigma": sigma,
                 "div_yield": div_yield,
                 "T": T,
+                "is_spread": strategy_name.startswith("SPREAD:"),
+                "strategy_name": strategy_name,
             })
         except Exception:
             continue
@@ -251,11 +277,29 @@ def run_stress_test(
 
                     # Full BS repricing (accurate for large moves)
                     try:
-                        price_base = float(np.float64(bs_price(opt_type, S, K, T, rfr_val, sigma, q)))
-                        price_new = float(np.float64(bs_price(opt_type, S_new, K, T, rfr_val, IV_new, q)))
-                        if not np.isfinite(price_base) or not np.isfinite(price_new):
-                            raise ValueError("NaN/Inf from BS")
-                        pnl = sign * (price_new - price_base) * 100
+                        is_spread = pos.get("is_spread", False)
+                        strategy_name = pos.get("strategy_name", "")
+
+                        if is_spread and strategy_name.startswith("SPREAD:"):
+                            # Reprice both legs of the spread
+                            parts = strategy_name.split(":")
+                            long_strike = float(parts[1])
+                            # Short leg: sell at K
+                            short_base = float(np.float64(bs_price(opt_type, S, K, T, rfr_val, sigma, q)))
+                            short_new = float(np.float64(bs_price(opt_type, S_new, K, T, rfr_val, IV_new, q)))
+                            # Long leg: buy at long_strike
+                            long_base = float(np.float64(bs_price(opt_type, S, long_strike, T, rfr_val, sigma, q)))
+                            long_new = float(np.float64(bs_price(opt_type, S_new, long_strike, T, rfr_val, IV_new, q)))
+                            if not all(np.isfinite(v) for v in [short_base, short_new, long_base, long_new]):
+                                raise ValueError("NaN/Inf from BS spread")
+                            # Spread P&L = (short_new - short_base)*-1 + (long_new - long_base)*+1
+                            pnl = (-(short_new - short_base) + (long_new - long_base)) * 100
+                        else:
+                            price_base = float(np.float64(bs_price(opt_type, S, K, T, rfr_val, sigma, q)))
+                            price_new = float(np.float64(bs_price(opt_type, S_new, K, T, rfr_val, IV_new, q)))
+                            if not np.isfinite(price_base) or not np.isfinite(price_new):
+                                raise ValueError("NaN/Inf from BS")
+                            pnl = sign * (price_new - price_base) * 100
                     except Exception:
                         # Delta-gamma fallback
                         dS = S * dS_pct

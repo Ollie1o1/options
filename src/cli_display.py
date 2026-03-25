@@ -984,8 +984,8 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         if _has_conf:
             try:
                 _, conf_label = calculate_confidence_score(r)
-                badge_map = {"High": "[HI]", "Medium": "[MD]", "Low": "[LO]"}
-                badge_color_map = {"High": fmt.Colors.GREEN, "Medium": fmt.Colors.YELLOW, "Low": fmt.Colors.RED}
+                badge_map = {"HIGH": "[HI]", "MEDIUM": "[MD]", "LOW": "[LO]", "VERY LOW": "[LO]"}
+                badge_color_map = {"HIGH": fmt.Colors.GREEN, "MEDIUM": fmt.Colors.YELLOW, "LOW": fmt.Colors.RED, "VERY LOW": fmt.Colors.RED}
                 badge_text = badge_map.get(conf_label, "")
                 badge_clr = badge_color_map.get(conf_label, fmt.Colors.DIM)
                 conf_badge = f" {fmt.colorize(f'{badge_text:>4}', badge_clr)}"

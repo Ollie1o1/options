@@ -1573,6 +1573,10 @@ def enrich_and_score(
         df["vrp_mean"] = 0.0
         df["vrp_regime"] = "UNKNOWN"
 
+    # Attach term structure spread
+    if term_structure_spread is not None:
+        df["term_structure_spread"] = term_structure_spread
+
     # 1. Call Helper: Metrics
     _div_yield = float(df["dividend_yield"].iloc[0]) if "dividend_yield" in df.columns and not df.empty else dividend_yield
     df = calculate_metrics(
