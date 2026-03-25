@@ -337,11 +337,12 @@ def run_backtest(
                         continue
                     entry_price = entry_price_gross * (1 + spread_cost_per_side)
 
-                    # Exit at day i+exit_dte
+                    # Exit at day i+exit_dte — use exit-day realized vol (not entry-day)
                     exit_idx = min(i + exit_dte, len(close_arr) - 1)
                     S_exit = float(close_arr[exit_idx])
                     T_exit = max((dte - exit_dte) / 365.0, 1 / 365.0)
-                    exit_price_time = _bs_option_price(direction, S_exit, K, T_exit, risk_free, sigma)
+                    sigma_exit = float(hv_arr[exit_idx]) if exit_idx < len(hv_arr) and hv_arr[exit_idx] > 0 else sigma
+                    exit_price_time = _bs_option_price(direction, S_exit, K, T_exit, risk_free, sigma_exit)
 
                     # Apply TP/SL: check if TP or SL was triggered before time exit
                     actual_exit_price = exit_price_time
@@ -354,7 +355,8 @@ def run_backtest(
                             break
                         S_j = float(close_arr[i + j])
                         T_j = max((dte - j) / 365.0, 1 / 365.0)
-                        px_j = _bs_option_price(direction, S_j, K, T_j, risk_free, sigma)
+                        sigma_j = float(hv_arr[i + j]) if (i + j) < len(hv_arr) and hv_arr[i + j] > 0 else sigma
+                        px_j = _bs_option_price(direction, S_j, K, T_j, risk_free, sigma_j)
                         if px_j >= tp_price:
                             actual_exit_price = px_j
                             break

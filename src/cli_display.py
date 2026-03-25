@@ -934,10 +934,23 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         except ImportError:
             pass
 
+    # Confidence badge import
+    _has_conf = False
+    try:
+        from .trade_analysis import calculate_confidence_score
+        _has_conf = True
+    except ImportError:
+        pass
+
     # Table header
     col_hdr = (
-        f"  {'#':>3}  {'Ticker':<6} {'Strike':<8} {'Exp':>8} {'Score':>6} {'PoP':>5}"
-        f" {'R/R':>5} {'IV%':>5} {'EV':>7} {'Sprd':>5}"
+        f"  {'#':>3}  {'Ticker':<6} {'Strike':<8} {'Exp':>8} {'Score':>6}"
+    )
+    if _has_conf:
+        col_hdr += f" {'':>4}"
+    col_hdr += (
+        f" {'PoP':>5}"
+        f" {'R/R':>5} {'IV%':>5} {'\u0394':>5} {'\u03BD':>5} {'EV':>7} {'Sprd':>5}"
     )
     if "iv_surface_residual" in rows.columns:
         col_hdr += f" {'SVI':>6}"
@@ -965,8 +978,26 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         sc_color = fmt.Colors.GREEN if score >= 0.70 else (fmt.Colors.YELLOW if score >= 0.50 else fmt.Colors.RED)
         score_padded = f"{score:>6.2f}"
         score_str = fmt.colorize(score_padded, sc_color)
+
+        # Confidence badge
+        conf_badge = ""
+        if _has_conf:
+            try:
+                _, conf_label = calculate_confidence_score(r)
+                badge_map = {"High": "[HI]", "Medium": "[MD]", "Low": "[LO]"}
+                badge_color_map = {"High": fmt.Colors.GREEN, "Medium": fmt.Colors.YELLOW, "Low": fmt.Colors.RED}
+                badge_text = badge_map.get(conf_label, "")
+                badge_clr = badge_color_map.get(conf_label, fmt.Colors.DIM)
+                conf_badge = f" {fmt.colorize(f'{badge_text:>4}', badge_clr)}"
+            except Exception:
+                conf_badge = f" {'':>4}"
+
         pop_str = f"{pop*100:>4.0f}%"
         rr_str = f"{rr:>4.1f}x" if rr > 0 else "  n/a"
+        delta_val = r.get("delta", 0) or 0
+        vega_val = r.get("vega", 0) or 0
+        delta_str = f"{delta_val:>+5.2f}"
+        vega_str = f"{vega_val:>5.2f}"
         ev_str = f"${ev:>+5.0f}" if abs(ev) < 10000 else f"{ev/1000:>+4.0f}k"
 
         # Symbol prefix for multi-ticker
@@ -974,8 +1005,10 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         strike_str = f"${strike:.0f}{opt_type}"
 
         line = (
-            f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8} {score_str} {pop_str:>5}"
-            f" {rr_str:>5} {iv_pct:>4.0f}% {ev_str:>7} {spread:>4.1f}%"
+            f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8} {score_str}"
+            f"{conf_badge}"
+            f" {pop_str:>5}"
+            f" {rr_str:>5} {iv_pct:>4.0f}% {delta_str} {vega_str} {ev_str:>7} {spread:>4.1f}%"
         )
         if "iv_surface_residual" in rows.columns:
             resid = r.get("iv_surface_residual", 0) or 0
@@ -999,7 +1032,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     print()
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
@@ -1207,6 +1240,14 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                     print(f"  {rank_plain} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>9,} {vol:>9,} {delta:>+7.2f}  {moneyness:<4}")
 
             arrow = fmt.colorize("\u21b3", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u21b3"
+
+            if compact:
+                # Compact mode: thesis line only
+                if HAS_ENHANCED_CLI:
+                    thesis = generate_trade_thesis(r)
+                    thesis_label = fmt.colorize("Thesis:", fmt.Colors.BRIGHT_CYAN)
+                    print(f"    {arrow} {thesis_label} {fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN)}")
+                continue
 
             # Risk alerts — before detail rows
             if HAS_ENHANCED_CLI:

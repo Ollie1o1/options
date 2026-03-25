@@ -992,6 +992,10 @@ def calculate_scores(
         r = s.rank(method="average", na_option="keep")
         return (r - 1.0) / (n - 1.0)
 
+    def _sigmoid_scale(x, center: float = 0.0, scale: float = 12.0):
+        """Smooth [0,1] mapping that preserves information at extremes."""
+        return 1.0 / (1.0 + np.exp(-scale * (x - center)))
+
     # Base features
     vol_n, oi_n = rank_norm(df["volume"].fillna(0)), rank_norm(df["openInterest"].fillna(0))
     sp_cap = max(config.get("spread_score_cap", 0.25), 0.01)
@@ -1167,15 +1171,24 @@ def calculate_scores(
         ).clip(0, 1)
         skew_combined_score = (0.5 * skew_align_score + 0.5 * skew_rank_score).clip(0, 1)
 
-        # VRP score: rewards options where IV premium matches the trading mode
+        # VRP score: sigmoid scaling preserves information at extremes (vs old linear clip)
         vrp_vals = pd.to_numeric(
             df.get("vrp_mean", pd.Series(0.0, index=df.index)), errors="coerce"
         ).fillna(0.0)
         if mode == "Premium Selling":
-            vrp_score = ((vrp_vals.clip(-0.10, 0.15) + 0.10) / 0.25).clip(0, 1)
+            vrp_score = _sigmoid_scale(vrp_vals, center=0.025, scale=12.0)
         else:
-            vrp_score = (((-vrp_vals).clip(-0.10, 0.15) + 0.10) / 0.25).clip(0, 1)
+            vrp_score = _sigmoid_scale(-vrp_vals, center=0.025, scale=12.0)
         df["vrp_score"] = vrp_score
+
+        # Vega risk score: penalizes high vega exposure when IV rank is already elevated
+        # High vega + high IV rank = mean-reversion risk (IV likely to compress)
+        vega_vals = pd.to_numeric(df.get("vega", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0).abs()
+        vega_dollar = vega_vals * 100  # per contract
+        iv_rank_for_vega = pd.to_numeric(df.get("iv_percentile_30", pd.Series(0.5, index=df.index)), errors="coerce").fillna(0.5)
+        vega_risk_raw = vega_dollar.rank(pct=True) * iv_rank_for_vega
+        vega_risk_score = (1.0 - vega_risk_raw).clip(0, 1)
+        df["vega_risk_score"] = vega_risk_score
 
         # Gamma pin score: rewards near-expiry contracts near max gamma strike
         gamma_pin_dist = pd.to_numeric(
@@ -1191,6 +1204,16 @@ def calculate_scores(
             index=df.index,
         )
         df["gamma_pin_score"] = gamma_pin_score
+
+        # Gamma magnitude score: high gamma near expiry = outsized convexity opportunity
+        gamma_vals_mag = pd.to_numeric(df.get("gamma", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        underlying_vals = pd.to_numeric(df.get("underlying", pd.Series(100.0, index=df.index)), errors="coerce").fillna(100.0)
+        gamma_dollar = (gamma_vals_mag * underlying_vals).abs()
+        dte_vals = df["T_years"].values * 365.0
+        expiry_boost = np.where(dte_vals < 14, 1.5, np.where(dte_vals < 21, 1.2, 1.0))
+        gamma_mag_raw = gamma_dollar * expiry_boost
+        gamma_magnitude_score = gamma_mag_raw.rank(pct=True).fillna(0.5)
+        df["gamma_magnitude_score"] = gamma_magnitude_score
 
         # Max pain score: near max pain is favorable for the market structure (sellers get paid)
         # Score high if within 3%, drop off linearly to 0.3 at 10%+
@@ -1215,6 +1238,18 @@ def calculate_scores(
         iv_velocity_score = pd.Series(iv_velocity_raw, index=df.index)
         df["iv_velocity_score"] = iv_velocity_score
 
+        # Term structure score: contango/backwardation impacts trade viability
+        ts_spread = pd.to_numeric(
+            df.get("term_structure_spread", pd.Series(0.0, index=df.index)), errors="coerce"
+        ).fillna(0.0)
+        if mode == "Premium Selling":
+            # Sellers benefit from contango (positive spread = front IV < back IV)
+            term_structure_score = _sigmoid_scale(ts_spread, center=0.0, scale=8.0)
+        else:
+            # Buyers benefit from backwardation (negative spread = front IV > back IV)
+            term_structure_score = _sigmoid_scale(-ts_spread, center=0.0, scale=8.0)
+        df["term_structure_score"] = term_structure_score
+
         # IV surface mispricing score: rewards buying cheap vs surface, selling rich vs surface
         resid = df.get("iv_surface_residual", pd.Series(0.0, index=df.index))
         resid = pd.to_numeric(resid, errors="coerce").fillna(0.0)
@@ -1235,9 +1270,11 @@ def calculate_scores(
             "pop": 0.08, "iv_mispricing": 0.05, "rr": 0.08, "momentum": 0.05,
             "iv_rank": 0.18, "liquidity": 0.06, "catalyst": 0.00, "theta": 0.05,
             "ev": 0.04, "trader_pref": 0.00, "iv_edge": 0.15, "skew_align": 0.03,
-            "gamma_theta": 0.01, "pcr": 0.01, "gex": 0.01, "oi_change": 0.01,
-            "sentiment": 0.01, "option_rvol": 0.01, "vrp": 0.09, "gamma_pin": 0.02,
-            "max_pain": 0.02, "iv_velocity": 0.04, "em_realism": 0.00,
+            "gamma_theta": 0.00, "pcr": 0.00, "gex": 0.01, "oi_change": 0.00,
+            "sentiment": 0.00, "option_rvol": 0.00, "vrp": 0.09, "gamma_pin": 0.00,
+            "max_pain": 0.01, "iv_velocity": 0.04, "em_realism": 0.00,
+            # Phase 2 scoring components
+            "gamma_magnitude": 0.03, "vega_risk": 0.02, "term_structure": 0.03,
         }
         cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
@@ -1263,6 +1300,9 @@ def calculate_scores(
             + w["vrp"]*vrp_score + w["gamma_pin"]*gamma_pin_score
             + w["max_pain"]*max_pain_score + w["iv_velocity"]*iv_velocity_score
             + w["iv_mispricing"]*iv_mispricing_score
+            + w["gamma_magnitude"]*gamma_magnitude_score
+            + w["vega_risk"]*vega_risk_score
+            + w["term_structure"]*term_structure_score
         ) / w_sum
         try:
             _cdf = pd.DataFrame({
@@ -1273,6 +1313,9 @@ def calculate_scores(
                 "Sent": w["sentiment"]*sentiment_score_component,
                 "VRP": w["vrp"]*vrp_score, "IV vel": w["iv_velocity"]*iv_velocity_score,
                 "SVI": w["iv_mispricing"]*iv_mispricing_score,
+                "Gam": w["gamma_magnitude"]*gamma_magnitude_score,
+                "Vega": w["vega_risk"]*vega_risk_score,
+                "TSpr": w["term_structure"]*term_structure_score,
             }, index=df.index)
             _neg_cdf = pd.DataFrame({
                 "spread": pd.Series(0.0, index=df.index),
@@ -2666,7 +2709,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
         elif verbose:
             print("\nNo options found within budget.")
 
@@ -2676,7 +2719,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
         elif verbose:
             print("\nNo discovery picks found.")
             
@@ -2701,7 +2744,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.sort_values("quality_score", ascending=False)
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours)
+                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
         elif verbose:
             print("\nNo premium selling candidates found.")
 
@@ -2711,7 +2754,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.copy()
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours)
+                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
         elif verbose:
             print("\nNo suitable options found.")
 
@@ -3013,6 +3056,7 @@ def main():
     parser.add_argument("--surface-greek", choices=["delta", "gamma", "vega", "theta"], default=None, help="Show greek sensitivity surface (implies --surface)")
     parser.add_argument("--no-contours", action="store_true", help="Disable contour lines on surface")
     parser.add_argument("--auto", action="store_true", help="Skip interactive prompts, use config defaults")
+    parser.add_argument("--compact", action="store_true", help="Compact per-pick output (3 lines per pick)")
     parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist"], help="Scan mode (skip mode menu)")
     parser.add_argument("--ticker", type=str, default=None, metavar="SYM", help="Ticker symbol (implies --mode ticker)")
     args, _ = parser.parse_known_args()
@@ -3394,7 +3438,7 @@ def main():
             surface_greek = getattr(args, 'surface_greek', None)
             surface_type = surface_greek if surface_greek else 'pnl'
             show_contours = not getattr(args, 'no_contours', False)
-            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours)
+            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
             if scan_results is None: sys.exit(0)
 
             picks = scan_results.picks

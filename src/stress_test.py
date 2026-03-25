@@ -407,6 +407,9 @@ def print_stress_test(
             else:
                 print(be_line)
 
+    # Correlation risk warnings
+    print_correlation_warnings(open_trades, width)
+
     note = "  [Full Black-Scholes repricing per scenario. Uses stored entry IV when available.]"
     if HAS_FMT and fmt:
         print(fmt.colorize(note, fmt.Colors.DIM))
@@ -415,10 +418,63 @@ def print_stress_test(
     print()
 
 
+def print_correlation_warnings(open_trades: list, width: int = 90) -> None:
+    """Flag concentration risk when portfolio tickers are highly correlated."""
+    if not HAS_NP or not HAS_PD or not HAS_YF:
+        return
+
+    tickers = list(set(t["ticker"] for t in open_trades if t.get("ticker")))
+    if len(tickers) < 2:
+        return
+
+    try:
+        import yfinance as yf
+        # Fetch 30 trading days of close prices
+        data = yf.download(tickers, period="2mo", progress=False, auto_adjust=True)
+        if data.empty:
+            return
+        closes = data["Close"] if "Close" in data.columns else data
+        if isinstance(closes, pd.Series):
+            return  # single ticker after dedup
+        returns = closes.pct_change().dropna()
+        if len(returns) < 15:
+            return
+        corr = returns.corr()
+
+        # Find high-correlation pairs
+        pairs = []
+        seen = set()
+        for i, t1 in enumerate(corr.columns):
+            for j, t2 in enumerate(corr.columns):
+                if i >= j:
+                    continue
+                key = tuple(sorted([t1, t2]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rho = corr.loc[t1, t2]
+                if np.isfinite(rho) and abs(rho) > 0.70:
+                    pairs.append((t1, t2, rho))
+
+        if not pairs:
+            return
+
+        pairs.sort(key=lambda x: abs(x[2]), reverse=True)
+        pair_strs = [f"{t1}/{t2} (\u03C1={rho:.2f})" for t1, t2, rho in pairs[:4]]
+        line = f"  Concentration risk: {', '.join(pair_strs)}"
+        if HAS_FMT and fmt:
+            print(fmt.colorize(line, fmt.Colors.YELLOW, bold=True))
+        else:
+            print(line)
+    except Exception:
+        pass
+
+
 __all__ = [
     "compute_position_greeks",
     "run_stress_test",
     "print_stress_test",
+    "print_correlation_warnings",
     "STOCK_MOVES",
     "IV_SHOCKS",
 ]
