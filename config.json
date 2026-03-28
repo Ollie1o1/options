@@ -139,6 +139,19 @@
     "min_confidence_threshold": 0.5,
     "terminal_width": 100
   },
+  "visualizer": {
+    "default_x": "moneyness",
+    "default_y": "DTE",
+    "default_z": "quality_score",
+    "default_color": "iv_percentile_30",
+    "default_size": "volume",
+    "top_n_annotate": 3,
+    "top_n_radar": 5,
+    "pnl_price_range": [-0.25, 0.25],
+    "pnl_iv_range": [-0.50, 0.50],
+    "pnl_grid_resolution": 40,
+    "auto_open_browser": true
+  },
   "entry_exit_rules": {
     "entry_improvement_pct": 0.05,
     "profit_target_pct": 0.50,

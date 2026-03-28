@@ -3059,6 +3059,7 @@ def main():
     parser.add_argument("--surface-mode", choices=["ascii", "braille"], default="braille", help="Surface render mode (default: braille)")
     parser.add_argument("--surface-greek", choices=["delta", "gamma", "vega", "theta"], default=None, help="Show greek sensitivity surface (implies --surface)")
     parser.add_argument("--no-contours", action="store_true", help="Disable contour lines on surface")
+    parser.add_argument("--viz", action="store_true", help="Launch interactive 3D visualizer in browser after scan")
     parser.add_argument("--auto", action="store_true", help="Skip interactive prompts, use config defaults")
     parser.add_argument("--compact", action="store_true", help="Compact per-pick output (3 lines per pick)")
     parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist"], help="Scan mode (skip mode menu)")
@@ -3108,6 +3109,7 @@ def main():
                 ("--surface-mode", "Surface render: ascii or braille (default: braille)"),
                 ("--surface-greek","Show greek surface: delta, gamma, vega, theta"),
                 ("--no-contours",  "Disable contour lines on surface"),
+                ("--viz",          "Open interactive 3D visualizer (Plotly, opens in browser)"),
             ]:
                 print(f"  {fmt.colorize(f'{flag:<18}', fmt.Colors.BRIGHT_YELLOW)} {desc}")
         else:
@@ -3479,6 +3481,20 @@ def main():
                 _msg = f"Auto-exported {len(_auto_df)} rows to {_auto_fname}"
                 print(fmt.format_success(_msg) if HAS_ENHANCED_CLI else f"  \u2713 {_msg}")
 
+            # ── Auto-launch 3D visualizer if --viz was passed ─────────────
+            if getattr(args, 'viz', False) and _has_results and not picks.empty:
+                try:
+                    from .visualizer_3d import OptionsVisualizer
+                    _viz_cfg = load_config("config.json")
+                    _viz = OptionsVisualizer(scan_results, config=_viz_cfg)
+                    _viz.show()
+                    msg = "3D Visualizer opened in browser"
+                    print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                except ImportError:
+                    print(fmt.format_warning("Plotly required for --viz: pip install plotly") if HAS_ENHANCED_CLI else "  plotly required for --viz")
+                except Exception as _viz_exc:
+                    logger.warning("Visualizer failed: %s", _viz_exc)
+
             # ── Collapsed post-scan prompt (always shown BEFORE scan-another) ──
             if _has_results:
                 if HAS_ENHANCED_CLI:
@@ -3486,10 +3502,11 @@ def main():
                     p_opt = fmt.colorize("[P]", fmt.Colors.BRIGHT_YELLOW) + " Paper trade top pick"
                     c_opt = fmt.colorize("[C]", fmt.Colors.BRIGHT_YELLOW) + " CSV"
                     l_opt = fmt.colorize("[L]", fmt.Colors.BRIGHT_YELLOW) + " Log trades"
+                    v_opt = fmt.colorize("[V]", fmt.Colors.BRIGHT_YELLOW) + " 3D Visualizer"
                     skip_opt = fmt.colorize("[Enter]", fmt.Colors.DIM) + " Skip"
-                    print(f"\n  {save_label}  {p_opt}  \u00b7  {c_opt}  \u00b7  {l_opt}  \u00b7  {skip_opt}")
+                    print(f"\n  {save_label}  {p_opt}  \u00b7  {c_opt}  \u00b7  {l_opt}  \u00b7  {v_opt}  \u00b7  {skip_opt}")
                 else:
-                    print("\n  Save/Export?  [P] Paper trade top pick  [C] CSV  [L] Log trades  [Enter] Skip")
+                    print("\n  Save/Export?  [P] Paper trade top pick  [C] CSV  [L] Log trades  [V] 3D Visualizer  [Enter] Skip")
                 save_choice = prompt_input("Choice", "").strip().upper()
 
                 if save_choice == "P":
@@ -3551,6 +3568,21 @@ def main():
                     if csv_file:
                         msg = f"Results exported to: {csv_file}"
                         print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
+
+                elif save_choice == "V":
+                    try:
+                        from .visualizer_3d import OptionsVisualizer
+                        _viz_cfg = load_config("config.json")
+                        _viz = OptionsVisualizer(scan_results, config=_viz_cfg)
+                        _viz.show()
+                        msg = "3D Visualizer opened in browser"
+                        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                    except ImportError:
+                        msg = "Plotly required for visualizer: pip install plotly"
+                        print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  {msg}")
+                    except Exception as _viz_exc:
+                        msg = f"Visualizer error: {_viz_exc}"
+                        print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  {msg}")
 
                 elif save_choice == "L":
                     log_src = picks if not picks.empty else (

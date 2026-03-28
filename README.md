@@ -151,6 +151,7 @@ Options:
   --surface-mode M       Render mode: braille (default, hi-res Unicode) or ascii
   --surface-greek G      Show greek sensitivity surface: delta, gamma, vega, theta
   --no-contours          Disable contour lines on surface
+  --viz                  Open interactive 3D visualizer (Plotly, opens in browser)
   -h, --help             Show help and exit
   --version       Show version string and exit
 ```
@@ -199,6 +200,21 @@ The CLI renders a fully colour-coded, responsive interface that adapts to your t
 Supports P&L and Greek sensitivity surfaces (`--surface-greek delta|gamma|vega|theta`).
 Uses Unicode braille characters (2x4 dots per character) for ~8x pixel density vs ASCII.
 Falls back to ASCII shading automatically if the terminal doesn't support Unicode.
+
+**Interactive 3D Visualizer** — browser-based multi-view dashboard (activated with `--viz` or `[V]` at the post-scan menu):
+
+Six tabbed views, all interactive with rotation, zoom, pan, and hover tooltips:
+
+| Tab | What it shows |
+|-----|---------------|
+| **Contract Explorer** | 3D scatter of all screened contracts. Four dropdown menus remap X/Y/Z axes and colour to any of 20 numeric fields (moneyness, DTE, score, IV, Greeks, EV, volume, etc.). Top picks highlighted as gold diamonds. |
+| **IV Surface** | SVI-fitted implied volatility surface with market IVs overlaid as scatter points. Points coloured by residual: blue = CHEAP vs surface, red = RICH. |
+| **Greek Landscape** | Delta/gamma/vega/theta sensitivity surfaces for the top pick. Toggle between Greeks with buttons. Full BS repricing across price and IV shocks. |
+| **P&L Scenarios** | P&L surface for top 3 picks across ±25% price and ±50% IV shocks. Red = loss, green = profit. Breakeven plane at $0. Toggle individual contracts. |
+| **Score Decomposition** | Parallel coordinates of 12 most-weighted score components. Drag on any axis to filter contracts. Lines coloured by quality score. |
+| **Risk Radar** | Spider chart comparing top 5 contracts across 7 risk dimensions (PoP, EV, Liquidity, IV Edge, VRP, Momentum, Greeks). |
+
+Dark financial theme. No extra dependencies — uses Plotly (already in requirements). Opens as a standalone HTML page in your default browser.
 
 **Stress test** — 7×3 scenario matrix with full Black-Scholes repricing:
 ```
@@ -648,6 +664,7 @@ options/
     ├── oi_snapshot.py        # OI change tracking between runs
     ├── watchlist.py          # Watchlist management (ADD/REMOVE commands)
     ├── visual_surface.py     # 3D risk surface: braille/ASCII, P&L + Greek surfaces, contours
+    ├── visualizer_3d.py      # Interactive 3D Plotly visualizer (6-tab browser dashboard)
     ├── visualize_results.py  # Matplotlib/Plotly charts for scan results
     ├── dashboard.py          # Streamlit web interface
     ├── ai_scorer.py          # Two-pass AI scoring with retry, fallback, narrative context
@@ -692,6 +709,7 @@ options/
 - [x] Historical IV crush estimation per ticker
 - [x] Config validation at module load
 - [x] 3D risk surface — braille hi-res + ASCII fallback, truecolor gradient, Greek surfaces, contour lines
+- [x] Interactive 3D visualizer — 6-tab Plotly browser dashboard (contract explorer, IV surface, Greek landscape, P&L scenarios, score decomposition, risk radar)
 - [ ] Real-time alerts (email / SMS)
 - [ ] Multi-leg spread support in paper manager
 - [ ] Backtesting UI improvements
