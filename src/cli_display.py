@@ -948,9 +948,11 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     )
     if _has_conf:
         col_hdr += f" {'':>4}"
+    _delta_hdr = "\u0394"
+    _vega_hdr = "\u03BD"
     col_hdr += (
         f" {'PoP':>5}"
-        f" {'R/R':>5} {'IV%':>5} {'\u0394':>5} {'\u03BD':>5} {'EV':>7} {'Sprd':>5}"
+        f" {'R/R':>5} {'IV%':>5} {_delta_hdr:>5} {_vega_hdr:>5} {'EV':>7} {'Sprd':>5}"
     )
     if "iv_surface_residual" in rows.columns:
         col_hdr += f" {'SVI':>6}"

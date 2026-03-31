@@ -3444,7 +3444,7 @@ def main():
             surface_greek = getattr(args, 'surface_greek', None)
             surface_type = surface_greek if surface_greek else 'pnl'
             show_contours = not getattr(args, 'no_contours', False)
-            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours)
             if scan_results is None: sys.exit(0)
 
             picks = scan_results.picks

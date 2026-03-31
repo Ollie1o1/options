@@ -11,7 +11,9 @@ import sys
 import subprocess
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
-_venv_python = os.path.join(_project_root, "venv", "bin", "python")
+_venv_python = os.path.join(_project_root, "venv", "Scripts", "python.exe")
+if not os.path.isfile(_venv_python):
+    _venv_python = os.path.join(_project_root, "venv", "bin", "python")
 
 if os.path.isfile(_venv_python) and sys.prefix == sys.base_prefix:
     sys.exit(subprocess.call(
