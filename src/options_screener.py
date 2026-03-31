@@ -121,7 +121,7 @@ _SCAN_WARNINGS = [0]
 
 # Optional imports (relative to this package)
 try:
-    from .simulation import monte_carlo_pop
+    from .simulation import monte_carlo_pop, batch_monte_carlo_pop
     HAS_SIMULATION = True
 except ImportError:
     HAS_SIMULATION = False
@@ -823,11 +823,19 @@ def calculate_metrics(
         n_sims = config.get("monte_carlo_simulations", 10000)
         _short_modes = {"Premium Selling", "Credit Spreads", "Iron Condor"}
         _is_short_mode = mode in _short_modes
-        def _calc_mc_pop(row):
-            pop_sim, pot_sim = monte_carlo_pop(S=safe_float(row["underlying"]), K=safe_float(row["strike"]), T=safe_float(row["T_years"]), sigma=safe_float(row["impliedVolatility"]), r=risk_free_rate, premium=safe_float(row["premium"]), option_type=row["type"], n_simulations=n_sims, is_short=_is_short_mode)
-            return pd.Series({"pop_sim": pop_sim, "pot_sim": pot_sim})
-        mc_res = df.apply(_calc_mc_pop, axis=1)
-        df["pop_sim"], df["pot_sim"] = mc_res["pop_sim"], mc_res["pot_sim"]
+        pop_arr, pot_arr = batch_monte_carlo_pop(
+            S_arr=df["underlying"].to_numpy(dtype=float, na_value=0.0),
+            K_arr=df["strike"].to_numpy(dtype=float, na_value=0.0),
+            T_arr=df["T_years"].to_numpy(dtype=float, na_value=0.0),
+            sigma_arr=df["impliedVolatility"].to_numpy(dtype=float, na_value=0.0),
+            r=risk_free_rate,
+            premium_arr=df["premium"].to_numpy(dtype=float, na_value=0.0),
+            option_types=df["type"].to_numpy(),
+            n_simulations=n_sims,
+            is_short=_is_short_mode,
+        )
+        df["pop_sim"] = pop_arr
+        df["pot_sim"] = pot_arr
     else:
         df["pop_sim"], df["pot_sim"] = pd.NA, pd.NA
 
@@ -2408,7 +2416,7 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
                 "history": None, "success": False, "error": str(e)}
 
 
-def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True):
+def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False):
     # Determine mode booleans for internal logic
     is_budget_mode = (mode == "Budget scan")
     is_discovery_mode = (mode == "Discovery scan")
@@ -2713,7 +2721,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
         elif verbose:
             print("\nNo options found within budget.")
 
@@ -2723,7 +2731,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
         elif verbose:
             print("\nNo discovery picks found.")
             
@@ -2748,7 +2756,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.sort_values("quality_score", ascending=False)
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
         elif verbose:
             print("\nNo premium selling candidates found.")
 
@@ -2758,7 +2766,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.copy()
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
         elif verbose:
             print("\nNo suitable options found.")
 
@@ -3444,7 +3452,7 @@ def main():
             surface_greek = getattr(args, 'surface_greek', None)
             surface_type = surface_greek if surface_greek else 'pnl'
             show_contours = not getattr(args, 'no_contours', False)
-            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours)
+            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
             if scan_results is None: sys.exit(0)
 
             picks = scan_results.picks
