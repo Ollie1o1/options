@@ -23,8 +23,9 @@ A Python-based options screening tool that identifies high-probability trading o
 6. [Analytics Engine](#analytics-engine)
 7. [Paper Trading](#paper-trading)
 8. [Configuration](#configuration)
-9. [Project Structure](#project-structure)
-10. [Roadmap](#roadmap)
+9. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
+10. [Project Structure](#project-structure)
+11. [Roadmap](#roadmap)
 
 ---
 
@@ -304,7 +305,7 @@ To change model at any time, edit the `model` field in `src/config_ai.py`. The `
    # Optional: Polygon.io for higher-quality news, VWAP, unusual flow
    # POLYGON_API_KEY=your_polygon_key_here
    ```
-   See `.env.example` for the full template.
+   See `.env.example` for the full template (also includes Discord/Telegram bot tokens).
 
 3. That's it. The screener loads the key automatically from `.env` at startup (works with or without `python-dotenv` installed).
 
@@ -621,6 +622,70 @@ Key levers:
 
 ---
 
+## API + Discord & Telegram Bots
+
+The screener can be exposed as a local HTTP API so that Discord and Telegram bots can query it from anywhere — live options data from your phone or in a chat app without opening a terminal.
+
+### Architecture
+
+```
+Discord Bot  ──┐
+               ├──► FastAPI server :8000 ──► run_scan / get_market_context
+Telegram Bot ──┘
+```
+
+### Setup
+
+```bash
+# Install bot dependencies
+pip install -r requirements_bots.txt
+
+# Set up tokens
+copy .env.example .env   # Windows
+# cp .env.example .env   # macOS/Linux
+
+# Edit .env with real values:
+#   DISCORD_BOT_TOKEN=...
+#   DISCORD_GUILD_ID=...    (server ID for instant slash-command sync)
+#   TELEGRAM_BOT_TOKEN=...
+#   API_BASE_URL=http://127.0.0.1:8000
+```
+
+### Running
+
+```bash
+# Start everything at once (API + both bots)
+python start_all.py
+
+# Or start individually:
+python -m uvicorn src.api:app --host 127.0.0.1 --port 8000
+python -m src.bots.discord_bot
+python -m src.bots.telegram_bot
+```
+
+### API Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `GET /market` | VIX level, regime, trend, macro risk (cached 60s) |
+| `GET /top?n=10` | Top N picks from `liquid_large_cap` watchlist |
+| `GET /scan/{symbol}` | Scan a single ticker |
+| `GET /watchlist/{name}` | Scan any named watchlist from config.json |
+
+### Bot Commands
+
+Both bots support the same four commands:
+
+| Command | What it does |
+|---------|-------------|
+| `/market` | Current market context: trend, VIX, macro risk |
+| `/top` | Top picks from the liquid_large_cap watchlist |
+| `/scan AAPL` | Scan a single ticker |
+| `/watchlist high_iv` | Scan a named watchlist (`liquid_large_cap`, `sector_etfs`, `high_iv`, `income`) |
+
+---
+
 ## Project Structure
 
 ```
@@ -632,8 +697,10 @@ options/
 ├── config.json               # Screener thresholds, weights, and exit rules
 ├── watchlist.json            # Personal ticker list (auto-created by ADD command)
 ├── requirements.txt
+├── requirements_bots.txt     # Bot/API dependencies (fastapi, discord.py, python-telegram-bot)
+├── start_all.py              # Launch API + both bots in one command
 ├── .env                      # Your API keys (gitignored — never committed)
-├── .env.example              # Template showing required env vars
+├── .env.example              # Template showing required env vars (screener + bots)
 ├── README.md
 └── src/
     ├── __main__.py           # Auto-venv launcher for python3 -m src
@@ -673,7 +740,12 @@ options/
     ├── prompts.py            # AI system/scoring prompt templates
     ├── config_ai.py          # AI layer configuration (models, weights, thresholds)
     ├── config_validator.py   # Config.json validation at module load
-    └── types.py              # Shared type definitions and data classes
+    ├── types.py              # Shared type definitions and data classes
+    ├── api.py                # FastAPI server (/market, /top, /scan, /watchlist)
+    └── bots/
+        ├── __init__.py
+        ├── discord_bot.py    # Discord slash commands (/market, /top, /scan, /watchlist)
+        └── telegram_bot.py   # Telegram command handlers (same 4 commands)
 ```
 
 ---
@@ -710,6 +782,10 @@ options/
 - [x] Config validation at module load
 - [x] 3D risk surface — braille hi-res + ASCII fallback, truecolor gradient, Greek surfaces, contour lines
 - [x] Interactive 3D visualizer — 6-tab Plotly browser dashboard (contract explorer, IV surface, Greek landscape, P&L scenarios, score decomposition, risk radar)
+- [x] FastAPI local HTTP server (market context, top picks, single-symbol scan, watchlist scan)
+- [x] Discord bot — slash commands: /market, /top, /scan, /watchlist
+- [x] Telegram bot — same 4 commands, Markdown formatting
+- [x] Single-launcher (start_all.py) for all 3 processes with clean Ctrl+C shutdown
 - [ ] Real-time alerts (email / SMS)
 - [ ] Multi-leg spread support in paper manager
 - [ ] Backtesting UI improvements
