@@ -982,6 +982,48 @@ def calculate_metrics(
     return df
 
 
+def _cross_section_normalize(df: pd.DataFrame) -> pd.DataFrame:
+    """Map raw quality_score to the display [0, 1] scale using a fixed absolute reference.
+
+    The raw quality_score is a weighted average of 23 components compressed into
+    roughly the 0.35–0.75 range. This function stretches that to [0, 1] using a
+    fixed linear mapping — no batch effects, no relative ranking, no caps.
+
+    A contract with raw 0.62 always maps to ~0.675 regardless of what else is in
+    the scan. Weak market days honestly show 2-star setups; strong market days
+    show 3–5 star setups. That's accurate.
+
+    Reference:
+        raw 0.35 → 0.00  (near-minimum: all signals weak)
+        raw 0.45 → 0.25  (2-star threshold)
+        raw 0.53 → 0.46  (3-star threshold)
+        raw 0.61 → 0.65  (4-star threshold)
+        raw 0.68 → 0.83  (5-star threshold)
+        raw 0.75 → 1.00  (near-maximum: all signals strong + bonuses)
+    """
+    n = len(df)
+    if n <= 1:
+        return df
+
+    raw = df["quality_score"].copy()
+
+    # Pure absolute mapping: raw score → display score, fixed reference range.
+    # Power curve (x^0.6) expands the middle range where scores cluster, so a
+    # contract with raw 0.48 maps to ~0.52 (3★) rather than 0.33 (2★) with linear.
+    base = ((raw - 0.35) / 0.40).clip(0, 1)
+    normalized = base ** 0.6
+
+    # EV tiebreaker: contracts with the same raw quality rank by expected value.
+    # Centered at 0 (median EV gets no bonus/penalty). Max effect: ±0.015.
+    # Visible in the 3rd decimal place without distorting the quality signal.
+    if "ev" in df.columns:
+        ev_rank = df["ev"].rank(pct=True).fillna(0.5)
+        normalized = (normalized + (ev_rank - 0.5) * 0.03).clip(0, 1)
+
+    df["quality_score"] = normalized.round(4)
+    return df
+
+
 def calculate_scores(
     df: pd.DataFrame,
     config: Dict,
@@ -1271,6 +1313,9 @@ def calculate_scores(
         # Dampen mispricing score by surface fit confidence
         surf_conf = pd.to_numeric(df.get("iv_surface_confidence", 1.0), errors="coerce").fillna(0.0)
         iv_mispricing_score = iv_mispricing_score * surf_conf.clip(0, 1)
+        # Bug fix: when no SVI surface fit exists (surf_conf ≈ 0), the multiplication
+        # above yields 0.0 — not the neutral 0.5.  Restore neutrality for unfit contracts.
+        iv_mispricing_score = iv_mispricing_score.where(surf_conf > 0.05, 0.5)
         df["iv_mispricing_score"] = iv_mispricing_score
 
         dw = {
@@ -1473,6 +1518,8 @@ def calculate_scores(
     df["spread_score"], df["theta_score"], df["momentum_score"] = spread_score, theta_score, momentum_score
     df["iv_rank_score"], df["catalyst_score"] = iv_rank_score, catalyst_score
     df["iv_advantage_score"] = iv_edge_score  # mode-aware: buyers rewarded for IV < HV
+    df["pop_score"] = pop_score   # stored for backtester IC analysis
+    df["rr_score"]  = rr_score    # stored for backtester IC analysis
     
     return df
 
@@ -2658,6 +2705,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         non_empty_picks = [df for df in all_picks if not df.empty]
         if non_empty_picks:
             picks = pd.concat(non_empty_picks, ignore_index=True)
+            # Cross-sectional normalization across the FULL combined batch.
+            # Must run here (not per-ticker) so scores reflect quality relative
+            # to every contract scanned, not just the ~5-15 from one ticker's chain.
+            # Risk-flag caps applied per-ticker earlier are preserved as the raw input.
+            picks = _cross_section_normalize(picks)
     
     if all_credit_spreads:
         credit_spreads_df = pd.concat(all_credit_spreads, ignore_index=True)
@@ -3223,9 +3275,24 @@ def main():
     # ── Regime Dashboard ─────────────────────────────────────────────────────
     try:
         from .regime_dashboard import print_regime_dashboard
+        import threading as _t, io as _io, sys as _sys
         print("  Loading market data...", end="", flush=True)
-        print_regime_dashboard(WIDTH)
-        print("\r" + " " * 30, end="\r")  # clear loading line if dashboard printed nothing
+        _result = [None]
+        def _fetch():
+            buf = _io.StringIO()
+            _old = _sys.stdout
+            _sys.stdout = buf
+            try:
+                print_regime_dashboard(WIDTH)
+            finally:
+                _sys.stdout = _old
+            _result[0] = buf.getvalue()
+        _th = _t.Thread(target=_fetch, daemon=True)
+        _th.start()
+        _th.join(timeout=8)  # hard 8-second cap on regime fetch
+        print("\r" + " " * 30 + "\r", end="")
+        if _result[0]:
+            print(_result[0], end="")
     except Exception:
         print()  # newline after "Loading..." if dashboard fails
 
@@ -3549,6 +3616,14 @@ def main():
                             "entry_vega": top_pick_row.get("vega"),
                             "entry_theta": top_pick_row.get("theta"),
                             "dividend_yield": top_pick_row.get("dividend_yield"),
+                            # Component scores — enable backtester IC analysis once 30+ trades close
+                            "pop_score": top_pick_row.get("pop_score"),
+                            "ev_score": top_pick_row.get("ev_score"),
+                            "rr_score": top_pick_row.get("rr_score"),
+                            "liquidity_score": top_pick_row.get("liquidity_score"),
+                            "momentum_score": top_pick_row.get("momentum_score"),
+                            "iv_rank_score": top_pick_row.get("iv_rank_score"),
+                            "theta_score": top_pick_row.get("theta_score"),
                         }
                         pm.log_trade(trade_dict)
                         msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"

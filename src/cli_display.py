@@ -898,7 +898,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     is_seller = (mode == "Premium Selling")
 
     _sort_map = {
-        "q": "quality_score", "quality_score": "quality_score",
+        "c": "quality_score", "q": "quality_score", "quality_score": "quality_score",
         "i": "iv_percentile_30", "iv": "iv_percentile_30",
         "s": "spread_pct", "spread": "spread_pct",
         "d": "T_years", "dte": "T_years",
@@ -1029,7 +1029,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         print(line)
 
     print(fmt.colorize(sep_line, fmt.Colors.DIM))
-    sort_hint = "  Sort: [Q]uality  [I]V Rank  [S]pread  [D]TE  [E]V"
+    sort_hint = "  Sort: [C]omposite  [I]V Rank  [S]pread  [D]TE  [E]V"
     print(fmt.colorize(sort_hint, fmt.Colors.DIM))
     print()
 
@@ -1115,10 +1115,10 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         while True:
             try:
                 _sort_choice = input(fmt.colorize(
-                    "  Re-sort? Enter key (q/i/s/d/e) or Enter to continue > ",
+                    "  Re-sort? Enter key (c/i/s/d/e) or q/Enter to skip > ",
                     fmt.Colors.DIM
                 )).strip().lower()
-                if _sort_choice in ("q", "i", "s", "d", "e"):
+                if _sort_choice in ("c", "i", "s", "d", "e"):
                     print_comparison_table(df_picks, mode, sort_by=_sort_choice, account_size=_acct)
                 else:
                     break

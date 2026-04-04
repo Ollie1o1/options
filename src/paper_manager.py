@@ -150,7 +150,8 @@ class PaperManager:
         """
         Logs a new paper trade to the SQLite database.
         Required keys: ticker, expiration, strike, type, entry_price, quality_score, strategy_name
-        Optional keys: ai_score, ai_confidence, entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield
+        Optional keys: ai_score, ai_confidence, entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield,
+                       pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score
         """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -160,8 +161,9 @@ class PaperManager:
             entry_price, quality_score, strategy_name,
             status, exit_price, exit_date, pnl_pct,
             ai_score, ai_confidence,
-            entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield,
+            pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         def _float_or_none(key):
@@ -195,6 +197,13 @@ class PaperManager:
             _float_or_none("entry_vega"),
             _float_or_none("entry_theta"),
             _float_or_none("dividend_yield"),
+            _float_or_none("pop_score"),
+            _float_or_none("ev_score"),
+            _float_or_none("rr_score"),
+            _float_or_none("liquidity_score"),
+            _float_or_none("momentum_score"),
+            _float_or_none("iv_rank_score"),
+            _float_or_none("theta_score"),
         )
 
         with self._get_connection() as conn:

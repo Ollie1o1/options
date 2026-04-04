@@ -265,16 +265,20 @@ def format_quality_score(score: float) -> Tuple[str, str]:
     Returns:
         Tuple of (stars_string, color_code)
     """
-    if score >= 0.90:
+    # Thresholds calibrated for cross-sectionally normalized scores (0–1 after
+    # within-batch percentile ranking).  In a healthy batch these correspond to
+    # roughly: ★★★★★ top ~17%, ★★★★☆ top ~35%, ★★★☆☆ top ~55%,
+    # ★★☆☆☆ top ~75%, ★☆☆☆☆ bottom ~25%.
+    if score >= 0.83:
         stars = "★★★★★"
         color = Colors.BRIGHT_GREEN
-    elif score >= 0.75:
+    elif score >= 0.65:
         stars = "★★★★☆"
         color = Colors.GREEN
-    elif score >= 0.60:
+    elif score >= 0.46:
         stars = "★★★☆☆"
         color = Colors.YELLOW
-    elif score >= 0.45:
+    elif score >= 0.25:
         stars = "★★☆☆☆"
         color = Colors.BRIGHT_RED
     else:
