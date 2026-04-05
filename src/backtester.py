@@ -323,10 +323,12 @@ def run_backtest(
                     else:
                         abs_rsi_momentum = (100.0 - rsi) / 100.0
 
-                    score = (0.5 * abs_momentum
+                    # Momentum-only proxy signal (NOT the full quality_score)
+                    momentum_signal = (0.5 * abs_momentum
                              + 0.3 * hv_rank_score
                              + 0.2 * abs_rsi_momentum)
-                    score = max(0.0, min(1.0, score))
+                    momentum_signal = max(0.0, min(1.0, momentum_signal))
+                    score = momentum_signal
 
                     # BS entry pricing (with bid-ask spread cost)
                     T_entry = dte / 365.0
@@ -379,6 +381,11 @@ def run_backtest(
                         except Exception:
                             pass
 
+                    # EM calibration: track expected vs realized move
+                    em_1sigma = S * sigma * math.sqrt(dte / 365.0)
+                    realized_move = abs(S_exit - S)
+                    within_em = realized_move <= em_1sigma
+
                     trades.append({
                         "day": i,
                         "direction": direction,
@@ -390,6 +397,7 @@ def run_backtest(
                         "win": pnl_pct > 0,
                         "vix_level": vix_val,
                         "vix_regime": _classify_vix_regime(vix_val),
+                        "within_em": within_em,
                     })
                 except Exception:
                     continue
@@ -403,6 +411,9 @@ def run_backtest(
             win_rate = float(trades_df["win"].mean())
             avg_return = float(trades_df["pnl_pct"].mean())
             avg_return_gross = float(trades_df["pnl_pct_gross"].mean()) if "pnl_pct_gross" in trades_df.columns else avg_return
+
+            # EM calibration: what fraction of realized moves fell within 1σ EM (target: ~68%)
+            em_within_pct = float(trades_df["within_em"].mean()) if "within_em" in trades_df.columns else None
 
             # Sharpe (annualised, assuming ~12 trades/year roughly)
             ret_std = float(trades_df["pnl_pct"].std())
@@ -482,6 +493,7 @@ def run_backtest(
                 "max_drawdown": max_drawdown,
                 "profit_factor": profit_factor,
                 "regime_summary": regime_summary,
+                "em_within_pct": em_within_pct,
             })
 
         except Exception as e:
@@ -645,14 +657,16 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
     _COMPONENT_COLS = [
         "pop_score", "ev_score", "rr_score", "liquidity_score",
         "momentum_score", "iv_rank_score", "theta_score",
+        "iv_edge_score", "vrp_score", "iv_mispricing_score",
+        "skew_align_score", "vega_risk_score", "term_structure_score",
     ]
     empty_result["component_ic"] = {}
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
+        _col_list = ", ".join(["quality_score", "pnl_pct"] + _COMPONENT_COLS)
         rows = conn.execute(
-            "SELECT quality_score, pnl_pct, pop_score, ev_score, rr_score, "
-            "liquidity_score, momentum_score, iv_rank_score, theta_score "
+            f"SELECT {_col_list} "
             "FROM trades WHERE status='CLOSED' "
             "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
         ).fetchall()
@@ -881,6 +895,18 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
             print(fmt.colorize(cost_line, fmt.Colors.YELLOW))
         else:
             print(cost_line)
+
+    # EM calibration: what fraction of realized moves fell within 1σ expected move
+    em_pcts = [r["em_within_pct"] for r in ticker_results if r.get("em_within_pct") is not None]
+    if em_pcts:
+        avg_em = sum(em_pcts) / len(em_pcts) * 100
+        em_color = (fmt.Colors.GREEN if abs(avg_em - 68) < 5 else fmt.Colors.YELLOW) if HAS_FMT and fmt else ""
+        em_line = f"  EM calibration: {avg_em:.0f}% of realized moves within 1\u03c3 EM (target: ~68%)"
+        if HAS_FMT and fmt and em_color:
+            print(fmt.colorize(em_line, em_color))
+        else:
+            print(em_line)
+
     print(_sep(width))
 
     # Combined quintile analysis
@@ -959,6 +985,13 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
             print(fmt.colorize(thr_line, fmt.Colors.YELLOW))
         else:
             print(thr_line)
+    _caveat = ("  Note: Walk-forward backtest uses a momentum-only proxy signal, "
+               "not the full quality_score.\n"
+               "  For quality_score validation, use: python -m src.backtester --paper-ic")
+    if HAS_FMT and fmt:
+        print(fmt.colorize(_caveat, fmt.Colors.DIM))
+    else:
+        print(_caveat)
     print()
 
     # Regime breakdown

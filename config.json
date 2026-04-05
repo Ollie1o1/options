@@ -68,6 +68,13 @@
   "default_budget": 750,
   "target_delta": 0.40,
   "spread_score_cap": 0.15,
+  "rr_expected_move_factor": 0.68,
+  "liquidity_thresholds": {
+    "volume_center": 500,
+    "volume_scale": 0.005,
+    "oi_center": 2000,
+    "oi_scale": 0.001
+  },
   "momentum_weights": {"rsi": 0.35, "ret5d": 0.30, "sma": 0.20, "vwap": 0.15},
   "earnings_buffer_days": 5,
   "iv_rank_weight_threshold": 0.5,

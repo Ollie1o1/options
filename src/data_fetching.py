@@ -69,6 +69,7 @@ _IV_RANK_CACHE: Dict[str, Tuple] = {}
 _SENTIMENT_CACHE: Dict[str, float] = {}
 _SEASONALITY_CACHE: Dict[str, float] = {}
 _CHAIN_CACHE: dict = {}
+_FETCH_TIMESTAMPS: Dict[str, datetime] = {}  # symbol → last fetch time
 
 # Module-level sector map — shared by sector_analyzer, ranking, and options_screener
 # ~180 major optionable names mapped to their SPDR sector ETF
@@ -168,6 +169,15 @@ SECTOR_MAP: Dict[str, str] = {
 def clear_chain_cache() -> None:
     """Clear the in-session options chain cache."""
     _CHAIN_CACHE.clear()
+    _FETCH_TIMESTAMPS.clear()
+
+
+def get_data_age_seconds() -> Optional[float]:
+    """Return age in seconds of the oldest fetch in this session, or None if no fetches."""
+    if not _FETCH_TIMESTAMPS:
+        return None
+    oldest = min(_FETCH_TIMESTAMPS.values())
+    return (datetime.now() - oldest).total_seconds()
 
 
 # --- Abstract Data Provider ---
@@ -260,7 +270,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     else:
         hv_30d = hv_30d_rolling or hv_ewma
 
-    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50 = \
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14 = \
         calculate_momentum_indicators(hist)
     rvol = calculate_rvol(hist)
     vwap, fib_50, fib_618 = calculate_technical_levels(hist)
@@ -349,6 +359,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     df["hv_30d"] = hv_30d
     df["ret_5d"] = ret_5d
     df["rsi_14"] = rsi_14
+    df["adx_14"] = adx_14
     df["atr_trend"] = atr_trend
     df["sma_20"] = sma_20
     df["sma_50"] = sma_50
@@ -1091,12 +1102,12 @@ def calculate_max_pain(df_chain: pd.DataFrame, underlying: float = 0.0) -> Optio
         return None
 
 
-def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool, Optional[float]]:
-    """Calculate RSI, ATR, SMA-20, SMA-50, etc. from history DataFrame."""
+def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool, Optional[float], Optional[float]]:
+    """Calculate RSI, ATR, ADX, SMA-20, SMA-50, etc. from history DataFrame."""
     try:
         if hist.empty or len(hist) < 21:
-            return None, None, None, None, None, None, False, None
-        
+            return None, None, None, None, None, None, False, None, None
+
         close = hist["Close"].astype(float)
         high = hist.get("High", close).astype(float)
         low = hist.get("Low", close).astype(float)
@@ -1121,13 +1132,32 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
         tr3 = (low - prev_close).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=14).mean()
-        
+
         atr_trend = None
         if len(atr.dropna()) >= 20:
             recent_atr = atr.iloc[-1]
             atr_ma = atr.rolling(window=20).mean().iloc[-1]
             if atr_ma and atr_ma > 0:
                 atr_trend = float(recent_atr / atr_ma - 1.0)
+
+        # ADX-14: trend strength (>25 = trending, <20 = ranging)
+        adx_14 = None
+        try:
+            if len(close) >= 28:
+                plus_dm = (high - high.shift(1)).clip(lower=0.0)
+                minus_dm = (low.shift(1) - low).clip(lower=0.0)
+                # Zero out when the other is larger
+                plus_dm[plus_dm < minus_dm] = 0.0
+                minus_dm[minus_dm < plus_dm] = 0.0
+                _atr_smooth = atr.bfill()
+                plus_di = 100.0 * (plus_dm.rolling(14).mean() / _atr_smooth.replace(0, np.nan))
+                minus_di = 100.0 * (minus_dm.rolling(14).mean() / _atr_smooth.replace(0, np.nan))
+                dx = (100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
+                adx_series = dx.rolling(14).mean()
+                if adx_series.notna().any():
+                    adx_14 = float(adx_series.iloc[-1]) if not np.isnan(adx_series.iloc[-1]) else None
+        except Exception:
+            pass
 
         # 20-day stats
         sma_20 = float(close.rolling(window=20).mean().iloc[-1])
@@ -1146,9 +1176,9 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
         kc_lower = sma_20 - (kc_atr * 1.5)
         is_squeezing = (bb_upper < kc_upper) and (bb_lower > kc_lower)
 
-        return ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50
+        return ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14
     except Exception:
-        return None, None, None, None, None, None, False, None
+        return None, None, None, None, None, None, False, None, None
 
 def calculate_rvol(hist: pd.DataFrame) -> Optional[float]:
     """Calculate Relative Volume (Current Vol / 30-day Avg Vol)."""
@@ -1569,7 +1599,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         hv_30d = 0.5 * hv_30d_rolling + 0.5 * hv_ewma
     else:
         hv_30d = hv_30d_rolling or hv_ewma
-    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50 = calculate_momentum_indicators(hist)
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14 = calculate_momentum_indicators(hist)
     rvol = calculate_rvol(hist)
     vwap, fib_50, fib_618 = calculate_technical_levels(hist)
 
@@ -1651,6 +1681,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     df["max_pain_strike"] = max_pain_strike
     df["ret_5d"] = ret_5d
     df["rsi_14"] = rsi_14
+    df["adx_14"] = adx_14
     df["atr_trend"] = atr_trend
     df["sma_20"] = sma_20
     df["sma_50"] = sma_50
@@ -1838,6 +1869,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         }
     }
     _CHAIN_CACHE[symbol] = result
+    _FETCH_TIMESTAMPS[symbol] = datetime.now()
     return result
 
 

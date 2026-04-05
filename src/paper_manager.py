@@ -29,7 +29,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -55,6 +55,15 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN entry_vega REAL",
         "ALTER TABLE trades ADD COLUMN entry_theta REAL",
         "ALTER TABLE trades ADD COLUMN dividend_yield REAL",
+    ],
+    6: [
+        # Expanded component scores for per-component IC validation
+        "ALTER TABLE trades ADD COLUMN iv_edge_score REAL",
+        "ALTER TABLE trades ADD COLUMN vrp_score REAL",
+        "ALTER TABLE trades ADD COLUMN iv_mispricing_score REAL",
+        "ALTER TABLE trades ADD COLUMN skew_align_score REAL",
+        "ALTER TABLE trades ADD COLUMN vega_risk_score REAL",
+        "ALTER TABLE trades ADD COLUMN term_structure_score REAL",
     ],
 }
 
@@ -151,7 +160,8 @@ class PaperManager:
         Logs a new paper trade to the SQLite database.
         Required keys: ticker, expiration, strike, type, entry_price, quality_score, strategy_name
         Optional keys: ai_score, ai_confidence, entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield,
-                       pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score
+                       pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score,
+                       iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score
         """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -162,8 +172,9 @@ class PaperManager:
             status, exit_price, exit_date, pnl_pct,
             ai_score, ai_confidence,
             entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield,
-            pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score,
+            iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         def _float_or_none(key):
@@ -204,6 +215,12 @@ class PaperManager:
             _float_or_none("momentum_score"),
             _float_or_none("iv_rank_score"),
             _float_or_none("theta_score"),
+            _float_or_none("iv_edge_score"),
+            _float_or_none("vrp_score"),
+            _float_or_none("iv_mispricing_score"),
+            _float_or_none("skew_align_score"),
+            _float_or_none("vega_risk_score"),
+            _float_or_none("term_structure_score"),
         )
 
         with self._get_connection() as conn:

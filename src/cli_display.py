@@ -221,7 +221,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
 
     ev = row.get("ev_per_contract", pd.NA)
     if pd.notna(ev) and math.isfinite(float(ev)):
-        ev_str = fmt.format_ev(float(ev)) if HAS_ENHANCED_CLI else f"${float(ev):.0f}"
+        _ml = float(row.get("max_loss", 0) or 0)
+        ev_str = fmt.format_ev(float(ev), max_loss=_ml) if HAS_ENHANCED_CLI else f"${float(ev):.0f}"
         val.append(f"EV: {ev_str}")
 
     quality = row.get('quality_score', 0.0)
@@ -747,9 +748,22 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
         fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW
     )
 
+    # Data freshness
+    _age_str = ""
+    try:
+        from .data_fetching import get_data_age_seconds
+        _age_s = get_data_age_seconds()
+        if _age_s is not None:
+            _age_m = int(_age_s // 60)
+            _age_color = fmt.Colors.GREEN if _age_m < 5 else (fmt.Colors.YELLOW if _age_m < 15 else fmt.Colors.RED)
+            _age_str = f" | Data: {fmt.colorize(f'{_age_m}m old', _age_color)}"
+    except Exception:
+        pass
+
     print(f"   Trend: {fmt.colorize(market_trend, trend_color, bold=True)} | "
           f"VIX: {fmt.colorize(vix_str, vol_color)} ({volatility_regime}) | "
-          f"Risk: {fmt.colorize('HIGH', fmt.Colors.RED, bold=True) if macro_risk else fmt.colorize('LOW', fmt.Colors.GREEN)}")
+          f"Risk: {fmt.colorize('HIGH', fmt.Colors.RED, bold=True) if macro_risk else fmt.colorize('LOW', fmt.Colors.GREEN)}"
+          f"{_age_str}")
 
     # Portfolio VaR
     try:
@@ -787,8 +801,9 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
 
         # Box for each pick
         print(fmt.draw_separator(width - 4, fmt.BoxChars.HORIZONTAL))
+        _ml = float(row.get("max_loss", 0) or 0)
         print(f"{fmt.BoxChars.VERTICAL} {i}. {symbol} ${strike} {opt_type} @ ${premium:.2f} • "
-              f"{fmt.format_pop(pop)} PoP • {fmt.format_rr(rr)} RR • {fmt.format_ev(ev)} EV • {stars}")
+              f"{fmt.format_pop(pop)} PoP • {fmt.format_rr(rr)} RR • {fmt.format_ev(ev, max_loss=_ml)} EV • {stars}")
 
         # Thesis
         thesis = generate_trade_thesis(row) if HAS_ENHANCED_CLI else "Standard setup"
@@ -859,7 +874,8 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
     thesis_short = thesis.split("|")[0].strip()[:55] if thesis else ""
     pop_str = fmt.format_pop(pop)
     rr_str = fmt.format_rr(rr)
-    ev_str = fmt.format_ev(ev)
+    _ml = float(top.get("max_loss", 0) or 0)
+    ev_str = fmt.format_ev(ev, max_loss=_ml)
 
     line1 = f"BEST SETUP  \u2014  {sym} {opt_type} ${strike:.0f}  exp {exp}   #1/{total}"
     line2 = f"PoP {pop_str}  RR {rr_str}  EV {ev_str}  {stars}  Score {quality:.2f}"

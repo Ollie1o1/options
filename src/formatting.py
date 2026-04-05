@@ -285,10 +285,13 @@ def format_quality_score(score: float) -> Tuple[str, str]:
         stars = "★☆☆☆☆"
         color = Colors.RED
 
-    if not supports_color():
-        return stars, ""
+    # Append raw score for transparency (stars alone are ambiguous across batch sizes)
+    stars_with_score = f"{stars} {score:.2f}"
 
-    return colorize(stars, color), color
+    if not supports_color():
+        return stars_with_score, ""
+
+    return colorize(stars_with_score, color), color
 
 
 def draw_box(title: str, width: int = 80, double: bool = False) -> str:
@@ -444,9 +447,19 @@ def format_rr(rr: float) -> str:
     return format_metric(rr, 1.5, 0.7, True, ".1f", "x")
 
 
-def format_ev(ev: float) -> str:
-    """Format expected value"""
-    return format_money(ev, threshold_positive=10)
+def format_ev(ev: float, max_loss: float = 0.0) -> str:
+    """Format expected value, optionally showing % of risk."""
+    base = format_money(ev, threshold_positive=10)
+    if max_loss and abs(max_loss) > 1.0:
+        ev_pct = ev / abs(max_loss) * 100
+        if ev_pct >= 2.0:
+            pct_str = f"\033[32m{ev_pct:+.1f}%\033[0m"
+        elif ev_pct >= 0:
+            pct_str = f"\033[33m{ev_pct:+.1f}%\033[0m"
+        else:
+            pct_str = f"\033[31m{ev_pct:+.1f}%\033[0m"
+        return f"{base} ({pct_str})"
+    return base
 
 
 def format_iv_rank_bar(iv_pct: float, hv: float, iv: float, width: int = 20, iv_confidence: str = "") -> str:
