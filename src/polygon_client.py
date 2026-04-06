@@ -11,7 +11,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Any, Optional
+from typing import Optional
 
 import requests
 

@@ -324,7 +324,6 @@ def _fetch_alpha_vantage(symbol: str, api_key: str, max_age_hours: int = 72) -> 
     """Fetch news sentiment from Alpha Vantage NEWS_SENTIMENT endpoint (free tier)."""
     items: List[NewsItem] = []
     try:
-        from datetime import timezone as tz
         params = {
             "function": "NEWS_SENTIMENT",
             "tickers": symbol,
@@ -569,7 +568,6 @@ def format_news_panel(
     RED   = "\033[91m" if use_color else ""
     GREEN = "\033[92m" if use_color else ""
     YELLOW = "\033[93m" if use_color else ""
-    MAGENTA = "\033[95m" if use_color else ""
 
     lines: list[str] = []
 

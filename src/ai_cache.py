@@ -17,7 +17,6 @@ import sqlite3
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Optional, Any
-import math
 
 _DB_PATH = Path(__file__).resolve().parent.parent / ".ai_score_cache.db"
 

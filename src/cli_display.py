@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Optional, Dict
 
 import pandas as pd
-import numpy as np
 
 from .utils import format_pct, format_money, determine_moneyness, generate_occ_symbol
 from .data_fetching import get_vix_level
@@ -154,7 +153,7 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
         print(sep)
         for _, row in bucket_df.iterrows():
             dte_val = int(row.get("_dte", 0))
-            iv_pct = row.get("iv_percentile_30", row.get("iv_percentile", 0)) or 0
+            row.get("iv_percentile_30", row.get("iv_percentile", 0)) or 0
             pop = row.get("prob_profit", 0) or 0
             prem = row.get("premium", 0) or 0
             delta = row.get("delta", 0) or 0
@@ -637,17 +636,13 @@ def _format_breakeven_line(row: pd.Series, arrow: str) -> str:
         else:
             label, color = "UNLIKELY", fmt.Colors.RED if HAS_ENHANCED_CLI else None
 
-        body = (
-            f"BE: ${breakeven:.2f} | Needs {sign}${required_move:.2f} ({sign}{req_pct:.1f}%)"
-            f"  1\u03c3 EM: ${expected_move:.2f} ({em_pct:.1f}%)  \u2192  {em_ratio:.1f}\u00d7 EM"
-        )
         prefix_sym = "\u26a0 " if em_ratio >= 1.0 else ""
         if HAS_ENHANCED_CLI and color:
             label_str = fmt.colorize(f"{prefix_sym}{label}", color)
         else:
             label_str = f"{prefix_sym}{label}"
 
-        be_label = fmt.colorize("BE:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "BE:"
+        fmt.colorize("BE:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "BE:"
         full_line = f"BE: ${breakeven:.2f} | Needs {sign}${required_move:.2f} ({sign}{req_pct:.1f}%)  1\u03c3 EM: ${expected_move:.2f} ({em_pct:.1f}%)  \u2192  {em_ratio:.1f}\u00d7 EM  {label_str}"
         be_dim = fmt.colorize("Breakevn: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Breakevn: "
         return f"    {arrow} {be_dim}{full_line[4:]}"  # strip leading "BE: " and use dim label
@@ -911,7 +906,6 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         return
 
     width = get_display_width()
-    is_seller = (mode == "Premium Selling")
 
     _sort_map = {
         "c": "quality_score", "q": "quality_score", "quality_score": "quality_score",
@@ -1099,7 +1093,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     elif mode == "Budget scan":
         print(f"  Budget: ${budget:.2f}/contract  |  LOW <${budget*0.33:.0f}  |  MED ${budget*0.33:.0f}\u2013${budget*0.66:.0f}  |  HIGH >${budget*0.66:.0f}")
     else:
-        print(f"  Top opportunities across all price ranges  |  LOW / MED / HIGH by premium")
+        print("  Top opportunities across all price ranges  |  LOW / MED / HIGH by premium")
 
     trend_str = fmt.colorize(market_trend, trend_color, bold=True) if HAS_ENHANCED_CLI else market_trend
     vol_str = fmt.colorize(volatility_regime, vol_color) if HAS_ENHANCED_CLI else volatility_regime

@@ -119,9 +119,12 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
     gamma_v = c.get("gamma")
     theta_v = c.get("theta")
     greek_parts = []
-    if delta_v is not None: greek_parts.append(f"δ:{float(delta_v):.2f}")
-    if gamma_v is not None: greek_parts.append(f"γ:{float(gamma_v):.4f}")
-    if theta_v is not None: greek_parts.append(f"θ:{float(theta_v):.3f}")
+    if delta_v is not None:
+        greek_parts.append(f"δ:{float(delta_v):.2f}")
+    if gamma_v is not None:
+        greek_parts.append(f"γ:{float(gamma_v):.4f}")
+    if theta_v is not None:
+        greek_parts.append(f"θ:{float(theta_v):.3f}")
     if greek_parts:
         kv.append(" ".join(greek_parts))
 
@@ -387,7 +390,7 @@ class AIScorer:
             underlying = float(sym_rows["underlying"].iloc[0])
 
         iv_rank = ctx.get("iv_rank")
-        iv_pct = ctx.get("iv_percentile")
+        ctx.get("iv_percentile")
         hv = ctx.get("hv")
         term_spread = ctx.get("term_structure_spread")
         earnings = ctx.get("earnings_date")
@@ -744,14 +747,22 @@ class AIScorer:
             earn   = c.get("Earnings Play", "NO")
 
             raw_parts = []
-            if udly is not None:   raw_parts.append(f"udly:{float(udly):.1f}")
-            if prem is not None:   raw_parts.append(f"prem:{float(prem):.2f}")
-            if iv_r is not None:   raw_parts.append(f"iv_rank:{float(iv_r):.0%}")
-            if delta is not None:  raw_parts.append(f"delta:{float(delta):.2f}")
-            if pop is not None:    raw_parts.append(f"PoP:{float(pop):.0%}")
-            if ev is not None:     raw_parts.append(f"EV:{float(ev):.0f}")
-            if rr is not None:     raw_parts.append(f"RR:{float(rr):.1f}x")
-            if trend is not None:  raw_parts.append(f"trend:{'Y' if trend else 'N'}")
+            if udly is not None:
+                raw_parts.append(f"udly:{float(udly):.1f}")
+            if prem is not None:
+                raw_parts.append(f"prem:{float(prem):.2f}")
+            if iv_r is not None:
+                raw_parts.append(f"iv_rank:{float(iv_r):.0%}")
+            if delta is not None:
+                raw_parts.append(f"delta:{float(delta):.2f}")
+            if pop is not None:
+                raw_parts.append(f"PoP:{float(pop):.0%}")
+            if ev is not None:
+                raw_parts.append(f"EV:{float(ev):.0f}")
+            if rr is not None:
+                raw_parts.append(f"RR:{float(rr):.1f}x")
+            if trend is not None:
+                raw_parts.append(f"trend:{'Y' if trend else 'N'}")
             raw_parts.append(f"earn:{earn}")
 
             # Ticker context (one line)
@@ -879,7 +890,7 @@ def _parse_json_response(raw: str) -> list[dict]:
     """Parse AI scoring response, with partial-JSON recovery for truncated responses."""
     text = raw.strip()
     if text.startswith("```"):
-        text = "\n".join(l for l in text.splitlines() if not l.startswith("```")).strip()
+        text = "\n".join(line for line in text.splitlines() if not line.startswith("```")).strip()
     start = text.find("{")
     end   = text.rfind("}") + 1
     if start == -1 or end == 0:
@@ -911,7 +922,7 @@ def _parse_json_response(raw: str) -> list[dict]:
 def _parse_json_single(raw: str) -> dict:
     text = raw.strip()
     if text.startswith("```"):
-        text = "\n".join(l for l in text.splitlines() if not l.startswith("```")).strip()
+        text = "\n".join(line for line in text.splitlines() if not line.startswith("```")).strip()
     start = text.find("{")
     end   = text.rfind("}") + 1
     if start == -1 or end == 0:

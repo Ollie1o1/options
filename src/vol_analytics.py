@@ -517,7 +517,7 @@ def classify_vol_regime(ticker: str, current_iv: Optional[float] = None) -> dict
             rec = f"BUY premium or vol \u2014 IV historically cheap, {ts.lower()} structure"
         else:
             if skew == "PUT_SKEW":
-                rec = f"NEUTRAL \u2014 consider put spreads or straddles; put skew elevated"
+                rec = "NEUTRAL \u2014 consider put spreads or straddles; put skew elevated"
             else:
                 rec = f"NEUTRAL \u2014 standard screening approach, {ts.lower()} structure"
 

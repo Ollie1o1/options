@@ -8,7 +8,6 @@ import logging
 import os
 import sqlite3
 import shutil
-import pandas as pd
 from datetime import datetime, date
 from typing import Optional
 
@@ -138,7 +137,7 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             entry_vega = float(r["entry_vega"])
             entry_theta = float(r["entry_theta"])
             entry_price = float(r["entry_price"])
-            exit_price = float(r["exit_price"]) if r["exit_price"] else 0.0
+            float(r["exit_price"]) if r["exit_price"] else 0.0
             pnl_ratio = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
 
             # We don't have S_entry/S_exit stored, so use pnl_ratio * entry_price * 100 as actual P&L
@@ -239,7 +238,6 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     # Batch-fetch unique stock prices (fast, 1 call per ticker)
     unique_tickers = list({r["ticker"] for r in open_trades})
     stock_prices: dict = {}
-    import warnings
     for ticker in unique_tickers:
         try:
             tkr = yf.Ticker(ticker)

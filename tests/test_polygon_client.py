@@ -5,7 +5,7 @@ Tests are compatible with  python -m pytest tests/test_polygon_client.py -v
 """
 
 import unittest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 
@@ -40,7 +40,8 @@ class TestPolygonClientWithKey(unittest.TestCase):
         import os
         os.environ["POLYGON_API_KEY"] = "test-key-1234"
         # Re-import after env var is set
-        import importlib, src.polygon_client
+        import importlib
+        import src.polygon_client
         importlib.reload(src.polygon_client)
         from src.polygon_client import PolygonClient
         self.PolygonClient = PolygonClient

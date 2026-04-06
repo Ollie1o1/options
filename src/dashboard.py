@@ -5,14 +5,11 @@ Professional "Dark Financial" Trading Terminal UI
 """
 
 import sys
-import os
 from pathlib import Path
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 import streamlit as st
 
 # Add parent directory to sys.path for imports
@@ -483,11 +480,16 @@ def render_scanner_tab(budget, dte_bucket_filter="All"):
                     if not match.empty:
                         st.session_state.selected_option = match.iloc[0]
 
-            with subtabs[0]: render_df(top_picks_df, "top")
-            with subtabs[1]: render_df(picks_df[picks_df['price_bucket'] == 'LOW'], "low")
-            with subtabs[2]: render_df(picks_df[picks_df['price_bucket'] == 'MEDIUM'], "med")
-            with subtabs[3]: render_df(picks_df[picks_df['price_bucket'] == 'HIGH'], "high")
-            with subtabs[4]: render_df(picks_df, "all")
+            with subtabs[0]:
+                render_df(top_picks_df, "top")
+            with subtabs[1]:
+                render_df(picks_df[picks_df['price_bucket'] == 'LOW'], "low")
+            with subtabs[2]:
+                render_df(picks_df[picks_df['price_bucket'] == 'MEDIUM'], "med")
+            with subtabs[3]:
+                render_df(picks_df[picks_df['price_bucket'] == 'HIGH'], "high")
+            with subtabs[4]:
+                render_df(picks_df, "all")
 
             # AI Ticker Regime Summary (from Pass 1 ticker analysis)
             ticker_contexts = results.ticker_contexts

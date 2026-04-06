@@ -137,7 +137,7 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resp.raise_for_status()
             data = resp.json()
         picks = data.get("picks", [])
-        text = _format_picks(picks, title=f"Top Picks — liquid_large_cap")
+        text = _format_picks(picks, title="Top Picks — liquid_large_cap")
     except Exception as exc:
         text = f"Error: {exc}"
     await msg.edit_text(text, parse_mode="Markdown")

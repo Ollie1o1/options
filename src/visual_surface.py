@@ -224,10 +224,14 @@ def _extract_contour_segments(grid_2d, level):
 
             # Classify corners as above/below level
             case = 0
-            if v00 >= level: case |= 1
-            if v10 >= level: case |= 2
-            if v01 >= level: case |= 4
-            if v11 >= level: case |= 8
+            if v00 >= level:
+                case |= 1
+            if v10 >= level:
+                case |= 2
+            if v01 >= level:
+                case |= 4
+            if v11 >= level:
+                case |= 8
 
             if case == 0 or case == 15:
                 continue

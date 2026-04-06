@@ -7,9 +7,8 @@ Uses stored entry IV from paper trades DB when available (falls back to 25%).
 Delta-gamma approximation is kept as a fallback if BS repricing fails.
 """
 
-import math
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 try:
     import numpy as np
@@ -115,7 +114,7 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
     if not HAS_UTILS:
         return []
 
-    from datetime import datetime, date as date_type
+    from datetime import datetime
 
     if stock_prices is None:
         tickers = [r["ticker"] for r in open_trades]

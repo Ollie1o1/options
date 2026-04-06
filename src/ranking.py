@@ -42,7 +42,7 @@ def combine_scores(
     """
     cfg = AI_CONFIG
     base_aw = ai_weight if ai_weight is not None else cfg["ai_weight"]
-    base_tw = technical_weight if technical_weight is not None else cfg["technical_weight"]
+    technical_weight if technical_weight is not None else cfg["technical_weight"]
 
     # Regime multiplier
     regime_mults = cfg.get("regime_weight_multipliers", {"low": 0.80, "normal": 1.00, "high": 1.30})
@@ -246,7 +246,6 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
     from rich import box
     from rich.text import Text
     from rich.panel import Panel
-    from rich.columns import Columns
 
     if "divergence_flag" in df.columns:
         try:

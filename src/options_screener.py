@@ -14,7 +14,6 @@ Note:
 """
 
 import sys
-import math
 import os
 import csv
 import json
@@ -24,17 +23,11 @@ import time
 import threading as _threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict, Union, Any
-from dataclasses import dataclass
 from .types import ScanResult
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.error import URLError
-import functools
-import random
 import argparse
-import shutil
 import warnings
 import contextlib
-import io
 
 
 # Dependency checks
@@ -57,24 +50,17 @@ if missing:
     sys.exit(1)
 
 from .data_fetching import (
-    get_underlying_price,
     get_risk_free_rate,
     get_vix_level,
     determine_vix_regime,
     get_market_context,
     fetch_options_yfinance,
-    retry_with_backoff,
     get_dynamic_tickers,
-    batch_fetch,
 )
 from .utils import (
     safe_float,
     norm_cdf,
-    norm_pdf,
-    bs_call,
-    bs_put,
     bs_delta,
-    bs_price,
     bs_gamma,
     bs_vega,
     bs_theta,
@@ -83,12 +69,8 @@ from .utils import (
     bs_vanna,
     early_exercise_premium,
     _d1d2,
-    format_pct,
-    format_money,
-    determine_moneyness,
 )
 from .filters import (
-    filter_options,
     filter_iv_smile_outliers,
     categorize_by_premium,
     pick_top_per_bucket
@@ -144,16 +126,14 @@ except ImportError:
 
 
 from .cli_display import (
-    get_display_width, format_analysis_row, format_mechanics_row,
-    _format_breakeven_line, _print_strategy_panel, print_executive_summary,
-    print_best_setup_callout, print_report, print_news_panel,
-    print_spreads_report, print_credit_spreads_report, print_iron_condor_report,
+    get_display_width, print_executive_summary,
+    print_report, print_news_panel,
+    print_credit_spreads_report, print_iron_condor_report,
 )
 from .watchlist import (
-    _WATCHLIST_PATH, load_watchlist, save_watchlist,
-    add_to_watchlist, remove_from_watchlist,
+    load_watchlist, add_to_watchlist, remove_from_watchlist,
 )
-from .oi_snapshot import _OI_SNAPSHOT_PATH, load_oi_snapshot, save_oi_snapshot
+from .oi_snapshot import load_oi_snapshot
 
 
 @contextlib.contextmanager
@@ -821,7 +801,8 @@ def calculate_metrics(
         for idx, row in df.iterrows():
             if pd.notna(row["exp_dt"]):
                 days_to_e = abs((row["exp_dt"].replace(tzinfo=None) - earnings_date.replace(tzinfo=None)).days)
-                if days_to_e <= eb_days: df.at[idx, "event_flag"] = "EARNINGS_NEARBY"
+                if days_to_e <= eb_days:
+                    df.at[idx, "event_flag"] = "EARNINGS_NEARBY"
     
     # Monte Carlo
     if HAS_SIMULATION:
@@ -1078,7 +1059,8 @@ def calculate_scores(
     
     def rank_norm(s: pd.Series) -> pd.Series:
         n = len(s)
-        if n <= 1: return pd.Series([0.5] * n, index=s.index)
+        if n <= 1:
+            return pd.Series([0.5] * n, index=s.index)
         r = s.rank(method="average", na_option="keep")
         return (r - 1.0) / (n - 1.0)
 
@@ -1487,20 +1469,20 @@ def calculate_scores(
         pass  # no earnings nearby — no adjustment needed
     # Reward earnings plays where IV is actually underpriced vs realized vol
     if "Earnings Play" in df.columns and "is_underpriced" in df.columns:
-        df.loc[(df["Earnings Play"] == "YES") & (df["is_underpriced"] == True), "quality_score"] += 0.08
-    df.loc[df["Trend_Aligned"] == True, "quality_score"] += 0.05
-    df.loc[df["decay_warning"] == True, "quality_score"] -= 0.20
+        df.loc[(df["Earnings Play"] == "YES") & (df["is_underpriced"]), "quality_score"] += 0.08
+    df.loc[df["Trend_Aligned"], "quality_score"] += 0.05
+    df.loc[df["decay_warning"], "quality_score"] -= 0.20
     # Gamma ramp: near-expiry gamma explosion is a structural risk — penalise hard
     if "gamma_ramp" in df.columns:
-        df.loc[df["gamma_ramp"] == True, "quality_score"] -= 0.15
+        df.loc[df["gamma_ramp"], "quality_score"] -= 0.15
     df.loc[df["sr_warning"] != "", "quality_score"] -= 0.10
     if "seasonal_win_rate" in df.columns:
         df.loc[df["seasonal_win_rate"] >= 0.8, "quality_score"] += 0.10
         df.loc[df["seasonal_win_rate"] <= 0.2, "quality_score"] -= 0.10
     df.loc[df["oi_wall_warning"] != "", "quality_score"] -= 0.10
-    df["squeeze_play"] = (df.get("is_squeezing", pd.Series(False, index=df.index)) == True) & (df.get("Unusual_Whale", pd.Series(False, index=df.index)) == True)
+    df["squeeze_play"] = (df.get("is_squeezing", pd.Series(False, index=df.index))) & (df.get("Unusual_Whale", pd.Series(False, index=df.index)))
     # Confirmed squeeze (trend-aligned) gets larger bonus; unconfirmed gets small nudge
-    _squeeze_confirmed = df["squeeze_play"] & (df.get("Trend_Aligned", pd.Series(False, index=df.index)) == True)
+    _squeeze_confirmed = df["squeeze_play"] & (df.get("Trend_Aligned", pd.Series(False, index=df.index)))
     df.loc[_squeeze_confirmed, "quality_score"] += 0.10
     df.loc[df["squeeze_play"] & ~_squeeze_confirmed, "quality_score"] += 0.04
     df.loc[df["macro_warning"].str.contains("MACRO RISK", na=False), "quality_score"] -= 0.10
@@ -1652,7 +1634,8 @@ def enrich_and_score(
     df = df[(df["T_years"] >= min_dte / 365.0) & (df["T_years"] <= max_dte / 365.0)].copy()
 
     for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility", "underlying"]:
-        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
     
     mb = config.get("moneyness_band", 0.15)
     if "underlying" in df.columns and "strike" in df.columns:
@@ -1676,7 +1659,8 @@ def enrich_and_score(
 
     if mode == "Premium Selling":
         df = df[df['type'] == 'put'].copy()
-        if df.empty: return df
+        if df.empty:
+            return df
         df['return_on_risk'] = df['premium'] / df['strike']
 
     df = df[(df["premium"].notna()) & (df["premium"] > 0)].copy()
@@ -1690,7 +1674,8 @@ def enrich_and_score(
     df["openInterest"] = pd.to_numeric(df["openInterest"], errors='coerce').fillna(0)
     df = df[(df["volume"] >= fc.get("min_volume", 50)) | (df["openInterest"] >= fc.get("min_open_interest", 10))].copy()
 
-    if df.empty: return df
+    if df.empty:
+        return df
 
     # IV Smile Outlier Filter: remove bad-print IV rows before enrichment
     df = filter_iv_smile_outliers(
@@ -1698,7 +1683,8 @@ def enrich_and_score(
         iv_threshold=config.get("iv_outlier_threshold", 0.30),
         min_volume=config.get("iv_outlier_min_volume", 10),
     )
-    if df.empty: return df
+    if df.empty:
+        return df
 
     df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors='coerce')
     df["iv_group_median"] = df.groupby(["exp_dt", "type"])["impliedVolatility"].transform(lambda s: s.median(skipna=True))
@@ -1744,9 +1730,11 @@ def enrich_and_score(
         d_min = fc.get("delta_min", 0.15)
         d_max = fc.get("delta_max", 0.35)
     df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
-    if mode != "Premium Selling": df = df[df["rr_ratio"] >= 0.25].copy()
+    if mode != "Premium Selling":
+        df = df[df["rr_ratio"] >= 0.25].copy()
 
-    if df.empty: return df
+    if df.empty:
+        return df
     
     # Sorting
     df = df.sort_values(["Unusual_Whale", "quality_score", "volume", "openInterest"], ascending=[False, False, False, False]).reset_index(drop=True)
@@ -2323,7 +2311,7 @@ def close_trades():
             hist = ticker.history(start=start_date, end=end_date, interval="1d")
             
             if hist.empty:
-                print(f"  ⚠️  No price data available")
+                print("  ⚠️  No price data available")
                 continue
             
             # Find closest date to expiration
@@ -2331,7 +2319,7 @@ def close_trades():
             closest_date = min(hist_dates, key=lambda d: abs((d - exp_date).days))
             filtered = hist[hist.index.date == closest_date]
             if filtered.empty:
-                print(f"  ⚠️  No matching price for expiry date")
+                print("  ⚠️  No matching price for expiry date")
                 continue
             exit_price = float(filtered['Close'].iloc[0])
             
@@ -2465,10 +2453,14 @@ def _score_fetched_data(
         vrp_data = context.get("vrp_data", {})
 
         context_log = []
-        if hv: context_log.append(f"HV (30d): {hv:.2%}")
-        if iv_rank: context_log.append(f"IV Rank: {iv_rank:.2f}")
-        if earnings_date: context_log.append(f"Earnings: {earnings_date.strftime('%Y-%m-%d')}")
-        if context.get("rvol"): context_log.append(f"RVOL: {context['rvol']:.2f}x")
+        if hv:
+            context_log.append(f"HV (30d): {hv:.2%}")
+        if iv_rank:
+            context_log.append(f"IV Rank: {iv_rank:.2f}")
+        if earnings_date:
+            context_log.append(f"Earnings: {earnings_date.strftime('%Y-%m-%d')}")
+        if context.get("rvol"):
+            context_log.append(f"RVOL: {context['rvol']:.2f}x")
         result["context_log"] = context_log
         result["news_data"] = news_data
 
@@ -2555,8 +2547,6 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
 
 def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False):
     # Determine mode booleans for internal logic
-    is_budget_mode = (mode == "Budget scan")
-    is_discovery_mode = (mode == "Discovery scan")
 
     # === LOAD CONFIGURATION ===
     if verbose:
@@ -3138,7 +3128,7 @@ def run_top_scan(
     Groups results into DTE buckets: Short (7-14), Standard (15-30), Swing (31-45).
     Prints a ranked table and optionally saves a CSV.
     """
-    from .cli_display import format_dte_bucket, print_top_n_table
+    from .cli_display import print_top_n_table
 
     _logger = setup_logging()
     config = load_config("config.json")
@@ -3365,7 +3355,9 @@ def main():
     # ── Regime Dashboard ─────────────────────────────────────────────────────
     try:
         from .regime_dashboard import print_regime_dashboard
-        import threading as _t, io as _io, sys as _sys
+        import threading as _t
+        import io as _io
+        import sys as _sys
         print("  Loading market data...", end="", flush=True)
         _result = [None]
         def _fetch():
@@ -3507,13 +3499,20 @@ def main():
     is_credit_spread_mode = (symbol_input == "SPREADS")
     is_iron_condor_mode = (symbol_input == "IRON")
 
-    if is_my_list_mode: mode = "Discovery scan"
-    elif is_discovery_mode: mode = "Discovery scan"
-    elif is_budget_mode: mode = "Budget scan"
-    elif is_premium_selling_mode: mode = "Premium Selling"
-    elif is_credit_spread_mode: mode = "Credit Spreads"
-    elif is_iron_condor_mode: mode = "Iron Condor"
-    else: mode = "Single-stock"
+    if is_my_list_mode:
+        mode = "Discovery scan"
+    elif is_discovery_mode:
+        mode = "Discovery scan"
+    elif is_budget_mode:
+        mode = "Budget scan"
+    elif is_premium_selling_mode:
+        mode = "Premium Selling"
+    elif is_credit_spread_mode:
+        mode = "Credit Spreads"
+    elif is_iron_condor_mode:
+        mode = "Iron Condor"
+    else:
+        mode = "Single-stock"
 
     budget = None
     tickers = []
@@ -3531,11 +3530,14 @@ def main():
         try:
             budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
             if budget <= 0:
-                print("Budget must be greater than 0."); sys.exit(1)
+                print("Budget must be greater than 0.")
+                sys.exit(1)
         except Exception:
-            print("Invalid budget amount."); sys.exit(1)
+            print("Invalid budget amount.")
+            sys.exit(1)
         scan_type = prompt_input("Enter 1 for TARGETED or 2 for DISCOVERY", "1")
-        if scan_type == "2": tickers = prompt_for_tickers()
+        if scan_type == "2":
+            tickers = prompt_for_tickers()
         else:
             default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
             tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
@@ -3543,11 +3545,13 @@ def main():
     elif is_ticker_mode:
         ticker_sym = prompt_input("Enter stock ticker symbol", "AAPL").upper()
         if not ticker_sym.isalnum():
-            print("Please enter a valid alphanumeric ticker."); sys.exit(1)
+            print("Please enter a valid alphanumeric ticker.")
+            sys.exit(1)
         tickers = [ticker_sym]
     else:
         if not symbol_input.isalnum():
-            print("Please enter a valid alphanumeric ticker."); sys.exit(1)
+            print("Please enter a valid alphanumeric ticker.")
+            sys.exit(1)
         tickers = [symbol_input]
     
     logger = setup_logging()
@@ -3581,12 +3585,14 @@ def main():
         try:
             max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
         except Exception:
-            print("Invalid number for expirations."); sys.exit(1)
+            print("Invalid number for expirations.")
+            sys.exit(1)
         try:
             min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
             max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
         except Exception:
-            print("Invalid DTE inputs."); sys.exit(1)
+            print("Invalid DTE inputs.")
+            sys.exit(1)
         profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
         trader_profile = "day" if profile_choice == "2" else "swing"
 
@@ -3610,11 +3616,10 @@ def main():
             surface_type = surface_greek if surface_greek else 'pnl'
             show_contours = not getattr(args, 'no_contours', False)
             scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
-            if scan_results is None: sys.exit(0)
+            if scan_results is None:
+                sys.exit(0)
 
             picks = scan_results.picks
-            rfr = scan_results.rfr
-            chain_iv_median = scan_results.chain_iv_median
 
             # ── AI Analysis ────────────────────────────────────────────────
             _ai_ranked = None
@@ -3793,10 +3798,13 @@ def main():
                 print("\n\U0001f44b Done! Happy trading!\n")
             break
 
-    except KeyboardInterrupt: print("\nCancelled.")
+    except KeyboardInterrupt:
+        print("\nCancelled.")
     except Exception as e:
         print(f"Error: {e}")
-        import traceback; traceback.print_exc(); sys.exit(1)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,6 @@ import sys
 import json
 import time
 import pandas as pd
-import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -221,7 +220,7 @@ def fetch_price_at_expiration(symbol: str, expiration_date: str) -> Optional[flo
             closest_idx = min(hist.index, key=lambda d: abs((d.date() - exp_dt).days))
             return float(hist.loc[closest_idx, "Close"])
     
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -322,7 +321,7 @@ def main():
     logs_dir = "logs"
     print(f"Loading logs from: {logs_dir}")
     if not os.path.exists(logs_dir):
-        print(f"\nNo logs directory found. Run the screener first to generate logs.")
+        print("\nNo logs directory found. Run the screener first to generate logs.")
         sys.exit(1)
     
     log_entries = load_historical_logs(logs_dir)
@@ -341,7 +340,7 @@ def main():
         sys.exit(0)
     
     print(f"\n{'=' * 80}")
-    print(f"  BACKTEST RESULTS")
+    print("  BACKTEST RESULTS")
     print(f"{'=' * 80}\n")
     
     # Performance summary

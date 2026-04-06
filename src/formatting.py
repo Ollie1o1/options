@@ -8,7 +8,7 @@ import math
 import os
 import re
 import sys
-from typing import Optional, Tuple
+from typing import Tuple
 
 
 # ANSI Color Codes
@@ -307,9 +307,9 @@ def draw_box(title: str, width: int = 80, double: bool = False) -> str:
         Box header string
     """
     if double:
-        tl, tr, h, v = BoxChars.D_TOP_LEFT, BoxChars.D_TOP_RIGHT, BoxChars.D_HORIZONTAL, BoxChars.D_VERTICAL
+        tl, tr, h, _v = BoxChars.D_TOP_LEFT, BoxChars.D_TOP_RIGHT, BoxChars.D_HORIZONTAL, BoxChars.D_VERTICAL
     else:
-        tl, tr, h, v = BoxChars.TOP_LEFT, BoxChars.TOP_RIGHT, BoxChars.HORIZONTAL, BoxChars.VERTICAL
+        tl, tr, h, _v = BoxChars.TOP_LEFT, BoxChars.TOP_RIGHT, BoxChars.HORIZONTAL, BoxChars.VERTICAL
 
     # Title with padding
     title_with_space = f" {title} "

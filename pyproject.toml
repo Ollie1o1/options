@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# E402: Module level import not at top of file (used heavily for sys.path manipulation)
+# F401: Unused imports (used heavily in try/except ImportError blocks)
+# E701, E702: Multiple statements on one line (used heavily for brevity)
+# E712: Equality comparisons to False (often used with pandas boolean series)
+# E741: Ambiguous variable name (e.g. 'l')
+# F601: Dictionary key literal repeated
+ignore = ["E402", "F401", "E701", "E702", "E712", "E741", "F601"]

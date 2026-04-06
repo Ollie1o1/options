@@ -15,7 +15,6 @@ Environment variables required (in .env):
 
 import os
 import sys
-import asyncio
 import logging
 from pathlib import Path
 

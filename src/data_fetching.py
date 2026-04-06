@@ -25,7 +25,7 @@ from finvizfinance.screener.performance import Performance
 logger = logging.getLogger(__name__)
 
 try:
-    from .news_fetcher import fetch_news_and_events, NewsData
+    from .news_fetcher import fetch_news_and_events
     _HAS_NEWS_FETCHER = True
 except Exception:
     _HAS_NEWS_FETCHER = False

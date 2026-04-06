@@ -426,7 +426,7 @@ class PaperManager:
                         continue
                     spread_width = abs(long_strike - float(strike))
                     low_k = min(float(strike), float(long_strike))
-                    high_k = max(float(strike), float(long_strike))
+                    max(float(strike), float(long_strike))
                     if spread_width > 0:
                         intrinsic_frac = max(0.0, min(1.0, (spot - low_k) / spread_width))
                     else:

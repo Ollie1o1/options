@@ -1,9 +1,7 @@
 """Tests for src/ranking.py combine_scores and ai_rank._rank_without_ai."""
 import sys
 import os
-import pytest
 import pandas as pd
-import numpy as np
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

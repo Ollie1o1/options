@@ -973,8 +973,6 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
         # Find win rate and PF at this threshold
         thr_wins = 0
         thr_n = 0
-        thr_pf_wins = 0.0
-        thr_pf_loss = 0.0
         for r in ticker_results:
             thr_wins += int(r.get("win_rate", 0) * r.get("n_trades", 0))
             thr_n += r.get("n_trades", 0)

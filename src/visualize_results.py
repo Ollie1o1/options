@@ -6,10 +6,8 @@ Generates charts for IV analysis, risk/reward, and expected moves.
 
 import os
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-from typing import Optional
 
 
 def create_visualizations(df: pd.DataFrame, mode: str, output_dir: str = "reports") -> None:

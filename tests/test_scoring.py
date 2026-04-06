@@ -1,6 +1,5 @@
 """Tests for enrich_and_score in src/options_screener.py."""
 import pandas as pd
-import numpy as np
 import pytest
 from unittest.mock import patch
 from datetime import datetime, timedelta

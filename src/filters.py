@@ -8,7 +8,7 @@ as well as helpers for bucketing and picking top results.
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 def filter_options(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
     """

@@ -44,7 +44,7 @@ The screener finds opportunities where all four forces converge. Consistency com
 
 ## Installation
 
-**Prerequisites:** Python 3.9+, pip
+**Prerequisites:** Python 3.10+, pip (Compatible with Python 3.14+)
 
 ```bash
 git clone https://github.com/Ollie1o1/options.git
@@ -459,6 +459,19 @@ Tickers
 
 ## Analytics Engine
 
+### Understanding Probability of Profit (PoP)
+
+PoP is arguably the most important metric in the screener. Unlike simple "Delta" (which estimates the probability of the option being 1 cent In-the-Money), **PoP calculates the probability that the trade will be profitable at expiration after accounting for the premium paid.**
+
+*   **Buying Options (Aggressive):** You start with a "premium tax." If you buy a $100 Call for $5.00, your breakeven is $105.00. The PoP will be significantly lower than the Delta because the stock must move +5% just for you to break even.
+    *   *Standard PoP:* ~25% – 35%
+    *   *Expectation:* High risk, high reward. You expect to lose more often than you win, but wins are outsized (100%+).
+*   **Selling Options (Conservative):** You "become the casino." When you sell an option, time is your friend. You win if the stock goes up, stays flat, or even if it drops slightly (less than the premium collected).
+    *   *Standard PoP:* ~65% – 85%
+    *   *Expectation:* Consistent income, lower risk, capped reward.
+
+**Why don't I see 50%+ PoP?** If you are buying "Out-of-the-Money" (OTM) options, you are intentionally taking a low-probability, high-payoff bet. To see 50%+ PoP, switch the screener to **"SELL" (Premium Selling) mode** or buy **Deep In-the-Money (ITM)** options.
+
 ### Scoring
 
 Each contract is scored across 23 weighted factors including:
@@ -517,7 +530,7 @@ For each pick the screener generates:
 Log any pick directly from the CLI and track it going forward:
 
 - Positions auto-update on every launch (fetches live quotes via yfinance)
-- Entry IV and Greeks stored per trade (schema v5)
+- Entry IV and Greeks stored per trade (schema v6)
 - Take Profit and Stop Loss thresholds enforced from `config.json`
 - P&L attribution for closed trades (delta/gamma/theta/vega breakdown)
 - Full BS repricing stress test on open portfolio
@@ -757,7 +770,7 @@ options/
 - [x] SVI IV surface fitting with mispricing detection
 - [x] Monte Carlo PoP blending (Merton Jump Diffusion)
 - [x] HV-adjusted expected value
-- [x] Paper trading with entry IV/Greeks storage, P&L attribution, schema v5
+- [x] Paper trading with entry IV/Greeks storage, P&L attribution, schema v6
 - [x] Full BS repricing stress test (7×3 scenario matrix)
 - [x] Streamlit dashboard
 - [x] Full colour CLI — responsive width, trade plan per pick, comparison table

@@ -5,7 +5,6 @@ This module groups expected-move and probability helpers used by the
 options screener, re-exported from ``options_screener`` for modular use.
 """
 
-from typing import Optional, Tuple
 
 from .options_screener import (
     calculate_expected_move,

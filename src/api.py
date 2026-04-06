@@ -11,7 +11,7 @@ import math
 import time
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from concurrent.futures import ThreadPoolExecutor
 
 # ── Resolve project root so load_config("config.json") finds the file ──────
@@ -78,7 +78,6 @@ def _serialize_picks(picks_df, n: int = 10) -> List[Dict]:
     # Ensure dte column exists
     if "dte" not in df.columns:
         if "T_years" in df.columns:
-            import numpy as np
             df["dte"] = (df["T_years"] * 365).round(0).astype(int)
         else:
             df["dte"] = None

@@ -1,6 +1,4 @@
 """Tests for in-session chain cache in src/data_fetching.py."""
-import pytest
-from unittest.mock import patch, MagicMock
 
 
 def test_chain_cache_hit_returns_cached():
