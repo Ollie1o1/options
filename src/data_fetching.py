@@ -1743,6 +1743,11 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         _info = tkr.info or {}
         _dy = _info.get("dividendYield", 0)
         dividend_yield = float(_dy) if _dy else 0.0
+        # yfinance returns dividendYield as percentage (e.g. 3.13 for 3.13%)
+        # BS formulas expect decimal (0.0313). Convert if > 0.20 (no stock has 20%+ yield).
+        if dividend_yield > 0.20:
+            dividend_yield /= 100.0
+        dividend_yield = min(dividend_yield, 0.15)  # hard clamp for data anomalies
     except Exception:
         dividend_yield = 0.0
     df["dividend_yield"] = dividend_yield

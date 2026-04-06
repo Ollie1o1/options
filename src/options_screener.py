@@ -323,7 +323,7 @@ def _invalidate_ic_weights_cache() -> None:
 
 
 
-def calculate_probability_of_profit(option_type: Union[str, np.ndarray], S: Union[float, np.ndarray], K: Union[float, np.ndarray], T: Union[float, np.ndarray], sigma: Union[float, np.ndarray], premium: Union[float, np.ndarray], q: Union[float, np.ndarray] = 0.0) -> Union[float, np.ndarray, None]:
+def calculate_probability_of_profit(option_type: Union[str, np.ndarray], S: Union[float, np.ndarray], K: Union[float, np.ndarray], T: Union[float, np.ndarray], sigma: Union[float, np.ndarray], premium: Union[float, np.ndarray], r: Union[float, np.ndarray] = 0.0, q: Union[float, np.ndarray] = 0.0) -> Union[float, np.ndarray, None]:
     """Calculate probability of profit at expiration (Vectorized)."""
     try:
         S = np.asanyarray(S)
@@ -331,6 +331,7 @@ def calculate_probability_of_profit(option_type: Union[str, np.ndarray], S: Unio
         T = np.asanyarray(T)
         sigma = np.asanyarray(sigma)
         premium = np.asanyarray(premium)
+        r = np.asanyarray(r, dtype=float)
         q = np.asanyarray(q, dtype=float)
         # Clip T to 1 hour minimum to prevent division-by-zero on expiration day
         T = np.maximum(T, 1.0 / (365.0 * 24.0))
@@ -343,8 +344,8 @@ def calculate_probability_of_profit(option_type: Union[str, np.ndarray], S: Unio
         # Break-even point
         breakeven = np.where(is_call, K + premium, K - premium)
 
-        # Use forward price adjusted for dividend yield
-        F = S * np.exp(-q * T)
+        # Forward price: F = S * exp((r - q) * T)
+        F = S * np.exp((r - q) * T)
         with np.errstate(divide='ignore', invalid='ignore'):
             d = (np.log(F / breakeven) - (0.5 * sigma * sigma) * T) / (sigma * np.sqrt(T))
 
@@ -692,7 +693,7 @@ def calculate_metrics(
     # Probability of Profit: breakeven-based formula P(S_T > K+prem) for calls,
     # P(S_T < K-prem) for puts — correctly accounts for premium cost unlike 1-delta.
     prem_vals = df["premium"].values
-    pop_arr = calculate_probability_of_profit(types_vals, S_vals, K_vals, T_vals, IV_vals, prem_vals, q=_q)
+    pop_arr = calculate_probability_of_profit(types_vals, S_vals, K_vals, T_vals, IV_vals, prem_vals, r=risk_free_rate, q=_q)
     if pop_arr is None:
         pop_arr = 1.0 - df["abs_delta"].values
     df["prob_profit"] = np.clip(pop_arr, 0.0, 1.0)
@@ -846,6 +847,7 @@ def calculate_metrics(
             n_simulations=n_sims,
             is_short=_is_short_mode,
             random_seed=_mc_seed,
+            q_arr=df["dividend_yield"].to_numpy(dtype=float, na_value=0.0) if "dividend_yield" in df.columns else None,
         )
         df["pop_sim"] = pop_arr
         df["pot_sim"] = pot_arr
@@ -873,7 +875,7 @@ def calculate_metrics(
             _crush_adj_iv = np.maximum(_crush_adj_iv, 1e-9)
             _pop_crush = calculate_probability_of_profit(
                 types_vals[_crush_valid], S_vals[_crush_valid], K_vals[_crush_valid],
-                T_vals[_crush_valid], _crush_adj_iv, prem_vals[_crush_valid], q=_q,
+                T_vals[_crush_valid], _crush_adj_iv, prem_vals[_crush_valid], r=risk_free_rate, q=_q,
             )
             if _pop_crush is not None:
                 # Blend: 70% crush-adjusted, 30% raw (uncertainty in crush magnitude)
@@ -1025,21 +1027,21 @@ def calculate_metrics(
 def _cross_section_normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Map raw quality_score to the display [0, 1] scale using a fixed absolute reference.
 
-    The raw quality_score is a weighted average of 23 components compressed into
-    roughly the 0.35–0.75 range. This function stretches that to [0, 1] using a
+    The raw quality_score is a weighted average of 23+ components compressed into
+    roughly the 0.28–0.82 range. This function stretches that to [0, 1] using a
     fixed linear mapping — no batch effects, no relative ranking, no caps.
 
-    A contract with raw 0.62 always maps to ~0.675 regardless of what else is in
-    the scan. Weak market days honestly show 2-star setups; strong market days
-    show 3–5 star setups. That's accurate.
+    A contract with raw 0.55 always maps to the same display score regardless of
+    what else is in the scan. Weak market days honestly show 2-star setups;
+    strong market days show 3–5 star setups.
 
     Reference:
-        raw 0.35 → 0.00  (near-minimum: all signals weak)
-        raw 0.45 → 0.25  (2-star threshold)
-        raw 0.53 → 0.46  (3-star threshold)
-        raw 0.61 → 0.65  (4-star threshold)
-        raw 0.68 → 0.83  (5-star threshold)
-        raw 0.75 → 1.00  (near-maximum: all signals strong + bonuses)
+        raw 0.28 → 0.00  (near-minimum: all signals weak + penalties)
+        raw 0.40 → 0.30  (2-star threshold)
+        raw 0.50 → 0.52  (3-star threshold)
+        raw 0.60 → 0.70  (4-star threshold)
+        raw 0.70 → 0.85  (5-star threshold)
+        raw 0.82 → 1.00  (near-maximum: all signals strong + bonuses)
     """
     n = len(df)
     if n <= 1:
@@ -1047,15 +1049,13 @@ def _cross_section_normalize(df: pd.DataFrame) -> pd.DataFrame:
 
     raw = df["quality_score"].copy()
 
-    # Pure absolute mapping: raw score → display score, fixed reference range.
-    # Power curve (x^0.6) expands the middle range where scores cluster, so a
-    # contract with raw 0.48 maps to ~0.52 (3★) rather than 0.33 (2★) with linear.
-    base = ((raw - 0.35) / 0.40).clip(0, 1)
-    normalized = base ** 0.6
+    # Wider range [0.28, 0.82] (span=0.54) accommodates penalty accumulation.
+    # Power curve (x^0.65) expands the middle range where scores cluster.
+    base = ((raw - 0.28) / 0.54).clip(0, 1)
+    normalized = base ** 0.65
 
     # EV tiebreaker: contracts with the same raw quality rank by expected value.
     # Centered at 0 (median EV gets no bonus/penalty). Max effect: ±0.015.
-    # Visible in the 3rd decimal place without distorting the quality signal.
     if "ev" in df.columns:
         ev_rank = df["ev"].rank(pct=True).fillna(0.5)
         normalized = (normalized + (ev_rank - 0.5) * 0.03).clip(0, 1)
@@ -1223,12 +1223,32 @@ def calculate_scores(
         except Exception:
             df["score_drivers"] = ""
     else:
-        # PCR score
-        pcr_vals = pd.to_numeric(df.get("pcr", pd.Series(np.nan, index=df.index)), errors="coerce")
         is_call_series = df["type"].str.lower() == "call"
-        pcr_score_call = (1 - np.clip(pcr_vals / 2.0, 0, 1)).fillna(0.5)
-        pcr_score_put = np.clip(pcr_vals / 2.0, 0, 1).fillna(0.5)
-        pcr_score = pd.Series(np.where(is_call_series, pcr_score_call, pcr_score_put), index=df.index)
+
+        # Build weight dict early so zero-weight guards can reference it
+        dw = {
+            # Rebalanced: profitability (pop+rr+ev=30%), direction (momentum=10%),
+            # vol signals (iv_rank+iv_edge+vrp=21%), execution (liq+spread+theta=15%)
+            "pop": 0.13, "iv_mispricing": 0.05, "rr": 0.10, "momentum": 0.10,
+            "iv_rank": 0.08, "liquidity": 0.08, "catalyst": 0.00, "theta": 0.06,
+            "ev": 0.07, "trader_pref": 0.00, "iv_edge": 0.08, "skew_align": 0.02,
+            "gamma_theta": 0.00, "pcr": 0.00, "gex": 0.01, "oi_change": 0.00,
+            "sentiment": 0.00, "option_rvol": 0.00, "vrp": 0.05, "gamma_pin": 0.00,
+            "max_pain": 0.01, "iv_velocity": 0.05, "em_realism": 0.00,
+            "gamma_magnitude": 0.03, "vega_risk": 0.03, "term_structure": 0.04,
+            "spread": 0.01,
+        }
+        cw = load_ic_adjusted_weights(config)
+        w = {k: cw.get(k, dw[k]) for k in dw}
+
+        # PCR score (skip if zero weight)
+        if w.get("pcr", 0) > 0:
+            pcr_vals = pd.to_numeric(df.get("pcr", pd.Series(np.nan, index=df.index)), errors="coerce")
+            pcr_score_call = (1 - np.clip(pcr_vals / 2.0, 0, 1)).fillna(0.5)
+            pcr_score_put = np.clip(pcr_vals / 2.0, 0, 1).fillna(0.5)
+            pcr_score = pd.Series(np.where(is_call_series, pcr_score_call, pcr_score_put), index=df.index)
+        else:
+            pcr_score = pd.Series(0.5, index=df.index)
 
         # GEX score: distance-based sigmoid (replaces binary 0.3/0.7)
         gex_flip = pd.to_numeric(df.get("gex_flip_price", pd.Series(np.nan, index=df.index)), errors="coerce")
@@ -1241,24 +1261,33 @@ def calculate_scores(
         gex_score = pd.Series(np.where(is_call_series, gex_score_call, gex_score_put), index=df.index)
         gex_score = gex_score.where(gex_flip_valid, 0.5)  # neutral when no flip data
 
-        # OI change score
-        oi_chg = pd.to_numeric(df.get("oi_change", pd.Series(0, index=df.index)), errors="coerce").fillna(0)
-        oi_change_score = rank_norm(oi_chg)
+        # OI change score (skip if zero weight)
+        if w.get("oi_change", 0) > 0:
+            oi_chg = pd.to_numeric(df.get("oi_change", pd.Series(0, index=df.index)), errors="coerce").fillna(0)
+            oi_change_score = rank_norm(oi_chg)
+        else:
+            oi_change_score = pd.Series(0.5, index=df.index)
 
-        # Sentiment score: bullish sentiment helps calls, hurts puts
-        raw_sent = pd.to_numeric(
-            df.get("sentiment_score", pd.Series(0.0, index=df.index)), errors="coerce"
-        ).fillna(0.0).clip(-1.0, 1.0)
-        sent_call = ((raw_sent + 0.5) / 1.0).clip(0, 1)
-        sent_put = ((0.5 - raw_sent) / 1.0).clip(0, 1)
-        sentiment_score_component = pd.Series(
-            np.where(is_call_series, sent_call, sent_put), index=df.index
-        )
+        # Sentiment score (skip if zero weight)
+        if w.get("sentiment", 0) > 0:
+            raw_sent = pd.to_numeric(
+                df.get("sentiment_score", pd.Series(0.0, index=df.index)), errors="coerce"
+            ).fillna(0.0).clip(-1.0, 1.0)
+            sent_call = ((raw_sent + 0.5) / 1.0).clip(0, 1)
+            sent_put = ((0.5 - raw_sent) / 1.0).clip(0, 1)
+            sentiment_score_component = pd.Series(
+                np.where(is_call_series, sent_call, sent_put), index=df.index
+            )
+        else:
+            sentiment_score_component = pd.Series(0.5, index=df.index)
 
-        # Option RVOL score: unusual contract-level volume relative to OI baseline
-        option_rvol_score = rank_norm(
-            pd.to_numeric(df.get("option_rvol", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
-        ).clip(0, 1)
+        # Option RVOL score (skip if zero weight)
+        if w.get("option_rvol", 0) > 0:
+            option_rvol_score = rank_norm(
+                pd.to_numeric(df.get("option_rvol", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+            ).clip(0, 1)
+        else:
+            option_rvol_score = pd.Series(0.5, index=df.index)
         df["option_rvol_score"] = option_rvol_score
 
         # Skew combined score: blend directional alignment with percentile rank
@@ -1291,19 +1320,22 @@ def calculate_scores(
         vega_risk_score = (1.0 - vega_risk_raw).clip(0, 1)
         df["vega_risk_score"] = vega_risk_score
 
-        # Gamma pin score: rewards near-expiry contracts near max gamma strike
-        gamma_pin_dist = pd.to_numeric(
-            df.get("gamma_pin_dist_pct", pd.Series(100.0, index=df.index)), errors="coerce"
-        ).fillna(100.0)
-        dte_arr = df["T_years"].values * 365.0
-        gamma_pin_score = pd.Series(
-            np.where(
-                dte_arr <= 14,
-                np.clip(1.0 - (gamma_pin_dist.values / 10.0), 0.0, 1.0),
-                0.5,
-            ),
-            index=df.index,
-        )
+        # Gamma pin score (skip if zero weight)
+        if w.get("gamma_pin", 0) > 0:
+            gamma_pin_dist = pd.to_numeric(
+                df.get("gamma_pin_dist_pct", pd.Series(100.0, index=df.index)), errors="coerce"
+            ).fillna(100.0)
+            dte_arr = df["T_years"].values * 365.0
+            gamma_pin_score = pd.Series(
+                np.where(
+                    dte_arr <= 14,
+                    np.clip(1.0 - (gamma_pin_dist.values / 10.0), 0.0, 1.0),
+                    0.5,
+                ),
+                index=df.index,
+            )
+        else:
+            gamma_pin_score = pd.Series(0.5, index=df.index)
         df["gamma_pin_score"] = gamma_pin_score
 
         # Gamma magnitude score: high gamma near expiry = outsized convexity opportunity
@@ -1326,13 +1358,14 @@ def calculate_scores(
         iv_trend_vals = df.get("iv_trend", pd.Series("stable", index=df.index))
         if not isinstance(iv_trend_vals, pd.Series):
             iv_trend_vals = pd.Series("stable", index=df.index)
-        is_seller = df["type"].str.lower() == "put"
+        # Sellers want IV to contract (option cheapens); buyers want IV to expand (vega profit)
+        _is_seller_mode = (mode == "Premium Selling")
         iv_velocity_raw = np.where(
             iv_trend_vals == "expanding",
-            np.where(is_seller, 1.0, 0.0),
+            0.0 if _is_seller_mode else 1.0,
             np.where(
                 iv_trend_vals == "contracting",
-                np.where(is_seller, 0.0, 1.0),
+                1.0 if _is_seller_mode else 0.0,
                 0.5,
             ),
         )
@@ -1369,20 +1402,6 @@ def calculate_scores(
         iv_mispricing_score = iv_mispricing_score.where(surf_conf > 0.05, 0.5)
         df["iv_mispricing_score"] = iv_mispricing_score
 
-        dw = {
-            # IC-optimised defaults: iv_edge(0.15) + vrp(0.09) + iv_rank(0.18) = 42% vol signal
-            "pop": 0.08, "iv_mispricing": 0.05, "rr": 0.08, "momentum": 0.05,
-            "iv_rank": 0.18, "liquidity": 0.06, "catalyst": 0.00, "theta": 0.05,
-            "ev": 0.04, "trader_pref": 0.00, "iv_edge": 0.15, "skew_align": 0.03,
-            "gamma_theta": 0.00, "pcr": 0.00, "gex": 0.01, "oi_change": 0.00,
-            "sentiment": 0.00, "option_rvol": 0.00, "vrp": 0.09, "gamma_pin": 0.00,
-            "max_pain": 0.01, "iv_velocity": 0.04, "em_realism": 0.00,
-            # Phase 2 scoring components
-            "gamma_magnitude": 0.03, "vega_risk": 0.02, "term_structure": 0.03,
-        }
-        cw = load_ic_adjusted_weights(config)
-        w = {k: cw.get(k, dw[k]) for k in dw}
-
         # Apply VIX regime multipliers — adjust weights based on current vol environment
         regime_mults = config.get("vix_regime_multipliers", {}).get(
             vix_regime_weights.get("regime", "normal") if isinstance(vix_regime_weights, dict) else "normal",
@@ -1407,6 +1426,7 @@ def calculate_scores(
             + w["gamma_magnitude"]*gamma_magnitude_score
             + w["vega_risk"]*vega_risk_score
             + w["term_structure"]*term_structure_score
+            + w.get("spread", 0)*spread_score
         ) / w_sum
         try:
             _cdf = pd.DataFrame({
@@ -1531,11 +1551,11 @@ def calculate_scores(
     except Exception:
         pass
 
-    # Tiered bid-ask spread penalty
+    # Tiered bid-ask spread penalty (reduced — spread_score now weighted in composite)
     _spread_pct = pd.to_numeric(df.get("spread_pct", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
     _spread_penalty = pd.Series(0.0, index=df.index)
-    _spread_penalty = _spread_penalty.where(_spread_pct <= 0.05, -0.05)
-    _spread_penalty = _spread_penalty.where(_spread_pct <= 0.10, -0.12)
+    _spread_penalty = _spread_penalty.where(_spread_pct <= 0.10, -0.04)
+    _spread_penalty = _spread_penalty.where(_spread_pct <= 0.15, -0.08)
     df["quality_score"] += _spread_penalty
     # Append spread penalty to score_drivers
     if "score_drivers" in df.columns:
@@ -1545,6 +1565,16 @@ def calculate_scores(
             df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + f" -spread({_pen_val:.2f})"
 
     df["quality_score"] = df["quality_score"].fillna(0.0).clip(0, 1)
+
+    # PoP soft floor for buyer modes: dampen very low probability trades
+    _buyer_modes = {"Single-stock", "Scan", "Watchlist"}
+    if mode in _buyer_modes or mode not in ("Premium Selling", "Credit Spreads", "Iron Condor"):
+        _low_pop = df["prob_profit"] < 0.25
+        if _low_pop.any():
+            df.loc[_low_pop, "quality_score"] *= 0.6
+            if "score_drivers" in df.columns:
+                for _idx in df.index[_low_pop]:
+                    df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + " -low_pop(-40%)"
 
     # Residual earnings crush penalty (reduced — primary crush adjustment now in PoP/EV)
     if "predicted_iv_crush" in df.columns and "Earnings Play" in df.columns:

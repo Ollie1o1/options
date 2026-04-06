@@ -156,6 +156,7 @@ def batch_monte_carlo_pop(
     n_simulations: int = 5000,
     is_short: bool = False,
     random_seed=None,
+    q_arr=None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Vectorized batch Monte Carlo PoP + analytical PoT across all contracts at once.
@@ -173,6 +174,10 @@ def batch_monte_carlo_pop(
     sigma_arr = np.asarray(sigma_arr, dtype=float)
     premium_arr = np.asarray(premium_arr, dtype=float)
     types_arr = np.array([str(t).lower() for t in option_types])
+    if q_arr is not None:
+        q_arr = np.asarray(q_arr, dtype=float)
+    else:
+        q_arr = np.zeros_like(S_arr)
 
     N = len(S_arr)
     pop_out = np.full(N, np.nan)
@@ -188,6 +193,7 @@ def batch_monte_carlo_pop(
     sigma = sigma_arr[valid]
     prem = premium_arr[valid]
     types = types_arr[valid]
+    q = q_arr[valid]
     Nv = S.shape[0]
 
     rng = np.random.default_rng(random_seed)
@@ -197,7 +203,7 @@ def batch_monte_carlo_pop(
     jump_mean = -0.02
     jump_vol = 0.04
     jump_corr = jump_intensity * (np.exp(jump_mean + 0.5 * jump_vol ** 2) - 1.0)
-    mu_adj = r - jump_corr - 0.5 * sigma ** 2  # (Nv,)
+    mu_adj = r - q - jump_corr - 0.5 * sigma ** 2  # (Nv,)
 
     Z = rng.standard_normal((Nv, n_simulations))
     n_jumps = rng.poisson(jump_intensity * T[:, None], size=(Nv, n_simulations))
@@ -229,8 +235,8 @@ def batch_monte_carlo_pop(
     #   P(min S_t <= K) = Φ((h - μT)/(σ√T)) + exp(2μh/σ²) × Φ((h + μT)/(σ√T))
     # For up-barrier (call, K typically > S):
     #   P(max S_t >= K) = Φ((-h - μT)/(σ√T)) + exp(-2μh/σ²) × Φ((-h + μT)/(σ√T))
-    # where h = ln(K/S), μ = r - σ²/2
-    mu_gbm = r - 0.5 * sigma ** 2
+    # where h = ln(K/S), μ = r - q - σ²/2
+    mu_gbm = r - q - 0.5 * sigma ** 2
     h = np.log(K / S)
     sqrt_T = np.sqrt(T)
     denom = sigma * sqrt_T
