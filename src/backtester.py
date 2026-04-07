@@ -337,7 +337,7 @@ def run_backtest(
                     entry_price_gross = _bs_option_price(direction, S, K, T_entry, risk_free, sigma)
                     if entry_price_gross <= 0.001:
                         continue
-                    entry_price = entry_price_gross * (1 + spread_cost_per_side)
+                    entry_price = entry_price_gross * (1 - spread_cost_per_side)
 
                     # Exit at day i+exit_dte — use exit-day realized vol (not entry-day)
                     exit_idx = min(i + exit_dte, len(close_arr) - 1)

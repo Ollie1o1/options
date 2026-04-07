@@ -165,7 +165,7 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             # (gamma is per-share per $1 move, so raw value is ~0.001-0.05)
             S_approx = float(stock_prices.get(r.get("ticker", ""), 100.0))
             abs_d = abs(entry_delta)
-            abs_g = abs(entry_gamma) * S_approx * 0.05  # 5% move as proxy
+            abs_g = 0.5 * abs(entry_gamma) * (S_approx * 0.05) ** 2 * 100  # quadratic: 0.5 * gamma * (ΔS)^2 * 100 shares
             abs_v = abs(entry_vega)
             total_mag = abs_d + abs_g + abs_v
             if total_mag > 0:
@@ -205,7 +205,7 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
 
     def _attr_line(name, val):
         pct = val / total_abs * 100 if total_abs > 0 else 0
-        sign = "+" if val >= 0 else ""
+        sign = "+" if val >= 0 else "-"
         color = ""
         if HAS_FMT and fmt:
             color = fmt.Colors.GREEN if val >= 0 else fmt.Colors.RED

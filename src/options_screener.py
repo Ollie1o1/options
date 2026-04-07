@@ -536,7 +536,7 @@ def calculate_metrics(
         df["early_exercise_flag"] = ""
         if _put_mask.any():
             _ee_func = np.vectorize(
-                lambda S, K, T, IV: early_exercise_premium("put", float(S), float(K), float(T), risk_free_rate, float(IV)),
+                lambda S, K, T, IV: early_exercise_premium("put", float(S), float(K), float(T), risk_free_rate, float(IV), _q),
                 otypes=[float],
             )
             _sub = df.loc[_put_mask]
@@ -942,12 +942,12 @@ def calculate_metrics(
                     np.maximum(eff_sigma.fillna(0).values, 1e-9),
                     hv_arr,
                 )
-                ev_d1, ev_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, ev_sig_full)
+                ev_d1, ev_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, ev_sig_full, q=_q)
                 with np.errstate(divide='ignore', invalid='ignore'):
                     ev_earn_payoff = np.where(
                         is_call,
-                        S_vals * norm_cdf(ev_d1) - K_vals * disc * norm_cdf(ev_d2),
-                        K_vals * disc * norm_cdf(-ev_d2) - S_vals * norm_cdf(-ev_d1),
+                        S_vals * _q_disc * norm_cdf(ev_d1) - K_vals * disc * norm_cdf(ev_d2),
+                        K_vals * disc * norm_cdf(-ev_d2) - S_vals * _q_disc * norm_cdf(-ev_d1),
                     )
                 ev_earn_raw = 100.0 * (ev_earn_payoff - prem_vals)
                 df.loc[valid_sigma, "ev_earnings"] = ev_earn_raw[valid_sigma.values]
