@@ -37,6 +37,13 @@ except ImportError:
     fmt = None
 
 try:
+    from .utils import is_short_position as _is_short_position
+except ImportError:
+    def _is_short_position(strategy_name: str) -> bool:  # type: ignore[misc]
+        s = (strategy_name or "").lower()
+        return any(k in s for k in ("short", "credit", "covered", "cash-secured", "cash secured", "naked", "iron condor", "sell"))
+
+try:
     from .utils import bs_delta, bs_gamma, bs_vega, bs_price
     HAS_UTILS = True
 except ImportError:
@@ -65,12 +72,6 @@ def _sep(width: int = 90) -> str:
     if HAS_FMT and fmt:
         return fmt.colorize(line, fmt.Colors.DIM)
     return line
-
-
-def _is_short_position(strategy_name: str) -> bool:
-    """Return True if the strategy is a short/credit position."""
-    s = (strategy_name or "").lower()
-    return any(k in s for k in ("short", "credit", "covered", "cash secured", "naked"))
 
 
 def _fetch_stock_prices(tickers: List[str]) -> Dict[str, float]:
@@ -160,7 +161,7 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
             if stored_q is not None:
                 try:
                     qv = float(stored_q)
-                    if 0.0 <= qv < 0.20:
+                    if 0.0 <= qv < 1.0:
                         div_yield = qv
                 except (ValueError, TypeError):
                     pass

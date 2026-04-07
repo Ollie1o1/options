@@ -23,6 +23,8 @@ try:
 except ImportError:
     _HAS_RFR = False
 
+from .utils import is_short_position as _is_short_position
+
 # Realistic execution cost constants (deprecated fallbacks — use config.json paper_trading section)
 COMMISSION_PER_CONTRACT = 0.65   # $ per contract per leg (retail ~$0.65, e.g. Tastytrade/TDA)
 SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half spread)
@@ -66,11 +68,6 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN term_structure_score REAL",
     ],
 }
-
-def _is_short_position(strategy_name: str) -> bool:
-    """Detect if a trade is a short/credit position (profits from premium decay)."""
-    s = (strategy_name or "").lower()
-    return any(k in s for k in ("short", "credit", "covered", "cash-secured", "cash secured", "naked", "iron condor", "sell"))
 
 
 class PaperManager:
@@ -163,6 +160,11 @@ class PaperManager:
                        pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score,
                        iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score
         """
+        if not trade_dict.get("strategy_name"):
+            raise ValueError("strategy_name is required; must include 'short'/'long' to set P&L direction")
+        if float(trade_dict.get("entry_price", 0)) <= 0:
+            raise ValueError(f"Cannot log trade: entry_price must be > 0, got {trade_dict.get('entry_price')}")
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         query = """
@@ -424,11 +426,15 @@ class PaperManager:
                     spot = spot_cache.get(ticker)
                     if spot is None:
                         continue
-                    spread_width = abs(long_strike - float(strike))
-                    low_k = min(float(strike), float(long_strike))
-                    max(float(strike), float(long_strike))
+                    short_k = float(strike)  # always the short leg (see log_spread)
+                    spread_width = abs(long_strike - short_k)
                     if spread_width > 0:
-                        intrinsic_frac = max(0.0, min(1.0, (spot - low_k) / spread_width))
+                        if short_k > long_strike:
+                            # Bull put spread: loses when spot falls below short put strike
+                            intrinsic_frac = max(0.0, min(1.0, (short_k - spot) / spread_width))
+                        else:
+                            # Bear call spread: loses when spot rises above short call strike
+                            intrinsic_frac = max(0.0, min(1.0, (spot - short_k) / spread_width))
                     else:
                         intrinsic_frac = 0.5
                     # For a short credit spread: loses when intrinsic_frac → 1
@@ -449,7 +455,7 @@ class PaperManager:
                         else:
                             reason = f"Time Exit ({dte}d to expiry)"
                         friction_fraction = self._friction_per_share / entry_price if entry_price > 0 else 0.0
-                        pnl_realistic = pnl_raw - friction_fraction
+                        pnl_realistic = max(pnl_raw - friction_fraction, -1.0)
                         closed_this_run.append(
                             f"{ticker} SPREAD ${strike:.0f}/{long_strike:.0f} → {reason} "
                             f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
@@ -491,7 +497,7 @@ class PaperManager:
                     _slip = self._get_spread_slippage(ticker, expiration, strike, option_type, entry_price)
                     _friction = (2 * _slip) + (2 * self._commission_per_contract / 100.0)
                     friction_fraction = _friction / entry_price if entry_price > 0 else 0.0
-                    pnl_realistic = pnl_raw - friction_fraction
+                    pnl_realistic = max(pnl_raw - friction_fraction, -1.0)
 
                     closed_this_run.append(
                         f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} "

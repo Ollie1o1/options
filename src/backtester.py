@@ -347,9 +347,10 @@ def run_backtest(
                     exit_price_time = _bs_option_price(direction, S_exit, K, T_exit, risk_free, sigma_exit)
 
                     # Apply TP/SL: check if TP or SL was triggered before time exit
+                    # Short position: profit when option price falls, loss when it rises
                     actual_exit_price = exit_price_time
-                    tp_price = entry_price * (1 + tp)    # price at which we take profit
-                    sl_price = entry_price * (1 + sl)    # price at which we cut loss (sl is negative)
+                    tp_price = entry_price * (1 - tp)    # price decays to tp% of entry → buy back at profit
+                    sl_price = entry_price * (1 - sl)    # price rises by |sl|% of entry → buy back at loss (sl is negative)
 
                     # Scan intra-period for TP/SL hit (simplified: daily check)
                     for j in range(1, exit_dte + 1):
@@ -359,17 +360,17 @@ def run_backtest(
                         T_j = max((dte - j) / 365.0, 1 / 365.0)
                         sigma_j = float(hv_arr[i + j]) if (i + j) < len(hv_arr) and hv_arr[i + j] > 0 else sigma
                         px_j = _bs_option_price(direction, S_j, K, T_j, risk_free, sigma_j)
-                        if px_j >= tp_price:
+                        if px_j <= tp_price:   # short: profit when price drops
                             actual_exit_price = px_j
                             break
-                        if px_j <= sl_price:
+                        if px_j >= sl_price:   # short: loss when price rises
                             actual_exit_price = px_j
                             break
 
-                    exit_price_after_costs = actual_exit_price * (1 - spread_cost_per_side)
-                    pnl_per_share = exit_price_after_costs - entry_price  # long option after costs
+                    exit_price_after_costs = actual_exit_price * (1 + spread_cost_per_side)
+                    pnl_per_share = entry_price - exit_price_after_costs  # short: profit from premium decay
                     pnl_pct = pnl_per_share / entry_price
-                    pnl_pct_gross = (actual_exit_price - entry_price_gross) / entry_price_gross
+                    pnl_pct_gross = (entry_price_gross - actual_exit_price) / entry_price_gross
 
                     # VIX regime for this trade day
                     vix_val = 20.0  # default "Normal"

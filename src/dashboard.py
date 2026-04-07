@@ -532,7 +532,7 @@ def render_scanner_tab(budget, dte_bucket_filter="All"):
                             "type": opt["type"],
                             "entry_price": float(entry_px) if entry_px else 0.0,
                             "quality_score": opt["quality_score"],
-                            "strategy_name": f"Long {opt['type'].capitalize()}"
+                            "strategy_name": f"Short {opt['type'].capitalize()}"
                         }
                         pm.log_trade(trade_dict)
                         st.success(f"Logged paper trade for {opt['symbol']}")

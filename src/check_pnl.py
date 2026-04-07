@@ -25,6 +25,13 @@ except ImportError:
     fmt = None
 
 try:
+    from .utils import is_short_position as _is_short
+except ImportError:
+    def _is_short(strategy_name: str) -> bool:  # type: ignore[misc]
+        s = (strategy_name or "").lower()
+        return any(k in s for k in ("short", "credit", "covered", "cash-secured", "cash secured", "naked", "iron condor", "sell"))
+
+try:
     from .utils import bs_delta, bs_gamma, bs_vega, bs_theta
     HAS_BS = True
 except ImportError:
@@ -104,11 +111,6 @@ def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str
     return None
 
 
-def _is_short(strategy_name: str) -> bool:
-    s = (strategy_name or "").lower()
-    return any(k in s for k in ("short", "credit", "covered", "cash secured", "naked"))
-
-
 def _has_entry_greeks(r) -> bool:
     """Check if a trade row has stored entry Greeks."""
     try:
@@ -137,7 +139,6 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             entry_vega = float(r["entry_vega"])
             entry_theta = float(r["entry_theta"])
             entry_price = float(r["entry_price"])
-            float(r["exit_price"]) if r["exit_price"] else 0.0
             pnl_ratio = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
 
             # We don't have S_entry/S_exit stored, so use pnl_ratio * entry_price * 100 as actual P&L
@@ -818,7 +819,16 @@ def view_portfolio():
             and _has_entry_greeks(r)
         ]
         if _attr_trades and HAS_BS:
-            _print_pnl_attribution(_attr_trades, {}, width)
+            _attr_tickers = list({r["ticker"] for r in _attr_trades})
+            _attr_prices: dict = {}
+            for _t in _attr_tickers:
+                try:
+                    _p = getattr(yf.Ticker(_t).fast_info, "last_price", None)
+                    if _p and float(_p) > 0:
+                        _attr_prices[_t] = float(_p)
+                except Exception:
+                    pass
+            _print_pnl_attribution(_attr_trades, _attr_prices, width)
 
         # Paper trade IC analysis
         if HAS_STRESS and len(closed_trades) >= 5:

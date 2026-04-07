@@ -1093,7 +1093,10 @@ def calculate_scores(
     rr_raw = pd.to_numeric(df["rr_ratio"], errors='coerce').fillna(0.0)
     # Smooth linear mapping [0.5 → 0, 4.0 → 1] instead of hard step thresholds
     rr_score = np.clip((rr_raw - 0.5) / 3.5, 0.0, 1.0)
-    ev_score = rank_norm(df["ev_per_contract"].fillna(df["ev_per_contract"].median()))
+    _ev_for_rank = df["ev_per_contract"].copy()
+    if mode == "Premium Selling":
+        _ev_for_rank = -_ev_for_rank  # seller's edge = prem_vals - hv_payoff
+    ev_score = rank_norm(_ev_for_rank.fillna(_ev_for_rank.median()))
     # Blend ev_score with ev_earnings_score for earnings plays (Improvement 6)
     if "ev_earnings" in df.columns and "Earnings Play" in df.columns:
         try:
@@ -1101,7 +1104,10 @@ def calculate_scores(
             _ev_earn_num = pd.to_numeric(df["ev_earnings"], errors="coerce")
             _ev_earn_valid = _earn_play_mask & _ev_earn_num.notna()
             if _ev_earn_valid.any():
-                ev_earnings_score = rank_norm(_ev_earn_num.fillna(df["ev_per_contract"].median()))
+                _ev_earn_for_rank = _ev_earn_num.copy()
+                if mode == "Premium Selling":
+                    _ev_earn_for_rank = -_ev_earn_for_rank
+                ev_earnings_score = rank_norm(_ev_earn_for_rank.fillna(_ev_for_rank.median()))
                 ev_score = ev_score.copy()
                 ev_score.loc[_ev_earn_valid] = (
                     0.5 * ev_score.loc[_ev_earn_valid]
@@ -1195,12 +1201,14 @@ def calculate_scores(
         weights = config.get("premium_selling_weights", {})
         ror_score = rank_norm(df["return_on_risk"].fillna(df["return_on_risk"].median()))
         w = {k: weights.get(k, 0.0) for k in ["pop", "return_on_risk", "iv_rank", "liquidity", "theta", "ev", "trader_pref"]}
+        w["em_realism"] = weights.get("em_realism", 0.05)
         w_sum = sum(w.values()) or 1.0
-        df["quality_score"] = (w["pop"]*pop_score + w["return_on_risk"]*ror_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score) / w_sum
+        df["quality_score"] = (w["pop"]*pop_score + w["return_on_risk"]*ror_score + w["iv_rank"]*iv_rank_score + w["liquidity"]*liquidity + w["theta"]*theta_score + w["ev"]*ev_score + w["trader_pref"]*trader_pref_score + w["em_realism"]*em_realism_score) / w_sum
         try:
             _cdf = pd.DataFrame({"PoP": w["pop"]*pop_score, "RoR": w["return_on_risk"]*ror_score,
                                   "IV rank": w["iv_rank"]*iv_rank_score, "Liq": w["liquidity"]*liquidity,
-                                  "Theta": w["theta"]*theta_score, "EV": w["ev"]*ev_score}, index=df.index)
+                                  "Theta": w["theta"]*theta_score, "EV": w["ev"]*ev_score,
+                                  "EM real": w["em_realism"]*em_realism_score}, index=df.index)
             df["score_drivers"] = _cdf.apply(lambda r: " · ".join(r.nlargest(3).index.tolist()), axis=1)
         except Exception:
             df["score_drivers"] = ""
@@ -3704,7 +3712,7 @@ def main():
                                 or safe_float(top_pick_row.get("premium"), 0.0)
                             ),
                             "quality_score": top_pick_row["quality_score"],
-                            "strategy_name": f"Long {str(top_pick_row['type']).capitalize()}",
+                            "strategy_name": f"Short {str(top_pick_row['type']).capitalize()}",
                             "entry_iv": top_pick_row.get("impliedVolatility"),
                             "entry_delta": top_pick_row.get("delta"),
                             "entry_gamma": top_pick_row.get("gamma"),

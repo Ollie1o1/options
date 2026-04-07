@@ -11,6 +11,14 @@ from typing import Optional, Union, Any
 
 # --- Basic Utilities ---
 
+def is_short_position(strategy_name: str) -> bool:
+    """Return True if strategy_name indicates a short/credit position."""
+    s = (strategy_name or "").lower()
+    return any(k in s for k in (
+        "short", "credit", "covered", "cash-secured", "cash secured",
+        "naked", "iron condor", "sell"
+    ))
+
 def safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
     """Safely convert a value to float, returning default on failure."""
     try:
@@ -490,6 +498,7 @@ def generate_occ_symbol(symbol: str, expiry: str, strike: float, opt_type: str) 
 
 
 __all__ = [
+    "is_short_position",
     "safe_float",
     "norm_cdf",
     "norm_pdf",
