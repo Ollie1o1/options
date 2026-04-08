@@ -74,20 +74,16 @@ class PaperManager:
     """Manages paper trades stored in a SQLite database."""
     
     def __init__(self, db_path: str = "paper_trades.db", config_path: str = "config.json"):
+        self.db_path = db_path
         self.config_path = config_path
-        # Load config and override db_path if present in env or config
-        self.db_path = os.environ.get("PAPER_TRADES_DB")
+        # Load friction costs from config (fall back to module-level constants)
         try:
             with open(config_path, 'r') as f:
                 _cfg = json.load(f)
             _pt = _cfg.get("paper_trading", {})
-            if not self.db_path:
-                self.db_path = _pt.get("db_path", db_path)
             self._commission_per_contract = float(_pt.get("commission_per_contract", COMMISSION_PER_CONTRACT))
             self._slippage_per_share = float(_pt.get("slippage_per_share", SLIPPAGE_PER_SHARE))
         except Exception:
-            if not self.db_path:
-                self.db_path = db_path
             self._commission_per_contract = COMMISSION_PER_CONTRACT
             self._slippage_per_share = SLIPPAGE_PER_SHARE
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)

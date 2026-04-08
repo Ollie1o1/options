@@ -75,7 +75,7 @@ def _make_config():
 
 def _call_enrich_and_score(df, config):
     """Helper that calls enrich_and_score with sensible defaults."""
-    from src.scanner import enrich_and_score
+    from src.options_screener import enrich_and_score
     vix_regime_weights = config.get("composite_weights", {})
     return enrich_and_score(
         df=df,
@@ -107,7 +107,7 @@ def test_enrich_and_score_returns_nonempty():
     """enrich_and_score should return a non-empty DataFrame with quality_score column."""
     df = _make_options_df(n=10)
     config = _make_config()
-    with patch("src.scanner.monte_carlo_pop", return_value=(0.6, 0.4)):
+    with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)):
         result = _call_enrich_and_score(df, config)
     assert not result.empty, "enrich_and_score returned an empty DataFrame"
     assert "quality_score" in result.columns, "quality_score column missing from output"
@@ -117,7 +117,7 @@ def test_quality_score_range():
     """All quality_score values should be in [0, 1] after clipping."""
     df = _make_options_df(n=10)
     config = _make_config()
-    with patch("src.scanner.monte_carlo_pop", return_value=(0.6, 0.4)):
+    with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)):
         result = _call_enrich_and_score(df, config)
     if result.empty:
         pytest.skip("enrich_and_score returned empty (all rows filtered out)")
@@ -126,11 +126,22 @@ def test_quality_score_range():
     assert (scores <= 1.0).all(), f"quality_score above 1: {scores[scores > 1]}"
 
 
+def test_trend_aligned_column_exists():
+    """Trend_Aligned column should be present in the output."""
+    df = _make_options_df(n=10)
+    config = _make_config()
+    with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)):
+        result = _call_enrich_and_score(df, config)
+    if result.empty:
+        pytest.skip("enrich_and_score returned empty (all rows filtered out)")
+    assert "Trend_Aligned" in result.columns, "Trend_Aligned column missing from output"
+
+
 def test_prob_profit_range():
     """All prob_profit values should be in [0, 1]."""
     df = _make_options_df(n=10)
     config = _make_config()
-    with patch("src.scanner.monte_carlo_pop", return_value=(0.6, 0.4)):
+    with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)):
         result = _call_enrich_and_score(df, config)
     if result.empty:
         pytest.skip("enrich_and_score returned empty (all rows filtered out)")

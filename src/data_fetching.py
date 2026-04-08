@@ -11,9 +11,6 @@ import random
 import functools
 import warnings
 import sqlite3
-import json
-import requests
-import threading
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -30,7 +27,7 @@ logger = logging.getLogger(__name__)
 try:
     from .news_fetcher import fetch_news_and_events
     _HAS_NEWS_FETCHER = True
-except (ImportError, ModuleNotFoundError):
+except Exception:
     _HAS_NEWS_FETCHER = False
 
 # Suppress noisy third-party library output at startup
@@ -40,14 +37,32 @@ logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 logging.getLogger("requests").setLevel(logging.CRITICAL)
 logging.getLogger("peewee").setLevel(logging.CRITICAL)
 
-from .http_client import get_global_session
-_yf_session = get_global_session()
+# Install intelligent request caching (15-minute expiry)
+# Use WAL journal mode to prevent SQLite write-lock contention across runs
+try:
+    requests_cache.install_cache(
+        'finance_cache', backend='sqlite', expire_after=900,
+        backend_options={'pragmas': {'journal_mode': 'wal'}},
+    )
+except Exception:
+    try:
+        # Older requests_cache versions don't support backend_options
+        requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+    except Exception:
+        pass  # Cache unavailable; requests proceed uncached
+
+# Shared curl_cffi session with timeout to prevent yfinance hangs on rate-limited connections
+try:
+    from curl_cffi import requests as _cffi_requests
+    _yf_session = _cffi_requests.Session(impersonate="chrome")
+    _yf_session.timeout = 20  # 20s default for all requests
+except ImportError:
+    _yf_session = None  # Let yfinance create its own session
 
 # Global cache bypass flag (set by --no-cache CLI flag)
 _NO_CACHE = False
 
-# In-memory caches and lock for thread-safety
-_CACHE_LOCK = threading.Lock()
+# In-memory caches
 _HV_CACHE: Dict[str, float] = {}
 _MOMENTUM_CACHE: Dict[str, Tuple] = {}
 _IV_RANK_CACHE: Dict[str, Tuple] = {}
@@ -153,17 +168,15 @@ SECTOR_MAP: Dict[str, str] = {
 
 def clear_chain_cache() -> None:
     """Clear the in-session options chain cache."""
-    with _CACHE_LOCK:
-        _CHAIN_CACHE.clear()
-        _FETCH_TIMESTAMPS.clear()
+    _CHAIN_CACHE.clear()
+    _FETCH_TIMESTAMPS.clear()
 
 
 def get_data_age_seconds() -> Optional[float]:
     """Return age in seconds of the oldest fetch in this session, or None if no fetches."""
-    with _CACHE_LOCK:
-        if not _FETCH_TIMESTAMPS:
-            return None
-        oldest = min(_FETCH_TIMESTAMPS.values())
+    if not _FETCH_TIMESTAMPS:
+        return None
+    oldest = min(_FETCH_TIMESTAMPS.values())
     return (datetime.now() - oldest).total_seconds()
 
 
@@ -200,7 +213,7 @@ class YFinanceProvider(BaseDataProvider):
 # yahooquery-backed provider
 # ---------------------------------------------------------------------------
 
-def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Optional[Dict[str, Any]]:
+def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     """
     Fetch options data via yahooquery and return the same dict structure as
     fetch_options_yfinance so the two providers are interchangeable.
@@ -209,10 +222,6 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Optional[Dict[st
     layer (HTTP calls) differs.  Fields that require yfinance-specific APIs
     (news, sentiment, short interest) are set to safe defaults.
     """
-    with _CACHE_LOCK:
-        if symbol in _CHAIN_CACHE:
-            return _CHAIN_CACHE[symbol]
-
     try:
         from yahooquery import Ticker as YQTicker
     except ImportError:
@@ -274,7 +283,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Optional[Dict[st
             future_mask = ed.index > pd.Timestamp.now()
             if future_mask.any():
                 earnings_date = ed.index[future_mask][0].to_pydatetime()
-    except (AttributeError, KeyError, ValueError) as exc:
+    except Exception as exc:
         logger.debug("Earnings date fetch failed for %s: %s", symbol, exc)
 
     sector_perf = get_sector_performance(symbol)
@@ -416,12 +425,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Optional[Dict[st
         except Exception as exc:
             logger.debug("Term structure spread computation failed: %s", exc)
 
-    # Structural validation
-    df = validate_options_data(df)
-    if df is None:
-        return None
-
-    result = {
+    return {
         "df": df,
         "history_df": hist,
         "context": {
@@ -450,10 +454,6 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Optional[Dict[st
             "dividend_yield": 0.0,
         },
     }
-    with _CACHE_LOCK:
-        _CHAIN_CACHE[symbol] = result
-        _FETCH_TIMESTAMPS[symbol] = datetime.now()
-    return result
 
 
 class YahooQueryProvider(BaseDataProvider):
@@ -498,7 +498,7 @@ class YahooQueryProvider(BaseDataProvider):
                     symbol, max_expiries, _batch_ticker=batch
                 ) if hasattr(fetch_options_yahooquery, "__wrapped__") \
                     else fetch_options_yahooquery(symbol, max_expiries)
-            except (RuntimeError, ValueError, KeyError, AttributeError) as exc:
+            except Exception as exc:
                 results[symbol] = {"error": str(exc)}
 
         return results
@@ -528,7 +528,7 @@ class FanOutProvider(BaseDataProvider):
             for fut in concurrent.futures.as_completed(future_to_provider):
                 try:
                     return fut.result()
-                except (RuntimeError, ValueError, KeyError, AttributeError, requests.exceptions.RequestException) as exc:
+                except Exception as exc:
                     prov = future_to_provider[fut]
                     errors.append((type(prov).__name__, str(exc)))
 
@@ -551,7 +551,7 @@ class FanOutProvider(BaseDataProvider):
             for fut in concurrent.futures.as_completed(future_to_provider):
                 try:
                     return fut.result()
-                except (RuntimeError, ValueError, KeyError, AttributeError, requests.exceptions.RequestException) as exc:
+                except Exception as exc:
                     prov = future_to_provider[fut]
                     errors.append((type(prov).__name__, str(exc)))
 
@@ -577,10 +577,11 @@ _DATA_PROVIDER: BaseDataProvider = _make_default_provider()
 
 def _get_iv_db_path() -> str:
     try:
+        import json
         with open("config.json") as f:
             cfg = json.load(f)
         return cfg.get("iv_history_db_path", "iv_cache.db")
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+    except Exception:
         return "iv_cache.db"
 
 
@@ -597,7 +598,7 @@ def _init_iv_db(db_path: str) -> None:
         """)
         conn.commit()
         conn.close()
-    except sqlite3.Error as exc:
+    except Exception as exc:
         logger.debug("IV DB init failed: %s", exc)
 
 
@@ -611,7 +612,7 @@ def _upsert_iv(ticker: str, date_str: str, iv: float, db_path: str) -> None:
         )
         conn.commit()
         conn.close()
-    except (sqlite3.Error, ValueError) as exc:
+    except Exception as exc:
         logger.debug("IV upsert failed for %s: %s", ticker, exc)
 
 
@@ -628,7 +629,7 @@ def _init_skew_db(db_path: str) -> None:
         """)
         conn.commit()
         conn.close()
-    except sqlite3.Error as exc:
+    except Exception as exc:
         logger.debug("Skew DB init failed: %s", exc)
 
 
@@ -642,7 +643,7 @@ def _upsert_skew(ticker: str, date_str: str, skew: float, db_path: str) -> None:
         )
         conn.commit()
         conn.close()
-    except (sqlite3.Error, ValueError) as exc:
+    except Exception as exc:
         logger.debug("Skew upsert failed for %s: %s", ticker, exc)
 
 
@@ -655,7 +656,7 @@ def _load_skew_history(ticker: str, db_path: str) -> List[float]:
         ).fetchall()
         conn.close()
         return [r[0] for r in rows if r[0] is not None]
-    except sqlite3.Error as exc:
+    except Exception as exc:
         logger.debug("Skew history load failed for %s: %s", ticker, exc)
         return []
 
@@ -671,7 +672,7 @@ def get_skew_percentile(ticker: str, current_skew: float) -> float:
             return 0.5
         arr = np.array(history, dtype=float)
         return float(np.clip((arr < current_skew).sum() / len(arr), 0.0, 1.0))
-    except (sqlite3.Error, ValueError, TypeError):
+    except Exception:
         return 0.5
 
 
@@ -717,7 +718,7 @@ def calculate_vrp(
         else:
             regime = "CHEAP"
         return {"vrp_mean": vrp_mean, "vrp_std": vrp_std, "vrp_percentile": vrp_pctile, "vrp_regime": regime}
-    except (KeyError, ValueError, ZeroDivisionError, TypeError) as exc:
+    except Exception as exc:
         logger.debug("VRP computation failed: %s", exc)
         return default
 
@@ -731,7 +732,7 @@ def _load_iv_history(ticker: str, db_path: str) -> List[float]:
         ).fetchall()
         conn.close()
         return [r[0] for r in rows if r[0] is not None]
-    except sqlite3.Error as exc:
+    except Exception as exc:
         logger.debug("IV history load failed for %s: %s", ticker, exc)
         return []
 
@@ -753,7 +754,7 @@ def iv_history_coverage(ticker: str) -> Dict[str, Any]:
         else:
             confidence = "Low"
         return {"ticker": ticker, "days": days, "confidence": confidence}
-    except (sqlite3.Error, ValueError, TypeError) as e:
+    except Exception as e:
         logger.warning("iv_history_coverage failed for %s: %s", ticker, e)
         return {"ticker": ticker, "days": 0, "confidence": "Low"}
 
@@ -785,7 +786,7 @@ def safe_float(x, default=None):
         if math.isfinite(v):
             return v
         return default
-    except (ValueError, TypeError):
+    except Exception:
         return default
 
 # --- Core Data Fetching Functions ---
@@ -817,7 +818,7 @@ def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
             return BACKUP_TICKERS[:max_tickers]
 
         return df['Ticker'].tolist()
-    except (requests.exceptions.RequestException, pd.errors.EmptyDataError, KeyError, AttributeError) as e:
+    except Exception as e:
         logging.warning(f"Could not fetch '{scan_type}' from Finviz: {e}. Using backup tickers.")
         return BACKUP_TICKERS[:max_tickers]
 
@@ -829,45 +830,22 @@ def get_underlying_price(ticker: yf.Ticker) -> Optional[float]:
             lp = safe_float(getattr(fi, "last_price", None))
             if lp:
                 return lp
-    except (AttributeError, ValueError, TypeError):
+    except Exception:
         pass
     try:
         info = ticker.info or {}
         lp = safe_float(info.get("regularMarketPrice"))
         if lp:
             return lp
-    except (requests.exceptions.RequestException, KeyError, ValueError):
+    except Exception:
         pass
     try:
         hist = ticker.history(period="5d", interval="1d")
         if not hist.empty:
             return safe_float(hist["Close"].iloc[-1])
-    except (requests.exceptions.RequestException, KeyError, IndexError):
+    except Exception:
         pass
     return None
-
-def validate_options_data(df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """
-    Simple structural validation wrapper that verifies the shape/columns
-    of the options chain DataFrame before returning it.
-    Returns the DataFrame if valid, otherwise logs an error and returns None.
-    """
-    if df is None or df.empty:
-        logger.error("Options chain validation failed: DataFrame is empty or None.")
-        return None
-    
-    required_cols = [
-        "strike", "lastPrice", "bid", "ask", "volume", 
-        "openInterest", "impliedVolatility", "type", 
-        "expiration", "symbol", "underlying"
-    ]
-    missing = [col for col in required_cols if col not in df.columns]
-    if missing:
-        logger.error(f"Options chain validation failed: Missing columns {missing}")
-        return None
-        
-    return df
-
 
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
@@ -877,9 +855,8 @@ def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
         return None
 
     key = f"{ticker.ticker}:sentiment"
-    with _CACHE_LOCK:
-        if key in _SENTIMENT_CACHE:
-            return _SENTIMENT_CACHE[key]
+    if key in _SENTIMENT_CACHE:
+        return _SENTIMENT_CACHE[key]
 
     try:
         news = ticker.news
@@ -890,10 +867,9 @@ def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
             return None
         blob = TextBlob(headlines)
         score = blob.sentiment.polarity
-        with _CACHE_LOCK:
-            _SENTIMENT_CACHE[key] = score
+        _SENTIMENT_CACHE[key] = score
         return score
-    except (AttributeError, KeyError, TypeError) as exc:
+    except Exception as exc:
         logger.debug("Sentiment analysis failed: %s", exc)
         return None
 
@@ -909,16 +885,15 @@ def get_news_headlines(ticker: yf.Ticker, max_headlines: int = 3) -> list:
             if title:
                 titles.append(title.strip())
         return titles[:max_headlines]
-    except (AttributeError, KeyError, TypeError) as exc:
+    except Exception as exc:
         logger.debug("News headlines fetch failed: %s", exc)
         return []
 
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
     key = f"{ticker.ticker}:seasonality"
-    with _CACHE_LOCK:
-        if key in _SEASONALITY_CACHE:
-            return _SEASONALITY_CACHE[key]
+    if key in _SEASONALITY_CACHE:
+        return _SEASONALITY_CACHE[key]
     try:
         hist = ticker.history(period="5y", interval="1mo")
         if hist.empty:
@@ -930,10 +905,9 @@ def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
         wins = (monthly_data['Close'] > monthly_data['Open']).sum()
         total = len(monthly_data)
         win_rate = wins / total if total > 0 else 0.0
-        with _CACHE_LOCK:
-            _SEASONALITY_CACHE[key] = win_rate
+        _SEASONALITY_CACHE[key] = win_rate
         return win_rate
-    except (requests.exceptions.RequestException, KeyError, ValueError) as exc:
+    except Exception as exc:
         logger.debug("Seasonality check failed for %s: %s", ticker.ticker, exc)
         return None
 
@@ -948,7 +922,7 @@ def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 return dt
-        except (AttributeError, IndexError, KeyError):
+        except Exception:
             pass
         try:
             cal = getattr(ticker, "calendar", None)
@@ -965,9 +939,9 @@ def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     return dt
-        except (AttributeError, IndexError, KeyError):
+        except Exception:
             pass
-    except (AttributeError, ValueError, TypeError):
+    except Exception:
         return None
     return None
 
@@ -977,9 +951,8 @@ def get_risk_free_rate() -> float:
     """Fetch current risk-free rate from ^IRX (13-week T-bill), cached for 15 min."""
     import time as _time
     now = _time.time()
-    with _CACHE_LOCK:
-        if _rfr_cache["value"] is not None and now - _rfr_cache["ts"] < 900:
-            return _rfr_cache["value"]
+    if _rfr_cache["value"] is not None and now - _rfr_cache["ts"] < 900:
+        return _rfr_cache["value"]
     default_rate = 0.045
     rate_result = default_rate
     try:
@@ -990,7 +963,7 @@ def get_risk_free_rate() -> float:
                 rate = safe_float(getattr(fi, "last_price", None))
                 if rate and rate > 0:
                     rate_result = rate / 100.0
-        except (AttributeError, KeyError):
+        except Exception:
             pass
         if rate_result == default_rate:
             hist = tbill.history(period="5d", interval="1d")
@@ -998,11 +971,10 @@ def get_risk_free_rate() -> float:
                 rate = safe_float(hist["Close"].iloc[-1])
                 if rate and rate > 0:
                     rate_result = rate / 100.0
-    except requests.exceptions.RequestException:
+    except Exception:
         pass
-    with _CACHE_LOCK:
-        _rfr_cache["value"] = rate_result
-        _rfr_cache["ts"] = now
+    _rfr_cache["value"] = rate_result
+    _rfr_cache["ts"] = now
     return rate_result
 
 def get_vix_level() -> Optional[float]:
@@ -1014,14 +986,14 @@ def get_vix_level() -> Optional[float]:
                 level = safe_float(getattr(fi, "last_price", None))
                 if level and level > 0:
                     return level
-        except AttributeError:
+        except Exception:
             pass
         hist = vix.history(period="5d", interval="1d")
         if not hist.empty:
             level = safe_float(hist["Close"].iloc[-1])
             if level and level > 0:
                 return level
-    except requests.exceptions.RequestException:
+    except Exception:
         pass
     return None
 
@@ -1055,7 +1027,7 @@ def calculate_historical_volatility(hist: pd.DataFrame, period: int = 30) -> Opt
             return None
         daily_vol = returns.std()
         return daily_vol * math.sqrt(252)
-    except (KeyError, ValueError, ZeroDivisionError, TypeError) as exc:
+    except Exception as exc:
         logger.debug("HV calculation failed: %s", exc)
         return None
 
@@ -1075,7 +1047,7 @@ def calculate_ewma_volatility(hist: pd.DataFrame, span: int = 20) -> Optional[fl
         if ewm_var.empty:
             return None
         return float(np.sqrt(ewm_var.iloc[-1] * 252))
-    except (KeyError, ValueError, ZeroDivisionError, TypeError) as exc:
+    except Exception as exc:
         logger.debug("EWMA vol calculation failed: %s", exc)
         return None
 
@@ -1094,7 +1066,7 @@ def calculate_parkinson_volatility(hist: pd.DataFrame, period: int = 30) -> Opti
             return None
         parkinson_var = (log_hl ** 2).mean() / (4 * math.log(2))
         return float(math.sqrt(parkinson_var * 252))
-    except (KeyError, ValueError, ZeroDivisionError, TypeError):
+    except Exception:
         return None
 
 
@@ -1126,7 +1098,7 @@ def calculate_max_pain(df_chain: pd.DataFrame, underlying: float = 0.0) -> Optio
                 min_pain = total
                 max_pain_strike = float(k)
         return max_pain_strike
-    except (KeyError, ValueError, TypeError):
+    except Exception:
         return None
 
 
@@ -1184,7 +1156,7 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
                 adx_series = dx.rolling(14).mean()
                 if adx_series.notna().any():
                     adx_14 = float(adx_series.iloc[-1]) if not np.isnan(adx_series.iloc[-1]) else None
-        except (KeyError, ValueError, ZeroDivisionError, TypeError):
+        except Exception:
             pass
 
         # 20-day stats
@@ -1205,7 +1177,7 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
         is_squeezing = (bb_upper < kc_upper) and (bb_lower > kc_lower)
 
         return ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14
-    except (KeyError, ValueError, ZeroDivisionError, TypeError):
+    except Exception:
         return None, None, None, None, None, None, False, None, None
 
 def calculate_rvol(hist: pd.DataFrame) -> Optional[float]:
@@ -1227,7 +1199,7 @@ def calculate_rvol(hist: pd.DataFrame) -> Optional[float]:
         if avg_vol and avg_vol > 0:
             return float(current_vol / avg_vol)
         return None
-    except (KeyError, ValueError, ZeroDivisionError, TypeError):
+    except Exception:
         return None
 
 def calculate_technical_levels(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -1253,7 +1225,7 @@ def calculate_technical_levels(hist: pd.DataFrame) -> Tuple[Optional[float], Opt
         fib_618 = period_high - (0.618 * diff)
         
         return vwap, fib_50, fib_618
-    except (KeyError, ValueError, ZeroDivisionError, TypeError):
+    except Exception:
         return None, None, None
 
 def get_iv_rank_percentile_from_history(
@@ -1306,7 +1278,7 @@ def get_iv_rank_percentile_from_history(
 
                     confidence = "High" if len(iv_history) >= 252 else "Medium"
                     return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
-        except (sqlite3.Error, ValueError, TypeError):
+        except Exception:
             pass
 
     # --- Fall back to HV-proxy computation ---
@@ -1334,7 +1306,7 @@ def get_iv_rank_percentile_from_history(
         iv_rank_30, iv_pct_30 = _iv_stats(30)
         iv_rank_90, iv_pct_90 = _iv_stats(90)
         return iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, confidence
-    except (KeyError, ValueError, ZeroDivisionError, TypeError):
+    except Exception:
         return None, None, None, None, confidence
 
 def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
@@ -1350,7 +1322,7 @@ def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
         if si > 1:
             si = si / 100.0
         return si
-    except (AttributeError, KeyError, ValueError, TypeError):
+    except Exception:
         return None
 
 def get_sector_performance(ticker_symbol: str) -> Dict:
@@ -1372,7 +1344,7 @@ def get_sector_performance(ticker_symbol: str) -> Dict:
             "ticker_return": tkr_ret,
             "sector_return": etf_ret
         }
-    except (requests.exceptions.RequestException, KeyError, ValueError):
+    except Exception:
         return {}
 
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
@@ -1388,7 +1360,7 @@ def check_macro_risk() -> bool:
             if current_range > (avg_range + 2 * std_range):
                 return True
         return False
-    except (requests.exceptions.RequestException, KeyError, ValueError):
+    except Exception:
         return False
 
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
@@ -1401,7 +1373,7 @@ def check_yield_spike() -> Tuple[bool, float]:
             tnx_change_pct = (tnx_close.iloc[-1] - tnx_close.iloc[-2]) / tnx_close.iloc[-2]
             return (tnx_change_pct > 0.025), tnx_change_pct
         return False, 0.0
-    except (requests.exceptions.RequestException, KeyError, ValueError):
+    except Exception:
         return False, 0.0
 
 def get_market_context() -> Tuple[str, str, bool, float]:
@@ -1427,7 +1399,7 @@ def get_market_context() -> Tuple[str, str, bool, float]:
         _, tnx_change_pct = check_yield_spike()
         
         return market_trend, volatility_regime, macro_risk_active, tnx_change_pct
-    except (requests.exceptions.RequestException, KeyError, ValueError):
+    except Exception:
         return "Unknown", "Unknown", False, 0.0
 
 
@@ -1435,7 +1407,7 @@ def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.Data
     try:
         # Wrap ticker.option_chain in try/except to handle invalid/empty expirations gracefully
         oc = tkr.option_chain(exp)
-    except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+    except Exception as e:
         logger.debug("Could not fetch options for %s on %s: %s", symbol, exp, e)
         return []
 
@@ -1476,7 +1448,7 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
         df_chain["exp_dt"] = pd.to_datetime(df_chain["expiration"], errors="coerce", utc=True)
         try:
             earnings_dt = pd.Timestamp(earnings_date).tz_localize("UTC") if earnings_date.tzinfo is None else pd.Timestamp(earnings_date).tz_convert("UTC")
-        except (ValueError, TypeError):
+        except Exception:
             earnings_dt = pd.Timestamp(earnings_date, tz="UTC")
         post_earnings_exps = df_chain[df_chain["exp_dt"] > earnings_dt]["expiration"].unique()
         if len(post_earnings_exps) == 0:
@@ -1517,7 +1489,7 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
                         op_mid = (otm_put.iloc[0]["bid"] + otm_put.iloc[0]["ask"]) / 2
                         if oc_mid > 0 and op_mid > 0:
                             strangle = oc_mid + op_mid
-        except (KeyError, ValueError, IndexError):
+        except Exception:
             strangle = None
 
         if strangle is not None:
@@ -1536,7 +1508,7 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
                 atm_iv_val = call_iv
             elif put_iv > 0:
                 atm_iv_val = put_iv
-        except (KeyError, AttributeError, ValueError):
+        except Exception:
             pass
 
         hist_moves = []
@@ -1562,7 +1534,7 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
                         if len(post_returns) >= 30:
                             post_event_hv = float(post_returns.iloc[-30:].std() * np.sqrt(252))
                             predicted_iv_crush = max(0.0, atm_iv_val - post_event_hv)
-        except (requests.exceptions.RequestException, AttributeError, KeyError, ValueError):
+        except Exception:
             pass
 
         if not hist_moves:
@@ -1587,19 +1559,18 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
             "predicted_iv_crush": predicted_iv_crush,
             "crush_confidence": crush_confidence,
         }
-    except (RuntimeError, ValueError, KeyError, IndexError, TypeError):
+    except Exception:
         return None
 
 
 @retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> Optional[Dict]:
+def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     """
     Fetch options data and all related context using a Single-Fetch architecture.
     Returns a dictionary with 'df' (options chain) and 'context' (all derived metrics).
     """
-    with _CACHE_LOCK:
-        if symbol in _CHAIN_CACHE:
-            return _CHAIN_CACHE[symbol]
+    if symbol in _CHAIN_CACHE:
+        return _CHAIN_CACHE[symbol]
 
     try:
         tkr = yf.Ticker(symbol, session=_yf_session)
@@ -1647,7 +1618,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Optional[Dict]:
             # Keep news_headlines in sync so AI context is consistent
             if news_data and news_data.top_headlines:
                 news_headlines = news_data.top_headlines
-        except (RuntimeError, ValueError, KeyError, AttributeError, requests.exceptions.RequestException):
+        except Exception:
             pass
     short_interest = get_short_interest(tkr)
 
@@ -1660,7 +1631,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Optional[Dict]:
             next_ex_div = future_divs.index[0].date() if not future_divs.empty else None
         else:
             next_ex_div = None
-    except (AttributeError, KeyError):
+    except Exception:
         next_ex_div = None
 
     # 4. Fetch Options Chains
@@ -1684,7 +1655,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Optional[Dict]:
             try:
                 result_frames = future.result()
                 frames.extend(result_frames)
-            except (RuntimeError, ValueError, KeyError, requests.exceptions.RequestException):
+            except Exception:
                 continue
 
     if not frames:
@@ -1740,7 +1711,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Optional[Dict]:
             _iv_db = _get_iv_db_path()
             _iv_date = datetime.now().strftime("%Y-%m-%d")
             _upsert_iv(symbol, _iv_date, float(median_iv), _iv_db)
-        except (sqlite3.Error, ValueError) as _uiv_exc:
+        except Exception as _uiv_exc:
             logger.warning("IV upsert failed for %s: %s", symbol, _uiv_exc)
         iv_rank_30, iv_pct_30, iv_rank_90, iv_pct_90, iv_confidence = get_iv_rank_percentile_from_history(
             hist, median_iv, ticker=symbol
@@ -1866,11 +1837,6 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Optional[Dict]:
     except Exception as _poly_exc:
         logger.debug("Polygon enrichment failed for %s: %s", symbol, _poly_exc)
 
-    # Structural validation
-    df = validate_options_data(df)
-    if df is None:
-        return None
-
     # Return structured result
     result = {
         "df": df,
@@ -1907,9 +1873,8 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Optional[Dict]:
             "dividend_yield": dividend_yield,
         }
     }
-    with _CACHE_LOCK:
-        _CHAIN_CACHE[symbol] = result
-        _FETCH_TIMESTAMPS[symbol] = datetime.now()
+    _CHAIN_CACHE[symbol] = result
+    _FETCH_TIMESTAMPS[symbol] = datetime.now()
     return result
 
 

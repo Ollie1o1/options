@@ -94,9 +94,9 @@ def _make_config():
 
 def _run_pipeline(df, config, mode="Single-stock"):
     """Run enrich_and_score with standard mocks."""
-    from src.scanner import enrich_and_score
+    from src.options_screener import enrich_and_score
     vix_regime_weights = config.get("composite_weights", {})
-    with patch("src.scanner.monte_carlo_pop", return_value=(0.6, 0.4)):
+    with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)):
         return enrich_and_score(
             df=df, min_dte=1, max_dte=90, risk_free_rate=0.05,
             config=config, vix_regime_weights=vix_regime_weights,
