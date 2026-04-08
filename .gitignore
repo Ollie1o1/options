@@ -36,3 +36,9 @@ temp_*.py
 # OS specific
 .DS_Store
 Thumbs.db
+
+# AI and Testing
+.claude/
+.hypothesis/
+.pytest_cache/
+

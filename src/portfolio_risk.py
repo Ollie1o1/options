@@ -79,7 +79,7 @@ class RiskAggregator:
         strike: float,
         opt_type: str,
     ) -> Optional[float]:
-        """Fetch implied volatility from the option chain; fallback 0.30."""
+        """Fetch implied volatility from the option chain; returns None on failure."""
         cache_key = f"{ticker}:{str(expiration)[:10]}:{strike:.2f}:{opt_type}"
         cached = _IV_CACHE.get(cache_key)
         if cached is not None:
@@ -90,7 +90,8 @@ class RiskAggregator:
             tkr = yf.Ticker(ticker)
             exps = tkr.options
             if not exps:
-                return 0.30
+                logger.warning(f"No options found for {ticker} to compute IV.")
+                return None
             # Pick the closest available expiration
             target = pd.Timestamp(expiration)
             exp_ts = [pd.Timestamp(e) for e in exps]
@@ -98,15 +99,17 @@ class RiskAggregator:
             chain = tkr.option_chain(closest.strftime("%Y-%m-%d"))
             tbl = chain.calls if opt_type.lower() == "call" else chain.puts
             if tbl is None or tbl.empty:
-                return 0.30
+                logger.warning(f"Empty option chain for {ticker} {closest.strftime('%Y-%m-%d')} {opt_type}.")
+                return None
             row = tbl.iloc[(tbl["strike"] - strike).abs().argsort()[:1]]
             iv = safe_float(row["impliedVolatility"].iloc[0])
             if iv and 0.01 < iv < 10.0:
                 _IV_CACHE[cache_key] = (iv, _time.monotonic())
                 return iv
-        except Exception:
-            pass
-        return 0.30
+            logger.warning(f"Invalid IV ({iv}) parsed for {ticker} {expiration} {strike} {opt_type}.")
+        except Exception as e:
+            logger.warning(f"Failed to fetch IV for {ticker} {expiration} {strike} {opt_type}: {e}")
+        return None
 
     def _dte(self, expiration: str) -> float:
         """Days to expiry as a fraction of a year (floored at 0)."""
@@ -161,7 +164,10 @@ class RiskAggregator:
                 # Skip already-expired positions — their Greeks are meaningless
                 continue
 
-            sigma = self._get_current_iv(ticker, expiration, strike, opt_type) or 0.30
+            sigma = self._get_current_iv(ticker, expiration, strike, opt_type)
+            if sigma is None:
+                logger.warning(f"Using default IV (0.30) for {ticker} as fallback due to missing data.")
+                sigma = 0.30
 
             try:
                 delta = float(bs_delta(opt_type, spot, strike, T, rfr, sigma))

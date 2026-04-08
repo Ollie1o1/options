@@ -23,9 +23,9 @@ def mock_options_df():
         "theta": np.random.uniform(-0.1, 0, n),
         "vega": np.random.uniform(0, 0.5, n),
         "type": np.random.choice(["call", "put"], n),
-        "underlying": ["AAPL"] * n,
+        "symbol": ["AAPL"] * n,
         "expiration": [datetime.datetime.now() + datetime.timedelta(days=30)] * n,
-        "underlying_price": [100.0] * n,
+        "underlying": [100.0] * n,
     })
     return df
 
@@ -45,4 +45,12 @@ def test_benchmark_enrich_and_score(benchmark, mock_options_df):
         "min_volume": 10,
         "min_oi": 100
     }
-    benchmark(enrich_and_score, mock_options_df, 1, 60, 0.05, config, "Single-stock")
+    kwargs = {
+        "iv_rank": 0.5,
+        "iv_percentile": 0.5,
+        "sentiment_score": 0.0,
+        "macro_risk_active": False,
+        "sector_perf": {},
+        "tnx_change_pct": 0.0
+    }
+    benchmark(enrich_and_score, mock_options_df, 1, 60, 0.05, config, "Single-stock", "Single-stock", **kwargs)

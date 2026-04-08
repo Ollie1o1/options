@@ -39,14 +39,15 @@ except ImportError:
     HAS_VISUALIZATION = False
 
 try:
-    from .vol_analytics import print_vol_cone, print_iv_surface, classify_vol_regime, print_regime_summary
+    from .vol_analytics import classify_vol_regime
+    from .cli_vol_display import print_vol_cone, print_iv_surface, print_regime_summary
     from .backtester import print_paper_trade_ic
     HAS_VOL_ANALYTICS = True
 except ImportError:
     HAS_VOL_ANALYTICS = False
 
 try:
-    from .visual_surface import print_risk_surface
+    from .cli_surface_display import print_risk_surface
     HAS_RISK_SURFACE = True
 except ImportError:
     HAS_RISK_SURFACE = False

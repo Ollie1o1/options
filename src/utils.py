@@ -5,9 +5,12 @@ This module provides high-performance, vectorized implementations of
 Black-Scholes Greeks and pricing functions using NumPy and SciPy.
 """
 
+import logging
 import numpy as np
 from scipy.stats import norm
 from typing import Optional, Union, Any
+
+logger = logging.getLogger(__name__)
 
 # --- Basic Utilities ---
 
@@ -27,6 +30,9 @@ def safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
         fval = float(val)
         return fval if np.isfinite(fval) else default
     except (ValueError, TypeError):
+        return default
+    except Exception as e:
+        logger.error(f"Unexpected error in safe_float: {e}")
         return default
 
 def norm_cdf(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
@@ -453,6 +459,9 @@ def format_pct(x: Any) -> str:
         return f"{100.0 * float(x):.1f}%"
     except (ValueError, TypeError):
         return "-"
+    except Exception as e:
+        logger.error(f"Unexpected error in format_pct: {e}")
+        return "-"
 
 def format_money(x: Any) -> str:
     """Format a number as a currency string."""
@@ -461,6 +470,9 @@ def format_money(x: Any) -> str:
             return "-"
         return f"${float(x):.2f}"
     except (ValueError, TypeError):
+        return "-"
+    except Exception as e:
+        logger.error(f"Unexpected error in format_money: {e}")
         return "-"
 
 def determine_moneyness(row: Any) -> str:
@@ -477,6 +489,9 @@ def determine_moneyness(row: Any) -> str:
         else:  # put
             return "ITM" if strike > underlying else "OTM"
     except (ValueError, TypeError, KeyError):
+        return "---"
+    except Exception as e:
+        logger.error(f"Unexpected error in determine_moneyness: {e}")
         return "---"
 
 def generate_occ_symbol(symbol: str, expiry: str, strike: float, opt_type: str) -> str:
