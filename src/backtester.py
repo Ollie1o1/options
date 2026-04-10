@@ -662,12 +662,24 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
         "momentum_score", "iv_rank_score", "theta_score",
         "iv_edge_score", "vrp_score", "iv_mispricing_score",
         "skew_align_score", "vega_risk_score", "term_structure_score",
+        # v7: full 27-weight coverage
+        "catalyst_score", "em_realism_score", "gamma_theta_score",
+        "gex_score", "gamma_magnitude_score", "gamma_pin_score",
+        "iv_velocity_score", "max_pain_score", "oi_change_score",
+        "option_rvol_score", "pcr_score", "sentiment_score_norm",
+        "spread_score", "trader_pref_score",
     ]
     empty_result["component_ic"] = {}
+    empty_result["component_n"] = {}
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        _col_list = ", ".join(["quality_score", "pnl_pct"] + _COMPONENT_COLS)
+        # Query only the component columns that actually exist on this DB version,
+        # so an older schema (e.g. v6 before PaperManager has run its v7 migration)
+        # doesn't trip a "no such column" error.
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+        present_components = [c for c in _COMPONENT_COLS if c in existing_cols]
+        _col_list = ", ".join(["quality_score", "pnl_pct"] + present_components)
         rows = conn.execute(
             f"SELECT {_col_list} "
             "FROM trades WHERE status='CLOSED' "
@@ -747,9 +759,10 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
     else:
         verdict = "IC could not be computed (scipy unavailable)"
 
-    # Per-component IC
+    # Per-component IC + per-component sample size (for "insufficient data" reporting)
     component_ic: dict = {}
     component_pvalues: dict = {}
+    component_n: dict = {}
     if HAS_SCIPY and HAS_NP and HAS_PD:
         try:
             full_df = pd.DataFrame(
@@ -757,13 +770,19 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
             )
             for col in _COMPONENT_COLS:
                 if col not in full_df.columns:
+                    component_n[col] = 0
                     continue
                 try:
                     sub = full_df[[col, "pnl_pct"]].dropna()
+                    component_n[col] = int(len(sub))
                     if len(sub) >= 10:
+                        # Skip degenerate columns (all values identical → undefined Pearson)
+                        if float(sub[col].std()) == 0.0:
+                            continue
                         comp_ic_val, comp_p = scipy_stats.pearsonr(sub[col].values, sub["pnl_pct"].values)
-                        component_ic[col] = float(comp_ic_val)
-                        component_pvalues[col] = float(comp_p)
+                        if math.isfinite(comp_ic_val):
+                            component_ic[col] = float(comp_ic_val)
+                            component_pvalues[col] = float(comp_p)
                 except Exception:
                     pass
         except Exception:
@@ -780,6 +799,7 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
         "verdict": verdict,
         "component_ic": component_ic,
         "component_pvalues": component_pvalues,
+        "component_n": component_n,
     }
 
 
@@ -1094,7 +1114,10 @@ CALIBRATION_MIN_TRADES = 25
 CALIBRATION_PRIOR_N = 60
 CALIBRATION_WEIGHT_CAP = 0.30
 
-# Map paper_trades.db component columns → composite_weights keys
+# Map paper_trades.db component columns → composite_weights keys.
+# Full 27-component coverage: schema v7 stores per-component scores for every
+# composite_weight key, so the calibrator can validate ALL weights against
+# realised P&L (not just the 13 it covered originally).
 COMPONENT_TO_WEIGHT_KEY: Dict[str, str] = {
     "pop_score":            "pop",
     "ev_score":             "ev",
@@ -1109,6 +1132,21 @@ COMPONENT_TO_WEIGHT_KEY: Dict[str, str] = {
     "skew_align_score":     "skew_align",
     "vega_risk_score":      "vega_risk",
     "term_structure_score": "term_structure",
+    # v7: remaining 14 composite_weights components
+    "catalyst_score":        "catalyst",
+    "em_realism_score":      "em_realism",
+    "gamma_theta_score":     "gamma_theta",
+    "gex_score":             "gex",
+    "gamma_magnitude_score": "gamma_magnitude",
+    "gamma_pin_score":       "gamma_pin",
+    "iv_velocity_score":     "iv_velocity",
+    "max_pain_score":        "max_pain",
+    "oi_change_score":       "oi_change",
+    "option_rvol_score":     "option_rvol",
+    "pcr_score":             "pcr",
+    "sentiment_score_norm":  "sentiment",
+    "spread_score":          "spread",
+    "trader_pref_score":     "trader_pref",
 }
 
 
@@ -1125,6 +1163,7 @@ def recommend_weights_from_paper_trades(
     ic_data = run_paper_trade_ic(db_path)
     n = ic_data.get("n_trades", 0)
     component_ic = ic_data.get("component_ic", {}) or {}
+    component_n = ic_data.get("component_n", {}) or {}
 
     try:
         with open(config_path) as f:
@@ -1181,6 +1220,7 @@ def recommend_weights_from_paper_trades(
         "recommended": recommended,
         "deltas": deltas,
         "component_ic": component_ic,
+        "component_n": component_n,
         "calibratable_keys": target_keys,
     }
 
@@ -1253,6 +1293,7 @@ def print_calibration_report(
 
     # Per-component IC table
     cic = rec.get("component_ic") or {}
+    cn = rec.get("component_n") or {}
     if cic:
         print("  Component IC (vs realised pnl_pct):")
         rows = sorted(
@@ -1265,6 +1306,31 @@ def print_calibration_report(
             if HAS_FMT and fmt:
                 color = fmt.Colors.GREEN if ic > 0.05 else (fmt.Colors.RED if ic < -0.05 else fmt.Colors.DIM)
                 print(fmt.colorize(line, color))
+            else:
+                print(line)
+        print()
+
+    # Insufficient-data report — components in COMPONENT_TO_WEIGHT_KEY that
+    # never reached the per-component IC threshold (≥10 non-NaN rows + non-zero variance).
+    no_data_rows = []
+    for col, wkey in COMPONENT_TO_WEIGHT_KEY.items():
+        if col in cic:
+            continue
+        col_n = cn.get(col, 0)
+        no_data_rows.append((wkey, col, col_n))
+    if no_data_rows:
+        no_data_rows.sort(key=lambda r: (-r[2], r[0]))
+        print(f"  Components without enough data to calibrate ({len(no_data_rows)}):")
+        for wkey, _col, col_n in no_data_rows:
+            if col_n == 0:
+                tag = "no rows logged with this score yet"
+            elif col_n < 10:
+                tag = f"only {col_n}/10 rows — log {10 - col_n} more"
+            else:
+                tag = f"{col_n} rows but variance is zero (constant score)"
+            line = f"    {wkey:<16} {tag}"
+            if HAS_FMT and fmt:
+                print(fmt.colorize(line, fmt.Colors.DIM))
             else:
                 print(line)
         print()

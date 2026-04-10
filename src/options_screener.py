@@ -1197,6 +1197,13 @@ def calculate_scores(
     gt_cap = gt_raw.quantile(0.95) if len(gt_raw) > 10 else gt_raw.max()
     gamma_theta_score = rank_norm(gt_raw.clip(upper=max(gt_cap, 1e-9))).fillna(0.5)
 
+    # Initialise components only computed in the non-Premium-Selling branch.
+    # Stays as NaN in Premium Selling mode → calibrator dropna() handles it cleanly.
+    pcr_score = pd.Series(float("nan"), index=df.index)
+    gex_score = pd.Series(float("nan"), index=df.index)
+    oi_change_score = pd.Series(float("nan"), index=df.index)
+    sentiment_score_component = pd.Series(float("nan"), index=df.index)
+
     # Weight Application
     if mode == "Premium Selling":
         weights = config.get("premium_selling_weights", {})
@@ -1601,7 +1608,15 @@ def calculate_scores(
     df["iv_advantage_score"] = iv_edge_score  # mode-aware: buyers rewarded for IV < HV
     df["pop_score"] = pop_score   # stored for backtester IC analysis
     df["rr_score"]  = rr_score    # stored for backtester IC analysis
-    
+    df["trader_pref_score"] = trader_pref_score
+    df["gamma_theta_score"] = gamma_theta_score
+    df["pcr_score"]         = pcr_score
+    df["gex_score"]         = gex_score
+    df["oi_change_score"]   = oi_change_score
+    # Save normalised sentiment under a distinct name so the raw `sentiment_score`
+    # input column (used by display) is preserved.
+    df["sentiment_score_norm"] = sentiment_score_component
+
     return df
 
 
@@ -3747,6 +3762,21 @@ def main():
                             "skew_align_score": top_pick_row.get("skew_align_score"),
                             "vega_risk_score": top_pick_row.get("vega_risk_score"),
                             "term_structure_score": top_pick_row.get("term_structure_score"),
+                            # v7: remaining 14 components — full IC coverage
+                            "catalyst_score": top_pick_row.get("catalyst_score"),
+                            "em_realism_score": top_pick_row.get("em_realism_score"),
+                            "gamma_theta_score": top_pick_row.get("gamma_theta_score"),
+                            "gex_score": top_pick_row.get("gex_score"),
+                            "gamma_magnitude_score": top_pick_row.get("gamma_magnitude_score"),
+                            "gamma_pin_score": top_pick_row.get("gamma_pin_score"),
+                            "iv_velocity_score": top_pick_row.get("iv_velocity_score"),
+                            "max_pain_score": top_pick_row.get("max_pain_score"),
+                            "oi_change_score": top_pick_row.get("oi_change_score"),
+                            "option_rvol_score": top_pick_row.get("option_rvol_score"),
+                            "pcr_score": top_pick_row.get("pcr_score"),
+                            "sentiment_score_norm": top_pick_row.get("sentiment_score_norm"),
+                            "spread_score": top_pick_row.get("spread_score"),
+                            "trader_pref_score": top_pick_row.get("trader_pref_score"),
                         }
                         pm.log_trade(trade_dict)
                         msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"

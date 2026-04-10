@@ -31,7 +31,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -66,6 +66,23 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN skew_align_score REAL",
         "ALTER TABLE trades ADD COLUMN vega_risk_score REAL",
         "ALTER TABLE trades ADD COLUMN term_structure_score REAL",
+    ],
+    7: [
+        # Remaining 14 composite_weights components — full IC coverage of all 27 weights
+        "ALTER TABLE trades ADD COLUMN catalyst_score REAL",
+        "ALTER TABLE trades ADD COLUMN em_realism_score REAL",
+        "ALTER TABLE trades ADD COLUMN gamma_theta_score REAL",
+        "ALTER TABLE trades ADD COLUMN gex_score REAL",
+        "ALTER TABLE trades ADD COLUMN gamma_magnitude_score REAL",
+        "ALTER TABLE trades ADD COLUMN gamma_pin_score REAL",
+        "ALTER TABLE trades ADD COLUMN iv_velocity_score REAL",
+        "ALTER TABLE trades ADD COLUMN max_pain_score REAL",
+        "ALTER TABLE trades ADD COLUMN oi_change_score REAL",
+        "ALTER TABLE trades ADD COLUMN option_rvol_score REAL",
+        "ALTER TABLE trades ADD COLUMN pcr_score REAL",
+        "ALTER TABLE trades ADD COLUMN sentiment_score_norm REAL",
+        "ALTER TABLE trades ADD COLUMN spread_score REAL",
+        "ALTER TABLE trades ADD COLUMN trader_pref_score REAL",
     ],
 }
 
@@ -156,9 +173,14 @@ class PaperManager:
         """
         Logs a new paper trade to the SQLite database.
         Required keys: ticker, expiration, strike, type, entry_price, quality_score, strategy_name
-        Optional keys: ai_score, ai_confidence, entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield,
-                       pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score,
-                       iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score
+        Optional keys (entry context):
+            ai_score, ai_confidence, entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield
+        Optional keys (per-component scores — full 27-weight coverage for IC calibration):
+            pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score,
+            iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score,
+            catalyst_score, em_realism_score, gamma_theta_score, gex_score, gamma_magnitude_score,
+            gamma_pin_score, iv_velocity_score, max_pain_score, oi_change_score, option_rvol_score,
+            pcr_score, sentiment_score_norm, spread_score, trader_pref_score
         """
         if not trade_dict.get("strategy_name"):
             raise ValueError("strategy_name is required; must include 'short'/'long' to set P&L direction")
@@ -175,8 +197,15 @@ class PaperManager:
             ai_score, ai_confidence,
             entry_iv, entry_delta, entry_gamma, entry_vega, entry_theta, dividend_yield,
             pop_score, ev_score, rr_score, liquidity_score, momentum_score, iv_rank_score, theta_score,
-            iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score,
+            catalyst_score, em_realism_score, gamma_theta_score, gex_score, gamma_magnitude_score,
+            gamma_pin_score, iv_velocity_score, max_pain_score, oi_change_score, option_rvol_score,
+            pcr_score, sentiment_score_norm, spread_score, trader_pref_score
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         """
 
         def _float_or_none(key):
@@ -223,6 +252,20 @@ class PaperManager:
             _float_or_none("skew_align_score"),
             _float_or_none("vega_risk_score"),
             _float_or_none("term_structure_score"),
+            _float_or_none("catalyst_score"),
+            _float_or_none("em_realism_score"),
+            _float_or_none("gamma_theta_score"),
+            _float_or_none("gex_score"),
+            _float_or_none("gamma_magnitude_score"),
+            _float_or_none("gamma_pin_score"),
+            _float_or_none("iv_velocity_score"),
+            _float_or_none("max_pain_score"),
+            _float_or_none("oi_change_score"),
+            _float_or_none("option_rvol_score"),
+            _float_or_none("pcr_score"),
+            _float_or_none("sentiment_score_norm"),
+            _float_or_none("spread_score"),
+            _float_or_none("trader_pref_score"),
         )
 
         with self._get_connection() as conn:
@@ -281,6 +324,74 @@ class PaperManager:
             return max(self._slippage_per_share, min(slippage, 0.50))
         except Exception:
             return self._slippage_per_share
+
+    # Trade-count thresholds at which a calibration notice should fire (once each)
+    _CALIBRATION_THRESHOLDS: Tuple[int, ...] = (25, 50, 100, 200, 400, 800)
+
+    def _calibration_marker_path(self) -> str:
+        """Path to the marker file recording the highest threshold already announced."""
+        return f"{self.db_path}.calibration_marker.json"
+
+    def _maybe_emit_calibration_threshold_notice(self) -> None:
+        """
+        After a close-trade run, if the closed-trade count crosses one of the
+        CALIBRATION_THRESHOLDS for the first time, print a one-line notice
+        pointing the user at `python -m src.backtester --calibrate`.
+        Persists state in a marker file so it never re-fires for the same threshold.
+        """
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM trades WHERE status='CLOSED' "
+                    "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
+                ).fetchone()
+            closed_count = int(row[0]) if row and row[0] is not None else 0
+        except Exception as exc:
+            logger.debug("Calibration notice: closed-count query failed: %s", exc)
+            return
+
+        # Highest threshold the new closed_count has reached
+        crossed = max((t for t in self._CALIBRATION_THRESHOLDS if closed_count >= t), default=0)
+        if crossed == 0:
+            return
+
+        marker_path = self._calibration_marker_path()
+        last_fired = 0
+        try:
+            if os.path.exists(marker_path):
+                with open(marker_path, "r") as f:
+                    last_fired = int(json.load(f).get("highest_threshold_fired", 0))
+        except Exception as exc:
+            logger.debug("Calibration notice: marker read failed: %s", exc)
+            last_fired = 0
+
+        if crossed <= last_fired:
+            return
+
+        # Cross — emit notice and persist new high-water mark
+        try:
+            with open(marker_path, "w") as f:
+                json.dump(
+                    {
+                        "highest_threshold_fired": crossed,
+                        "closed_count_at_fire": closed_count,
+                        "fired_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                    f,
+                )
+        except Exception as exc:
+            logger.debug("Calibration notice: marker write failed: %s", exc)
+
+        bar = "─" * 70
+        print()
+        print(f"  {bar}")
+        print(f"  📊 CALIBRATION MILESTONE — {closed_count} closed paper trades logged")
+        print(f"     Reached the {crossed}-trade threshold. Component IC is now")
+        print(f"     statistically meaningful enough to recalibrate composite_weights.")
+        print(f"     Review:  python -m src.backtester --calibrate")
+        print(f"     Apply:   python -m src.backtester --calibrate --apply")
+        print(f"  {bar}")
+        print()
 
     def update_positions(self):
         """Updates all OPEN positions using SQLite and checks exit rules."""
@@ -516,6 +627,7 @@ class PaperManager:
             for msg in closed_this_run:
                 print(f"    \u2713 {msg}")
             print(f"    [costs: ${self._slippage_per_share:.2f}/share slippage ×2 + ${self._commission_per_contract:.2f}/contract commissions ×2]")
+            self._maybe_emit_calibration_threshold_notice()
 
     def get_correlated_open_positions(
         self,
