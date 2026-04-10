@@ -675,7 +675,7 @@ def calculate_metrics(
     prem_vals = df["premium"].values
     pop_arr = calculate_probability_of_profit(types_vals, S_vals, K_vals, T_vals, IV_vals, prem_vals, r=risk_free_rate, q=_q)
     if pop_arr is None:
-        pop_arr = 1.0 - df["abs_delta"].values
+        pop_arr = np.where(is_call, 1.0 - df["delta"].values, 1.0 + df["delta"].values)
     df["prob_profit"] = np.clip(pop_arr, 0.0, 1.0)
 
     _pot_result = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
@@ -702,7 +702,8 @@ def calculate_metrics(
     # Theta Decay Pressure: use actual Greek theta as fraction of premium
     # (replaces old premium/DTE/delta formula which inflated OTM options)
     _theta_abs = np.abs(df["theta"].values)
-    df["theta_decay_pressure"] = _theta_abs / np.maximum(df["premium"].values, 0.01)
+    _prem_safe = np.nan_to_num(df["premium"].values, nan=0.0)
+    df["theta_decay_pressure"] = _theta_abs / np.maximum(_prem_safe, 0.01)
 
     # IV vs HV comparison
     if "hv_30d" in df.columns and df["hv_30d"].notna().any():
@@ -1932,8 +1933,8 @@ def normalize_spreads_for_ranking(spreads_df: pd.DataFrame, mode: str = "Credit 
         spread_width = abs(float(row.get("short_strike", 0)) - float(row.get("long_strike", 0)))
 
         # Probability of max profit: net_credit / spread_width (breakeven-based PoP proxy)
-        pop_proxy = (net_credit / spread_width) if spread_width > 0 else 0.5
-        pop_proxy = min(max(pop_proxy + 0.5, 0.3), 0.9)  # shift: credit/(width) is P(ITM at exp), flip
+        pop_proxy = 1.0 - (net_credit / spread_width) if spread_width > 0 else 0.5
+        pop_proxy = min(max(pop_proxy, 0.3), 0.9)
 
         rr = (max_profit / 100) / net_credit if net_credit > 0 else 0.0
 

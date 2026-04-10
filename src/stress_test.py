@@ -58,7 +58,7 @@ except ImportError:
 
 # Stock move and IV shock scenario axes
 STOCK_MOVES = [-0.20, -0.10, -0.05, 0.00, +0.05, +0.10, +0.20]
-IV_SHOCKS = [0.0, 0.10, 0.20]
+IV_SHOCKS = [-0.10, 0.0, 0.10, 0.20]
 
 
 def _c(text: str, color: str = "", bold: bool = False) -> str:
@@ -254,7 +254,7 @@ def run_stress_test(
     # Total book value (entry cost basis)
     book_value = sum(abs(p["entry_price"]) * 100 for p in position_greeks)
     if book_value <= 0:
-        book_value = 1.0  # avoid div/zero
+        book_value = max(sum(abs(p.get("notional_value", 0)) for p in position_greeks), 1.0)
 
     rows = []
     for dS_pct in STOCK_MOVES:

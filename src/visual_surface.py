@@ -238,11 +238,11 @@ def _extract_contour_segments(grid_2d, level):
 
             # Edge interpolation helpers
             def _interp_x(va, vb, row, col_a, col_b):
-                t = (level - va) / (vb - va) if vb != va else 0.5
+                t = (level - va) / (vb - va) if abs(vb - va) > 1e-10 else 0.5
                 return (col_a + t * (col_b - col_a)) / max(nc - 1, 1), row / max(nr - 1, 1)
 
             def _interp_y(va, vb, col, row_a, row_b):
-                t = (level - va) / (vb - va) if vb != va else 0.5
+                t = (level - va) / (vb - va) if abs(vb - va) > 1e-10 else 0.5
                 return col / max(nc - 1, 1), (row_a + t * (row_b - row_a)) / max(nr - 1, 1)
 
             # Edge midpoints: top(0-1), bottom(2-3), left(0-2), right(1-3)

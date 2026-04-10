@@ -5,6 +5,7 @@ Generates charts for IV analysis, risk/reward, and expected moves.
 """
 
 import os
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -86,7 +87,8 @@ def create_visualizations(df: pd.DataFrame, mode: str, output_dir: str = "report
         }).sort_index()
         
         if not exp_grouped.empty:
-            exp_grouped["exp_move_pct"] = (exp_grouped["expected_move"] / exp_grouped["underlying"]) * 100
+            safe_underlying = exp_grouped["underlying"].replace(0, np.nan)
+            exp_grouped["exp_move_pct"] = (exp_grouped["expected_move"] / safe_underlying) * 100
             ax3.plot(exp_grouped.index, exp_grouped["exp_move_pct"], marker="o", linewidth=2, markersize=6, color="green")
             ax3.set_xlabel("Expiration Date", fontsize=10)
             ax3.set_ylabel("Expected Move %", fontsize=10)

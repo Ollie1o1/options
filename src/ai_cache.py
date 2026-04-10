@@ -53,13 +53,17 @@ CREATE TABLE IF NOT EXISTS ticker_contexts (
 """
 
 def _trade_date() -> str:
-    """Return today's date string in UTC."""
-    return date.today().isoformat()
+    """Return today's date string in US/Eastern (market) timezone."""
+    from datetime import timezone, timedelta
+    eastern = timezone(timedelta(hours=-5))
+    return datetime.now(timezone.utc).astimezone(eastern).date().isoformat()
 
 def _make_fingerprint(row: dict[str, Any]) -> str:
     symbol = str(row.get("symbol", "")).upper()
     opt_type = str(row.get("type", "")).lower()
     strike = row.get("strike", 0) or 0
+    if isinstance(strike, float) and (strike != strike):  # NaN check
+        strike = 0
     # Bucket to nearest $5 — use int arithmetic to avoid float rounding issues
     strike_bucket = int(round(float(strike) / 5)) * 5
     expiry = str(row.get("expiration", ""))[:10]

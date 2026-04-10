@@ -174,17 +174,17 @@ def _enrich_candidate_context(c: dict[str, Any], cfg: dict) -> str:
 
     theta = c.get("theta")
     premium = c.get("premium")
-    if theta and premium and float(premium) > 0:
+    if premium is not None and float(premium) > 0 and theta is not None:
         bleed = abs(float(theta)) / float(premium)
         if bleed >= thr.get("theta_decay_high", 0.05):
             kv.append(f"theta:{bleed:.1%}/day(HIGH)")
 
     spread = c.get("spread_pct")
-    if spread and float(spread) >= thr.get("spread_wide", 0.15):
+    if spread is not None and float(spread) >= thr.get("spread_wide", 0.15):
         kv.append(f"spread:{spread:.0%}(WIDE)")
 
     rvol = c.get("rvol")
-    if rvol and float(rvol) >= thr.get("rvol_unusual", 1.5):
+    if rvol is not None and float(rvol) >= thr.get("rvol_unusual", 1.5):
         kv.append(f"rvol:{rvol:.1f}x(unusual)")
 
     opt_rvol = c.get("option_rvol")
@@ -390,7 +390,7 @@ class AIScorer:
             underlying = float(sym_rows["underlying"].iloc[0])
 
         iv_rank = ctx.get("iv_rank")
-        ctx.get("iv_percentile")
+        iv_percentile = ctx.get("iv_percentile")
         hv = ctx.get("hv")
         term_spread = ctx.get("term_structure_spread")
         earnings = ctx.get("earnings_date")
@@ -406,7 +406,9 @@ class AIScorer:
         if iv_rank is not None:
             regime_txt = "HIGH (expensive)" if iv_rank > 0.65 else ("LOW (cheap)" if iv_rank < 0.35 else "NORMAL")
             lines.append(f"IV Rank 30d: {iv_rank:.0%} -- {regime_txt}")
-        if hv:
+        if iv_percentile is not None:
+            lines.append(f"IV Percentile: {iv_percentile:.0%}")
+        if hv is not None:
             lines.append(f"30d Realized HV: {hv:.1%}")
         if term_spread is not None:
             ts_label = "CONTANGO" if term_spread > 0.005 else ("BACKWARDATION" if term_spread < -0.005 else "FLAT")
@@ -927,7 +929,10 @@ def _parse_json_single(raw: str) -> dict:
     end   = text.rfind("}") + 1
     if start == -1 or end == 0:
         return {}
-    return json.loads(text[start:end])
+    try:
+        return json.loads(text[start:end])
+    except (json.JSONDecodeError, ValueError):
+        return {}
 
 def _default_result(id_: str) -> dict:
     return {

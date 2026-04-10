@@ -49,6 +49,8 @@ def _d1d2(S, K, T, r, sigma, q=0.0):
     q = np.asanyarray(q)
 
     # Merton (1973): replace S with S*exp(-q*T) in d1/d2
+    T = np.maximum(T, 1e-10)
+    sigma = np.maximum(sigma, 1e-10)
     with np.errstate(divide='ignore', invalid='ignore'):
         d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
@@ -213,17 +215,18 @@ def bs_charm(option_type, S, K, T, r, sigma, q=0.0):
     if d1 is None:
         return 0.0
     with np.errstate(divide='ignore', invalid='ignore'):
-        charm_raw = -norm.pdf(d1) * (2 * (r - q) * T - d2 * sigma * np.sqrt(T)) / (2 * T * sigma * np.sqrt(T))
-    if isinstance(option_type, str):
-        if option_type.lower() == "call":
-            return charm_raw / 365.0
+        q_disc = np.exp(-q * T)
+        charm_raw = -q_disc * norm.pdf(d1) * (2 * (r - q) * T - d2 * sigma * np.sqrt(T)) / (2 * T * sigma * np.sqrt(T))
+        if isinstance(option_type, str):
+            if option_type.lower() == "call":
+                return (charm_raw + q * q_disc * norm_cdf(d1)) / 365.0
+            else:
+                return (-charm_raw + q * q_disc * norm_cdf(-d1)) / 365.0
         else:
-            return (-charm_raw) / 365.0
-    else:
-        option_type = np.asanyarray(option_type)
-        is_call = np.char.lower(option_type.astype(str)) == "call"
-        charm = np.where(is_call, charm_raw, -charm_raw)
-        return charm / 365.0
+            option_type = np.asanyarray(option_type)
+            is_call = np.char.lower(option_type.astype(str)) == "call"
+            charm = np.where(is_call, charm_raw + q * q_disc * norm_cdf(d1), -charm_raw + q * q_disc * norm_cdf(-d1))
+            return charm / 365.0
 
 
 def bs_vanna(S, K, T, r, sigma, q=0.0):

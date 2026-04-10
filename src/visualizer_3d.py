@@ -206,7 +206,7 @@ class OptionsVisualizer:
         self.underlying_price = scan_result.underlying_price
         self.market_context = getattr(scan_result, "market_context", {}) or {}
         self._viz_cfg = (config or {}).get("visualizer", {})
-        self._picks_raw = scan_result.picks.copy() if not scan_result.picks.empty else pd.DataFrame()
+        self._picks_raw = scan_result.picks.copy() if (scan_result.picks is not None and not scan_result.picks.empty) else pd.DataFrame()
         self.df: pd.DataFrame = pd.DataFrame()
         self.top_df: pd.DataFrame = pd.DataFrame()
         self._prepare_data()

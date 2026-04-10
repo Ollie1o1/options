@@ -130,7 +130,10 @@ def _picks_embed(title: str, picks: list, footer: str = "") -> discord.Embed:
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
-guild_obj = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
+try:
+    guild_obj = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
+except (ValueError, TypeError):
+    guild_obj = None
 
 
 @client.event
@@ -164,7 +167,9 @@ async def cmd_market(interaction: discord.Interaction):
     vix = data.get("vix_level")
     vix_regime = data.get("vix_regime", "Unknown")
     macro = data.get("macro_risk_active", False)
-    tnx = data.get("tnx_change_pct", 0.0) or 0.0
+    tnx = data.get("tnx_change_pct")
+    if tnx is None:
+        tnx = 0.0
 
     embed = discord.Embed(title="Market Context", color=0x00B4D8)
     embed.add_field(
@@ -187,7 +192,7 @@ async def cmd_market(interaction: discord.Interaction):
         value=f"**{regime}**",
         inline=True,
     )
-    if tnx:
+    if tnx is not None:
         embed.add_field(
             name="📉 10Y Yield Δ",
             value=f"**{tnx:+.2f}%**",

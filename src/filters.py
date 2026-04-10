@@ -183,7 +183,7 @@ def filter_iv_smile_outliers(
     iv = pd.to_numeric(df["impliedVolatility"], errors="coerce")
     median_iv = df.groupby("expiration")["impliedVolatility"].transform("median")
     median_iv = pd.to_numeric(median_iv, errors="coerce")
-    vol = pd.to_numeric(df["volume"] if "volume" in df.columns else 0, errors="coerce").fillna(0)
+    vol = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else pd.Series(0, index=df.index)
 
     safe_median = median_iv.replace(0, np.nan)
     outlier = (

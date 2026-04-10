@@ -307,7 +307,7 @@ def compute_iv_surface(ticker: str) -> Optional["pd.DataFrame"]:
             spot = float(tkr.fast_info.last_price or 0)
         except Exception:
             spot = 0.0
-        if spot <= 0:
+        if spot <= 0 or not math.isfinite(spot):
             try:
                 import warnings
                 with warnings.catch_warnings():
@@ -316,7 +316,7 @@ def compute_iv_surface(ticker: str) -> Optional["pd.DataFrame"]:
                 spot = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
             except Exception:
                 spot = 0.0
-        if spot <= 0:
+        if spot <= 0 or not math.isfinite(spot):
             return None
 
         today = date.today()
@@ -373,7 +373,11 @@ def print_iv_surface(ticker: str, spot: Optional[float] = None, width: int = 90)
     prev_atm_iv = None
     for _, row in surface.iterrows():
         atm_iv = row["atm_iv"]
-        dte = int(row["dte"])
+        dte_val = row["dte"]
+        if pd.isna(dte_val):
+            dte = 0
+        else:
+            dte = int(dte_val)
         exp_str = str(row["expiration"])[:10]
 
         # Term structure label

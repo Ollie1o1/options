@@ -1062,7 +1062,7 @@ def calculate_parkinson_volatility(hist: pd.DataFrame, period: int = 30) -> Opti
             return None
         subset = hist.iloc[-period:].copy()
         log_hl = np.log(subset["High"] / subset["Low"])
-        if (log_hl <= 0).any() or len(log_hl) < 5:
+        if (log_hl < 0).any() or len(log_hl) < 5:
             return None
         parkinson_var = (log_hl ** 2).mean() / (4 * math.log(2))
         return float(math.sqrt(parkinson_var * 252))
@@ -1119,8 +1119,8 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
         delta = close.diff().dropna()
         gain = delta.clip(lower=0.0)
         loss = -delta.clip(upper=0.0)
-        avg_gain = gain.rolling(window=14).mean()
-        avg_loss = loss.rolling(window=14).mean()
+        avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi_series = 100.0 - (100.0 / (1.0 + rs))
         rsi_14 = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else None

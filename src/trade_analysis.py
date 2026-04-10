@@ -357,7 +357,6 @@ def assess_risk_factors(row: pd.Series) -> List[str]:
 
     # Time decay risk
     dte = row.get('T_years', 0) * 365
-    row.get('theta', 0)
     if dte < 7:
         risks.append("Extreme time decay - gamma/theta risk high")
     elif dte < 14:

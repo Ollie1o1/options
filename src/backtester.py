@@ -418,7 +418,7 @@ def run_backtest(
 
             # Sharpe (annualised, assuming ~12 trades/year roughly)
             ret_std = float(trades_df["pnl_pct"].std())
-            sharpe = (avg_return / ret_std * math.sqrt(n_trades / (lookback_days / 252))) if ret_std > 0 else 0.0
+            sharpe = (avg_return / ret_std * 252**0.5) if ret_std > 0 else 0.0
 
             # IC: Pearson correlation between score and pnl_pct
             ic = float("nan")

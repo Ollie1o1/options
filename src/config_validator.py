@@ -25,7 +25,9 @@ def validate_core_config(cfg: dict) -> list:
 
     d_min = f.get("delta_min", 0.15)
     d_max = f.get("delta_max", 0.35)
-    if d_min >= d_max:
+    if not isinstance(d_min, (int, float)) or not isinstance(d_max, (int, float)):
+        warnings.append(f"delta_min/delta_max must be numeric, got {d_min}/{d_max}")
+    elif d_min >= d_max:
         warnings.append(f"delta_min ({d_min}) >= delta_max ({d_max})")
 
     # Exit rules
@@ -44,6 +46,10 @@ def validate_ai_config(cfg: dict) -> None:
     """Raise ValueError with a clear message if any config value is out of range."""
     aw = cfg.get("ai_weight", 0)
     tw = cfg.get("technical_weight", 0)
+    if aw is None or not isinstance(aw, (int, float)):
+        raise ValueError(f"ai_weight must be numeric, got {aw}")
+    if tw is None or not isinstance(tw, (int, float)):
+        raise ValueError(f"technical_weight must be numeric, got {tw}")
     if not (0.0 <= aw <= 1.0):
         raise ValueError(f"ai_weight must be in [0.0, 1.0], got {aw}")
     if not (0.0 <= tw <= 1.0):

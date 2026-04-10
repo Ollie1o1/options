@@ -25,6 +25,8 @@ def _svi_total_variance(k: np.ndarray, a: float, b: float, rho: float,
 def _svi_iv(k: np.ndarray, T: float, a: float, b: float, rho: float,
             m: float, sigma: float) -> np.ndarray:
     """Convert SVI total variance to implied volatility."""
+    if T <= 0:
+        T = 1e-10
     w = _svi_total_variance(k, a, b, rho, m, sigma)
     w = np.maximum(w, 1e-10)
     return np.sqrt(w / T)
@@ -159,7 +161,7 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
 
         # Residual where we have valid market IV and fitted IV
         safe = (fitted_iv > 1e-6) & (market_iv > 0) & np.isfinite(market_iv)
-        residuals = np.where(safe, (market_iv - fitted_iv) / fitted_iv, 0.0)
+        residuals = np.where(safe, (market_iv - fitted_iv) / fitted_iv, np.nan)
 
         df.loc[idx, "iv_surface_residual"] = residuals
         df.loc[idx, "iv_surface_confidence"] = fit_quality

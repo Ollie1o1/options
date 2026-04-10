@@ -293,15 +293,26 @@ class RiskAggregator:
             S_T = spot * np.exp(terminal_log)
 
             # Re-price option at terminal price (1 contract = 100 shares)
-            T_remaining = max(T_curr - T_horizon, 1 / 365.0)
+            T_remaining = max(T_curr - T_horizon, 0.0)
             try:
-                if opt_type == "call":
-                    exit_prices = bs_call(S_T, strike, T_remaining, rfr, sigma)
+                if T_remaining <= 0:
+                    # Expired: intrinsic value only
+                    if opt_type == "call":
+                        exit_prices = np.maximum(S_T - strike, 0.0)
+                    else:
+                        exit_prices = np.maximum(strike - S_T, 0.0)
                 else:
-                    exit_prices = bs_put(S_T, strike, T_remaining, rfr, sigma)
+                    if opt_type == "call":
+                        exit_prices = bs_call(S_T, strike, T_remaining, rfr, sigma)
+                    else:
+                        exit_prices = bs_put(S_T, strike, T_remaining, rfr, sigma)
                 exit_prices = np.asarray(exit_prices, dtype=float)
-                # P&L per contract (long position assumed; 100-share multiplier)
-                pnl = (exit_prices - entry_price) * 100.0
+                strategy_name = str(pos.get("strategy_name", ""))
+                is_short = any(k in strategy_name.lower() for k in ("short", "credit", "covered", "cash-secured", "cash secured", "naked", "iron condor", "sell"))
+                if is_short:
+                    pnl = (entry_price - exit_prices) * 100.0
+                else:
+                    pnl = (exit_prices - entry_price) * 100.0
             except Exception:
                 continue
 

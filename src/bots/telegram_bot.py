@@ -59,7 +59,9 @@ def _format_market(data: dict) -> str:
     vix = data.get("vix_level")
     vix_regime = data.get("vix_regime", "Unknown")
     macro = data.get("macro_risk_active", False)
-    tnx = data.get("tnx_change_pct") or 0.0
+    tnx = data.get("tnx_change_pct")
+    if tnx is None:
+        tnx = 0.0
 
     lines = [
         "*Market Context*",
@@ -68,7 +70,7 @@ def _format_market(data: dict) -> str:
         f"Vol Regime: *{regime}*",
         f"Macro Risk: *{'⚠️ Active' if macro else '✅ Clear'}*",
     ]
-    if tnx:
+    if tnx is not None:
         lines.append(f"10Y Yield Δ: *{tnx:+.2f}%*")
     return "\n".join(lines)
 

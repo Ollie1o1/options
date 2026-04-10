@@ -639,7 +639,7 @@ def render_paper_portfolio_tab():
         open_count = len(df_paper[df_paper["status"] == "OPEN"])
         closed_df = df_paper[df_paper["status"] == "CLOSED"]
         # pnl_pct is already sign-corrected for short/credit positions by update_positions()
-        total_pnl_usd = (closed_df["pnl_pct"] * closed_df["entry_price"] * 100).sum() if not closed_df.empty else 0.0
+        total_pnl_usd = (closed_df["pnl_pct"].fillna(0) * closed_df["entry_price"].fillna(0) * 100).sum() if not closed_df.empty else 0.0
         
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total PnL ($)", f"${total_pnl_usd:,.2f}")

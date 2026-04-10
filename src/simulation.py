@@ -207,7 +207,7 @@ def batch_monte_carlo_pop(
 
     Z = rng.standard_normal((Nv, n_simulations))
     n_jumps = rng.poisson(jump_intensity * T[:, None], size=(Nv, n_simulations))
-    jump_log = rng.normal(jump_mean, jump_vol, (Nv, n_simulations)) * n_jumps
+    jump_log = np.where(n_jumps > 0, rng.normal(jump_mean * n_jumps, jump_vol * np.sqrt(np.maximum(n_jumps, 0)), (Nv, n_simulations)), 0.0)
     log_ret = mu_adj[:, None] * T[:, None] + sigma[:, None] * np.sqrt(T[:, None]) * Z + jump_log
     final_prices = S[:, None] * np.exp(log_ret)  # (Nv, n_sims)
 

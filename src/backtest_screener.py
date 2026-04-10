@@ -139,6 +139,9 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                     continue
 
                 # Apply profit/stop multipliers from config
+                # Note: profit_target and stop_loss are option PRICE thresholds,
+                # not underlying price thresholds. For short trades, profit_target
+                # is below entry (option decays in our favor), stop_loss is above entry.
                 if is_short_trade:
                     profit_target = entry_price * profit_mult_short
                     stop_loss = entry_price * stop_mult_short
@@ -167,7 +170,7 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                 if outcome == "EXPIRED":
                     final_price = fetch_price_at_expiration(pick["symbol"], pick["expiration"])
                     if final_price is not None:
-                        pnl_data = calculate_realized_pnl(pick["type"], pick["strike"], entry_price, final_price)
+                        pnl_data = calculate_realized_pnl(pick["type"], pick["strike"], entry_price, final_price, is_short=is_short_trade)
                         if pnl_data.get("pnl_per_contract", 0) > 0:
                             outcome = "WIN"
                         else:
@@ -228,7 +231,8 @@ def calculate_realized_pnl(
     option_type: str,
     strike: float,
     entry_premium: float,
-    final_price: float
+    final_price: float,
+    is_short: bool = False,
 ) -> Dict:
     """
     Calculate realized P/L for an option held to expiration.
@@ -245,8 +249,11 @@ def calculate_realized_pnl(
         else:  # put
             intrinsic_value = max(0, strike - final_price)
         
-        # P/L per share = intrinsic value - premium paid
-        pnl_per_share = intrinsic_value - entry_premium
+        # P/L per share (accounts for long vs short)
+        if is_short:
+            pnl_per_share = entry_premium - intrinsic_value
+        else:
+            pnl_per_share = intrinsic_value - entry_premium
         
         # P/L per contract (multiplier of 100)
         pnl_per_contract = pnl_per_share * 100

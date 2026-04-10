@@ -42,7 +42,11 @@ def combine_scores(
     """
     cfg = AI_CONFIG
     base_aw = ai_weight if ai_weight is not None else cfg["ai_weight"]
-    technical_weight if technical_weight is not None else cfg["technical_weight"]
+    base_tw = technical_weight if technical_weight is not None else cfg["technical_weight"]
+
+    # Validate weights sum to approximately 1.0
+    if abs(base_aw + base_tw - 1.0) > 0.05:
+        base_tw = max(0.0, 1.0 - base_aw)
 
     # Regime multiplier
     regime_mults = cfg.get("regime_weight_multipliers", {"low": 0.80, "normal": 1.00, "high": 1.30})
@@ -74,7 +78,7 @@ def combine_scores(
     liquidity_adj = pd.Series(1.0, index=df.index)
     if "spread_pct" in df.columns:
         wide_spread = df["spread_pct"].fillna(0) > 0.20
-        liquidity_adj = np.where(wide_spread, 1.10, 1.0)
+        liquidity_adj = pd.Series(np.where(wide_spread, 1.10, 1.0), index=df.index)
 
     aw_dynamic = (base_aw * regime_mult * confidence_mult * liquidity_adj).clip(0, 0.55)
     tw_dynamic = 1.0 - aw_dynamic
@@ -171,7 +175,7 @@ _RISK_STYLE    = {"low": "bold green", "medium": "bold yellow", "high": "bold re
 _DIV_STYLE     = {"AI>TECH": "bold cyan", "TECH>AI": "bold magenta", "---": "dim white"}
 
 _SCORE_BANDS: list[tuple[float, float, str]] = [
-    (80, 101, "bold bright_green"),
+    (80, 200, "bold bright_green"),
     (60, 80,  "green"),
     (40, 60,  "yellow"),
     (20, 40,  "red"),
@@ -262,7 +266,7 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
     avg_tech = df["quality_score"].mean() * 100 if "quality_score" in df.columns else 0
     n_diverge = len(divergent)
     top_sym = str(df.iloc[0]["symbol"]) if (not df.empty and "symbol" in df.columns) else "?"
-    top_final = float(df.iloc[0]["final_score"]) * 100 if (not df.empty and "final_score" in df.columns) else 0
+    top_final = float(df.iloc[0]["final_score"]) * 100 if (not df.empty and "final_score" in df.columns and pd.notna(df.iloc[0]["final_score"])) else 0
 
     summary_parts = [
         f"[bold bright_cyan]{n_picks}[/bold bright_cyan] picks ranked",

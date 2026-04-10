@@ -135,10 +135,11 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
     for r in closed_trades:
         try:
             entry_delta = float(r["entry_delta"])
+            entry_theta = float(r["entry_theta"])
             entry_gamma = float(r["entry_gamma"])
             entry_vega = float(r["entry_vega"])
-            entry_theta = float(r["entry_theta"])
             entry_price = float(r["entry_price"])
+            is_short = _is_short(r.get("strategy_name", ""))
             pnl_ratio = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
 
             # We don't have S_entry/S_exit stored, so use pnl_ratio * entry_price * 100 as actual P&L
@@ -153,7 +154,9 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
                 days_held = 14  # fallback
 
             # Theta P&L (daily theta * days held * 100 shares)
-            theta_pnl = entry_theta * days_held * 100
+            # For short positions, theta P&L has opposite sign
+            sign_mult = -1.0 if is_short else 1.0
+            theta_pnl = sign_mult * entry_theta * days_held * 100
 
             # For delta/gamma/vega, we'd need spot price change.
             # Approximate: actual - theta = delta+gamma+vega+residual
@@ -485,12 +488,9 @@ def view_portfolio():
                 total_cost_usd += entry_price * 100
                 fetched_count  += 1
 
-                sign = "+" if pnl_usd >= 0 else ""
+                sign = "+" if pnl_usd >= 0 else "-"
                 raw_usd = f"{sign}${abs(pnl_usd):.2f}"
                 raw_pct = f"{sign}{abs(pnl_pct):.1f}%"
-                if pnl_usd < 0:
-                    raw_usd = f"-${abs(pnl_usd):.2f}"
-                    raw_pct = f"-{abs(pnl_pct):.1f}%"
 
                 live_str = f"${live_price:.2f}"
 
@@ -728,7 +728,7 @@ def view_portfolio():
             avg_win  = sum(winning_r) / len(winning_r) if winning_r else 0.0
             avg_loss = sum(losing_r)  / len(losing_r)  if losing_r  else 0.0
             wr = len(winning_r) / len(returns)
-            pf = sum(winning_r) / abs(sum(losing_r)) if losing_r else float("inf")
+            pf = sum(winning_r) / abs(sum(losing_r)) if losing_r and abs(sum(losing_r)) > 1e-12 else (float("inf") if winning_r else 0.0)
             expectancy = wr * avg_win + (1 - wr) * avg_loss
 
             # Max drawdown on cumulative return sequence

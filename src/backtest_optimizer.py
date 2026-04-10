@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import warnings
 from dataclasses import dataclass
 from functools import partial
@@ -151,7 +152,8 @@ def strike_for_delta(
         d = bs_put_delta(S, K, T, r, sigma)
         if abs(d - target_delta) < tol:
             return K
-        # More negative delta -> further OTM -> lower K
+        # For puts: K↑ → delta becomes more negative (K=S → -0.5, K<<S → 0).
+        # If d is already more negative than target, K is too high → lower hi.
         if d < target_delta:
             hi = K
         else:
@@ -345,8 +347,10 @@ def backtest_ticker(
             rsi_window = closes.iloc[max(0, idx - 20):idx].diff().dropna()
             gains = rsi_window.clip(lower=0).rolling(14).mean()
             losses = (-rsi_window).clip(lower=0).rolling(14).mean()
-            avg_g = float(gains.iloc[-1]) if len(gains) else 0
-            avg_l = float(losses.iloc[-1]) if len(losses) else 1e-8
+            raw_g = float(gains.iloc[-1]) if len(gains) > 0 else 0
+            raw_l = float(losses.iloc[-1]) if len(losses) > 0 else 1e-8
+            avg_g = raw_g if math.isfinite(raw_g) else 0
+            avg_l = raw_l if math.isfinite(raw_l) else 1e-8
             rsi = 100 - 100 / (1 + avg_g / max(avg_l, 1e-8))
             rsi_score = float(np.clip(rsi / 100.0, 0, 1))
 

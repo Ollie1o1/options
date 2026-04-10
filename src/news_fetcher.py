@@ -28,7 +28,8 @@ _NEWS_CACHE: dict = {}
 
 
 def _news_cache_key(symbol: str) -> str:
-    hour = datetime.utcnow().strftime("%Y%m%d%H")
+    from datetime import timezone
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
     return f"{symbol.upper()}:{hour}"
 
 import requests
@@ -409,7 +410,7 @@ def _fetch_polygon_news_items(symbol: str, client, max_age_hours: int = 72) -> L
                     published=pi.published_utc,
                     sentiment=pi.sentiment,
                     url=pi.url,
-                    relevance=1.2,   # slightly higher priority in sort
+                    relevance=1.0,   # slightly higher priority in sort
                 ))
     except Exception as exc:
         logger.debug("Polygon news fetch failed for %s: %s", symbol, exc)
@@ -537,9 +538,9 @@ def fetch_news_and_events(
 # ── Display helpers ────────────────────────────────────────────────────────────
 
 _SENTIMENT_BAR = {
-    (0.3, 1.1):   ("(+) Positive", "\033[92m"),   # green
+    (0.3, 2.0):   ("(+) Positive", "\033[92m"),   # green
     (-0.3, 0.3):  ("(~) Neutral",  "\033[93m"),   # yellow
-    (-1.1, -0.3): ("(-) Negative", "\033[91m"),   # red
+    (-2.0, -0.3): ("(-) Negative", "\033[91m"),   # red
 }
 
 

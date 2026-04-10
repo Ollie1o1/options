@@ -90,11 +90,15 @@ def get_display_width() -> int:
 def format_dte_bucket(dte: float) -> str:
     """Return DTE bucket name for a given days-to-expiration value."""
     dte = float(dte)
+    if dte <= 0:
+        return "Expired"
     if dte <= 14:
-        return "Short (7-14 DTE)"
+        return "Short (1-14 DTE)"
     if dte <= 30:
         return "Standard (15-30 DTE)"
-    return "Swing (31-45 DTE)"
+    if dte <= 45:
+        return "Swing (31-45 DTE)"
+    return "LEAPS (45+ DTE)"
 
 
 def print_score_breakdown(score_drivers_str: str) -> str:
@@ -153,17 +157,17 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
         print(sep)
         for _, row in bucket_df.iterrows():
             dte_val = int(row.get("_dte", 0))
-            row.get("iv_percentile_30", row.get("iv_percentile", 0)) or 0
+            iv_pct_raw = row.get("iv_percentile_30", row.get("iv_percentile", 0))
+            iv_pct = iv_pct_raw if iv_pct_raw is not None else 0.5
             pop = row.get("prob_profit", 0) or 0
             prem = row.get("premium", 0) or 0
             delta = row.get("delta", 0) or 0
-            iv = row.get("impliedVolatility", 0) or 0
             score = row.get("quality_score", 0) or 0
             drivers = str(row.get("score_drivers", ""))[:30]
             line = (
                 f"{rank:<5} {str(row.get('symbol','')):<7} {str(row.get('type','')):<5} "
                 f"{row.get('strike', 0):>7.1f} {str(row.get('expiration', '')):<12} "
-                f"{dte_val:>4} {delta:>6.2f} {iv*100:>5.1f}% {pop*100:>5.1f}% "
+                f"{dte_val:>4} {delta:>6.2f} IV{iv_pct*100:>4.0f}% {pop*100:>5.1f}% "
                 f"${prem:>6.2f} {score:>7.3f}  {drivers}"
             )
             print(line)
@@ -642,7 +646,6 @@ def _format_breakeven_line(row: pd.Series, arrow: str) -> str:
         else:
             label_str = f"{prefix_sym}{label}"
 
-        fmt.colorize("BE:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "BE:"
         full_line = f"BE: ${breakeven:.2f} | Needs {sign}${required_move:.2f} ({sign}{req_pct:.1f}%)  1\u03c3 EM: ${expected_move:.2f} ({em_pct:.1f}%)  \u2192  {em_ratio:.1f}\u00d7 EM  {label_str}"
         be_dim = fmt.colorize("Breakevn: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Breakevn: "
         return f"    {arrow} {be_dim}{full_line[4:]}"  # strip leading "BE: " and use dim label
@@ -807,9 +810,11 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
         # Entry/Exit
         if config.get('display', {}).get('show_entry_exit_levels', True):
             levels = calculate_entry_exit_levels(row, config)
+            _tp = config.get("entry_exit_rules", {}).get("profit_target_pct", 0.50)
+            _sl = abs(config.get("entry_exit_rules", {}).get("stop_loss_pct", 0.25))
             print(f"{fmt.BoxChars.VERTICAL}    📍 Entry: ≤${levels['entry_price']:.2f} | "
-                  f"Target: ${levels['profit_target']:.2f} (+50%) | "
-                  f"Stop: ${levels['stop_loss']:.2f} (-25%)")
+                  f"Target: ${levels['profit_target']:.2f} (+{_tp:.0%}) | "
+                  f"Stop: ${levels['stop_loss']:.2f} (-{_sl:.0%})")
 
     print(fmt.draw_separator(width - 4, fmt.BoxChars.HORIZONTAL))
 

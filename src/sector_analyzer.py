@@ -40,7 +40,10 @@ def _roc_20(series: pd.Series) -> float:
     if len(series) < 21:
         return 0.0
     try:
-        return float(series.iloc[-1] / series.iloc[-21]) - 1.0
+        denom = series.iloc[-21]
+        if denom == 0 or pd.isna(denom):
+            return 0.0
+        return float(series.iloc[-1] / denom) - 1.0
     except Exception:
         return 0.0
 
@@ -106,7 +109,7 @@ class SectorAnalyzer:
             return _empty_context()
 
         spy_roc = _roc_20(closes["SPY"])
-        if spy_roc == 0.0:
+        if abs(spy_roc) < 1e-10:
             # Avoid division by zero — return neutral context
             return _empty_context()
 
