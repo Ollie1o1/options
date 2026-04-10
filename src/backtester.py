@@ -19,11 +19,13 @@ Important limitations:
 - Results should be used for qualitative signal validation, not as a trading system.
 """
 
+import json
 import math
 import pathlib
 import sqlite3
 import sys
-from typing import Optional, List, Dict, Any
+from datetime import datetime
+from typing import Optional, List, Dict, Any, Tuple
 
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = str(_PROJECT_ROOT / "paper_trades.db")
@@ -1072,14 +1074,289 @@ def print_paper_trade_ic(db_path: str = DEFAULT_DB_PATH, width: int = 90) -> Non
     print()
 
 
+# ─── Weight calibrator (paper-trade driven) ──────────────────────────────────────
+#
+# Reads closed paper trades from paper_trades.db, computes per-component IC vs
+# realised pnl_pct, and produces a Bayesian-shrunk recommendation that updates only
+# the keys we have data for. Other composite_weights (iv_velocity, gamma_magnitude,
+# vega_risk, term_structure, gamma_pin, max_pain, …) are preserved.
+#
+# Sample-size guardrails:
+#   N <  10  → no IC computed at all (existing run_paper_trade_ic threshold)
+#   N <  25  → IC shown for diagnostics, no recommendation
+#   N >= 25  → recommendation produced with strong shrinkage toward current weights
+#   N >= 60  → shrinkage at 50/50 (current vs IC-derived target)
+#   N >= 200 → shrinkage at ~80/20 (mostly IC-derived)
+#
+# The shrinkage formula is Bayesian: λ = N / (N + N_PRIOR), N_PRIOR = 60.
+
+CALIBRATION_MIN_TRADES = 25
+CALIBRATION_PRIOR_N = 60
+CALIBRATION_WEIGHT_CAP = 0.30
+
+# Map paper_trades.db component columns → composite_weights keys
+COMPONENT_TO_WEIGHT_KEY: Dict[str, str] = {
+    "pop_score":            "pop",
+    "ev_score":             "ev",
+    "rr_score":             "rr",
+    "liquidity_score":      "liquidity",
+    "momentum_score":       "momentum",
+    "iv_rank_score":        "iv_rank",
+    "theta_score":          "theta",
+    "iv_edge_score":        "iv_edge",
+    "vrp_score":            "vrp",
+    "iv_mispricing_score":  "iv_mispricing",
+    "skew_align_score":     "skew_align",
+    "vega_risk_score":      "vega_risk",
+    "term_structure_score": "term_structure",
+}
+
+
+def recommend_weights_from_paper_trades(
+    db_path: str = DEFAULT_DB_PATH,
+    config_path: str = "config.json",
+) -> Dict[str, Any]:
+    """
+    Compute a recommended composite_weights update from real closed paper trades.
+
+    Returns a dict with:
+        n_trades, ready (bool), shrinkage, current, recommended, deltas, component_ic, budget
+    """
+    ic_data = run_paper_trade_ic(db_path)
+    n = ic_data.get("n_trades", 0)
+    component_ic = ic_data.get("component_ic", {}) or {}
+
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except Exception as exc:
+        return {"error": f"could not read {config_path}: {exc}", "n_trades": n, "ready": False}
+
+    cw = dict(cfg.get("composite_weights", {}))
+    target_keys = list(COMPONENT_TO_WEIGHT_KEY.values())
+    current_subset = {k: float(cw.get(k, 0.0)) for k in target_keys}
+    budget = sum(current_subset.values())
+
+    # IC-derived weight target: positive IC only, normalised to the existing budget
+    raw_ic = {
+        COMPONENT_TO_WEIGHT_KEY[col]: max(component_ic.get(col, 0.0), 0.0)
+        for col in COMPONENT_TO_WEIGHT_KEY
+    }
+    raw_sum = sum(raw_ic.values())
+    if raw_sum > 0 and budget > 0:
+        ic_target = {k: (raw_ic.get(k, 0.0) / raw_sum) * budget for k in target_keys}
+    else:
+        ic_target = dict(current_subset)
+
+    if n < CALIBRATION_MIN_TRADES:
+        shrink = 0.0
+    else:
+        shrink = n / (n + CALIBRATION_PRIOR_N)
+
+    new_subset = {
+        k: (1.0 - shrink) * current_subset[k] + shrink * ic_target[k]
+        for k in target_keys
+    }
+    # Cap individual weights then renormalise back to the original budget
+    new_subset = {k: min(v, CALIBRATION_WEIGHT_CAP) for k, v in new_subset.items()}
+    s = sum(new_subset.values())
+    if s > 0 and budget > 0:
+        new_subset = {k: v / s * budget for k, v in new_subset.items()}
+
+    recommended = dict(cw)
+    for k, v in new_subset.items():
+        recommended[k] = round(v, 4)
+
+    deltas = {k: round(recommended[k] - cw.get(k, 0.0), 4) for k in target_keys}
+
+    ready = (n >= CALIBRATION_MIN_TRADES) and (raw_sum > 0)
+
+    return {
+        "n_trades": n,
+        "min_trades_required": CALIBRATION_MIN_TRADES,
+        "ready": ready,
+        "shrinkage": round(shrink, 3),
+        "budget": round(budget, 4),
+        "current": cw,
+        "recommended": recommended,
+        "deltas": deltas,
+        "component_ic": component_ic,
+        "calibratable_keys": target_keys,
+    }
+
+
+def apply_recommended_weights(
+    recommended: Dict[str, float],
+    config_path: str = "config.json",
+) -> Optional[str]:
+    """
+    Write recommended composite_weights to config.json after a timestamped backup.
+    Returns backup path on success, None on failure.
+    """
+    cfg_path = pathlib.Path(config_path)
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception as exc:
+        print(f"  ! could not read {cfg_path}: {exc}")
+        return None
+    bak = cfg_path.with_name(
+        f"{cfg_path.stem}.bak.{datetime.now().strftime('%Y%m%d-%H%M%S')}{cfg_path.suffix}"
+    )
+    bak.write_text(cfg_path.read_text())
+    cfg["composite_weights"] = recommended
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    return str(bak)
+
+
+def print_calibration_report(
+    db_path: str = DEFAULT_DB_PATH,
+    config_path: str = "config.json",
+    width: int = 90,
+) -> Dict[str, Any]:
+    """Print a recommended-weights report from paper trades. Returns the rec dict."""
+    rec = recommend_weights_from_paper_trades(db_path, config_path)
+    n = rec.get("n_trades", 0)
+    sep = "─" * width
+    title = "  PAPER-TRADE WEIGHT CALIBRATION"
+    if HAS_FMT and fmt:
+        print(fmt.colorize(sep, fmt.Colors.DIM))
+        print(fmt.colorize(title, fmt.Colors.BRIGHT_CYAN, bold=True))
+        print(fmt.colorize(sep, fmt.Colors.DIM))
+    else:
+        print(sep); print(title); print(sep)
+
+    if "error" in rec:
+        print(f"  ! {rec['error']}")
+        return rec
+
+    if n < CALIBRATION_MIN_TRADES:
+        need = CALIBRATION_MIN_TRADES - n
+        msg = (
+            f"  Closed paper trades: {n}/{CALIBRATION_MIN_TRADES}  "
+            f"(log {need} more before recommendations are reliable)"
+        )
+        print(msg)
+        print(f"  Shrinkage: 0.0 — current weights unchanged")
+        print()
+        return rec
+
+    print(
+        f"  Closed paper trades: {n}    "
+        f"Shrinkage: {rec['shrinkage']:.2f}  "
+        f"(0 = ignore IC, 1 = trust IC fully)"
+    )
+    print(f"  Calibratable budget: {rec['budget']:.3f} of 1.000  "
+          f"({len(rec['calibratable_keys'])} components)")
+    print()
+
+    # Per-component IC table
+    cic = rec.get("component_ic") or {}
+    if cic:
+        print("  Component IC (vs realised pnl_pct):")
+        rows = sorted(
+            ((COMPONENT_TO_WEIGHT_KEY.get(c, c), c, ic) for c, ic in cic.items()),
+            key=lambda r: abs(r[2]), reverse=True,
+        )
+        for key, _col, ic in rows:
+            arrow = "↑" if ic > 0.05 else ("↓" if ic < -0.05 else " ")
+            line = f"    {key:<16} IC = {ic:+.3f}  {arrow}"
+            if HAS_FMT and fmt:
+                color = fmt.Colors.GREEN if ic > 0.05 else (fmt.Colors.RED if ic < -0.05 else fmt.Colors.DIM)
+                print(fmt.colorize(line, color))
+            else:
+                print(line)
+        print()
+
+    # Deltas table
+    print("  Recommended weight changes:")
+    print(f"    {'Component':<16} {'Current':>9} {'New':>9} {'Δ':>9}")
+    deltas = rec.get("deltas") or {}
+    rec_w = rec.get("recommended") or {}
+    cur_w = rec.get("current") or {}
+    movers = sorted(deltas.items(), key=lambda kv: abs(kv[1]), reverse=True)
+    for k, d in movers:
+        if abs(d) < 0.001:
+            continue
+        c = cur_w.get(k, 0.0)
+        nw = rec_w.get(k, 0.0)
+        line = f"    {k:<16} {c:>9.4f} {nw:>9.4f} {d:>+9.4f}"
+        if HAS_FMT and fmt:
+            color = fmt.Colors.GREEN if d > 0 else fmt.Colors.RED
+            print(fmt.colorize(line, color))
+        else:
+            print(line)
+    if not any(abs(d) >= 0.001 for d in deltas.values()):
+        print("    (no meaningful deltas)")
+    print()
+    print("  To apply: python -m src.backtester --calibrate --apply")
+    print()
+    return rec
+
+
+def get_calibration_status(
+    db_path: str = DEFAULT_DB_PATH,
+) -> Tuple[int, str]:
+    """
+    Lightweight startup banner data: (closed_count, status_label).
+    Used by options_screener to surface calibration readiness without running scipy.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE status='CLOSED' "
+            "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
+        ).fetchone()[0]
+        conn.close()
+    except Exception:
+        return 0, "no paper trade db yet"
+    if n < 10:
+        return n, f"need {10 - n} more trades for IC analysis"
+    if n < CALIBRATION_MIN_TRADES:
+        return n, f"need {CALIBRATION_MIN_TRADES - n} more trades for weight calibration"
+    return n, "calibration available — run `python -m src.backtester --calibrate`"
+
+
 # ─── CLI entry ───────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    tickers = sys.argv[1:] or ["AAPL", "SPY", "NVDA", "QQQ", "TSLA"]
+def _cli_main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Walk-forward backtester + paper-trade weight calibrator"
+    )
+    ap.add_argument("tickers", nargs="*",
+                    help="Tickers for walk-forward backtest (default: AAPL SPY NVDA QQQ TSLA)")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="Compute weight recommendation from paper_trades.db")
+    ap.add_argument("--apply", action="store_true",
+                    help="With --calibrate: write recommendation to config.json (with backup)")
+    ap.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to paper_trades.db")
+    ap.add_argument("--config", default="config.json", help="Path to config.json")
+    args = ap.parse_args()
+
+    if args.calibrate:
+        rec = print_calibration_report(db_path=args.db, config_path=args.config)
+        if args.apply:
+            if not rec.get("ready"):
+                print("  ! recommendation not ready (insufficient trades) — refusing to apply")
+                return
+            bak = apply_recommended_weights(rec["recommended"], config_path=args.config)
+            if bak:
+                print(f"  ✓ config.json updated  (backup: {bak})")
+            else:
+                print("  ! apply failed")
+        return
+
+    tickers = args.tickers or ["AAPL", "SPY", "NVDA", "QQQ", "TSLA"]
     print(f"Running backtest for: {', '.join(tickers)}")
     results = run_backtest(tickers)
     print_backtest_report(results)
-    print_paper_trade_ic()
+    print_paper_trade_ic(db_path=args.db)
+
+
+if __name__ == "__main__":
+    _cli_main()
 
 
 __all__ = [
@@ -1088,4 +1365,10 @@ __all__ = [
     "run_paper_trade_ic",
     "print_backtest_report",
     "print_paper_trade_ic",
+    "recommend_weights_from_paper_trades",
+    "apply_recommended_weights",
+    "print_calibration_report",
+    "get_calibration_status",
+    "COMPONENT_TO_WEIGHT_KEY",
+    "CALIBRATION_MIN_TRADES",
 ]

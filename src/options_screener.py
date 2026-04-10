@@ -3285,6 +3285,19 @@ def main():
         _warn = f"composite_weights sum to {_cw_sum:.2f} (expected ~1.0)"
         print(fmt.colorize(f"  \u26a0 Config: {_warn}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0 Config: {_warn}")
 
+    # ── Calibration banner ────────────────────────────────────────────────────
+    try:
+        from .backtester import get_calibration_status
+        _cal_n, _cal_status = get_calibration_status()
+        _cal_line = f"  Paper-trade calibration: {_cal_n} closed — {_cal_status}"
+        if HAS_ENHANCED_CLI:
+            _color = fmt.Colors.BRIGHT_GREEN if "available" in _cal_status else fmt.Colors.DIM
+            print(fmt.colorize(_cal_line, _color))
+        else:
+            print(_cal_line)
+    except Exception:
+        pass
+
     if not getattr(args, 'no_ai', False):
         # Ensure .env is loaded before checking for keys
         _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")

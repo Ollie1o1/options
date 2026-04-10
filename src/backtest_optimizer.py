@@ -505,13 +505,15 @@ def optimize_weights(
     n_trials: int = 300,
     l2_lambda: float = 0.10,
     verbose: bool = True,
+    current_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, float]:
     n = len(WEIGHT_KEYS)
     bounds = [(0.0, 0.5)] * n
     obj = partial(_objective, component_scores=bt.component_scores,
                   pnl_pct=bt.pnl_pct, l2_lambda=l2_lambda)
 
-    x0_current  = np.array([CURRENT_WEIGHTS[k]  for k in WEIGHT_KEYS], float)
+    cw_dict = current_weights if current_weights is not None else CURRENT_WEIGHTS
+    x0_current  = np.array([cw_dict.get(k, CURRENT_WEIGHTS[k])  for k in WEIGHT_KEYS], float)
     x0_research = np.array([RESEARCH_WEIGHTS[k] for k in WEIGHT_KEYS], float)
     x0_current  /= x0_current.sum()
     x0_research /= x0_research.sum()
@@ -602,15 +604,56 @@ def print_comparison(current: Dict[str, float], optimised: Dict[str, float]) -> 
     print(f"  {sep}")
 
 
+def _load_current_from_config(config_path: Path) -> Dict[str, float]:
+    """Load actual current weights from config.json (subset of WEIGHT_KEYS)."""
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+        cw = cfg.get("composite_weights", {})
+        sub = {k: float(cw.get(k, 0.0)) for k in WEIGHT_KEYS}
+        s = sum(sub.values())
+        if s > 0:
+            return {k: v / s for k, v in sub.items()}
+    except Exception:
+        pass
+    return dict(CURRENT_WEIGHTS)
+
+
 def save_to_config(weights: Dict[str, float], config_path: Path) -> None:
+    """
+    Merge optimised WEIGHT_KEYS into config.json's composite_weights, preserving any
+    keys this optimiser does not cover (iv_mispricing, iv_velocity, gamma_magnitude,
+    vega_risk, term_structure, spread, etc.). Writes a timestamped backup first.
+    """
+    from datetime import datetime
+    config_path = Path(config_path)
     with open(config_path) as f:
         cfg = json.load(f)
-    # Renormalise to ensure sum == 1 before saving
-    total = sum(weights.values())
-    cfg["composite_weights"] = {k: round(v / total, 4) for k, v in weights.items()}
+    cw = dict(cfg.get("composite_weights", {}))
+
+    # Budget = sum of WEIGHT_KEYS' current weights. Optimised values are renormalised
+    # to fit that budget so the non-optimised keys retain their share.
+    budget = sum(float(cw.get(k, 0.0)) for k in WEIGHT_KEYS)
+    if budget <= 0:
+        budget = 1.0
+    total_optim = sum(weights.values())
+    if total_optim <= 0:
+        print("  ! optimiser produced zero-sum weights; refusing to save")
+        return
+
+    # Backup
+    bak_path = config_path.with_name(
+        f"{config_path.stem}.bak.{datetime.now().strftime('%Y%m%d-%H%M%S')}{config_path.suffix}"
+    )
+    bak_path.write_text(config_path.read_text())
+
+    for k in WEIGHT_KEYS:
+        cw[k] = round(weights[k] / total_optim * budget, 4)
+    cfg["composite_weights"] = cw
     with open(config_path, "w") as f:
         json.dump(cfg, f, indent=2)
     print(f"  Saved to {config_path}")
+    print(f"  Backup at {bak_path}")
 
 
 # -- CLI -----------------------------------------------------------------------
@@ -654,8 +697,10 @@ def main() -> None:
 
     # -- 2. Optimise --
     print("\n[2/4] Optimising weights (IC maximisation + L2 regularisation)...")
+    live_current = _load_current_from_config(config_path)
     optimised = optimize_weights(bt, method=args.method,
-                                 n_trials=args.trials, l2_lambda=args.l2)
+                                 n_trials=args.trials, l2_lambda=args.l2,
+                                 current_weights=live_current)
 
     # -- 3. Cross-validate --
     if not args.no_cv:
@@ -672,7 +717,7 @@ def main() -> None:
 
     # -- 4. Report --
     print("\n[4/4] Results")
-    print_comparison(CURRENT_WEIGHTS, optimised)
+    print_comparison(live_current, optimised)
 
     # Factor-level IC table
     print("\n  Per-factor IC (each component vs realised P&L):")
