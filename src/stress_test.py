@@ -261,6 +261,8 @@ def run_stress_test(
         for dIV in IV_SHOCKS:
             total_pnl = 0.0
             counted = 0
+            bs_count = 0
+            fallback_count = 0
             for pos in position_greeks:
                 try:
                     S = pos["S"]
@@ -275,6 +277,7 @@ def run_stress_test(
                     S_new = S * (1.0 + dS_pct)
                     IV_new = max(sigma + dIV, 0.01)
 
+                    method = "bs"
                     # Full BS repricing (accurate for large moves)
                     try:
                         is_spread = pos.get("is_spread", False)
@@ -301,7 +304,10 @@ def run_stress_test(
                                 raise ValueError("NaN/Inf from BS")
                             pnl = sign * (price_new - price_base) * 100
                     except Exception:
-                        # Delta-gamma fallback
+                        # Delta-gamma fallback — under-states tail risk for large
+                        # moves past strike (gamma non-linearity, vomma). Tracked
+                        # and surfaced to the user in print_stress_test.
+                        method = "deltagamma"
                         dS = S * dS_pct
                         pnl_delta = sign * pos["delta"] * dS * 100
                         pnl_gamma = sign * 0.5 * pos["gamma"] * (dS ** 2) * 100
@@ -311,6 +317,10 @@ def run_stress_test(
 
                     total_pnl += pnl
                     counted += 1
+                    if method == "bs":
+                        bs_count += 1
+                    else:
+                        fallback_count += 1
                 except Exception:
                     continue
 
@@ -320,6 +330,9 @@ def run_stress_test(
                 "total_pnl_usd": total_pnl,
                 "pnl_pct_of_book": total_pnl / book_value if book_value > 0 else 0.0,
                 "n_positions": counted,
+                "bs_count": bs_count,
+                "fallback_count": fallback_count,
+                "method_breakdown": f"{bs_count}/{counted}" if counted else "0/0",
             })
 
     return pd.DataFrame(rows)
@@ -450,6 +463,23 @@ def print_stress_test(
                 print(fmt.colorize(be_line, fmt.Colors.YELLOW))
             else:
                 print(be_line)
+
+    # Flag any cells that silently fell back to delta-gamma (BS repricing failed)
+    if "fallback_count" in df.columns:
+        total_fb = int(df["fallback_count"].sum())
+        total_cells = int(df["n_positions"].sum())
+        cells_with_fb = int((df["fallback_count"] > 0).sum())
+        if total_fb > 0 and total_cells > 0:
+            warn = (
+                f"  \u26a0  {total_fb}/{total_cells} position-cells ({cells_with_fb} "
+                f"of {len(df)} scenarios) fell back to delta-gamma "
+                f"(BS repricing failed — usually missing entry IV or dividend "
+                f"yield). Max-loss estimates for those cells under-state tail risk."
+            )
+            if HAS_FMT and fmt:
+                print(fmt.colorize(warn, fmt.Colors.YELLOW, bold=True))
+            else:
+                print(warn)
 
     # Correlation risk warnings
     print_correlation_warnings(open_trades, width)

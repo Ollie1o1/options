@@ -777,6 +777,15 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
                   f"{int(config.get('var_confidence', 0.95) * 100)}% 1-day VaR: ${_var_data['var_95']:,.0f}  |  "
                   f"CVaR: ${_var_data['cvar_95']:,.0f}  |  "
                   f"Expected P&L: ${_var_data['mean_pnl']:+,.0f}")
+            _n_fb = int(_var_data.get("n_iv_fallback", 0) or 0)
+            _n_pos = int(_var_data.get("n_positions", 0) or 0)
+            if _n_fb > 0:
+                _warn = (
+                    f"{_n_fb} of {_n_pos} positions priced with fallback IV "
+                    f"(σ={0.30:.2f}) — yfinance unavailable; Greeks & VaR may be stale. "
+                    f"Re-run in a few minutes."
+                )
+                print("   " + fmt.format_warning(_warn))
     except Exception:
         pass
 

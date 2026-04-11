@@ -72,25 +72,34 @@ class RiskAggregator:
             pass
         return None
 
+    _FALLBACK_IV = 0.30
+
     def _get_current_iv(
         self,
         ticker: str,
         expiration: str,
         strike: float,
         opt_type: str,
-    ) -> Optional[float]:
-        """Fetch implied volatility from the option chain; fallback 0.30."""
+    ) -> Tuple[float, str]:
+        """Fetch implied volatility from the option chain.
+
+        Returns ``(iv, source)`` where ``source`` is one of:
+          * ``"market"`` — freshly fetched from the option chain
+          * ``"cache"``  — reused from the in-process IV cache
+          * ``"fallback"`` — yfinance unavailable / empty chain / bad value;
+             caller should treat downstream Greeks as stale.
+        """
         cache_key = f"{ticker}:{str(expiration)[:10]}:{strike:.2f}:{opt_type}"
         cached = _IV_CACHE.get(cache_key)
         if cached is not None:
             iv_val, ts = cached
             if _time.monotonic() - ts < _IV_CACHE_TTL:
-                return iv_val
+                return iv_val, "cache"
         try:
             tkr = yf.Ticker(ticker)
             exps = tkr.options
             if not exps:
-                return 0.30
+                return self._FALLBACK_IV, "fallback"
             # Pick the closest available expiration
             target = pd.Timestamp(expiration)
             exp_ts = [pd.Timestamp(e) for e in exps]
@@ -98,15 +107,15 @@ class RiskAggregator:
             chain = tkr.option_chain(closest.strftime("%Y-%m-%d"))
             tbl = chain.calls if opt_type.lower() == "call" else chain.puts
             if tbl is None or tbl.empty:
-                return 0.30
+                return self._FALLBACK_IV, "fallback"
             row = tbl.iloc[(tbl["strike"] - strike).abs().argsort()[:1]]
             iv = safe_float(row["impliedVolatility"].iloc[0])
             if iv and 0.01 < iv < 10.0:
                 _IV_CACHE[cache_key] = (iv, _time.monotonic())
-                return iv
-        except Exception:
-            pass
-        return 0.30
+                return iv, "market"
+        except Exception as exc:
+            logger.debug("IV fetch failed for %s %s %s: %s", ticker, expiration, strike, exc)
+        return self._FALLBACK_IV, "fallback"
 
     def _dte(self, expiration: str) -> float:
         """Days to expiry as a fraction of a year (floored at 0)."""
@@ -161,7 +170,9 @@ class RiskAggregator:
                 # Skip already-expired positions — their Greeks are meaningless
                 continue
 
-            sigma = self._get_current_iv(ticker, expiration, strike, opt_type) or 0.30
+            sigma, iv_source = self._get_current_iv(ticker, expiration, strike, opt_type)
+            if not sigma or sigma <= 0:
+                sigma, iv_source = self._FALLBACK_IV, "fallback"
 
             try:
                 delta = float(bs_delta(opt_type, spot, strike, T, rfr, sigma))
@@ -179,6 +190,7 @@ class RiskAggregator:
                 spot=spot,
                 T_years=T,
                 sigma=sigma,
+                iv_source=iv_source,
                 delta=delta,
                 gamma=gamma,
                 vega=vega,
@@ -205,14 +217,21 @@ class RiskAggregator:
                 "portfolio_gex": 0.0,
                 "portfolio_vega": 0.0,
                 "n_positions": 0,
+                "n_iv_fallback": 0,
                 "positions_df": df,
             }
+        n_iv_fallback = (
+            int((df["iv_source"] == "fallback").sum())
+            if "iv_source" in df.columns
+            else 0
+        )
         return {
             "portfolio_delta": float(df["delta"].sum()),
             "portfolio_gamma": float(df["gamma"].sum()),
             "portfolio_gex": float(df["gex"].sum()),
             "portfolio_vega": float(df["vega"].sum()),
             "n_positions": len(df),
+            "n_iv_fallback": n_iv_fallback,
             "positions_df": df,
         }
 
@@ -239,6 +258,7 @@ class RiskAggregator:
             "cvar_95": 0.0,
             "mean_pnl": 0.0,
             "n_positions": 0,
+            "n_iv_fallback": 0,
             "pnl_distribution": np.array([]),
         }
 
@@ -327,11 +347,17 @@ class RiskAggregator:
         cvar_mask = portfolio_pnl < -var
         cvar = float(-portfolio_pnl[cvar_mask].mean()) if cvar_mask.any() else var
 
+        n_iv_fallback = (
+            int((df["iv_source"] == "fallback").sum())
+            if "iv_source" in df.columns
+            else 0
+        )
         return {
             "var_95": var,
             "cvar_95": cvar,
             "mean_pnl": float(portfolio_pnl.mean()),
             "n_positions": len(df),
+            "n_iv_fallback": n_iv_fallback,
             "pnl_distribution": portfolio_pnl,
         }
 
