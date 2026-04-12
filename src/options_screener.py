@@ -3702,8 +3702,9 @@ def main():
                 except Exception as _viz_exc:
                     logger.warning("Visualizer failed: %s", _viz_exc)
 
-            # ── Collapsed post-scan prompt (always shown BEFORE scan-another) ──
+            # ── Collapsed post-scan prompt (loops so V → P → L all work in one sitting) ──
             if _has_results:
+              while True:
                 if HAS_ENHANCED_CLI:
                     save_label = fmt.colorize("Save/Export?", fmt.Colors.BRIGHT_CYAN)
                     p_opt = fmt.colorize("[P]", fmt.Colors.BRIGHT_YELLOW) + " Paper trade top pick"
@@ -3715,6 +3716,9 @@ def main():
                 else:
                     print("\n  Save/Export?  [P] Paper trade top pick  [C] CSV  [L] Log trades  [V] 3D Visualizer  [Enter] Skip")
                 save_choice = prompt_input("Choice", "").strip().upper()
+
+                if save_choice == "":
+                    break  # Enter → done with save menu
 
                 if save_choice == "P":
                     if mode in ("Credit Spreads", "Iron Condor"):
@@ -3831,6 +3835,11 @@ def main():
                             log_trade_entry(picks_to_log, mode)
                             msg = f"Logged {len(picks_to_log)} trades."
                             print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
+
+                else:
+                    _msg = "Unknown choice — press P / C / L / V or Enter to skip"
+                    print(fmt.format_warning(_msg) if HAS_ENHANCED_CLI else f"  {_msg}")
+                # Loop back and re-prompt so V → P → L all work in one sitting
 
             # ── Scan-another shortcut (single-stock only, AFTER save menu) ──
             if _is_single_stock and _repeat_count < 5:

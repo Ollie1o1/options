@@ -39,18 +39,19 @@ from .visual_surface import compute_pnl_grid, compute_greek_grid
 
 log = logging.getLogger(__name__)
 
-# ─── Dark financial theme (matches dashboard.py CSS) ─────────────────────────
+# ─── Notion-inspired dark theme ──────────────────────────────────────────────
 
-DARK_BG = "#0e1117"
-DARK_PANEL = "#161b22"
-DARK_BORDER = "#30363d"
-DARK_GRID = "#21262d"
-TEXT_PRIMARY = "#e6edf3"
-TEXT_MUTED = "#8b949e"
-ACCENT_BLUE = "#58a6ff"
-COLOR_POS = "#3fb950"
-COLOR_NEG = "#f85149"
-COLOR_WARN = "#d29922"
+DARK_BG = "#191919"                       # page bg (Notion dark primary)
+DARK_PANEL = "#202020"                    # header / tab-bar bg
+DARK_HOVER = "#2a2a2a"                    # hover + active tab
+DARK_BORDER = "rgba(255,255,255,0.094)"   # Notion's signature subtle border
+DARK_GRID = "rgba(255,255,255,0.06)"      # subtler grid lines for plots
+TEXT_PRIMARY = "#e6e6e6"                  # Notion body text
+TEXT_MUTED = "#9b9a97"                    # Notion secondary text
+ACCENT_BLUE = "#529cca"                   # Notion blue accent
+COLOR_POS = "#4dab9a"                     # Notion green
+COLOR_NEG = "#e16b6b"                     # Notion red
+COLOR_WARN = "#d9a74a"                    # Notion yellow
 
 _SCENE_AXIS = dict(
     backgroundcolor=DARK_BG, gridcolor=DARK_GRID, zerolinecolor=DARK_BORDER,
@@ -62,12 +63,14 @@ _BASE_LAYOUT = dict(
     template="plotly_dark",
     paper_bgcolor=DARK_BG,
     plot_bgcolor=DARK_BG,
-    font=dict(family="Roboto Mono, monospace", color=TEXT_PRIMARY, size=12),
-    title_font=dict(size=16, color=ACCENT_BLUE),
-    margin=dict(t=80, l=40, r=40, b=40),
+    font=dict(family="Inter, -apple-system, system-ui, sans-serif",
+              color=TEXT_PRIMARY, size=12),
+    title_font=dict(size=15, color=TEXT_PRIMARY),
+    margin=dict(t=48, l=40, r=40, b=40),
     hoverlabel=dict(
         bgcolor=DARK_PANEL, bordercolor=DARK_BORDER,
-        font=dict(color=TEXT_PRIMARY, family="Roboto Mono, monospace", size=12),
+        font=dict(color=TEXT_PRIMARY,
+                  family="Inter, -apple-system, sans-serif", size=12),
     ),
 )
 
@@ -257,6 +260,8 @@ class OptionsVisualizer:
 
     def _apply(self, fig: go.Figure, title: str = "") -> go.Figure:
         fig.update_layout(**_BASE_LAYOUT)
+        # Let Plotly resize to fill its container instead of baking a fixed height
+        fig.update_layout(autosize=True)
         if title:
             fig.update_layout(title_text=title)
         return fig
@@ -764,17 +769,40 @@ class OptionsVisualizer:
             tickers = "\u2014"
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+        # Top-pick summary so the header earns its space (ranked #0 by quality)
+        top_pick_html = ""
+        if not self.df.empty and "symbol" in self.df.columns:
+            top = self.df.iloc[0]
+            sym = str(top.get("symbol", ""))
+            strike_raw = top.get("strike")
+            opt_type = str(top.get("type", "")).upper()[:1]  # C / P
+            dte_raw = top.get("DTE")
+            score_raw = top.get("quality_score")
+            try:
+                if sym and strike_raw is not None and score_raw is not None:
+                    top_pick_html = (
+                        f'<span class="top-pick">Top: <strong>{sym}</strong> '
+                        f'{float(strike_raw):.0f}{opt_type} '
+                        f'{int(float(dte_raw))}d \u00b7 {float(score_raw):.2f}</span>'
+                    )
+            except (ValueError, TypeError):
+                top_pick_html = ""
+
         # Build HTML fragments
         btn_html = "\n".join(
             f'<button class="tab{" active" if i == 0 else ""}" '
-            f'onclick="switchTab({i})">{name}</button>'
+            f'onclick="switchTab({i})" title="Press {i+1} to jump here">'
+            f'<span class="tab-num">{i+1}</span>{name}</button>'
             for i, (name, _) in enumerate(tab_divs)
         )
+        # Every tab gets the same .tab-content class; only tab 0 starts active.
+        # Using visibility (not display:none) so all plots have real layout
+        # dimensions on first render and Plotly can size them correctly.
         content_html = "\n".join(
-            f'<div class="tab-content" id="tab-{i}" '
-            f'style="display:{"block" if i == 0 else "none"}">{div}</div>'
+            f'<div class="tab-content{" active" if i == 0 else ""}" id="tab-{i}">{div}</div>'
             for i, (_, div) in enumerate(tab_divs)
         )
+        n_tabs = len(tab_divs)
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -782,48 +810,136 @@ class OptionsVisualizer:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Options 3D Visualizer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:{DARK_BG};color:{TEXT_PRIMARY};font-family:'Roboto Mono',monospace}}
-.header{{display:flex;justify-content:space-between;align-items:center;
-  padding:12px 24px;background:{DARK_PANEL};border-bottom:1px solid {DARK_BORDER}}}
-.header h1{{font-size:16px;color:{ACCENT_BLUE};font-weight:600}}
-.header .meta{{font-size:12px;color:{TEXT_MUTED}}}
-.header .meta span{{margin-left:16px}}
-.tab-bar{{display:flex;gap:2px;padding:0 24px;background:{DARK_BG};
-  border-bottom:1px solid {DARK_BORDER}}}
-.tab{{padding:10px 18px;border:none;background:transparent;color:{TEXT_MUTED};
-  font-family:inherit;font-size:13px;cursor:pointer;
-  border-bottom:2px solid transparent;transition:all .15s}}
-.tab:hover{{color:{TEXT_PRIMARY};background:{DARK_PANEL}}}
-.tab.active{{color:{ACCENT_BLUE};border-bottom-color:{ACCENT_BLUE}}}
-.tab-content{{width:100%;height:calc(100vh - 95px)}}
-.tab-content .plotly-graph-div,.tab-content .js-plotly-plot{{width:100%!important;height:100%!important}}
+html,body{{height:100%;overflow:hidden}}
+body{{
+  background:{DARK_BG};color:{TEXT_PRIMARY};
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+}}
+.header{{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:0 32px;height:52px;
+  background:{DARK_PANEL};border-bottom:1px solid {DARK_BORDER};
+  position:relative;z-index:10;
+}}
+.header h1{{
+  font-size:15px;color:{TEXT_PRIMARY};font-weight:600;
+  letter-spacing:-0.01em;
+}}
+.header .meta{{
+  display:flex;gap:24px;align-items:center;
+  font-size:12px;color:{TEXT_MUTED};font-weight:400;
+}}
+.header .meta .top-pick{{color:{TEXT_PRIMARY};font-weight:500}}
+.header .meta .top-pick strong{{color:{ACCENT_BLUE};font-weight:600}}
+.header .meta .hint{{
+  color:{TEXT_MUTED};opacity:0.7;font-size:11px;
+  padding:3px 8px;border:1px solid {DARK_BORDER};border-radius:4px;
+}}
+.tab-bar{{
+  display:flex;gap:2px;padding:0 24px;height:44px;align-items:center;
+  background:{DARK_PANEL};border-bottom:1px solid {DARK_BORDER};
+  position:relative;z-index:10;
+}}
+.tab{{
+  display:flex;align-items:center;gap:8px;
+  padding:6px 12px;border:none;border-radius:4px;
+  background:transparent;color:{TEXT_MUTED};
+  font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;
+  transition:all 120ms cubic-bezier(0.4,0,0.2,1);
+}}
+.tab:hover{{color:{TEXT_PRIMARY};background:{DARK_HOVER}}}
+.tab.active{{color:{TEXT_PRIMARY};background:{DARK_HOVER}}}
+.tab-num{{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:18px;height:18px;padding:0 4px;
+  background:rgba(255,255,255,0.06);border-radius:3px;
+  font-size:10px;font-weight:500;color:{TEXT_MUTED};
+  transition:all 120ms cubic-bezier(0.4,0,0.2,1);
+}}
+.tab.active .tab-num{{background:{ACCENT_BLUE};color:#ffffff}}
+.stage{{position:absolute;top:96px;left:0;right:0;bottom:0;background:{DARK_BG}}}
+.tab-content{{
+  position:absolute;top:0;left:0;right:0;bottom:0;
+  visibility:hidden;pointer-events:none;
+  padding:8px 16px 16px 16px;
+}}
+.tab-content.active{{visibility:visible;pointer-events:auto}}
+/* Fix: anonymous pio.to_html wrapper has no height \u2192 plot collapses.
+   Flex-fill propagates full height through any number of wrappers. */
+.tab-content > div{{width:100%;height:100%;display:flex;flex-direction:column}}
+.tab-content .plotly-graph-div,.tab-content .js-plotly-plot{{
+  width:100%!important;height:100%!important;flex:1
+}}
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>OPTIONS 3D VISUALIZER</h1>
+  <h1>Options 3D Visualizer</h1>
   <div class="meta">
+    {top_pick_html}
     <span>{n_picks} contracts</span>
     <span>{tickers}</span>
     <span>{now}</span>
+    <span class="hint">1\u2013{n_tabs} \u00b7 \u2190 \u2192</span>
   </div>
 </div>
 <div class="tab-bar">
 {btn_html}
 </div>
+<div class="stage">
 {content_html}
+</div>
 <script>
+var N_TABS = {n_tabs};
+var currentTab = 0;
+
+function resizeAll(){{
+  document.querySelectorAll('.js-plotly-plot').forEach(function(p){{
+    try {{ Plotly.Plots.resize(p); }} catch(e) {{}}
+  }});
+}}
+
 function switchTab(i){{
-  document.querySelectorAll('.tab-content').forEach(function(d){{d.style.display='none'}});
+  if(i<0) i = N_TABS - 1;
+  if(i>=N_TABS) i = 0;
+  currentTab = i;
+  document.querySelectorAll('.tab-content').forEach(function(d){{d.classList.remove('active')}});
   document.querySelectorAll('.tab').forEach(function(b){{b.classList.remove('active')}});
-  document.getElementById('tab-'+i).style.display='block';
+  document.getElementById('tab-'+i).classList.add('active');
   document.querySelectorAll('.tab')[i].classList.add('active');
   var p=document.getElementById('tab-'+i).querySelector('.js-plotly-plot');
-  if(p)Plotly.Plots.resize(p);
+  if(p) try {{ Plotly.Plots.resize(p); }} catch(e) {{}}
 }}
+
+// Resize every plot once the page is fully loaded — cheap insurance
+// against CDN / layout-timing weirdness on first render.
+window.addEventListener('load', function(){{
+  setTimeout(resizeAll, 50);
+  setTimeout(resizeAll, 300);
+}});
+
+// Re-fit plots when the browser window changes size.
+window.addEventListener('resize', resizeAll);
+
+// Keyboard shortcuts: 1..N to jump, arrows to cycle.
+document.addEventListener('keydown', function(e){{
+  if(e.target && (e.target.tagName==='INPUT' || e.target.tagName==='TEXTAREA')) return;
+  if(e.key >= '1' && e.key <= String.fromCharCode(48+N_TABS)){{
+    var idx = parseInt(e.key, 10) - 1;
+    if(idx>=0 && idx<N_TABS) switchTab(idx);
+  }} else if(e.key === 'ArrowRight'){{
+    switchTab(currentTab + 1);
+  }} else if(e.key === 'ArrowLeft'){{
+    switchTab(currentTab - 1);
+  }}
+}});
 </script>
 </body>
 </html>"""
