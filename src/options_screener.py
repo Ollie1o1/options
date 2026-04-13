@@ -134,6 +134,7 @@ from .watchlist import (
     load_watchlist, add_to_watchlist, remove_from_watchlist,
 )
 from .oi_snapshot import load_oi_snapshot
+from .utils import safe_float
 
 
 @contextlib.contextmanager
@@ -3021,16 +3022,28 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
     
     for i, row in top_n.iterrows():
         symbol = row.get('symbol', 'N/A')
-        type_ = row.get('type', 'N/A').upper()
-        strike = row.get('strike', 0.0)
+        type_ = str(row.get('type', 'N/A')).upper()
+        
+        # Determine strike display (Single vs Spread vs Condor)
+        if 'short_strike' in row and 'long_strike' in row:
+            # Credit Spread
+            strike_val = f"{row['short_strike']:.0f}/{row['long_strike']:.0f}"
+        elif 'short_put_strike' in row:
+            # Iron Condor
+            strike_val = f"{row['short_put_strike']:.0f}/{row['short_call_strike']:.0f}"
+        else:
+            # Single option
+            strike_val = f"{row.get('strike', 0.0):.1f}"
+            
         exp = row.get('expiration', 'N/A')
         if isinstance(exp, str):
             exp = exp.split("T")[0]
         
-        premium = row.get('premium', 0.0)
+        # Determine premium display
+        premium = row.get('premium') or row.get('net_credit') or row.get('total_credit') or 0.0
         quality = row.get('quality_score', 0.0)
         
-        print(f"  [{i+1}] {symbol:<5} {type_:<4} {strike:>7.2f} {exp} | Prem: ${premium:>6.2f} | Qual: {quality:.2f}")
+        print(f"  [{i+1}] {symbol:<5} {type_:<12} {strike_val:>12} {exp} | Prem: ${premium:>6.2f} | Qual: {quality:.2f}")
 
     print("="*60)
     print("Enter the numbers of the trades you want to log, separated by commas.")
@@ -3833,6 +3846,67 @@ def main():
                         picks_to_log = select_trades_to_log(log_src)
                         if not picks_to_log.empty:
                             log_trade_entry(picks_to_log, mode)
+                            
+                            # Also log to PaperManager for portfolio visibility
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            for _, row in picks_to_log.iterrows():
+                                try:
+                                    if "short_strike" in row or "net_credit" in row:
+                                        # It's a Credit Spread
+                                        pm.log_spread({
+                                            "date": today_str,
+                                            "ticker": row["symbol"],
+                                            "expiration": row["expiration"],
+                                            "short_strike": row["short_strike"],
+                                            "long_strike": row["long_strike"],
+                                            "type": row["type"],
+                                            "net_credit": row["net_credit"],
+                                            "max_profit": row.get("max_profit", 0),
+                                            "max_loss": row.get("max_loss", 0),
+                                            "quality_score": row.get("quality_score", 0.5)
+                                        })
+                                    elif "total_credit" in row:
+                                        # It's an Iron Condor
+                                        pm.log_spread({
+                                            "date": today_str,
+                                            "ticker": row["symbol"],
+                                            "expiration": row["expiration"],
+                                            "short_strike": row["short_put_strike"],
+                                            "long_strike": row["long_put_strike"],
+                                            "type": "Iron Condor",
+                                            "net_credit": row["total_credit"],
+                                            "max_profit": row.get("max_profit", 0), # total_credit * 100 handled inside log_spread? No.
+                                            "max_loss": row.get("max_risk", 0),
+                                            "quality_score": row.get("quality_score", 0.5)
+                                        })
+                                    else:
+                                        # It's a single option
+                                        trade_dict = {
+                                            "date": today_str,
+                                            "ticker": row["symbol"],
+                                            "expiration": row["expiration"],
+                                            "strike": row["strike"],
+                                            "type": str(row["type"]).capitalize(),
+                                            "entry_price": (
+                                                safe_float(row.get("ask") or None)
+                                                or safe_float(row.get("lastPrice"))
+                                                or safe_float(row.get("premium"), 0.0)
+                                            ),
+                                            "quality_score": row.get("quality_score", 0.5),
+                                            "strategy_name": f"Short {str(row['type']).capitalize()}",
+                                            "entry_iv": row.get("impliedVolatility"),
+                                            "entry_delta": row.get("delta"),
+                                            "entry_gamma": row.get("gamma"),
+                                            "entry_vega": row.get("vega"),
+                                            "entry_theta": row.get("theta"),
+                                            "pop_score": row.get("pop_score"),
+                                            "ev_score": row.get("ev_score"),
+                                            "rr_score": row.get("rr_score"),
+                                        }
+                                        pm.log_trade(trade_dict)
+                                except Exception as _log_exc:
+                                    print(f"  Error logging to DB: {_log_exc}")
+
                             msg = f"Logged {len(picks_to_log)} trades."
                             print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
 

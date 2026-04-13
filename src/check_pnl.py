@@ -384,7 +384,8 @@ def view_portfolio():
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
-            all_rows = conn.execute("SELECT * FROM trades ORDER BY date DESC").fetchall()
+            rows = conn.execute("SELECT * FROM trades ORDER BY date DESC").fetchall()
+            all_rows = [dict(r) for r in rows]
     except Exception as e:
         print(f"\n  Error reading database: {e}\n")
         return
