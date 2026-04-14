@@ -394,7 +394,12 @@ def print_stress_test(
     max_pnl = float("-inf")
 
     for iv in iv_shocks:
-        iv_label = f"IV +{int(iv*100)}%" if iv > 0 else "IV flat "
+        if iv == 0:
+            iv_label = "IV flat "
+        elif iv > 0:
+            iv_label = f"IV +{int(iv*100)}%"
+        else:
+            iv_label = f"IV {int(iv*100)}%"
         row_parts = [f"  {iv_label:<12}"]
         for sm in stock_moves:
             subset = df[(df["stock_move"] == sm) & (df["iv_shock"] == iv)]

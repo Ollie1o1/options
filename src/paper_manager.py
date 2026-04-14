@@ -618,7 +618,8 @@ class PaperManager:
                     _slip = self._get_spread_slippage(ticker, expiration, strike, option_type, entry_price)
                     _friction = (2 * _slip) + (2 * self._commission_per_contract / 100.0)
                     friction_fraction = _friction / entry_price if entry_price > 0 else 0.0
-                    pnl_realistic = max(pnl_raw - friction_fraction, -1.0)
+                    # No floor for short legs — loss can exceed entry premium (e.g. short call bought back at 2x)
+                    pnl_realistic = pnl_raw - friction_fraction
 
                     closed_this_run.append(
                         f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} "

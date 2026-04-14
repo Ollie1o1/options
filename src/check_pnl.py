@@ -677,9 +677,12 @@ def view_portfolio():
                     total_max_loss += ep * 100
 
         if total_max_loss > 0 or has_undefined_risk:
-            risk_str = f"  Portfolio Max Loss: ${total_max_loss:,.0f}"
-            if has_undefined_risk:
-                risk_str += "  (+ undefined risk from naked short positions)"
+            if total_max_loss > 0:
+                risk_str = f"  Portfolio Max Loss: ${total_max_loss:,.0f}"
+                if has_undefined_risk:
+                    risk_str += "  (+ undefined risk from naked short positions)"
+            else:
+                risk_str = "  Portfolio Max Loss: N/A  (undefined risk from naked short positions)"
             if HAS_FMT and fmt:
                 print(fmt.colorize(risk_str, fmt.Colors.RED))
             else:
@@ -732,8 +735,18 @@ def view_portfolio():
             entry_price = float(r["entry_price"])
             exit_price  = float(r["exit_price"]) if r["exit_price"] else 0.0
             pnl_ratio   = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
-            pnl_usd     = pnl_ratio * entry_price * 100
-            pnl_pct     = pnl_ratio * 100
+            # Compute dollar P/L from actual prices when exit_price is stored,
+            # so short positions that lost more than entry premium display correctly.
+            if exit_price > 0 and entry_price > 0:
+                is_short_closed = _is_short(str(r.get("strategy_name", "")))
+                if is_short_closed:
+                    pnl_usd = (entry_price - exit_price) * 100
+                else:
+                    pnl_usd = (exit_price - entry_price) * 100
+                pnl_pct = pnl_usd / (entry_price * 100) * 100
+            else:
+                pnl_usd = pnl_ratio * entry_price * 100
+                pnl_pct = pnl_ratio * 100
             won         = pnl_usd > 0
             if won:
                 wins += 1
