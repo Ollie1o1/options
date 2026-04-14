@@ -1428,7 +1428,17 @@ def check_yield_spike() -> Tuple[bool, float]:
     except Exception:
         return False, 0.0
 
+# In-memory cache for market context (15-min TTL) — avoids re-fetching SPY/VIX/EURUSD/TNX
+# on every scan within the same session
+_market_context_cache: dict = {"value": None, "ts": 0.0}
+_MARKET_CONTEXT_TTL = 900  # 15 minutes
+
 def get_market_context() -> Tuple[str, str, bool, float]:
+    import time as _time
+    now = _time.time()
+    if _market_context_cache["value"] is not None and now - _market_context_cache["ts"] < _MARKET_CONTEXT_TTL:
+        return _market_context_cache["value"]
+
     _init_yfinance()  # Lazy init yfinance on first use
     _init_yf_session()  # Lazy init curl_cffi session
     _init_request_cache()  # Lazy init: first network call triggers cache setup
@@ -1436,24 +1446,47 @@ def get_market_context() -> Tuple[str, str, bool, float]:
     volatility_regime = "Unknown"
     macro_risk_active = False
     tnx_change_pct = 0.0
+
+    # Fetch SPY, VIX, EURUSD, TNX in parallel to cut wall-clock time ~4x
+    def _fetch_spy():
+        try:
+            spy = yf.Ticker("SPY", session=_yf_session)
+            return spy.history(period="3mo")
+        except Exception:
+            return None
+
+    def _fetch_vix():
+        try:
+            vix = yf.Ticker("^VIX", session=_yf_session)
+            return vix.history(period="5d")
+        except Exception:
+            return None
+
     try:
-        spy = yf.Ticker("SPY", session=_yf_session)
-        spy_hist = spy.history(period="3mo")
-        if not spy_hist.empty:
-            spy_sma50 = spy_hist['Close'].rolling(window=50).mean().iloc[-1]
-            spy_current = spy_hist['Close'].iloc[-1]
-            market_trend = "Bull" if spy_current > spy_sma50 else "Bear"
-        
-        vix = yf.Ticker("^VIX", session=_yf_session)
-        vix_hist = vix.history(period="5d")
-        if not vix_hist.empty:
-            vix_current = vix_hist['Close'].iloc[-1]
-            volatility_regime = "High" if vix_current > 20 else "Low"
-            
-        macro_risk_active = check_macro_risk()
-        _, tnx_change_pct = check_yield_spike()
-        
-        return market_trend, volatility_regime, macro_risk_active, tnx_change_pct
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            spy_fut = pool.submit(_fetch_spy)
+            vix_fut = pool.submit(_fetch_vix)
+            macro_fut = pool.submit(check_macro_risk)
+            yield_fut = pool.submit(check_yield_spike)
+
+            spy_hist = spy_fut.result()
+            if spy_hist is not None and not spy_hist.empty:
+                spy_sma50 = spy_hist['Close'].rolling(window=50).mean().iloc[-1]
+                spy_current = spy_hist['Close'].iloc[-1]
+                market_trend = "Bull" if spy_current > spy_sma50 else "Bear"
+
+            vix_hist = vix_fut.result()
+            if vix_hist is not None and not vix_hist.empty:
+                vix_current = vix_hist['Close'].iloc[-1]
+                volatility_regime = "High" if vix_current > 20 else "Low"
+
+            macro_risk_active = macro_fut.result()
+            _, tnx_change_pct = yield_fut.result()
+
+        result = (market_trend, volatility_regime, macro_risk_active, tnx_change_pct)
+        _market_context_cache["value"] = result
+        _market_context_cache["ts"] = now
+        return result
     except Exception:
         return "Unknown", "Unknown", False, 0.0
 
