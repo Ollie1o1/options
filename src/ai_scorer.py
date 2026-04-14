@@ -315,14 +315,23 @@ class AIScorer:
         ticker_summaries: dict[str, dict] = {}
         if self.config.get("two_pass_enabled", True) and ticker_contexts:
             syms = list(ticker_contexts.keys())
-            print(f"  [ai_scorer] two-pass ticker analysis: {len(syms)} symbols", flush=True)
-            for idx, symbol in enumerate(syms, 1):
-                ctx = ticker_contexts[symbol]
-                print(f"  [ai_scorer]   ticker {idx}/{len(syms)}: {symbol}", flush=True)
+            print(f"  [ai_scorer] two-pass ticker analysis: {len(syms)} symbols (parallel)", flush=True)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            def _one(sym):
                 try:
-                    ticker_summaries[symbol] = self._score_ticker_context(symbol, ctx, df)
+                    return sym, self._score_ticker_context(sym, ticker_contexts[sym], df)
                 except Exception as e:
-                    logger.warning("Ticker context pass failed for %s: %s", symbol, e)
+                    logger.warning("Ticker context pass failed for %s: %s", sym, e)
+                    return sym, None
+            with ThreadPoolExecutor(max_workers=min(8, len(syms))) as ex:
+                futs = [ex.submit(_one, s) for s in syms]
+                done_n = 0
+                for fut in as_completed(futs):
+                    sym, res = fut.result()
+                    done_n += 1
+                    print(f"  [ai_scorer]   ticker {done_n}/{len(syms)}: {sym} {'ok' if res else 'skip'}", flush=True)
+                    if res:
+                        ticker_summaries[sym] = res
 
         candidates = self._extract_candidates(df, ticker_summaries)
         all_results: list[dict] = []
