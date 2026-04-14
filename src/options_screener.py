@@ -920,7 +920,7 @@ def calculate_metrics(
         hv_payoff = np.where(is_call,
             S_vals * _q_disc * norm_cdf(hv_d1) - K_vals * disc * norm_cdf(hv_d2),
             K_vals * disc * norm_cdf(-hv_d2) - S_vals * _q_disc * norm_cdf(-hv_d1))
-    df["ev_per_contract"] = 100.0 * (hv_payoff - prem_vals) - (100.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
+    df["ev_per_contract"] = 100.0 * (hv_payoff - prem_vals) - (50.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
     # Null out EV where HV was missing (IV fallback produces meaningless ~0 values)
     df["ev_hv_fallback"] = _hv_fallback_mask
     df.loc[_hv_fallback_mask, "ev_per_contract"] = np.nan
@@ -1949,7 +1949,7 @@ def normalize_spreads_for_ranking(spreads_df: pd.DataFrame, mode: str = "Credit 
         spread_width = abs(float(row.get("short_strike", 0)) - float(row.get("long_strike", 0)))
 
         # Probability of max profit: net_credit / spread_width (breakeven-based PoP proxy)
-        pop_proxy = 1.0 - (net_credit / spread_width) if spread_width > 0 else 0.5
+        pop_proxy = (net_credit / spread_width) if spread_width > 0 else 0.5
         pop_proxy = min(max(pop_proxy, 0.3), 0.9)
 
         rr = (max_profit / 100) / net_credit if net_credit > 0 else 0.0
@@ -3902,6 +3902,30 @@ def main():
                                             "pop_score": row.get("pop_score"),
                                             "ev_score": row.get("ev_score"),
                                             "rr_score": row.get("rr_score"),
+                                            "liquidity_score": row.get("liquidity_score"),
+                                            "momentum_score": row.get("momentum_score"),
+                                            "iv_rank_score": row.get("iv_rank_score"),
+                                            "theta_score": row.get("theta_score"),
+                                            "iv_edge_score": row.get("iv_advantage_score"),
+                                            "vrp_score": row.get("vrp_score"),
+                                            "iv_mispricing_score": row.get("iv_mispricing_score"),
+                                            "skew_align_score": row.get("skew_align_score"),
+                                            "vega_risk_score": row.get("vega_risk_score"),
+                                            "term_structure_score": row.get("term_structure_score"),
+                                            "catalyst_score": row.get("catalyst_score"),
+                                            "em_realism_score": row.get("em_realism_score"),
+                                            "gamma_theta_score": row.get("gamma_theta_score"),
+                                            "gex_score": row.get("gex_score"),
+                                            "gamma_magnitude_score": row.get("gamma_magnitude_score"),
+                                            "gamma_pin_score": row.get("gamma_pin_score"),
+                                            "iv_velocity_score": row.get("iv_velocity_score"),
+                                            "max_pain_score": row.get("max_pain_score"),
+                                            "oi_change_score": row.get("oi_change_score"),
+                                            "option_rvol_score": row.get("option_rvol_score"),
+                                            "pcr_score": row.get("pcr_score"),
+                                            "sentiment_score_norm": row.get("sentiment_score_norm"),
+                                            "spread_score": row.get("spread_score"),
+                                            "trader_pref_score": row.get("trader_pref_score"),
                                         }
                                         pm.log_trade(trade_dict)
                                 except Exception as _log_exc:

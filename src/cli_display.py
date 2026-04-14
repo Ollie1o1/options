@@ -9,7 +9,7 @@ from typing import Optional, Dict
 
 import pandas as pd
 
-from .utils import format_pct, format_money, determine_moneyness, generate_occ_symbol
+from .utils import format_pct, format_money, determine_moneyness, generate_occ_symbol, is_short_position
 from .data_fetching import get_vix_level
 from .oi_snapshot import save_oi_snapshot
 
@@ -131,7 +131,7 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
         f"{'Score':>7}  Score Drivers"
     )
 
-    dte_bucket_order = ["Short (7-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"]
+    dte_bucket_order = ["Short (1-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"]
     contracts = contracts.copy()
     contracts["_dte"] = (contracts["T_years"] * 365.0).round(0) if "T_years" in contracts.columns else 0
     contracts["_bucket"] = contracts["_dte"].apply(format_dte_bucket)
@@ -568,14 +568,23 @@ def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_si
         total_cost = mid * 100
         sizing_line = f"Cost (1 contract): ${total_cost:,.0f}  |  Max loss: ${total_cost:,.0f}"
 
+    # Detect if this is a short/selling strategy
+    _is_short_ticket = is_short_position(row.get('strategy_name', ''))
+
     # Entry/exit levels
     tp_pct = 0.50
     sl_pct = 0.25
     if config:
         tp_pct = config.get("entry_exit_rules", {}).get("profit_target_pct", 0.50)
         sl_pct = abs(config.get("entry_exit_rules", {}).get("stop_loss_pct", 0.25))
-    target = mid * (1 + tp_pct)
-    stop = mid * (1 - sl_pct)
+    if _is_short_ticket:
+        # Shorts: profit when price drops, stop when it rises
+        target = mid * (1 - tp_pct)
+        stop = mid * (1 + sl_pct)
+    else:
+        # Longs: profit when price rises, stop when it drops
+        target = mid * (1 + tp_pct)
+        stop = mid * (1 - sl_pct)
 
     # Build box
     width = get_display_width()

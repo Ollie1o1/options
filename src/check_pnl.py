@@ -601,6 +601,23 @@ def view_portfolio():
                 except Exception:
                     pass
 
+            # 50% max-profit milestone alert (only when live price is available)
+            if live_price is not None and live_price > 0:
+                tp_threshold = 0.50  # config.get("exit_rules", {}).get("take_profit", 0.50) if config available
+                if short:
+                    # Short: profit = entry - live (premium decay)
+                    profit_pct = (entry_price - live_price) / entry_price if entry_price > 0 else 0.0
+                else:
+                    # Long: profit = live - entry
+                    profit_pct = (live_price - entry_price) / entry_price if entry_price > 0 else 0.0
+
+                if profit_pct >= tp_threshold:
+                    milestone_line = f"    ✓ {profit_pct:.0%} profit — consider closing ({tp_threshold:.0%} target reached)"
+                    if HAS_FMT and fmt:
+                        print(fmt.colorize(milestone_line, fmt.Colors.GREEN, bold=True))
+                    else:
+                        print(milestone_line)
+
         # Open totals
         if HAS_FMT and fmt:
             print(fmt.colorize(sep, fmt.Colors.DIM))

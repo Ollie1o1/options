@@ -9,6 +9,11 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 
+try:
+    from .utils import is_short_position
+except ImportError:
+    from utils import is_short_position
+
 
 def generate_trade_thesis(row: pd.Series) -> str:
     """
@@ -124,16 +129,25 @@ def calculate_entry_exit_levels(row: pd.Series, config: Dict) -> Dict[str, float
     # For wide spreads, be more aggressive in improving entry
     improvement_factor = min(entry_improvement + (spread_pct * 0.3), 0.15)
 
+    # Detect if this is a short/selling strategy
+    is_short = is_short_position(row.get('strategy_name', ''))
+
     # Buying: try to enter below mid
     # Selling: try to enter above mid
-    entry_price = premium * (1 - improvement_factor)
+    entry_price = premium * (1 + improvement_factor) if is_short else premium * (1 - improvement_factor)
 
     # Ensure entry is between bid and ask
     entry_price = max(bid, min(ask, entry_price))
 
     # Calculate profit target and stop loss
-    profit_target = entry_price * (1 + profit_target_pct)
-    stop_loss = entry_price * (1 - stop_loss_pct)
+    if is_short:
+        # Shorts: profit when price goes down (buy back cheaper), stop when it rises
+        profit_target = entry_price * (1 - profit_target_pct)
+        stop_loss = entry_price * (1 + stop_loss_pct)
+    else:
+        # Longs: profit when price goes up, stop when it drops
+        profit_target = entry_price * (1 + profit_target_pct)
+        stop_loss = entry_price * (1 - stop_loss_pct)
 
     # Calculate breakeven
     if opt_type == 'call':
@@ -145,7 +159,12 @@ def calculate_entry_exit_levels(row: pd.Series, config: Dict) -> Dict[str, float
     max_loss = entry_price * 100
 
     # Calculate potential profit (at profit target)
-    potential_profit = (profit_target - entry_price) * 100
+    if is_short:
+        # Shorts: profit when price goes down (entry > profit_target)
+        potential_profit = (entry_price - profit_target) * 100
+    else:
+        # Longs: profit when price goes up (profit_target > entry)
+        potential_profit = (profit_target - entry_price) * 100
 
     return {
         'entry_price': entry_price,

@@ -453,11 +453,11 @@ def format_ev(ev: float, max_loss: float = 0.0) -> str:
     if max_loss and abs(max_loss) > 1.0:
         ev_pct = ev / abs(max_loss) * 100
         if ev_pct >= 2.0:
-            pct_str = f"\033[32m{ev_pct:+.1f}%\033[0m"
+            pct_str = colorize(f"{ev_pct:+.1f}%", Colors.GREEN)
         elif ev_pct >= 0:
-            pct_str = f"\033[33m{ev_pct:+.1f}%\033[0m"
+            pct_str = colorize(f"{ev_pct:+.1f}%", Colors.YELLOW)
         else:
-            pct_str = f"\033[31m{ev_pct:+.1f}%\033[0m"
+            pct_str = colorize(f"{ev_pct:+.1f}%", Colors.RED)
         return f"{base} ({pct_str})"
     return base
 
