@@ -23,7 +23,7 @@ import time
 import threading as _threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict, Union, Any
-from .types import ScanResult
+from .schemas import ScanResult
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
 import warnings
@@ -2185,7 +2185,7 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
         with open(log_file, 'a', newline='') as f:
             fieldnames = [
                 'entry_id', 'timestamp', 'mode', 'symbol', 'type', 'strike', 'expiration',
-                'entry_premium', 'entry_underlying', 'delta', 'iv', 'hv', 'iv_rank',
+                'entry_price', 'entry_underlying', 'delta', 'iv', 'hv', 'iv_rank',
                 'prob_profit', 'p_itm', 'rr_ratio', 'theo_value', 'ev_per_contract',
                 'quality_score', 'event_flag', 'status',
                 'exit_premium', 'exit_underlying', 'exit_date', 'realized_pnl'
@@ -2205,7 +2205,7 @@ def log_trade_entry(df_picks: pd.DataFrame, mode: str) -> None:
                     'type': row.get('type', ''),
                     'strike': row.get('strike', ''),
                     'expiration': row.get('expiration', ''),
-                    'entry_premium': row.get('premium', ''),
+                    'entry_price': row.get('premium', ''),
                     'entry_underlying': row.get('underlying', ''),
                     'delta': row.get('delta', ''),
                     'iv': row.get('impliedVolatility', ''),
@@ -2357,11 +2357,11 @@ def close_trades():
             else:  # put
                 intrinsic_value = max(0, strike - exit_price)
             
-            entry_premium = float(trade['entry_premium'])
+            entry_price = float(trade['entry_price'])
             exit_premium = intrinsic_value
             
             # P/L per share
-            pnl_per_share = exit_premium - entry_premium
+            pnl_per_share = exit_premium - entry_price
             realized_pnl = pnl_per_share * 100  # Per contract
             
             # Update the dataframe

@@ -34,7 +34,7 @@ try:
 except ImportError:
     _HAS_GRIDDATA = False
 
-from .types import ScanResult
+from .schemas import ScanResult
 from .visual_surface import compute_pnl_grid, compute_greek_grid
 
 log = logging.getLogger(__name__)

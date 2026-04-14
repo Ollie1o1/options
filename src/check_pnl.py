@@ -8,8 +8,19 @@ import logging
 import os
 import sqlite3
 import shutil
+import sys
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, List, Dict, Any
+from pathlib import Path
+
+# Add project root and src to sys.path for direct execution
+_file_path = Path(__file__).resolve()
+_project_root = _file_path.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+_src_path = _file_path.parent
+if str(_src_path) not in sys.path:
+    sys.path.insert(0, str(_src_path))
 
 try:
     import yfinance as yf
@@ -18,36 +29,47 @@ except ImportError:
     HAS_YF = False
 
 try:
-    from . import formatting as fmt
+    try:
+        from . import formatting as fmt
+    except (ImportError, ValueError):
+        import formatting as fmt
     HAS_FMT = fmt.supports_color()
-except ImportError:
+except Exception:
     HAS_FMT = False
     fmt = None
 
 try:
-    from .utils import is_short_position as _is_short
-except ImportError:
+    try:
+        from .utils import is_short_position as _is_short
+        from .utils import bs_delta, bs_gamma, bs_vega, bs_theta, american_price
+    except (ImportError, ValueError):
+        from utils import is_short_position as _is_short
+        from utils import bs_delta, bs_gamma, bs_vega, bs_theta, american_price
+    HAS_BS = True
+except Exception:
+    HAS_BS = False
     def _is_short(strategy_name: str) -> bool:  # type: ignore[misc]
         s = (strategy_name or "").lower()
         return any(k in s for k in ("short", "credit", "covered", "cash-secured", "cash secured", "naked", "iron condor", "sell"))
 
 try:
-    from .utils import bs_delta, bs_gamma, bs_vega, bs_theta
-    HAS_BS = True
-except ImportError:
-    HAS_BS = False
-
-try:
-    from .stress_test import print_stress_test
-    from .backtester import print_paper_trade_ic
+    try:
+        from .stress_test import print_stress_test
+        from .backtester import print_paper_trade_ic
+    except (ImportError, ValueError):
+        from stress_test import print_stress_test
+        from backtester import print_paper_trade_ic
     HAS_STRESS = True
-except ImportError:
+except Exception:
     HAS_STRESS = False
 
 try:
-    from .data_fetching import get_risk_free_rate as _get_rfr
+    try:
+        from .data_fetching import get_risk_free_rate as _get_rfr
+    except (ImportError, ValueError):
+        from data_fetching import get_risk_free_rate as _get_rfr
     HAS_RFR = True
-except ImportError:
+except Exception:
     HAS_RFR = False
 
 DB_PATH = "paper_trades.db"
@@ -80,6 +102,7 @@ def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str
         return None
     try:
         from pandas import to_datetime
+        import numpy as np
         exp = to_datetime(expiration)
         date_str = exp.strftime("%y%m%d")
         otype = "C" if opt_type.lower() == "call" else "P"
@@ -87,22 +110,45 @@ def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str
         occ = f"{ticker.upper()}{date_str}{otype}{strike_str}"
 
         tkr = yf.Ticker(occ)
+        price = None
 
         try:
             price = getattr(tkr.fast_info, "last_price", None)
             if price and float(price) > 0:
-                return float(price)
+                price = float(price)
         except Exception:
             pass
 
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            hist = tkr.history(period="1d")
-        if not hist.empty:
-            p = float(hist["Close"].iloc[-1])
-            if p > 0:
-                return p
+        if price is None or np.isnan(price) or price <= 0:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                hist = tkr.history(period="1d")
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+
+        # Black-Scholes Fallback (mirrors PaperManager)
+        if (price is None or np.isnan(price) or price <= 0) and HAS_BS:
+            try:
+                tkr_spot = yf.Ticker(ticker)
+                S = getattr(tkr_spot.fast_info, "last_price", None)
+                if not S:
+                    hist_s = tkr_spot.history(period="5d")
+                    if not hist_s.empty:
+                        S = float(hist_s["Close"].iloc[-1])
+                
+                if S and S > 0:
+                    exp_dt = datetime.strptime(expiration[:10], "%Y-%m-%d")
+                    T = max((exp_dt - datetime.now()).days / 365.25, 1/365.25)
+                    _rfr = _get_rfr() if HAS_RFR else 0.045
+                    # Use a standard 30% volatility for fallback if we don't have stored IV
+                    price = american_price(opt_type.lower(), float(S), float(strike), T, _rfr, 0.30)
+            except Exception:
+                pass
+
+        if price is not None and not np.isnan(price) and price > 0:
+            return float(price)
+
     except Exception:
         if _retries > 0:
             import time
@@ -532,7 +578,7 @@ def view_portfolio():
                     live_underlying = None
                     try:
                         tkr_obj = yf.Ticker(ticker)
-                        live_underlying = tkr_obj.fast_info.get("lastPrice") or tkr_obj.fast_info.get("regularMarketPrice")
+                        live_underlying = getattr(tkr_obj.fast_info, "last_price", None) or getattr(tkr_obj.fast_info, "regularMarketPrice", None)
                     except Exception:
                         pass
                     if live_underlying and live_underlying > 0:

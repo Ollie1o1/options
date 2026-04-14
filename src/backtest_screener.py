@@ -230,7 +230,7 @@ def fetch_price_at_expiration(symbol: str, expiration_date: str) -> Optional[flo
 def calculate_realized_pnl(
     option_type: str,
     strike: float,
-    entry_premium: float,
+    entry_price: float,
     final_price: float,
     is_short: bool = False,
 ) -> Dict:
@@ -251,15 +251,15 @@ def calculate_realized_pnl(
         
         # P/L per share (accounts for long vs short)
         if is_short:
-            pnl_per_share = entry_premium - intrinsic_value
+            pnl_per_share = entry_price - intrinsic_value
         else:
-            pnl_per_share = intrinsic_value - entry_premium
+            pnl_per_share = intrinsic_value - entry_price
         
         # P/L per contract (multiplier of 100)
         pnl_per_contract = pnl_per_share * 100
         
         # P/L percentage (relative to initial investment)
-        pnl_pct = (pnl_per_share / entry_premium) * 100 if entry_premium > 0 else 0
+        pnl_pct = (pnl_per_share / entry_price) * 100 if entry_price > 0 else 0
         
         return {
             "pnl_per_share": pnl_per_share,

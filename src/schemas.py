@@ -1,4 +1,4 @@
-"""Shared type definitions for the options screener pipeline."""
+"""Shared schema definitions for the options screener pipeline."""
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any

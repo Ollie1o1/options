@@ -252,7 +252,7 @@ def compute_component_scores(
 # -- Trade simulation ----------------------------------------------------------
 
 def simulate_pnl(
-    entry_premium: float,
+    entry_price: float,
     future_closes: np.ndarray,
     K: float,
     sigma: float,
@@ -264,11 +264,11 @@ def simulate_pnl(
     slippage: float = SLIPPAGE_PCT,
 ) -> float:
     """Simulate a short put and return pnl_pct (fraction of premium received)."""
-    if entry_premium <= 0:
+    if entry_price <= 0:
         return 0.0
-    received = entry_premium * (1 - slippage / 2)
-    stop_val  = entry_premium * stop_mult
-    take_val  = entry_premium * profit_target
+    received = entry_price * (1 - slippage / 2)
+    stop_val  = entry_price * stop_mult
+    take_val  = entry_price * profit_target
 
     for i, S in enumerate(future_closes):
         dte = entry_dte - i - 1
@@ -277,7 +277,7 @@ def simulate_pnl(
         exit_now = (val <= take_val) or (val >= stop_val) or (dte <= min_dte)
         if exit_now or i == len(future_closes) - 1:
             exit_cost = val * (1 + slippage / 2)
-            return float((received - exit_cost) / max(entry_premium, 1e-8))
+            return float((received - exit_cost) / max(entry_price, 1e-8))
     return 0.0
 
 
