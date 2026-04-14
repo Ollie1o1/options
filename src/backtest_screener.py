@@ -9,10 +9,20 @@ import sys
 import json
 import time
 import pandas as pd
-import yfinance as yf
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import glob
+
+# Lazy-load yfinance to avoid startup hang
+_yf = None
+
+def _get_yf():
+    """Lazily import yfinance on first use."""
+    global _yf
+    if _yf is None:
+        import yfinance as _yf_mod
+        _yf = _yf_mod
+    return _yf
 
 try:
     from .visualize_results import create_backtest_charts
@@ -94,7 +104,7 @@ def managed_trade_simulation(log_entries: List[Dict]) -> pd.DataFrame:
                     print(f"  - Skipping {option_symbol} (not expired)")
                     continue
 
-                hist = yf.download(option_symbol, start=entry_date, end=exp_date, progress=False)
+                hist = _get_yf().download(option_symbol, start=entry_date, end=exp_date, progress=False)
                 if hist.empty:
                     print(f"  - No historical data for {option_symbol}")
                     continue
@@ -207,7 +217,7 @@ def fetch_price_at_expiration(symbol: str, expiration_date: str) -> Optional[flo
     """Fetch the closing price on or near expiration date."""
     try:
         exp_dt = pd.to_datetime(expiration_date).date()
-        ticker = yf.Ticker(symbol)
+        ticker = _get_yf().Ticker(symbol)
         
         start_date = exp_dt - timedelta(days=5)
         end_date = exp_dt + timedelta(days=5)

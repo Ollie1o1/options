@@ -37,10 +37,6 @@ try:
 except Exception:
     missing.append("pandas")
 try:
-    import yfinance as yf
-except Exception:
-    missing.append("yfinance")
-try:
     import numpy as np
 except Exception:
     missing.append("numpy")

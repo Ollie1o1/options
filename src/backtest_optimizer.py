@@ -41,11 +41,21 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from scipy.optimize import differential_evolution, minimize
 from scipy.stats import pearsonr
 
 logger = logging.getLogger(__name__)
+
+# Lazy-load yfinance to avoid startup hang
+_yf = None
+
+def _get_yf():
+    """Lazily import yfinance on first use."""
+    global _yf
+    if _yf is None:
+        import yfinance as _yf_mod
+        _yf = _yf_mod
+    return _yf
 
 # -- Config --------------------------------------------------------------------
 
@@ -303,7 +313,7 @@ def backtest_ticker(
     Return (component_scores [N?21], pnl_pct [N]) for one ticker, or None.
     """
     try:
-        raw = yf.download(symbol, period=period, interval="1d",
+        raw = _get_yf().download(symbol, period=period, interval="1d",
                           auto_adjust=True, progress=False)
         if raw.empty:
             return None

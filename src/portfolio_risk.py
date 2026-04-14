@@ -13,12 +13,22 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from .utils import bs_call, bs_put, bs_delta, bs_gamma, bs_vega, safe_float
 from .data_fetching import get_risk_free_rate
 
 logger = logging.getLogger(__name__)
+
+# Lazy-load yfinance to avoid startup hang
+_yf = None
+
+def _get_yf():
+    """Lazily import yfinance on first use."""
+    global _yf
+    if _yf is None:
+        import yfinance as _yf_mod
+        _yf = _yf_mod
+    return _yf
 
 import time as _time
 _IV_CACHE: dict = {}          # {key: (iv_value, timestamp)}
@@ -57,7 +67,7 @@ class RiskAggregator:
     def _fetch_spot(self, ticker: str) -> Optional[float]:
         """Fetch current spot price via fast_info, with history fallback."""
         try:
-            tkr = yf.Ticker(ticker)
+            tkr = _get_yf().Ticker(ticker)
             fi = getattr(tkr, "fast_info", None)
             if fi is not None:
                 lp = safe_float(getattr(fi, "last_price", None))
@@ -96,7 +106,7 @@ class RiskAggregator:
             if _time.monotonic() - ts < _IV_CACHE_TTL:
                 return iv_val, "cache"
         try:
-            tkr = yf.Ticker(ticker)
+            tkr = _get_yf().Ticker(ticker)
             exps = tkr.options
             if not exps:
                 return self._FALLBACK_IV, "fallback"

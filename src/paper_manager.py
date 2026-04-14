@@ -9,13 +9,23 @@ import json
 import sqlite3
 import pandas as pd
 import numpy as np
-import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Lazy-load yfinance to avoid startup hang
+_yf = None
+
+def _get_yf():
+    """Lazily import yfinance on first use."""
+    global _yf
+    if _yf is None:
+        import yfinance as _yf_mod
+        _yf = _yf_mod
+    return _yf
 
 try:
     from .data_fetching import get_risk_free_rate as _get_rfr
@@ -312,7 +322,7 @@ class PaperManager:
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
             if not symbol:
                 return self._slippage_per_share
-            tkr = yf.Ticker(symbol)
+            tkr = _get_yf().Ticker(symbol)
             bid = getattr(tkr.fast_info, "bid", None)
             ask = getattr(tkr.fast_info, "ask", None)
             if bid is None or ask is None:
@@ -422,7 +432,7 @@ class PaperManager:
 
         def _fetch_spot(t: str) -> Tuple[str, Optional[float]]:
             try:
-                tkr = yf.Ticker(t)
+                tkr = _get_yf().Ticker(t)
                 s = getattr(tkr.fast_info, "last_price", None)
                 if s and float(s) > 0:
                     return t, float(s)
@@ -463,7 +473,7 @@ class PaperManager:
         def _fetch_option_price(task_tuple):
             entry_id, symbol, ticker, expiration, strike, option_type = task_tuple
             try:
-                tkr = yf.Ticker(symbol)
+                tkr = _get_yf().Ticker(symbol)
                 price = None
                 try:
                     price = getattr(tkr.fast_info, "last_price", None)
@@ -662,7 +672,7 @@ class PaperManager:
             import warnings as _w
             with _w.catch_warnings():
                 _w.simplefilter("ignore")
-                hist = yf.download(sym, period=period, interval="1d", progress=False, auto_adjust=True)
+                hist = _get_yf().download(sym, period=period, interval="1d", progress=False, auto_adjust=True)
             if hist.empty:
                 return sym, None
             close_col = hist["Close"]
