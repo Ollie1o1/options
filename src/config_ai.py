@@ -56,7 +56,7 @@ AI_CONFIG: dict = {
     "batch_size": 3,     # smaller batches = shorter responses = less truncation risk
     "max_tokens": 2048,  # enough room for 3 candidates at ~600 tokens each with margin
     "temperature": 0.1,
-    "timeout": 60,
+    "timeout": 25,
 
     # ── Narrative thresholds for context enrichment ───────────────────────────
     "narrative_thresholds": {

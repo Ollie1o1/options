@@ -317,22 +317,34 @@ class AIScorer:
             syms = list(ticker_contexts.keys())
             print(f"  [ai_scorer] two-pass ticker analysis: {len(syms)} symbols (parallel)", flush=True)
             from concurrent.futures import ThreadPoolExecutor, as_completed
+            import threading as _th
+            t0_all = time.time()
             def _one(sym):
+                t0 = time.time()
                 print(f"  [ai_scorer]   → start {sym}", flush=True)
                 try:
-                    return sym, self._score_ticker_context(sym, ticker_contexts[sym], df)
+                    res = self._score_ticker_context(sym, ticker_contexts[sym], df)
+                    return sym, res, time.time() - t0, None
                 except Exception as e:
-                    logger.warning("Ticker context pass failed for %s: %s", sym, e)
-                    return sym, None
+                    return sym, None, time.time() - t0, e
             with ThreadPoolExecutor(max_workers=min(8, len(syms))) as ex:
                 futs = [ex.submit(_one, s) for s in syms]
+                stop_hb = _th.Event()
+                def _heartbeat():
+                    while not stop_hb.wait(5):
+                        done = sum(1 for f in futs if f.done())
+                        print(f"  [ai_scorer]   ... {done}/{len(syms)} done ({time.time()-t0_all:.0f}s elapsed)", flush=True)
+                hb = _th.Thread(target=_heartbeat, daemon=True)
+                hb.start()
                 done_n = 0
                 for fut in as_completed(futs):
-                    sym, res = fut.result()
+                    sym, res, dt, err = fut.result()
                     done_n += 1
-                    print(f"  [ai_scorer]   ticker {done_n}/{len(syms)}: {sym} {'ok' if res else 'skip'}", flush=True)
+                    status = f"ok ({dt:.1f}s)" if res else f"skip ({dt:.1f}s) {type(err).__name__ if err else ''}"
+                    print(f"  [ai_scorer]   ticker {done_n}/{len(syms)}: {sym} {status}", flush=True)
                     if res:
                         ticker_summaries[sym] = res
+                stop_hb.set()
 
         candidates = self._extract_candidates(df, ticker_summaries)
         all_results: list[dict] = []
