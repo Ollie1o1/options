@@ -9,7 +9,7 @@ from typing import Optional, Dict
 
 import pandas as pd
 
-from .utils import format_pct, format_money, determine_moneyness, generate_occ_symbol, is_short_position
+from .utils import format_pct, format_money, determine_moneyness, generate_occ_symbol
 from .data_fetching import get_vix_level
 from .oi_snapshot import save_oi_snapshot
 
@@ -568,7 +568,11 @@ def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_si
         total_cost = mid * 100
         sizing_line = f"Cost (1 contract): ${total_cost:,.0f}  |  Max loss: ${total_cost:,.0f}"
 
-    # Detect if this is a short/selling strategy
+    # Detect if this is a short/selling strategy (lazy import to avoid startup overhead)
+    try:
+        from .utils import is_short_position
+    except ImportError:
+        from utils import is_short_position
     _is_short_ticket = is_short_position(row.get('strategy_name', ''))
 
     # Entry/exit levels

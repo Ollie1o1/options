@@ -9,11 +9,6 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 
-try:
-    from .utils import is_short_position
-except ImportError:
-    from utils import is_short_position
-
 
 def generate_trade_thesis(row: pd.Series) -> str:
     """
@@ -129,7 +124,11 @@ def calculate_entry_exit_levels(row: pd.Series, config: Dict) -> Dict[str, float
     # For wide spreads, be more aggressive in improving entry
     improvement_factor = min(entry_improvement + (spread_pct * 0.3), 0.15)
 
-    # Detect if this is a short/selling strategy
+    # Detect if this is a short/selling strategy (lazy import to avoid startup overhead)
+    try:
+        from .utils import is_short_position
+    except ImportError:
+        from utils import is_short_position
     is_short = is_short_position(row.get('strategy_name', ''))
 
     # Buying: try to enter below mid
