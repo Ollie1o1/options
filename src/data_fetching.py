@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Data fetching utilities for the options screener.
 Handles all yfinance interactions with a Single-Fetch architecture for performance.
@@ -239,6 +240,8 @@ class YFinanceProvider(BaseDataProvider):
         return fetch_options_yfinance(symbol, max_expiries=4)
 
     def fetch_spot(self, symbol: str) -> float:
+        _init_yfinance()
+        _init_yf_session()
         return float(yf.Ticker(symbol, session=_yf_session).fast_info["lastPrice"])
 
     async def fetch_chain_async(self, symbol: str) -> Dict[str, Any]:
@@ -859,6 +862,7 @@ def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
         order = 'Volatility (Month)'
 
     try:
+        _init_finviz()
         fperformance = Performance()
         fperformance.set_filter(filters_dict=filters_dict)
         df = fperformance.screener_view(order=order, limit=max_tickers, verbose=0)
@@ -872,7 +876,7 @@ def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
         logging.warning(f"Could not fetch '{scan_type}' from Finviz: {e}. Using backup tickers.")
         return BACKUP_TICKERS[:max_tickers]
 
-def get_underlying_price(ticker: yf.Ticker) -> Optional[float]:
+def get_underlying_price(ticker: Any) -> Optional[float]:
     # Try fast_info, then info, then last close
     try:
         fi = getattr(ticker, "fast_info", None)
@@ -1030,6 +1034,8 @@ def get_risk_free_rate() -> float:
     return rate_result
 
 def get_vix_level() -> Optional[float]:
+    _init_yfinance()
+    _init_yf_session()
     try:
         vix = yf.Ticker("^VIX", session=_yf_session)
         try:
@@ -1378,6 +1384,8 @@ def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
         return None
 
 def get_sector_performance(ticker_symbol: str) -> Dict:
+    _init_yfinance()
+    _init_yf_session()
     sector_etf = SECTOR_MAP.get(ticker_symbol, "SPY")
     try:
         tkr = yf.Ticker(ticker_symbol, session=_yf_session)
@@ -1401,6 +1409,8 @@ def get_sector_performance(ticker_symbol: str) -> Dict:
 
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_macro_risk() -> bool:
+    _init_yfinance()
+    _init_yf_session()
     try:
         eurusd = yf.Ticker("EURUSD=X", session=_yf_session)
         fx_hist = eurusd.history(period="1mo")
@@ -1417,6 +1427,8 @@ def check_macro_risk() -> bool:
 
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_yield_spike() -> Tuple[bool, float]:
+    _init_yfinance()
+    _init_yf_session()
     try:
         tnx = yf.Ticker("^TNX", session=_yf_session)
         tnx_hist = tnx.history(period="5d")
@@ -2021,6 +2033,8 @@ def get_historical_iv_crush(ticker: str, n_quarters: int = 8, iv_db_path: str = 
         # ------------------------------------------------------------------
         # Fetch earnings dates
         # ------------------------------------------------------------------
+        _init_yfinance()
+        _init_yf_session()
         tkr = yf.Ticker(ticker, session=_yf_session)
         earnings_dates = None
         try:
