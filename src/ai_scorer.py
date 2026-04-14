@@ -316,7 +316,7 @@ class AIScorer:
         if self.config.get("two_pass_enabled", True) and ticker_contexts:
             syms = list(ticker_contexts.keys())
             print(f"  [ai_scorer] two-pass ticker analysis: {len(syms)} symbols (parallel)", flush=True)
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
             import threading as _th
             t0_all = time.time()
             def _one(sym):
@@ -327,7 +327,7 @@ class AIScorer:
                     return sym, res, time.time() - t0, None
                 except Exception as e:
                     return sym, None, time.time() - t0, e
-            HARD_DEADLINE = 45.0
+            HARD_DEADLINE = 60.0
             ex = ThreadPoolExecutor(max_workers=min(4, len(syms)))
             fut_to_sym = {ex.submit(_one, s): s for s in syms}
             stop_hb = _th.Event()
@@ -346,11 +346,12 @@ class AIScorer:
                     print(f"  [ai_scorer]   ticker {done_n}/{len(syms)}: {sym} {status}", flush=True)
                     if res:
                         ticker_summaries[sym] = res
-            except TimeoutError:
+            except FuturesTimeoutError:
                 unfinished = [fut_to_sym[f] for f in fut_to_sym if not f.done()]
                 print(f"  [ai_scorer]   hard deadline {HARD_DEADLINE:.0f}s hit — abandoning {len(unfinished)} stuck ticker(s): {','.join(unfinished)}", flush=True)
-            stop_hb.set()
-            ex.shutdown(wait=False, cancel_futures=True)
+            finally:
+                stop_hb.set()
+                ex.shutdown(wait=False, cancel_futures=True)
 
         candidates = self._extract_candidates(df, ticker_summaries)
         all_results: list[dict] = []

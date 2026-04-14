@@ -9,7 +9,7 @@ import json
 import sqlite3
 import pandas as pd
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
 import logging
