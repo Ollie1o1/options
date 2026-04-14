@@ -314,7 +314,11 @@ class AIScorer:
         # Run two-pass ticker analysis if enabled and contexts provided
         ticker_summaries: dict[str, dict] = {}
         if self.config.get("two_pass_enabled", True) and ticker_contexts:
-            for symbol, ctx in ticker_contexts.items():
+            syms = list(ticker_contexts.keys())
+            print(f"  [ai_scorer] two-pass ticker analysis: {len(syms)} symbols", flush=True)
+            for idx, symbol in enumerate(syms, 1):
+                ctx = ticker_contexts[symbol]
+                print(f"  [ai_scorer]   ticker {idx}/{len(syms)}: {symbol}", flush=True)
                 try:
                     ticker_summaries[symbol] = self._score_ticker_context(symbol, ctx, df)
                 except Exception as e:
@@ -351,7 +355,7 @@ class AIScorer:
         batches = [uncached[i: i + batch_size] for i in range(0, len(uncached), batch_size)]
 
         for i, batch in enumerate(batches):
-            logger.info("Scoring batch %d/%d (%d candidates)...", i + 1, len(batches), len(batch))
+            print(f"  [ai_scorer] scoring batch {i + 1}/{len(batches)} ({len(batch)} candidates)...", flush=True)
             results = self._score_batch_with_retry(batch, batch_num=i + 1)
             # Write to cache — skip default/fallback results so they get re-scored next run
             if self._cache:
@@ -653,24 +657,23 @@ class AIScorer:
 
     def _score_batch_with_retry(self, batch: list[dict], batch_num: int = 1) -> list[dict]:
         """Score with exponential backoff; switches to fallback models on failure."""
-        max_retries = 5
-        delay = 5
+        max_retries = 3
+        delay = 3
         fallback        = self.config.get("fallback_model")
         second_fallback = self.config.get("second_fallback_model")
         third_fallback  = self.config.get("third_fallback_model")
 
         def _pick_model(attempt: int) -> str:
-            if attempt <= 2:
+            if attempt == 1:
                 return self.config["model"]
-            if attempt == 3:
+            if attempt == 2:
                 return fallback or self.config["model"]
-            if attempt == 4:
-                return second_fallback or fallback or self.config["model"]
-            return third_fallback or second_fallback or fallback or self.config["model"]
+            return second_fallback or third_fallback or fallback or self.config["model"]
 
         for attempt in range(1, max_retries + 1):
             use_model = _pick_model(attempt)
             try:
+                print(f"  [ai_scorer] batch {batch_num} attempt {attempt}/{max_retries} model={use_model}", flush=True)
                 result = self._score_batch(batch, model=use_model)
                 self._api_call_count += 1
                 estimated_tokens = len(batch) * 600  # rough estimate: ~600 tokens per candidate (prompt + response)

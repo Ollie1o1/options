@@ -3126,7 +3126,31 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
         from src.ranking import print_ranked_table
         from src.config_ai import AI_CONFIG
         from src.data_fetching import _CHAIN_CACHE
+    except Exception as exc:
+        msg = f"AI scoring unavailable — import failed: {type(exc).__name__}: {exc}"
+        if HAS_ENHANCED_CLI:
+            print(fmt.format_warning(msg))
+        else:
+            print(f"\n⚠  {msg}")
+        import traceback as _tb
+        _tb.print_exc()
+        return None
 
+    # Ensure at least one OpenRouter / Anthropic key is set before trying any network call
+    _key_env_vars = [
+        "OPENROUTER_API_KEY", "OPENROUTER_ARCEE_KEY",
+        "OPENROUTER_STEPFUN_KEY", "OPENROUTER_NVIDIA_KEY",
+        "OPENROUTER_HUNTER_KEY", "ANTHROPIC_API_KEY",
+    ]
+    if not any(os.environ.get(k) for k in _key_env_vars):
+        msg = "AI scoring skipped — no API key set. Add OPENROUTER_API_KEY (or similar) to .env"
+        if HAS_ENHANCED_CLI:
+            print(fmt.format_warning(msg))
+        else:
+            print(f"\n⚠  {msg}")
+        return None
+
+    try:
         vix_map = {"Low": "low", "Normal": "normal", "High": "high"}
         vix_regime = vix_map.get(str(volatility_regime), "normal")
 
@@ -3138,12 +3162,22 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
                 if sym in _CHAIN_CACHE:
                     ticker_contexts[sym] = _CHAIN_CACHE[sym].get("context", {})
 
+        if verbose:
+            _tp = "two-pass " if ticker_contexts else ""
+            print(f"\n  Running AI {_tp}analysis on top {len(candidates)} picks...")
+
         ranked = score_and_rank(candidates, ticker_contexts, vix_regime, sector_ctx=sector_ctx)
         if verbose:
             print_ranked_table(ranked, top_n=10)
         return ranked
     except Exception as exc:
-        print(f"  AI scoring unavailable: {exc}")
+        msg = f"AI scoring failed: {type(exc).__name__}: {exc}"
+        if HAS_ENHANCED_CLI:
+            print(fmt.format_warning(msg))
+        else:
+            print(f"\n⚠  {msg}")
+        import traceback as _tb
+        _tb.print_exc()
         return None
 
 
