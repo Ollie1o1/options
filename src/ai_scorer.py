@@ -318,6 +318,7 @@ class AIScorer:
             print(f"  [ai_scorer] two-pass ticker analysis: {len(syms)} symbols (parallel)", flush=True)
             from concurrent.futures import ThreadPoolExecutor, as_completed
             def _one(sym):
+                print(f"  [ai_scorer]   → start {sym}", flush=True)
                 try:
                     return sym, self._score_ticker_context(sym, ticker_contexts[sym], df)
                 except Exception as e:
@@ -625,6 +626,8 @@ class AIScorer:
             client = openai.OpenAI(
                 api_key=api_key,
                 base_url="https://openrouter.ai/api/v1",
+                max_retries=0,
+                timeout=float(self.config.get("timeout", 30)),
                 default_headers={
                     "HTTP-Referer": "https://github.com/Ollie1o1/options",
                     "X-Title": "Options Screener AI Ranking",
