@@ -327,24 +327,30 @@ class AIScorer:
                     return sym, res, time.time() - t0, None
                 except Exception as e:
                     return sym, None, time.time() - t0, e
-            with ThreadPoolExecutor(max_workers=min(8, len(syms))) as ex:
-                futs = [ex.submit(_one, s) for s in syms]
-                stop_hb = _th.Event()
-                def _heartbeat():
-                    while not stop_hb.wait(5):
-                        done = sum(1 for f in futs if f.done())
-                        print(f"  [ai_scorer]   ... {done}/{len(syms)} done ({time.time()-t0_all:.0f}s elapsed)", flush=True)
-                hb = _th.Thread(target=_heartbeat, daemon=True)
-                hb.start()
-                done_n = 0
-                for fut in as_completed(futs):
+            HARD_DEADLINE = 45.0
+            ex = ThreadPoolExecutor(max_workers=min(4, len(syms)))
+            fut_to_sym = {ex.submit(_one, s): s for s in syms}
+            stop_hb = _th.Event()
+            def _heartbeat():
+                while not stop_hb.wait(5):
+                    done = sum(1 for f in fut_to_sym if f.done())
+                    print(f"  [ai_scorer]   ... {done}/{len(syms)} done ({time.time()-t0_all:.0f}s elapsed)", flush=True)
+            hb = _th.Thread(target=_heartbeat, daemon=True)
+            hb.start()
+            done_n = 0
+            try:
+                for fut in as_completed(list(fut_to_sym.keys()), timeout=HARD_DEADLINE):
                     sym, res, dt, err = fut.result()
                     done_n += 1
                     status = f"ok ({dt:.1f}s)" if res else f"skip ({dt:.1f}s) {type(err).__name__ if err else ''}"
                     print(f"  [ai_scorer]   ticker {done_n}/{len(syms)}: {sym} {status}", flush=True)
                     if res:
                         ticker_summaries[sym] = res
-                stop_hb.set()
+            except TimeoutError:
+                unfinished = [fut_to_sym[f] for f in fut_to_sym if not f.done()]
+                print(f"  [ai_scorer]   hard deadline {HARD_DEADLINE:.0f}s hit — abandoning {len(unfinished)} stuck ticker(s): {','.join(unfinished)}", flush=True)
+            stop_hb.set()
+            ex.shutdown(wait=False, cancel_futures=True)
 
         candidates = self._extract_candidates(df, ticker_summaries)
         all_results: list[dict] = []
