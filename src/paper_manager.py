@@ -16,22 +16,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Lazy-load yfinance to avoid startup hang
-_yf = None
-
-def _get_yf():
-    """Lazily import yfinance on first use."""
-    global _yf
-    if _yf is None:
-        import yfinance as _yf_mod
-        _yf = _yf_mod
-    return _yf
-
 try:
     from .data_fetching import get_risk_free_rate as _get_rfr
     _HAS_RFR = True
 except ImportError:
     _HAS_RFR = False
+
+# Use optimized yfinance from data_fetching (with curl_cffi session + caching)
+def _get_yf_and_session():
+    """Get lazily-initialized yfinance and curl_cffi session from data_fetching."""
+    from . import data_fetching
+    data_fetching._init_yfinance()
+    data_fetching._init_yf_session()
+    return data_fetching.yf, data_fetching._yf_session
 
 from .utils import is_short_position as _is_short_position
 
@@ -322,7 +319,8 @@ class PaperManager:
             symbol = self._get_option_symbol(ticker, expiration, strike, option_type)
             if not symbol:
                 return self._slippage_per_share
-            tkr = _get_yf().Ticker(symbol)
+            yf, session = _get_yf_and_session()
+            tkr = yf.Ticker(symbol, session=session)
             bid = getattr(tkr.fast_info, "bid", None)
             ask = getattr(tkr.fast_info, "ask", None)
             if bid is None or ask is None:
@@ -432,7 +430,8 @@ class PaperManager:
 
         def _fetch_spot(t: str) -> Tuple[str, Optional[float]]:
             try:
-                tkr = _get_yf().Ticker(t)
+                yf, session = _get_yf_and_session()
+                tkr = yf.Ticker(t, session=session)
                 s = getattr(tkr.fast_info, "last_price", None)
                 if s and float(s) > 0:
                     return t, float(s)
@@ -473,7 +472,8 @@ class PaperManager:
         def _fetch_option_price(task_tuple):
             entry_id, symbol, ticker, expiration, strike, option_type = task_tuple
             try:
-                tkr = _get_yf().Ticker(symbol)
+                yf, session = _get_yf_and_session()
+                tkr = yf.Ticker(symbol, session=session)
                 price = None
                 try:
                     price = getattr(tkr.fast_info, "last_price", None)
@@ -672,7 +672,8 @@ class PaperManager:
             import warnings as _w
             with _w.catch_warnings():
                 _w.simplefilter("ignore")
-                hist = _get_yf().download(sym, period=period, interval="1d", progress=False, auto_adjust=True)
+                yf, session = _get_yf_and_session()
+                hist = yf.download(sym, period=period, interval="1d", progress=False, auto_adjust=True, session=session)
             if hist.empty:
                 return sym, None
             close_col = hist["Close"]
