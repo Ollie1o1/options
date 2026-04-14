@@ -13,16 +13,20 @@ import warnings
 import sqlite3
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import requests_cache
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
-from finvizfinance.screener.performance import Performance
+
+# Lazy import for slow modules
+requests_cache = None
 
 logger = logging.getLogger(__name__)
+
+# Lazy imports for slow modules (yfinance, finvizfinance)
+yf = None  # yfinance Ticker imported on first use
+Performance = None  # finvizfinance imported on first use
 
 try:
     from .news_fetcher import fetch_news_and_events
@@ -37,27 +41,66 @@ logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 logging.getLogger("requests").setLevel(logging.CRITICAL)
 logging.getLogger("peewee").setLevel(logging.CRITICAL)
 
-# Install intelligent request caching (15-minute expiry)
-# Use WAL journal mode to prevent SQLite write-lock contention across runs
-try:
-    requests_cache.install_cache(
-        'finance_cache', backend='sqlite', expire_after=900,
-        backend_options={'pragmas': {'journal_mode': 'wal'}},
-    )
-except Exception:
-    try:
-        # Older requests_cache versions don't support backend_options
-        requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
-    except Exception:
-        pass  # Cache unavailable; requests proceed uncached
+# Lazy cache initialization (deferred to first use to avoid startup slowdown)
+_CACHE_INITIALIZED = False
+_YF_IMPORTED = False
+_FINVIZ_IMPORTED = False
 
-# Shared curl_cffi session with timeout to prevent yfinance hangs on rate-limited connections
-try:
-    from curl_cffi import requests as _cffi_requests
-    _yf_session = _cffi_requests.Session(impersonate="chrome")
-    _yf_session.timeout = 20  # 20s default for all requests
-except ImportError:
-    _yf_session = None  # Let yfinance create its own session
+def _init_request_cache():
+    """Initialize request cache on first use (lazy-loaded to avoid startup slowdown)."""
+    global _CACHE_INITIALIZED, requests_cache
+    if _CACHE_INITIALIZED:
+        return
+    _CACHE_INITIALIZED = True
+    try:
+        import requests_cache as _rc
+        requests_cache = _rc
+        requests_cache.install_cache(
+            'finance_cache', backend='sqlite', expire_after=900,
+            backend_options={'pragmas': {'journal_mode': 'wal'}},
+        )
+    except Exception:
+        try:
+            if requests_cache is None:
+                import requests_cache as _rc
+                requests_cache = _rc
+            # Older requests_cache versions don't support backend_options
+            requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+        except Exception:
+            pass  # Cache unavailable; requests proceed uncached
+
+def _init_yfinance():
+    """Import yfinance on first use (lazy-loaded to avoid startup slowdown)."""
+    global yf, _YF_IMPORTED
+    if _YF_IMPORTED:
+        return
+    _YF_IMPORTED = True
+    import yfinance as _yf
+    yf = _yf
+
+def _init_finviz():
+    """Import finvizfinance on first use (lazy-loaded to avoid startup slowdown)."""
+    global Performance, _FINVIZ_IMPORTED
+    if _FINVIZ_IMPORTED:
+        return
+    _FINVIZ_IMPORTED = True
+    from finvizfinance.screener.performance import Performance as _Performance
+    Performance = _Performance
+
+# Shared curl_cffi session with timeout to prevent yfinance hangs on rate-limited connections (lazy)
+_yf_session = None  # Initialized on first use
+
+def _init_yf_session():
+    """Initialize curl_cffi session on first use (lazy-loaded to avoid startup slowdown)."""
+    global _yf_session
+    if _yf_session is not None:
+        return
+    try:
+        from curl_cffi import requests as _cffi_requests
+        _yf_session = _cffi_requests.Session(impersonate="chrome")
+        _yf_session.timeout = 20  # 20s default for all requests
+    except ImportError:
+        _yf_session = None  # Let yfinance create its own session
 
 # Global cache bypass flag (set by --no-cache CLI flag)
 _NO_CACHE = False
@@ -561,17 +604,24 @@ class FanOutProvider(BaseDataProvider):
         )
 
 
-# Module-level singleton — swap out for testing or alternative sources
+# Module-level singleton — swap out for testing or alternative sources (lazy-loaded)
+_DATA_PROVIDER = None  # Lazy-initialized on first use
+
 def _make_default_provider() -> BaseDataProvider:
     """Build the default provider, using FanOut if yahooquery is available."""
+    _init_yfinance()  # Ensure yfinance is available
     try:
         import yahooquery  # noqa: F401
         return FanOutProvider([YFinanceProvider(), YahooQueryProvider()])
     except ImportError:
         return YFinanceProvider()
 
-
-_DATA_PROVIDER: BaseDataProvider = _make_default_provider()
+def _get_data_provider() -> BaseDataProvider:
+    """Get the default data provider, initializing it on first use."""
+    global _DATA_PROVIDER
+    if _DATA_PROVIDER is None:
+        _DATA_PROVIDER = _make_default_provider()
+    return _DATA_PROVIDER
 
 # --- IV History Persistence ---
 
@@ -949,6 +999,8 @@ _rfr_cache: dict = {"value": None, "ts": 0.0}
 
 def get_risk_free_rate() -> float:
     """Fetch current risk-free rate from ^IRX (13-week T-bill), cached for 15 min."""
+    _init_yfinance()  # Lazy init yfinance on first use
+    _init_yf_session()  # Lazy init curl_cffi session
     import time as _time
     now = _time.time()
     if _rfr_cache["value"] is not None and now - _rfr_cache["ts"] < 900:
@@ -1377,6 +1429,9 @@ def check_yield_spike() -> Tuple[bool, float]:
         return False, 0.0
 
 def get_market_context() -> Tuple[str, str, bool, float]:
+    _init_yfinance()  # Lazy init yfinance on first use
+    _init_yf_session()  # Lazy init curl_cffi session
+    _init_request_cache()  # Lazy init: first network call triggers cache setup
     market_trend = "Unknown"
     volatility_regime = "Unknown"
     macro_risk_active = False
@@ -1569,6 +1624,10 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     Fetch options data and all related context using a Single-Fetch architecture.
     Returns a dictionary with 'df' (options chain) and 'context' (all derived metrics).
     """
+    _init_yfinance()  # Lazy init yfinance on first use
+    _init_yf_session()  # Lazy init curl_cffi session
+    _init_request_cache()  # Lazy init: first fetch triggers cache setup, not import
+
     if symbol in _CHAIN_CACHE:
         return _CHAIN_CACHE[symbol]
 
@@ -2060,7 +2119,7 @@ async def batch_fetch_async(
     the provider's fetch_chain method, or {"error": str} on failure.
     """
     import asyncio
-    _provider = provider or _DATA_PROVIDER
+    _provider = provider or _get_data_provider()
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def _fetch_one(sym: str):
