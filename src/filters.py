@@ -200,3 +200,39 @@ __all__ = [
     "pick_top_per_bucket",
     "filter_options",
 ]
+
+
+def filter_long_gamma(df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Apply Long Gamma mode hard gates. Passes only options that are:
+    - Cheap (IV rank < 40%)
+    - Long-dated enough for a move to develop (DTE 20-60)
+    - Liquid enough to buy (volume >= 100)
+    - Tight spreads (spread_pct < 40%)
+    Delta filtering is intentionally omitted: straddles and strangles span
+    the full delta range by design.
+    """
+    if df.empty:
+        return df
+
+    # IV rank gate: only cheap options
+    iv_pct_col = next(
+        (c for c in ["iv_percentile_30", "iv_percentile"] if c in df.columns), None
+    )
+    if iv_pct_col:
+        df = df[df[iv_pct_col].fillna(1.0) < 0.40].copy()
+
+    # DTE gate: 20-60 calendar days
+    if "T_years" in df.columns:
+        dte = df["T_years"] * 365.0
+        df = df[(dte >= 20) & (dte <= 60)].copy()
+
+    # Minimum volume: illiquid options cannot be bought cleanly
+    if "volume" in df.columns:
+        df = df[df["volume"].fillna(0).astype(float) >= 100].copy()
+
+    # Spread filter (reuse existing threshold)
+    if "spread_pct" in df.columns:
+        df = df[df["spread_pct"].fillna(1.0) <= 0.40].copy()
+
+    return df
