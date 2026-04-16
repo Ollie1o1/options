@@ -235,7 +235,7 @@ def render_sidebar():
     with st.sidebar.expander("SCAN SETTINGS", expanded=True):
         scan_mode = st.selectbox(
             "Strategy",
-            ["Discovery scan", "Single-stock", "Budget scan", "Premium Selling"],
+            ["Discovery scan", "Single-stock", "Budget scan", "Premium Selling", "Long Gamma"],
             index=0
         )
         
@@ -441,6 +441,25 @@ def render_scanner_tab(budget, dte_bucket_filter="All"):
                 'ai_score': 'AI Score', 'ai_confidence': 'AI Conf', 'final_score': 'Final',
                 'catalyst_risk': 'Catalyst'
             }
+            # Long Gamma mode: surface squeeze/strategy signals first
+            if scan_mode == 'Long Gamma':
+                lg_priority = [
+                    'recommended_strategy', 'long_gamma_score', 'symbol', 'type', 'strike',
+                    'expiration', 'bb_width_pct', 'is_squeezing', 'iv_rank', 'rvol',
+                    'rsi_14', 'adx_14', 'premium', 'volume',
+                ]
+                existing_priority = [c for c in lg_priority if c in picks_df.columns]
+                remaining = [c for c in picks_df.columns if c not in existing_priority]
+                picks_df = picks_df[existing_priority + remaining].copy()
+                common_cols = existing_priority
+                col_rename['recommended_strategy'] = 'Strategy'
+                col_rename['long_gamma_score'] = 'LG Score'
+                col_rename['bb_width_pct'] = 'BB Width%'
+                col_rename['is_squeezing'] = 'Squeeze'
+                col_rename['rvol'] = 'RVOL'
+                col_rename['rsi_14'] = 'RSI'
+                col_rename['adx_14'] = 'ADX'
+
             sort_col = 'final_score' if (has_ai and 'final_score' in picks_df.columns) else 'quality_score'
             column_config = {
                 "Tech Score": st.column_config.NumberColumn("Tech Score (0-100)", format="%.1f"),
