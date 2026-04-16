@@ -1783,20 +1783,46 @@ def enrich_and_score(
     _sector_etf = sector_perf.get("sector_etf") if sector_perf else None
     df = calculate_scores(df, config, vix_regime_weights, trader_profile, mode, min_dte, max_dte, sector_etf=_sector_etf)
 
+    # Strategy recommendation for Long Gamma mode
+    if mode == "Long Gamma":
+        _is_sq = df.get("is_squeezing", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+        _adx = pd.to_numeric(df.get("adx_14", pd.Series(20.0, index=df.index)), errors="coerce").fillna(20.0)
+        _rsi = pd.to_numeric(df.get("rsi_14", pd.Series(50.0, index=df.index)), errors="coerce").fillna(50.0)
+        _iv_pct = pd.to_numeric(df.get("iv_percentile_30", pd.Series(0.3, index=df.index)), errors="coerce").fillna(0.3)
+        _rvol = pd.to_numeric(df.get("rvol", pd.Series(1.0, index=df.index)), errors="coerce").fillna(1.0)
+        _underlying = pd.to_numeric(df.get("underlying", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        _sma50 = pd.to_numeric(df.get("sma_50", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        _neutral_rsi = (_rsi >= 45) & (_rsi <= 55)
+        _conditions = [
+            _is_sq & (_adx < 20) & _neutral_rsi & (_iv_pct < 0.15),
+            _is_sq & (_adx < 20) & _neutral_rsi & (_iv_pct >= 0.15),
+            _is_sq & (_adx >= 20) & (_rsi > 55) & (_underlying > _sma50),
+            _is_sq & (_adx >= 20) & (_rsi < 45) & (_underlying < _sma50),
+            (~_is_sq) & (_rvol > 1.5) & (_adx > 25),
+        ]
+        _choices = ["Straddle", "Strangle", "Bull Call Spread", "Bear Put Spread", "Directional Debit Spread"]
+        df["recommended_strategy"] = np.select(_conditions, _choices, default="Monitor")
+    else:
+        df["recommended_strategy"] = ""
+
     # Final Filters
-    if mode == "Premium Selling":
+    if mode == "Long Gamma":
+        # No delta target for straddles/strangles — they span the full delta range by design
+        pass
+    elif mode == "Premium Selling":
         d_min = fc.get("premium_selling_delta_min", 0.15)
         d_max = fc.get("premium_selling_delta_max", 0.40)
+        df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
     else:
         d_min = fc.get("delta_min", 0.15)
         d_max = fc.get("delta_max", 0.35)
-    df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
-    if mode != "Premium Selling":
+        df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
+    if mode not in ("Premium Selling", "Long Gamma"):
         df = df[df["rr_ratio"] >= 0.25].copy()
 
     if df.empty:
         return df
-    
+
     # Sorting
     df = df.sort_values(["Unusual_Whale", "quality_score", "volume", "openInterest"], ascending=[False, False, False, False]).reset_index(drop=True)
     return df
