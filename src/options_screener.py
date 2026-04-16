@@ -2608,6 +2608,12 @@ def _score_fetched_data(
             if not puts.empty:
                 result["picks"].append(puts)
                 result["success"] = True
+        elif mode == "Long Gamma":
+            from .filters import filter_long_gamma
+            lg_filtered = filter_long_gamma(df_scored)
+            if not lg_filtered.empty:
+                result["picks"].append(lg_filtered)
+                result["success"] = True
         else:
             result["picks"].append(df_scored)
             result["success"] = True

@@ -414,6 +414,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     df["sentiment_score"] = sentiment_score
     df["seasonal_win_rate"] = seasonal_win_rate
     df["is_squeezing"] = is_squeezing
+    df["bb_width_pct"] = bb_width_pct
     df["rvol"] = rvol
     df["short_interest"] = short_interest
     df["vwap"] = vwap
@@ -1807,6 +1808,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     df["sentiment_score"] = sentiment_score
     df["seasonal_win_rate"] = seasonal_win_rate
     df["is_squeezing"] = is_squeezing
+    df["bb_width_pct"] = bb_width_pct
     df["rvol"] = rvol
     df["short_interest"] = short_interest
     df["vwap"] = vwap
