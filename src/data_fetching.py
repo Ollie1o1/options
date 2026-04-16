@@ -316,7 +316,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     else:
         hv_30d = hv_30d_rolling or hv_ewma
 
-    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14 = \
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14, bb_width_pct = \
         calculate_momentum_indicators(hist)
     rvol = calculate_rvol(hist)
     vwap, fib_50, fib_618 = calculate_technical_levels(hist)
@@ -476,6 +476,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
         "history_df": hist,
         "context": {
             "hv": hv_30d,
+            "bb_width_pct": bb_width_pct,
             "hv_ewma": hv_ewma,
             "hv_parkinson": hv_parkinson,
             "iv_rank": iv_rank_30,
@@ -1160,11 +1161,11 @@ def calculate_max_pain(df_chain: pd.DataFrame, underlying: float = 0.0) -> Optio
         return None
 
 
-def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool, Optional[float], Optional[float]]:
+def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], bool, Optional[float], Optional[float], Optional[float]]:
     """Calculate RSI, ATR, ADX, SMA-20, SMA-50, etc. from history DataFrame."""
     try:
         if hist.empty or len(hist) < 21:
-            return None, None, None, None, None, None, False, None, None
+            return None, None, None, None, None, None, False, None, None, None
 
         close = hist["Close"].astype(float)
         high = hist.get("High", close).astype(float)
@@ -1234,9 +1235,21 @@ def calculate_momentum_indicators(hist: pd.DataFrame) -> Tuple[Optional[float], 
         kc_lower = sma_20 - (kc_atr * 1.5)
         is_squeezing = (bb_upper < kc_upper) and (bb_lower > kc_lower)
 
-        return ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14
+        # BB Width percentile: (BB upper - BB lower) / SMA-20, ranked vs history
+        # Low value = volatility compressed = primed to expand
+        bb_width_pct = None
+        try:
+            bb_width_series = (close.rolling(window=20).std() * 4.0) / close.rolling(window=20).mean().replace(0, np.nan)
+            bb_width_series = bb_width_series.dropna()
+            if len(bb_width_series) >= 20:
+                current_width = bb_width_series.iloc[-1]
+                bb_width_pct = float((bb_width_series < current_width).mean())
+        except Exception:
+            pass
+
+        return ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14, bb_width_pct
     except Exception:
-        return None, None, None, None, None, None, False, None, None
+        return None, None, None, None, None, None, False, None, None, None
 
 def calculate_rvol(hist: pd.DataFrame) -> Optional[float]:
     """Calculate Relative Volume (Current Vol / 30-day Avg Vol)."""
@@ -1703,7 +1716,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         hv_30d = 0.5 * hv_30d_rolling + 0.5 * hv_ewma
     else:
         hv_30d = hv_30d_rolling or hv_ewma
-    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14 = calculate_momentum_indicators(hist)
+    ret_5d, rsi_14, atr_trend, sma_20, high_20, low_20, is_squeezing, sma_50, adx_14, bb_width_pct = calculate_momentum_indicators(hist)
     rvol = calculate_rvol(hist)
     vwap, fib_50, fib_618 = calculate_technical_levels(hist)
 
@@ -1947,6 +1960,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         "history_df": hist,
         "context": {
             "hv": hv_30d,
+            "bb_width_pct": bb_width_pct,
             "hv_ewma": hv_ewma,
             "hv_parkinson": hv_parkinson,
             "iv_rank": iv_rank_30,
