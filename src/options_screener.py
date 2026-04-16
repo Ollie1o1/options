@@ -1614,6 +1614,46 @@ def calculate_scores(
     # input column (used by display) is preserved.
     df["sentiment_score_norm"] = sentiment_score_component
 
+    # Long Gamma mode: compute dedicated score with inverted IV rank
+    # Done after all component scores are saved so we can reference them by column name
+    if mode == "Long Gamma":
+        lg_w = config.get("long_gamma_weights", {
+            "iv_cheap": 0.30, "squeeze": 0.25, "rvol": 0.20, "momentum": 0.15, "liquidity": 0.10
+        })
+        # Invert IV rank: low IV = good for buying options
+        _iv_cheap = (1.0 - pd.to_numeric(
+            df.get("iv_rank_score", pd.Series(0.5, index=df.index)), errors="coerce"
+        ).fillna(0.5)).clip(0, 1)
+        # Invert BB width: tight bands = compressed vol = primed to expand
+        _bb_raw = pd.to_numeric(
+            df.get("bb_width_pct", pd.Series(0.5, index=df.index)), errors="coerce"
+        ).fillna(0.5)
+        _squeeze = (1.0 - _bb_raw).clip(0, 1)
+        # Relative volume: rank-normalised (high rvol = catalyst brewing)
+        _rvol_raw = pd.to_numeric(
+            df.get("rvol", pd.Series(1.0, index=df.index)), errors="coerce"
+        ).fillna(1.0)
+        _n = len(_rvol_raw)
+        _rvol_n = ((_rvol_raw.rank(method="average", na_option="keep") - 1.0) / max(_n - 1, 1)).clip(0, 1) if _n > 1 else pd.Series(0.5, index=df.index)
+        _mom = pd.to_numeric(
+            df.get("momentum_score", pd.Series(0.5, index=df.index)), errors="coerce"
+        ).fillna(0.5)
+        _liq = pd.to_numeric(
+            df.get("liquidity_score", pd.Series(0.5, index=df.index)), errors="coerce"
+        ).fillna(0.5)
+        _lg_sum = sum(lg_w.values()) or 1.0
+        df["long_gamma_score"] = (
+            lg_w.get("iv_cheap", 0.30) * _iv_cheap
+            + lg_w.get("squeeze", 0.25) * _squeeze
+            + lg_w.get("rvol", 0.20) * _rvol_n
+            + lg_w.get("momentum", 0.15) * _mom
+            + lg_w.get("liquidity", 0.10) * _liq
+        ) / _lg_sum
+        # Override quality_score so existing sort/display logic works unchanged
+        df["quality_score"] = df["long_gamma_score"]
+    else:
+        df["long_gamma_score"] = pd.NA
+
     return df
 
 
