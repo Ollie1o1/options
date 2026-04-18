@@ -213,11 +213,13 @@ SECTOR_MAP: Dict[str, str] = {
 
 
 def clear_chain_cache() -> None:
-    """Clear the in-session options chain cache."""
+    """Clear all in-session caches between scans."""
     _CHAIN_CACHE.clear()
     _FETCH_TIMESTAMPS.clear()
     _NEWS_CACHE.clear()
     _INFO_CACHE.clear()
+    _SENTIMENT_CACHE.clear()
+    _SEASONALITY_CACHE.clear()
 
 
 def get_data_age_seconds() -> Optional[float]:
@@ -893,7 +895,7 @@ def get_underlying_price(ticker: Any) -> Optional[float]:
     except Exception:
         pass
     try:
-        info = ticker.info or {}
+        info = _get_info_cached(ticker.ticker, ticker)
         lp = safe_float(info.get("regularMarketPrice"))
         if lp:
             return lp
@@ -1469,22 +1471,27 @@ def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
     except Exception:
         return None
 
-def get_sector_performance(ticker_symbol: str) -> Dict:
+def get_sector_performance(ticker_symbol: str, hist: "pd.DataFrame | None" = None) -> Dict:
     _init_yfinance()
     _init_yf_session()
     sector_etf = SECTOR_MAP.get(ticker_symbol, "SPY")
     try:
-        tkr = yf.Ticker(ticker_symbol, session=_yf_session)
-        etf = yf.Ticker(sector_etf, session=_yf_session)
-        tkr_hist = tkr.history(period="5d")
-        etf_hist = etf.history(period="5d")
-        
-        if len(tkr_hist) < 2 or len(etf_hist) < 2:
-            return {}
+        # Derive ticker 5d return from existing history if available
+        if hist is not None and len(hist) >= 6:
+            tkr_ret = float(hist['Close'].iloc[-1] / hist['Close'].iloc[-6] - 1)
+        else:
+            tkr = yf.Ticker(ticker_symbol, session=_yf_session)
+            tkr_hist = tkr.history(period="5d")
+            if len(tkr_hist) < 2:
+                return {}
+            tkr_ret = float(tkr_hist['Close'].iloc[-1] / tkr_hist['Close'].iloc[0] - 1)
 
-        tkr_ret = (tkr_hist['Close'].iloc[-1] / tkr_hist['Close'].iloc[0]) - 1
-        etf_ret = (etf_hist['Close'].iloc[-1] / etf_hist['Close'].iloc[0]) - 1
-        
+        etf = yf.Ticker(sector_etf, session=_yf_session)
+        etf_hist = etf.history(period="5d")
+        if len(etf_hist) < 2:
+            return {}
+        etf_ret = float(etf_hist['Close'].iloc[-1] / etf_hist['Close'].iloc[0] - 1)
+
         return {
             "sector_etf": sector_etf,
             "ticker_return": tkr_ret,
@@ -1807,7 +1814,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             aux_pool.submit(_aux, "sentiment", get_sentiment, tkr),
             aux_pool.submit(_aux, "news", get_news_headlines, tkr),
             aux_pool.submit(_aux, "seasonality", check_seasonality, tkr),
-            aux_pool.submit(_aux, "sector", get_sector_performance, symbol),
+            aux_pool.submit(_aux, "sector", get_sector_performance, symbol, hist),
             aux_pool.submit(_aux, "short_interest", get_short_interest, tkr),
         ]
         for fut in as_completed(aux_futures):
