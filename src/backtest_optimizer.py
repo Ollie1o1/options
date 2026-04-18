@@ -60,29 +60,35 @@ def _get_yf():
 # -- Config --------------------------------------------------------------------
 
 WEIGHT_KEYS: List[str] = [
-    "pop", "em_realism", "rr", "momentum", "iv_rank", "liquidity", "catalyst",
-    "theta", "ev", "trader_pref", "iv_edge", "skew_align", "gamma_theta", "pcr",
-    "gex", "oi_change", "sentiment", "option_rvol", "vrp", "gamma_pin", "max_pain",
+    "pop", "em_realism", "iv_mispricing", "rr", "momentum", "iv_rank",
+    "liquidity", "catalyst", "theta", "ev", "trader_pref", "iv_edge",
+    "skew_align", "gamma_theta", "pcr", "gex", "oi_change", "sentiment",
+    "option_rvol", "vrp", "gamma_pin", "max_pain", "iv_velocity",
+    "gamma_magnitude", "vega_risk", "term_structure", "spread",
 ]
 
 # Current config.json weights (baseline)
 CURRENT_WEIGHTS: Dict[str, float] = {
-    "pop": 0.20, "em_realism": 0.18, "rr": 0.13, "momentum": 0.10,
-    "iv_rank": 0.05, "liquidity": 0.10, "catalyst": 0.02, "theta": 0.07,
-    "ev": 0.08, "trader_pref": 0.04, "iv_edge": 0.09, "skew_align": 0.04,
-    "gamma_theta": 0.03, "pcr": 0.02, "gex": 0.03, "oi_change": 0.02,
-    "sentiment": 0.02, "option_rvol": 0.04, "vrp": 0.05, "gamma_pin": 0.03,
-    "max_pain": 0.04,
+    "pop": 0.13, "em_realism": 0.0, "iv_mispricing": 0.05, "rr": 0.10,
+    "momentum": 0.10, "iv_rank": 0.08, "liquidity": 0.08, "catalyst": 0.0,
+    "theta": 0.06, "ev": 0.07, "trader_pref": 0.0, "iv_edge": 0.08,
+    "skew_align": 0.02, "gamma_theta": 0.0, "pcr": 0.0, "gex": 0.01,
+    "oi_change": 0.0, "sentiment": 0.0, "option_rvol": 0.0, "vrp": 0.05,
+    "gamma_pin": 0.0, "max_pain": 0.01, "iv_velocity": 0.05,
+    "gamma_magnitude": 0.03, "vega_risk": 0.03, "term_structure": 0.04,
+    "spread": 0.01,
 }
 
 # Research-backed starting point (used as x0 for local search)
 RESEARCH_WEIGHTS: Dict[str, float] = {
-    "pop": 0.22, "em_realism": 0.04, "rr": 0.11, "momentum": 0.05,
-    "iv_rank": 0.18, "liquidity": 0.09, "catalyst": 0.01, "theta": 0.07,
-    "ev": 0.05, "trader_pref": 0.02, "iv_edge": 0.08, "skew_align": 0.03,
-    "gamma_theta": 0.01, "pcr": 0.01, "gex": 0.01, "oi_change": 0.01,
-    "sentiment": 0.01, "option_rvol": 0.02, "vrp": 0.06, "gamma_pin": 0.01,
-    "max_pain": 0.01,
+    "pop": 0.22, "em_realism": 0.04, "iv_mispricing": 0.04, "rr": 0.11,
+    "momentum": 0.05, "iv_rank": 0.18, "liquidity": 0.09, "catalyst": 0.01,
+    "theta": 0.07, "ev": 0.05, "trader_pref": 0.02, "iv_edge": 0.08,
+    "skew_align": 0.03, "gamma_theta": 0.01, "pcr": 0.01, "gex": 0.01,
+    "oi_change": 0.01, "sentiment": 0.01, "option_rvol": 0.02, "vrp": 0.06,
+    "gamma_pin": 0.01, "max_pain": 0.01, "iv_velocity": 0.04,
+    "gamma_magnitude": 0.02, "vega_risk": 0.02, "term_structure": 0.03,
+    "spread": 0.01,
 }
 
 DEFAULT_UNIVERSE: List[str] = [
@@ -187,7 +193,7 @@ def compute_component_scores(
     rsi_score: float,      # [0,1] from RSI-14
     vol_rank: float,       # [0,1] volume percentile rank
 ) -> np.ndarray:
-    """Return a length-21 array of component scores in [0,1]."""
+    """Return a length-27 array of component scores in [0,1]."""
     prem = bs_put_price(S, K, T, r, sigma)
     delta = bs_put_delta(S, K, T, r, sigma)
     theta = bs_theta_daily(S, K, T, r, sigma)
@@ -231,29 +237,66 @@ def compute_component_scores(
     # Liquidity from volume rank
     liquidity_score = float(np.clip(vol_rank, 0, 1))
 
+    # -- New factors (match config.json composite_weights) -----------------
+
+    # IV velocity: rate of change in vol — proxy via HV ratio deviation from 1.0
+    iv_velocity_score = float(np.clip(abs(hv_ratio - 1.0) * 2.0, 0, 1))
+
+    # IV mispricing: requires live surface data, neutral in backtest
+    iv_mispricing_score = _NEUTRAL
+
+    # Term structure: proxy — longer DTE with elevated vol = steeper term structure
+    term_structure_score = float(np.clip((hv_ratio - 0.9) * T * 8.0, 0, 1))
+
+    # Gamma magnitude: BS gamma normalized
+    import math as _m
+    if T > 0 and sigma > 0 and S > 0:
+        sq = sigma * _m.sqrt(T)
+        _d1 = (_m.log(S / K) + (r + 0.5 * sigma**2) * T) / sq
+        _gamma = _m.exp(-0.5 * _d1**2) / (_m.sqrt(2 * _m.pi) * S * sq)
+        gamma_magnitude_score = float(np.clip(_gamma * S * 100, 0, 1))
+    else:
+        gamma_magnitude_score = _NEUTRAL
+
+    # Vega risk: vega as fraction of premium (high vega/premium = risky for sellers)
+    if T > 0 and sigma > 0 and S > 0:
+        _vega = S * _m.exp(-0.5 * _d1**2) / _m.sqrt(2 * _m.pi) * _m.sqrt(T)
+        vega_risk_score = float(np.clip(1.0 - _vega / max(prem * 10, 0.01), 0, 1))
+    else:
+        vega_risk_score = _NEUTRAL
+
+    # Spread: requires live bid-ask, neutral in backtest
+    spread_score = _NEUTRAL
+
     # -- Neutral for factors without historical data ----------------------------
     scores = np.array([
-        pop_score,          # pop
-        em_realism_score,   # em_realism
-        rr_score,           # rr
-        momentum_score,     # momentum
-        iv_rank_score,      # iv_rank
-        liquidity_score,    # liquidity
-        _NEUTRAL,           # catalyst  (no historical earnings calendar)
-        theta_score,        # theta
-        ev_score,           # ev
-        _NEUTRAL,           # trader_pref
-        iv_edge_score,      # iv_edge
-        skew_align_score,   # skew_align
-        _NEUTRAL,           # gamma_theta
-        _NEUTRAL,           # pcr
-        _NEUTRAL,           # gex
-        _NEUTRAL,           # oi_change
-        _NEUTRAL,           # sentiment
-        _NEUTRAL,           # option_rvol
-        vrp_score,          # vrp
-        _NEUTRAL,           # gamma_pin
-        _NEUTRAL,           # max_pain
+        pop_score,              # pop
+        em_realism_score,       # em_realism
+        iv_mispricing_score,    # iv_mispricing
+        rr_score,               # rr
+        momentum_score,         # momentum
+        iv_rank_score,          # iv_rank
+        liquidity_score,        # liquidity
+        _NEUTRAL,               # catalyst
+        theta_score,            # theta
+        ev_score,               # ev
+        _NEUTRAL,               # trader_pref
+        iv_edge_score,          # iv_edge
+        skew_align_score,       # skew_align
+        _NEUTRAL,               # gamma_theta
+        _NEUTRAL,               # pcr
+        _NEUTRAL,               # gex
+        _NEUTRAL,               # oi_change
+        _NEUTRAL,               # sentiment
+        _NEUTRAL,               # option_rvol
+        vrp_score,              # vrp
+        _NEUTRAL,               # gamma_pin
+        _NEUTRAL,               # max_pain
+        iv_velocity_score,      # iv_velocity
+        gamma_magnitude_score,  # gamma_magnitude
+        vega_risk_score,        # vega_risk
+        term_structure_score,   # term_structure
+        spread_score,           # spread
     ], dtype=np.float64)
 
     return np.clip(scores, 0.0, 1.0)
@@ -413,7 +456,7 @@ def backtest_ticker(
 
 @dataclass
 class BacktestResult:
-    component_scores: np.ndarray   # (N, 21)
+    component_scores: np.ndarray   # (N, 27)
     pnl_pct: np.ndarray            # (N,)
     symbols: List[str]
 
