@@ -2738,7 +2738,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     raw_results: Dict[str, Any] = {}
     with _suppress_scan_noise():
-        with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 12)) as executor:
             _future_map = {executor.submit(_fetch_one, sym): sym for sym in tickers}
             if HAS_ENHANCED_CLI and verbose:
                 bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
