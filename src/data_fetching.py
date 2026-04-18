@@ -973,16 +973,59 @@ def get_news_headlines(ticker: yf.Ticker, max_headlines: int = 3) -> list:
         logger.debug("News headlines fetch failed: %s", exc)
         return []
 
+def _read_seasonality_cache(symbol: str, month: int, db_path: str = "iv_cache.db") -> Optional[float]:
+    """Read cached seasonality win rate. Returns None if stale (>7 days) or missing."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""CREATE TABLE IF NOT EXISTS seasonality_cache (
+            symbol TEXT, month INTEGER, win_rate REAL, updated TEXT,
+            PRIMARY KEY (symbol, month))""")
+        row = conn.execute(
+            "SELECT win_rate, updated FROM seasonality_cache WHERE symbol=? AND month=?",
+            (symbol, month)
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        updated = datetime.fromisoformat(row[1])
+        if datetime.now() - updated > timedelta(days=7):
+            return None
+        return row[0]
+    except Exception:
+        return None
+
+
+def _write_seasonality_cache(symbol: str, month: int, win_rate: float, db_path: str = "iv_cache.db") -> None:
+    """Write seasonality win rate to SQLite cache."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""CREATE TABLE IF NOT EXISTS seasonality_cache (
+            symbol TEXT, month INTEGER, win_rate REAL, updated TEXT,
+            PRIMARY KEY (symbol, month))""")
+        conn.execute(
+            "INSERT OR REPLACE INTO seasonality_cache (symbol, month, win_rate, updated) VALUES (?, ?, ?, ?)",
+            (symbol, month, win_rate, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
     key = f"{ticker.ticker}:seasonality"
     if key in _SEASONALITY_CACHE:
         return _SEASONALITY_CACHE[key]
+    current_month = datetime.now().month
+    cached = _read_seasonality_cache(ticker.ticker, current_month)
+    if cached is not None:
+        _SEASONALITY_CACHE[key] = cached
+        return cached
     try:
         hist = ticker.history(period="5y", interval="1mo")
         if hist.empty:
             return None
-        current_month = datetime.now().month
         monthly_data = hist[hist.index.month == current_month]
         if monthly_data.empty:
             return None
@@ -990,6 +1033,7 @@ def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
         total = len(monthly_data)
         win_rate = wins / total if total > 0 else 0.0
         _SEASONALITY_CACHE[key] = win_rate
+        _write_seasonality_cache(ticker.ticker, current_month, win_rate)
         return win_rate
     except Exception as exc:
         logger.debug("Seasonality check failed for %s: %s", ticker.ticker, exc)

@@ -41,3 +41,30 @@ def test_info_cache_deduplicates():
     result2 = _get_info_cached("TEST", ticker=None)
     assert result1 is result2
     assert result1["shortPercentOfFloat"] == 0.05
+
+
+import os
+
+def test_seasonality_sqlite_cache_hit():
+    """check_seasonality should return cached value from SQLite when fresh."""
+    from src.data_fetching import _read_seasonality_cache, _write_seasonality_cache
+    db = "/tmp/test_seasonality_cache.db"
+    if os.path.exists(db):
+        os.remove(db)
+    _write_seasonality_cache("AAPL", 4, 0.65, db)
+    result = _read_seasonality_cache("AAPL", 4, db)
+    assert result == 0.65
+    if os.path.exists(db):
+        os.remove(db)
+
+
+def test_seasonality_sqlite_cache_miss():
+    """_read_seasonality_cache returns None when no entry exists."""
+    from src.data_fetching import _read_seasonality_cache
+    db = "/tmp/test_seasonality_miss.db"
+    if os.path.exists(db):
+        os.remove(db)
+    result = _read_seasonality_cache("AAPL", 4, db)
+    assert result is None
+    if os.path.exists(db):
+        os.remove(db)
