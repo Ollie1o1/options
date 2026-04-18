@@ -30,3 +30,14 @@ def test_news_cache_deduplicates():
     result2 = _get_news_cached("TEST", ticker=None)
     assert result1 is result2
     assert result1 == [{"title": "Test headline"}]
+
+
+def test_info_cache_deduplicates():
+    """_get_info_cached should return the same dict on repeated calls."""
+    from src.data_fetching import _get_info_cached, _INFO_CACHE
+    _INFO_CACHE.clear()
+    _INFO_CACHE["TEST"] = {"shortPercentOfFloat": 0.05, "dividendYield": 1.2}
+    result1 = _get_info_cached("TEST", ticker=None)
+    result2 = _get_info_cached("TEST", ticker=None)
+    assert result1 is result2
+    assert result1["shortPercentOfFloat"] == 0.05

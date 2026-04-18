@@ -114,6 +114,7 @@ _SENTIMENT_CACHE: Dict[str, float] = {}
 _SEASONALITY_CACHE: Dict[str, float] = {}
 _CHAIN_CACHE: dict = {}
 _NEWS_CACHE: Dict[str, list] = {}
+_INFO_CACHE: Dict[str, dict] = {}
 _FETCH_TIMESTAMPS: Dict[str, datetime] = {}  # symbol → last fetch time
 
 # Module-level sector map — shared by sector_analyzer, ranking, and options_screener
@@ -216,6 +217,7 @@ def clear_chain_cache() -> None:
     _CHAIN_CACHE.clear()
     _FETCH_TIMESTAMPS.clear()
     _NEWS_CACHE.clear()
+    _INFO_CACHE.clear()
 
 
 def get_data_age_seconds() -> Optional[float]:
@@ -917,6 +919,18 @@ def _get_news_cached(symbol: str, ticker: "yf.Ticker") -> list:
     return _NEWS_CACHE[symbol]
 
 
+def _get_info_cached(symbol: str, ticker: "yf.Ticker") -> dict:
+    """Fetch ticker.info once per session, cache result."""
+    if symbol in _INFO_CACHE:
+        return _INFO_CACHE[symbol]
+    try:
+        info = (ticker.info if ticker else None) or {}
+    except Exception:
+        info = {}
+    _INFO_CACHE[symbol] = info
+    return _INFO_CACHE[symbol]
+
+
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
     try:
@@ -1398,7 +1412,7 @@ def get_iv_rank_percentile_from_history(
 def get_short_interest(ticker: yf.Ticker) -> Optional[float]:
     """Fetch short interest (shortPercentOfFloat) from ticker info."""
     try:
-        info = ticker.info or {}
+        info = _get_info_cached(ticker.ticker, ticker)
         si = info.get("shortPercentOfFloat", None)
         if si is None:
             return None
@@ -1873,7 +1887,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     # Dividend yield from ticker.info
     dividend_yield = 0.0
     try:
-        _info = tkr.info or {}
+        _info = _get_info_cached(symbol, tkr)
         _dy = _info.get("dividendYield", 0)
         dividend_yield = float(_dy) if _dy else 0.0
         # yfinance returns dividendYield as percentage (e.g. 3.13 for 3.13%)
