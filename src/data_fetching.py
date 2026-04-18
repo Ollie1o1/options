@@ -1793,24 +1793,43 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     rvol = calculate_rvol(hist)
     vwap, fib_50, fib_618 = calculate_technical_levels(hist)
 
-    # 3. Fetch Other Data (Earnings, Sentiment, Seasonality)
-    earnings_date = get_next_earnings_date(tkr)
-    sentiment_score = get_sentiment(tkr)
-    news_headlines = get_news_headlines(tkr)
-    seasonal_win_rate = check_seasonality(tkr)
-    sector_perf = get_sector_performance(symbol)
+    # 3. Fetch Other Data (Earnings, Sentiment, Seasonality) — PARALLEL
+    _aux_results: Dict[str, Any] = {}
+    def _aux(name, fn, *args, **kwargs):
+        try:
+            return name, fn(*args, **kwargs)
+        except Exception:
+            return name, None
 
-    # Rich news + analyst data (multi-source aggregation)
+    with ThreadPoolExecutor(max_workers=6) as aux_pool:
+        aux_futures = [
+            aux_pool.submit(_aux, "earnings", get_next_earnings_date, tkr),
+            aux_pool.submit(_aux, "sentiment", get_sentiment, tkr),
+            aux_pool.submit(_aux, "news", get_news_headlines, tkr),
+            aux_pool.submit(_aux, "seasonality", check_seasonality, tkr),
+            aux_pool.submit(_aux, "sector", get_sector_performance, symbol),
+            aux_pool.submit(_aux, "short_interest", get_short_interest, tkr),
+        ]
+        for fut in as_completed(aux_futures):
+            name, val = fut.result()
+            _aux_results[name] = val
+
+    earnings_date = _aux_results.get("earnings")
+    sentiment_score = _aux_results.get("sentiment")
+    news_headlines = _aux_results.get("news") or []
+    seasonal_win_rate = _aux_results.get("seasonality")
+    sector_perf = _aux_results.get("sector") or {}
+    short_interest = _aux_results.get("short_interest")
+
+    # Rich news + analyst data (uses cached news from _get_news_cached)
     news_data = None
     if _HAS_NEWS_FETCHER:
         try:
             news_data = fetch_news_and_events(symbol, ticker_obj=tkr, max_age_hours=72, max_headlines=5)
-            # Keep news_headlines in sync so AI context is consistent
             if news_data and news_data.top_headlines:
                 news_headlines = news_data.top_headlines
         except Exception:
             pass
-    short_interest = get_short_interest(tkr)
 
     # Next ex-dividend date
     next_ex_div = None
