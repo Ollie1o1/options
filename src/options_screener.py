@@ -3504,7 +3504,8 @@ def main():
     except Exception:
         pass
 
-    # ── Regime Dashboard ─────────────────────────────────────────────────────
+    # ── Regime Dashboard + Portfolio Update (parallel) ─────────────────────
+    pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
     try:
         from .regime_dashboard import print_regime_dashboard
         import threading as _t
@@ -3512,6 +3513,7 @@ def main():
         import sys as _sys
         print("  Loading market data...", end="", flush=True)
         _result = [None]
+        _update_done = _t.Event()
         def _fetch():
             buf = _io.StringIO()
             _old = _sys.stdout
@@ -3521,14 +3523,25 @@ def main():
             finally:
                 _sys.stdout = _old
             _result[0] = buf.getvalue()
+        def _bg_update():
+            try:
+                pm.update_positions()
+            except Exception:
+                pass
+            finally:
+                _update_done.set()
         _th = _t.Thread(target=_fetch, daemon=True)
+        _th2 = _t.Thread(target=_bg_update, daemon=True)
         _th.start()
-        _th.join(timeout=8)  # hard 8-second cap on regime fetch
+        _th2.start()
+        _th.join(timeout=6)
         print("\r" + " " * 30 + "\r", end="")
         if _result[0]:
             print(_result[0], end="")
+        if not _update_done.wait(timeout=2):
+            print(fmt.format_warning("Portfolio update timed out — skipping live price refresh") if HAS_ENHANCED_CLI else "⚠ Portfolio update timed out")
     except Exception:
-        print()  # newline after "Loading..." if dashboard fails
+        print()
 
     # ── Market Hours Check ───────────────────────────────────────────────────
     is_open, mkt_msg = _check_market_hours()
@@ -3540,28 +3553,6 @@ def main():
             print(f"⚠  {mkt_msg}")
             print("  Quotes are 15+ min delayed. Use results for planning, not live execution.")
     print()
-
-    # Initialize PaperManager and silently auto-close any TP/SL hits
-    pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
-    try:
-        import threading
-        _update_done = threading.Event()
-        _update_err = [None]
-        def _bg_update():
-            try:
-                pm.update_positions()
-            except Exception as e:
-                _update_err[0] = e
-            finally:
-                _update_done.set()
-        _t = threading.Thread(target=_bg_update, daemon=True)
-        _t.start()
-        if not _update_done.wait(timeout=15):
-            print(fmt.format_warning("Portfolio update timed out — skipping live price refresh") if HAS_ENHANCED_CLI else "⚠ Portfolio update timed out")
-        elif _update_err[0]:
-            pass  # silently ignore update errors
-    except Exception:
-        pass
 
     # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
     _wl = load_watchlist()

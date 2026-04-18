@@ -42,17 +42,24 @@ def _c(text: str, color: str = "", bold: bool = False) -> str:
     return str(text)
 
 
+_cached_session = None
+
 def _get_session():
-    """Return a timeout-aware session for yfinance calls."""
+    """Return a timeout-aware session for yfinance calls (cached)."""
+    global _cached_session
+    if _cached_session is not None:
+        return _cached_session
     try:
         from curl_cffi import requests as _cffi
         s = _cffi.Session(impersonate="chrome")
-        s.timeout = 10
+        s.timeout = 6
+        _cached_session = s
         return s
     except ImportError:
         import requests as _req
         s = _req.Session()
-        s.request = lambda *a, timeout=10, **kw: _req.Session.request(s, *a, timeout=timeout, **kw)
+        s.request = lambda *a, timeout=6, **kw: _req.Session.request(s, *a, timeout=timeout, **kw)
+        _cached_session = s
         return s
 
 
@@ -103,6 +110,8 @@ def fetch_market_regime() -> Dict[str, Any]:
             "posture_rationale": str,
         }
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     result: Dict[str, Any] = {
         "vix": None,
         "vix_3m": None,
@@ -115,13 +124,37 @@ def fetch_market_regime() -> Dict[str, Any]:
         "posture_rationale": "Insufficient data for regime classification",
     }
 
-    try:
-        # VIX spot
-        vix = _safe_last_price("^VIX")
-        result["vix"] = vix
+    def _fetch_pcr() -> Optional[float]:
+        if not HAS_YF or not HAS_PD:
+            return None
+        try:
+            spy_tkr = yf.Ticker("SPY", session=_get_session())
+            exps = spy_tkr.options
+            if exps:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    ch = spy_tkr.option_chain(exps[0])
+                calls_oi = float(ch.calls["openInterest"].sum()) if not ch.calls.empty else 0.0
+                puts_oi = float(ch.puts["openInterest"].sum()) if not ch.puts.empty else 0.0
+                if calls_oi > 0:
+                    return round(puts_oi / calls_oi, 3)
+        except Exception:
+            pass
+        return None
 
-        # VIX3M (^VIX3M)
-        vix3m = _safe_last_price("^VIX3M")
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_vix = pool.submit(_safe_last_price, "^VIX")
+            f_vix3m = pool.submit(_safe_last_price, "^VIX3M")
+            f_spy = pool.submit(_safe_hist, "SPY", "3mo")
+            f_pcr = pool.submit(_fetch_pcr)
+
+            vix = f_vix.result(timeout=6)
+            vix3m = f_vix3m.result(timeout=6)
+            spy_close = f_spy.result(timeout=6)
+            result["options_pcr"] = f_pcr.result(timeout=6)
+
+        result["vix"] = vix
         result["vix_3m"] = vix3m
 
         # VIX term structure
@@ -134,34 +167,15 @@ def fetch_market_regime() -> Dict[str, Any]:
                 result["vix_term_structure"] = "FLAT"
 
         # SPY history for 5d return and 30d HV
-        spy_close = _safe_hist("SPY", period="3mo")
         if spy_close is not None and len(spy_close) >= 6:
-            # 5d return
             spy_ret_5d = float(spy_close.iloc[-1] / spy_close.iloc[-6] - 1.0)
             result["spy_ret_5d"] = spy_ret_5d
 
-            # 30d realized vol
             if HAS_NP and len(spy_close) >= 32:
                 import numpy as _np
                 log_rets = _np.log(spy_close / spy_close.shift(1)).dropna()
                 hv_30 = float(log_rets.iloc[-30:].std() * math.sqrt(252))
                 result["spy_hv_30"] = hv_30
-
-        # SPY aggregate put/call ratio from options chain
-        if HAS_YF and HAS_PD:
-            try:
-                spy_tkr = yf.Ticker("SPY", session=_get_session())
-                exps = spy_tkr.options
-                if exps:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        ch = spy_tkr.option_chain(exps[0])
-                    calls_oi = float(ch.calls["openInterest"].sum()) if not ch.calls.empty else 0.0
-                    puts_oi = float(ch.puts["openInterest"].sum()) if not ch.puts.empty else 0.0
-                    if calls_oi > 0:
-                        result["options_pcr"] = round(puts_oi / calls_oi, 3)
-            except Exception:
-                pass
 
         # IV premium: VIX / SPY_HV_30 - 1
         if result["vix"] is not None and result["spy_hv_30"] is not None and result["spy_hv_30"] > 0:
