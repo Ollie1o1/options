@@ -113,6 +113,7 @@ _IV_RANK_CACHE: Dict[str, Tuple] = {}
 _SENTIMENT_CACHE: Dict[str, float] = {}
 _SEASONALITY_CACHE: Dict[str, float] = {}
 _CHAIN_CACHE: dict = {}
+_NEWS_CACHE: Dict[str, list] = {}
 _FETCH_TIMESTAMPS: Dict[str, datetime] = {}  # symbol → last fetch time
 
 # Module-level sector map — shared by sector_analyzer, ranking, and options_screener
@@ -214,6 +215,7 @@ def clear_chain_cache() -> None:
     """Clear the in-session options chain cache."""
     _CHAIN_CACHE.clear()
     _FETCH_TIMESTAMPS.clear()
+    _NEWS_CACHE.clear()
 
 
 def get_data_age_seconds() -> Optional[float]:
@@ -903,6 +905,18 @@ def get_underlying_price(ticker: Any) -> Optional[float]:
         pass
     return None
 
+def _get_news_cached(symbol: str, ticker: "yf.Ticker") -> list:
+    """Fetch ticker.news once per session, cache result."""
+    if symbol in _NEWS_CACHE:
+        return _NEWS_CACHE[symbol]
+    try:
+        news = ticker.news if ticker else []
+    except Exception:
+        news = []
+    _NEWS_CACHE[symbol] = news or []
+    return _NEWS_CACHE[symbol]
+
+
 @retry_with_backoff(retries=2, backoff_in_seconds=1)
 def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
     try:
@@ -915,7 +929,7 @@ def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
         return _SENTIMENT_CACHE[key]
 
     try:
-        news = ticker.news
+        news = _get_news_cached(ticker.ticker, ticker)
         if not news:
             return None
         headlines = ". ".join([item.get("title", "") for item in news])
@@ -932,7 +946,7 @@ def get_sentiment(ticker: yf.Ticker) -> Optional[float]:
 def get_news_headlines(ticker: yf.Ticker, max_headlines: int = 3) -> list:
     """Return up to max_headlines recent news titles for a ticker."""
     try:
-        news = ticker.news
+        news = _get_news_cached(ticker.ticker, ticker)
         if not news:
             return []
         titles = []

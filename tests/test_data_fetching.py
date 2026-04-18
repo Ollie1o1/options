@@ -19,3 +19,14 @@ def test_clear_chain_cache_empties_cache():
     assert len(_CHAIN_CACHE) >= 2
     clear_chain_cache()
     assert len(_CHAIN_CACHE) == 0
+
+
+def test_news_cache_deduplicates():
+    """_get_news_cached should return the same list object on repeated calls."""
+    from src.data_fetching import _get_news_cached, _NEWS_CACHE
+    _NEWS_CACHE.clear()
+    _NEWS_CACHE["TEST"] = [{"title": "Test headline"}]
+    result1 = _get_news_cached("TEST", ticker=None)
+    result2 = _get_news_cached("TEST", ticker=None)
+    assert result1 is result2
+    assert result1 == [{"title": "Test headline"}]
