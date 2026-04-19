@@ -1,0 +1,32 @@
+{
+  "description": "Baseline weight profile — snapshot of config.json composite_weights. Use as control group for optimization.",
+  "composite_weights": {
+    "pop": 0.13,
+    "em_realism": 0.0,
+    "iv_mispricing": 0.05,
+    "rr": 0.1,
+    "momentum": 0.1,
+    "iv_rank": 0.08,
+    "liquidity": 0.08,
+    "catalyst": 0.0,
+    "theta": 0.06,
+    "ev": 0.07,
+    "trader_pref": 0.0,
+    "iv_edge": 0.08,
+    "skew_align": 0.02,
+    "gamma_theta": 0.0,
+    "pcr": 0.0,
+    "gex": 0.01,
+    "oi_change": 0.0,
+    "sentiment": 0.0,
+    "option_rvol": 0.0,
+    "vrp": 0.05,
+    "gamma_pin": 0.0,
+    "max_pain": 0.01,
+    "iv_velocity": 0.05,
+    "gamma_magnitude": 0.03,
+    "vega_risk": 0.03,
+    "term_structure": 0.04,
+    "spread": 0.01
+  }
+}

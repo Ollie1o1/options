@@ -38,7 +38,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -90,6 +90,12 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN sentiment_score_norm REAL",
         "ALTER TABLE trades ADD COLUMN spread_score REAL",
         "ALTER TABLE trades ADD COLUMN trader_pref_score REAL",
+    ],
+    8: [
+        # Tag each trade with the weight profile that produced it, so scans under
+        # different weight configurations can be compared head-to-head later.
+        "ALTER TABLE trades ADD COLUMN weight_profile TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_dedup_profile ON trades(ticker, strike, expiration, type, weight_profile, date)",
     ],
 }
 
@@ -207,11 +213,13 @@ class PaperManager:
             iv_edge_score, vrp_score, iv_mispricing_score, skew_align_score, vega_risk_score, term_structure_score,
             catalyst_score, em_realism_score, gamma_theta_score, gex_score, gamma_magnitude_score,
             gamma_pin_score, iv_velocity_score, max_pain_score, oi_change_score, option_rvol_score,
-            pcr_score, sentiment_score_norm, spread_score, trader_pref_score
+            pcr_score, sentiment_score_norm, spread_score, trader_pref_score,
+            weight_profile
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?
         )
         """
 
@@ -273,12 +281,47 @@ class PaperManager:
             _float_or_none("sentiment_score_norm"),
             _float_or_none("spread_score"),
             _float_or_none("trader_pref_score"),
+            trade_dict.get("weight_profile"),
         )
 
         with self._get_connection() as conn:
             conn.execute(query, params)
 
         print(f"Logged {trade_dict['type'].upper()} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
+
+    def log_trade_if_new(self, trade_dict: Dict[str, Any]) -> bool:
+        """Insert a paper trade unless an identical row already exists today.
+
+        Dedup key: ``(calendar day, ticker, strike, expiration, type, weight_profile)``.
+        ``weight_profile`` may be ``None`` for untagged trades — NULL-equal rows still
+        dedup against each other because ``IS`` is used instead of ``=``.
+
+        Returns ``True`` if inserted, ``False`` if skipped as duplicate.
+        """
+        ticker = trade_dict["ticker"].upper()
+        typ = trade_dict["type"].lower()
+        strike = float(trade_dict["strike"])
+        expiration = trade_dict["expiration"]
+        profile = trade_dict.get("weight_profile")
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM trades
+                WHERE ticker = ?
+                  AND strike = ?
+                  AND expiration = ?
+                  AND type = ?
+                  AND weight_profile IS ?
+                  AND date(date) = date('now', 'localtime')
+                LIMIT 1
+                """,
+                (ticker, strike, expiration, typ, profile),
+            ).fetchone()
+        if row is not None:
+            return False
+        self.log_trade(trade_dict)
+        return True
 
     def log_spread(self, spread_dict: dict) -> None:
         """

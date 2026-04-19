@@ -22,10 +22,11 @@ A Python-based options screening tool that identifies high-probability trading o
    - [Output Columns Explained](#output-columns-explained)
 6. [Analytics Engine](#analytics-engine)
 7. [Paper Trading](#paper-trading)
-8. [Configuration](#configuration)
-9. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
-10. [Project Structure](#project-structure)
-11. [Roadmap](#roadmap)
+8. [Weight-Profile Auto-Logging](#weight-profile-auto-logging)
+9. [Configuration](#configuration)
+10. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
+11. [Project Structure](#project-structure)
+12. [Roadmap](#roadmap)
 
 ---
 
@@ -144,17 +145,29 @@ python3 run.py [OPTIONS]                   # auto-activates venv
 python3 -m src [OPTIONS]                   # auto-activates venv
 
 Options:
-  --no-color      Disable ANSI color output (useful for piping to a log file)
-  --no-ai         Skip AI analysis after scan
-  --close-trades  Update the trade log with closing prices and realised P/L
-  --ui            Launch the Streamlit web dashboard
+  --no-color             Disable ANSI color output (useful for piping to a log file)
+  --no-ai                Skip AI analysis after scan
+  --close-trades         Update the trade log with closing prices and realised P/L
+  --ui                   Launch the Streamlit web dashboard
+  --mode MODE            Skip mode menu: ticker | all | discover | sell | spreads | iron | portfolio | mylist
+  --ticker SYM           Ticker symbol (implies --mode ticker)
+  --watchlist NAME       Use named watchlist (liquid_large_cap, sector_etfs, high_iv, income)
+  --top N                Cross-ticker top-N scan (default 10), grouped by DTE bucket
+  --export csv           Export top scan results to scan_results_YYYYMMDD_HHMM.csv
+  --auto                 Skip interactive prompts, use config defaults
+  --compact              Compact per-pick output (3 lines per pick)
+  --no-cache             Disable all caching (requests, AI scores, IV history)
+  --weights NAME         Weight profile name (in configs/weights/) or path to JSON; tags logged trades
+  --auto-log             Auto-log top-N picks after scan (skips save-menu prompt)
+  --log-top N            With --auto-log: how many top picks to log (default 5)
+  --list-profiles        List available weight profiles and exit
   --surface              Show 3D P&L risk surface for the top pick (single-stock mode)
   --surface-mode M       Render mode: braille (default, hi-res Unicode) or ascii
   --surface-greek G      Show greek sensitivity surface: delta, gamma, vega, theta
   --no-contours          Disable contour lines on surface
   --viz                  Open interactive 3D visualizer (Plotly, opens in browser)
   -h, --help             Show help and exit
-  --version       Show version string and exit
+  --version              Show version string and exit
 ```
 
 ### Terminal Output
@@ -474,7 +487,7 @@ PoP is arguably the most important metric in the screener. Unlike simple "Delta"
 
 ### Scoring
 
-Each contract is scored across 23 weighted factors including:
+Each contract is scored across 27 weighted factors including:
 
 | Factor | What it measures |
 |--------|-----------------|
@@ -530,13 +543,76 @@ For each pick the screener generates:
 Log any pick directly from the CLI and track it going forward:
 
 - Positions auto-update on every launch (fetches live quotes via yfinance)
-- Entry IV and Greeks stored per trade (schema v6)
+- Entry IV and Greeks stored per trade (schema v8)
+- All 27 per-component scores stored at entry — enables per-component IC analysis after trades close
 - Take Profit and Stop Loss thresholds enforced from `config.json`
 - P&L attribution for closed trades (delta/gamma/theta/vega breakdown)
 - Full BS repricing stress test on open portfolio
 - Win rate, total P/L, and average return tracked in a local SQLite database
 - Close expired positions with `python -m src.options_screener --close-trades`
-- View portfolio with `python -m src.check_pnl`
+- View portfolio with `python -m src.check_pnl` (or press `7` / `PORTFOLIO` at the mode menu)
+
+---
+
+## Weight-Profile Auto-Logging
+
+Collect optimization data for the 27 composite weights by running the screener under different weight configurations and auto-logging the best picks. Every logged trade is tagged with a `weight_profile` column so you can later compute per-profile win rate, IC, and P&L and pick the best weight set.
+
+### The default "mimic a full scan and log the best trades" command
+
+```bash
+python -m src.options_screener --mode discover --weights baseline --auto-log --log-top 5 --auto
+```
+
+This is the recommended daily data-collection command. It:
+
+- Runs a **Discovery scan** across the top 100 most-liquid tickers (thousands of contracts screened).
+- Applies the **baseline** weight profile (a snapshot of `config.json`'s `composite_weights` — the control).
+- After scoring, takes the **top 5 picks** by `quality_score` and logs them to `paper_trades.db`.
+- **Deduplicates**: if you re-run the same day under the same profile, duplicates are skipped so noise doesn't pollute the dataset.
+- **No prompts** (`--auto`): runs end-to-end unattended.
+
+Each auto-logged trade is identical to a manually-logged one — it appears in the portfolio view (`python -m src.check_pnl` or `7` at the mode menu), contributes to portfolio Greeks/stress test, and can be closed with `--close-trades`.
+
+### A/B-testing weight sets
+
+Create a variant in `configs/weights/` (copy `baseline.json`, tweak weights), then run both:
+
+```bash
+python -m src.options_screener --mode discover --weights baseline --auto-log --auto
+python -m src.options_screener --mode discover --weights exp_high_pop --auto-log --auto
+```
+
+Same scan, different weights → different rankings → different logged picks. Over weeks, the DB builds up per-profile P&L that you can compare directly.
+
+```bash
+# List available profiles
+python -m src.options_screener --list-profiles
+
+# Inspect per-profile counts
+sqlite3 paper_trades.db "SELECT weight_profile, COUNT(*) FROM trades GROUP BY weight_profile"
+
+# Per-profile P&L on closed trades
+sqlite3 paper_trades.db "SELECT weight_profile, COUNT(*), ROUND(AVG(pnl_pct)*100,1) AS avg_pct FROM trades WHERE status='CLOSED' GROUP BY weight_profile"
+```
+
+### Creating a new profile
+
+```bash
+cp configs/weights/baseline.json configs/weights/my_experiment.json
+# Edit the file — tweak any of the 27 weights under "composite_weights"
+python -m src.options_screener --weights my_experiment --auto-log --auto --mode discover
+```
+
+Unknown keys log a warning; non-numeric values error out. If `--weights` is omitted, behaviour is unchanged from pre-profile runs (trades logged with `weight_profile = NULL`).
+
+### Dedup rule
+
+`(calendar_day, ticker, strike, expiration, type, weight_profile)` is the unique key. Meaning:
+
+- Same contract re-scanned on the same day under the same profile → **skipped**.
+- Same contract under a different profile → **inserted** (so profiles can diverge).
+- Same contract the next day → **inserted** (re-entry signal preserved).
 
 ---
 
@@ -708,6 +784,8 @@ options/
 ├── options_screener.py       # Thin wrapper for backward compatibility
 ├── backtest_screener.py      # Backtester entry point
 ├── config.json               # Screener thresholds, weights, and exit rules
+├── configs/
+│   └── weights/              # Weight profiles for A/B optimization (baseline.json + experiments)
 ├── watchlist.json            # Personal ticker list (auto-created by ADD command)
 ├── requirements.txt
 ├── requirements_bots.txt     # Bot/API dependencies (fastapi, discord.py, python-telegram-bot)
@@ -729,7 +807,8 @@ options/
     ├── simulation.py         # Monte Carlo PoP / PoT (Merton Jump Diffusion GBM)
     ├── formatting.py         # ANSI colours, box drawing, metric formatters
     ├── stress_test.py        # Full BS repricing scenario P/L matrix
-    ├── paper_manager.py      # SQLite paper trade logging, schema migration (v5)
+    ├── paper_manager.py      # SQLite paper trade logging, schema migration (v8), dedup, weight_profile tagging
+    ├── weight_profiles.py    # Load/list weight profiles from configs/weights/
     ├── check_pnl.py          # Standalone portfolio P/L viewer with Greeks
     ├── news_fetcher.py       # Concurrent multi-source news (yfinance, Finviz, Polygon)
     ├── macro_analyzer.py     # Macro risk gating (10Y yield, VIX, DXY, credit spreads)
@@ -770,7 +849,8 @@ options/
 - [x] SVI IV surface fitting with mispricing detection
 - [x] Monte Carlo PoP blending (Merton Jump Diffusion)
 - [x] HV-adjusted expected value
-- [x] Paper trading with entry IV/Greeks storage, P&L attribution, schema v6
+- [x] Paper trading with entry IV/Greeks + all 27 component scores stored, P&L attribution, schema v8
+- [x] Weight-profile auto-logging system — `--weights NAME --auto-log` for A/B optimization with per-profile dedup
 - [x] Full BS repricing stress test (7×3 scenario matrix)
 - [x] Streamlit dashboard
 - [x] Full colour CLI — responsive width, trade plan per pick, comparison table

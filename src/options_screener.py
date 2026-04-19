@@ -3343,6 +3343,10 @@ def main():
     parser.add_argument("--compact", action="store_true", help="Compact per-pick output (3 lines per pick)")
     parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist"], help="Scan mode (skip mode menu)")
     parser.add_argument("--ticker", type=str, default=None, metavar="SYM", help="Ticker symbol (implies --mode ticker)")
+    parser.add_argument("--weights", type=str, default=None, metavar="NAME", help="Weight profile name (in configs/weights/) or path to a JSON file; tags logged trades with the profile id")
+    parser.add_argument("--auto-log", action="store_true", help="Skip the save-menu prompt and automatically log top-N picks to paper_trades.db")
+    parser.add_argument("--log-top", type=int, default=5, metavar="N", help="With --auto-log: number of top-ranked picks to log (default 5)")
+    parser.add_argument("--list-profiles", action="store_true", help="List available weight profiles and exit")
     args, _ = parser.parse_known_args()
 
     if args.no_cache:
@@ -3365,6 +3369,29 @@ def main():
     if args.version:
         print("Options Screener v1.0.0")
         sys.exit(0)
+
+    if args.list_profiles:
+        from .weight_profiles import list_profiles as _lp
+        _names = _lp()
+        if _names:
+            print("Available weight profiles:")
+            for n in _names:
+                print(f"  {n}")
+        else:
+            print("No weight profiles found in configs/weights/")
+        sys.exit(0)
+
+    # ── Load weight profile if requested (used below by run_scan + trade logging) ──
+    _weight_profile_id: Optional[str] = None
+    _custom_weights: Optional[Dict] = None
+    if args.weights:
+        try:
+            from .weight_profiles import load_weight_profile as _lwp
+            _weight_profile_id, _custom_weights = _lwp(args.weights)
+            print(f"Weight profile: {_weight_profile_id} ({len(_custom_weights)} weights)")
+        except (FileNotFoundError, ValueError) as _wp_exc:
+            print(f"Error loading --weights {args.weights}: {_wp_exc}")
+            sys.exit(2)
 
     WIDTH = get_display_width()
 
@@ -3389,6 +3416,10 @@ def main():
                 ("--surface-greek","Show greek surface: delta, gamma, vega, theta"),
                 ("--no-contours",  "Disable contour lines on surface"),
                 ("--viz",          "Open interactive 3D visualizer (Plotly, opens in browser)"),
+                ("--weights NAME", "Weight profile (configs/weights/<name>.json) — tags logged trades"),
+                ("--auto-log",     "Skip save-menu and auto-log top-N picks to paper_trades.db"),
+                ("--log-top N",    "With --auto-log: how many top picks to log (default 5)"),
+                ("--list-profiles","List available weight profiles and exit"),
             ]:
                 print(f"  {fmt.colorize(f'{flag:<18}', fmt.Colors.BRIGHT_YELLOW)} {desc}")
         else:
@@ -3758,7 +3789,7 @@ def main():
             surface_greek = getattr(args, 'surface_greek', None)
             surface_type = surface_greek if surface_greek else 'pnl'
             show_contours = not getattr(args, 'no_contours', False)
-            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, custom_weights=_custom_weights, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
             if scan_results is None:
                 sys.exit(0)
 
@@ -3807,6 +3838,94 @@ def main():
                     print(fmt.format_warning("Plotly required for --viz: pip install plotly") if HAS_ENHANCED_CLI else "  plotly required for --viz")
                 except Exception as _viz_exc:
                     logger.warning("Visualizer failed: %s", _viz_exc)
+
+            # ── Auto-log mode: bypass interactive save menu ──────────────────
+            if _has_results and getattr(args, "auto_log", False):
+                _log_src = picks if not picks.empty else (
+                    _credit_spreads if isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty
+                    else _iron_condors
+                )
+                if isinstance(_log_src, pd.DataFrame) and not _log_src.empty and "symbol" in _log_src.columns:
+                    # Single-leg picks only in v1; spreads/condors need separate dedup logic.
+                    _single_legs = _log_src.copy()
+                    if "short_strike" in _single_legs.columns or "net_credit" in _single_legs.columns or "total_credit" in _single_legs.columns:
+                        # log_src was a spreads/condors DF — skip auto-log (not supported yet)
+                        print(fmt.format_warning("--auto-log supports single-leg picks only; skipping spreads/condors") if HAS_ENHANCED_CLI else "  Auto-log supports single-leg picks only.")
+                        _single_legs = _single_legs.iloc[0:0]
+
+                    if not _single_legs.empty and "quality_score" in _single_legs.columns:
+                        _single_legs = _single_legs.sort_values("quality_score", ascending=False)
+                    _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                    _candidates = _single_legs.head(_top_n)
+
+                    _today_str = datetime.now().strftime("%Y-%m-%d")
+                    _inserted = 0
+                    _skipped = 0
+                    for _, row in _candidates.iterrows():
+                        _entry_price = (
+                            safe_float(row.get("ask") or None)
+                            or safe_float(row.get("lastPrice"))
+                            or safe_float(row.get("premium"), 0.0)
+                        )
+                        if not _entry_price or _entry_price <= 0:
+                            continue
+                        _trade = {
+                            "date": _today_str,
+                            "ticker": row["symbol"],
+                            "expiration": row["expiration"],
+                            "strike": row["strike"],
+                            "type": str(row["type"]).capitalize(),
+                            "entry_price": _entry_price,
+                            "quality_score": row.get("quality_score", 0.5),
+                            "strategy_name": f"Short {str(row['type']).capitalize()}",
+                            "entry_iv": row.get("impliedVolatility"),
+                            "entry_delta": row.get("delta"),
+                            "entry_gamma": row.get("gamma"),
+                            "entry_vega": row.get("vega"),
+                            "entry_theta": row.get("theta"),
+                            "dividend_yield": row.get("dividend_yield"),
+                            "pop_score": row.get("pop_score"),
+                            "ev_score": row.get("ev_score"),
+                            "rr_score": row.get("rr_score"),
+                            "liquidity_score": row.get("liquidity_score"),
+                            "momentum_score": row.get("momentum_score"),
+                            "iv_rank_score": row.get("iv_rank_score"),
+                            "theta_score": row.get("theta_score"),
+                            "iv_edge_score": row.get("iv_advantage_score"),
+                            "vrp_score": row.get("vrp_score"),
+                            "iv_mispricing_score": row.get("iv_mispricing_score"),
+                            "skew_align_score": row.get("skew_align_score"),
+                            "vega_risk_score": row.get("vega_risk_score"),
+                            "term_structure_score": row.get("term_structure_score"),
+                            "catalyst_score": row.get("catalyst_score"),
+                            "em_realism_score": row.get("em_realism_score"),
+                            "gamma_theta_score": row.get("gamma_theta_score"),
+                            "gex_score": row.get("gex_score"),
+                            "gamma_magnitude_score": row.get("gamma_magnitude_score"),
+                            "gamma_pin_score": row.get("gamma_pin_score"),
+                            "iv_velocity_score": row.get("iv_velocity_score"),
+                            "max_pain_score": row.get("max_pain_score"),
+                            "oi_change_score": row.get("oi_change_score"),
+                            "option_rvol_score": row.get("option_rvol_score"),
+                            "pcr_score": row.get("pcr_score"),
+                            "sentiment_score_norm": row.get("sentiment_score_norm"),
+                            "spread_score": row.get("spread_score"),
+                            "trader_pref_score": row.get("trader_pref_score"),
+                            "weight_profile": _weight_profile_id,
+                        }
+                        try:
+                            if pm.log_trade_if_new(_trade):
+                                _inserted += 1
+                            else:
+                                _skipped += 1
+                        except Exception as _log_exc:
+                            print(f"  Error auto-logging {row.get('symbol')}: {_log_exc}")
+
+                    _tag = _weight_profile_id or "untagged"
+                    _summary = f"Auto-logged {_inserted} new, skipped {_skipped} duplicates (profile: {_tag})"
+                    print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  \u2713 {_summary}")
+                # Skip the interactive save-menu loop below; continue to scan-another prompt
+                _has_results = False
 
             # ── Collapsed post-scan prompt (loops so V → P → L all work in one sitting) ──
             if _has_results:
@@ -3887,6 +4006,7 @@ def main():
                             "sentiment_score_norm": top_pick_row.get("sentiment_score_norm"),
                             "spread_score": top_pick_row.get("spread_score"),
                             "trader_pref_score": top_pick_row.get("trader_pref_score"),
+                            "weight_profile": _weight_profile_id,
                         }
                         pm.log_trade(trade_dict)
                         msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
@@ -4019,6 +4139,7 @@ def main():
                                             "sentiment_score_norm": row.get("sentiment_score_norm"),
                                             "spread_score": row.get("spread_score"),
                                             "trader_pref_score": row.get("trader_pref_score"),
+                                            "weight_profile": _weight_profile_id,
                                         }
                                         pm.log_trade(trade_dict)
                                 except Exception as _log_exc:
