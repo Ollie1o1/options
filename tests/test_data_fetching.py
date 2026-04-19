@@ -68,3 +68,22 @@ def test_seasonality_sqlite_cache_miss():
     assert result is None
     if os.path.exists(db):
         os.remove(db)
+
+
+def test_clear_chain_cache_clears_all_caches():
+    """clear_chain_cache should clear sentiment and seasonality caches too."""
+    from src.data_fetching import (
+        clear_chain_cache, _CHAIN_CACHE, _NEWS_CACHE, _INFO_CACHE,
+        _SENTIMENT_CACHE, _SEASONALITY_CACHE,
+    )
+    _CHAIN_CACHE["X"] = {}
+    _NEWS_CACHE["X"] = []
+    _INFO_CACHE["X"] = {}
+    _SENTIMENT_CACHE["X:sentiment"] = 0.5
+    _SEASONALITY_CACHE["X:seasonality"] = 0.6
+    clear_chain_cache()
+    assert len(_CHAIN_CACHE) == 0
+    assert len(_NEWS_CACHE) == 0
+    assert len(_INFO_CACHE) == 0
+    assert len(_SENTIMENT_CACHE) == 0
+    assert len(_SEASONALITY_CACHE) == 0
