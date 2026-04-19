@@ -561,10 +561,18 @@ Collect optimization data for the 27 composite weights by running the screener u
 ### The default "mimic a full scan and log the best trades" command
 
 ```bash
+python3 run.py --default-scoring
+```
+
+(or the alias `-ds`, or the long form below — all three are equivalent.)
+
+Under the hood this expands to, and auto-activates the venv for you:
+
+```bash
 python -m src.options_screener --mode discover --weights baseline --auto-log --log-top 5 --auto
 ```
 
-This is the recommended daily data-collection command. It:
+It:
 
 - Runs a **Discovery scan** across the top 100 most-liquid tickers (thousands of contracts screened).
 - Applies the **baseline** weight profile (a snapshot of `config.json`'s `composite_weights` — the control).
