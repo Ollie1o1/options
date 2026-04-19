@@ -566,6 +566,14 @@ python3 run.py --default-scoring
 
 (or the alias `-ds`, or the long form below — all three are equivalent.)
 
+**Change the top-N count inline** — append `--5`, `--10`, `--25` (any positive integer) to override `--log-top`:
+
+```bash
+python3 run.py --default-scoring --10   # log top 10 instead of the default 5
+python3 run.py -ds --25                 # log top 25
+python3 run.py --5 --mode mylist --weights baseline --auto-log --auto   # use --5 on its own
+```
+
 Under the hood this expands to, and auto-activates the venv for you:
 
 ```bash

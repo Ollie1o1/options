@@ -8,8 +8,13 @@ Shortcut flags (expanded before forwarding):
   --default-scoring   Discovery scan + baseline weights + auto-log top 5 + unattended.
                       Equivalent to:
                         --mode discover --weights baseline --auto-log --log-top 5 --auto
+                      Aliases: --default_scoring, -ds
+
+  --5, --10, --N      Shorthand for --log-top N. Can be combined with --default-scoring
+                      (the later value wins, so `--default-scoring --10` logs top 10).
 """
 import os
+import re
 import sys
 import subprocess
 
@@ -26,12 +31,19 @@ _DEFAULT_SCORING_EXPANSION = [
     "--auto",
 ]
 _shortcut_aliases = {"--default-scoring", "--default_scoring", "-ds"}
+# --5 / --10 / --25 / etc. → --log-top N
+_TOPN_PATTERN = re.compile(r"^--(\d+)$")
+
 _argv = []
 for _arg in sys.argv[1:]:
     if _arg in _shortcut_aliases:
         _argv.extend(_DEFAULT_SCORING_EXPANSION)
-    else:
-        _argv.append(_arg)
+        continue
+    _m = _TOPN_PATTERN.match(_arg)
+    if _m:
+        _argv.extend(["--log-top", _m.group(1)])
+        continue
+    _argv.append(_arg)
 
 # Locate venv Python (Windows first, then Unix)
 _venv_python = os.path.join(_project_root, "venv", "Scripts", "python.exe")
