@@ -5,16 +5,23 @@ import logging
 AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
-    "model": "arcee-ai/trinity-large-preview:free",
-    "fallback_model": "stepfun/step-3.5-flash:free",                   # used after 2 failed retries
-    "second_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free", # used after 3 failed retries
-    "third_fallback_model": "meta-llama/llama-3.3-70b-instruct:free",  # used after 4 failed retries
-    "api_key_env": "OPENROUTER_ARCEE_KEY",
+    # New key chain (2026-04-20): z-ai primary, gpt-oss-120b fallback, elephant-alpha tertiary.
+    # All three are fresh keys, so prior "batch 1 attempt" hangs from exhausted free-tier credits
+    # should be gone. A hard wall-clock timeout in _score_batch_with_retry guarantees we fall
+    # through the chain even if an endpoint silently hangs at the TCP layer.
+    "model": "z-ai/glm-4.5-air:free",                                      # attempt 1 (PRIMARY)
+    "fallback_model": "openai/gpt-oss-120b:free",                          # attempt 2
+    "second_fallback_model": "openrouter/elephant-alpha",                  # attempt 3 (Elephant)
+    "third_fallback_model": "meta-llama/llama-3.3-70b-instruct:free",      # attempt 4 (legacy spare)
+    "api_key_env": "OPENROUTER_API_KEY",
 
     # ── Per-model API key overrides ───────────────────────────────────────────
     # Maps model id → env var name for models that use a different key.
     # Models NOT listed here fall back to "api_key_env".
     "model_key_map": {
+        "z-ai/glm-4.5-air:free":                  "OPENROUTER_ZAI_KEY",
+        "openai/gpt-oss-120b:free":               "OPENROUTER_GPTOSS_KEY",
+        "openrouter/elephant-alpha":              "OPENROUTER_ELEPHANT_KEY",
         "arcee-ai/trinity-large-preview:free":    "OPENROUTER_ARCEE_KEY",
         "stepfun/step-3.5-flash:free":            "OPENROUTER_STEPFUN_KEY",
         "nvidia/nemotron-3-super-120b-a12b:free": "OPENROUTER_NVIDIA_KEY",
@@ -56,7 +63,7 @@ AI_CONFIG: dict = {
     "batch_size": 3,     # smaller batches = shorter responses = less truncation risk
     "max_tokens": 2048,  # enough room for 3 candidates at ~600 tokens each with margin
     "temperature": 0.1,
-    "timeout": 25,
+    "timeout": 12,       # lowered from 25 — free-tier models that take >12s are usually hung
 
     # ── Narrative thresholds for context enrichment ───────────────────────────
     "narrative_thresholds": {
@@ -114,6 +121,8 @@ def resolve_api_key_env(model_id: str, config: dict) -> str:
     if model_id in explicit:
         return explicit[model_id]
     prefix_map = {
+        "z-ai/":       "OPENROUTER_ZAI_KEY",
+        "openai/":     "OPENROUTER_GPTOSS_KEY",
         "arcee-ai/":   "OPENROUTER_ARCEE_KEY",
         "stepfun/":    "OPENROUTER_STEPFUN_KEY",
         "nvidia/":     "OPENROUTER_NVIDIA_KEY",

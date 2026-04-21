@@ -221,7 +221,8 @@ def _maybe_trigger_recalib(cache_path: str) -> None:
             _IC_RECALIB_RUNNING = True
             try:
                 import sqlite3 as _sqlite3
-                with _sqlite3.connect("paper_trades.db") as _conn:
+                from contextlib import closing as _closing
+                with _closing(_sqlite3.connect("paper_trades.db")) as _conn:
                     n = _conn.execute(
                         "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL"
                     ).fetchone()[0]
@@ -2472,7 +2473,7 @@ def prompt_for_tickers() -> List[str]:
             "CRM", "ORCL", "ADBE", "CSCO", "AVGO", "QCOM", "TXN", "AMAT", "MU", "LRCX",
             # Financial
             "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "V",
-            "MA", "PYPL", "SQ", "COIN",
+            "MA", "PYPL", "XYZ", "COIN",
             # Healthcare & Pharma
             "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "LLY", "ABT", "DHR", "BMY",
             "AMGN", "GILD", "CVS", "MRNA", "BNTX",
@@ -2619,7 +2620,15 @@ def _score_fetched_data(
             result["success"] = True
 
     except Exception as e:
+        import traceback, os
+        tb = traceback.format_exc()
         result["error"] = str(e)
+        try:
+            debug_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_errors.log")
+            with open(debug_path, "a") as _f:
+                _f.write(f"\n=== {symbol} ({mode}) ===\n{tb}\n")
+        except Exception:
+            pass
 
     return result
 
@@ -2736,9 +2745,27 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         except Exception as exc:
             return sym, {"error": str(exc)}
 
+    def _is_transient_err(msg: str) -> bool:
+        """Errors worth retrying serially: Yahoo rate-limits, transient network failures, empty-expiration races."""
+        if not msg:
+            return False
+        m = msg.lower()
+        return (
+            "too many requests" in m
+            or "rate limited" in m
+            or "no options expirations available" in m
+            or "no options data frames fetched" in m
+            or "could not resolve host" in m
+            or "could not fetch price history" in m
+            or "failed to perform" in m
+        )
+
     raw_results: Dict[str, Any] = {}
+    # Fast mode: outer=5 × aux_pool=2 × global 0.25s-interval throttle → ~4-6 req/sec aggregate.
+    # Pushes Yahoo's ~60-100 req/min ceiling; the 15s cooldown in retry_with_backoff catches any 429.
+    _fetch_workers = min(len(tickers), 5)
     with _suppress_scan_noise():
-        with ThreadPoolExecutor(max_workers=min(len(tickers), 12)) as executor:
+        with ThreadPoolExecutor(max_workers=_fetch_workers) as executor:
             _future_map = {executor.submit(_fetch_one, sym): sym for sym in tickers}
             if HAS_ENHANCED_CLI and verbose:
                 bar_fmt = "  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
@@ -2756,6 +2783,31 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             if _pbar is not None:
                 _pbar.close()
                 print(flush=True)  # clean line after bar clears
+
+    # Phase 1b — Serial retry pass for transient failures (rate limits, empty-expirations, DNS blips).
+    # After the parallel storm subsides, Yahoo tends to serve the same tickers cleanly.
+    # Up to two retry waves: first after 20s cooldown (spacing 1.5s), second after another 45s if any remain.
+    import time as _time
+    for _wave_idx, _wave_cooldown in enumerate([20, 45]):
+        _retry_syms = [
+            s for s in tickers
+            if isinstance(raw_results.get(s), dict) and _is_transient_err(raw_results[s].get("error", ""))
+        ]
+        if not _retry_syms:
+            break
+        if verbose:
+            _retry_msg = (
+                f"  Retry wave {_wave_idx + 1}: {len(_retry_syms)} ticker(s) "
+                f"(cooling down {_wave_cooldown}s, then serial with 1.5s spacing)..."
+            )
+            print(fmt.colorize(_retry_msg, fmt.Colors.DIM) if HAS_ENHANCED_CLI else _retry_msg)
+        _time.sleep(_wave_cooldown)
+        with _suppress_scan_noise():
+            for _rs in _retry_syms:
+                _sym2, _res2 = _fetch_one(_rs)
+                if isinstance(_res2, dict) and "error" not in _res2:
+                    raw_results[_sym2] = _res2
+                _time.sleep(1.5)
 
     # Phase 2 — Score each fetched result
     for symbol in tickers:

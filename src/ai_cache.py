@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Optional, Any
@@ -88,10 +89,18 @@ class AIScoreCache:
         ).hexdigest()[:8]
         self._init_db()
 
-    def _conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _conn(self):
         conn = sqlite3.connect(str(self._db))
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._conn() as conn:

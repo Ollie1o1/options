@@ -10,6 +10,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from contextlib import contextmanager
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
 import logging
@@ -119,11 +120,19 @@ class PaperManager:
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
         self._init_db()
 
+    @contextmanager
     def _get_connection(self):
-        """Returns a new sqlite3 connection with WAL mode for concurrent access."""
+        """Yield a sqlite3 connection with WAL mode; commits on success, rollbacks on error, always closes."""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self):
         """Creates the trades table if it doesn't exist."""
@@ -151,7 +160,7 @@ class PaperManager:
 
     def _migrate_db(self):
         """Apply incremental schema migrations up to _SCHEMA_VERSION."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA user_version")
             current_version = cur.fetchone()[0]
@@ -162,7 +171,6 @@ class PaperManager:
                     except sqlite3.OperationalError:
                         pass  # column may already exist
                 cur.execute(f"PRAGMA user_version = {int(ver)}")
-            conn.commit()
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads configuration for exit rules."""
@@ -329,7 +337,7 @@ class PaperManager:
         spread_dict keys: date, ticker, expiration, short_strike, long_strike, type,
                           net_credit, max_profit, max_loss, quality_score
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 INSERT INTO trades (date, ticker, expiration, strike, type, entry_price, quality_score, strategy_name, status)
@@ -344,7 +352,6 @@ class PaperManager:
                 spread_dict.get("quality_score", 0.5),
                 f"SPREAD:{spread_dict.get('long_strike', 0)}:{spread_dict.get('max_profit', 0):.2f}:{spread_dict.get('max_loss', 0):.2f}"
             ))
-            conn.commit()
 
     def _get_option_symbol(self, ticker: str, expiration: str, strike: float, option_type: str) -> str:
         """Generates a yfinance-compatible option symbol."""

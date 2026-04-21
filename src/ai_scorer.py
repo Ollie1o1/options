@@ -640,13 +640,19 @@ class AIScorer:
         else:
             try:
                 import openai
+                import httpx
             except ImportError as exc:
-                raise ImportError("Run:  pip install openai") from exc
+                raise ImportError("Run:  pip install openai httpx") from exc
+            # Explicit httpx.Timeout bounds each phase (connect/read/write/pool) separately.
+                        # Without this, slow-streaming servers can hang past the total timeout because
+            # read is reset on every byte received.
+            _t = float(self.config.get("timeout", 30))
+            http_timeout = httpx.Timeout(connect=5.0, read=_t, write=_t, pool=5.0)
             client = openai.OpenAI(
                 api_key=api_key,
                 base_url="https://openrouter.ai/api/v1",
                 max_retries=0,
-                timeout=float(self.config.get("timeout", 30)),
+                timeout=http_timeout,
                 default_headers={
                     "HTTP-Referer": "https://github.com/Ollie1o1/options",
                     "X-Title": "Options Screener AI Ranking",
@@ -687,41 +693,69 @@ class AIScorer:
             return response.choices[0].message.content or ""
 
     def _score_batch_with_retry(self, batch: list[dict], batch_num: int = 1) -> list[dict]:
-        """Score with exponential backoff; switches to fallback models on failure."""
-        max_retries = 3
+        """Score with exponential backoff; switches to fallback models on failure.
+
+        Each attempt is wrapped in a hard wall-clock timeout (thread-based) because
+        the OpenAI SDK's `timeout=` kwarg can silently fail to enforce on slow free-tier
+        endpoints (the TCP/stream layer blocks past the value, no exception raised).
+        Without this wrapper, a hung primary model stalls the whole scan indefinitely.
+        """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        max_retries = 4  # 4 attempts → tries every model in the chain
         delay = 3
         fallback        = self.config.get("fallback_model")
         second_fallback = self.config.get("second_fallback_model")
         third_fallback  = self.config.get("third_fallback_model")
 
         def _pick_model(attempt: int) -> str:
-            if attempt == 1:
-                return self.config["model"]
-            if attempt == 2:
-                return fallback or self.config["model"]
-            return second_fallback or third_fallback or fallback or self.config["model"]
+            chain = [self.config["model"], fallback, second_fallback, third_fallback]
+            chain = [m for m in chain if m]
+            idx = min(attempt - 1, len(chain) - 1)
+            return chain[idx]
+
+        # Hard wall-clock cap per attempt. Config "timeout" is the SDK read timeout;
+        # wrapper cap is slightly larger to let the SDK timeout fire first when it works.
+        sdk_timeout = float(self.config.get("timeout", 30))
+        hard_timeout = sdk_timeout + 5.0  # +5s slack for the SDK to raise its own TimeoutError
 
         for attempt in range(1, max_retries + 1):
             use_model = _pick_model(attempt)
             try:
                 print(f"  [ai_scorer] batch {batch_num} attempt {attempt}/{max_retries} model={use_model}", flush=True)
-                result = self._score_batch(batch, model=use_model)
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(self._score_batch, batch, use_model)
+                    try:
+                        result = fut.result(timeout=hard_timeout)
+                    except FuturesTimeout:
+                        fut.cancel()
+                        raise RuntimeError(
+                            f"hard timeout {hard_timeout:.0f}s exceeded — model hung at transport layer"
+                        )
                 self._api_call_count += 1
-                estimated_tokens = len(batch) * 600  # rough estimate: ~600 tokens per candidate (prompt + response)
+                estimated_tokens = len(batch) * 600
                 self._api_token_estimate += estimated_tokens
                 if self._api_call_count % 10 == 0:
                     print(f"  [ai_scorer] {self._api_call_count} API calls this session, ~{self._api_token_estimate:,} tokens estimated")
                 return result
             except Exception as exc:
-                is_rate_limit = "429" in str(exc) or "rate" in str(exc).lower()
+                msg = str(exc)
+                is_rate_limit = "429" in msg or "rate" in msg.lower()
+                is_timeout = "timeout" in msg.lower() or "timed out" in msg.lower() or "hung" in msg.lower()
                 if attempt < max_retries:
-                    if is_rate_limit:
-                        label = f"fallback ({use_model})" if attempt > 2 else "primary"
-                        print(f"  [ai_scorer] batch {batch_num} rate-limited on {label} model, retrying in {delay}s...")
+                    if is_timeout:
+                        print(f"  [ai_scorer] batch {batch_num} model {use_model} hung, switching to next fallback immediately", flush=True)
+                        sleep_for = 0  # no delay — just jump to next model
+                    elif is_rate_limit:
+                        label = f"fallback ({use_model})" if attempt > 1 else "primary"
+                        print(f"  [ai_scorer] batch {batch_num} rate-limited on {label}, retrying in {delay}s...", flush=True)
+                        sleep_for = delay
                     else:
-                        print(f"  [ai_scorer] batch {batch_num} error (attempt {attempt}): {exc}")
+                        print(f"  [ai_scorer] batch {batch_num} error (attempt {attempt}): {exc}", flush=True)
+                        sleep_for = 1
                     self._api_retry_count += 1
-                    time.sleep(delay if is_rate_limit else 1)
+                    if sleep_for:
+                        time.sleep(sleep_for)
                     delay = min(delay * 2, 60)
                 else:
                     logger.warning("Batch %d failed after %d attempts: %s", batch_num, attempt, exc)

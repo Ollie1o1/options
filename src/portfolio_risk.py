@@ -9,6 +9,7 @@ computes portfolio Greeks and GEX, and estimates 1-day Value-at-Risk via MJD.
 import math
 import logging
 import sqlite3
+from contextlib import closing
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -53,12 +54,11 @@ class RiskAggregator:
     def _load_open_trades(self) -> List[Dict]:
         """Load all OPEN trades from the paper trades database."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM trades WHERE status='OPEN'"
-            ).fetchall()
-            conn.close()
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM trades WHERE status='OPEN'"
+                ).fetchall()
             return [dict(r) for r in rows]
         except Exception as exc:
             logger.debug("Could not load open trades: %s", exc)

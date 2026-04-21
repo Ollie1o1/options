@@ -309,7 +309,7 @@ def render_sidebar():
             with st.spinner("Scanning Market..."):
                 if scan_mode != "Single-stock":
                     tickers = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
-                               "META", "NFLX", "JPM", "GS", "V", "MA", "COIN", "INTC", "PYPL", "SQ"][:num_tickers]
+                               "META", "NFLX", "JPM", "GS", "V", "MA", "COIN", "INTC", "PYPL", "XYZ"][:num_tickers]
 
                 logger = setup_logging()
                 try:

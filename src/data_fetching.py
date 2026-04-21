@@ -10,11 +10,13 @@ import math
 import logging
 import random
 import functools
+import threading
 import warnings
 import sqlite3
 import pandas as pd
 import numpy as np
 from abc import ABC, abstractmethod
+from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,7 +50,12 @@ _YF_IMPORTED = False
 _FINVIZ_IMPORTED = False
 
 def _init_request_cache():
-    """Initialize request cache on first use (lazy-loaded to avoid startup slowdown)."""
+    """Initialize request cache on first use (lazy-loaded to avoid startup slowdown).
+
+    CRITICAL: allowable_codes=[200] prevents caching 429 rate-limit responses. Without this
+    filter, once Yahoo 429s any request it stays cached for 15 min and every retry hits the
+    cached error — poisoning the scan for an hour.
+    """
     global _CACHE_INITIALIZED, requests_cache
     if _CACHE_INITIALIZED:
         return
@@ -58,6 +65,7 @@ def _init_request_cache():
         requests_cache = _rc
         requests_cache.install_cache(
             'finance_cache', backend='sqlite', expire_after=900,
+            allowable_codes=[200],
             backend_options={'pragmas': {'journal_mode': 'wal'}},
         )
     except Exception:
@@ -66,9 +74,13 @@ def _init_request_cache():
                 import requests_cache as _rc
                 requests_cache = _rc
             # Older requests_cache versions don't support backend_options
-            requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+            requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900, allowable_codes=[200])
         except Exception:
-            pass  # Cache unavailable; requests proceed uncached
+            try:
+                # Fallback: install without allowable_codes filter (older versions)
+                requests_cache.install_cache('finance_cache', backend='sqlite', expire_after=900)
+            except Exception:
+                pass  # Cache unavailable; requests proceed uncached
 
 def _init_yfinance():
     """Import yfinance on first use (lazy-loaded to avoid startup slowdown)."""
@@ -136,7 +148,7 @@ SECTOR_MAP: Dict[str, str] = {
     "C": "XLF", "BLK": "XLF", "SCHW": "XLF", "AXP": "XLF", "COF": "XLF",
     "USB": "XLF", "PNC": "XLF", "TFC": "XLF", "ICE": "XLF", "CME": "XLF",
     "SPGI": "XLF", "MCO": "XLF", "V": "XLF", "MA": "XLF", "PYPL": "XLF",
-    "FIS": "XLF", "FISV": "XLF", "SQ": "XLF", "ALLY": "XLF", "DFS": "XLF",
+    "FIS": "XLF", "FISV": "XLF", "XYZ": "XLF", "ALLY": "XLF", "DFS": "XLF",
     "MTB": "XLF", "RF": "XLF", "HBAN": "XLF", "KEY": "XLF", "CFG": "XLF",
     "XLF": "XLF",
 
@@ -648,17 +660,16 @@ def _get_iv_db_path() -> str:
 
 def _init_iv_db(db_path: str) -> None:
     try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS iv_history (
-                ticker TEXT,
-                date   TEXT,
-                iv_value REAL,
-                PRIMARY KEY (ticker, date)
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS iv_history (
+                    ticker TEXT,
+                    date   TEXT,
+                    iv_value REAL,
+                    PRIMARY KEY (ticker, date)
+                )
+            """)
+            conn.commit()
     except Exception as exc:
         logger.debug("IV DB init failed: %s", exc)
 
@@ -666,30 +677,28 @@ def _init_iv_db(db_path: str) -> None:
 def _upsert_iv(ticker: str, date_str: str, iv: float, db_path: str) -> None:
     try:
         _init_iv_db(db_path)
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "INSERT OR REPLACE INTO iv_history (ticker, date, iv_value) VALUES (?, ?, ?)",
-            (ticker, date_str, float(iv)),
-        )
-        conn.commit()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO iv_history (ticker, date, iv_value) VALUES (?, ?, ?)",
+                (ticker, date_str, float(iv)),
+            )
+            conn.commit()
     except Exception as exc:
         logger.debug("IV upsert failed for %s: %s", ticker, exc)
 
 
 def _init_skew_db(db_path: str) -> None:
     try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS skew_history (
-                ticker TEXT,
-                date   TEXT,
-                skew_value REAL,
-                PRIMARY KEY (ticker, date)
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS skew_history (
+                    ticker TEXT,
+                    date   TEXT,
+                    skew_value REAL,
+                    PRIMARY KEY (ticker, date)
+                )
+            """)
+            conn.commit()
     except Exception as exc:
         logger.debug("Skew DB init failed: %s", exc)
 
@@ -697,25 +706,23 @@ def _init_skew_db(db_path: str) -> None:
 def _upsert_skew(ticker: str, date_str: str, skew: float, db_path: str) -> None:
     try:
         _init_skew_db(db_path)
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "INSERT OR REPLACE INTO skew_history (ticker, date, skew_value) VALUES (?, ?, ?)",
-            (ticker, date_str, float(skew)),
-        )
-        conn.commit()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO skew_history (ticker, date, skew_value) VALUES (?, ?, ?)",
+                (ticker, date_str, float(skew)),
+            )
+            conn.commit()
     except Exception as exc:
         logger.debug("Skew upsert failed for %s: %s", ticker, exc)
 
 
 def _load_skew_history(ticker: str, db_path: str) -> List[float]:
     try:
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            "SELECT skew_value FROM skew_history WHERE ticker=? ORDER BY date ASC",
-            (ticker,),
-        ).fetchall()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            rows = conn.execute(
+                "SELECT skew_value FROM skew_history WHERE ticker=? ORDER BY date ASC",
+                (ticker,),
+            ).fetchall()
         return [r[0] for r in rows if r[0] is not None]
     except Exception as exc:
         logger.debug("Skew history load failed for %s: %s", ticker, exc)
@@ -786,12 +793,11 @@ def calculate_vrp(
 
 def _load_iv_history(ticker: str, db_path: str) -> List[float]:
     try:
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            "SELECT iv_value FROM iv_history WHERE ticker=? ORDER BY date ASC",
-            (ticker,),
-        ).fetchall()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            rows = conn.execute(
+                "SELECT iv_value FROM iv_history WHERE ticker=? ORDER BY date ASC",
+                (ticker,),
+            ).fetchall()
         return [r[0] for r in rows if r[0] is not None]
     except Exception as exc:
         logger.debug("IV history load failed for %s: %s", ticker, exc)
@@ -802,11 +808,10 @@ def iv_history_coverage(ticker: str) -> Dict[str, Any]:
     """Return coverage stats for ticker's IV history in iv_cache.db."""
     try:
         db_path = _get_iv_db_path()
-        conn = sqlite3.connect(db_path)
-        row = conn.execute(
-            "SELECT COUNT(*) FROM iv_history WHERE ticker=?", (ticker,)
-        ).fetchone()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM iv_history WHERE ticker=?", (ticker,)
+            ).fetchone()
         days = int(row[0]) if row else 0
         if days >= 252:
             confidence = "High"
@@ -821,6 +826,27 @@ def iv_history_coverage(ticker: str) -> Dict[str, Any]:
 
 
 # --- Retry Decorator ---
+# Global token-bucket throttle for Yahoo requests.
+# All threads share one gate so aggregate request rate stays under Yahoo's ~60-100 req/min ceiling.
+_YF_THROTTLE_LOCK = threading.Lock()
+_YF_LAST_CALL_TS = [0.0]
+_YF_MIN_INTERVAL = 0.25  # seconds between any two Yahoo calls (4 req/sec aggregate — fast mode; 429 cooldown will back off if hit)
+
+def _yf_throttle():
+    with _YF_THROTTLE_LOCK:
+        now = time.monotonic()
+        wait = _YF_LAST_CALL_TS[0] + _YF_MIN_INTERVAL - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _YF_LAST_CALL_TS[0] = now
+
+def _yf_cooldown(seconds: float):
+    """Push the next-allowed call forward by `seconds` across all threads (use after 429)."""
+    with _YF_THROTTLE_LOCK:
+        _YF_LAST_CALL_TS[0] = max(_YF_LAST_CALL_TS[0], time.monotonic()) + seconds
+
+
 def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)):
     def decorator(func):
         @functools.wraps(func)
@@ -830,10 +856,37 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)
                 try:
                     return func(*args, **kwargs)
                 except error_types as e:
+                    msg = str(e).lower()
+                    # yfinance has a bug (history.py:224) where a rate-limited/empty response
+                    # causes `data['chart']` to raise TypeError('NoneType' object is not subscriptable).
+                    # Treat that as a rate-limit signal so the global cooldown kicks in.
+                    is_rate_limit = (
+                        ("too many requests" in msg)
+                        or ("rate limited" in msg)
+                        or ("429" in msg)
+                        or ("nonetype" in msg and "subscriptable" in msg)
+                    )
+                    if is_rate_limit:
+                        # Global cooldown: all other threads wait too, so we don't hammer Yahoo after a 429.
+                        _yf_cooldown(15.0)
                     if x == retries:
                         logging.warning(f"Function {func.__name__} failed after {retries} retries: {e}")
+                        # When the failure is a Python-level bug (NoneType, etc.) rather than a
+                        # network/rate-limit issue, dump the traceback so we can pinpoint it.
+                        if not is_rate_limit and "no options" not in msg and "price history" not in msg:
+                            try:
+                                import os, traceback
+                                _log = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_errors.log")
+                                sym_hint = args[0] if args else kwargs.get("symbol", "?")
+                                with open(_log, "a") as _f:
+                                    _f.write(f"\n=== {func.__name__}({sym_hint}) ===\n{traceback.format_exc()}\n")
+                            except Exception:
+                                pass
                         raise e
-                    sleep = (backoff_in_seconds * 2 ** x + random.uniform(0, 1))
+                    base = backoff_in_seconds * (2 ** x)
+                    if is_rate_limit:
+                        base = max(base, 6.0 * (x + 1))  # 6s, 12s, 18s on rate limits
+                    sleep = base + random.uniform(0, 1)
                     time.sleep(sleep)
                     x += 1
         return wrapper
@@ -978,15 +1031,14 @@ def get_news_headlines(ticker: yf.Ticker, max_headlines: int = 3) -> list:
 def _read_seasonality_cache(symbol: str, month: int, db_path: str = "iv_cache.db") -> Optional[float]:
     """Read cached seasonality win rate. Returns None if stale (>7 days) or missing."""
     try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("""CREATE TABLE IF NOT EXISTS seasonality_cache (
-            symbol TEXT, month INTEGER, win_rate REAL, updated TEXT,
-            PRIMARY KEY (symbol, month))""")
-        row = conn.execute(
-            "SELECT win_rate, updated FROM seasonality_cache WHERE symbol=? AND month=?",
-            (symbol, month)
-        ).fetchone()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS seasonality_cache (
+                symbol TEXT, month INTEGER, win_rate REAL, updated TEXT,
+                PRIMARY KEY (symbol, month))""")
+            row = conn.execute(
+                "SELECT win_rate, updated FROM seasonality_cache WHERE symbol=? AND month=?",
+                (symbol, month)
+            ).fetchone()
         if row is None:
             return None
         updated = datetime.fromisoformat(row[1])
@@ -1000,16 +1052,15 @@ def _read_seasonality_cache(symbol: str, month: int, db_path: str = "iv_cache.db
 def _write_seasonality_cache(symbol: str, month: int, win_rate: float, db_path: str = "iv_cache.db") -> None:
     """Write seasonality win rate to SQLite cache."""
     try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("""CREATE TABLE IF NOT EXISTS seasonality_cache (
-            symbol TEXT, month INTEGER, win_rate REAL, updated TEXT,
-            PRIMARY KEY (symbol, month))""")
-        conn.execute(
-            "INSERT OR REPLACE INTO seasonality_cache (symbol, month, win_rate, updated) VALUES (?, ?, ?, ?)",
-            (symbol, month, win_rate, datetime.now().isoformat())
-        )
-        conn.commit()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS seasonality_cache (
+                symbol TEXT, month INTEGER, win_rate REAL, updated TEXT,
+                PRIMARY KEY (symbol, month))""")
+            conn.execute(
+                "INSERT OR REPLACE INTO seasonality_cache (symbol, month, win_rate, updated) VALUES (?, ?, ?, ?)",
+                (symbol, month, win_rate, datetime.now().isoformat())
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -1506,7 +1557,11 @@ def check_macro_risk() -> bool:
     _init_yf_session()
     try:
         eurusd = yf.Ticker("EURUSD=X", session=_yf_session)
-        fx_hist = eurusd.history(period="1mo")
+        _yf_throttle()
+        try:
+            fx_hist = eurusd.history(period="1mo")
+        except TypeError:
+            return False
         if not fx_hist.empty and len(fx_hist) > 5:
             daily_range = (fx_hist['High'] - fx_hist['Low']) / fx_hist['Open']
             current_range = daily_range.iloc[-1]
@@ -1524,7 +1579,11 @@ def check_yield_spike() -> Tuple[bool, float]:
     _init_yf_session()
     try:
         tnx = yf.Ticker("^TNX", session=_yf_session)
-        tnx_hist = tnx.history(period="5d")
+        _yf_throttle()
+        try:
+            tnx_hist = tnx.history(period="5d")
+        except TypeError:
+            return False, 0.0
         if not tnx_hist.empty and len(tnx_hist) >= 2:
             tnx_close = tnx_hist['Close']
             tnx_change_pct = (tnx_close.iloc[-1] - tnx_close.iloc[-2]) / tnx_close.iloc[-2]
@@ -1552,20 +1611,37 @@ def get_market_context() -> Tuple[str, str, bool, float]:
     macro_risk_active = False
     tnx_change_pct = 0.0
 
-    # Fetch SPY, VIX, EURUSD, TNX in parallel to cut wall-clock time ~4x
+    # Fetch SPY, VIX, EURUSD, TNX in parallel to cut wall-clock time ~4x.
+    # Each inner call is throttled via _yf_throttle() and guards yfinance's
+    # NoneType-subscript bug on rate-limited responses. Each .result() has a
+    # hard wall-clock timeout so startup can never hang indefinitely.
     def _fetch_spy():
         try:
             spy = yf.Ticker("SPY", session=_yf_session)
-            return spy.history(period="3mo")
+            _yf_throttle()
+            try:
+                return spy.history(period="3mo")
+            except TypeError:
+                return None
         except Exception:
             return None
 
     def _fetch_vix():
         try:
             vix = yf.Ticker("^VIX", session=_yf_session)
-            return vix.history(period="5d")
+            _yf_throttle()
+            try:
+                return vix.history(period="5d")
+            except TypeError:
+                return None
         except Exception:
             return None
+
+    def _safe_result(fut, timeout, default):
+        try:
+            return fut.result(timeout=timeout)
+        except Exception:
+            return default
 
     try:
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1574,19 +1650,19 @@ def get_market_context() -> Tuple[str, str, bool, float]:
             macro_fut = pool.submit(check_macro_risk)
             yield_fut = pool.submit(check_yield_spike)
 
-            spy_hist = spy_fut.result()
+            spy_hist = _safe_result(spy_fut, 20, None)
             if spy_hist is not None and not spy_hist.empty:
                 spy_sma50 = spy_hist['Close'].rolling(window=50).mean().iloc[-1]
                 spy_current = spy_hist['Close'].iloc[-1]
                 market_trend = "Bull" if spy_current > spy_sma50 else "Bear"
 
-            vix_hist = vix_fut.result()
+            vix_hist = _safe_result(vix_fut, 15, None)
             if vix_hist is not None and not vix_hist.empty:
                 vix_current = vix_hist['Close'].iloc[-1]
                 volatility_regime = "High" if vix_current > 20 else "Low"
 
-            macro_risk_active = macro_fut.result()
-            _, tnx_change_pct = yield_fut.result()
+            macro_risk_active = _safe_result(macro_fut, 15, False)
+            _, tnx_change_pct = _safe_result(yield_fut, 15, (False, 0.0))
 
         result = (market_trend, volatility_regime, macro_risk_active, tnx_change_pct)
         _market_context_cache["value"] = result
@@ -1599,6 +1675,7 @@ def get_market_context() -> Tuple[str, str, bool, float]:
 def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
     try:
         # Wrap ticker.option_chain in try/except to handle invalid/empty expirations gracefully
+        _yf_throttle()
         oc = tkr.option_chain(exp)
     except Exception as e:
         logger.debug("Could not fetch options for %s on %s: %s", symbol, exp, e)
@@ -1756,7 +1833,7 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
         return None
 
 
-@retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
+@retry_with_backoff(retries=3, backoff_in_seconds=3, error_types=(Exception,))
 def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     """
     Fetch options data and all related context using a Single-Fetch architecture.
@@ -1776,12 +1853,19 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
 
     # 1. Fetch History ONCE (1 year daily)
     try:
+        _yf_throttle()
         hist = tkr.history(period="1y", interval="1d")
+    except TypeError as e:
+        # yfinance bug: on rate-limited/empty responses it hits `data['chart']` where data is None.
+        # Convert to an explicit rate-limit error so the retry decorator's cooldown kicks in.
+        if "subscriptable" in str(e).lower():
+            raise RuntimeError(f"Rate limited while fetching history for {symbol}") from e
+        raise
     except (ValueError, KeyError, URLError) as e:
         logging.warning(f"Failed to fetch history for {symbol}: {e}")
         hist = pd.DataFrame()
 
-    if hist.empty:
+    if hist is None or hist.empty:
         raise RuntimeError(f"Could not fetch price history for {symbol}")
 
     # 2. Derive Metrics from History
@@ -1808,7 +1892,8 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         except Exception:
             return name, None
 
-    with ThreadPoolExecutor(max_workers=6) as aux_pool:
+    # aux_pool=3 fast mode: global throttle still caps aggregate rate, parallelism just hides latency.
+    with ThreadPoolExecutor(max_workers=3) as aux_pool:
         aux_futures = [
             aux_pool.submit(_aux, "earnings", get_next_earnings_date, tkr),
             aux_pool.submit(_aux, "sentiment", get_sentiment, tkr),
@@ -1852,7 +1937,12 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
 
     # 4. Fetch Options Chains
     try:
+        _yf_throttle()
         expirations = tkr.options
+    except TypeError as e:
+        if "subscriptable" in str(e).lower():
+            raise RuntimeError(f"Rate limited while fetching expirations for {symbol}") from e
+        raise
     except (ValueError, KeyError, AttributeError) as e:
         raise RuntimeError(f"Failed to fetch options expirations for {symbol}: {e}")
 
@@ -1864,15 +1954,15 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         num_expiries_to_fetch = 2
     expirations_to_scan = expirations[:num_expiries_to_fetch]
 
+    # Serial expiration fetch: relies on global _yf_throttle inside _process_option_chain.
+    # Was ThreadPoolExecutor(max_workers=4) — combined with outer workers=3 that gave 12-way
+    # concurrency per symbol and triggered 429 storms.
     frames = []
-    with ThreadPoolExecutor(max_workers=min(4, len(expirations_to_scan))) as executor:
-        future_to_exp = {executor.submit(_process_option_chain, tkr, symbol, exp): exp for exp in expirations_to_scan}
-        for future in as_completed(future_to_exp):
-            try:
-                result_frames = future.result()
-                frames.extend(result_frames)
-            except Exception:
-                continue
+    for _exp in expirations_to_scan:
+        try:
+            frames.extend(_process_option_chain(tkr, symbol, _exp))
+        except Exception:
+            continue
 
     if not frames:
         raise RuntimeError(f"No options data frames fetched for {symbol}.")
@@ -2119,28 +2209,26 @@ def get_historical_iv_crush(ticker: str, n_quarters: int = 8, iv_db_path: str = 
         # Check cache first
         # ------------------------------------------------------------------
         try:
-            conn = sqlite3.connect(iv_db_path)
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS iv_crush_cache "
-                "(ticker TEXT PRIMARY KEY, avg_crush REAL, std_crush REAL, "
-                "n_events INT, updated TEXT)"
-            )
-            row = conn.execute(
-                "SELECT avg_crush, std_crush, n_events, updated "
-                "FROM iv_crush_cache WHERE ticker = ?",
-                (ticker.upper(),),
-            ).fetchone()
+            with closing(sqlite3.connect(iv_db_path)) as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS iv_crush_cache "
+                    "(ticker TEXT PRIMARY KEY, avg_crush REAL, std_crush REAL, "
+                    "n_events INT, updated TEXT)"
+                )
+                row = conn.execute(
+                    "SELECT avg_crush, std_crush, n_events, updated "
+                    "FROM iv_crush_cache WHERE ticker = ?",
+                    (ticker.upper(),),
+                ).fetchone()
             if row is not None:
                 updated = datetime.fromisoformat(row[3])
                 if (datetime.now() - updated).days < 7:
-                    conn.close()
                     return {
                         "avg_crush": row[0],
                         "std_crush": row[1],
                         "n_events": row[2],
                         "crushes": [],  # individual values not cached
                     }
-            conn.close()
         except Exception:
             pass
 
@@ -2234,21 +2322,20 @@ def get_historical_iv_crush(ticker: str, n_quarters: int = 8, iv_db_path: str = 
         # Cache the result
         # ------------------------------------------------------------------
         try:
-            conn = sqlite3.connect(iv_db_path)
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS iv_crush_cache "
-                "(ticker TEXT PRIMARY KEY, avg_crush REAL, std_crush REAL, "
-                "n_events INT, updated TEXT)"
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO iv_crush_cache "
-                "(ticker, avg_crush, std_crush, n_events, updated) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (ticker.upper(), avg_crush, std_crush, len(crushes),
-                 datetime.now().isoformat()),
-            )
-            conn.commit()
-            conn.close()
+            with closing(sqlite3.connect(iv_db_path)) as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS iv_crush_cache "
+                    "(ticker TEXT PRIMARY KEY, avg_crush REAL, std_crush REAL, "
+                    "n_events INT, updated TEXT)"
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO iv_crush_cache "
+                    "(ticker, avg_crush, std_crush, n_events, updated) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (ticker.upper(), avg_crush, std_crush, len(crushes),
+                     datetime.now().isoformat()),
+                )
+                conn.commit()
         except Exception:
             pass
 

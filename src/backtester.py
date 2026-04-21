@@ -24,6 +24,7 @@ import math
 import pathlib
 import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -672,20 +673,19 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
     empty_result["component_ic"] = {}
     empty_result["component_n"] = {}
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        # Query only the component columns that actually exist on this DB version,
-        # so an older schema (e.g. v6 before PaperManager has run its v7 migration)
-        # doesn't trip a "no such column" error.
-        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
-        present_components = [c for c in _COMPONENT_COLS if c in existing_cols]
-        _col_list = ", ".join(["quality_score", "pnl_pct"] + present_components)
-        rows = conn.execute(
-            f"SELECT {_col_list} "
-            "FROM trades WHERE status='CLOSED' "
-            "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
-        ).fetchall()
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            # Query only the component columns that actually exist on this DB version,
+            # so an older schema (e.g. v6 before PaperManager has run its v7 migration)
+            # doesn't trip a "no such column" error.
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            present_components = [c for c in _COMPONENT_COLS if c in existing_cols]
+            _col_list = ", ".join(["quality_score", "pnl_pct"] + present_components)
+            rows = conn.execute(
+                f"SELECT {_col_list} "
+                "FROM trades WHERE status='CLOSED' "
+                "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
+            ).fetchall()
     except Exception as e:
         empty_result["verdict"] = f"Could not read database: {e}"
         return empty_result
@@ -1369,12 +1369,11 @@ def get_calibration_status(
     Used by options_screener to surface calibration readiness without running scipy.
     """
     try:
-        conn = sqlite3.connect(db_path)
-        n = conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE status='CLOSED' "
-            "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
-        ).fetchone()[0]
-        conn.close()
+        with closing(sqlite3.connect(db_path)) as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE status='CLOSED' "
+                "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
+            ).fetchone()[0]
     except Exception:
         return 0, "no paper trade db yet"
     if n < 10:
