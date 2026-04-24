@@ -752,7 +752,15 @@ def view_portfolio():
             pnl_ratio   = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
             # Compute dollar P/L from actual prices when exit_price is stored,
             # so short positions that lost more than entry premium display correctly.
-            if exit_price > 0 and entry_price > 0:
+            # DB pnl_pct is the friction-aware, strategy-aware source of truth
+            # (computed in paper_manager._evaluate_*_exit as pnl_raw - friction).
+            # Use it to determine win/loss so the row count matches BY STRATEGY
+            # and the IC analytics. Fall back to mark-to-market recomputation
+            # only when DB lacks pnl_pct (historical rows).
+            if r["pnl_pct"] is not None:
+                pnl_pct = pnl_ratio * 100
+                pnl_usd = pnl_ratio * entry_price * 100
+            elif exit_price > 0 and entry_price > 0:
                 is_short_closed = _is_short(str(r.get("strategy_name", "")))
                 if is_short_closed:
                     pnl_usd = (entry_price - exit_price) * 100
@@ -760,9 +768,9 @@ def view_portfolio():
                     pnl_usd = (exit_price - entry_price) * 100
                 pnl_pct = pnl_usd / (entry_price * 100) * 100
             else:
-                pnl_usd = pnl_ratio * entry_price * 100
-                pnl_pct = pnl_ratio * 100
-            won         = pnl_usd > 0
+                pnl_usd = 0.0
+                pnl_pct = 0.0
+            won = pnl_usd > 0
             if won:
                 wins += 1
             closed_pnl_usd += pnl_usd
@@ -823,17 +831,27 @@ def view_portfolio():
             pf = sum(winning_r) / abs(sum(losing_r)) if losing_r and abs(sum(losing_r)) > 1e-12 else (float("inf") if winning_r else 0.0)
             expectancy = wr * avg_win + (1 - wr) * avg_loss
 
-            # Max drawdown on cumulative return sequence
-            cum, peak, max_dd = 0.0, 0.0, 0.0
-            for ret in returns:
-                cum += ret
-                peak = max(peak, cum)
-                max_dd = max(max_dd, peak - cum)
+            # Max drawdown on chronologically-ordered USD equity curve.
+            # Previous impl summed per-trade pnl_pct (dimensionless) and
+            # formatted as a percentage, which produced nonsensical
+            # "-1270%" readings. Dollar drawdown is the honest view for a
+            # paper portfolio without a fixed starting equity.
+            chrono = sorted(
+                [r for r in closed_trades if r["pnl_pct"] is not None],
+                key=lambda r: (r.get("exit_date") or r.get("date") or "")
+            )
+            cum_usd, peak_usd, max_dd_usd = 0.0, 0.0, 0.0
+            for r in chrono:
+                ep = float(r["entry_price"]) if r["entry_price"] else 0.0
+                pnl_u = float(r["pnl_pct"]) * ep * 100 if ep > 0 else 0.0
+                cum_usd += pnl_u
+                peak_usd = max(peak_usd, cum_usd)
+                max_dd_usd = max(max_dd_usd, peak_usd - cum_usd)
 
             pf_str = f"{pf:.2f}x" if pf != float("inf") else "∞"
             analytics = (
                 f"  Profit Factor: {pf_str}   Expectancy: {expectancy:+.1%}/trade"
-                f"   Max Drawdown: -{max_dd:.1%}"
+                f"   Max Drawdown: -${max_dd_usd:,.0f}"
                 f"   Avg Win: {avg_win:+.1%}  Avg Loss: {avg_loss:+.1%}"
             )
             if HAS_FMT and fmt:
