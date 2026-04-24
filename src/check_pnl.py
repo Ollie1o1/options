@@ -428,6 +428,20 @@ def view_portfolio():
         print("\n  No paper_trades.db found. Log some trades first.\n")
         return
 
+    # Enforce exit rules (TP / SL / strike breach / time exit) BEFORE displaying.
+    # Without this, the viewer just shows stale OPEN positions that should have
+    # been auto-closed — which is how a -16k drawdown accumulated silently.
+    try:
+        try:
+            from .paper_manager import PaperManager
+        except (ImportError, ValueError):
+            from paper_manager import PaperManager
+        print("  Enforcing exit rules...", end="", flush=True)
+        PaperManager(db_path=DB_PATH, config_path="config.json").update_positions()
+        print("\r" + " " * 30 + "\r", end="")
+    except Exception as _e:
+        print(f"\r  (exit enforcement skipped: {_e})")
+
     try:
         with closing(sqlite3.connect(DB_PATH)) as conn:
             conn.row_factory = sqlite3.Row

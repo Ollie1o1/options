@@ -32,6 +32,161 @@ def _get_yf_and_session():
     return data_fetching.yf, data_fetching._yf_session
 
 from .utils import is_short_position as _is_short_position
+from .utils import bs_delta as _bs_delta
+
+
+def _normalize_exit_rules(config: dict) -> dict:
+    """Pull context-aware exit rules from config with legacy fallback.
+
+    New schema (config.json → exit_rules):
+      time_exit_dte, min_days_held
+      short_premium: take_profit_{ge_21_dte,7_to_21_dte,lt_7_dte},
+                     stop_loss_premium_multiple, stop_loss_on_strike_breach,
+                     strike_breach_buffer, stop_loss_delta_multiple
+      spread: take_profit, stop_loss
+      long_option: take_profit, take_profit_delta, stop_loss
+
+    Legacy keys (take_profit, stop_loss) are used as fallbacks only.
+    """
+    raw = (config or {}).get("exit_rules", {}) or {}
+    legacy_tp = float(raw.get("take_profit", 0.50))
+    legacy_sl = float(raw.get("stop_loss", -0.25))
+
+    short_r = raw.get("short_premium", {}) or {}
+    spread_r = raw.get("spread", {}) or {}
+    long_r = raw.get("long_option", {}) or {}
+
+    return {
+        "time_exit_dte": int(raw.get("time_exit_dte", 21)),
+        "min_days_held": int(raw.get("min_days_held", 3)),
+        "short": {
+            "tp_ge_21":       float(short_r.get("take_profit_ge_21_dte", legacy_tp)),
+            "tp_7_21":        float(short_r.get("take_profit_7_to_21_dte", legacy_tp * 0.70)),
+            "tp_lt_7":        float(short_r.get("take_profit_lt_7_dte", legacy_tp * 0.50)),
+            "sl_prem_mult":   float(short_r.get("stop_loss_premium_multiple", 2.0)),
+            "sl_strike":      bool(short_r.get("stop_loss_on_strike_breach", True)),
+            "sl_strike_buf":  float(short_r.get("strike_breach_buffer", 0.0)),
+            "sl_delta_mult":  float(short_r.get("stop_loss_delta_multiple", 2.5)),
+            "legacy_sl":      legacy_sl,
+        },
+        "spread": {
+            "tp": float(spread_r.get("take_profit", 0.50)),
+            "sl": float(spread_r.get("stop_loss", -1.0)),
+        },
+        "long": {
+            "tp":       float(long_r.get("take_profit", 1.00)),
+            "tp_delta": float(long_r.get("take_profit_delta", 0.80)),
+            "sl":       float(long_r.get("stop_loss", -0.50)),
+        },
+    }
+
+
+def _tp_for_dte(rules_short: dict, dte: int) -> float:
+    if dte >= 21:
+        return rules_short["tp_ge_21"]
+    if dte >= 7:
+        return rules_short["tp_7_21"]
+    return rules_short["tp_lt_7"]
+
+
+def _evaluate_short_single_leg_exit(
+    rules: dict,
+    option_type: str,
+    strike: float,
+    spot: Optional[float],
+    entry_price: float,
+    current_price: float,
+    entry_delta: Optional[float],
+    entry_iv: Optional[float],
+    dte: int,
+    days_held: int,
+    rfr: float,
+) -> Tuple[bool, Optional[str], float]:
+    """Evaluate context-aware exits for a short single-leg option.
+
+    Returns (should_close, reason_or_None, pnl_raw_mark_to_market).
+    Trigger priority (first fires wins):
+      1. Take profit (DTE-tiered)
+      2. Time exit (≤ time_exit_dte, min_days_held satisfied)
+      3. Stop loss — strike breach, premium multiple, delta multiple
+    """
+    short = rules["short"]
+    pnl_raw = (entry_price - current_price) / entry_price if entry_price > 0 else 0.0
+
+    tp_target = _tp_for_dte(short, dte)
+    if pnl_raw >= tp_target:
+        return True, f"Take Profit ({tp_target*100:.0f}% @ {dte}d)", pnl_raw
+
+    if 0 < dte <= rules["time_exit_dte"] and days_held >= rules["min_days_held"]:
+        return True, f"Time Exit ({dte}d to expiry)", pnl_raw
+
+    # Strike-breach stop (defensive — short strike tested)
+    if short["sl_strike"] and spot is not None and strike > 0:
+        buf = short["sl_strike_buf"]
+        ot = (option_type or "").lower()
+        if ot == "call" and spot >= strike * (1.0 + buf):
+            return True, "Stop Loss (strike breached)", pnl_raw
+        if ot == "put" and spot <= strike * (1.0 - buf):
+            return True, "Stop Loss (strike breached)", pnl_raw
+
+    # Premium-multiple stop (e.g. premium ≥ 2× entry ⇒ pnl_raw ≤ -1.0)
+    sl_prem = -(short["sl_prem_mult"] - 1.0)
+    if pnl_raw <= sl_prem:
+        return True, f"Stop Loss ({short['sl_prem_mult']:.1f}× premium)", pnl_raw
+
+    # Delta-multiple early warning (requires entry_delta + entry_iv + spot)
+    if (
+        entry_delta is not None and entry_iv is not None and spot is not None
+        and abs(entry_delta) > 1e-4 and entry_iv > 0 and dte > 0
+    ):
+        try:
+            T = max(dte / 365.0, 1 / 365.0)
+            cur_delta = _bs_delta((option_type or "call").lower(), float(spot), float(strike), T, rfr, float(entry_iv))
+            if abs(cur_delta) >= short["sl_delta_mult"] * abs(entry_delta):
+                return True, f"Stop Loss (Δ {abs(cur_delta):.2f} ≥ {short['sl_delta_mult']:.1f}× entry)", pnl_raw
+        except Exception:
+            pass
+
+    return False, None, pnl_raw
+
+
+def _evaluate_long_single_leg_exit(
+    rules: dict,
+    option_type: str,
+    strike: float,
+    spot: Optional[float],
+    entry_price: float,
+    current_price: float,
+    entry_iv: Optional[float],
+    dte: int,
+    days_held: int,
+    rfr: float,
+) -> Tuple[bool, Optional[str], float]:
+    """Exits for long single-leg: TP on profit or deep-ITM delta; SL on loss; time exit."""
+    lng = rules["long"]
+    pnl_raw = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+
+    if pnl_raw >= lng["tp"]:
+        return True, f"Take Profit ({lng['tp']*100:.0f}%)", pnl_raw
+
+    if 0 < dte <= rules["time_exit_dte"] and days_held >= rules["min_days_held"]:
+        return True, f"Time Exit ({dte}d to expiry)", pnl_raw
+
+    # Deep-ITM TP via delta
+    if entry_iv is not None and spot is not None and entry_iv > 0 and dte > 0:
+        try:
+            T = max(dte / 365.0, 1 / 365.0)
+            cur_delta = _bs_delta((option_type or "call").lower(), float(spot), float(strike), T, rfr, float(entry_iv))
+            if abs(cur_delta) >= lng["tp_delta"]:
+                return True, f"Take Profit (Δ {abs(cur_delta):.2f} deep ITM)", pnl_raw
+        except Exception:
+            pass
+
+    if pnl_raw <= lng["sl"]:
+        return True, f"Stop Loss ({lng['sl']*100:.0f}%)", pnl_raw
+
+    return False, None, pnl_raw
+
 
 # Realistic execution cost constants (deprecated fallbacks — use config.json paper_trading section)
 COMMISSION_PER_CONTRACT = 0.65   # $ per contract per leg (retail ~$0.65, e.g. Tastytrade/TDA)
@@ -39,7 +194,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -97,6 +252,10 @@ _MIGRATIONS = {
         # different weight configurations can be compared head-to-head later.
         "ALTER TABLE trades ADD COLUMN weight_profile TEXT",
         "CREATE INDEX IF NOT EXISTS idx_dedup_profile ON trades(ticker, strike, expiration, type, weight_profile, date)",
+    ],
+    9: [
+        # Record which exit rule fired (Take Profit / Stop Loss / Strike Breach / Delta Touch / Time Exit)
+        "ALTER TABLE trades ADD COLUMN exit_reason TEXT",
     ],
 }
 
@@ -298,9 +457,12 @@ class PaperManager:
         print(f"Logged {trade_dict['type'].upper()} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
 
     def log_trade_if_new(self, trade_dict: Dict[str, Any]) -> bool:
-        """Insert a paper trade unless an identical row already exists today.
+        """Insert a paper trade unless an identical row already exists.
 
-        Dedup key: ``(calendar day, ticker, strike, expiration, type, weight_profile)``.
+        Dedup key: ``(trade date, ticker, strike, expiration, type, weight_profile)``.
+        The trade date is whatever ``log_trade`` would store — either the caller's
+        explicit ``trade_dict["date"]`` or today's timestamp — so a re-logged row
+        matches its prior copy even when re-runs happen on a later calendar day.
         ``weight_profile`` may be ``None`` for untagged trades — NULL-equal rows still
         dedup against each other because ``IS`` is used instead of ``=``.
 
@@ -311,6 +473,9 @@ class PaperManager:
         strike = float(trade_dict["strike"])
         expiration = trade_dict["expiration"]
         profile = trade_dict.get("weight_profile")
+        effective_date = trade_dict.get("date") or datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
 
         with self._get_connection() as conn:
             row = conn.execute(
@@ -321,10 +486,10 @@ class PaperManager:
                   AND expiration = ?
                   AND type = ?
                   AND weight_profile IS ?
-                  AND date(date) = date('now', 'localtime')
+                  AND date(date) = date(?)
                 LIMIT 1
                 """,
-                (ticker, strike, expiration, typ, profile),
+                (ticker, strike, expiration, typ, profile, effective_date),
             ).fetchone()
         if row is not None:
             return False
@@ -452,12 +617,22 @@ class PaperManager:
         print()
 
     def update_positions(self):
-        """Updates all OPEN positions using SQLite and checks exit rules."""
+        """Updates all OPEN positions using SQLite and checks context-aware exit rules.
+
+        Uses strategy-aware rules from config.exit_rules:
+          - short single-leg: DTE-tiered TP, strike-breach + premium-multiple + delta-multiple stops
+          - spreads: 50% TP / 1× credit SL
+          - long single-leg: 100% TP or deep-ITM delta / -50% SL
+        """
         config = self._load_config()
-        exit_rules = config.get("exit_rules", {"take_profit": 0.50, "stop_loss": -0.25})
-        tp = exit_rules.get("take_profit", 0.50)
-        sl = exit_rules.get("stop_loss", -0.25)
-        time_exit_dte = exit_rules.get("time_exit_dte", 21)  # close at ≤21 DTE regardless
+        rules = _normalize_exit_rules(config)
+        time_exit_dte = rules["time_exit_dte"]
+        spread_tp = rules["spread"]["tp"]
+        spread_sl = rules["spread"]["sl"]
+        try:
+            rfr = _get_rfr() if _HAS_RFR else 0.045
+        except Exception:
+            rfr = 0.045
 
         # Fetch open trades
         with self._get_connection() as conn:
@@ -615,14 +790,14 @@ class PaperManager:
                         pnl_raw = (net_credit - current_value) / net_credit
                     else:
                         continue
-                    hit_tp = pnl_raw >= tp
-                    hit_sl = pnl_raw <= sl
-                    hit_time = (0 < dte <= time_exit_dte) and days_held >= 3
+                    hit_tp = pnl_raw >= spread_tp
+                    hit_sl = pnl_raw <= spread_sl
+                    hit_time = (0 < dte <= time_exit_dte) and days_held >= rules["min_days_held"]
                     if hit_tp or hit_sl or hit_time:
                         if hit_tp:
-                            reason = "Take Profit"
+                            reason = f"Take Profit ({spread_tp*100:.0f}% of credit)"
                         elif hit_sl:
-                            reason = "Stop Loss"
+                            reason = f"Stop Loss ({abs(spread_sl)*100:.0f}% of credit)"
                         else:
                             reason = f"Time Exit ({dte}d to expiry)"
                         friction_fraction = self._friction_per_share / entry_price if entry_price > 0 else 0.0
@@ -633,8 +808,8 @@ class PaperManager:
                         )
                         with self._get_connection() as conn:
                             conn.execute(
-                                "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=? WHERE entry_id=?",
-                                (current_value, now, pnl_realistic, entry_id),
+                                "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, exit_reason=? WHERE entry_id=?",
+                                (current_value, now, pnl_realistic, reason, entry_id),
                             )
                 except Exception as exc:
                     logger.debug("Spread P&L calc failed for %s: %s", ticker, exc)
@@ -644,26 +819,31 @@ class PaperManager:
             current_price = option_price_cache.get(entry_id)
 
             if current_price is not None:
-                # Raw market P&L — flip sign for short/credit positions
-                # (seller profits when option loses value)
                 is_short = _is_short_position(row["strategy_name"] or "")
+                spot = spot_cache.get(ticker)
+                try:
+                    entry_delta = row["entry_delta"] if "entry_delta" in row.keys() else None
+                except Exception:
+                    entry_delta = None
+                try:
+                    entry_iv = row["entry_iv"] if "entry_iv" in row.keys() else None
+                except Exception:
+                    entry_iv = None
+
                 if is_short:
-                    pnl_raw = (entry_price - current_price) / entry_price
+                    should_close, reason, pnl_raw = _evaluate_short_single_leg_exit(
+                        rules, option_type, float(strike), spot,
+                        entry_price, current_price, entry_delta, entry_iv,
+                        dte, days_held, rfr,
+                    )
                 else:
-                    pnl_raw = (current_price - entry_price) / entry_price
-                hit_tp = pnl_raw >= tp
-                hit_sl = pnl_raw <= sl
-                # Time exit needs at least 3 days held to avoid closing freshly-logged trades
-                hit_time = (0 < dte <= time_exit_dte) and days_held >= 3
+                    should_close, reason, pnl_raw = _evaluate_long_single_leg_exit(
+                        rules, option_type, float(strike), spot,
+                        entry_price, current_price, entry_iv,
+                        dte, days_held, rfr,
+                    )
 
-                if hit_tp or hit_sl or hit_time:
-                    if hit_tp:
-                        reason = "Take Profit"
-                    elif hit_sl:
-                        reason = "Stop Loss"
-                    else:
-                        reason = f"Time Exit ({dte}d to expiry)"
-
+                if should_close:
                     # Realistic P&L: proportional slippage (30% of bid-ask) + commissions
                     _slip = self._get_spread_slippage(ticker, expiration, strike, option_type, entry_price)
                     _friction = (2 * _slip) + (2 * self._commission_per_contract / 100.0)
@@ -677,11 +857,11 @@ class PaperManager:
                     )
                     update_query = """
                     UPDATE trades
-                    SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?
+                    SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, exit_reason=?
                     WHERE entry_id=?
                     """
                     with self._get_connection() as conn:
-                        conn.execute(update_query, (current_price, now, pnl_realistic, entry_id))
+                        conn.execute(update_query, (current_price, now, pnl_realistic, reason, entry_id))
 
         if closed_this_run:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")

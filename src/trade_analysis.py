@@ -114,11 +114,9 @@ def calculate_entry_exit_levels(row: pd.Series, config: Dict) -> Dict[str, float
     strike = row.get('strike', 0)
     opt_type = row.get('type', 'call').lower()
 
-    # Get exit rules from config
+    # Get exit rules from config — use new context-aware schema when present
     exit_rules = config.get('exit_rules', {})
     entry_improvement = config.get('entry_exit_rules', {}).get('entry_improvement_pct', 0.05)
-    profit_target_pct = exit_rules.get('take_profit', 0.50)
-    stop_loss_pct = abs(exit_rules.get('stop_loss', -0.25))
 
     # Calculate entry price (aim for better than mid)
     # For wide spreads, be more aggressive in improving entry
@@ -130,6 +128,21 @@ def calculate_entry_exit_levels(row: pd.Series, config: Dict) -> Dict[str, float
     except ImportError:
         from utils import is_short_position
     is_short = is_short_position(row.get('strategy_name', ''))
+
+    # Context-aware TP/SL: shorts use tiered TP (display the ≥21 DTE tier —
+    # what the user sees at entry) and the 2× premium stop. Longs use 100% /
+    # -50%. Falls back to legacy flat take_profit / stop_loss if the new
+    # keys are missing.
+    legacy_tp = exit_rules.get('take_profit', 0.50)
+    legacy_sl = abs(exit_rules.get('stop_loss', -0.25))
+    if is_short:
+        sp = exit_rules.get('short_premium', {})
+        profit_target_pct = float(sp.get('take_profit_ge_21_dte', legacy_tp))
+        stop_loss_pct = float(sp.get('stop_loss_premium_multiple', 2.0)) - 1.0
+    else:
+        lo = exit_rules.get('long_option', {})
+        profit_target_pct = float(lo.get('take_profit', legacy_tp))
+        stop_loss_pct = abs(float(lo.get('stop_loss', -legacy_sl)))
 
     # Buying: try to enter below mid
     # Selling: try to enter above mid

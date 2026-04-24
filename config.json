@@ -86,9 +86,28 @@
   "iv_rank_low_threshold": 0.2,
   "monte_carlo_simulations": 5000,
   "exit_rules": {
+    "time_exit_dte": 21,
+    "min_days_held": 3,
+    "short_premium": {
+      "take_profit_ge_21_dte": 0.50,
+      "take_profit_7_to_21_dte": 0.35,
+      "take_profit_lt_7_dte": 0.25,
+      "stop_loss_premium_multiple": 2.0,
+      "stop_loss_on_strike_breach": true,
+      "strike_breach_buffer": 0.0,
+      "stop_loss_delta_multiple": 2.5
+    },
+    "spread": {
+      "take_profit": 0.50,
+      "stop_loss": -1.0
+    },
+    "long_option": {
+      "take_profit": 1.00,
+      "take_profit_delta": 0.80,
+      "stop_loss": -0.50
+    },
     "take_profit": 0.5,
-    "stop_loss": -0.25,
-    "time_exit_dte": 21
+    "stop_loss": -0.25
   },
   "premium_selling_weights": {
     "pop": 0.32,

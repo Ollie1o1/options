@@ -3380,6 +3380,7 @@ def main():
     parser.add_argument("--help", "-h", action="store_true", help="Show help and exit")
     parser.add_argument("--version", action="store_true", help="Show version and exit")
     parser.add_argument("--close-trades", action="store_true", help="Update trade log with closing P/L")
+    parser.add_argument("--enforce-exits", action="store_true", help="Run exit-rule enforcement on paper_trades.db and exit (suitable for cron)")
     parser.add_argument("--ui", action="store_true", help="Launch Streamlit dashboard")
     parser.add_argument("--no-ai", action="store_true", help="Skip AI analysis after scan")
     parser.add_argument("--top", type=int, default=None, metavar="N", help="Run top-N cross-ticker scan and exit")
@@ -3481,6 +3482,13 @@ def main():
 
     if args.close_trades:
         close_trades()
+        sys.exit(0)
+
+    if args.enforce_exits:
+        print("Enforcing exit rules on paper_trades.db...")
+        pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
+        pm.update_positions()
+        print("Done.")
         sys.exit(0)
 
     if args.ui:
@@ -3588,6 +3596,10 @@ def main():
         pass
 
     # ── Regime Dashboard + Portfolio Update (parallel) ─────────────────────
+    # Regime dashboard runs in a background thread for the UX; exit enforcement
+    # runs synchronously so auto-closes actually complete before we move on.
+    # Previously the update was a 2-second daemon thread that got killed before
+    # yfinance finished, so stop-loss/take-profit never actually fired.
     pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
     try:
         from .regime_dashboard import print_regime_dashboard
@@ -3596,7 +3608,6 @@ def main():
         import sys as _sys
         print("  Loading market data...", end="", flush=True)
         _result = [None]
-        _update_done = _t.Event()
         def _fetch():
             buf = _io.StringIO()
             _old = _sys.stdout
@@ -3606,23 +3617,18 @@ def main():
             finally:
                 _sys.stdout = _old
             _result[0] = buf.getvalue()
-        def _bg_update():
-            try:
-                pm.update_positions()
-            except Exception:
-                pass
-            finally:
-                _update_done.set()
         _th = _t.Thread(target=_fetch, daemon=True)
-        _th2 = _t.Thread(target=_bg_update, daemon=True)
         _th.start()
-        _th2.start()
+        # Enforce exits synchronously. yfinance fetches are capped inside
+        # update_positions (30s spot + 30s option prices) so worst case is ~60s.
+        try:
+            pm.update_positions()
+        except Exception:
+            pass
         _th.join(timeout=6)
         print("\r" + " " * 30 + "\r", end="")
         if _result[0]:
             print(_result[0], end="")
-        if not _update_done.wait(timeout=2):
-            print(fmt.format_warning("Portfolio update timed out — skipping live price refresh") if HAS_ENHANCED_CLI else "⚠ Portfolio update timed out")
     except Exception:
         print()
 

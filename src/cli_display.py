@@ -575,18 +575,28 @@ def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_si
         from utils import is_short_position
     _is_short_ticket = is_short_position(row.get('strategy_name', ''))
 
-    # Entry/exit levels
-    tp_pct = 0.50
-    sl_pct = 0.25
-    if config:
-        tp_pct = config.get("entry_exit_rules", {}).get("profit_target_pct", 0.50)
-        sl_pct = abs(config.get("entry_exit_rules", {}).get("stop_loss_pct", 0.25))
+    # Entry/exit levels — pull from exit_rules (what's actually enforced by
+    # update_positions), not legacy entry_exit_rules. Fall back to the old
+    # keys if the new structure isn't present.
+    _exit = (config or {}).get("exit_rules", {})
+    _legacy = (config or {}).get("entry_exit_rules", {})
     if _is_short_ticket:
-        # Shorts: profit when price drops, stop when it rises
+        # Context-aware short stops: premium × 2.0 (or strike breach, shown
+        # as a note). Take-profit uses the long-DTE tier since the ticket is
+        # at entry; it tightens on the way to expiry.
+        _sp = _exit.get("short_premium", {})
+        tp_pct = float(_sp.get("take_profit_ge_21_dte",
+                               _legacy.get("profit_target_pct", 0.50)))
+        prem_mult = float(_sp.get("stop_loss_premium_multiple", 2.0))
+        sl_pct = prem_mult - 1.0
         target = mid * (1 - tp_pct)
-        stop = mid * (1 + sl_pct)
+        stop = mid * prem_mult
     else:
-        # Longs: profit when price rises, stop when it drops
+        _lo = _exit.get("long_option", {})
+        tp_pct = float(_lo.get("take_profit",
+                               _legacy.get("profit_target_pct", 0.50)))
+        sl_pct = abs(float(_lo.get("stop_loss",
+                                   -abs(_legacy.get("stop_loss_pct", 0.25)))))
         target = mid * (1 + tp_pct)
         stop = mid * (1 - sl_pct)
 
@@ -612,6 +622,20 @@ def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_si
         f"  {v} {pad_line(sizing_line)} {v}",
         f"  {v} {pad_line(f'Target: ${target:.2f} (+{tp_pct:.0%})  |  Stop: ${stop:.2f} (-{sl_pct:.0%})')} {v}",
     ]
+    if _is_short_ticket:
+        try:
+            _strike = float(row.get('strike', 0))
+        except (TypeError, ValueError):
+            _strike = 0.0
+        _opt_type = str(row.get('type', '')).lower()
+        if _strike > 0 and _opt_type in ('call', 'put'):
+            _dir = "above" if _opt_type == 'call' else "below"
+            lines.append(
+                f"  {v} {pad_line(fmt.colorize(f'Also closes on: strike breach (spot {_dir} ${_strike:.2f}) or 21 DTE', fmt.Colors.DIM))} {v}"
+            )
+        lines.append(
+            f"  {v} {pad_line(fmt.colorize('TP tightens near expiry: 35% @ 7–21 DTE, 25% @ <7 DTE', fmt.Colors.DIM))} {v}"
+        )
 
     print(top_border)
     for line in lines:
@@ -832,8 +856,21 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
         # Entry/Exit
         if config.get('display', {}).get('show_entry_exit_levels', True):
             levels = calculate_entry_exit_levels(row, config)
-            _tp = config.get("entry_exit_rules", {}).get("profit_target_pct", 0.50)
-            _sl = abs(config.get("entry_exit_rules", {}).get("stop_loss_pct", 0.25))
+            # Context-aware TP/SL labels — match what update_positions enforces
+            try:
+                from .utils import is_short_position as _is_sh
+            except ImportError:
+                from utils import is_short_position as _is_sh
+            _short_pick = _is_sh(row.get('strategy_name', ''))
+            _exit_cfg = config.get("exit_rules", {})
+            if _short_pick:
+                _sp = _exit_cfg.get("short_premium", {})
+                _tp = float(_sp.get("take_profit_ge_21_dte", _exit_cfg.get("take_profit", 0.50)))
+                _sl = float(_sp.get("stop_loss_premium_multiple", 2.0)) - 1.0
+            else:
+                _lo = _exit_cfg.get("long_option", {})
+                _tp = float(_lo.get("take_profit", _exit_cfg.get("take_profit", 0.50)))
+                _sl = abs(float(_lo.get("stop_loss", _exit_cfg.get("stop_loss", -0.50))))
             print(f"{fmt.BoxChars.VERTICAL}    📍 Entry: ≤${levels['entry_price']:.2f} | "
                   f"Target: ${levels['profit_target']:.2f} (+{_tp:.0%}) | "
                   f"Stop: ${levels['stop_loss']:.2f} (-{_sl:.0%})")
@@ -1325,10 +1362,21 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 thesis_text = fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN) if not _extra_thesis else thesis
                 print(f"    {arrow} {thesis_label} {thesis_text}")
                 levels = calculate_entry_exit_levels(r, config)
-                tp_pct = (config.get("entry_exit_rules", {}).get("profit_target_pct")
-                          or config.get("exit_rules", {}).get("take_profit", 0.50))
-                sl_pct = abs(config.get("entry_exit_rules", {}).get("stop_loss_pct")
-                             or config.get("exit_rules", {}).get("stop_loss", -0.25))
+                # Context-aware labels mirroring update_positions enforcement
+                try:
+                    from .utils import is_short_position as _is_sh
+                except ImportError:
+                    from utils import is_short_position as _is_sh
+                _short_pick = _is_sh(r.get('strategy_name', ''))
+                _exit_cfg = config.get("exit_rules", {})
+                if _short_pick:
+                    _sp = _exit_cfg.get("short_premium", {})
+                    tp_pct = float(_sp.get("take_profit_ge_21_dte", _exit_cfg.get("take_profit", 0.50)))
+                    sl_pct = float(_sp.get("stop_loss_premium_multiple", 2.0)) - 1.0
+                else:
+                    _lo = _exit_cfg.get("long_option", {})
+                    tp_pct = float(_lo.get("take_profit", _exit_cfg.get("take_profit", 0.50)))
+                    sl_pct = abs(float(_lo.get("stop_loss", _exit_cfg.get("stop_loss", -0.50))))
                 entry_str = fmt.colorize(f"\u2264${levels['entry_price']:.2f}", fmt.Colors.BRIGHT_WHITE)
                 target_str = fmt.colorize(f"${levels['profit_target']:.2f} (+{tp_pct:.0%})", fmt.Colors.GREEN)
                 stop_str = fmt.colorize(f"${levels['stop_loss']:.2f} (-{sl_pct:.0%})", fmt.Colors.RED)

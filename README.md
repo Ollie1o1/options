@@ -542,15 +542,48 @@ For each pick the screener generates:
 
 Log any pick directly from the CLI and track it going forward:
 
-- Positions auto-update on every launch (fetches live quotes via yfinance)
-- Entry IV and Greeks stored per trade (schema v8)
+- Positions auto-update on every launch (fetches live quotes via yfinance) — **synchronously**, so auto-closes actually finalize before the program continues
+- Entry IV and Greeks stored per trade (schema v9 — includes `exit_reason`)
 - All 27 per-component scores stored at entry — enables per-component IC analysis after trades close
-- Take Profit and Stop Loss thresholds enforced from `config.json`
+- **Context-aware exit enforcement** (see below)
 - P&L attribution for closed trades (delta/gamma/theta/vega breakdown)
 - Full BS repricing stress test on open portfolio
 - Win rate, total P/L, and average return tracked in a local SQLite database
 - Close expired positions with `python -m src.options_screener --close-trades`
-- View portfolio with `python -m src.check_pnl` (or press `7` / `PORTFOLIO` at the mode menu)
+- Enforce exits standalone (e.g. from cron) with `python3 run.py --enforce-exits`
+- View portfolio with `python -m src.check_pnl` (or press `7` / `PORTFOLIO` at the mode menu) — viewer runs exit enforcement before display
+
+### Context-aware exit rules
+
+Flat `take_profit=50% / stop_loss=-25%` doesn't work for options: it's too tight for short premium (whipsaws on normal IV noise) and misses obvious defensive signals (short strike going ITM). The enforcement layer uses strategy-aware rules from `config.json → exit_rules`:
+
+**Short single-leg (short calls / short puts)** — first trigger wins:
+
+| Priority | Trigger | Rule |
+|---|---|---|
+| 1 | Take profit (DTE-tiered) | 50% @ ≥21 DTE · 35% @ 7–21 DTE · 25% @ <7 DTE |
+| 2 | Time exit | DTE ≤ 21 and days-held ≥ 3 |
+| 3 | Stop — strike breach | Spot crosses the short strike (unambiguous defensive signal) |
+| 4 | Stop — premium multiple | Current premium ≥ 2.0× entry |
+| 5 | Stop — delta multiple | `abs(current Δ) ≥ 2.5 × abs(entry Δ)` (early warning; uses stored entry_delta + entry_iv) |
+
+**Credit spreads** (defined risk):
+
+| Trigger | Rule |
+|---|---|
+| Take profit | 50% of credit received |
+| Stop loss | Position worth 2× credit (i.e. loss = 1× credit) |
+| Time exit | 21 DTE |
+
+**Long single-leg**:
+
+| Trigger | Rule |
+|---|---|
+| Take profit | +100% premium **or** delta ≥ 0.80 (deep ITM) |
+| Stop loss | −50% premium |
+| Time exit | 21 DTE |
+
+Which rule fired is persisted in the `exit_reason` column on close.
 
 ---
 
@@ -649,9 +682,26 @@ Unknown keys log a warning; non-numeric values error out. If `--weights` is omit
     "min_iv_percentile": 20
   },
   "exit_rules": {
-    "take_profit": 0.50,
-    "stop_loss": -0.25,
-    "time_exit_dte": 21
+    "time_exit_dte": 21,
+    "min_days_held": 3,
+    "short_premium": {
+      "take_profit_ge_21_dte": 0.50,
+      "take_profit_7_to_21_dte": 0.35,
+      "take_profit_lt_7_dte": 0.25,
+      "stop_loss_premium_multiple": 2.0,
+      "stop_loss_on_strike_breach": true,
+      "strike_breach_buffer": 0.0,
+      "stop_loss_delta_multiple": 2.5
+    },
+    "spread": {
+      "take_profit": 0.50,
+      "stop_loss": -1.0
+    },
+    "long_option": {
+      "take_profit": 1.00,
+      "take_profit_delta": 0.80,
+      "stop_loss": -0.50
+    }
   },
   "composite_weights": {
     "pop": 0.22,
@@ -865,7 +915,8 @@ options/
 - [x] SVI IV surface fitting with mispricing detection
 - [x] Monte Carlo PoP blending (Merton Jump Diffusion)
 - [x] HV-adjusted expected value
-- [x] Paper trading with entry IV/Greeks + all 27 component scores stored, P&L attribution, schema v8
+- [x] Paper trading with entry IV/Greeks + all 27 component scores stored, P&L attribution, schema v9
+- [x] Context-aware exit enforcement — DTE-tiered TP, strike-breach + 2× premium + delta-multiple stops for shorts; credit-based stops for spreads; synchronous enforcement at startup, in portfolio viewer, and via `--enforce-exits` CLI
 - [x] Weight-profile auto-logging system — `--weights NAME --auto-log` for A/B optimization with per-profile dedup
 - [x] Full BS repricing stress test (7×3 scenario matrix)
 - [x] Streamlit dashboard

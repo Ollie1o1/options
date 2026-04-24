@@ -36,3 +36,11 @@ temp_*.py
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Runtime state
+.hypothesis/
+ic_weights_cache.json
+paper_trades.db-shm
+paper_trades.db-wal
+paper_trades.db.bak-*
+paper_trades.db.calibration_marker.json
