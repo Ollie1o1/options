@@ -1706,6 +1706,26 @@ def enrich_and_score(
     # Only use valid bid/ask prices (> 0), otherwise fall back to lastPrice
     df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
     df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
+    df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
+
+    # Detect systemic stale-quote condition: yfinance sometimes serves
+    # bid=0/ask=0 for the whole chain even when the market is open.
+    # If >=80% of rows are zero-quoted but lastPrice exists, synthesize
+    # a conservative bid/ask around lastPrice so downstream filters don't
+    # drop every contract. Flag on df so the caller can surface it.
+    zero_quote_mask = (
+        ((df["bid"].fillna(0) <= 0) & (df["ask"].fillna(0) <= 0))
+        & df["lastPrice"].notna() & (df["lastPrice"] > 0)
+    )
+    stale_ratio = float(zero_quote_mask.mean()) if len(df) else 0.0
+    stale_quotes_active = stale_ratio >= 0.80 and len(df) >= 5
+    if stale_quotes_active:
+        # Assume a 10% round-trip spread around lastPrice for stale rows.
+        lp = df.loc[zero_quote_mask, "lastPrice"].astype(float)
+        df.loc[zero_quote_mask, "bid"] = (lp * 0.95).clip(lower=0.01)
+        df.loc[zero_quote_mask, "ask"] = (lp * 1.05).clip(lower=0.02)
+        df.attrs["stale_quotes_active"] = True
+        df.attrs["stale_quote_ratio"] = stale_ratio
 
     # Calculate mid only when both bid and ask are valid (> 0)
     valid_bid = (df["bid"].notna()) & (df["bid"] > 0)
@@ -2578,6 +2598,9 @@ def _score_fetched_data(
             news_data=news_data,
         )
 
+        if bool(df_scored.attrs.get("stale_quotes_active")):
+            result["stale_quote_ratio"] = float(df_scored.attrs.get("stale_quote_ratio", 0.0))
+
         if df_scored.empty:
             result["error"] = "No contracts passed filters"
             return result
@@ -2761,9 +2784,16 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         )
 
     raw_results: Dict[str, Any] = {}
-    # Fast mode: outer=5 × aux_pool=2 × global 0.25s-interval throttle → ~4-6 req/sec aggregate.
-    # Pushes Yahoo's ~60-100 req/min ceiling; the 15s cooldown in retry_with_backoff catches any 429.
-    _fetch_workers = min(len(tickers), 5)
+    # Scale outer fetch concurrency with the scan size. For big scans (>=80 tickers),
+    # drop parallelism to 3 so we don't exceed Yahoo's ~60-100 req/min ceiling in
+    # the first 30s. The adaptive throttle in data_fetching widens intervals and
+    # quarantines further once 429s start cascading.
+    if len(tickers) >= 80:
+        _fetch_workers = 3
+    elif len(tickers) >= 30:
+        _fetch_workers = 4
+    else:
+        _fetch_workers = min(len(tickers), 5)
     with _suppress_scan_noise():
         with ThreadPoolExecutor(max_workers=_fetch_workers) as executor:
             _future_map = {executor.submit(_fetch_one, sym): sym for sym in tickers}
@@ -2827,6 +2857,25 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             budget, macro_risk_active, tnx_change_pct
         )
 
+
+    # Stale-quote advisory: yfinance periodically serves bid=0/ask=0 chains
+    # even when the market is open. If many tickers saw this, warn loudly —
+    # scoring used a lastPrice-based synthetic mid, which is a workaround
+    # and not a reliable quote.
+    _stale_tickers = [
+        s for s in tickers
+        if float((results_buffer.get(s) or {}).get("stale_quote_ratio", 0.0)) >= 0.80
+    ]
+    if verbose and _stale_tickers:
+        _n = len(_stale_tickers)
+        _total = len(tickers)
+        _msg = (
+            f"  ! Stale-quote fallback active on {_n}/{_total} tickers "
+            f"(yfinance bid=0/ask=0). Using lastPrice +/-5% as synthetic "
+            f"bid/ask. Treat premiums as approximate; do NOT trade off these "
+            f"quotes without verifying on a live feed."
+        )
+        print(fmt.colorize(_msg, fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else _msg)
 
     # Print per-ticker summary after all futures complete
     if verbose:

@@ -278,6 +278,12 @@ class AIScorer:
         self._api_token_estimate = 0
         self._api_retry_count = 0
         self._session_warnings_issued: set = set()
+        # Session-level circuit breaker: if a model hangs/fails twice in one scan,
+        # blacklist it for the rest of the scan so we stop wasting hard-timeout
+        # slots on it. Reset per AIScorer instance.
+        self._model_failures: dict[str, int] = {}
+        self._model_blacklist: set[str] = set()
+        self._CB_FAIL_THRESHOLD = 2
         if self.config.get("cache_enabled", True):
             try:
                 from src.ai_cache import AIScoreCache
@@ -327,8 +333,15 @@ class AIScorer:
                     return sym, res, time.time() - t0, None
                 except Exception as e:
                     return sym, None, time.time() - t0, e
-            HARD_DEADLINE = 60.0
-            ex = ThreadPoolExecutor(max_workers=min(4, len(syms)))
+            # Per-call hard timeout in _chat_complete_with_fallback is ~(sdk_timeout + 5)
+            # per model and we walk up to 4 models. With the circuit breaker, after the
+            # first ~2 hangs a bad model is out of the chain, so practical worst-case
+            # per ticker drops fast. Keep a generous cap so healthy tickers aren't killed.
+            HARD_DEADLINE = 45.0
+            # Raise parallelism: OpenRouter free tier handles concurrent requests fine,
+            # and most wall-clock time is network-bound. 8 workers reduces wall-clock
+            # for 13 tickers to ~2 waves instead of ~4.
+            ex = ThreadPoolExecutor(max_workers=min(8, len(syms)))
             fut_to_sym = {ex.submit(_one, s): s for s in syms}
             stop_hb = _th.Event()
             def _heartbeat():
@@ -512,12 +525,12 @@ class AIScorer:
         prompt = "\n".join(lines) + "\n\nProvide your ticker-level assessment."
 
         try:
-            raw = self._chat_complete(
+            raw = self._chat_complete_with_fallback(
                 system=ticker_context_prompt(),
                 user=prompt,
                 max_tokens=512,
             )
-            parsed = _parse_json_single(raw)
+            parsed = _parse_json_single(raw) if raw else None
             result = parsed if isinstance(parsed, dict) else {}
             if result and self._cache:
                 self._cache.set_ticker_context(symbol, result)
@@ -692,6 +705,64 @@ class AIScorer:
             )
             return response.choices[0].message.content or ""
 
+    def _chat_complete_with_fallback(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = None,
+    ) -> Optional[str]:
+        """Hard-wall-clock chat completion that walks the fallback chain and
+        honors the session-level model blacklist.
+
+        Used for lightweight one-shot calls (e.g. per-ticker context) that
+        previously only tried the primary model and stalled the whole scan
+        when the primary hung.
+        """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        chain = [
+            self.config["model"],
+            self.config.get("fallback_model"),
+            self.config.get("second_fallback_model"),
+            self.config.get("third_fallback_model"),
+        ]
+        chain = [m for m in chain if m]
+        live = [m for m in chain if m not in self._model_blacklist]
+        use_chain = live if live else chain
+
+        sdk_timeout = float(self.config.get("timeout", 30))
+        hard_timeout = sdk_timeout + 5.0
+
+        for use_model in use_chain:
+            try:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(
+                        self._chat_complete,
+                        system=system, user=user,
+                        max_tokens=max_tokens, model=use_model,
+                    )
+                    try:
+                        return fut.result(timeout=hard_timeout)
+                    except FuturesTimeout:
+                        fut.cancel()
+                        fails = self._model_failures.get(use_model, 0) + 1
+                        self._model_failures[use_model] = fails
+                        if fails >= self._CB_FAIL_THRESHOLD and use_model not in self._model_blacklist:
+                            self._model_blacklist.add(use_model)
+                            print(f"  [ai_scorer] circuit breaker: blacklisting {use_model} for the rest of this scan after {fails} hard-timeouts", flush=True)
+                        continue  # try next model
+            except Exception as e:
+                msg = str(e).lower()
+                if "timeout" in msg or "timed out" in msg or "hung" in msg:
+                    fails = self._model_failures.get(use_model, 0) + 1
+                    self._model_failures[use_model] = fails
+                    if fails >= self._CB_FAIL_THRESHOLD and use_model not in self._model_blacklist:
+                        self._model_blacklist.add(use_model)
+                        print(f"  [ai_scorer] circuit breaker: blacklisting {use_model} for the rest of this scan after {fails} hard-timeouts", flush=True)
+                logger.debug("chat_complete_with_fallback %s failed: %s", use_model, e)
+                continue
+        return None
+
     def _score_batch_with_retry(self, batch: list[dict], batch_num: int = 1) -> list[dict]:
         """Score with exponential backoff; switches to fallback models on failure.
 
@@ -711,8 +782,12 @@ class AIScorer:
         def _pick_model(attempt: int) -> str:
             chain = [self.config["model"], fallback, second_fallback, third_fallback]
             chain = [m for m in chain if m]
-            idx = min(attempt - 1, len(chain) - 1)
-            return chain[idx]
+            # Skip blacklisted models entirely. If everything's blacklisted,
+            # fall back to the last model in the original chain so something runs.
+            live = [m for m in chain if m not in self._model_blacklist]
+            use_chain = live if live else chain
+            idx = min(attempt - 1, len(use_chain) - 1)
+            return use_chain[idx]
 
         # Hard wall-clock cap per attempt. Config "timeout" is the SDK read timeout;
         # wrapper cap is slightly larger to let the SDK timeout fire first when it works.
@@ -742,6 +817,13 @@ class AIScorer:
                 msg = str(exc)
                 is_rate_limit = "429" in msg or "rate" in msg.lower()
                 is_timeout = "timeout" in msg.lower() or "timed out" in msg.lower() or "hung" in msg.lower()
+                # Circuit breaker: count persistent transport-layer failures per model.
+                if is_timeout:
+                    fails = self._model_failures.get(use_model, 0) + 1
+                    self._model_failures[use_model] = fails
+                    if fails >= self._CB_FAIL_THRESHOLD and use_model not in self._model_blacklist:
+                        self._model_blacklist.add(use_model)
+                        print(f"  [ai_scorer] circuit breaker: blacklisting {use_model} for the rest of this scan after {fails} hard-timeouts", flush=True)
                 if attempt < max_retries:
                     if is_timeout:
                         print(f"  [ai_scorer] batch {batch_num} model {use_model} hung, switching to next fallback immediately", flush=True)

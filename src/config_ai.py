@@ -5,14 +5,14 @@ import logging
 AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
-    # New key chain (2026-04-20): z-ai primary, gpt-oss-120b fallback, elephant-alpha tertiary.
-    # All three are fresh keys, so prior "batch 1 attempt" hangs from exhausted free-tier credits
-    # should be gone. A hard wall-clock timeout in _score_batch_with_retry guarantees we fall
-    # through the chain even if an endpoint silently hangs at the TCP layer.
-    "model": "z-ai/glm-4.5-air:free",                                      # attempt 1 (PRIMARY)
-    "fallback_model": "openai/gpt-oss-120b:free",                          # attempt 2
-    "second_fallback_model": "openrouter/elephant-alpha",                  # attempt 3 (Elephant)
-    "third_fallback_model": "meta-llama/llama-3.3-70b-instruct:free",      # attempt 4 (legacy spare)
+    # Key chain (2026-04-24): gpt-oss-120b primary (proven fast), z-ai demoted to spare.
+    # Observed: z-ai/glm-4.5-air consistently hangs at the streaming layer (>17s wall-clock
+    # even on HTTP 200), wasting ~17s per attempt. Session-level circuit breaker in
+    # AIScorer will also blacklist any model after 2 consecutive hard-timeouts.
+    "model": "openai/gpt-oss-120b:free",                                   # attempt 1 (PRIMARY)
+    "fallback_model": "openrouter/elephant-alpha",                         # attempt 2
+    "second_fallback_model": "meta-llama/llama-3.3-70b-instruct:free",     # attempt 3
+    "third_fallback_model": "z-ai/glm-4.5-air:free",                       # attempt 4 (spare)
     "api_key_env": "OPENROUTER_API_KEY",
 
     # ── Per-model API key overrides ───────────────────────────────────────────

@@ -830,21 +830,63 @@ def iv_history_coverage(ticker: str) -> Dict[str, Any]:
 # All threads share one gate so aggregate request rate stays under Yahoo's ~60-100 req/min ceiling.
 _YF_THROTTLE_LOCK = threading.Lock()
 _YF_LAST_CALL_TS = [0.0]
-_YF_MIN_INTERVAL = 0.25  # seconds between any two Yahoo calls (4 req/sec aggregate — fast mode; 429 cooldown will back off if hit)
+_YF_BASE_INTERVAL = 0.25  # healthy-state minimum spacing between Yahoo calls
+_YF_MIN_INTERVAL = [_YF_BASE_INTERVAL]  # mutable — adaptive throttle can widen this
+_YF_RECENT_429S: list = []               # timestamps of recent rate-limit events (for adaptive pacing)
+_YF_QUARANTINE_UNTIL = [0.0]             # monotonic deadline during which we refuse fresh fetches
+_YF_QUARANTINE_WINDOW_S = 60.0           # once triggered, fetches wait this long for Yahoo's window to reset
 
 def _yf_throttle():
-    with _YF_THROTTLE_LOCK:
-        now = time.monotonic()
-        wait = _YF_LAST_CALL_TS[0] + _YF_MIN_INTERVAL - now
+    # Block until we've passed the quarantine deadline (no new 429s during that window).
+    while True:
+        with _YF_THROTTLE_LOCK:
+            now = time.monotonic()
+            q_wait = _YF_QUARANTINE_UNTIL[0] - now
+            interval = _YF_MIN_INTERVAL[0]
+            wait = _YF_LAST_CALL_TS[0] + interval - now
+        if q_wait > 0:
+            time.sleep(min(q_wait, 5.0))
+            continue
         if wait > 0:
             time.sleep(wait)
-            now = time.monotonic()
-        _YF_LAST_CALL_TS[0] = now
+        with _YF_THROTTLE_LOCK:
+            _YF_LAST_CALL_TS[0] = time.monotonic()
+        return
 
 def _yf_cooldown(seconds: float):
     """Push the next-allowed call forward by `seconds` across all threads (use after 429)."""
     with _YF_THROTTLE_LOCK:
         _YF_LAST_CALL_TS[0] = max(_YF_LAST_CALL_TS[0], time.monotonic()) + seconds
+
+def _yf_register_429():
+    """Record a 429 event and escalate global pacing if Yahoo is persistently angry.
+
+    Strategy:
+    - Drop a 15s cooldown on the shared gate so all threads space out.
+    - Track 429s in the last 60s. If >=3 fire, widen the base interval to 0.75s
+      (from 0.25s) and quarantine fetches for 60s so Yahoo's rolling window
+      has time to reset. Without this, we cascade through hundreds of
+      rate-limited retries and waste 60-80s per ticker.
+    """
+    now = time.monotonic()
+    with _YF_THROTTLE_LOCK:
+        _YF_LAST_CALL_TS[0] = max(_YF_LAST_CALL_TS[0], now) + 15.0
+        _YF_RECENT_429S.append(now)
+        # Drop events older than 60s
+        cutoff = now - 60.0
+        while _YF_RECENT_429S and _YF_RECENT_429S[0] < cutoff:
+            _YF_RECENT_429S.pop(0)
+        n_recent = len(_YF_RECENT_429S)
+        if n_recent >= 3 and _YF_QUARANTINE_UNTIL[0] < now:
+            # Yahoo is rate-limiting us hard — pause the whole pool and slow
+            # the steady-state rate. Only log once per quarantine entry.
+            _YF_MIN_INTERVAL[0] = max(_YF_MIN_INTERVAL[0], 0.75)
+            _YF_QUARANTINE_UNTIL[0] = now + _YF_QUARANTINE_WINDOW_S
+            logging.warning(
+                f"[yf-throttle] {n_recent} rate-limit events in the last 60s — "
+                f"pausing all fetches for {_YF_QUARANTINE_WINDOW_S:.0f}s and widening "
+                f"base interval to {_YF_MIN_INTERVAL[0]:.2f}s"
+            )
 
 
 def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)):
@@ -867,12 +909,17 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)
                         or ("nonetype" in msg and "subscriptable" in msg)
                     )
                     if is_rate_limit:
-                        # Global cooldown: all other threads wait too, so we don't hammer Yahoo after a 429.
-                        _yf_cooldown(15.0)
-                    if x == retries:
-                        logging.warning(f"Function {func.__name__} failed after {retries} retries: {e}")
-                        # When the failure is a Python-level bug (NoneType, etc.) rather than a
-                        # network/rate-limit issue, dump the traceback so we can pinpoint it.
+                        # Global cooldown + adaptive escalation: all threads back off,
+                        # and if Yahoo is persistently angry we quarantine.
+                        _yf_register_429()
+                    # Fast-fail on rate limits: retrying a 429 more than twice is
+                    # almost always wasted (~60-80s per ticker). The screener's
+                    # serial retry waves will pick these up after the parallel
+                    # storm subsides.
+                    rl_max = min(retries, 1)
+                    max_attempts = rl_max if is_rate_limit else retries
+                    if x >= max_attempts:
+                        logging.warning(f"Function {func.__name__} failed after {x + 1} attempt(s): {e}")
                         if not is_rate_limit and "no options" not in msg and "price history" not in msg:
                             try:
                                 import os, traceback
@@ -885,7 +932,7 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)
                         raise e
                     base = backoff_in_seconds * (2 ** x)
                     if is_rate_limit:
-                        base = max(base, 6.0 * (x + 1))  # 6s, 12s, 18s on rate limits
+                        base = max(base, 8.0 * (x + 1))  # 8s per attempt on rate limits
                     sleep = base + random.uniform(0, 1)
                     time.sleep(sleep)
                     x += 1
