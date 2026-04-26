@@ -1150,6 +1150,187 @@ COMPONENT_TO_WEIGHT_KEY: Dict[str, str] = {
 }
 
 
+# Structure-aware filtering ─────────────────────────────────────────────────
+# Schema v10 columns identify multi-leg structures:
+#   - iron_condor: short_put_strike AND short_call_strike both populated
+#   - spread:      long_strike populated AND short_call_strike NULL
+#   - single:      long_strike NULL AND short_put_strike NULL
+
+_STRUCTURE_FILTER_SQL = {
+    "single":      "(long_strike IS NULL AND short_put_strike IS NULL)",
+    "spread":      "(long_strike IS NOT NULL AND short_put_strike IS NULL)",
+    "iron_condor": "(short_put_strike IS NOT NULL AND short_call_strike IS NOT NULL)",
+}
+
+# Components used per structure for IC/optimizer. Matches the feature_to_col
+# maps in spread_scoring.enrich_credit_spreads / enrich_iron_condors so the
+# optimizer learns the same weight keys the live scorer consumes.
+_SPREAD_FEATURE_COLS = (
+    "pop_score", "credit_to_width_score", "iv_rank_score",
+    "return_on_risk_score", "liquidity_score", "theta_score",
+    "spread_score", "momentum_score", "catalyst_score",
+)
+_SPREAD_COL_TO_KEY = {
+    "pop_score":             "pop",
+    "credit_to_width_score": "credit_to_width",
+    "iv_rank_score":         "iv_rank",
+    "return_on_risk_score":  "return_on_risk",
+    "liquidity_score":       "liquidity",
+    "theta_score":           "theta",
+    "spread_score":          "spread",
+    "momentum_score":        "momentum",
+    "catalyst_score":        "catalyst",
+}
+
+_IRON_FEATURE_COLS = (
+    "pop_score", "credit_to_width_score", "delta_neutral_score",
+    "iv_rank_score", "liquidity_score", "theta_score", "spread_score",
+)
+_IRON_COL_TO_KEY = {
+    "pop_score":             "pop",
+    "credit_to_width_score": "credit_to_width",
+    "delta_neutral_score":   "delta_neutral",
+    "iv_rank_score":         "iv_rank",
+    "liquidity_score":       "liquidity",
+    "theta_score":           "theta",
+    "spread_score":          "spread",
+}
+
+
+def _structure_filter_clause(structure: str) -> str:
+    return _STRUCTURE_FILTER_SQL.get(structure, "1=1")
+
+
+def run_paper_trade_ic_for_structure(
+    db_path: str,
+    structure: str,
+    feature_cols: tuple,
+) -> dict:
+    """Per-structure IC: filters trades to one structure (single/spread/IC),
+    computes per-component IC against pnl_pct over feature_cols only."""
+    out = {"n_trades": 0, "component_ic": {}, "component_n": {}}
+    where = _structure_filter_clause(structure)
+    # Build column list, filter to columns that actually exist
+    try:
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            present = [c for c in feature_cols if c in existing_cols]
+            col_list = ", ".join(["quality_score", "pnl_pct"] + present)
+            rows = conn.execute(
+                f"SELECT {col_list} FROM trades "
+                f"WHERE status='CLOSED' AND quality_score IS NOT NULL "
+                f"AND pnl_pct IS NOT NULL AND {where}"
+            ).fetchall()
+    except Exception as exc:
+        out["error"] = str(exc)
+        return out
+
+    if not rows or not HAS_PD or not HAS_NP or not HAS_SCIPY:
+        out["n_trades"] = len(rows) if rows else 0
+        return out
+
+    df = pd.DataFrame(
+        [{k: (float(r[k]) if r[k] is not None else float("nan")) for k in list(r.keys())} for r in rows]
+    )
+    out["n_trades"] = int(len(df))
+    for col in present:
+        try:
+            sub = df[[col, "pnl_pct"]].dropna()
+            out["component_n"][col] = int(len(sub))
+            if len(sub) >= 10 and float(sub[col].std()) > 0:
+                ic_val, _ = scipy_stats.pearsonr(sub[col].values, sub["pnl_pct"].values)
+                if math.isfinite(ic_val):
+                    out["component_ic"][col] = float(ic_val)
+        except Exception:
+            pass
+    return out
+
+
+def recommend_weights_for_structure(
+    db_path: str = DEFAULT_DB_PATH,
+    config_path: str = "config.json",
+    structure: str = "single",
+) -> Dict[str, Any]:
+    """Per-structure weight optimizer. Reads only trades of `structure`,
+    learns the matching config block:
+        - single      → composite_weights         (delegates to recommend_weights_from_paper_trades)
+        - spread      → credit_spread_weights
+        - iron_condor → iron_condor_weights
+    """
+    if structure == "single":
+        return recommend_weights_from_paper_trades(db_path, config_path)
+
+    if structure == "spread":
+        feature_cols = _SPREAD_FEATURE_COLS
+        col_to_key = _SPREAD_COL_TO_KEY
+        weights_key = "credit_spread_weights"
+        from .spread_scoring import DEFAULT_SPREAD_WEIGHTS as default_w
+    elif structure == "iron_condor":
+        feature_cols = _IRON_FEATURE_COLS
+        col_to_key = _IRON_COL_TO_KEY
+        weights_key = "iron_condor_weights"
+        from .spread_scoring import DEFAULT_IRON_WEIGHTS as default_w
+    else:
+        return {"error": f"unknown structure: {structure}", "ready": False, "n_trades": 0}
+
+    ic_data = run_paper_trade_ic_for_structure(db_path, structure, feature_cols)
+    n = ic_data.get("n_trades", 0)
+    component_ic = ic_data.get("component_ic", {}) or {}
+
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except Exception as exc:
+        return {"error": f"could not read {config_path}: {exc}", "n_trades": n, "ready": False}
+
+    cw = dict(cfg.get(weights_key, dict(default_w)))
+    target_keys = list(col_to_key.values())
+    current_subset = {k: float(cw.get(k, 0.0)) for k in target_keys}
+    budget = sum(current_subset.values())
+
+    raw_ic = {col_to_key[col]: max(component_ic.get(col, 0.0), 0.0) for col in col_to_key}
+    raw_sum = sum(raw_ic.values())
+    if raw_sum > 0 and budget > 0:
+        ic_target = {k: (raw_ic.get(k, 0.0) / raw_sum) * budget for k in target_keys}
+    else:
+        ic_target = dict(current_subset)
+
+    if n < CALIBRATION_MIN_TRADES:
+        shrink = 0.0
+    else:
+        shrink = n / (n + CALIBRATION_PRIOR_N)
+
+    new_subset = {k: (1.0 - shrink) * current_subset[k] + shrink * ic_target[k] for k in target_keys}
+    new_subset = {k: min(v, CALIBRATION_WEIGHT_CAP) for k, v in new_subset.items()}
+    s = sum(new_subset.values())
+    if s > 0 and budget > 0:
+        new_subset = {k: v / s * budget for k, v in new_subset.items()}
+
+    recommended = dict(cw)
+    for k, v in new_subset.items():
+        recommended[k] = round(v, 4)
+
+    deltas = {k: round(recommended[k] - cw.get(k, 0.0), 4) for k in target_keys}
+    ready = (n >= CALIBRATION_MIN_TRADES) and (raw_sum > 0)
+
+    return {
+        "structure": structure,
+        "weights_key": weights_key,
+        "n_trades": n,
+        "min_trades_required": CALIBRATION_MIN_TRADES,
+        "ready": ready,
+        "shrinkage": round(shrink, 3),
+        "budget": round(budget, 4),
+        "current": cw,
+        "recommended": recommended,
+        "deltas": deltas,
+        "component_ic": component_ic,
+        "component_n": ic_data.get("component_n", {}),
+        "calibratable_keys": target_keys,
+    }
+
+
 def recommend_weights_from_paper_trades(
     db_path: str = DEFAULT_DB_PATH,
     config_path: str = "config.json",
@@ -1431,6 +1612,8 @@ __all__ = [
     "print_backtest_report",
     "print_paper_trade_ic",
     "recommend_weights_from_paper_trades",
+    "recommend_weights_for_structure",
+    "run_paper_trade_ic_for_structure",
     "apply_recommended_weights",
     "print_calibration_report",
     "get_calibration_status",

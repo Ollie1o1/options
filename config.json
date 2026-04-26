@@ -122,6 +122,26 @@
     "momentum": 0.0,
     "catalyst": 0.0
   },
+  "credit_spread_weights": {
+    "pop": 0.25,
+    "credit_to_width": 0.20,
+    "iv_rank": 0.15,
+    "return_on_risk": 0.10,
+    "liquidity": 0.10,
+    "theta": 0.08,
+    "spread": 0.05,
+    "momentum": 0.04,
+    "catalyst": 0.03
+  },
+  "iron_condor_weights": {
+    "pop": 0.30,
+    "credit_to_width": 0.20,
+    "delta_neutral": 0.15,
+    "iv_rank": 0.12,
+    "liquidity": 0.10,
+    "theta": 0.08,
+    "spread": 0.05
+  },
   "composite_weights": {
     "pop": 0.13,
     "em_realism": 0.0,

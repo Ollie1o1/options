@@ -131,6 +131,7 @@ from .watchlist import (
 )
 from .oi_snapshot import load_oi_snapshot
 from .utils import safe_float
+from .spread_scoring import enrich_credit_spreads, enrich_iron_condors
 
 
 @contextlib.contextmanager
@@ -2620,11 +2621,13 @@ def _score_fetched_data(
         if mode == "Credit Spreads":
             spreads = find_credit_spreads(df_scored)
             if not spreads.empty:
+                spreads = enrich_credit_spreads(spreads, df_scored, config)
                 result["credit_spreads"].append(spreads)
                 result["success"] = True
         elif mode == "Iron Condor":
             condors = find_iron_condors(df_scored)
             if not condors.empty:
+                condors = enrich_iron_condors(condors, df_scored, config)
                 result["iron_condors"] = condors
                 result["success"] = True
         elif mode == "Premium Selling":
@@ -3948,20 +3951,108 @@ def main():
 
             # ── Auto-log mode: bypass interactive save menu ──────────────────
             if _has_results and getattr(args, "auto_log", False):
+                # Pick exactly one result source — prefer single-leg picks, otherwise
+                # the first non-empty spread/condor DF that the scan produced.
                 _log_src = picks if not picks.empty else (
                     _credit_spreads if isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty
                     else _iron_condors
                 )
-                if isinstance(_log_src, pd.DataFrame) and not _log_src.empty and "symbol" in _log_src.columns:
-                    # Single-leg picks only in v1; spreads/condors need separate dedup logic.
-                    _single_legs = _log_src.copy()
-                    if "short_strike" in _single_legs.columns or "net_credit" in _single_legs.columns or "total_credit" in _single_legs.columns:
-                        # log_src was a spreads/condors DF — skip auto-log (not supported yet)
-                        print(fmt.format_warning("--auto-log supports single-leg picks only; skipping spreads/condors") if HAS_ENHANCED_CLI else "  Auto-log supports single-leg picks only.")
-                        _single_legs = _single_legs.iloc[0:0]
+                _is_spread_src = (
+                    isinstance(_log_src, pd.DataFrame) and not _log_src.empty
+                    and ("short_strike" in _log_src.columns or "net_credit" in _log_src.columns or "total_credit" in _log_src.columns)
+                )
 
+                if _is_spread_src:
+                    # ── Spreads / iron condors path ─────────────────────────
+                    _spreads = _log_src.copy()
+                    if "quality_score" in _spreads.columns:
+                        _spreads = _spreads.sort_values("quality_score", ascending=False)
+                    # One row per ticker — keep highest-scored structure per symbol
+                    if "symbol" in _spreads.columns:
+                        _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
+                    _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                    _candidates = _spreads.head(_top_n)
+                    _today_str = datetime.now().strftime("%Y-%m-%d")
+                    _inserted = 0
+                    _skipped = 0
+
+                    # Component-score fields carried over from the spread enrichment
+                    _spread_score_keys = (
+                        "pop_score", "ev_score", "rr_score", "liquidity_score",
+                        "momentum_score", "iv_rank_score", "theta_score",
+                        "iv_advantage_score", "vrp_score", "iv_mispricing_score",
+                        "skew_align_score", "vega_risk_score", "term_structure_score",
+                        "catalyst_score", "em_realism_score", "gamma_theta_score",
+                        "gex_score", "gamma_magnitude_score", "gamma_pin_score",
+                        "iv_velocity_score", "max_pain_score", "oi_change_score",
+                        "option_rvol_score", "pcr_score", "sentiment_score_norm",
+                        "spread_score", "trader_pref_score",
+                        "entry_iv", "entry_delta", "entry_gamma", "entry_vega", "entry_theta",
+                    )
+                    # iv_edge_score has the source name iv_advantage_score in scoring, but the
+                    # paper_trades column is iv_edge_score. Map at insert time below.
+                    for _, row in _candidates.iterrows():
+                        _sym = str(row.get("symbol", "")).upper()
+                        try:
+                            _is_condor = ("total_credit" in row.index) and not pd.isna(row.get("total_credit"))
+                            _common_scores = {k: row.get(k) for k in _spread_score_keys if k in row.index}
+                            _common_scores["iv_edge_score"] = row.get("iv_advantage_score")
+                            _common_scores["weight_profile"] = _weight_profile_id
+
+                            if _is_condor:
+                                _payload = dict(_common_scores)
+                                _payload.update({
+                                    "date": _today_str,
+                                    "ticker": _sym,
+                                    "expiration": row["expiration"],
+                                    "short_put_strike": row.get("short_put_strike", 0),
+                                    "long_put_strike":  row.get("long_put_strike", 0),
+                                    "short_call_strike": row.get("short_call_strike", 0),
+                                    "long_call_strike":  row.get("long_call_strike", 0),
+                                    "total_credit": row.get("total_credit", 0),
+                                    "max_profit":   row.get("max_profit", 0),
+                                    "max_risk":     row.get("max_risk", 0),
+                                    "net_delta":    row.get("net_delta"),
+                                    "quality_score": row.get("quality_score", 0.5),
+                                })
+                                if pm.log_iron_condor_if_new(_payload):
+                                    _inserted += 1
+                                else:
+                                    _skipped += 1
+                            else:
+                                _payload = dict(_common_scores)
+                                _payload.update({
+                                    "date": _today_str,
+                                    "ticker": _sym,
+                                    "expiration": row["expiration"],
+                                    "short_strike": row.get("short_strike", 0),
+                                    "long_strike":  row.get("long_strike", 0),
+                                    "type": row.get("type", "Spread"),
+                                    "net_credit": row.get("net_credit", 0),
+                                    "max_profit": row.get("max_profit", 0),
+                                    "max_loss":   row.get("max_loss", 0),
+                                    "quality_score": row.get("quality_score", 0.5),
+                                })
+                                if pm.log_spread_if_new(_payload):
+                                    _inserted += 1
+                                else:
+                                    _skipped += 1
+                        except Exception as _log_exc:
+                            print(f"  Error auto-logging {_sym}: {_log_exc}")
+                    _tag = _weight_profile_id or "untagged"
+                    _summary = f"Auto-logged {_inserted} spreads/condors, skipped {_skipped} duplicates (profile: {_tag})"
+                    print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
+                    _has_results = False
+
+                # ── Single-leg path (original) ──────────────────────────────
+                elif isinstance(_log_src, pd.DataFrame) and not _log_src.empty and "symbol" in _log_src.columns:
+                    _single_legs = _log_src.copy()
                     if not _single_legs.empty and "quality_score" in _single_legs.columns:
                         _single_legs = _single_legs.sort_values("quality_score", ascending=False)
+                    # One row per ticker — keep the highest-scored leg per symbol to avoid
+                    # concentration (e.g. ORCL×6 from a single scan).
+                    if "symbol" in _single_legs.columns:
+                        _single_legs = _single_legs.drop_duplicates(subset=["symbol"], keep="first")
                     _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
                     _candidates = _single_legs.head(_top_n)
 

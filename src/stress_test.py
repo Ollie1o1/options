@@ -61,6 +61,40 @@ STOCK_MOVES = [-0.20, -0.10, -0.05, 0.00, +0.05, +0.10, +0.20]
 IV_SHOCKS = [-0.10, 0.0, 0.10, 0.20]
 
 
+def _classify_structure(trade) -> str:
+    """Return one of 'iron_condor', 'spread', or 'single' from a trade row.
+
+    Detection priority: dedicated columns first (post-v10), then strategy_name
+    fallback for legacy rows.
+    """
+    sn = str(trade.get("strategy_name", "") or "").lower()
+    sp_strike = trade.get("short_put_strike")
+    sc_strike = trade.get("short_call_strike")
+    if (sp_strike not in (None, "", 0) and sc_strike not in (None, "", 0)) or "iron condor" in sn:
+        return "iron_condor"
+    long_strike = trade.get("long_strike")
+    if long_strike not in (None, "", 0) or any(k in sn for k in ("bull put", "bear call")):
+        return "spread"
+    if sn.startswith("spread:"):
+        return "spread"
+    return "single"
+
+
+def _row_get(row, key, default=None):
+    """sqlite3.Row + dict-compatible getter."""
+    if hasattr(row, "keys"):
+        try:
+            keys = row.keys()
+            if key in keys:
+                v = row[key]
+                return v if v is not None else default
+        except Exception:
+            pass
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return default
+
+
 def _c(text: str, color: str = "", bold: bool = False) -> str:
     if HAS_FMT and fmt and color:
         return fmt.colorize(str(text), color, bold=bold)
@@ -167,27 +201,62 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
                     pass
 
             sign = -1.0 if _is_short_position(strategy_name) else 1.0
+            structure = _classify_structure(trade)
 
-            # For spreads: compute Greeks for both legs (short + long)
-            if strategy_name.startswith("SPREAD:"):
+            # Helper to resolve legacy `SPREAD:long:width:max_loss` rows that
+            # never got a `long_strike` column populated.
+            def _legacy_long_strike() -> Optional[float]:
                 try:
                     parts = strategy_name.split(":")
-                    long_strike = float(parts[1])
-                    # Short leg (strike = K, sign = -1)
+                    return float(parts[1])
+                except (ValueError, IndexError):
+                    return None
+
+            if structure == "iron_condor":
+                try:
+                    sp_K = float(trade.get("short_put_strike") or 0)
+                    lp_K = float(trade.get("long_put_strike") or 0)
+                    sc_K = float(trade.get("short_call_strike") or 0)
+                    lc_K = float(trade.get("long_call_strike") or 0)
+                    # Net = -short_put + long_put - short_call + long_call
+                    d_sp = float(bs_delta("put",  S, sp_K, T, rfr, sigma, div_yield))
+                    d_lp = float(bs_delta("put",  S, lp_K, T, rfr, sigma, div_yield))
+                    d_sc = float(bs_delta("call", S, sc_K, T, rfr, sigma, div_yield))
+                    d_lc = float(bs_delta("call", S, lc_K, T, rfr, sigma, div_yield))
+                    g_sp = float(bs_gamma(S, sp_K, T, rfr, sigma, div_yield))
+                    g_lp = float(bs_gamma(S, lp_K, T, rfr, sigma, div_yield))
+                    g_sc = float(bs_gamma(S, sc_K, T, rfr, sigma, div_yield))
+                    g_lc = float(bs_gamma(S, lc_K, T, rfr, sigma, div_yield))
+                    v_sp = float(bs_vega(S, sp_K, T, rfr, sigma, div_yield))
+                    v_lp = float(bs_vega(S, lp_K, T, rfr, sigma, div_yield))
+                    v_sc = float(bs_vega(S, sc_K, T, rfr, sigma, div_yield))
+                    v_lc = float(bs_vega(S, lc_K, T, rfr, sigma, div_yield))
+                    delta = -d_sp + d_lp - d_sc + d_lc
+                    gamma = -g_sp + g_lp - g_sc + g_lc
+                    vega  = -v_sp + v_lp - v_sc + v_lc
+                    sign = 1.0  # net sign baked in
+                except Exception:
+                    delta = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
+                    gamma = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
+                    vega  = float(bs_vega(S, K, T, rfr, sigma, div_yield))
+            elif structure == "spread":
+                long_strike = trade.get("long_strike")
+                try:
+                    long_strike = float(long_strike) if long_strike not in (None, "", 0) else _legacy_long_strike()
+                except (TypeError, ValueError):
+                    long_strike = _legacy_long_strike()
+                if long_strike is not None:
                     d_short = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
                     g_short = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
                     v_short = float(bs_vega(S, K, T, rfr, sigma, div_yield))
-                    # Long leg (strike = long_strike, sign = +1)
                     d_long = float(bs_delta(opt_type, S, long_strike, T, rfr, sigma, div_yield))
                     g_long = float(bs_gamma(S, long_strike, T, rfr, sigma, div_yield))
                     v_long = float(bs_vega(S, long_strike, T, rfr, sigma, div_yield))
-                    # Net Greeks = short leg * -1 + long leg * +1
                     delta = -d_short + d_long
                     gamma = -g_short + g_long
                     vega = -v_short + v_long
-                    sign = 1.0  # Net sign already baked into the combined Greeks
-                except Exception:
-                    # Fallback to single-leg
+                    sign = 1.0
+                else:
                     delta = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
                     gamma = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
                     vega = float(bs_vega(S, K, T, rfr, sigma, div_yield))
@@ -195,6 +264,13 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
                 delta = float(bs_delta(opt_type, S, K, T, rfr, sigma, div_yield))
                 gamma = float(bs_gamma(S, K, T, rfr, sigma, div_yield))
                 vega = float(bs_vega(S, K, T, rfr, sigma, div_yield))
+
+            # Resolve effective long strike for downstream BS repricing
+            long_strike_eff = trade.get("long_strike")
+            try:
+                long_strike_eff = float(long_strike_eff) if long_strike_eff not in (None, "", 0) else _legacy_long_strike()
+            except (TypeError, ValueError):
+                long_strike_eff = _legacy_long_strike()
 
             result.append({
                 "ticker": ticker,
@@ -211,8 +287,14 @@ def compute_position_greeks(open_trades: list, stock_prices: Optional[Dict[str, 
                 "sigma": sigma,
                 "div_yield": div_yield,
                 "T": T,
-                "is_spread": strategy_name.startswith("SPREAD:"),
+                "structure": structure,
+                "is_spread": structure in ("spread", "iron_condor"),
                 "strategy_name": strategy_name,
+                "long_strike": long_strike_eff,
+                "short_put_strike": trade.get("short_put_strike"),
+                "long_put_strike":  trade.get("long_put_strike"),
+                "short_call_strike": trade.get("short_call_strike"),
+                "long_call_strike":  trade.get("long_call_strike"),
             })
         except Exception:
             continue
@@ -280,22 +362,39 @@ def run_stress_test(
                     method = "bs"
                     # Full BS repricing (accurate for large moves)
                     try:
-                        is_spread = pos.get("is_spread", False)
-                        strategy_name = pos.get("strategy_name", "")
+                        structure = pos.get("structure", "single")
 
-                        if is_spread and strategy_name.startswith("SPREAD:"):
-                            # Reprice both legs of the spread
-                            parts = strategy_name.split(":")
-                            long_strike = float(parts[1])
-                            # Short leg: sell at K
+                        if structure == "iron_condor":
+                            sp_K = float(pos.get("short_put_strike") or 0)
+                            lp_K = float(pos.get("long_put_strike") or 0)
+                            sc_K = float(pos.get("short_call_strike") or 0)
+                            lc_K = float(pos.get("long_call_strike") or 0)
+                            sp_b = float(np.float64(bs_price("put",  S,     sp_K, T, rfr_val, sigma,  q)))
+                            sp_n = float(np.float64(bs_price("put",  S_new, sp_K, T, rfr_val, IV_new, q)))
+                            lp_b = float(np.float64(bs_price("put",  S,     lp_K, T, rfr_val, sigma,  q)))
+                            lp_n = float(np.float64(bs_price("put",  S_new, lp_K, T, rfr_val, IV_new, q)))
+                            sc_b = float(np.float64(bs_price("call", S,     sc_K, T, rfr_val, sigma,  q)))
+                            sc_n = float(np.float64(bs_price("call", S_new, sc_K, T, rfr_val, IV_new, q)))
+                            lc_b = float(np.float64(bs_price("call", S,     lc_K, T, rfr_val, sigma,  q)))
+                            lc_n = float(np.float64(bs_price("call", S_new, lc_K, T, rfr_val, IV_new, q)))
+                            vals = [sp_b, sp_n, lp_b, lp_n, sc_b, sc_n, lc_b, lc_n]
+                            if not all(np.isfinite(v) for v in vals):
+                                raise ValueError("NaN/Inf from BS iron condor")
+                            pnl = (
+                                -(sp_n - sp_b) + (lp_n - lp_b)
+                                - (sc_n - sc_b) + (lc_n - lc_b)
+                            ) * 100
+                        elif structure == "spread":
+                            long_strike = pos.get("long_strike")
+                            if long_strike is None:
+                                raise ValueError("spread missing long_strike")
+                            long_strike = float(long_strike)
                             short_base = float(np.float64(bs_price(opt_type, S, K, T, rfr_val, sigma, q)))
                             short_new = float(np.float64(bs_price(opt_type, S_new, K, T, rfr_val, IV_new, q)))
-                            # Long leg: buy at long_strike
                             long_base = float(np.float64(bs_price(opt_type, S, long_strike, T, rfr_val, sigma, q)))
                             long_new = float(np.float64(bs_price(opt_type, S_new, long_strike, T, rfr_val, IV_new, q)))
                             if not all(np.isfinite(v) for v in [short_base, short_new, long_base, long_new]):
                                 raise ValueError("NaN/Inf from BS spread")
-                            # Spread P&L = (short_new - short_base)*-1 + (long_new - long_base)*+1
                             pnl = (-(short_new - short_base) + (long_new - long_base)) * 100
                         else:
                             price_base = float(np.float64(bs_price(opt_type, S, K, T, rfr_val, sigma, q)))

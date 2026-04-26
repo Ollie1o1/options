@@ -1539,6 +1539,134 @@ def print_spreads_report(df_spreads: pd.DataFrame):
             )
 
 
+_SPREAD_FEATURE_LABELS = {
+    "pop_score":             "POP",
+    "credit_to_width_score": "Credit/W",
+    "iv_rank_score":         "IV-Rank",
+    "return_on_risk_score":  "RoR",
+    "liquidity_score":       "Liquid",
+    "theta_score":           "Theta",
+    "spread_score":          "Spread",
+    "momentum_score":        "Momentum",
+    "catalyst_score":        "Catalyst",
+    "delta_neutral_score":   "DeltaN",
+}
+
+
+def _top_contributing_components(row, score_cols, n: int = 3):
+    pairs = []
+    for col in score_cols:
+        try:
+            val = row.get(col)
+            if val is None:
+                continue
+            v = float(val)
+            if math.isnan(v):
+                continue
+        except Exception:
+            continue
+        pairs.append((_SPREAD_FEATURE_LABELS.get(col, col), v))
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    return pairs[:n]
+
+
+def _spread_thesis(row) -> str:
+    parts = []
+    pop = row.get("pop_score")
+    c2w = row.get("credit_to_width_score")
+    ivr = row.get("iv_rank_score")
+    if pop is not None and float(pop) >= 0.65:
+        parts.append(f"high PoP ({float(pop)*100:.0f}%)")
+    if c2w is not None and float(c2w) >= 0.50:
+        cw_ratio = row.get("credit_to_width_ratio")
+        if cw_ratio is not None:
+            parts.append(f"strong credit/width ({float(cw_ratio):.2f})")
+    if ivr is not None and float(ivr) >= 0.60:
+        parts.append("rich IV-rank")
+    ror = row.get("return_on_risk_ratio")
+    if ror is not None and float(ror) >= 0.30:
+        parts.append(f"RoR {float(ror)*100:.0f}%")
+    if not parts:
+        parts.append("balanced setup")
+    return " · ".join(parts)
+
+
+def _spread_breakevens(row):
+    typ = str(row.get("type", "")).lower()
+    short_k = float(row.get("short_strike", 0) or 0)
+    credit = float(row.get("net_credit", 0) or 0)
+    if "put" in typ:
+        return short_k - credit, None
+    return None, short_k + credit
+
+
+def _spread_execution_guidance(row) -> str:
+    credit = float(row.get("net_credit", 0) or 0)
+    if credit <= 0:
+        return ""
+    sp_score = row.get("spread_score")
+    try:
+        s = float(sp_score) if sp_score is not None else None
+    except Exception:
+        s = None
+    if s is not None and s >= 0.65:
+        return f"LIMIT credit ≥ ${credit:.2f} (mid; tight chain)"
+    if s is not None and s <= 0.30:
+        return f"LIMIT credit ≥ ${max(credit - 0.10, 0.05):.2f} (work order; wide chain)"
+    return f"LIMIT credit ≥ ${max(credit - 0.05, 0.05):.2f} (mid -$0.05)"
+
+
+def _print_spread_detail_card(row, idx: int, total: int, width: int):
+    sym = row.get("symbol", "?")
+    typ = row.get("type", "?")
+    exp = pd.to_datetime(row["expiration"]).date()
+    short_k = float(row.get("short_strike", 0))
+    long_k = float(row.get("long_strike", 0))
+    credit = float(row.get("net_credit", 0) or 0)
+    max_p = float(row.get("max_profit", 0) or 0)
+    max_l = float(row.get("max_loss", 0) or 0)
+    quality = float(row.get("quality_score", 0) or 0)
+    width_strikes = abs(short_k - long_k)
+
+    title = f"  [{idx}/{total}]  {sym}  {typ}  ${short_k:.0f}/${long_k:.0f}  exp {exp}"
+    if HAS_ENHANCED_CLI:
+        print()
+        print(fmt.colorize(title, fmt.Colors.BOLD))
+        print("  " + fmt.draw_separator(width - 2))
+    else:
+        print(f"\n{title}\n  {'-'*(width-2)}")
+
+    ror = (max_p / max_l) if max_l > 0 else 0.0
+    c2w = (credit / width_strikes) if width_strikes > 0 else 0.0
+    be_low, be_high = _spread_breakevens(row)
+    be_str = f"BE ${be_low:.2f}" if be_low is not None else f"BE ${be_high:.2f}"
+    line1 = (
+        f"    Credit ${credit:.2f}  width ${width_strikes:.0f}  "
+        f"max profit ${max_p:.0f}  max loss ${max_l:.0f}  "
+        f"RoR {ror*100:.0f}%  C/W {c2w:.2f}  {be_str}"
+    )
+    print(line1)
+
+    if HAS_ENHANCED_CLI:
+        stars, _ = fmt.format_quality_score(quality)
+        print(f"    Score {quality:.2f} {stars}  ·  Thesis: {_spread_thesis(row)}")
+    else:
+        print(f"    Score {quality:.2f}  ·  Thesis: {_spread_thesis(row)}")
+
+    top_components = _top_contributing_components(
+        row,
+        ["pop_score", "credit_to_width_score", "iv_rank_score", "return_on_risk_score",
+         "liquidity_score", "theta_score", "spread_score", "momentum_score", "catalyst_score"],
+    )
+    if top_components:
+        comp_str = "  ".join(f"{lbl} {val:.2f}" for lbl, val in top_components)
+        print(f"    Top components:  {comp_str}")
+
+    exec_g = _spread_execution_guidance(row)
+    if exec_g:
+        print(f"    Execution:  {exec_g}")
+
+
 def print_credit_spreads_report(df_spreads: pd.DataFrame):
     """Prints a dedicated report for credit spreads."""
     if df_spreads.empty:
@@ -1553,6 +1681,18 @@ def print_credit_spreads_report(df_spreads: pd.DataFrame):
         print("=" * WIDTH)
         print("  CREDIT SPREADS REPORT (INCOME ENGINE)")
         print("=" * WIDTH)
+
+    detail_n = min(5, len(df_spreads))
+    for i in range(detail_n):
+        _print_spread_detail_card(df_spreads.iloc[i], i + 1, detail_n, WIDTH)
+
+    print()
+    if HAS_ENHANCED_CLI:
+        print(fmt.colorize("  COMPARISON TABLE", fmt.Colors.BOLD))
+        print("  " + fmt.draw_separator(WIDTH - 2))
+    else:
+        print("  COMPARISON TABLE")
+        print("  " + "-" * (WIDTH - 2))
 
     hdr = f"  {'Symbol':<7} {'Type':<10} {'Short':>8} {'Long':>8} {'Expiration':<12} {'Credit':<10} {'Max Profit':<12} {'Max Loss':<10} Score"
     print(fmt.colorize(hdr, fmt.Colors.BOLD) if HAS_ENHANCED_CLI else hdr)
@@ -1582,6 +1722,92 @@ def print_credit_spreads_report(df_spreads: pd.DataFrame):
         )
 
 
+def _ic_thesis(row) -> str:
+    parts = []
+    pop = row.get("pop_score")
+    dn = row.get("delta_neutral_score")
+    c2w = row.get("credit_to_width_score")
+    ivr = row.get("iv_rank_score")
+    if pop is not None and float(pop) >= 0.65:
+        parts.append(f"high PoP ({float(pop)*100:.0f}%)")
+    if dn is not None and float(dn) >= 0.80:
+        parts.append("delta-neutral")
+    if c2w is not None and float(c2w) >= 0.50:
+        parts.append("strong credit/width")
+    if ivr is not None and float(ivr) >= 0.60:
+        parts.append("rich IV-rank")
+    if not parts:
+        parts.append("balanced range-bound setup")
+    return " · ".join(parts)
+
+
+def _ic_execution_guidance(row) -> str:
+    credit = float(row.get("total_credit", 0) or 0)
+    if credit <= 0:
+        return ""
+    sp_score = row.get("spread_score")
+    try:
+        s = float(sp_score) if sp_score is not None else None
+    except Exception:
+        s = None
+    if s is not None and s >= 0.65:
+        return f"LIMIT credit ≥ ${credit:.2f} (mid; tight chains)"
+    if s is not None and s <= 0.30:
+        return f"LIMIT credit ≥ ${max(credit - 0.20, 0.10):.2f} (work order; wide chains)"
+    return f"LIMIT credit ≥ ${max(credit - 0.10, 0.10):.2f} (mid -$0.10)"
+
+
+def _print_ic_detail_card(row, idx: int, total: int, width: int):
+    sym = row.get("symbol", "?")
+    exp = pd.to_datetime(row["expiration"]).date()
+    sp = float(row.get("short_put_strike", 0))
+    lp = float(row.get("long_put_strike", 0))
+    sc = float(row.get("short_call_strike", 0))
+    lc = float(row.get("long_call_strike", 0))
+    credit = float(row.get("total_credit", 0) or 0)
+    max_p = float(row.get("max_profit", 0) or 0)
+    max_r = float(row.get("max_risk", 0) or 0)
+    net_delta = float(row.get("net_delta", 0) or 0)
+    quality = float(row.get("quality_score", 0) or 0)
+
+    title = f"  [{idx}/{total}]  {sym}  IC  ${lp:.0f}/${sp:.0f} - ${sc:.0f}/${lc:.0f}  exp {exp}"
+    if HAS_ENHANCED_CLI:
+        print()
+        print(fmt.colorize(title, fmt.Colors.BOLD))
+        print("  " + fmt.draw_separator(width - 2))
+    else:
+        print(f"\n{title}\n  {'-'*(width-2)}")
+
+    ror = (max_p / max_r) if max_r > 0 else 0.0
+    be_low = sp - credit
+    be_high = sc + credit
+    line1 = (
+        f"    Credit ${credit:.2f}  max profit ${max_p:.0f}  max risk ${max_r:.0f}  "
+        f"RoR {ror*100:.0f}%  net Δ {net_delta:+.3f}  "
+        f"BE ${be_low:.2f}–${be_high:.2f}"
+    )
+    print(line1)
+
+    if HAS_ENHANCED_CLI:
+        stars, _ = fmt.format_quality_score(quality)
+        print(f"    Score {quality:.2f} {stars}  ·  Thesis: {_ic_thesis(row)}")
+    else:
+        print(f"    Score {quality:.2f}  ·  Thesis: {_ic_thesis(row)}")
+
+    top_components = _top_contributing_components(
+        row,
+        ["pop_score", "credit_to_width_score", "delta_neutral_score", "iv_rank_score",
+         "liquidity_score", "theta_score", "spread_score"],
+    )
+    if top_components:
+        comp_str = "  ".join(f"{lbl} {val:.2f}" for lbl, val in top_components)
+        print(f"    Top components:  {comp_str}")
+
+    exec_g = _ic_execution_guidance(row)
+    if exec_g:
+        print(f"    Execution:  {exec_g}")
+
+
 def print_iron_condor_report(df_condors: pd.DataFrame):
     """Prints a dedicated report for iron condors."""
     if df_condors.empty:
@@ -1596,6 +1822,18 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
         print("=" * WIDTH)
         print("  IRON CONDOR REPORT (RANGE-BOUND STRATEGIES)")
         print("=" * WIDTH)
+
+    detail_n = min(5, len(df_condors))
+    for i in range(detail_n):
+        _print_ic_detail_card(df_condors.iloc[i], i + 1, detail_n, WIDTH)
+
+    print()
+    if HAS_ENHANCED_CLI:
+        print(fmt.colorize("  COMPARISON TABLE", fmt.Colors.BOLD))
+        print("  " + fmt.draw_separator(WIDTH - 2))
+    else:
+        print("  COMPARISON TABLE")
+        print("  " + "-" * (WIDTH - 2))
 
     _delta_hdr = "Net \u0394"
     hdr = f"  {'Symbol':<7} {'Exp':<12} {'Put Wing':<18} {'Call Wing':<18} {'Credit':<10} {'Max Risk':<10} {'RoR':<8} {_delta_hdr:<8} Score"

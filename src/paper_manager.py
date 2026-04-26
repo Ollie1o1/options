@@ -150,6 +150,57 @@ def _evaluate_short_single_leg_exit(
     return False, None, pnl_raw
 
 
+def _classify_structure(row) -> str:
+    """Determine row structure from new schema columns; falls back to strategy_name."""
+    try:
+        sn = str(row["strategy_name"] or "").lower() if "strategy_name" in row.keys() else ""
+    except Exception:
+        sn = ""
+    try:
+        sp = row["short_put_strike"] if "short_put_strike" in row.keys() else None
+        sc = row["short_call_strike"] if "short_call_strike" in row.keys() else None
+    except Exception:
+        sp, sc = None, None
+    if (sp not in (None, "", 0) and sc not in (None, "", 0)) or "iron condor" in sn:
+        return "iron_condor"
+    try:
+        ls = row["long_strike"] if "long_strike" in row.keys() else None
+    except Exception:
+        ls = None
+    if ls not in (None, "", 0) or any(k in sn for k in ("bull put", "bear call")):
+        return "spread"
+    if sn.startswith("spread:"):
+        return "spread"
+    return "single"
+
+
+def _evaluate_multileg_exit(
+    rules: dict,
+    entry_credit: float,
+    current_credit_to_close: float,
+    dte: int,
+    days_held: int,
+) -> Tuple[bool, Optional[str], float]:
+    """TP / SL / time-exit evaluation for credit spreads & iron condors.
+
+    pnl_raw = (entry_credit - current_credit) / entry_credit. Positive when
+    the structure has decayed (premium seller's profit). spread.tp / spread.sl
+    in config are interpreted as fractions of credit collected.
+    """
+    if entry_credit <= 0:
+        return False, None, 0.0
+    pnl_raw = (entry_credit - current_credit_to_close) / entry_credit
+    tp = rules["spread"]["tp"]
+    sl = rules["spread"]["sl"]
+    if pnl_raw >= tp:
+        return True, f"Take Profit ({tp*100:.0f}% of credit)", pnl_raw
+    if pnl_raw <= sl:
+        return True, f"Stop Loss ({abs(sl)*100:.0f}% of credit)", pnl_raw
+    if 0 < dte <= rules["time_exit_dte"] and days_held >= rules["min_days_held"]:
+        return True, f"Time Exit ({dte}d to expiry)", pnl_raw
+    return False, None, pnl_raw
+
+
 def _evaluate_long_single_leg_exit(
     rules: dict,
     option_type: str,
@@ -194,7 +245,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -256,6 +307,23 @@ _MIGRATIONS = {
     9: [
         # Record which exit rule fired (Take Profit / Stop Loss / Strike Breach / Delta Touch / Time Exit)
         "ALTER TABLE trades ADD COLUMN exit_reason TEXT",
+    ],
+    10: [
+        # Multi-leg structural columns. For single-leg trades these stay NULL.
+        # For credit spreads: long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd.
+        # For iron condors: also short_call_strike, long_call_strike, short_put_strike, long_put_strike,
+        # plus net_delta. The 'strike' column continues to hold the short-put strike for spreads
+        # (and the short-put strike for iron condors) so existing dedup keys keep working.
+        "ALTER TABLE trades ADD COLUMN long_strike REAL",
+        "ALTER TABLE trades ADD COLUMN spread_width REAL",
+        "ALTER TABLE trades ADD COLUMN net_credit REAL",
+        "ALTER TABLE trades ADD COLUMN max_profit_usd REAL",
+        "ALTER TABLE trades ADD COLUMN max_loss_usd REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_strike REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_strike REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_strike REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_strike REAL",
+        "ALTER TABLE trades ADD COLUMN net_delta REAL",
     ],
 }
 
@@ -381,12 +449,16 @@ class PaperManager:
             catalyst_score, em_realism_score, gamma_theta_score, gex_score, gamma_magnitude_score,
             gamma_pin_score, iv_velocity_score, max_pain_score, oi_change_score, option_rvol_score,
             pcr_score, sentiment_score_norm, spread_score, trader_pref_score,
-            weight_profile
+            weight_profile,
+            long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
+            short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?
+            ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?
         )
         """
 
@@ -449,12 +521,22 @@ class PaperManager:
             _float_or_none("spread_score"),
             _float_or_none("trader_pref_score"),
             trade_dict.get("weight_profile"),
+            _float_or_none("long_strike"),
+            _float_or_none("spread_width"),
+            _float_or_none("net_credit"),
+            _float_or_none("max_profit_usd"),
+            _float_or_none("max_loss_usd"),
+            _float_or_none("short_call_strike"),
+            _float_or_none("long_call_strike"),
+            _float_or_none("short_put_strike"),
+            _float_or_none("long_put_strike"),
+            _float_or_none("net_delta"),
         )
 
         with self._get_connection() as conn:
             conn.execute(query, params)
 
-        print(f"Logged {trade_dict['type'].upper()} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
+        print(f"Logged {trade_dict['strategy_name']} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
 
     def log_trade_if_new(self, trade_dict: Dict[str, Any]) -> bool:
         """Insert a paper trade unless an identical row already exists.
@@ -497,26 +579,157 @@ class PaperManager:
         return True
 
     def log_spread(self, spread_dict: dict) -> None:
+        """Log a multi-leg credit spread as a single paper trade.
+
+        Routes through ``log_trade`` so component scores, Greeks, and weight_profile
+        all persist. Required keys: ``ticker, expiration, short_strike, long_strike,
+        type, net_credit``. Optional: every component-score key accepted by
+        ``log_trade`` plus ``max_profit``, ``max_loss``, ``quality_score``,
+        ``weight_profile``, entry Greeks.
+
+        ``type`` becomes ``strategy_name`` ("Bull Put" / "Bear Call"). The DB
+        ``type`` column gets the underlying option type ("put" / "call") inferred
+        from the strategy name.
         """
-        Log a multi-leg spread (credit spread, calendar, etc.) as a single paper trade.
-        spread_dict keys: date, ticker, expiration, short_strike, long_strike, type,
-                          net_credit, max_profit, max_loss, quality_score
+        spread_type = str(spread_dict.get("type", "Spread"))
+        opt_type = "put" if "put" in spread_type.lower() else "call"
+        short_strike = float(spread_dict.get("short_strike") or 0)
+        long_strike = float(spread_dict.get("long_strike") or 0)
+        net_credit = float(spread_dict.get("net_credit") or 0)
+        max_profit = spread_dict.get("max_profit")
+        max_loss = spread_dict.get("max_loss")
+
+        if net_credit <= 0:
+            raise ValueError(f"log_spread: net_credit must be > 0, got {net_credit}")
+
+        trade_dict = dict(spread_dict)  # copy so we don't mutate caller's dict
+        trade_dict["strike"] = short_strike
+        trade_dict["type"] = opt_type
+        trade_dict["entry_price"] = net_credit
+        trade_dict["strategy_name"] = spread_type
+        trade_dict["long_strike"] = long_strike
+        trade_dict["spread_width"] = abs(short_strike - long_strike)
+        trade_dict["net_credit"] = net_credit
+        if max_profit is not None:
+            trade_dict["max_profit_usd"] = float(max_profit)
+        if max_loss is not None:
+            trade_dict["max_loss_usd"] = float(max_loss)
+        trade_dict.setdefault("quality_score", 0.5)
+        # log_trade requires ticker — make sure case-normalized
+        trade_dict["ticker"] = str(spread_dict.get("ticker", "")).upper()
+
+        self.log_trade(trade_dict)
+
+    def log_iron_condor(self, condor_dict: dict) -> None:
+        """Log an iron condor (4-leg) as a single paper trade.
+
+        Required keys: ``ticker, expiration, short_put_strike, long_put_strike,
+        short_call_strike, long_call_strike, total_credit``. The DB ``strike``
+        column holds the short-put strike (canonical anchor for dedup); 4-leg
+        details persist in named columns.
         """
+        sp_strike = float(condor_dict.get("short_put_strike") or 0)
+        lp_strike = float(condor_dict.get("long_put_strike") or 0)
+        sc_strike = float(condor_dict.get("short_call_strike") or 0)
+        lc_strike = float(condor_dict.get("long_call_strike") or 0)
+        total_credit = float(condor_dict.get("total_credit") or condor_dict.get("net_credit") or 0)
+        max_risk = condor_dict.get("max_risk") or condor_dict.get("max_loss")
+
+        if total_credit <= 0:
+            raise ValueError(f"log_iron_condor: total_credit must be > 0, got {total_credit}")
+
+        put_width = sp_strike - lp_strike
+        call_width = lc_strike - sc_strike
+        spread_width = max(put_width, call_width)
+
+        trade_dict = dict(condor_dict)
+        trade_dict["strike"] = sp_strike  # canonical anchor (short put)
+        trade_dict["type"] = "put"        # short-put-anchored (matches dedup convention)
+        trade_dict["entry_price"] = total_credit
+        trade_dict["strategy_name"] = "Iron Condor"
+        trade_dict["long_strike"] = lp_strike  # paired long for the anchor leg
+        trade_dict["short_put_strike"] = sp_strike
+        trade_dict["long_put_strike"] = lp_strike
+        trade_dict["short_call_strike"] = sc_strike
+        trade_dict["long_call_strike"] = lc_strike
+        trade_dict["spread_width"] = spread_width
+        trade_dict["net_credit"] = total_credit
+        if max_risk is not None:
+            trade_dict["max_loss_usd"] = float(max_risk)
+        if condor_dict.get("max_profit") is not None:
+            trade_dict["max_profit_usd"] = float(condor_dict["max_profit"])
+        if condor_dict.get("net_delta") is not None:
+            trade_dict["net_delta"] = float(condor_dict["net_delta"])
+        trade_dict.setdefault("quality_score", 0.5)
+        trade_dict["ticker"] = str(condor_dict.get("ticker", "")).upper()
+
+        self.log_trade(trade_dict)
+
+    def log_spread_if_new(self, spread_dict: dict) -> bool:
+        """Insert a credit spread unless an identical OPEN row already exists for
+        the same (date, ticker, expiration, short_strike, long_strike, strategy, profile).
+        Returns True if inserted, False if duplicate.
+        """
+        ticker = str(spread_dict.get("ticker", "")).upper()
+        strategy = str(spread_dict.get("type", "Spread"))
+        short_strike = float(spread_dict.get("short_strike") or 0)
+        long_strike = float(spread_dict.get("long_strike") or 0)
+        expiration = spread_dict.get("expiration", "")
+        profile = spread_dict.get("weight_profile")
+        effective_date = spread_dict.get("date") or datetime.now().strftime("%Y-%m-%d")
+
         with self._get_connection() as conn:
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO trades (date, ticker, expiration, strike, type, entry_price, quality_score, strategy_name, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
-            """, (
-                spread_dict.get("date", datetime.now().strftime("%Y-%m-%d")),
-                spread_dict.get("ticker", ""),
-                spread_dict.get("expiration", ""),
-                spread_dict.get("short_strike", 0),
-                spread_dict.get("type", "Spread"),
-                spread_dict.get("net_credit", 0),
-                spread_dict.get("quality_score", 0.5),
-                f"SPREAD:{spread_dict.get('long_strike', 0)}:{spread_dict.get('max_profit', 0):.2f}:{spread_dict.get('max_loss', 0):.2f}"
-            ))
+            row = conn.execute(
+                """
+                SELECT 1 FROM trades
+                WHERE ticker = ?
+                  AND strike = ?
+                  AND long_strike = ?
+                  AND expiration = ?
+                  AND strategy_name = ?
+                  AND weight_profile IS ?
+                  AND date(date) = date(?)
+                LIMIT 1
+                """,
+                (ticker, short_strike, long_strike, expiration, strategy, profile, effective_date),
+            ).fetchone()
+        if row is not None:
+            return False
+        self.log_spread(spread_dict)
+        return True
+
+    def log_iron_condor_if_new(self, condor_dict: dict) -> bool:
+        """Same dedup pattern as log_spread_if_new but for 4-leg iron condors."""
+        ticker = str(condor_dict.get("ticker", "")).upper()
+        sp_strike = float(condor_dict.get("short_put_strike") or 0)
+        lp_strike = float(condor_dict.get("long_put_strike") or 0)
+        sc_strike = float(condor_dict.get("short_call_strike") or 0)
+        lc_strike = float(condor_dict.get("long_call_strike") or 0)
+        expiration = condor_dict.get("expiration", "")
+        profile = condor_dict.get("weight_profile")
+        effective_date = condor_dict.get("date") or datetime.now().strftime("%Y-%m-%d")
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM trades
+                WHERE ticker = ?
+                  AND strategy_name = 'Iron Condor'
+                  AND short_put_strike = ?
+                  AND long_put_strike = ?
+                  AND short_call_strike = ?
+                  AND long_call_strike = ?
+                  AND expiration = ?
+                  AND weight_profile IS ?
+                  AND date(date) = date(?)
+                LIMIT 1
+                """,
+                (ticker, sp_strike, lp_strike, sc_strike, lc_strike, expiration, profile, effective_date),
+            ).fetchone()
+        if row is not None:
+            return False
+        self.log_iron_condor(condor_dict)
+        return True
 
     def _get_option_symbol(self, ticker: str, expiration: str, strike: float, option_type: str) -> str:
         """Generates a yfinance-compatible option symbol."""
@@ -680,22 +893,68 @@ class PaperManager:
             except TimeoutError:
                 logger.warning("Spot price fetch timed out after 30s — proceeding with partial data")
 
-        # Pre-build symbol list and parallel-fetch option prices for non-spread positions
-        _option_fetch_tasks: List[Tuple[int, str, str, str, float, str]] = []
+        # Build leg list per row: single = 1 leg, spread = 2, iron condor = 4.
+        # We fetch each unique (ticker, exp, strike, type) once and reuse.
+        def _legs_for_row(row) -> List[Tuple[float, str, int]]:
+            structure = _classify_structure(row)
+            if structure == "iron_condor":
+                try:
+                    return [
+                        (float(row["short_put_strike"]),  "put",  -1),
+                        (float(row["long_put_strike"]),   "put",  +1),
+                        (float(row["short_call_strike"]), "call", -1),
+                        (float(row["long_call_strike"]),  "call", +1),
+                    ]
+                except (TypeError, ValueError):
+                    return []
+            if structure == "spread":
+                opt_type = str(row["type"] or "").lower()
+                if opt_type not in ("put", "call"):
+                    sn = str(row["strategy_name"] or "").lower()
+                    opt_type = "put" if "bull put" in sn else "call"
+                ls = row["long_strike"] if "long_strike" in row.keys() else None
+                try:
+                    long_strike = float(ls) if ls not in (None, "", 0) else None
+                except (TypeError, ValueError):
+                    long_strike = None
+                if long_strike is None:
+                    # Legacy SPREAD:long:width:max_loss fallback
+                    try:
+                        long_strike = float(str(row["strategy_name"] or "").split(":")[1])
+                    except (ValueError, IndexError):
+                        return []
+                return [
+                    (float(row["strike"]), opt_type, -1),
+                    (long_strike,          opt_type, +1),
+                ]
+            return [(float(row["strike"]), str(row["type"] or "").lower(), -1 if _is_short_position(row["strategy_name"] or "") else +1)]
+
+        # Compose unique fetch tasks across every leg of every open row.
+        # Tasks are keyed by (ticker, expiration, strike, opt_type) so multi-leg
+        # rows can pull each leg's mark independently.
+        LegKey = Tuple[str, str, float, str]
+        _option_fetch_tasks: List[Tuple[LegKey, str]] = []
+        _row_legs: Dict[int, List[Tuple[float, str, int]]] = {}
+        _seen_legs: set = set()
         for row in open_trades:
-            strategy_name = row["strategy_name"] or ""
-            if strategy_name.startswith("SPREAD:"):
-                continue
             if row["ticker"] not in spot_cache:
                 continue
-            symbol = self._get_option_symbol(row["ticker"], row["expiration"], row["strike"], row["type"])
-            if symbol:
-                _option_fetch_tasks.append((row["entry_id"], symbol, row["ticker"], row["expiration"], row["strike"], row["type"]))
+            legs = _legs_for_row(row)
+            _row_legs[row["entry_id"]] = legs
+            for strike_v, opt_t, _qty in legs:
+                key: LegKey = (row["ticker"], row["expiration"], float(strike_v), opt_t)
+                if key in _seen_legs:
+                    continue
+                _seen_legs.add(key)
+                symbol = self._get_option_symbol(row["ticker"], row["expiration"], strike_v, opt_t)
+                if symbol:
+                    _option_fetch_tasks.append((key, symbol))
 
-        option_price_cache: Dict[int, float] = {}
+        option_price_cache: Dict[LegKey, float] = {}
 
         def _fetch_option_price(task_tuple):
-            entry_id, symbol, ticker, expiration, strike, option_type = task_tuple
+            key, symbol = task_tuple
+            ticker, expiration, strike, option_type = key
             try:
                 yf, session = _get_yf_and_session()
                 tkr = yf.Ticker(symbol, session=session)
@@ -721,18 +980,18 @@ class PaperManager:
                     except Exception:
                         pass
                 if price is not None and not np.isnan(price) and price > 0:
-                    return entry_id, float(price)
+                    return key, float(price)
             except Exception as exc:
                 logger.debug("Option price fetch failed for %s: %s", symbol, exc)
-            return entry_id, None
+            return key, None
 
         if _option_fetch_tasks:
             _opt_workers = min(len(_option_fetch_tasks), 8)
             with ThreadPoolExecutor(max_workers=_opt_workers) as ex:
                 try:
-                    for eid, price in ex.map(_fetch_option_price, _option_fetch_tasks, timeout=30):
+                    for k, price in ex.map(_fetch_option_price, _option_fetch_tasks, timeout=30):
                         if price is not None:
-                            option_price_cache[eid] = price
+                            option_price_cache[k] = price
                 except TimeoutError:
                     logger.warning("Option price fetch timed out — proceeding with partial data")
 
@@ -761,62 +1020,77 @@ class PaperManager:
             if ticker not in spot_cache:
                 continue
 
-            # Spread P&L: detect and handle spread rows before single-leg symbol fetch
-            strategy_name = row["strategy_name"] or ""
-            if strategy_name.startswith("SPREAD:"):
+            # Multi-leg structure path: spreads and iron condors mark-to-market via per-leg prices.
+            structure = _classify_structure(row)
+            if structure in ("spread", "iron_condor"):
+                legs = _row_legs.get(entry_id, [])
+                if not legs:
+                    continue
+                leg_marks: List[Tuple[int, float]] = []
+                missing = False
+                for strike_v, opt_t, qty in legs:
+                    leg_key: LegKey = (ticker, expiration, float(strike_v), opt_t)
+                    lp = option_price_cache.get(leg_key)
+                    if lp is None:
+                        missing = True
+                        break
+                    leg_marks.append((qty, lp))
+                if missing:
+                    continue
+
+                # entry_credit — prefer stored net_credit / total_credit columns, fall back to entry_price
                 try:
-                    parts = strategy_name.split(":")
-                    long_strike = float(parts[1])
-                    max_profit = float(parts[2])
-                    max_loss = float(parts[3])
-                    spot = spot_cache.get(ticker)
-                    if spot is None:
-                        continue
-                    short_k = float(strike)  # always the short leg (see log_spread)
-                    spread_width = abs(long_strike - short_k)
-                    if spread_width > 0:
-                        if short_k > long_strike:
-                            # Bull put spread: loses when spot falls below short put strike
-                            intrinsic_frac = max(0.0, min(1.0, (short_k - spot) / spread_width))
-                        else:
-                            # Bear call spread: loses when spot rises above short call strike
-                            intrinsic_frac = max(0.0, min(1.0, (spot - short_k) / spread_width))
+                    nc = row["net_credit"] if "net_credit" in row.keys() else None
+                except Exception:
+                    nc = None
+                try:
+                    entry_credit = float(nc) if nc not in (None, "", 0) else float(entry_price or 0)
+                except (TypeError, ValueError):
+                    entry_credit = float(entry_price or 0)
+
+                # cost-to-close = sum(-qty × leg_price). For a short credit structure
+                # (qty=-1 on shorts, +1 on longs) this is the debit needed to flatten.
+                current_credit_to_close = sum(-qty * lp for qty, lp in leg_marks)
+
+                should_close, reason, pnl_raw = _evaluate_multileg_exit(
+                    rules, entry_credit, current_credit_to_close, dte, days_held,
+                )
+                if should_close:
+                    # Friction: 2 commissions × number of legs (round trip), 2 slippage × legs
+                    n_legs = len(legs)
+                    friction = (2 * self._slippage_per_share * n_legs) + (2 * self._commission_per_contract * n_legs / 100.0)
+                    friction_fraction = friction / entry_credit if entry_credit > 0 else 0.0
+                    pnl_realistic = max(pnl_raw - friction_fraction, -1.0)
+                    if structure == "iron_condor":
+                        try:
+                            sp = float(row["short_put_strike"]); lp_s = float(row["long_put_strike"])
+                            sc = float(row["short_call_strike"]); lc = float(row["long_call_strike"])
+                            label = f"IC {lp_s:.0f}/{sp:.0f}—{sc:.0f}/{lc:.0f}"
+                        except Exception:
+                            label = "IC"
                     else:
-                        intrinsic_frac = 0.5
-                    # For a short credit spread: loses when intrinsic_frac → 1
-                    current_value = float(max_loss) * intrinsic_frac   # cost to close (positive = loss)
-                    net_credit = float(max_profit)
-                    if net_credit > 0:
-                        pnl_raw = (net_credit - current_value) / net_credit
-                    else:
-                        continue
-                    hit_tp = pnl_raw >= spread_tp
-                    hit_sl = pnl_raw <= spread_sl
-                    hit_time = (0 < dte <= time_exit_dte) and days_held >= rules["min_days_held"]
-                    if hit_tp or hit_sl or hit_time:
-                        if hit_tp:
-                            reason = f"Take Profit ({spread_tp*100:.0f}% of credit)"
-                        elif hit_sl:
-                            reason = f"Stop Loss ({abs(spread_sl)*100:.0f}% of credit)"
+                        try:
+                            ls_v = float(row["long_strike"]) if row["long_strike"] not in (None, "", 0) else None
+                        except Exception:
+                            ls_v = None
+                        if ls_v is None:
+                            label = f"SPREAD ${strike:.0f}"
                         else:
-                            reason = f"Time Exit ({dte}d to expiry)"
-                        friction_fraction = self._friction_per_share / entry_price if entry_price > 0 else 0.0
-                        pnl_realistic = max(pnl_raw - friction_fraction, -1.0)
-                        closed_this_run.append(
-                            f"{ticker} SPREAD ${strike:.0f}/{long_strike:.0f} → {reason} "
-                            f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
+                            label = f"SPREAD ${strike:.0f}/{ls_v:.0f}"
+                    closed_this_run.append(
+                        f"{ticker} {label} → {reason} "
+                        f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
+                    )
+                    with self._get_connection() as conn:
+                        conn.execute(
+                            "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, exit_reason=? WHERE entry_id=?",
+                            (current_credit_to_close, now, pnl_realistic, reason, entry_id),
                         )
-                        with self._get_connection() as conn:
-                            conn.execute(
-                                "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, exit_reason=? WHERE entry_id=?",
-                                (current_value, now, pnl_realistic, reason, entry_id),
-                            )
-                except Exception as exc:
-                    logger.debug("Spread P&L calc failed for %s: %s", ticker, exc)
                 continue
 
-            # Use pre-fetched option price from parallel batch
-            current_price = option_price_cache.get(entry_id)
+            # Single-leg path
+            single_key: LegKey = (ticker, expiration, float(strike), str(option_type or "").lower())
+            current_price = option_price_cache.get(single_key)
 
             if current_price is not None:
                 is_short = _is_short_position(row["strategy_name"] or "")

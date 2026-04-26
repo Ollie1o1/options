@@ -132,8 +132,8 @@ Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (
 | `ALL` | Budget scan | Multi-ticker scan filtered to a per-contract dollar budget |
 | `DISCOVER` | Discovery | Scans the top 100 most-liquid tickers, no budget limit |
 | `SELL` | Premium Selling | Short put candidates ranked by return-on-risk |
-| `SPREADS` | Credit Spreads | Bull Put and Bear Call spread opportunities |
-| `IRON` | Iron Condors | Delta-neutral range-bound strategies |
+| `SPREADS` | Credit Spreads | Bull Put and Bear Call spread opportunities — full detail cards with thesis, breakevens, top components, execution guidance + comparison table |
+| `IRON` | Iron Condors | Delta-neutral range-bound strategies — same detail-card pipeline as singles + spreads |
 | `PORTFOLIO` | Portfolio | View P/L on all open paper trades |
 | `MY LIST` | Watchlist | Scan your personal watchlist (type `ADD AAPL` to build it) |
 
@@ -543,8 +543,10 @@ For each pick the screener generates:
 Log any pick directly from the CLI and track it going forward:
 
 - Positions auto-update on every launch (fetches live quotes via yfinance) — **synchronously**, so auto-closes actually finalize before the program continues
-- Entry IV and Greeks stored per trade (schema v9 — includes `exit_reason`)
+- Entry IV and Greeks stored per trade (schema v10 — includes `exit_reason`, full multi-leg columns)
 - All 27 per-component scores stored at entry — enables per-component IC analysis after trades close
+- **Multi-leg structures are first-class**: credit spreads (`long_strike`, `spread_width`, `net_credit`) and iron condors (`short_put_strike`, `long_put_strike`, `short_call_strike`, `long_call_strike`, `net_delta`) round-trip through the same log/exit/portfolio path as singles
+- **Real per-leg mark-to-market** for spreads + ICs — every leg is repriced via yfinance and `cost_to_close = Σ(-qty × leg_price)` drives TP/SL/Time exits (no more intrinsic-fraction approximation)
 - **Context-aware exit enforcement** (see below)
 - P&L attribution for closed trades (delta/gamma/theta/vega breakdown)
 - Full BS repricing stress test on open portfolio
@@ -567,13 +569,15 @@ Flat `take_profit=50% / stop_loss=-25%` doesn't work for options: it's too tight
 | 4 | Stop — premium multiple | Current premium ≥ 2.0× entry |
 | 5 | Stop — delta multiple | `abs(current Δ) ≥ 2.5 × abs(entry Δ)` (early warning; uses stored entry_delta + entry_iv) |
 
-**Credit spreads** (defined risk):
+**Credit spreads & iron condors** (defined risk, real per-leg marks):
 
 | Trigger | Rule |
 |---|---|
-| Take profit | 50% of credit received |
-| Stop loss | Position worth 2× credit (i.e. loss = 1× credit) |
-| Time exit | 21 DTE |
+| Take profit | 50% of credit received (raw P/L before friction) |
+| Stop loss | Position worth 2× credit (i.e. raw loss = 1× credit) |
+| Time exit | DTE ≤ 21 and days-held ≥ 3 |
+
+Friction model: per-close costs are `(2 × slippage + 2 × commission/100) × n_legs`, subtracted from raw P/L before persisting `pnl_pct`. Stored `exit_price` = cost-to-close so closed multi-leg trades can be re-derived.
 
 **Long single-leg**:
 
@@ -873,7 +877,8 @@ options/
     ├── simulation.py         # Monte Carlo PoP / PoT (Merton Jump Diffusion GBM)
     ├── formatting.py         # ANSI colours, box drawing, metric formatters
     ├── stress_test.py        # Full BS repricing scenario P/L matrix
-    ├── paper_manager.py      # SQLite paper trade logging, schema migration (v8), dedup, weight_profile tagging
+    ├── paper_manager.py      # SQLite paper trade logging, schema migration (v10), multi-leg log/exit, dedup, weight_profile tagging
+    ├── spread_scoring.py     # Spread + iron condor composite scoring (credit_to_width, delta_neutral, etc.)
     ├── weight_profiles.py    # Load/list weight profiles from configs/weights/
     ├── check_pnl.py          # Standalone portfolio P/L viewer with Greeks
     ├── news_fetcher.py       # Concurrent multi-source news (yfinance, Finviz, Polygon)
@@ -883,7 +888,7 @@ options/
     ├── polygon_client.py     # Polygon.io integration (news, VWAP, unusual flow)
     ├── vol_analytics.py      # Vol cone, concurrent IV surface, regime classification
     ├── regime_dashboard.py   # VIX/PCR/SPY market regime dashboard at startup
-    ├── backtester.py         # Walk-forward backtester with spread cost simulation
+    ├── backtester.py         # Walk-forward backtester + paper-trade IC + per-structure weight optimizer (singles / spreads / iron condors)
     ├── backtest_optimizer.py # Weight optimizer for composite_weights via IC analysis
     ├── calc_expected_move.py # Implied expected move calculator
     ├── oi_snapshot.py        # OI change tracking between runs
@@ -915,8 +920,11 @@ options/
 - [x] SVI IV surface fitting with mispricing detection
 - [x] Monte Carlo PoP blending (Merton Jump Diffusion)
 - [x] HV-adjusted expected value
-- [x] Paper trading with entry IV/Greeks + all 27 component scores stored, P&L attribution, schema v9
-- [x] Context-aware exit enforcement — DTE-tiered TP, strike-breach + 2× premium + delta-multiple stops for shorts; credit-based stops for spreads; synchronous enforcement at startup, in portfolio viewer, and via `--enforce-exits` CLI
+- [x] Paper trading with entry IV/Greeks + all 27 component scores stored, P&L attribution, schema v10 (full multi-leg columns + `exit_reason`)
+- [x] Multi-leg paper trades — credit spreads + iron condors logged, marked-to-market, and exit-enforced via real per-leg yfinance reprices through the same pipeline as singles
+- [x] Context-aware exit enforcement — DTE-tiered TP, strike-breach + 2× premium + delta-multiple stops for shorts; credit-based TP/SL/Time exits for spreads & ICs (real cost-to-close); synchronous enforcement at startup, in portfolio viewer, and via `--enforce-exits` CLI
+- [x] Spread + iron condor scan reports with full detail cards (thesis, breakevens, top contributing components, execution guidance) + comparison table — parity with single-leg discover output
+- [x] Per-structure weight optimizer — `recommend_weights_for_structure()` learns independent `composite_weights` / `credit_spread_weights` / `iron_condor_weights` maps from each structure's closed-trade subset using component-level IC + shrinkage + cap + budget renormalization
 - [x] Weight-profile auto-logging system — `--weights NAME --auto-log` for A/B optimization with per-profile dedup
 - [x] Full BS repricing stress test (7×3 scenario matrix)
 - [x] Streamlit dashboard
@@ -947,7 +955,6 @@ options/
 - [x] Telegram bot — same 4 commands, Markdown formatting
 - [x] Single-launcher (start_all.py) for all 3 processes with clean Ctrl+C shutdown
 - [ ] Real-time alerts (email / SMS)
-- [ ] Multi-leg spread support in paper manager
 - [ ] Backtesting UI improvements
 
 ---

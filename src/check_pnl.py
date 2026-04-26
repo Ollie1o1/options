@@ -55,14 +55,21 @@ except Exception:
 
 try:
     try:
-        from .stress_test import print_stress_test
+        from .stress_test import print_stress_test, _classify_structure
         from .backtester import print_paper_trade_ic
     except (ImportError, ValueError):
-        from stress_test import print_stress_test
+        from stress_test import print_stress_test, _classify_structure
         from backtester import print_paper_trade_ic
     HAS_STRESS = True
 except Exception:
     HAS_STRESS = False
+    def _classify_structure(trade) -> str:  # type: ignore[misc]
+        sn = str(trade.get("strategy_name", "") or "").lower()
+        if (trade.get("short_put_strike") and trade.get("short_call_strike")) or "iron condor" in sn:
+            return "iron_condor"
+        if trade.get("long_strike") or any(k in sn for k in ("bull put", "bear call")):
+            return "spread"
+        return "single"
 
 try:
     try:
@@ -95,6 +102,50 @@ def _dte(expiration: str) -> int:
         return (exp - date.today()).days
     except Exception:
         return 0
+
+
+def _legs_for_row(r) -> list:
+    """Return list of (opt_type, strike, qty_sign) for the given DB row.
+
+    qty_sign: +1 = long leg, -1 = short leg. Used to compute net position
+    value as sum(qty * leg_price) so credit spreads / iron condors mark to
+    market correctly. Returns [] for unrecognized rows.
+    """
+    structure = _classify_structure(r)
+    if structure == "iron_condor":
+        return [
+            ("put",  float(r["short_put_strike"]),  -1),
+            ("put",  float(r["long_put_strike"]),   +1),
+            ("call", float(r["short_call_strike"]), -1),
+            ("call", float(r["long_call_strike"]),  +1),
+        ]
+    if structure == "spread":
+        opt_type = str(r.get("type", "")).lower() or ("put" if "bull put" in str(r.get("strategy_name", "")).lower() else "call")
+        long_strike = r.get("long_strike")
+        if long_strike in (None, "", 0):
+            # Legacy SPREAD:long:width:max_loss fallback
+            try:
+                long_strike = float(str(r.get("strategy_name", "")).split(":")[1])
+            except (ValueError, IndexError):
+                return []
+        return [
+            (opt_type, float(r["strike"]),  -1),
+            (opt_type, float(long_strike), +1),
+        ]
+    # Single leg
+    sign = -1 if _is(_get_strategy_name(r)) else 1
+    return [(str(r["type"]).lower(), float(r["strike"]), sign)]
+
+
+def _is(strategy_name: str) -> bool:
+    return _is_short(strategy_name)
+
+
+def _get_strategy_name(r) -> str:
+    try:
+        return r["strategy_name"] or ""
+    except Exception:
+        return ""
 
 
 def _fetch_live_price(ticker: str, expiration: str, strike: float, opt_type: str, _retries: int = 2) -> Optional[float]:
@@ -280,13 +331,14 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
 def _print_portfolio_greeks(open_trades: list, width: int):
     """
     Compute and display aggregate portfolio Greeks for open positions.
-    Uses current stock prices from yfinance and a 25% IV estimate as fallback.
-    Signs: long calls = +Δ, short calls = -Δ, long puts = -Δ, short puts = +Δ.
+
+    Multi-leg structures (vertical credit spreads, iron condors) reprice each
+    leg independently and net the Greeks with proper signs, so a short put
+    spread doesn't show up as if it were a naked short.
     """
     if not open_trades or not HAS_BS or not HAS_YF:
         return
 
-    # Batch-fetch unique stock prices (fast, 1 call per ticker)
     unique_tickers = list({r["ticker"] for r in open_trades})
     stock_prices: dict = {}
     for ticker in unique_tickers:
@@ -301,9 +353,9 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     rfr = _get_rfr() if HAS_RFR else 0.045
     now_dt = datetime.now()
     net_delta = 0.0
-    net_gamma_dollar = 0.0   # $ P&L per 1% stock move across the book
-    net_vega = 0.0           # $ P&L per 1% IV rise across the book
-    net_theta = 0.0          # $ P&L per day from theta decay
+    net_gamma_dollar = 0.0
+    net_vega = 0.0
+    net_theta = 0.0
     counted = 0
 
     for r in open_trades:
@@ -311,15 +363,12 @@ def _print_portfolio_greeks(open_trades: list, width: int):
         S = stock_prices.get(ticker)
         if S is None:
             continue
-        K = float(r["strike"])
-        opt_type = r["type"].lower()
         try:
             exp_dt = datetime.strptime(r["expiration"][:10], "%Y-%m-%d")
-            T = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / (365 * 24))  # floor at 1 hour
+            T = max((exp_dt - now_dt).total_seconds() / (365.25 * 24 * 3600), 1.0 / (365 * 24))
         except Exception:
             continue
 
-        # Use stored entry IV if available, else fall back to 25%
         sigma = 0.25
         try:
             stored_iv = r.get("entry_iv") if isinstance(r, dict) else (r["entry_iv"] if "entry_iv" in r.keys() else None)
@@ -330,19 +379,28 @@ def _print_portfolio_greeks(open_trades: list, width: int):
         except Exception:
             pass
 
-        is_short = _is_short(r["strategy_name"] or "")
-        sign = -1.0 if is_short else 1.0
+        legs = _legs_for_row(r)
+        if not legs:
+            continue
 
         try:
-            delta = float(bs_delta(opt_type, S, K, T, rfr, sigma))
-            gamma = float(bs_gamma(S, K, T, rfr, sigma))
-            vega  = float(bs_vega(S, K, T, rfr, sigma))   # already per 1% IV per share
-            theta = float(bs_theta(opt_type, S, K, T, rfr, sigma))
-            net_delta       += sign * delta
-            # dollar gamma: $ gain per 1% stock move = 0.5 × gamma × (S×0.01)² × 100 shares
-            net_gamma_dollar += sign * 0.5 * gamma * (S * 0.01) ** 2 * 100
-            net_vega        += sign * vega * 100   # per contract (×100 shares)
-            net_theta       += sign * theta * 100  # per contract (×100 shares)
+            row_delta = 0.0
+            row_gamma = 0.0
+            row_vega  = 0.0
+            row_theta = 0.0
+            for leg_type, leg_strike, leg_qty in legs:
+                d = float(bs_delta(leg_type, S, leg_strike, T, rfr, sigma))
+                g = float(bs_gamma(S, leg_strike, T, rfr, sigma))
+                v = float(bs_vega(S, leg_strike, T, rfr, sigma))
+                t = float(bs_theta(leg_type, S, leg_strike, T, rfr, sigma))
+                row_delta += leg_qty * d
+                row_gamma += leg_qty * g
+                row_vega  += leg_qty * v
+                row_theta += leg_qty * t
+            net_delta        += row_delta
+            net_gamma_dollar += 0.5 * row_gamma * (S * 0.01) ** 2 * 100
+            net_vega         += row_vega * 100
+            net_theta        += row_theta * 100
             counted += 1
         except Exception as _greeks_exc:
             logging.getLogger(__name__).debug("Greeks computation failed for position: %s", _greeks_exc)
@@ -498,9 +556,15 @@ def view_portfolio():
         total_cost_usd  = 0.0
         fetched_count   = 0
 
-        # Parallel-fetch all live option prices up front
+        # Parallel-fetch all live option prices up front. For multi-leg
+        # structures (spreads / iron condors) we need ALL legs' marks so the
+        # P&L row shows the true net cost-to-close rather than just one leg.
         from concurrent.futures import ThreadPoolExecutor
-        _live_tasks = [(r["ticker"], r["expiration"][:10], float(r["strike"]), r["type"]) for r in open_trades]
+        _live_tasks_set: set = set()
+        for r in open_trades:
+            for opt_type, strike, _qty in _legs_for_row(r):
+                _live_tasks_set.add((r["ticker"], r["expiration"][:10], strike, opt_type))
+        _live_tasks = list(_live_tasks_set)
         _live_prices: dict = {}
         def _fetch_one(args):
             return args, _fetch_live_price(*args)
@@ -512,7 +576,7 @@ def view_portfolio():
 
         for r in open_trades:
             ticker      = r["ticker"]
-            opt_type    = r["type"].upper()
+            structure   = _classify_structure(r)
             strike      = float(r["strike"])
             expiry      = r["expiration"][:10]
             opened      = r["date"][:10]
@@ -526,14 +590,35 @@ def view_portfolio():
                 days_held = 0
             held_str = f"{days_held}d"
 
-            live_price = _live_prices.get((ticker, expiry, strike, r["type"]))
-
-            # Type column
-            if HAS_FMT and fmt:
-                tc = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
-                type_str = fmt.colorize(f"{opt_type:<5}", tc)
+            # Display label and strike for the type column
+            if structure == "iron_condor":
+                opt_type_disp = "IC"
+                # Show short put / short call
+                sp = float(r.get("short_put_strike") or 0)
+                sc = float(r.get("short_call_strike") or 0)
+                strike_disp = f"{sp:.0f}/{sc:.0f}"
+            elif structure == "spread":
+                sn_low = (r.get("strategy_name") or "").lower()
+                opt_type_disp = "BPS" if "bull put" in sn_low else ("BCS" if "bear call" in sn_low else "SPR")
+                long_k = r.get("long_strike")
+                try:
+                    long_k = float(long_k) if long_k not in (None, "", 0) else None
+                except (TypeError, ValueError):
+                    long_k = None
+                strike_disp = f"{strike:.0f}/{long_k:.0f}" if long_k else f"{strike:.0f}"
             else:
-                type_str = f"{opt_type:<5}"
+                opt_type_disp = str(r["type"]).upper()
+                strike_disp = f"{strike:.2f}"
+
+            # Type column color
+            if HAS_FMT and fmt:
+                if structure == "single":
+                    tc = fmt.Colors.BRIGHT_GREEN if opt_type_disp == "CALL" else fmt.Colors.BRIGHT_RED
+                else:
+                    tc = fmt.Colors.BRIGHT_CYAN
+                type_str = fmt.colorize(f"{opt_type_disp:<5}", tc)
+            else:
+                type_str = f"{opt_type_disp:<5}"
 
             # DTE column
             if HAS_FMT and fmt:
@@ -542,37 +627,78 @@ def view_portfolio():
             else:
                 dte_str = f"{max(dte,0):>4}"
 
-            if live_price is not None and live_price > 0:
-                pnl_per = (entry_price - live_price) if short else (live_price - entry_price)
-                pnl_usd = pnl_per * 100
-                pnl_pct = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
-                total_pnl_usd  += pnl_usd
-                total_cost_usd += entry_price * 100
+            # Mark-to-market: for multi-leg structures, sum each leg's mark
+            # weighted by qty sign (-1 short, +1 long); position value =
+            # sum(qty * leg_now). Single-leg falls through the same path.
+            legs = _legs_for_row(r)
+            leg_marks = []
+            for leg_type, leg_strike, leg_qty in legs:
+                lp = _live_prices.get((ticker, expiry, leg_strike, leg_type))
+                leg_marks.append((leg_qty, lp))
+            all_legs_priced = all(lp is not None and lp > 0 for _, lp in leg_marks)
+
+            if structure == "single":
+                live_price = leg_marks[0][1] if leg_marks else None
+                live_str = f"${live_price:.2f}" if (live_price is not None and live_price > 0) else None
+                if live_price is not None and live_price > 0:
+                    pnl_per = (entry_price - live_price) if short else (live_price - entry_price)
+                    pnl_usd_row = pnl_per * 100
+                    pnl_pct_row = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
+                    cost_basis = entry_price * 100
+                else:
+                    pnl_usd_row = None
+                    pnl_pct_row = None
+                    cost_basis = 0.0
+            else:
+                # Spread / iron condor — entry_price is the net credit collected
+                if all_legs_priced:
+                    # current_credit_to_close = short_now - long_now
+                    current_credit = sum(-qty * lp for qty, lp in leg_marks)
+                    pnl_per = entry_price - current_credit  # decay = profit for credit seller
+                    pnl_usd_row = pnl_per * 100
+                    pnl_pct_row = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
+                    live_str = f"${current_credit:.2f}"
+                    # Cost basis ≈ max_loss (true defined risk) for concentration math
+                    ml_col = r.get("max_loss_usd")
+                    try:
+                        cost_basis = abs(float(ml_col)) if ml_col not in (None, "", 0) else entry_price * 100
+                    except (TypeError, ValueError):
+                        cost_basis = entry_price * 100
+                else:
+                    pnl_usd_row = None
+                    pnl_pct_row = None
+                    live_str = None
+                    cost_basis = 0.0
+
+            if pnl_usd_row is not None:
+                total_pnl_usd  += pnl_usd_row
+                total_cost_usd += cost_basis
                 fetched_count  += 1
-
-                sign = "+" if pnl_usd >= 0 else "-"
-                raw_usd = f"{sign}${abs(pnl_usd):.2f}"
-                raw_pct = f"{sign}{abs(pnl_pct):.1f}%"
-
-                live_str = f"${live_price:.2f}"
-
+                sign = "+" if pnl_usd_row >= 0 else "-"
+                raw_usd = f"{sign}${abs(pnl_usd_row):.2f}"
+                raw_pct = f"{sign}{abs(pnl_pct_row):.1f}%"
                 if HAS_FMT and fmt:
-                    pc = fmt.Colors.GREEN if pnl_usd >= 0 else fmt.Colors.RED
+                    pc = fmt.Colors.GREEN if pnl_usd_row >= 0 else fmt.Colors.RED
                     usd_str = fmt.colorize(f"{raw_usd:>10}", pc)
                     pct_str = fmt.colorize(f"{raw_pct:>7}", pc)
                 else:
                     usd_str = f"{raw_usd:>10}"
                     pct_str = f"{raw_pct:>7}"
+                live_render = live_str if live_str is not None else "—"
             else:
-                live_str = _c(f"{'—':>8}", fmt.Colors.DIM if HAS_FMT and fmt else "")
+                live_render = _c(f"{'—':>8}", fmt.Colors.DIM if HAS_FMT and fmt else "")
                 usd_str  = _c(f"{'—':>10}", fmt.Colors.DIM if HAS_FMT and fmt else "")
                 pct_str  = _c(f"{'—':>7}", fmt.Colors.DIM if HAS_FMT and fmt else "")
 
             print(
-                f"  {ticker:<7} {type_str} {strike:>8.2f} {expiry:<12}"
-                f" {dte_str} {opened:<11} {held_str:>5} ${entry_price:>6.2f} {live_str:>8}"
+                f"  {ticker:<7} {type_str} {strike_disp:>8} {expiry:<12}"
+                f" {dte_str} {opened:<11} {held_str:>5} ${entry_price:>6.2f} {live_render:>8}"
                 f" {usd_str} {pct_str}"
             )
+
+            # Backwards-compat placeholder for the delta-drift sub-line below;
+            # multi-leg structures skip that block (see if-guard).
+            live_price = leg_marks[0][1] if (structure == "single" and leg_marks) else None
 
             # Delta drift sub-line
             if live_price is not None and live_price > 0 and HAS_BS:
@@ -671,22 +797,35 @@ def view_portfolio():
                 else:
                     print(conc_msg)
 
-        # Portfolio max loss aggregation (spreads have defined max_loss)
+        # Portfolio max loss aggregation (defined-risk structures have stored max_loss)
         total_max_loss = 0.0
         has_undefined_risk = False
         for r in open_trades:
+            structure = _classify_structure(r)
             sn = str(r.get("strategy_name", ""))
-            if sn.startswith("SPREAD:"):
+            if structure in ("spread", "iron_condor"):
+                ml_col = r.get("max_loss_usd")
+                ml_val = None
                 try:
-                    parts = sn.split(":")
-                    ml = float(parts[3]) if len(parts) >= 4 else 0.0
-                    total_max_loss += abs(ml) * 100  # per contract
-                except (ValueError, IndexError):
+                    if ml_col not in (None, "", 0):
+                        ml_val = abs(float(ml_col))
+                except (TypeError, ValueError):
+                    ml_val = None
+                if ml_val is None and sn.startswith("SPREAD:"):
+                    # Legacy fallback parsing
+                    try:
+                        parts = sn.split(":")
+                        ml_val = abs(float(parts[3])) * 100 if len(parts) >= 4 else None
+                    except (ValueError, IndexError):
+                        ml_val = None
+                if ml_val is None:
                     has_undefined_risk = True
+                else:
+                    total_max_loss += ml_val
             else:
                 # Single-leg: max loss = entry_price * 100 (for longs) or unlimited (shorts)
                 ep = abs(float(r.get("entry_price", 0)))
-                if _is_short(str(r.get("strategy_name", ""))):
+                if _is_short(sn):
                     has_undefined_risk = True
                 else:
                     total_max_loss += ep * 100

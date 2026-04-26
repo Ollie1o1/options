@@ -10,8 +10,17 @@ Shortcut flags (expanded before forwarding):
                         --mode discover --weights baseline --auto-log --log-top 5 --auto
                       Aliases: --default_scoring, -ds
 
-  --5, --10, --N      Shorthand for --log-top N. Can be combined with --default-scoring
-                      (the later value wins, so `--default-scoring --10` logs top 10).
+  --spreads-scoring   Credit-spread scan + baseline + auto-log top 5 + unattended.
+                      Aliases: --spreads_scoring, -sps
+  --iron-scoring      Iron-condor scan + baseline + auto-log top 5 + unattended.
+                      Aliases: --iron_scoring, -ics
+  --sell-scoring      Short-premium (single-leg) scan + baseline + auto-log top 5 + unattended.
+                      Aliases: --sell_scoring, -ss
+
+  --5, --10, --N      Shorthand for --log-top N. Can be combined with any *-scoring
+                      shortcut (the later value wins, so `--spreads-scoring --10` logs top 10).
+
+  --logging-help, -lh  Print calibration guidance (what/when to log) and exit.
 """
 import os
 import re
@@ -20,24 +29,109 @@ import subprocess
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 
+# ── Logging-help doc (shown by --logging-help / -lh) ──────────────────────
+_LOGGING_HELP = """\
+Calibration logging guide
+=========================
+
+Goal: build a diverse paper-trade ledger so the weight optimizer and IC
+analysis have signal across strategies, tickers, and score ranges — not
+just "top-1 short premium on ORCL every day."
+
+Shortcut commands
+-----------------
+  python3 run.py --default-scoring   (alias -ds)
+      Discovery scan, baseline weights, auto-log top 5. The workhorse.
+
+  python3 run.py --spreads-scoring   (alias -sps)
+      Credit-spread scan. Logs defined-risk two-leg trades.
+
+  python3 run.py --iron-scoring      (alias -ics)
+      Iron-condor scan. Logs range-bound, defined-risk trades.
+
+  python3 run.py --sell-scoring      (alias -ss)
+      Short-premium single-leg scan. Naked risk — size carefully.
+
+  Any of the above accepts --5 / --10 / --N to override top-N.
+      e.g.  python3 run.py --default-scoring --10
+
+When to use what
+----------------
+1. ROTATE MODES DAILY — don't stack the same scan all week.
+   Recommended weekly rotation:
+     Mon  --default-scoring   (discover)
+     Tue  --spreads-scoring
+     Wed  --iron-scoring
+     Thu  --default-scoring
+     Fri  --sell-scoring      (only if stress test is healthy)
+   Why: the optimizer can't learn which weights work for spreads if 90%
+   of the ledger is single-leg discover picks.
+
+2. ONE POSITION PER TICKER PER SCAN — enforced automatically.
+   All *-scoring shortcuts now dedupe by symbol before taking top-N, so
+   if MU shows 6 candidates the auto-log keeps only the highest-scored
+   one. Concentration tanked the last ledger (ORCL + MU = 85% of a
+   $15k loss) — this guard prevents the repeat.
+
+3. LOG ACROSS THE SCORE DISTRIBUTION when calibrating.
+   Auto-log top 5 is fine as a default, but every 1-2 weeks sample
+   deeper: `--default-scoring --20` and manually pick rank 5, 10, 15, 20.
+   Why: IC regression needs variance in the x-axis. If every logged
+   trade has score 0.82-0.88 the correlation is meaningless.
+
+4. CHECK STRESS BEFORE ADDING NAKED RISK.
+   Run `python3 -m src.check_pnl` first. If `Stress -1σ` loss exceeds
+   your open book, CLOSE OR ROLL existing naked shorts before adding
+   `--sell-scoring` trades. Defined-risk modes (--spreads, --iron) are
+   safe to keep logging.
+
+5. DON'T RE-RUN THE SAME SCAN TWICE IN A DAY.
+   The ledger ends up with near-duplicate rows and the IC gets biased
+   by a single day's regime.
+
+Quick reference
+---------------
+  Healthy book, calibrating?     rotate modes, top 5 default
+  Stress >> book?                 --spreads-scoring or --iron-scoring only
+  IC looks flat/inverted?         sample deeper (--20) and manually vary ranks
+  Want the full screener help?    python3 run.py --help
+"""
+
 # ── Shortcut-flag expansion ────────────────────────────────────────────────
-# Accept --default-scoring / --default_scoring / -ds as shorthand for the full
-# weight-optimization data-collection command.
-_DEFAULT_SCORING_EXPANSION = [
-    "--mode", "discover",
-    "--weights", "baseline",
-    "--auto-log",
-    "--log-top", "5",
-    "--auto",
-]
-_shortcut_aliases = {"--default-scoring", "--default_scoring", "-ds"}
+# Each shortcut expands to a full arg list forwarded to the screener.
+_SCORING_BASE = ["--weights", "baseline", "--auto-log", "--log-top", "5", "--auto"]
+_SHORTCUT_EXPANSIONS: dict = {
+    # discovery (existing)
+    "--default-scoring":  ["--mode", "discover"] + _SCORING_BASE,
+    "--default_scoring":  ["--mode", "discover"] + _SCORING_BASE,
+    "-ds":                ["--mode", "discover"] + _SCORING_BASE,
+    # credit spreads
+    "--spreads-scoring":  ["--mode", "spreads"] + _SCORING_BASE,
+    "--spreads_scoring":  ["--mode", "spreads"] + _SCORING_BASE,
+    "-sps":               ["--mode", "spreads"] + _SCORING_BASE,
+    # iron condors
+    "--iron-scoring":     ["--mode", "iron"] + _SCORING_BASE,
+    "--iron_scoring":     ["--mode", "iron"] + _SCORING_BASE,
+    "-ics":               ["--mode", "iron"] + _SCORING_BASE,
+    # short premium (single-leg)
+    "--sell-scoring":     ["--mode", "sell"] + _SCORING_BASE,
+    "--sell_scoring":     ["--mode", "sell"] + _SCORING_BASE,
+    "-ss":                ["--mode", "sell"] + _SCORING_BASE,
+}
+_LOGGING_HELP_ALIASES = {"--logging-help", "--logging_help", "-lh"}
 # --5 / --10 / --25 / etc. → --log-top N
 _TOPN_PATTERN = re.compile(r"^--(\d+)$")
 
+# Intercept --logging-help before venv checks / forwarding.
+for _arg in sys.argv[1:]:
+    if _arg in _LOGGING_HELP_ALIASES:
+        sys.stdout.write(_LOGGING_HELP)
+        sys.exit(0)
+
 _argv = []
 for _arg in sys.argv[1:]:
-    if _arg in _shortcut_aliases:
-        _argv.extend(_DEFAULT_SCORING_EXPANSION)
+    if _arg in _SHORTCUT_EXPANSIONS:
+        _argv.extend(_SHORTCUT_EXPANSIONS[_arg])
         continue
     _m = _TOPN_PATTERN.match(_arg)
     if _m:
