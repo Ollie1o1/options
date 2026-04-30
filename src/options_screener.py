@@ -158,6 +158,20 @@ def _suppress_scan_noise():
             _root.setLevel(_saved_root)
 
 
+def _strategy_label_for_mode(mode: str, opt_type) -> str:
+    """Map screener mode + option type to a paper-trade strategy_name.
+
+    Premium-Selling logs are short-premium (Short Put / Short Call).
+    All other single-leg modes (Discovery, Budget, Single-stock) generate buy
+    signals and are logged as Long Put / Long Call so the P&L sign and
+    Greeks signing in check_pnl read correctly.
+    """
+    t = str(opt_type or "").capitalize()
+    if mode == "Premium Selling":
+        return f"Short {t}"
+    return f"Long {t}"
+
+
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults."""
     default_config = {
@@ -1831,6 +1845,11 @@ def enrich_and_score(
     if mode == "Long Gamma":
         # No delta target for straddles/strangles — they span the full delta range by design
         pass
+    elif mode in ("Iron Condor", "Credit Spreads"):
+        # Multi-leg modes need the deep-OTM long wings (|delta| < 0.15);
+        # find_iron_condors / find_credit_spreads apply their own per-leg delta filters.
+        # Cap upper |delta| so we don't carry deep-ITM contracts into the leg matcher.
+        df = df[df["abs_delta"] <= fc.get("delta_max", 0.35) + 0.10].copy()
     elif mode == "Premium Selling":
         d_min = fc.get("premium_selling_delta_min", 0.15)
         d_max = fc.get("premium_selling_delta_max", 0.40)
@@ -1839,7 +1858,7 @@ def enrich_and_score(
         d_min = fc.get("delta_min", 0.15)
         d_max = fc.get("delta_max", 0.35)
         df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
-    if mode not in ("Premium Selling", "Long Gamma"):
+    if mode not in ("Premium Selling", "Long Gamma", "Iron Condor", "Credit Spreads"):
         df = df[df["rr_ratio"] >= 0.25].copy()
 
     if df.empty:
@@ -2073,22 +2092,32 @@ def normalize_spreads_for_ranking(spreads_df: pd.DataFrame, mode: str = "Credit 
     return result
 
 
-def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
+def find_iron_condors(df: pd.DataFrame, config: Optional[dict] = None) -> pd.DataFrame:
     """
     Identifies Iron Condor opportunities (Bull Put Spread + Bear Call Spread).
-    
+
     An Iron Condor sells premium on both sides expecting the stock to stay range-bound.
-    Includes strict liquidity requirements and delta neutrality checks.
+    Per-leg liquidity, delta bands, and minimum credit-to-width are tunable via
+    ``config['filters']['iron_condor']``.
     """
+    ic_cfg = ((config or {}).get("filters", {}) or {}).get("iron_condor", {}) or {}
+    leg_min_vol = float(ic_cfg.get("leg_min_volume", 50))
+    leg_min_oi = float(ic_cfg.get("leg_min_open_interest", 200))
+    sd_min = float(ic_cfg.get("short_delta_min", 0.18))
+    sd_max = float(ic_cfg.get("short_delta_max", 0.35))
+    long_d_max = float(ic_cfg.get("long_delta_max", 0.15))
+    min_c2w = float(ic_cfg.get("min_credit_to_width", 0.20))
+    max_net_d = float(ic_cfg.get("max_net_delta", 0.10))
+
     condors = []
-    
+
     # Separate puts and calls
     put_df = df[df['type'] == 'put'].copy()
     call_df = df[df['type'] == 'call'].copy()
-    
-    # Strict liquidity filter for all legs (volume > 50, OI > 500)
-    put_df = put_df[(put_df['volume'] > 50) & (put_df['openInterest'] > 500)].copy()
-    call_df = call_df[(call_df['volume'] > 50) & (call_df['openInterest'] > 500)].copy()
+
+    # Per-leg liquidity gate (config-driven)
+    put_df = put_df[(put_df['volume'] > leg_min_vol) & (put_df['openInterest'] > leg_min_oi)].copy()
+    call_df = call_df[(call_df['volume'] > leg_min_vol) & (call_df['openInterest'] > leg_min_oi)].copy()
     
     if put_df.empty or call_df.empty:
         return pd.DataFrame()
@@ -2102,28 +2131,29 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
             continue
         
         # --- PUT WING (Bull Put Spread) ---
-        # Short Put: Delta between -0.30 and -0.20
+        # Short Put: |delta| in [sd_min, sd_max] (signed: between -sd_max and -sd_min)
         short_put_candidates = put_group[
-            (put_group['delta'] >= -0.30) & (put_group['delta'] <= -0.20)
+            (put_group['delta'] >= -sd_max) & (put_group['delta'] <= -sd_min)
         ].copy()
         
         best_put_spread = None
-        best_put_credit = 0
-        
+        best_put_ratio = 0.0
+
         for _, short_put in short_put_candidates.iterrows():
-            # Long Put: abs(delta) < 0.15 (closer to 0, further OTM) AND lower strike
-            # This ensures the long put is a protective wing, not ITM
+            # Long Put: |delta| < long_d_max (further OTM) AND lower strike
             long_put_candidates = put_group[
-                (put_group['delta'].abs() < 0.15) &
+                (put_group['delta'].abs() < long_d_max) &
                 (put_group['strike'] < short_put['strike'])
             ]
-            
+
             for _, long_put in long_put_candidates.iterrows():
                 put_width = short_put['strike'] - long_put['strike']
                 put_credit = short_put['premium'] - long_put['premium']
-                
-                if put_credit > best_put_credit and put_credit > 0:
-                    best_put_credit = put_credit
+                if put_width <= 0 or put_credit <= 0:
+                    continue
+                ratio = put_credit / put_width
+                if ratio > best_put_ratio:
+                    best_put_ratio = ratio
                     best_put_spread = {
                         'short_put': short_put,
                         'long_put': long_put,
@@ -2135,27 +2165,29 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
             continue
         
         # --- CALL WING (Bear Call Spread) ---
-        # Short Call: Delta between 0.20 and 0.30
+        # Short Call: delta in [sd_min, sd_max]
         short_call_candidates = call_group[
-            (call_group['delta'] >= 0.20) & (call_group['delta'] <= 0.30)
+            (call_group['delta'] >= sd_min) & (call_group['delta'] <= sd_max)
         ].copy()
         
         best_call_spread = None
-        best_call_credit = 0
-        
+        best_call_ratio = 0.0
+
         for _, short_call in short_call_candidates.iterrows():
-            # Long Call: Delta < 0.15 (further OTM) AND higher strike
+            # Long Call: delta < long_d_max (further OTM) AND higher strike
             long_call_candidates = call_group[
-                (call_group['delta'] < 0.15) &
+                (call_group['delta'] < long_d_max) &
                 (call_group['strike'] > short_call['strike'])
             ]
-            
+
             for _, long_call in long_call_candidates.iterrows():
                 call_width = long_call['strike'] - short_call['strike']
                 call_credit = short_call['premium'] - long_call['premium']
-                
-                if call_credit > best_call_credit and call_credit > 0:
-                    best_call_credit = call_credit
+                if call_width <= 0 or call_credit <= 0:
+                    continue
+                ratio = call_credit / call_width
+                if ratio > best_call_ratio:
+                    best_call_ratio = ratio
                     best_call_spread = {
                         'short_call': short_call,
                         'long_call': long_call,
@@ -2171,17 +2203,17 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
         max_width = max(best_put_spread['put_width'], best_call_spread['call_width'])
         max_risk = max_width - total_credit
         
-        # Filter: Must collect at least 1/5 of the width as credit (relaxed from 1/3)
-        min_credit = 0.20 * max_width
+        # Filter: Must collect at least min_c2w of the width as credit
+        min_credit = min_c2w * max_width
         if total_credit <= min_credit or max_risk <= 0:
             continue
-        
-        # Delta Neutrality Check: abs(short_put_delta + short_call_delta) < 0.10
+
+        # Delta Neutrality Check: |short_put_delta + short_call_delta| < max_net_d
         short_put_delta = best_put_spread['short_put']['delta']
         short_call_delta = best_call_spread['short_call']['delta']
         net_delta = short_put_delta + short_call_delta
-        
-        if abs(net_delta) >= 0.10:
+
+        if abs(net_delta) >= max_net_d:
             continue  # Too directional
         
         # Calculate metrics
@@ -2204,6 +2236,7 @@ def find_iron_condors(df: pd.DataFrame) -> pd.DataFrame:
             'call_credit': best_call_spread['call_credit'],
             'total_credit': total_credit,
             'max_width': max_width,
+            'max_profit': total_credit * 100,  # Per contract
             'max_risk': max_risk * 100,  # Per contract
             'return_on_risk': return_on_risk,
             'net_delta': net_delta,
@@ -2625,7 +2658,7 @@ def _score_fetched_data(
                 result["credit_spreads"].append(spreads)
                 result["success"] = True
         elif mode == "Iron Condor":
-            condors = find_iron_condors(df_scored)
+            condors = find_iron_condors(df_scored, config)
             if not condors.empty:
                 condors = enrich_iron_condors(condors, df_scored, config)
                 result["iron_condors"] = condors
@@ -2664,7 +2697,7 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
                    budget=None, macro_risk_active: bool = False, tnx_change_pct: float = 0.0) -> dict:
     """Thin wrapper: fetch data then score it."""
     try:
-        data_result = fetch_options_yfinance(symbol, max_expiries)
+        data_result = fetch_options_yfinance(symbol, max_expiries, min_dte=min_dte, max_dte=max_dte)
         return _score_fetched_data(symbol, data_result, mode, min_dte, max_dte, rfr,
                                    config, vix_weights, trader_profile, budget,
                                    macro_risk_active, tnx_change_pct)
@@ -2767,7 +2800,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Phase 1 — Pre-fetch all chains in parallel with a progress bar
     def _fetch_one(sym: str):
         try:
-            return sym, fetch_options_yfinance(sym, max_expiries)
+            return sym, fetch_options_yfinance(sym, max_expiries, min_dte=min_dte, max_dte=max_dte)
         except Exception as exc:
             return sym, {"error": str(exc)}
 
@@ -2792,9 +2825,9 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # the first 30s. The adaptive throttle in data_fetching widens intervals and
     # quarantines further once 429s start cascading.
     if len(tickers) >= 80:
-        _fetch_workers = 3
+        _fetch_workers = 2
     elif len(tickers) >= 30:
-        _fetch_workers = 4
+        _fetch_workers = 3
     else:
         _fetch_workers = min(len(tickers), 5)
     with _suppress_scan_noise():
@@ -3426,6 +3459,20 @@ def run_top_scan(
 
 
 def main():
+    # ── Raise soft file-descriptor limit ────────────────────────────────────
+    # macOS defaults RLIMIT_NOFILE soft to 256, which is too low once curl_cffi
+    # sessions, sqlite caches, and the fetch ThreadPool all hold sockets at once
+    # — symptom is "[Errno 24] Too many open files" cascading across every
+    # ticker mid-scan. Hard limit is unlimited, so bump soft to 8192.
+    try:
+        import resource
+        _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        _target = 8192 if _hard == resource.RLIM_INFINITY else min(_hard, 8192)
+        if _soft < _target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (_target, _hard))
+    except (ImportError, ValueError, OSError):
+        pass
+
     # ── CLI argument parsing (Phase 7) ───────────────────────────────────────
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--no-color", action="store_true", help="Disable colored output")
@@ -4059,6 +4106,8 @@ def main():
                     _today_str = datetime.now().strftime("%Y-%m-%d")
                     _inserted = 0
                     _skipped = 0
+                    _skipped_long_puts = 0
+                    _skip_long_puts = bool(config.get("auto_log_skip_long_puts", True))
                     for _, row in _candidates.iterrows():
                         _entry_price = (
                             safe_float(row.get("ask") or None)
@@ -4066,6 +4115,14 @@ def main():
                             or safe_float(row.get("premium"), 0.0)
                         )
                         if not _entry_price or _entry_price <= 0:
+                            continue
+                        _strat_name = _strategy_label_for_mode(mode, row['type'])
+                        # Long Put has been the worst-PF strategy in the ledger (PF 0.60,
+                        # 32% win across 31 trades). Skip auto-logging it until the IC
+                        # signal stabilizes or the user explicitly opts back in via
+                        # config "auto_log_skip_long_puts": false.
+                        if _skip_long_puts and _strat_name == "Long Put":
+                            _skipped_long_puts += 1
                             continue
                         _trade = {
                             "date": _today_str,
@@ -4075,7 +4132,7 @@ def main():
                             "type": str(row["type"]).capitalize(),
                             "entry_price": _entry_price,
                             "quality_score": row.get("quality_score", 0.5),
-                            "strategy_name": f"Short {str(row['type']).capitalize()}",
+                            "strategy_name": _strat_name,
                             "entry_iv": row.get("impliedVolatility"),
                             "entry_delta": row.get("delta"),
                             "entry_gamma": row.get("gamma"),
@@ -4121,6 +4178,8 @@ def main():
 
                     _tag = _weight_profile_id or "untagged"
                     _summary = f"Auto-logged {_inserted} new, skipped {_skipped} duplicates (profile: {_tag})"
+                    if _skipped_long_puts:
+                        _summary += f", filtered {_skipped_long_puts} Long Put(s)"
                     print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  \u2713 {_summary}")
                 # Skip the interactive save-menu loop below; continue to scan-another prompt
                 _has_results = False
@@ -4168,7 +4227,7 @@ def main():
                                 or safe_float(top_pick_row.get("premium"), 0.0)
                             ),
                             "quality_score": top_pick_row["quality_score"],
-                            "strategy_name": f"Short {str(top_pick_row['type']).capitalize()}",
+                            "strategy_name": _strategy_label_for_mode(mode, top_pick_row['type']),
                             "entry_iv": top_pick_row.get("impliedVolatility"),
                             "entry_delta": top_pick_row.get("delta"),
                             "entry_gamma": top_pick_row.get("gamma"),
@@ -4277,18 +4336,23 @@ def main():
                                             "quality_score": row.get("quality_score", 0.5)
                                         })
                                     elif "total_credit" in row:
-                                        # It's an Iron Condor
-                                        pm.log_spread({
+                                        # Iron Condor — persist all four legs so the
+                                        # portfolio viewer can render strikes and mark
+                                        # to market. log_iron_condor_if_new dedups on
+                                        # the (ticker, exp, 4 strikes) tuple.
+                                        pm.log_iron_condor_if_new({
                                             "date": today_str,
                                             "ticker": row["symbol"],
                                             "expiration": row["expiration"],
-                                            "short_strike": row["short_put_strike"],
-                                            "long_strike": row["long_put_strike"],
-                                            "type": "Iron Condor",
-                                            "net_credit": row["total_credit"],
-                                            "max_profit": row.get("max_profit", 0), # total_credit * 100 handled inside log_spread? No.
-                                            "max_loss": row.get("max_risk", 0),
-                                            "quality_score": row.get("quality_score", 0.5)
+                                            "short_put_strike": row["short_put_strike"],
+                                            "long_put_strike":  row["long_put_strike"],
+                                            "short_call_strike": row["short_call_strike"],
+                                            "long_call_strike":  row["long_call_strike"],
+                                            "total_credit": row["total_credit"],
+                                            "max_profit": row.get("max_profit", 0),
+                                            "max_risk":   row.get("max_risk", 0),
+                                            "net_delta":  row.get("net_delta"),
+                                            "quality_score": row.get("quality_score", 0.5),
                                         })
                                     else:
                                         # It's a single option
@@ -4304,7 +4368,7 @@ def main():
                                                 or safe_float(row.get("premium"), 0.0)
                                             ),
                                             "quality_score": row.get("quality_score", 0.5),
-                                            "strategy_name": f"Short {str(row['type']).capitalize()}",
+                                            "strategy_name": _strategy_label_for_mode(mode, row['type']),
                                             "entry_iv": row.get("impliedVolatility"),
                                             "entry_delta": row.get("delta"),
                                             "entry_gamma": row.get("gamma"),

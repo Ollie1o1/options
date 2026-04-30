@@ -328,6 +328,52 @@ _MIGRATIONS = {
 }
 
 
+_CREDIT_STRUCTURES = {"Bull Put", "Bear Call", "Iron Condor"}
+_SHORT_SINGLE_LEGS = {"Short Put", "Short Call"}
+
+
+def _sanitize_close_values(
+    strategy_name: str,
+    entry_price: float,
+    exit_price: float,
+    pnl_pct: float,
+) -> tuple[float, float, float]:
+    """Clamp close-time values to physically possible bounds and derive pnl_usd.
+
+    Caller observed a QQQ Bear Call closed with pnl_pct=+3.58 and exit_price=-1.22 —
+    both impossible for a credit spread. Without clamping, anomalies poison the IC
+    sample (one outlier flipped the sign of skew_align IC from -0.16 to ~0).
+
+    Bounds by structure:
+      - credit spreads (Bull Put / Bear Call / Iron Condor): pnl_pct ∈ [-1.0, +1.0]
+        (max gain = full credit kept; max loss = full credit + width, capped at -1.0
+        in this scoring convention which expresses pct relative to entry credit).
+      - short single legs (Short Put / Short Call): max gain = full credit (+1.0);
+        loss is unbounded since premium can multiply against you.
+      - long premium (Long Call / Long Put): max loss = full premium (-1.0);
+        gain is unbounded.
+
+    exit_price is clamped to >= 0 (negative option prices are impossible).
+    pnl_usd is computed deterministically from the sanitized pnl_pct so it can never
+    be NULL after a close (caller bug: 115 historical closes were NULL because
+    pnl_usd wasn't being written by the auto-exit UPDATE statements).
+    """
+    safe_exit = max(float(exit_price), 0.0) if exit_price is not None else 0.0
+    raw_pct = float(pnl_pct) if pnl_pct is not None else 0.0
+    if not np.isfinite(raw_pct):
+        raw_pct = 0.0
+
+    if strategy_name in _CREDIT_STRUCTURES:
+        clamped_pct = max(-1.0, min(1.0, raw_pct))
+    elif strategy_name in _SHORT_SINGLE_LEGS:
+        clamped_pct = min(1.0, raw_pct)  # gain capped, loss unbounded
+    else:
+        clamped_pct = max(-1.0, raw_pct)  # loss capped, gain unbounded (long premium)
+
+    pnl_usd = round(float(entry_price) * clamped_pct * 100.0, 2)
+    return safe_exit, clamped_pct, pnl_usd
+
+
 class PaperManager:
     """Manages paper trades stored in a SQLite database."""
     
@@ -1081,10 +1127,14 @@ class PaperManager:
                         f"{ticker} {label} → {reason} "
                         f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
                     )
+                    safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
+                        row["strategy_name"] or "", entry_credit,
+                        current_credit_to_close, pnl_realistic,
+                    )
                     with self._get_connection() as conn:
                         conn.execute(
-                            "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, exit_reason=? WHERE entry_id=?",
-                            (current_credit_to_close, now, pnl_realistic, reason, entry_id),
+                            "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, pnl_usd=?, exit_reason=? WHERE entry_id=?",
+                            (safe_exit, now, clamped_pct, pnl_usd, reason, entry_id),
                         )
                 continue
 
@@ -1129,13 +1179,17 @@ class PaperManager:
                         f"{ticker} {option_type.upper()} ${strike:.0f} → {reason} "
                         f"(mkt: {pnl_raw:+.1%}, after costs: {pnl_realistic:+.1%})"
                     )
+                    safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
+                        row["strategy_name"] or "", entry_price,
+                        current_price, pnl_realistic,
+                    )
                     update_query = """
                     UPDATE trades
-                    SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, exit_reason=?
+                    SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, pnl_usd=?, exit_reason=?
                     WHERE entry_id=?
                     """
                     with self._get_connection() as conn:
-                        conn.execute(update_query, (current_price, now, pnl_realistic, reason, entry_id))
+                        conn.execute(update_query, (safe_exit, now, clamped_pct, pnl_usd, reason, entry_id))
 
         if closed_this_run:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")

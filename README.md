@@ -23,6 +23,7 @@ A Python-based options screening tool that identifies high-probability trading o
 6. [Analytics Engine](#analytics-engine)
 7. [Paper Trading](#paper-trading)
 8. [Weight-Profile Auto-Logging](#weight-profile-auto-logging)
+   - [Calibration tracking](#calibration-tracking)
 9. [Configuration](#configuration)
 10. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
 11. [Project Structure](#project-structure)
@@ -666,6 +667,26 @@ Unknown keys log a warning; non-numeric values error out. If `--weights` is omit
 - Same contract re-scanned on the same day under the same profile → **skipped**.
 - Same contract under a different profile → **inserted** (so profiles can diverge).
 - Same contract the next day → **inserted** (re-entry signal preserved).
+
+### Calibration tracking
+
+Once the paper-trade ledger has accumulated enough closed trades, the per-component IC analysis tells you which scoring weights are actually predictive. Full plan and current state in **`LOGGING_PLAN.md`**.
+
+| Tool | What it does |
+|---|---|
+| `scripts/calibration_status.sh` | One-page dashboard: closed-trade counts, per-strategy progress, apply-gate checklist, top-5 IC components, data integrity. Run anytime, no side effects. |
+| `python3 -m src.backtester --calibrate` | Read-only IC report against `paper_trades.db`. Run anytime to preview recommended weight changes. |
+| `python3 -m src.backtester --calibrate --apply` | Writes recommended weights into `config.json` (only run once you've crossed the gates in `LOGGING_PLAN.md`). |
+| `scripts/enforce_exits.sh` | Wrapper around `--enforce-exits`. Install in cron for automatic daily TP/stop/time-exit closes. |
+| `scripts/calibrate_snapshot.sh` | Weekly snapshot — runs `--calibrate`, appends per-component IC drift to `logs/calibration_history.tsv`, integrity-checks the DB for out-of-bounds PnL or NULL `pnl_usd`. |
+| `logs/calibration_history.tsv` | Time series of per-component IC. Plot to see how signal stability changes as the corpus grows. |
+| `logs/calibration_<date>.warnings` | Created only when integrity-check finds an anomaly. Empty / absent = data is clean. |
+
+Auto-log filters that affect the calibration corpus (toggle in `config.json`):
+
+- `auto_log_skip_long_puts: true` — Long Puts are silently filtered from `--auto-log` because their PF is 0.69 in the historical ledger and they're now disabled going forward. Auto-log line shows `filtered N Long Put(s)` for visibility.
+
+PnL data is auto-sanitized at close time in `paper_manager.py` — `pnl_pct` is clamped to physically-possible bounds per strategy, `exit_price` to ≥0, and `pnl_usd` is always populated. This prevents IC pollution from anomalous closes (e.g. a credit spread storing pnl_pct=+3.58, which actually happened once and silently flipped the sign of `skew_align` IC).
 
 ---
 
