@@ -1570,6 +1570,18 @@ def _top_contributing_components(row, score_cols, n: int = 3):
     return pairs[:n]
 
 
+def _fmt_strike(k: float) -> str:
+    """Format a strike: integer if whole, else trim trailing zeros (e.g. 83, 83.5, 84.25)."""
+    try:
+        kf = float(k)
+    except (TypeError, ValueError):
+        return str(k)
+    if abs(kf - round(kf)) < 1e-6:
+        return f"{int(round(kf))}"
+    s = f"{kf:.2f}".rstrip("0").rstrip(".")
+    return s
+
+
 def _spread_thesis(row) -> str:
     parts = []
     pop = row.get("pop_score")
@@ -1770,7 +1782,7 @@ def _print_ic_detail_card(row, idx: int, total: int, width: int):
     net_delta = float(row.get("net_delta", 0) or 0)
     quality = float(row.get("quality_score", 0) or 0)
 
-    title = f"  [{idx}/{total}]  {sym}  IC  ${lp:.0f}/${sp:.0f} - ${sc:.0f}/${lc:.0f}  exp {exp}"
+    title = f"  [{idx}/{total}]  {sym}  IC  ${_fmt_strike(lp)}/${_fmt_strike(sp)} - ${_fmt_strike(sc)}/${_fmt_strike(lc)}  exp {exp}"
     if HAS_ENHANCED_CLI:
         print()
         print(fmt.colorize(title, fmt.Colors.BOLD))
@@ -1836,14 +1848,17 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
         print("  " + "-" * (WIDTH - 2))
 
     _delta_hdr = "Net \u0394"
-    hdr = f"  {'Symbol':<7} {'Exp':<12} {'Put Wing':<18} {'Call Wing':<18} {'Credit':<10} {'Max Risk':<10} {'RoR':<8} {_delta_hdr:<8} Score"
+    col_widths = [7, 12, 18, 18, 10, 12, 8, 8]
+    hdr_cells = ["Symbol", "Exp", "Put Wing", "Call Wing", "Credit", "Max Risk", "RoR", _delta_hdr]
+    hdr_body = fmt.align_columns(hdr_cells, col_widths) + " Score"
+    hdr = "  " + hdr_body
     print(fmt.colorize(hdr, fmt.Colors.BOLD) if HAS_ENHANCED_CLI else hdr)
     print(("  " + fmt.draw_separator(WIDTH - 2)) if HAS_ENHANCED_CLI else ("  " + "-" * (WIDTH - 2)))
 
     for _, row in df_condors.iterrows():
         exp = pd.to_datetime(row["expiration"]).date()
-        put_wing = f"{row['long_put_strike']:.0f}/{row['short_put_strike']:.0f}"
-        call_wing = f"{row['short_call_strike']:.0f}/{row['long_call_strike']:.0f}"
+        put_wing = f"{_fmt_strike(row['long_put_strike'])}/{_fmt_strike(row['short_put_strike'])}"
+        call_wing = f"{_fmt_strike(row['short_call_strike'])}/{_fmt_strike(row['long_call_strike'])}"
         net_delta = row['net_delta']
         quality = row['quality_score']
 
@@ -1851,22 +1866,16 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
         risk_str = fmt.colorize(f"${row['max_risk']:.2f}", fmt.Colors.RED) if HAS_ENHANCED_CLI else format_money(row['max_risk'])
         ror_str = fmt.colorize(f"{row['return_on_risk']:.2f}x", fmt.Colors.GREEN if row['return_on_risk'] > 0.25 else fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"{row['return_on_risk']:.2f}x"
         delta_color = fmt.Colors.GREEN if abs(net_delta) < 0.05 else fmt.Colors.RED
-        delta_str = fmt.colorize(f"{net_delta:>+.3f}", delta_color) if HAS_ENHANCED_CLI else f"{net_delta:>+.3f}"
+        delta_str = fmt.colorize(f"{net_delta:+.3f}", delta_color) if HAS_ENHANCED_CLI else f"{net_delta:+.3f}"
         if HAS_ENHANCED_CLI:
             stars, _ = fmt.format_quality_score(quality)
             score_str = f"{quality:.2f} {stars}"
         else:
             score_str = f"{quality:.2f}"
 
-        print(
-            f"  {row['symbol']:<7} {exp} "
-            f"{put_wing:<18} {call_wing:<18} "
-            f"{credit_str:<10} "
-            f"{risk_str:<10} "
-            f"{ror_str:<8} "
-            f"{delta_str:<8} "
-            f"{score_str}"
-        )
+        cells = [row['symbol'], str(exp), put_wing, call_wing,
+                 credit_str, risk_str, ror_str, delta_str]
+        print("  " + fmt.align_columns(cells, col_widths) + " " + score_str)
 
     if HAS_ENHANCED_CLI:
         print("\n" + fmt.draw_separator(WIDTH))

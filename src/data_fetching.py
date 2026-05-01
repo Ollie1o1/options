@@ -8,6 +8,7 @@ Handles all yfinance interactions with a Single-Fetch architecture for performan
 import time
 import math
 import logging
+import pickle
 import random
 import functools
 import threading
@@ -18,7 +19,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from contextlib import closing
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 
@@ -128,6 +129,102 @@ _CHAIN_CACHE: dict = {}
 _NEWS_CACHE: Dict[str, list] = {}
 _INFO_CACHE: Dict[str, dict] = {}
 _FETCH_TIMESTAMPS: Dict[str, datetime] = {}  # symbol → last fetch time
+
+# === Disk-backed yfinance cache ===
+# requests_cache doesn't apply because yfinance is given a curl_cffi session
+# (impersonate="chrome") for bot-detection evasion; requests_cache only patches
+# the standard requests library. So we cache at the function level: pickle the
+# return value of expensive Ticker methods, keyed by (symbol, kind).
+_YF_DISK_DB = "yf_disk_cache.db"
+_YF_DISK_LOCK = threading.Lock()
+_YF_DISK_INITIALIZED = [False]
+
+def _yf_disk_init() -> None:
+    if _YF_DISK_INITIALIZED[0]:
+        return
+    with _YF_DISK_LOCK:
+        if _YF_DISK_INITIALIZED[0]:
+            return
+        try:
+            with closing(sqlite3.connect(_YF_DISK_DB, timeout=5.0)) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS yf_cache "
+                    "(key TEXT PRIMARY KEY, value BLOB, expires INTEGER)"
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS yf_expires_idx ON yf_cache(expires)")
+                conn.commit()
+            _YF_DISK_INITIALIZED[0] = True
+        except Exception as e:
+            logger.warning("yf disk cache init failed: %s", e)
+
+def _yf_disk_get(key: str):
+    if _NO_CACHE or not _YF_DISK_INITIALIZED[0]:
+        return None
+    try:
+        now = int(time.time())
+        with closing(sqlite3.connect(_YF_DISK_DB, timeout=2.0)) as conn:
+            row = conn.execute(
+                "SELECT value FROM yf_cache WHERE key=? AND expires>?",
+                (key, now),
+            ).fetchone()
+        if row is None:
+            return None
+        return pickle.loads(row[0])
+    except Exception:
+        return None
+
+def _yf_disk_put(key: str, value: Any, ttl_s: int) -> None:
+    if _NO_CACHE or value is None or not _YF_DISK_INITIALIZED[0]:
+        return
+    # Skip caching empty DataFrames or empty tuples — these usually indicate a
+    # silent rate-limit failure rather than legitimate data. Empty Series is
+    # allowed (e.g., dividends for non-payers is legitimately empty).
+    if isinstance(value, pd.DataFrame) and value.empty:
+        return
+    if isinstance(value, tuple) and len(value) == 0:
+        return
+    # Option-chain dict: skip if BOTH calls and puts are empty (rate-limit signal).
+    if isinstance(value, dict) and {"calls", "puts"}.issubset(value.keys()):
+        c, p = value.get("calls"), value.get("puts")
+        c_empty = c is None or (isinstance(c, pd.DataFrame) and c.empty)
+        p_empty = p is None or (isinstance(p, pd.DataFrame) and p.empty)
+        if c_empty and p_empty:
+            return
+    try:
+        blob = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        expires = int(time.time()) + ttl_s
+        with closing(sqlite3.connect(_YF_DISK_DB, timeout=2.0)) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO yf_cache (key, value, expires) VALUES (?, ?, ?)",
+                (key, blob, expires),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+def _yf_cached(symbol: str, kind: str, fetch: Callable[[], Any], ttl_s: int):
+    """Disk-cached wrapper. fetch() is called only on miss; the result is pickled."""
+    _yf_disk_init()
+    key = f"{symbol.upper()}|{kind}"
+    hit = _yf_disk_get(key)
+    if hit is not None:
+        return hit
+    val = fetch()
+    _yf_disk_put(key, val, ttl_s)
+    return val
+
+def _yf_disk_purge_expired() -> None:
+    """Best-effort cleanup of expired rows. Safe to call any time."""
+    if not _YF_DISK_INITIALIZED[0]:
+        return
+    try:
+        now = int(time.time())
+        with closing(sqlite3.connect(_YF_DISK_DB, timeout=2.0)) as conn:
+            conn.execute("DELETE FROM yf_cache WHERE expires<=?", (now,))
+            conn.commit()
+    except Exception:
+        pass
 
 # Module-level sector map — shared by sector_analyzer, ranking, and options_screener
 # ~180 major optionable names mapped to their SPDR sector ETF
@@ -830,11 +927,22 @@ def iv_history_coverage(ticker: str) -> Dict[str, Any]:
 # All threads share one gate so aggregate request rate stays under Yahoo's ~60-100 req/min ceiling.
 _YF_THROTTLE_LOCK = threading.Lock()
 _YF_LAST_CALL_TS = [0.0]
-_YF_BASE_INTERVAL = 0.25  # healthy-state minimum spacing between Yahoo calls
+_YF_BASE_INTERVAL = 0.5  # healthy-state minimum spacing between Yahoo calls
 _YF_MIN_INTERVAL = [_YF_BASE_INTERVAL]  # mutable — adaptive throttle can widen this
 _YF_RECENT_429S: list = []               # timestamps of recent rate-limit events (for adaptive pacing)
 _YF_QUARANTINE_UNTIL = [0.0]             # monotonic deadline during which we refuse fresh fetches
-_YF_QUARANTINE_WINDOW_S = 60.0           # once triggered, fetches wait this long for Yahoo's window to reset
+
+# Adaptive escalation: when Yahoo stays angry across multiple quarantines we
+# widen pauses and steady-state spacing further. Each tuple is (window_s, base_interval_s)
+# applied to the Nth quarantine in a 15-minute streak. Resets once we go 5min clean.
+_YF_QUARANTINE_TIERS = [
+    (60.0,  0.75),   # 1st: gentle nudge
+    (120.0, 1.50),   # 2nd: Yahoo is persistently angry
+    (240.0, 2.50),   # 3rd: back off hard, almost serial
+]
+_YF_QUARANTINE_COUNT = [0]               # how many quarantines fired in current streak
+_YF_LAST_QUARANTINE_TS = [0.0]           # for streak-reset detection
+_YF_STREAK_RESET_S = 300.0               # 5 min clean → reset count back to 0
 
 def _yf_throttle():
     # Block until we've passed the quarantine deadline (no new 429s during that window).
@@ -863,10 +971,10 @@ def _yf_register_429():
 
     Strategy:
     - Drop a 15s cooldown on the shared gate so all threads space out.
-    - Track 429s in the last 60s. If >=3 fire, widen the base interval to 0.75s
-      (from 0.25s) and quarantine fetches for 60s so Yahoo's rolling window
-      has time to reset. Without this, we cascade through hundreds of
-      rate-limited retries and waste 60-80s per ticker.
+    - Track 429s in the last 60s. If >=3 fire, enter quarantine. Each successive
+      quarantine within ~5min escalates the pause window and base interval:
+      tier 1 = 60s pause + 0.75s base, tier 2 = 120s + 1.5s, tier 3 = 240s + 2.5s.
+      Streak resets once we go 5min without a quarantine.
     """
     now = time.monotonic()
     with _YF_THROTTLE_LOCK:
@@ -878,14 +986,19 @@ def _yf_register_429():
             _YF_RECENT_429S.pop(0)
         n_recent = len(_YF_RECENT_429S)
         if n_recent >= 3 and _YF_QUARANTINE_UNTIL[0] < now:
-            # Yahoo is rate-limiting us hard — pause the whole pool and slow
-            # the steady-state rate. Only log once per quarantine entry.
-            _YF_MIN_INTERVAL[0] = max(_YF_MIN_INTERVAL[0], 0.75)
-            _YF_QUARANTINE_UNTIL[0] = now + _YF_QUARANTINE_WINDOW_S
+            # Reset streak if last quarantine was a while ago
+            if now - _YF_LAST_QUARANTINE_TS[0] > _YF_STREAK_RESET_S:
+                _YF_QUARANTINE_COUNT[0] = 0
+            tier_idx = min(_YF_QUARANTINE_COUNT[0], len(_YF_QUARANTINE_TIERS) - 1)
+            window_s, base_iv = _YF_QUARANTINE_TIERS[tier_idx]
+            _YF_MIN_INTERVAL[0] = max(_YF_MIN_INTERVAL[0], base_iv)
+            _YF_QUARANTINE_UNTIL[0] = now + window_s
+            _YF_QUARANTINE_COUNT[0] += 1
+            _YF_LAST_QUARANTINE_TS[0] = now
             logging.warning(
-                f"[yf-throttle] {n_recent} rate-limit events in the last 60s — "
-                f"pausing all fetches for {_YF_QUARANTINE_WINDOW_S:.0f}s and widening "
-                f"base interval to {_YF_MIN_INTERVAL[0]:.2f}s"
+                f"[yf-throttle] tier {tier_idx + 1}/{len(_YF_QUARANTINE_TIERS)}: "
+                f"{n_recent} rate-limit events in last 60s — "
+                f"pausing {window_s:.0f}s, base interval → {_YF_MIN_INTERVAL[0]:.2f}s"
             )
 
 
@@ -1010,11 +1123,11 @@ def get_underlying_price(ticker: Any) -> Optional[float]:
     return None
 
 def _get_news_cached(symbol: str, ticker: "yf.Ticker") -> list:
-    """Fetch ticker.news once per session, cache result."""
+    """Fetch ticker.news once per session; disk-cached 1h across runs."""
     if symbol in _NEWS_CACHE:
         return _NEWS_CACHE[symbol]
     try:
-        news = ticker.news if ticker else []
+        news = _yf_cached(symbol, "news", lambda: (ticker.news if ticker else []), ttl_s=3600)
     except Exception:
         news = []
     _NEWS_CACHE[symbol] = news or []
@@ -1022,11 +1135,11 @@ def _get_news_cached(symbol: str, ticker: "yf.Ticker") -> list:
 
 
 def _get_info_cached(symbol: str, ticker: "yf.Ticker") -> dict:
-    """Fetch ticker.info once per session, cache result."""
+    """Fetch ticker.info once per session; disk-cached 24h across runs."""
     if symbol in _INFO_CACHE:
         return _INFO_CACHE[symbol]
     try:
-        info = (ticker.info if ticker else None) or {}
+        info = _yf_cached(symbol, "info", lambda: ((ticker.info if ticker else None) or {}), ttl_s=86400) or {}
     except Exception:
         info = {}
     _INFO_CACHE[symbol] = info
@@ -1123,8 +1236,9 @@ def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
         _SEASONALITY_CACHE[key] = cached
         return cached
     try:
-        hist = ticker.history(period="5y", interval="1mo")
-        if hist.empty:
+        hist = _yf_cached(ticker.ticker, "hist_5y_monthly",
+                          lambda: ticker.history(period="5y", interval="1mo"), ttl_s=86400)
+        if hist is None or hist.empty:
             return None
         monthly_data = hist[hist.index.month == current_month]
         if monthly_data.empty:
@@ -1142,7 +1256,9 @@ def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
 def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
     try:
         try:
-            ed = ticker.get_earnings_dates(limit=1)
+            # Earnings calendar moves quarterly — disk-cache 12h across runs.
+            ed = _yf_cached(ticker.ticker, "earnings_dates_1",
+                            lambda: ticker.get_earnings_dates(limit=1), ttl_s=43200)
             if ed is not None and not ed.empty:
                 dt = ed.index[0]
                 if not isinstance(dt, datetime):
@@ -1720,16 +1836,20 @@ def get_market_context() -> Tuple[str, str, bool, float]:
 
 
 def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
-    try:
-        # Wrap ticker.option_chain in try/except to handle invalid/empty expirations gracefully
+    # yfinance returns an Options namedtuple defined dynamically — not pickleable.
+    # Cache the (calls, puts) DataFrame pair as a plain dict instead.
+    def _do_fetch():
         _yf_throttle()
-        oc = tkr.option_chain(exp)
+        oc_local = tkr.option_chain(exp)
+        return {"calls": oc_local.calls, "puts": oc_local.puts}
+    try:
+        oc_dict = _yf_cached(symbol, f"chain:{exp}", _do_fetch, ttl_s=600)
     except Exception as e:
         logger.debug("Could not fetch options for %s on %s: %s", symbol, exp, e)
         return []
 
     sub_frames = []
-    for opt_type, df in [("call", oc.calls), ("put", oc.puts)]:
+    for opt_type, df in [("call", oc_dict.get("calls")), ("put", oc_dict.get("puts"))]:
         if df is None or df.empty:
             continue
         sub = df.copy()
@@ -1832,10 +1952,13 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
         predicted_iv_crush = None
         crush_confidence = ""
         try:
-            earn_dates = tkr.get_earnings_dates(limit=16)
+            # Earnings history (16 quarters) and 3y daily history both disk-cached.
+            earn_dates = _yf_cached(tkr.ticker, "earnings_dates_16",
+                                    lambda: tkr.get_earnings_dates(limit=16), ttl_s=43200)
             if earn_dates is not None and not earn_dates.empty:
                 earn_dates = earn_dates.dropna(subset=["EPS Actual"])
-                hist = tkr.history(period="3y", interval="1d")
+                hist = _yf_cached(tkr.ticker, "hist_3y",
+                                  lambda: tkr.history(period="3y", interval="1d"), ttl_s=14400)
                 if not hist.empty:
                     for earn_dt in earn_dates.index[:8]:
                         earn_date_loc = hist.index.searchsorted(earn_dt)
@@ -1881,27 +2004,36 @@ def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[date
 
 
 @retry_with_backoff(retries=3, backoff_in_seconds=3, error_types=(Exception,))
-def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
+def fetch_options_yfinance(symbol: str, max_expiries: int,
+                           min_dte: Optional[int] = None,
+                           max_dte: Optional[int] = None) -> Dict:
     """
     Fetch options data and all related context using a Single-Fetch architecture.
     Returns a dictionary with 'df' (options chain) and 'context' (all derived metrics).
+
+    When min_dte/max_dte are provided, expirations outside that range are skipped
+    BEFORE the max_expiries slice — otherwise iron-condor / longer-DTE modes get
+    starved on Sundays when the front 4 expiries are all 0-3 DTE.
     """
     _init_yfinance()  # Lazy init yfinance on first use
     _init_yf_session()  # Lazy init curl_cffi session
     _init_request_cache()  # Lazy init: first fetch triggers cache setup, not import
 
-    if symbol in _CHAIN_CACHE:
-        return _CHAIN_CACHE[symbol]
+    _cache_key = (symbol, min_dte, max_dte)
+    if _cache_key in _CHAIN_CACHE:
+        return _CHAIN_CACHE[_cache_key]
 
     try:
         tkr = yf.Ticker(symbol, session=_yf_session)
     except (ValueError, TypeError) as e:
         raise RuntimeError(f"Failed to initialize ticker {symbol}: {e}")
 
-    # 1. Fetch History ONCE (1 year daily)
+    # 1. Fetch History ONCE (1 year daily) — disk-cached 4h
     try:
-        _yf_throttle()
-        hist = tkr.history(period="1y", interval="1d")
+        def _do_hist():
+            _yf_throttle()
+            return tkr.history(period="1y", interval="1d")
+        hist = _yf_cached(symbol, "hist_1y", _do_hist, ttl_s=14400)
     except TypeError as e:
         # yfinance bug: on rate-limited/empty responses it hits `data['chart']` where data is None.
         # Convert to an explicit rate-limit error so the retry decorator's cooldown kicks in.
@@ -1970,10 +2102,10 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
         except Exception:
             pass
 
-    # Next ex-dividend date
+    # Next ex-dividend date — disk-cached 24h
     next_ex_div = None
     try:
-        divs = tkr.dividends
+        divs = _yf_cached(symbol, "dividends", lambda: tkr.dividends, ttl_s=86400)
         if divs is not None and not divs.empty:
             future_divs = divs[divs.index > pd.Timestamp.now(tz='UTC')]
             next_ex_div = future_divs.index[0].date() if not future_divs.empty else None
@@ -1982,10 +2114,12 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
     except Exception:
         next_ex_div = None
 
-    # 4. Fetch Options Chains
+    # 4. Fetch Options Chains — expirations list disk-cached 30min
     try:
-        _yf_throttle()
-        expirations = tkr.options
+        def _do_expirations():
+            _yf_throttle()
+            return tuple(tkr.options) if tkr.options else tuple()
+        expirations = _yf_cached(symbol, "expirations", _do_expirations, ttl_s=1800)
     except TypeError as e:
         if "subscriptable" in str(e).lower():
             raise RuntimeError(f"Rate limited while fetching expirations for {symbol}") from e
@@ -1995,6 +2129,22 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
 
     if not expirations:
         raise RuntimeError(f"No options expirations available for {symbol}.")
+
+    if min_dte is not None or max_dte is not None:
+        from datetime import datetime as _dt, timezone as _tz
+        _now = _dt.now(_tz.utc).date()
+        _lo = min_dte if min_dte is not None else 0
+        _hi = max_dte if max_dte is not None else 10_000
+        _filtered = []
+        for _e in expirations:
+            try:
+                _d = (pd.Timestamp(_e).date() - _now).days
+            except Exception:
+                continue
+            if _lo <= _d <= _hi:
+                _filtered.append(_e)
+        if _filtered:
+            expirations = _filtered
 
     num_expiries_to_fetch = max_expiries
     if max_expiries == 1 and len(expirations) > 1:
@@ -2228,7 +2378,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int) -> Dict:
             "dividend_yield": dividend_yield,
         }
     }
-    _CHAIN_CACHE[symbol] = result
+    _CHAIN_CACHE[_cache_key] = result
     _FETCH_TIMESTAMPS[symbol] = datetime.now()
     return result
 

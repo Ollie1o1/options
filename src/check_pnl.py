@@ -109,32 +109,56 @@ def _legs_for_row(r) -> list:
 
     qty_sign: +1 = long leg, -1 = short leg. Used to compute net position
     value as sum(qty * leg_price) so credit spreads / iron condors mark to
-    market correctly. Returns [] for unrecognized rows.
+    market correctly. Returns [] for unrecognized or malformed rows.
     """
+    def _f(v):
+        try:
+            if v in (None, "", 0):
+                return None
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
     structure = _classify_structure(r)
     if structure == "iron_condor":
+        sp = _f(r.get("short_put_strike"))
+        lp = _f(r.get("long_put_strike"))
+        sc = _f(r.get("short_call_strike"))
+        lc = _f(r.get("long_call_strike"))
+        if None in (sp, lp, sc, lc):
+            # Legacy iron-condor row classified by strategy_name but missing
+            # the dedicated leg columns — skip valuation rather than crash.
+            return []
         return [
-            ("put",  float(r["short_put_strike"]),  -1),
-            ("put",  float(r["long_put_strike"]),   +1),
-            ("call", float(r["short_call_strike"]), -1),
-            ("call", float(r["long_call_strike"]),  +1),
+            ("put",  sp, -1),
+            ("put",  lp, +1),
+            ("call", sc, -1),
+            ("call", lc, +1),
         ]
     if structure == "spread":
-        opt_type = str(r.get("type", "")).lower() or ("put" if "bull put" in str(r.get("strategy_name", "")).lower() else "call")
-        long_strike = r.get("long_strike")
-        if long_strike in (None, "", 0):
+        opt_type = str(r.get("type", "") or "").lower()
+        if not opt_type:
+            opt_type = "put" if "bull put" in str(r.get("strategy_name", "")).lower() else "call"
+        long_strike = _f(r.get("long_strike"))
+        if long_strike is None:
             # Legacy SPREAD:long:width:max_loss fallback
             try:
                 long_strike = float(str(r.get("strategy_name", "")).split(":")[1])
             except (ValueError, IndexError):
                 return []
+        short_strike = _f(r.get("strike"))
+        if short_strike is None:
+            return []
         return [
-            (opt_type, float(r["strike"]),  -1),
-            (opt_type, float(long_strike), +1),
+            (opt_type, short_strike, -1),
+            (opt_type, long_strike,  +1),
         ]
     # Single leg
     sign = -1 if _is(_get_strategy_name(r)) else 1
-    return [(str(r["type"]).lower(), float(r["strike"]), sign)]
+    strike = _f(r.get("strike"))
+    if strike is None:
+        return []
+    return [(str(r.get("type", "")).lower(), strike, sign)]
 
 
 def _is(strategy_name: str) -> bool:
@@ -593,10 +617,11 @@ def view_portfolio():
             # Display label and strike for the type column
             if structure == "iron_condor":
                 opt_type_disp = "IC"
-                # Show short put / short call
                 sp = float(r.get("short_put_strike") or 0)
                 sc = float(r.get("short_call_strike") or 0)
-                strike_disp = f"{sp:.0f}/{sc:.0f}"
+                sp_str = f"{sp:.0f}" if sp > 0 else "—"
+                sc_str = f"{sc:.0f}" if sc > 0 else "—"
+                strike_disp = f"{sp_str}/{sc_str}"
             elif structure == "spread":
                 sn_low = (r.get("strategy_name") or "").lower()
                 opt_type_disp = "BPS" if "bull put" in sn_low else ("BCS" if "bear call" in sn_low else "SPR")
@@ -635,7 +660,10 @@ def view_portfolio():
             for leg_type, leg_strike, leg_qty in legs:
                 lp = _live_prices.get((ticker, expiry, leg_strike, leg_type))
                 leg_marks.append((leg_qty, lp))
-            all_legs_priced = all(lp is not None and lp > 0 for _, lp in leg_marks)
+            # Require at least one leg AND every leg priced — `all([])` is vacuously
+            # True, which would mark legacy multi-leg rows with missing strike columns
+            # as fully captured (pnl == credit). Guard against that.
+            all_legs_priced = bool(leg_marks) and all(lp is not None and lp > 0 for _, lp in leg_marks)
 
             if structure == "single":
                 live_price = leg_marks[0][1] if leg_marks else None
