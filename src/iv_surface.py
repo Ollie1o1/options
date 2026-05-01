@@ -84,7 +84,10 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
         res = minimize(penalised, x0, method="Nelder-Mead",
                        options={"maxiter": 5000, "xatol": 1e-8,
                                 "fatol": 1e-10, "adaptive": True})
-        if not res.success and res.fun > mean_var * len(k):
+        # Reject the fit if either the optimizer didn't converge OR residual is too high.
+        # (Was `and` — a converged-but-garbage fit slipped through, polluting the
+        # iv_surface_residual signal that drives the iv_mispricing scoring component.)
+        if (not res.success) or res.fun > mean_var * len(k):
             return None, 0.0
         params = _enforce_constraints(res.x)
         fit_quality = max(0.0, 1.0 - res.fun / max(mean_var * len(k), 1e-10))

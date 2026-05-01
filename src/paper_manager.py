@@ -337,6 +337,7 @@ def _sanitize_close_values(
     entry_price: float,
     exit_price: float,
     pnl_pct: float,
+    max_loss_floor: float | None = None,
 ) -> tuple[float, float, float]:
     """Clamp close-time values to physically possible bounds and derive pnl_usd.
 
@@ -345,9 +346,12 @@ def _sanitize_close_values(
     sample (one outlier flipped the sign of skew_align IC from -0.16 to ~0).
 
     Bounds by structure:
-      - credit spreads (Bull Put / Bear Call / Iron Condor): pnl_pct ∈ [-1.0, +1.0]
-        (max gain = full credit kept; max loss = full credit + width, capped at -1.0
-        in this scoring convention which expresses pct relative to entry credit).
+      - credit spreads (Bull Put / Bear Call / Iron Condor):
+          max gain = +1.0 (full credit kept).
+          max loss is `-(spread_width / entry_credit - 1)`, which can far exceed -1.0
+          (e.g. $0.50 credit on a $5 wide spread → -9.0 / -900%). Caller passes this
+          value as ``max_loss_floor``; if not supplied, a permissive -100.0 floor is
+          used so a real max-loss close is recorded faithfully rather than truncated.
       - short single legs (Short Put / Short Call): max gain = full credit (+1.0);
         loss is unbounded since premium can multiply against you.
       - long premium (Long Call / Long Put): max loss = full premium (-1.0);
@@ -364,7 +368,11 @@ def _sanitize_close_values(
         raw_pct = 0.0
 
     if strategy_name in _CREDIT_STRUCTURES:
-        clamped_pct = max(-1.0, min(1.0, raw_pct))
+        # Use caller-supplied max_loss_floor when available so true max-loss closes
+        # (e.g. -3× credit on a wide spread) are recorded as-is. Fall back to a
+        # permissive -100.0 floor — better to preserve magnitude than truncate at -1.0.
+        floor = float(max_loss_floor) if (max_loss_floor is not None and np.isfinite(max_loss_floor)) else -100.0
+        clamped_pct = max(floor, min(1.0, raw_pct))
     elif strategy_name in _SHORT_SINGLE_LEGS:
         clamped_pct = min(1.0, raw_pct)  # gain capped, loss unbounded
     else:
@@ -529,10 +537,10 @@ class PaperManager:
             trade_dict["strategy_name"],
             "OPEN",
             None,   # exit_price
-            "",     # exit_date
+            None,   # exit_date — NULL until close (was "" historically; broke IS NULL filters)
             None,   # pnl_pct
-            trade_dict.get("ai_score"),        # None if not ranked yet
-            trade_dict.get("ai_confidence"),   # None if not ranked yet
+            _float_or_none("ai_score"),        # None if not ranked yet
+            _float_or_none("ai_confidence"),   # None if not ranked yet
             _float_or_none("entry_iv"),
             _float_or_none("entry_delta"),
             _float_or_none("entry_gamma"),
@@ -587,12 +595,13 @@ class PaperManager:
     def log_trade_if_new(self, trade_dict: Dict[str, Any]) -> bool:
         """Insert a paper trade unless an identical row already exists.
 
-        Dedup key: ``(trade date, ticker, strike, expiration, type, weight_profile)``.
-        The trade date is whatever ``log_trade`` would store — either the caller's
-        explicit ``trade_dict["date"]`` or today's timestamp — so a re-logged row
-        matches its prior copy even when re-runs happen on a later calendar day.
-        ``weight_profile`` may be ``None`` for untagged trades — NULL-equal rows still
-        dedup against each other because ``IS`` is used instead of ``=``.
+        Dedup key: ``(trade date, ticker, strike, expiration, type, strategy_name,
+        weight_profile)``. ``strategy_name`` participates so a Long Call and a
+        Short Call at the same strike on the same day don't collide. The trade
+        date is whatever ``log_trade`` would store — either the caller's explicit
+        ``trade_dict["date"]`` or today's timestamp. ``weight_profile`` may be
+        ``None`` for untagged trades — NULL-equal rows still dedup against each
+        other because ``IS`` is used instead of ``=``.
 
         Returns ``True`` if inserted, ``False`` if skipped as duplicate.
         """
@@ -600,6 +609,7 @@ class PaperManager:
         typ = trade_dict["type"].lower()
         strike = float(trade_dict["strike"])
         expiration = trade_dict["expiration"]
+        strategy = trade_dict.get("strategy_name") or ""
         profile = trade_dict.get("weight_profile")
         effective_date = trade_dict.get("date") or datetime.now().strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -613,11 +623,12 @@ class PaperManager:
                   AND strike = ?
                   AND expiration = ?
                   AND type = ?
+                  AND COALESCE(strategy_name, '') = ?
                   AND weight_profile IS ?
                   AND date(date) = date(?)
                 LIMIT 1
                 """,
-                (ticker, strike, expiration, typ, profile, effective_date),
+                (ticker, strike, expiration, typ, strategy, profile, effective_date),
             ).fetchone()
         if row is not None:
             return False
@@ -1106,7 +1117,31 @@ class PaperManager:
                     n_legs = len(legs)
                     friction = (2 * self._slippage_per_share * n_legs) + (2 * self._commission_per_contract * n_legs / 100.0)
                     friction_fraction = friction / entry_credit if entry_credit > 0 else 0.0
-                    pnl_realistic = max(pnl_raw - friction_fraction, -1.0)
+                    # Compute the structural max-loss floor (loss in pct-of-credit units).
+                    # For a credit spread: floor = -(width / credit - 1).
+                    # For an iron condor: floor = -(max_wing_width / credit - 1).
+                    # If width can't be derived (legacy row missing strikes), fall back to None
+                    # so _sanitize_close_values applies its permissive default.
+                    spread_width_val: float | None = None
+                    try:
+                        if structure == "iron_condor":
+                            sp_v = float(row["short_put_strike"]); lp_sv = float(row["long_put_strike"])
+                            sc_v = float(row["short_call_strike"]); lc_v = float(row["long_call_strike"])
+                            spread_width_val = max(abs(sp_v - lp_sv), abs(lc_v - sc_v))
+                        else:
+                            ls_raw = row["long_strike"] if "long_strike" in row.keys() else None
+                            ls_f = float(ls_raw) if ls_raw not in (None, "", 0) else None
+                            if ls_f is not None:
+                                spread_width_val = abs(float(strike) - ls_f)
+                    except (TypeError, ValueError, KeyError):
+                        spread_width_val = None
+                    if spread_width_val and entry_credit > 0 and spread_width_val > entry_credit:
+                        max_loss_floor = -((spread_width_val / entry_credit) - 1.0)
+                    else:
+                        max_loss_floor = None  # let sanitizer use permissive default
+                    # Don't pre-clamp pnl_realistic — let _sanitize_close_values apply the
+                    # structural floor below so true max-loss closes are preserved.
+                    pnl_realistic = pnl_raw - friction_fraction
                     if structure == "iron_condor":
                         try:
                             sp = float(row["short_put_strike"]); lp_s = float(row["long_put_strike"])
@@ -1130,6 +1165,7 @@ class PaperManager:
                     safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
                         row["strategy_name"] or "", entry_credit,
                         current_credit_to_close, pnl_realistic,
+                        max_loss_floor=max_loss_floor,
                     )
                     with self._get_connection() as conn:
                         conn.execute(

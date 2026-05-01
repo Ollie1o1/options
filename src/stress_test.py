@@ -493,12 +493,14 @@ def print_stress_test(
     max_pnl = float("-inf")
 
     for iv in iv_shocks:
+        # IV shocks are *additive* in vol points (sigma + dIV). Label as "pp"
+        # (percentage points) so users don't read "+10%" as multiplicative ×1.10.
         if iv == 0:
             iv_label = "IV flat "
         elif iv > 0:
-            iv_label = f"IV +{int(iv*100)}%"
+            iv_label = f"IV +{int(iv*100)}pp"
         else:
-            iv_label = f"IV {int(iv*100)}%"
+            iv_label = f"IV {int(iv*100)}pp"
         row_parts = [f"  {iv_label:<12}"]
         for sm in stock_moves:
             subset = df[(df["stock_move"] == sm) & (df["iv_shock"] == iv)]
@@ -539,7 +541,7 @@ def print_stress_test(
         if not min_subset.empty:
             min_book_pct = float(min_subset["pnl_pct_of_book"].iloc[0]) * 100
             max_loss_line = (
-                f"  Max loss scenario: {sm_pct:+d}% stock / +{iv_pct}% IV"
+                f"  Max loss scenario: {sm_pct:+d}% stock / {iv_pct:+d}pp IV"
                 f" = ${min_pnl:,.0f} ({min_book_pct:+.1f}% of book)"
             )
             if HAS_FMT and fmt:

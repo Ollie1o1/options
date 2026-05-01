@@ -27,20 +27,58 @@ REPORT="logs/calibration_${DATE_TAG}.txt"
 # which silently inverted the IC sign on skew_align. Repeat that and IC drift becomes
 # noise. Now sanitize_close_values clamps these at write time, so this check is a
 # safety net for any bypass paths (manual SQL, future code).
+#
+# Note (2026-05-01): credit-spread pnl_pct CAN now exceed -1.0 in magnitude on a true
+# max-loss close (e.g. $0.50 credit on $5-wide spread → -9.0). The check below now
+# flags only positive overages (>1.0, impossible) and negative violations of the
+# structural floor `-(width/credit - 1)` — the previous flat |pnl| > 1.0 rule
+# was truncating real tail losses.
 ANOMALIES=$(venv/bin/python - <<'PY'
 import sqlite3, sys
 conn = sqlite3.connect("paper_trades.db")
 problems = []
-# Credit structures: |pnl_pct| > 1.0 is impossible
+# Credit structures: pnl_pct > 1.0 is impossible (can't make more than the credit).
+# Negative bound is `-(width/credit - 1)`; flag rows that exceed it by >5%.
 rows = conn.execute("""
-  SELECT entry_id, ticker, strategy_name, entry_price, exit_price, pnl_pct
+  SELECT entry_id, ticker, strategy_name, entry_price, exit_price, pnl_pct,
+         spread_width, net_credit, short_put_strike, long_put_strike,
+         short_call_strike, long_call_strike, strike, long_strike
     FROM trades
    WHERE status='CLOSED'
      AND strategy_name IN ('Bull Put','Bear Call','Iron Condor')
-     AND (pnl_pct > 1.0 OR pnl_pct < -1.0)
 """).fetchall()
 for r in rows:
-    problems.append(f"credit-spread out of bounds: id={r[0]} {r[1]} {r[2]} pnl_pct={r[5]}")
+    eid, ticker, strat, entry_p, exit_p, pct = r[0], r[1], r[2], r[3], r[4], r[5]
+    if pct is None:
+        continue
+    if pct > 1.0:
+        problems.append(f"credit-spread pct>1.0 (impossible gain): id={eid} {ticker} {strat} pnl_pct={pct}")
+        continue
+    # derive structural floor
+    width = r[6]
+    credit = r[7] or entry_p
+    if not width:
+        # iron condor: max wing width
+        try:
+            sp, lp_s, sc, lc = (float(x) if x is not None else None for x in (r[8], r[9], r[10], r[11]))
+            if None not in (sp, lp_s, sc, lc):
+                width = max(abs(sp - lp_s), abs(lc - sc))
+        except (TypeError, ValueError):
+            width = None
+        if not width:
+            # spread: from strike vs long_strike
+            try:
+                k = float(r[12]); lk = float(r[13]) if r[13] not in (None, 0) else None
+                if lk is not None:
+                    width = abs(k - lk)
+            except (TypeError, ValueError):
+                width = None
+    if width and credit and credit > 0 and width > credit:
+        floor = -((width / credit) - 1.0) - 0.05  # 5% slack for friction
+        if pct < floor:
+            problems.append(
+                f"credit-spread below floor: id={eid} {ticker} {strat} pnl_pct={pct:.3f} floor={floor:.3f} (width={width}, credit={credit})"
+            )
 # Negative exit prices
 rows = conn.execute("""
   SELECT entry_id, ticker, strategy_name, exit_price

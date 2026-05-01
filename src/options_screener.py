@@ -206,7 +206,22 @@ def load_config(config_path: str = "config.json") -> Dict:
                 if key not in config:
                     config[key] = default_config[key]
             return config
-    except Exception:
+    except FileNotFoundError:
+        # First-run case — silently use defaults.
+        return default_config
+    except json.JSONDecodeError as e:
+        # Malformed JSON: surface loudly so a typo in config.json doesn't silently
+        # erase the user's tuned weights/filters/exit rules during a cron run.
+        sys.stderr.write(
+            f"\n[load_config] ERROR: {config_path} failed to parse — using DEFAULTS. "
+            f"Fix and re-run.\n  {type(e).__name__}: {e}\n"
+        )
+        return default_config
+    except Exception as e:
+        sys.stderr.write(
+            f"\n[load_config] WARNING: unexpected error reading {config_path} — using defaults.\n"
+            f"  {type(e).__name__}: {e}\n"
+        )
         return default_config
 
 
@@ -4108,7 +4123,26 @@ def main():
                     _skipped = 0
                     _skipped_long_puts = 0
                     _skip_long_puts = bool(config.get("auto_log_skip_long_puts", True))
-                    for _, row in _candidates.iterrows():
+                    # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
+                    # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
+                    # and re-sorted, so positional alignment with picks is not preserved.
+                    _ai_lookup = {}
+                    if isinstance(_ai_ranked, pd.DataFrame) and not _ai_ranked.empty:
+                        _ai_cols_present = [c for c in ("ai_score", "ai_confidence") if c in _ai_ranked.columns]
+                        if _ai_cols_present:
+                            for _r in _ai_ranked.itertuples(index=False):
+                                _r_dict = _r._asdict() if hasattr(_r, "_asdict") else {}
+                                try:
+                                    _key = (
+                                        str(_r_dict.get("symbol", "")).upper(),
+                                        float(_r_dict.get("strike", 0)),
+                                        str(_r_dict.get("expiration", "")),
+                                        str(_r_dict.get("type", "")).lower(),
+                                    )
+                                except (TypeError, ValueError):
+                                    continue
+                                _ai_lookup[_key] = {c: _r_dict.get(c) for c in _ai_cols_present}
+                    for _idx, row in _candidates.iterrows():
                         _entry_price = (
                             safe_float(row.get("ask") or None)
                             or safe_float(row.get("lastPrice"))
@@ -4168,6 +4202,15 @@ def main():
                             "trader_pref_score": row.get("trader_pref_score"),
                             "weight_profile": _weight_profile_id,
                         }
+                        _row_key = (
+                            str(row.get("symbol", "")).upper(),
+                            float(row.get("strike", 0) or 0),
+                            str(row.get("expiration", "")),
+                            str(row.get("type", "")).lower(),
+                        )
+                        _row_ai = _ai_lookup.get(_row_key, {})
+                        _trade["ai_score"] = _row_ai.get("ai_score")
+                        _trade["ai_confidence"] = _row_ai.get("ai_confidence")
                         try:
                             if pm.log_trade_if_new(_trade):
                                 _inserted += 1
@@ -4207,12 +4250,24 @@ def main():
                         msg = "Paper trading for spreads/condors is not supported — use [L] Log trades instead."
                         print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  \u26a0  {msg}")
                     elif not picks.empty:
-                        # Use AI-ranked top pick when available, otherwise fall back to quality_score
+                        # Use AI-ranked top pick when available, otherwise fall back to quality_score.
+                        # Match on (symbol, strike, expiration, type) — _ai_ranked indices are not
+                        # aligned with picks indices after reset_index inside combine_scores.
+                        top_pick_row = None
                         if _ai_ranked is not None and not _ai_ranked.empty and "final_score" in _ai_ranked.columns:
-                            _best_idx = _ai_ranked.sort_values("final_score", ascending=False).index[0]
-                            top_pick_row = picks.loc[_best_idx] if _best_idx in picks.index \
-                                else picks.sort_values("quality_score", ascending=False).iloc[0]
-                        else:
+                            _best = _ai_ranked.sort_values("final_score", ascending=False).iloc[0]
+                            try:
+                                _match = picks[
+                                    (picks["symbol"].astype(str).str.upper() == str(_best.get("symbol", "")).upper())
+                                    & (picks["strike"].astype(float) == float(_best.get("strike", 0)))
+                                    & (picks["expiration"].astype(str) == str(_best.get("expiration", "")))
+                                    & (picks["type"].astype(str).str.lower() == str(_best.get("type", "")).lower())
+                                ]
+                                if not _match.empty:
+                                    top_pick_row = _match.iloc[0]
+                            except (KeyError, ValueError, TypeError):
+                                top_pick_row = None
+                        if top_pick_row is None:
                             top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
                         today_str = datetime.now().strftime("%Y-%m-%d")
                         trade_dict = {
@@ -4265,6 +4320,22 @@ def main():
                             "trader_pref_score": top_pick_row.get("trader_pref_score"),
                             "weight_profile": _weight_profile_id,
                         }
+                        # AI-score lookup via stable key (see auto-log path comment).
+                        if _ai_ranked is not None and not _ai_ranked.empty:
+                            try:
+                                _m = _ai_ranked[
+                                    (_ai_ranked["symbol"].astype(str).str.upper() == str(top_pick_row.get("symbol", "")).upper())
+                                    & (_ai_ranked["strike"].astype(float) == float(top_pick_row.get("strike", 0)))
+                                    & (_ai_ranked["expiration"].astype(str) == str(top_pick_row.get("expiration", "")))
+                                    & (_ai_ranked["type"].astype(str).str.lower() == str(top_pick_row.get("type", "")).lower())
+                                ]
+                                if not _m.empty:
+                                    if "ai_score" in _m.columns:
+                                        trade_dict["ai_score"] = _m["ai_score"].iloc[0]
+                                    if "ai_confidence" in _m.columns:
+                                        trade_dict["ai_confidence"] = _m["ai_confidence"].iloc[0]
+                            except (KeyError, ValueError, TypeError):
+                                pass
                         pm.log_trade(trade_dict)
                         msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
                         print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
@@ -4319,7 +4390,24 @@ def main():
                             
                             # Also log to PaperManager for portfolio visibility
                             today_str = datetime.now().strftime("%Y-%m-%d")
-                            for _, row in picks_to_log.iterrows():
+                            # Stable-key AI lookup (see auto-log path).
+                            _ai_lookup_l = {}
+                            if isinstance(_ai_ranked, pd.DataFrame) and not _ai_ranked.empty:
+                                _ai_cols_l = [c for c in ("ai_score", "ai_confidence") if c in _ai_ranked.columns]
+                                if _ai_cols_l:
+                                    for _r in _ai_ranked.itertuples(index=False):
+                                        _r_dict = _r._asdict() if hasattr(_r, "_asdict") else {}
+                                        try:
+                                            _key = (
+                                                str(_r_dict.get("symbol", "")).upper(),
+                                                float(_r_dict.get("strike", 0)),
+                                                str(_r_dict.get("expiration", "")),
+                                                str(_r_dict.get("type", "")).lower(),
+                                            )
+                                        except (TypeError, ValueError):
+                                            continue
+                                        _ai_lookup_l[_key] = {c: _r_dict.get(c) for c in _ai_cols_l}
+                            for _idx_l, row in picks_to_log.iterrows():
                                 try:
                                     if "short_strike" in row or "net_credit" in row:
                                         # It's a Credit Spread
@@ -4403,6 +4491,15 @@ def main():
                                             "trader_pref_score": row.get("trader_pref_score"),
                                             "weight_profile": _weight_profile_id,
                                         }
+                                        _row_key_l = (
+                                            str(row.get("symbol", "")).upper(),
+                                            float(row.get("strike", 0) or 0),
+                                            str(row.get("expiration", "")),
+                                            str(row.get("type", "")).lower(),
+                                        )
+                                        _row_ai_l = _ai_lookup_l.get(_row_key_l, {})
+                                        trade_dict["ai_score"] = _row_ai_l.get("ai_score")
+                                        trade_dict["ai_confidence"] = _row_ai_l.get("ai_confidence")
                                         pm.log_trade(trade_dict)
                                 except Exception as _log_exc:
                                     print(f"  Error logging to DB: {_log_exc}")
