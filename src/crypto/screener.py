@@ -362,25 +362,44 @@ def _log_credit_spread(row: pd.Series, currency: str) -> None:
 
 
 def _interactive_log_prompt(scan_result: dict) -> None:
-    """After a scan, let the user pick a strategy bucket and log its top pick."""
+    """After a scan, let the user pick a strategy bucket and log its top pick.
+
+    Accepts: number (1, 2, ...), initials (lp, bc, ic), or full/partial name.
+    Empty / Q skips.
+    """
     if not scan_result or not scan_result.get("picks_by_strategy"):
         return
     picks = scan_result["picks_by_strategy"]
     currency = scan_result["currency"]
     print()
-    print("  Log top pick from a strategy?  Enter the strategy name or [Enter] to skip.")
-    print(f"  Available: {', '.join(picks.keys())}")
+    print(_color("  Log a top pick?", "BOLD", bold=True))
+    strategies = list(picks.keys())
+    for i, name in enumerate(strategies, 1):
+        df = picks[name]
+        n = len(df)
+        # Show the top-pick score so the user has a quick quality cue.
+        if "score" in df.columns:
+            top_score = float(df["score"].iloc[0])
+        elif "strategy_score" in df.columns:
+            top_score = float(df["strategy_score"].iloc[0])
+        else:
+            top_score = 0.0
+        sc_color = "BRIGHT_GREEN" if top_score >= 0.55 else ("BRIGHT_YELLOW" if top_score >= 0.35 else "WHITE")
+        print(f"    {_color(f'[{i}]', 'BRIGHT_YELLOW', bold=True)} {name:<14} "
+              f"({n} pick{'s' if n != 1 else ''}, top score "
+              f"{_color(f'{top_score:.3f}', sc_color, bold=True)})")
+    print(f"    {_color('[Enter]', 'DIM')} skip")
     try:
-        choice = input("  Strategy: ").strip()
+        choice = input("  Choice: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return
-    if not choice:
+    if not choice or choice in ("q", "quit", "skip", "n", "no"):
         return
-    # Case-insensitive match
-    match = next((k for k in picks if k.lower() == choice.lower()), None)
+
+    match = _resolve_strategy_choice(choice, strategies)
     if match is None:
-        print(f"  Unknown strategy: {choice!r}")
+        print(f"  Unknown choice: {choice!r}")
         return
     df = picks[match]
     if df.empty:
@@ -393,6 +412,46 @@ def _interactive_log_prompt(scan_result: dict) -> None:
         _log_credit_spread(top, currency)
     else:
         _log_long_premium(top, currency)
+
+
+def _resolve_strategy_choice(raw: str, strategies: list) -> Optional[str]:
+    """Resolve a user input to one of the available strategy names.
+
+    Accepts (case-insensitive):
+      - Number index ("1", "2", ...)
+      - Initials of multi-word strategies ("lp" → "Long Put", "bc" → "Bear Call")
+      - Exact / prefix match on the strategy name ("long put", "bear", "ic")
+    Returns the matched strategy name or None.
+    """
+    raw = raw.strip().lower()
+    if not raw:
+        return None
+    # 1) Numeric index
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(strategies):
+            return strategies[idx]
+        return None
+    # 2) Initials of each multi-word strategy
+    initials_map = {
+        "".join(w[0] for w in s.split()).lower(): s
+        for s in strategies
+    }
+    if raw in initials_map:
+        return initials_map[raw]
+    # 3) Exact case-insensitive name
+    for s in strategies:
+        if s.lower() == raw:
+            return s
+    # 4) Unique prefix match
+    prefix_hits = [s for s in strategies if s.lower().startswith(raw)]
+    if len(prefix_hits) == 1:
+        return prefix_hits[0]
+    # 5) Unique substring match
+    substr_hits = [s for s in strategies if raw in s.lower()]
+    if len(substr_hits) == 1:
+        return substr_hits[0]
+    return None
 
 
 def _present_scan(scan: dict) -> None:
