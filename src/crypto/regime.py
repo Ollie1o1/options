@@ -67,9 +67,9 @@ def classify_btc(history: pd.DataFrame) -> Optional[Regime]:
 # weights. Keep close to 1.0 until we have closed paper trades to calibrate.
 REGIME_WEIGHT_MULTIPLIERS = {
     "bull":  {"vrp": 0.85, "iv_rank": 0.85, "term_structure": 1.10, "skew": 1.00,
-              "funding_z": 1.10, "basis": 1.00, "liquidity": 1.00},
+              "funding_z": 1.10, "basis": 1.00, "funding_divergence": 1.00, "liquidity": 1.00},
     "chop":  {"vrp": 1.20, "iv_rank": 1.20, "term_structure": 1.10, "skew": 1.00,
-              "funding_z": 0.90, "basis": 1.00, "liquidity": 1.00},
+              "funding_z": 0.90, "basis": 1.00, "funding_divergence": 1.20, "liquidity": 1.00},
     "bear":  {"vrp": 1.10, "iv_rank": 1.05, "term_structure": 0.90, "skew": 1.20,
-              "funding_z": 1.10, "basis": 0.95, "liquidity": 1.10},
+              "funding_z": 1.10, "basis": 0.95, "funding_divergence": 1.10, "liquidity": 1.10},
 }

@@ -24,13 +24,14 @@ import pandas as pd
 from . import data_fetching as _df
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "iv_rank":        1.0 / 7,
-    "vrp":            1.0 / 7,
-    "term_structure": 1.0 / 7,
-    "skew":           1.0 / 7,
-    "funding_z":      1.0 / 7,
-    "basis":          1.0 / 7,
-    "liquidity":      1.0 / 7,
+    "iv_rank":             1.0 / 8,
+    "vrp":                 1.0 / 8,
+    "term_structure":      1.0 / 8,
+    "skew":                1.0 / 8,
+    "funding_z":           1.0 / 8,
+    "basis":               1.0 / 8,
+    "funding_divergence":  1.0 / 8,
+    "liquidity":           1.0 / 8,
 }
 
 
@@ -203,6 +204,30 @@ def score_funding_z(funding_history: pd.DataFrame) -> float:
     return score
 
 
+def score_funding_divergence(aggregated_funding: Optional[Dict[str, Any]]) -> float:
+    """Score cross-exchange funding divergence.
+
+    Wide divergence between Binance / Bybit / OKX / dYdX funding signals:
+      • crowded positioning on one venue (the outlier)
+      • fading-the-outlier mean reversion when divergence narrows
+      • sometimes a real perp-perp arb if you can hold both sides
+
+    Score is 0.5 (neutral) when all venues align, rising toward 1.0 as the
+    cross-venue spread widens. Saturation at ~10% annualized spread.
+    """
+    if aggregated_funding is None:
+        return 0.5
+    div = aggregated_funding.get("divergence") or {}
+    if not div or div.get("venue_count", 0) < 2:
+        return 0.5
+    spread_per_8h = float(div.get("max_8h", 0)) - float(div.get("min_8h", 0))
+    # Convert to annualized for human-meaningful scaling
+    spread_ann = spread_per_8h * 3 * 365
+    # tanh squash: 5% annualized → ~0.7, 10% → ~0.88, 20% → ~0.96
+    score = 0.5 + 0.5 * math.tanh(abs(spread_ann) / 0.05)
+    return _clip01(score)
+
+
 def score_basis(funding: Optional[Dict[str, float]]) -> float:
     """Spot-perp basis. Wide basis ⇒ basis trade opportunity.
 
@@ -237,8 +262,15 @@ def score_chain(
     funding_history: pd.DataFrame,
     weights: Optional[Dict[str, float]] = None,
     regime_multipliers: Optional[Dict[str, float]] = None,
+    aggregated_funding: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
-    """Score every contract in the chain. Adds per-component columns and quality_score."""
+    """Score every contract in the chain. Adds per-component columns and quality_score.
+
+    `aggregated_funding` (optional) is the dict from
+    `data_fetching.get_aggregated_funding()`. When supplied, enables the
+    `funding_divergence` component. When None, that component falls back
+    to neutral (0.5) so legacy / backtest callers still work.
+    """
     if chain.empty:
         return chain
     w = dict(weights or DEFAULT_WEIGHTS)
@@ -252,29 +284,32 @@ def score_chain(
         w = {k: v / total for k, v in w.items()}
 
     # Chain-level (constant across rows for a single fetch)
-    s_iv_rank        = score_iv_rank(chain, history)
-    s_vrp            = score_vrp(chain, history)
-    s_term_structure = score_term_structure(chain)
-    s_skew           = score_skew(chain)
-    s_funding_z      = score_funding_z(funding_history)
-    s_basis          = score_basis(funding)
+    s_iv_rank            = score_iv_rank(chain, history)
+    s_vrp                = score_vrp(chain, history)
+    s_term_structure     = score_term_structure(chain)
+    s_skew               = score_skew(chain)
+    s_funding_z          = score_funding_z(funding_history)
+    s_basis              = score_basis(funding)
+    s_funding_divergence = score_funding_divergence(aggregated_funding)
 
     df = chain.copy()
-    df["iv_rank_score"]        = s_iv_rank
-    df["vrp_score"]            = s_vrp
-    df["term_structure_score"] = s_term_structure
-    df["skew_score"]           = s_skew
-    df["funding_z_score"]      = s_funding_z
-    df["basis_score"]          = s_basis
-    df["liquidity_score"]      = df.apply(score_liquidity, axis=1)
+    df["iv_rank_score"]            = s_iv_rank
+    df["vrp_score"]                = s_vrp
+    df["term_structure_score"]     = s_term_structure
+    df["skew_score"]               = s_skew
+    df["funding_z_score"]          = s_funding_z
+    df["basis_score"]              = s_basis
+    df["funding_divergence_score"] = s_funding_divergence
+    df["liquidity_score"]          = df.apply(score_liquidity, axis=1)
 
     df["quality_score"] = (
-        w["iv_rank"]        * df["iv_rank_score"]
-        + w["vrp"]            * df["vrp_score"]
-        + w["term_structure"] * df["term_structure_score"]
-        + w["skew"]           * df["skew_score"]
-        + w["funding_z"]      * df["funding_z_score"]
-        + w["basis"]          * df["basis_score"]
-        + w["liquidity"]      * df["liquidity_score"]
+        w["iv_rank"]            * df["iv_rank_score"]
+        + w["vrp"]                * df["vrp_score"]
+        + w["term_structure"]     * df["term_structure_score"]
+        + w["skew"]               * df["skew_score"]
+        + w["funding_z"]          * df["funding_z_score"]
+        + w["basis"]              * df["basis_score"]
+        + w["funding_divergence"] * df["funding_divergence_score"]
+        + w["liquidity"]          * df["liquidity_score"]
     )
     return df

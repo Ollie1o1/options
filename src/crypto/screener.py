@@ -72,7 +72,7 @@ def _chain_quality_score(scored_chain: pd.DataFrame) -> float:
     if scored_chain.empty:
         return 0.5
     cols = ["iv_rank_score", "vrp_score", "term_structure_score", "skew_score",
-            "funding_z_score", "basis_score"]
+            "funding_z_score", "basis_score", "funding_divergence_score"]
     vals = [float(scored_chain[c].iloc[0]) for c in cols if c in scored_chain.columns]
     return sum(vals) / len(vals) if vals else 0.5
 
@@ -82,12 +82,13 @@ def _print_chain_diagnostics(scored: pd.DataFrame) -> None:
     if scored.empty:
         return
     cols = [
-        ("iv_rank_score",        "IV Rank"),
-        ("vrp_score",            "VRP"),
-        ("term_structure_score", "Term"),
-        ("skew_score",           "Skew"),
-        ("funding_z_score",      "Funding"),
-        ("basis_score",          "Basis"),
+        ("iv_rank_score",            "IV Rank"),
+        ("vrp_score",                "VRP"),
+        ("term_structure_score",     "Term"),
+        ("skew_score",               "Skew"),
+        ("funding_z_score",          "Funding"),
+        ("basis_score",              "Basis"),
+        ("funding_divergence_score", "FundDiv"),
     ]
     parts = []
     for col, label in cols:
@@ -113,10 +114,11 @@ def _scan_currency(currency: str) -> Optional[dict]:
     if history is None or history.empty:
         print(f"  {_color('WARN', 'BRIGHT_YELLOW')}: no spot history — VRP/IV-rank will fall back to neutral")
 
-    print("  Fetching perp funding (Binance)...")
+    print("  Fetching perp funding (Binance + Bybit + OKX + dYdX)...")
     fsym = f"{currency.upper()}USDT"
-    funding = _df.get_funding_rate(fsym)
+    funding = _df.get_funding_rate(fsym)             # legacy single-venue (kept for basis_pct)
     funding_hist = _df.get_funding_history(fsym, limit=120)
+    aggregated = _df.get_aggregated_funding(currency)  # 4-venue aggregator
 
     btc_history = history if currency.upper() == "BTC" else _df.get_spot_history("BTC", days=400)
     regime = _regime.classify_btc(btc_history) if btc_history is not None and not btc_history.empty else None
@@ -127,6 +129,7 @@ def _scan_currency(currency: str) -> Optional[dict]:
     scored = _scoring.score_chain(
         chain, history, funding, funding_hist,
         regime_multipliers=regime_mults,
+        aggregated_funding=aggregated,
     )
     _print_chain_diagnostics(scored)
 
@@ -491,27 +494,51 @@ def _present_scan(scan: dict) -> None:
 
 
 def _funding_basis_dashboard() -> None:
-    _banner("FUNDING / BASIS MONITOR")
-    for sym, label in (("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")):
+    _banner("FUNDING / BASIS MONITOR  —  Binance · Bybit · OKX · dYdX")
+    for currency in ("BTC", "ETH"):
         print()
-        f = _df.get_funding_rate(sym)
-        if f is None:
-            print(f"  {label}: funding fetch failed")
+        agg = _df.get_aggregated_funding(currency)
+        exchanges = agg.get("exchanges", {})
+        if not exchanges:
+            print(f"  {currency}: all venues failed to respond")
             continue
-        annualized = f["funding_rate"] * 3 * 365
-        basis_bps = f["basis_pct"] * 10000
-        sign = "+" if annualized > 0 else ""
-        f_color = "BRIGHT_GREEN" if abs(annualized) > 0.10 else "WHITE"
-        print(f"  {_color(label, 'BRIGHT_CYAN', bold=True)}")
-        print(f"    Mark:   ${f['mark_price']:,.2f}")
-        print(f"    Index:  ${f['index_price']:,.2f}")
-        print(f"    Basis:  {basis_bps:+.1f} bps")
-        print(f"    Funding (8h):  {f['funding_rate']*100:+.4f}%   "
-              f"→ {_color(f'{sign}{annualized:.1%} annualized', f_color, bold=True)}")
+        # Cross-venue snapshot table
+        print(f"  {_color(currency, 'BRIGHT_CYAN', bold=True)}")
+        header = f"    {'Venue':<10} {'Mark':>12} {'Index':>12} {'Basis':>9} {'Fund (8h)':>11} {'Annualized':>13}"
+        print(_color(header, "BOLD", bold=True))
+        print("    " + "─" * (len(header) - 4))
+        for venue, e in exchanges.items():
+            mark = e.get("mark_price") or 0
+            idx  = e.get("index_price") or mark
+            basis_bps = ((mark - idx) / idx * 10000) if idx > 0 else 0.0
+            rate_8h = float(e["rate_8h"])
+            annualized = rate_8h * 3 * 365
+            ann_color = "BRIGHT_GREEN" if abs(annualized) > 0.10 else (
+                "BRIGHT_YELLOW" if abs(annualized) > 0.05 else "WHITE"
+            )
+            sign = "+" if annualized > 0 else ""
+            print(f"    {venue:<10} ${mark:>10,.2f} ${idx:>10,.2f} "
+                  f"{basis_bps:>+7.1f}bps {rate_8h*100:>+9.4f}% "
+                  f"{_color(f'{sign}{annualized:>10.1%}', ann_color, bold=True)}")
+        # Divergence summary
+        div = agg.get("divergence", {})
+        if div:
+            max_ann = div["max_8h"] * 3 * 365
+            min_ann = div["min_8h"] * 3 * 365
+            spread_ann = (div["max_8h"] - div["min_8h"]) * 3 * 365
+            spread_bps = float(div["spread_bps"])
+            spread_color = "BRIGHT_GREEN" if abs(spread_ann) > 0.10 else (
+                "BRIGHT_YELLOW" if abs(spread_ann) > 0.05 else "DIM"
+            )
+            spread_str = f"{spread_bps:.2f} bps/8h ({spread_ann:+.1%} ann)"
+            print()
+            print(f"    Cross-venue spread: {_color(spread_str, spread_color, bold=True)}")
+            print(f"    Range: {min_ann:+.1%} (low) → {max_ann:+.1%} (high) annualized")
     print()
     print(_color("  NOTES", "DIM"))
     print("  • |annualized funding| > 10% sustained → cash-and-carry (long spot, short perp)")
-    print("  • Negative funding for days → fear-driven crowded shorts; short-vol structures often work")
+    print("  • Cross-venue spread > 5% annualized → potential perp-spot or perp-perp arb")
+    print("  • Negative funding sustained → crowded shorts; short-vol structures favored")
     print()
 
 

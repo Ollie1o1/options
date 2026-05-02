@@ -16,8 +16,20 @@ from . import cache as _cache
 
 _DERIBIT_BASE = "https://www.deribit.com/api/v2/public"
 _BINANCE_FAPI = "https://fapi.binance.com/fapi/v1"
+_BYBIT_BASE   = "https://api.bybit.com/v5/market"
+_OKX_BASE     = "https://www.okx.com/api/v5/public"
+_DYDX_BASE    = "https://indexer.dydx.trade/v4"
 _HTTP_TIMEOUT = 10
 _USER_AGENT = "options-screener-crypto/1.0"
+
+# Funding cycle hours per exchange. Used to normalize all rates to "per 8h"
+# so they're directly comparable in the dashboard / divergence math.
+_FUNDING_CYCLE_HOURS = {
+    "binance": 8,
+    "bybit":   8,
+    "okx":     8,
+    "dydx":    1,   # dYdX v4 funds hourly
+}
 
 
 def _http_get(url: str, params: Optional[dict] = None) -> Optional[dict]:
@@ -160,6 +172,174 @@ def get_funding_rate(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
         out["basis_pct"] = (out["mark_price"] - out["index_price"]) / out["index_price"]
     except (KeyError, ValueError, ZeroDivisionError):
         return None
+    _cache.put("binance_funding", cache_key, out)
+    return out
+
+
+# ── Cross-exchange funding ───────────────────────────────────────────────
+
+def _normalize_to_8h(rate: float, cycle_hours: int) -> float:
+    """Scale a funding rate to per-8h-equivalent for cross-venue comparison."""
+    if cycle_hours <= 0:
+        return rate
+    return float(rate) * (8.0 / float(cycle_hours))
+
+
+def _funding_binance(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+    data = _http_get(f"{_BINANCE_FAPI}/premiumIndex", {"symbol": symbol.upper()})
+    if not data or "lastFundingRate" not in data:
+        return None
+    try:
+        rate_native = float(data["lastFundingRate"])
+        return {
+            "exchange": "binance",
+            "cycle_hours": _FUNDING_CYCLE_HOURS["binance"],
+            "rate_native": rate_native,
+            "rate_8h": _normalize_to_8h(rate_native, _FUNDING_CYCLE_HOURS["binance"]),
+            "mark_price": float(data["markPrice"]),
+            "index_price": float(data["indexPrice"]),
+        }
+    except (KeyError, ValueError):
+        return None
+
+
+def _funding_bybit(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+    data = _http_get(
+        f"{_BYBIT_BASE}/tickers",
+        {"category": "linear", "symbol": symbol.upper()},
+    )
+    if not data or data.get("retCode") != 0:
+        return None
+    try:
+        items = data.get("result", {}).get("list", [])
+        if not items:
+            return None
+        item = items[0]
+        rate_native = float(item.get("fundingRate") or 0)
+        return {
+            "exchange": "bybit",
+            "cycle_hours": _FUNDING_CYCLE_HOURS["bybit"],
+            "rate_native": rate_native,
+            "rate_8h": _normalize_to_8h(rate_native, _FUNDING_CYCLE_HOURS["bybit"]),
+            "mark_price": float(item.get("markPrice") or 0),
+            "index_price": float(item.get("indexPrice") or 0),
+        }
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _funding_okx(currency: str = "BTC") -> Optional[Dict[str, float]]:
+    inst = f"{currency.upper()}-USDT-SWAP"
+    data = _http_get(f"{_OKX_BASE}/funding-rate", {"instId": inst})
+    if not data or data.get("code") != "0":
+        return None
+    try:
+        items = data.get("data", [])
+        if not items:
+            return None
+        item = items[0]
+        rate_native = float(item.get("fundingRate") or 0)
+        # OKX funding-rate endpoint is funding-only — fetch mark/index separately.
+        ticker = _http_get(f"https://www.okx.com/api/v5/market/ticker", {"instId": inst})
+        mark = idx = 0.0
+        if ticker and ticker.get("code") == "0":
+            try:
+                row = ticker.get("data", [])[0]
+                mark = float(row.get("last") or row.get("markPx") or 0)
+                idx  = float(row.get("idxPx") or mark)
+            except (KeyError, ValueError, IndexError):
+                pass
+        return {
+            "exchange": "okx",
+            "cycle_hours": _FUNDING_CYCLE_HOURS["okx"],
+            "rate_native": rate_native,
+            "rate_8h": _normalize_to_8h(rate_native, _FUNDING_CYCLE_HOURS["okx"]),
+            "mark_price": mark,
+            "index_price": idx,
+        }
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _funding_dydx(currency: str = "BTC") -> Optional[Dict[str, float]]:
+    ticker = f"{currency.upper()}-USD"
+    data = _http_get(f"{_DYDX_BASE}/perpetualMarkets", {"ticker": ticker})
+    if not data:
+        return None
+    try:
+        market = data.get("markets", {}).get(ticker)
+        if not market:
+            return None
+        # dYdX `nextFundingRate` is per-hour. Mark price not directly exposed
+        # via this endpoint; oraclePrice is the closest proxy.
+        rate_native = float(market.get("nextFundingRate") or 0)
+        oracle = float(market.get("oraclePrice") or 0)
+        return {
+            "exchange": "dydx",
+            "cycle_hours": _FUNDING_CYCLE_HOURS["dydx"],
+            "rate_native": rate_native,
+            "rate_8h": _normalize_to_8h(rate_native, _FUNDING_CYCLE_HOURS["dydx"]),
+            "mark_price": oracle,
+            "index_price": oracle,
+        }
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def get_aggregated_funding(currency: str = "BTC") -> Dict[str, Any]:
+    """Funding rate from all 4 venues + cross-venue divergence stats.
+
+    Returns a dict with structure::
+
+        {
+          'exchanges': {
+            'binance': { rate_native, rate_8h, mark_price, index_price, cycle_hours, ... },
+            'bybit':   {...},
+            'okx':     {...},
+            'dydx':    {...},
+          },
+          'divergence': {
+            'max_8h':   highest rate observed across venues
+            'min_8h':   lowest rate observed across venues
+            'spread_bps': (max_8h - min_8h) in basis points
+            'mean_8h':  cross-venue mean
+            'std_8h':   cross-venue std
+            'venue_count': number of venues that responded
+          }
+        }
+
+    All rates normalized to per-8h equivalent. Divergence omitted if fewer
+    than 2 venues respond.
+    """
+    cache_key = f"agg_funding_{currency.upper()}"
+    cached = _cache.get("binance_funding", cache_key, ttl=60)  # 1-min TTL across all venues
+    if cached is not None:
+        return cached
+
+    sym_usdt = f"{currency.upper()}USDT"
+    results: Dict[str, Optional[Dict[str, float]]] = {
+        "binance": _funding_binance(sym_usdt),
+        "bybit":   _funding_bybit(sym_usdt),
+        "okx":     _funding_okx(currency),
+        "dydx":    _funding_dydx(currency),
+    }
+    exchanges = {k: v for k, v in results.items() if v is not None}
+    out: Dict[str, Any] = {"exchanges": exchanges, "divergence": {}}
+    if len(exchanges) >= 2:
+        rates = [e["rate_8h"] for e in exchanges.values()]
+        max_r = max(rates)
+        min_r = min(rates)
+        mean_r = sum(rates) / len(rates)
+        var_r = sum((r - mean_r) ** 2 for r in rates) / len(rates)
+        std_r = var_r ** 0.5
+        out["divergence"] = {
+            "max_8h": max_r,
+            "min_8h": min_r,
+            "spread_bps": (max_r - min_r) * 10000,
+            "mean_8h": mean_r,
+            "std_8h": std_r,
+            "venue_count": len(exchanges),
+        }
     _cache.put("binance_funding", cache_key, out)
     return out
 
