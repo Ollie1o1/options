@@ -250,10 +250,15 @@ if os.path.isfile(_venv_python) and _venv_import_is_hanging():
     print("(Imports should complete in <3s; the probe stamps venv/.provenance_probe_ok.)")
     sys.exit(1)
 
+# If any equity-side flag was provided, dispatch directly to options_screener
+# (preserves cron + every power-user shortcut). With no flags, route through
+# src.launcher which shows the [1] STOCKS [2] CRYPTO menu.
+_target_module = "src.launcher" if not _argv else "src.options_screener"
+
 # If not already inside the venv, re-launch with the venv interpreter
 if os.path.isfile(_venv_python) and sys.prefix == sys.base_prefix:
     sys.exit(subprocess.call(
-        [_venv_python, "-m", "src.options_screener"] + _argv,
+        [_venv_python, "-m", _target_module] + _argv,
         cwd=_project_root,
     ))
 
@@ -268,5 +273,8 @@ if not os.path.isfile(_venv_python):
     sys.exit(1)
 
 sys.argv = [sys.argv[0]] + _argv
-from src.options_screener import main
+if _argv:
+    from src.options_screener import main
+else:
+    from src.launcher import main
 main()
