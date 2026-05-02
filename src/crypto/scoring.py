@@ -16,7 +16,7 @@ Components:
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -40,21 +40,46 @@ def _clip01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
 
 
-def _atm_iv(chain: pd.DataFrame, expiration_filter=None) -> Optional[float]:
-    """Mark IV of the contract closest to ATM, optionally restricted to one expiry."""
+def _pick_expiry(chain: pd.DataFrame, target_dte: float) -> Optional[Any]:
+    """Return the expiration date in `chain` closest to `target_dte` calendar days.
+
+    Picking a target-DTE-aware expiry is essential — comparing IV across mixed
+    expiries (e.g. 1-DTE gamma vol vs 9-month vega) is meaningless.
+    """
+    if chain.empty or "dte" not in chain.columns:
+        return None
+    by_exp = chain.groupby("expiration")["dte"].first().reset_index()
+    if by_exp.empty:
+        return None
+    by_exp["dist"] = (by_exp["dte"] - float(target_dte)).abs()
+    return by_exp.sort_values("dist").iloc[0]["expiration"]
+
+
+def _atm_iv(chain: pd.DataFrame, expiration_filter=None,
+             target_dte: float = 30.0) -> Optional[float]:
+    """Mark IV of the contract closest to ATM at a SINGLE expiry.
+
+    If no expiration_filter is provided, picks the expiry closest to
+    `target_dte` so the IV reflects a meaningful tenor (default: 30 days).
+    Averages call + put IV at the closest strike to remove put/call IV asymmetry.
+    """
     if chain.empty:
         return None
-    df = chain
-    if expiration_filter is not None:
-        df = df[df["expiration"] == expiration_filter]
+    if expiration_filter is None:
+        expiration_filter = _pick_expiry(chain, target_dte)
+        if expiration_filter is None:
+            return None
+    df = chain[chain["expiration"] == expiration_filter]
     if df.empty:
         return None
     df = df.copy()
     df["moneyness"] = (df["strike"] - df["underlying_price"]).abs()
-    atm = df.sort_values("moneyness").head(2)
-    if atm.empty:
+    # Take the closest strike, average call + put IV (ATM straddle IV).
+    closest_strike = df.sort_values("moneyness").iloc[0]["strike"]
+    atm_rows = df[df["strike"] == closest_strike]
+    if atm_rows.empty:
         return None
-    iv = atm["mark_iv"].mean()
+    iv = atm_rows["mark_iv"].mean()
     return float(iv) if math.isfinite(iv) else None
 
 
@@ -97,21 +122,22 @@ def score_vrp(chain: pd.DataFrame, history: pd.DataFrame) -> float:
 
 
 def score_term_structure(chain: pd.DataFrame) -> float:
-    """Front-expiry ATM IV vs back-expiry ATM IV.
+    """Compare 7-DTE ATM IV vs 30-DTE ATM IV.
 
-    Backwardation (front > back) is fear / event-pricing — favors the front
-    leg in a calendar OR avoiding short-front-month premium-selling.
-    Contango (front < back) is normal — favors short-front premium.
+    Backwardation (7-DTE > 30-DTE) is fear / event-pricing — favors avoiding
+    short-front-month premium-selling. Contango (7-DTE < 30-DTE) is normal
+    and supports short-front premium structures.
+
+    Comparing min vs max expiry (e.g. 1-DTE vs 9-month) saturates the score
+    almost always because of the gamma-vs-vega regime change — not signal.
+    Picking 7-DTE and 30-DTE keeps both points in the same vol regime.
 
     Returns 0.5 when flat. <0.5 when backwardated, >0.5 when in contango.
     """
     if chain.empty:
         return 0.5
-    expiries = sorted(chain["expiration"].unique())
-    if len(expiries) < 2:
-        return 0.5
-    front_iv = _atm_iv(chain, expiration_filter=expiries[0])
-    back_iv = _atm_iv(chain, expiration_filter=expiries[-1])
+    front_iv = _atm_iv(chain, target_dte=7.0)
+    back_iv  = _atm_iv(chain, target_dte=30.0)
     if front_iv is None or back_iv is None or front_iv <= 0:
         return 0.5
     slope = (back_iv - front_iv) / front_iv
@@ -120,7 +146,7 @@ def score_term_structure(chain: pd.DataFrame) -> float:
 
 
 def score_skew(chain: pd.DataFrame) -> float:
-    """25-delta put IV vs 25-delta call IV (front expiry).
+    """25-delta put IV vs 25-delta call IV at the 30-DTE expiry.
 
     Crypto skew is usually call-heavy (bullish skew) in bull, put-heavy in fear.
     For premium-selling, neutral skew (≈ 1.0 ratio) is best; extreme skew suggests
@@ -128,10 +154,10 @@ def score_skew(chain: pd.DataFrame) -> float:
     """
     if chain.empty:
         return 0.5
-    expiries = sorted(chain["expiration"].unique())
-    if not expiries:
+    target_exp = _pick_expiry(chain, 30.0)
+    if target_exp is None:
         return 0.5
-    front = chain[chain["expiration"] == expiries[0]]
+    front = chain[chain["expiration"] == target_exp]
     if front.empty:
         return 0.5
     underlying = float(front["underlying_price"].iloc[0])
