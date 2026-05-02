@@ -44,3 +44,6 @@ paper_trades.db-shm
 paper_trades.db-wal
 paper_trades.db.bak-*
 paper_trades.db.calibration_marker.json
+
+# Crypto chain snapshot accumulator (user data)
+data/crypto_snapshots/

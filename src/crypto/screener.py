@@ -17,6 +17,8 @@ from typing import List, Optional
 
 import pandas as pd
 
+from . import backtester as _backtester
+from . import chain_snapshot as _snap
 from . import data_fetching as _df
 from . import regime as _regime
 from . import scoring as _scoring
@@ -127,6 +129,14 @@ def _scan_currency(currency: str) -> Optional[dict]:
         regime_multipliers=regime_mults,
     )
     _print_chain_diagnostics(scored)
+
+    # Auto-snapshot today's chain for the backtester to replay later.
+    try:
+        snap_path = _snap.save_snapshot(chain, currency)
+        if snap_path:
+            print(f"  ↳ chain snapshot saved ({snap_path.name})")
+    except Exception:
+        pass
 
     chain_q = _chain_quality_score(scored)
     regime_label = regime.label if regime else "chop"
@@ -570,6 +580,116 @@ def _prompt(label: str, default: str = "") -> str:
         return ""
 
 
+def _backtest_dialog() -> None:
+    _banner("CRYPTO BACKTESTER  —  walk-forward simulation")
+    print()
+    print("  Replays the screener over historical spot, synthesizing option chains")
+    print("  via BS pricing where real snapshots are missing. Validates which")
+    print("  scoring signals would have predicted realized P&L.")
+    print()
+    cur = _prompt("Currency [BTC/ETH] (default BTC)", "BTC").upper()
+    if cur not in ("BTC", "ETH"):
+        print(f"  Unknown currency: {cur!r}")
+        return
+    days_str = _prompt("Days of history (default 365)", "365")
+    try:
+        days = max(120, min(1095, int(days_str)))
+    except ValueError:
+        days = 365
+    freq_str = _prompt("Cadence in days [3-14] (default 7)", "7")
+    try:
+        freq = max(2, min(30, int(freq_str)))
+    except ValueError:
+        freq = 7
+
+    print()
+    print(f"  Running {cur} backtest, last {days} days, every {freq} days...")
+    n_snaps = _snap.snapshot_count(cur)
+    print(f"  Real chain snapshots available: {n_snaps}  "
+          f"(synthetic chain used for the rest)")
+    print()
+
+    def _progress(n, total):
+        if n == 1 or n % max(1, total // 8) == 0 or n == total:
+            print(f"    {n:3}/{total} test dates...", flush=True)
+
+    try:
+        result = _backtester.run_backtest(
+            currency=cur, days_back=days, frequency_days=freq,
+            progress_callback=_progress,
+        )
+    except Exception as e:
+        print(f"  Backtest failed: {type(e).__name__}: {e}")
+        return
+    if result is None or result.trades.empty:
+        print("  No trades simulated — insufficient history.")
+        return
+
+    print()
+    print(_color(f"  Window: {result.start_date} → {result.end_date}", "BOLD", bold=True))
+    print(f"  Trades simulated: {len(result.trades)}")
+    print()
+
+    # Per-strategy summary table
+    print(_color("  Per-strategy performance", "BOLD", bold=True))
+    header = f"  {'Strategy':<14} {'N':>4} {'Win%':>6} {'AvgPnL':>9} {'PF':>7} {'Total $':>10}"
+    print(header)
+    print("  " + "─" * (len(header) - 2))
+    for strat in sorted(result.summary.keys()):
+        if strat == "__ALL__":
+            continue
+        s = result.summary[strat]
+        pf = s["profit_factor"]
+        pf_str = f"{pf:.2f}x" if pf < 999 else "∞"
+        pf_color = "BRIGHT_GREEN" if pf >= 1.20 else ("BRIGHT_YELLOW" if pf >= 0.95 else "BRIGHT_RED")
+        print(f"  {strat:<14} {s['n']:>4} {s['win_rate']:>5.0%} "
+              f"{s['avg_pnl_pct']:>+8.1%} "
+              f"{_color(f'{pf_str:>7}', pf_color, bold=True)} "
+              f"${s['total_pnl_usd']:>+9,.0f}")
+    if "__ALL__" in result.summary:
+        s = result.summary["__ALL__"]
+        pf = s["profit_factor"]
+        pf_str = f"{pf:.2f}x" if pf < 999 else "∞"
+        pf_color = "BRIGHT_GREEN" if pf >= 1.20 else ("BRIGHT_YELLOW" if pf >= 0.95 else "BRIGHT_RED")
+        print("  " + "─" * (len(header) - 2))
+        print(f"  {'ALL':<14} {s['n']:>4} {s['win_rate']:>5.0%} "
+              f"{s['avg_pnl_pct']:>+8.1%} "
+              f"{_color(f'{pf_str:>7}', pf_color, bold=True)} "
+              f"${s['total_pnl_usd']:>+9,.0f}")
+
+    # Per-component IC (Spearman rank correlation with realized P&L)
+    print()
+    print(_color("  Per-component IC (rank correlation with pnl_pct)", "BOLD", bold=True))
+    print("  " + _color("  > +0.10 = real signal,  ~0 = noise,  < -0.10 = inverse signal", "DIM"))
+    sorted_ic = sorted(result.component_ic.items(), key=lambda x: -abs(x[1]))
+    for comp, ic in sorted_ic:
+        if abs(ic) >= 0.10:
+            ic_color = "BRIGHT_GREEN" if ic > 0 else "BRIGHT_RED"
+        else:
+            ic_color = "DIM"
+        print(f"    {comp:<22}  IC = {_color(f'{ic:+.3f}', ic_color, bold=True)}")
+
+    # Regime breakdown — which regime each strategy was tested in
+    print()
+    print(_color("  Trades by regime", "BOLD", bold=True))
+    by_regime = result.trades.groupby("regime").size().sort_values(ascending=False)
+    for r, n in by_regime.items():
+        wins = result.trades[(result.trades["regime"] == r) & (result.trades["pnl_pct"] > 0)]
+        wr = len(wins) / n if n > 0 else 0.0
+        print(f"    {r:<8}  n={n:3}   win {wr:.0%}")
+
+    # Caveats — be honest about what this backtest does and doesn't validate
+    print()
+    print(_color("  Caveats", "DIM"))
+    print(_color("  • Synthetic chains hold IV flat post-entry → biased AGAINST long premium", "DIM"))
+    print(_color("    (real Long Calls in real bull moves often profit from IV expansion).", "DIM"))
+    print(_color("  • Funding/basis components held neutral (no historical perp data).", "DIM"))
+    print(_color("  • Bid/ask synthesized at 5% — real spreads are wider for low-OI strikes.", "DIM"))
+    print(_color("  • As real chain snapshots accumulate (auto-saved each scan), backtest", "DIM"))
+    print(_color("    accuracy improves for those dates.", "DIM"))
+    print()
+
+
 def main() -> None:
     while True:
         _banner("CRYPTO STRATEGIST  —  BTC / ETH options + perp basis")
@@ -579,6 +699,7 @@ def main() -> None:
         print("  [3] FUNDING / BASIS MONITOR")
         print("  [4] PORTFOLIO  (paper_trades_crypto.db)")
         print("  [5] CALIBRATION STATUS")
+        print("  [6] BACKTEST  (walk-forward signal validation)  " + _color("[NEW]", "BRIGHT_GREEN", bold=True))
         print("  [Q] BACK")
         print()
         choice = _prompt("Choice", "Q").upper()
@@ -600,6 +721,8 @@ def main() -> None:
             _portfolio_view()
         elif choice == "5":
             _calibration_status()
+        elif choice == "6":
+            _backtest_dialog()
         else:
             print(f"  Unknown choice: {choice!r}")
 
