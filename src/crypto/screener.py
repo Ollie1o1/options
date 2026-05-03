@@ -198,6 +198,10 @@ def _scan_currency(currency: str) -> Optional[dict]:
             df_picks = _strategy.build_credit_spread_candidates(
                 tradable, strat, regime_label, chain_q, top_n=5,
             )
+        elif strat.direction == "calendar_debit":
+            df_picks = _strategy.build_calendar_candidates(
+                tradable, strat, regime_label, chain_q, top_n=5,
+            )
         else:
             df_picks = _strategy.score_for_strategy(
                 tradable, strat, regime_label, chain_q,
@@ -254,6 +258,28 @@ def _print_credit_spread_table(df: pd.DataFrame, strategy_name: str, currency: s
             f"${row['short_strike']:>8,.0f} ${row['long_strike']:>8,.0f} "
             f"${int(row['width']):>6,} ${row['net_credit']:>8,.0f} "
             f"${row['max_loss']:>8,.0f} {row['risk_reward']:>4.2f}x "
+            f"{_color(f'{sc:>6.3f}', sc_color, bold=True)}"
+        )
+
+
+def _print_calendar_table(df: pd.DataFrame, strategy_name: str, currency: str) -> None:
+    print()
+    title = f"  {_color(strategy_name, 'BRIGHT_CYAN', bold=True)}  ({currency} time spread, theta differential)"
+    print(title)
+    header = (
+        f"  {'#':<3} {'Strike':>10} {'Front':>11} {'Back':>11} {'F.DTE':>6} {'B.DTE':>6} "
+        f"{'F.IV':>6} {'B.IV':>6} {'Net Deb':>9} {'Score':>7}"
+    )
+    print(_color(header, "BOLD", bold=True))
+    print("  " + "─" * (len(header) - 2))
+    for i, (_, row) in enumerate(df.iterrows(), 1):
+        sc = float(row["score"])
+        sc_color = "BRIGHT_GREEN" if sc >= 0.55 else ("BRIGHT_YELLOW" if sc >= 0.35 else "WHITE")
+        print(
+            f"  {i:<3} {row['strike']:>10,.0f} {str(row['front_expiration']):>11} "
+            f"{str(row['back_expiration']):>11} {int(row['front_dte']):>6} "
+            f"{int(row['back_dte']):>6} {row['front_iv']:>5.1%} "
+            f"{row['back_iv']:>5.1%} ${row['net_debit']:>8,.0f} "
             f"{_color(f'{sc:>6.3f}', sc_color, bold=True)}"
         )
 
@@ -323,6 +349,54 @@ def _log_long_premium(row: pd.Series, currency: str) -> None:
             print(f"  ✓ Logged {trade['strategy_name']} on {currency} "
                   f"${trade['strike']:,.0f} @ ${entry_price:,.2f} "
                   f"(score {trade['quality_score']:.3f})")
+        else:
+            print("  Skipped — duplicate of an open paper trade today.")
+    except Exception as e:
+        print(f"  Log failed: {type(e).__name__}: {e}")
+
+
+def _log_calendar(row: pd.Series, currency: str) -> None:
+    """Log a calendar (time spread) to the crypto paper ledger.
+
+    The current paper_trades schema doesn't have a back_expiration column,
+    so we encode the back expiry into strategy_name (e.g. "Calendar Call
+    [back 2026-06-26]"). spread_width is repurposed to hold the days
+    between expirations so backtest analysis can reconstruct the structure.
+    """
+    try:
+        from src.paper_manager import PaperManager
+        pm = PaperManager(db_path=_CRYPTO_DB_PATH)
+    except Exception as e:
+        print(f"  Could not initialize PaperManager: {e}")
+        return
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    strat_name = str(row["strategy_name"])
+    back_exp = str(row["back_expiration"])
+    front_exp = str(row["front_expiration"])
+    strike = float(row["strike"])
+    leg_type = str(row["type"]).lower()
+    net_debit = float(row["net_debit"])
+    days_between = int(row["back_dte"]) - int(row["front_dte"])
+    annotated_strategy = f"{strat_name} [back {back_exp}]"
+    trade = {
+        "date": today,
+        "ticker": currency.upper(),
+        "expiration": front_exp,                  # front expiry — the one that decays first
+        "strike": strike,
+        "type": leg_type,
+        "entry_price": net_debit,
+        "quality_score": float(row["score"]),
+        "strategy_name": annotated_strategy,
+        "entry_iv": float(row.get("front_iv") or 0),
+        "long_strike": strike,                    # same strike (single-strike calendar)
+        "spread_width": float(days_between),      # repurposed: days between expirations
+        "weight_profile": "crypto_baseline",
+    }
+    try:
+        if pm.log_trade_if_new(trade):
+            print(f"  ✓ Logged {strat_name} on {currency} ${strike:,.0f} "
+                  f"front {front_exp} / back {back_exp} "
+                  f"net debit ${net_debit:,.0f} (score {row['score']:.3f})")
         else:
             print("  Skipped — duplicate of an open paper trade today.")
     except Exception as e:
@@ -450,6 +524,8 @@ def _interactive_log_prompt(scan_result: dict) -> None:
         _log_iron_condor(top, currency)
     elif "short_strike" in df.columns:
         _log_credit_spread(top, currency)
+    elif "back_expiration" in df.columns:
+        _log_calendar(top, currency)
     else:
         _log_long_premium(top, currency)
 
@@ -516,6 +592,8 @@ def _present_scan(scan: dict) -> None:
             _print_iron_condor_table(df, currency)
         elif "short_strike" in df.columns:
             _print_credit_spread_table(df, strat_name, currency)
+        elif "back_expiration" in df.columns:
+            _print_calendar_table(df, strat_name, currency)
         else:
             _print_long_premium_table(df, strat_name, currency)
 

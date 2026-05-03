@@ -84,6 +84,29 @@ STRATEGIES: List[StrategyDef] = [
         target_dte_min=30, target_dte_max=60,
         regime_fit={"bull": 0.40, "chop": 1.00, "bear": 0.40},
     ),
+    # ── Calendar spreads (theta differential) ────────────────────────────
+    # Single-strike calendars: long back-month + short front-month at same K.
+    # Theta-positive: front decays faster than back. Vega-positive: long
+    # back-month vega. Best in chop / mild-vol regimes; avoid deep contango
+    # (back-month already overpriced vs front, so debit is high).
+    StrategyDef(
+        name="Calendar Call",
+        direction="calendar_debit",
+        leg_type="call",
+        target_moneyness=1.00,           # ATM
+        moneyness_tolerance=0.05,
+        target_dte_min=7, target_dte_max=14,   # front leg DTE band
+        regime_fit={"bull": 0.65, "chop": 1.00, "bear": 0.50},
+    ),
+    StrategyDef(
+        name="Calendar Put",
+        direction="calendar_debit",
+        leg_type="put",
+        target_moneyness=1.00,           # ATM
+        moneyness_tolerance=0.05,
+        target_dte_min=7, target_dte_max=14,
+        regime_fit={"bull": 0.50, "chop": 1.00, "bear": 0.65},
+    ),
 ]
 
 
@@ -251,6 +274,167 @@ def build_credit_spread_candidates(
                 "short_oi": int(short_row.get("open_interest") or 0),
                 "long_oi": int(long_row.get("open_interest") or 0),
             })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    return df.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+
+
+def build_calendar_candidates(
+    chain: pd.DataFrame,
+    strategy: StrategyDef,
+    regime_label: str,
+    chain_quality: float,
+    front_dte_target: int = 10,
+    back_dte_target: int = 35,
+    top_n: int = 5,
+) -> pd.DataFrame:
+    """Enumerate calendar (time-spread) candidates for a Calendar Call/Put.
+
+    A calendar:
+      sells short-dated option at strike K, exp_front
+      buys long-dated option at strike K, exp_back
+    Both same type. Net DEBIT (back leg more expensive). Profits from:
+      • theta differential (front decays faster)
+      • IV expansion on back leg
+      • underlying near K at front expiration
+
+    Approach:
+      1. Identify front expiry: DTE closest to `front_dte_target` (default 10d).
+         Must be in strategy.target_dte_min..max if specified.
+      2. Identify back expiry: DTE closest to `back_dte_target` (default 35d),
+         must be > front DTE.
+      3. For each strike near ATM (within strategy.moneyness_tolerance),
+         pair the front and back legs of the matching type.
+      4. Compute net debit, theta differential proxy (1/sqrt(T_front) -
+         1/sqrt(T_back)), and a score combining strategy fit + theta edge.
+
+    Term-structure aware: in deep contango (term_structure_score > 0.70),
+    the back is expensive and calendar debit is high — score penalty
+    applied. In mild contango / backwardation, calendar is favored.
+
+    Returns DataFrame with: strategy_name, strike, type, front_expiration,
+    back_expiration, front_dte, back_dte, front_iv, back_iv, front_mid,
+    back_mid, net_debit, breakeven_low, breakeven_high, theta_edge,
+    moneyness_fit, score.
+    """
+    if strategy.direction != "calendar_debit":
+        return pd.DataFrame()
+    if chain.empty or strategy.leg_type not in ("call", "put"):
+        return pd.DataFrame()
+
+    leg_type = strategy.leg_type
+    legs = chain[chain["type"] == leg_type].copy()
+    if legs.empty:
+        return pd.DataFrame()
+
+    # Group by expiry → DTE map
+    by_exp = legs.groupby("expiration")["dte"].first().reset_index()
+    if len(by_exp) < 2:
+        return pd.DataFrame()
+
+    by_exp["dist_front"] = (by_exp["dte"] - float(front_dte_target)).abs()
+    front_row = by_exp.sort_values("dist_front").iloc[0]
+    front_exp = front_row["expiration"]
+    front_dte = float(front_row["dte"])
+
+    # Back expiry must be later than front by at least 7 days
+    candidates_back = by_exp[by_exp["dte"] >= front_dte + 7].copy()
+    if candidates_back.empty:
+        return pd.DataFrame()
+    candidates_back["dist_back"] = (candidates_back["dte"] - float(back_dte_target)).abs()
+    back_row = candidates_back.sort_values("dist_back").iloc[0]
+    back_exp = back_row["expiration"]
+    back_dte = float(back_row["dte"])
+
+    front_legs = legs[legs["expiration"] == front_exp].copy()
+    back_legs  = legs[legs["expiration"] == back_exp].copy()
+    if front_legs.empty or back_legs.empty:
+        return pd.DataFrame()
+
+    underlying = float(front_legs["underlying_price"].iloc[0])
+    target_strike = underlying * strategy.target_moneyness
+    tolerance_abs = underlying * strategy.moneyness_tolerance * 2.5  # widen for ATM bell tail
+
+    # Collect strikes that exist on BOTH expiries near ATM
+    front_strikes = set(front_legs["strike"].astype(float))
+    back_strikes = set(back_legs["strike"].astype(float))
+    common = sorted(front_strikes & back_strikes,
+                    key=lambda k: abs(k - target_strike))
+
+    rows = []
+    regime_mult = float(strategy.regime_fit.get(regime_label, 0.5))
+    for k in common:
+        if abs(k - target_strike) > tolerance_abs:
+            break
+        f_row = front_legs[front_legs["strike"] == k].iloc[0]
+        b_row = back_legs[back_legs["strike"]  == k].iloc[0]
+        f_mid = float(f_row.get("mid_price") or 0)
+        b_mid = float(b_row.get("mid_price") or 0)
+        if f_mid <= 0 or b_mid <= 0:
+            continue
+        net_debit = b_mid - f_mid
+        if net_debit <= 0:
+            # Inverted (front more expensive): treat as backwardation calendar
+            # — profitable to OPEN but unusual. Skip for v1; only standard
+            # debit calendars surface.
+            continue
+        # Theta edge proxy: theta scales with 1/sqrt(T). Calendar collects
+        # (theta_front - theta_back). For ATM options, theta ∝ -S*sigma/sqrt(T).
+        # A bigger differential = better theta edge.
+        if front_dte <= 0 or back_dte <= 0:
+            continue
+        theta_edge = (1.0 / math.sqrt(max(front_dte, 1))
+                      - 1.0 / math.sqrt(max(back_dte, 1)))
+
+        # Term-structure penalty: if back IV >> front IV (deep contango),
+        # we're paying through the nose for the back leg.
+        f_iv = float(f_row.get("mark_iv") or 0)
+        b_iv = float(b_row.get("mark_iv") or 0)
+        if f_iv > 0 and b_iv > 0:
+            iv_slope = (b_iv - f_iv) / f_iv
+            # Penalty: -0.0 to -0.3 for slope 0 to 0.30 (30% steeper back)
+            ts_penalty = max(-0.30, -iv_slope) if iv_slope > 0.05 else 0.0
+        else:
+            ts_penalty = 0.0
+
+        m_fit = _moneyness_fit(k, underlying, strategy.target_moneyness, strategy.moneyness_tolerance)
+        # Liquidity = average of the two legs
+        liq_f = float(f_row.get("liquidity_score") or 0.5)
+        liq_b = float(b_row.get("liquidity_score") or 0.5)
+        liq = (liq_f + liq_b) / 2.0
+
+        base_score = (
+            max(0.10, float(chain_quality))
+            * (0.5 + 0.5 * regime_mult)
+            * m_fit
+            * (0.5 + 0.5 * liq)
+        )
+        score = max(0.0, base_score * (1.0 + ts_penalty) + theta_edge * 0.10)
+
+        # Breakevens are non-trivial for calendars (depend on residual back-month
+        # value at front expiry). Approximate: BE ≈ K ± net_debit (rough).
+        rows.append({
+            "strategy_name": strategy.name,
+            "strike": k,
+            "type": leg_type,
+            "front_expiration": front_exp,
+            "back_expiration": back_exp,
+            "front_dte": int(front_dte),
+            "back_dte": int(back_dte),
+            "front_iv": f_iv,
+            "back_iv": b_iv,
+            "front_mid": f_mid,
+            "back_mid": b_mid,
+            "net_debit": net_debit,
+            "breakeven_low":  k - net_debit,
+            "breakeven_high": k + net_debit,
+            "theta_edge": theta_edge,
+            "moneyness_fit": m_fit,
+            "ts_penalty": ts_penalty,
+            "underlying_price": underlying,
+            "score": score,
+        })
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)

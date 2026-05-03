@@ -179,15 +179,36 @@ the strategy module's regime-fit handles direction. Boosted in bear
 Live state at ship: combined z = −0.19σ (mild contraction), USDT 7d
 −0.11%, USDC 7d −0.61%, 30d USDT +3.06%. No surge signal currently.
 
-### Tier 1.5 — Calendar spread builder
-**Why**: The system flags "strong contango" (term_structure score 0.96
-today) but doesn't construct the calendar trade. A 7-DTE / 30-DTE ATM
-calendar is the natural play to capture term-structure carry.
+### Tier 1.5 — Calendar spread builder ✅
+**Why**: The system flagged steep term structure but didn't construct
+the calendar trade. Single-strike calendars (long back-month + short
+front-month) are theta-positive and capture term-structure carry.
 
-**Build**: Mirror `build_credit_spread_candidates` for calendars. Show
-new strategy bucket "Calendar" when term structure is steep.
+**Built**: New `Calendar Call` and `Calendar Put` strategy definitions
+with regime fits (chop=1.00 best, bull=0.65/0.50, bear=0.50/0.65).
+`build_calendar_candidates()` pairs ATM strikes from front DTE ≈10
+with back DTE ≈35 (must differ by ≥7 days), computes net debit, theta
+edge proxy (1/√T_front − 1/√T_back), and applies a term-structure
+penalty when back IV is ≥5% richer than front (deep contango makes the
+debit too expensive).
 
-**Estimate**: ~150 LOC, an evening.
+UI integration:
+- Surfaces as a strategy bucket in `_present_scan` (alongside long
+  premium, credit spreads, iron condors).
+- Dedicated `_print_calendar_table` showing strike, both expiries,
+  both IVs, net debit, and score.
+- Numbered + abbreviated log prompt accepts "Calendar Put", "cp",
+  prefix matches, etc.
+- `_log_calendar()` handler. The schema doesn't yet have a
+  `back_expiration` column, so we encode the back expiry into
+  strategy_name ("Calendar Put [back 2026-05-29]") and repurpose
+  `spread_width` to hold days-between-expiries. Backtest can
+  reconstruct from these.
+
+Live state at ship: in current BEAR regime, Calendar Put surfaced as
+the 3rd strategy alongside Long Put + Bear Call. Top pick: ATM $78k
+put, front 11d / back 25d, IVs 37.0%/38.0%, debit $1,037, score 0.52.
+Calendar Call hidden in BEAR (regime fit 0.50 < 0.55 threshold).
 
 ---
 
