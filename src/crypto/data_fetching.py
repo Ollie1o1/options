@@ -344,6 +344,178 @@ def get_aggregated_funding(currency: str = "BTC") -> Dict[str, Any]:
     return out
 
 
+# ── Open Interest ────────────────────────────────────────────────────────
+
+def _oi_binance_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+    """Current Binance USDT-M open interest (BTC-denominated)."""
+    data = _http_get(f"{_BINANCE_FAPI}/openInterest", {"symbol": symbol.upper()})
+    if not data or "openInterest" not in data:
+        return None
+    try:
+        return {
+            "exchange": "binance",
+            "oi_native": float(data["openInterest"]),
+            "ts_ms": int(data.get("time") or 0),
+        }
+    except (KeyError, ValueError):
+        return None
+
+
+def _oi_bybit_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+    """Bybit OI is on the ticker payload."""
+    data = _http_get(f"{_BYBIT_BASE}/tickers",
+                     {"category": "linear", "symbol": symbol.upper()})
+    if not data or data.get("retCode") != 0:
+        return None
+    try:
+        items = data.get("result", {}).get("list", [])
+        if not items:
+            return None
+        return {
+            "exchange": "bybit",
+            "oi_native": float(items[0].get("openInterest") or 0),
+            "ts_ms": 0,
+        }
+    except (KeyError, ValueError):
+        return None
+
+
+def _oi_okx_now(currency: str = "BTC") -> Optional[Dict[str, float]]:
+    """OKX OI from the public open-interest endpoint."""
+    inst = f"{currency.upper()}-USDT-SWAP"
+    data = _http_get(f"{_OKX_BASE}/open-interest",
+                     {"instType": "SWAP", "instId": inst})
+    if not data or data.get("code") != "0":
+        return None
+    try:
+        items = data.get("data", [])
+        if not items:
+            return None
+        return {
+            "exchange": "okx",
+            "oi_native": float(items[0].get("oiCcy") or 0),  # in BTC
+            "oi_usd":    float(items[0].get("oiUsd") or 0),
+            "ts_ms": int(items[0].get("ts") or 0),
+        }
+    except (KeyError, ValueError):
+        return None
+
+
+def _oi_dydx_now(currency: str = "BTC") -> Optional[Dict[str, float]]:
+    """dYdX OI from the perpetualMarkets payload."""
+    ticker = f"{currency.upper()}-USD"
+    data = _http_get(f"{_DYDX_BASE}/perpetualMarkets", {"ticker": ticker})
+    if not data:
+        return None
+    try:
+        market = data.get("markets", {}).get(ticker)
+        if not market:
+            return None
+        return {
+            "exchange": "dydx",
+            "oi_native": float(market.get("openInterest") or 0),
+            "ts_ms": 0,
+        }
+    except (KeyError, ValueError):
+        return None
+
+
+def get_aggregated_oi(currency: str = "BTC") -> Dict[str, Any]:
+    """Current open interest across the 4 perp venues + total.
+
+    Returns dict::
+
+        {
+          'exchanges': {'binance': {oi_native, ...}, 'bybit': {...}, 'okx': {...}, 'dydx': {...}},
+          'total_native': sum of native-units OI across venues that responded,
+          'venue_count': how many responded
+        }
+    """
+    cache_key = f"agg_oi_{currency.upper()}"
+    cached = _cache.get("binance_funding", cache_key, ttl=120)
+    if cached is not None:
+        return cached
+
+    sym_usdt = f"{currency.upper()}USDT"
+    results: Dict[str, Optional[Dict[str, float]]] = {
+        "binance": _oi_binance_now(sym_usdt),
+        "bybit":   _oi_bybit_now(sym_usdt),
+        "okx":     _oi_okx_now(currency),
+        "dydx":    _oi_dydx_now(currency),
+    }
+    exchanges = {k: v for k, v in results.items() if v is not None}
+    total = sum(float(v.get("oi_native") or 0) for v in exchanges.values())
+    out = {
+        "exchanges": exchanges,
+        "total_native": total,
+        "venue_count": len(exchanges),
+    }
+    _cache.put("binance_funding", cache_key, out)
+    return out
+
+
+def get_oi_history(symbol: str = "BTCUSDT", days: int = 30) -> pd.DataFrame:
+    """Daily OI history from Binance USDT-M (last `days`).
+
+    Binance gives the most reliable historical OI feed of the four — Bybit
+    only provides last 200 daily bars and is sometimes flaky; OKX has no
+    public history. We use Binance as the canonical history reference
+    since it carries the largest BTC-perp OI by volume.
+
+    Returns DataFrame with columns: ts (UTC datetime), oi_native (BTC),
+    oi_usd, day (date).
+    """
+    cache_key = f"oi_history_{symbol.upper()}_{days}"
+    cached = _cache.get("binance_funding", cache_key, ttl=900)
+    if cached is not None:
+        df = pd.DataFrame(cached)
+        if not df.empty and "ts" in df.columns:
+            df["ts"] = pd.to_datetime(df["ts"])
+        return df
+    data = _http_get(
+        "https://fapi.binance.com/futures/data/openInterestHist",
+        {"symbol": symbol.upper(), "period": "1d", "limit": int(days)},
+    )
+    if not data or not isinstance(data, list):
+        return pd.DataFrame()
+    rows = []
+    for item in data:
+        try:
+            rows.append({
+                "ts_ms": int(item["timestamp"]),
+                "oi_native": float(item["sumOpenInterest"]),
+                "oi_usd":    float(item.get("sumOpenInterestValue") or 0),
+            })
+        except (KeyError, ValueError):
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["ts"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True)
+    df["day"] = df["ts"].dt.date
+    _cache.put("binance_funding", cache_key, df.drop(columns=["ts"]).to_dict("records"))
+    return df
+
+
+def oi_z_score(history: pd.DataFrame) -> Optional[float]:
+    """Z-score of latest OI vs the 30-day distribution.
+
+    Positive z = OI building (leverage being added), negative z = unwinding.
+    Magnitude > 1.5 is a meaningful surge in either direction.
+    """
+    if history is None or history.empty or "oi_native" not in history.columns:
+        return None
+    s = history["oi_native"].astype(float).dropna()
+    if len(s) < 5:
+        return None
+    mean = float(s.mean())
+    std = float(s.std())
+    latest = float(s.iloc[-1])
+    if std <= 0:
+        return None
+    return (latest - mean) / std
+
+
 def get_funding_history(symbol: str = "BTCUSDT", limit: int = 100) -> pd.DataFrame:
     """Last `limit` funding rates (8h bars) for z-score computation."""
     cache_key = f"funding_history_{symbol.upper()}_{limit}"

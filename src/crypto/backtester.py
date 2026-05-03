@@ -316,17 +316,13 @@ def run_backtest(
         if tradable.empty:
             continue
 
-        chain_q = sum(
-            float(scored[c].iloc[0]) for c in (
-                "iv_rank_score", "vrp_score", "term_structure_score",
-                "skew_score", "funding_z_score", "basis_score",
-                "funding_divergence_score",
-            ) if c in scored.columns
-        ) / max(1, sum(1 for c in (
+        _chain_cols = (
             "iv_rank_score", "vrp_score", "term_structure_score",
             "skew_score", "funding_z_score", "basis_score",
-            "funding_divergence_score",
-        ) if c in scored.columns))
+            "funding_divergence_score", "oi_surge_score",
+        )
+        _present = [c for c in _chain_cols if c in scored.columns]
+        chain_q = (sum(float(scored[c].iloc[0]) for c in _present) / max(1, len(_present)))
 
         # For each strategy with regime fit ≥ 0.55, simulate the top pick.
         for strat in _strategy.STRATEGIES:

@@ -24,14 +24,15 @@ import pandas as pd
 from . import data_fetching as _df
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "iv_rank":             1.0 / 8,
-    "vrp":                 1.0 / 8,
-    "term_structure":      1.0 / 8,
-    "skew":                1.0 / 8,
-    "funding_z":           1.0 / 8,
-    "basis":               1.0 / 8,
-    "funding_divergence":  1.0 / 8,
-    "liquidity":           1.0 / 8,
+    "iv_rank":             1.0 / 9,
+    "vrp":                 1.0 / 9,
+    "term_structure":      1.0 / 9,
+    "skew":                1.0 / 9,
+    "funding_z":           1.0 / 9,
+    "basis":               1.0 / 9,
+    "funding_divergence":  1.0 / 9,
+    "oi_surge":            1.0 / 9,
+    "liquidity":           1.0 / 9,
 }
 
 
@@ -228,6 +229,22 @@ def score_funding_divergence(aggregated_funding: Optional[Dict[str, Any]]) -> fl
     return _clip01(score)
 
 
+def score_oi_surge(oi_z: Optional[float]) -> float:
+    """Score open-interest surge magnitude.
+
+    OI z-score is computed against the 30-day OI distribution. Both directions
+    of extreme OI (build-up or unwind) carry information:
+      • |z| > 1.5 with high funding  → crowded longs, fade signal (sell calls)
+      • |z| > 1.5 with low funding   → crowded shorts, fade signal (sell puts)
+      • |z| < 0.5                    → no information, neutral
+    Score rises with |z|, saturating around |z| = 2.5.
+    """
+    if oi_z is None or not math.isfinite(oi_z):
+        return 0.5
+    score = _clip01(0.5 + 0.5 * math.tanh(abs(float(oi_z)) / 1.5))
+    return score
+
+
 def score_basis(funding: Optional[Dict[str, float]]) -> float:
     """Spot-perp basis. Wide basis ⇒ basis trade opportunity.
 
@@ -263,6 +280,7 @@ def score_chain(
     weights: Optional[Dict[str, float]] = None,
     regime_multipliers: Optional[Dict[str, float]] = None,
     aggregated_funding: Optional[Dict[str, Any]] = None,
+    oi_z: Optional[float] = None,
 ) -> pd.DataFrame:
     """Score every contract in the chain. Adds per-component columns and quality_score.
 
@@ -270,6 +288,10 @@ def score_chain(
     `data_fetching.get_aggregated_funding()`. When supplied, enables the
     `funding_divergence` component. When None, that component falls back
     to neutral (0.5) so legacy / backtest callers still work.
+
+    `oi_z` (optional) is the open-interest z-score from
+    `data_fetching.oi_z_score(get_oi_history(...))`. Enables the `oi_surge`
+    component when supplied; held neutral otherwise.
     """
     if chain.empty:
         return chain
@@ -291,6 +313,7 @@ def score_chain(
     s_funding_z          = score_funding_z(funding_history)
     s_basis              = score_basis(funding)
     s_funding_divergence = score_funding_divergence(aggregated_funding)
+    s_oi_surge           = score_oi_surge(oi_z)
 
     df = chain.copy()
     df["iv_rank_score"]            = s_iv_rank
@@ -300,6 +323,7 @@ def score_chain(
     df["funding_z_score"]          = s_funding_z
     df["basis_score"]              = s_basis
     df["funding_divergence_score"] = s_funding_divergence
+    df["oi_surge_score"]           = s_oi_surge
     df["liquidity_score"]          = df.apply(score_liquidity, axis=1)
 
     df["quality_score"] = (
@@ -310,6 +334,7 @@ def score_chain(
         + w["funding_z"]          * df["funding_z_score"]
         + w["basis"]              * df["basis_score"]
         + w["funding_divergence"] * df["funding_divergence_score"]
+        + w["oi_surge"]           * df["oi_surge_score"]
         + w["liquidity"]          * df["liquidity_score"]
     )
     return df

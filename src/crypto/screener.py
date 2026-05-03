@@ -72,7 +72,8 @@ def _chain_quality_score(scored_chain: pd.DataFrame) -> float:
     if scored_chain.empty:
         return 0.5
     cols = ["iv_rank_score", "vrp_score", "term_structure_score", "skew_score",
-            "funding_z_score", "basis_score", "funding_divergence_score"]
+            "funding_z_score", "basis_score", "funding_divergence_score",
+            "oi_surge_score"]
     vals = [float(scored_chain[c].iloc[0]) for c in cols if c in scored_chain.columns]
     return sum(vals) / len(vals) if vals else 0.5
 
@@ -89,6 +90,7 @@ def _print_chain_diagnostics(scored: pd.DataFrame) -> None:
         ("funding_z_score",          "Funding"),
         ("basis_score",              "Basis"),
         ("funding_divergence_score", "FundDiv"),
+        ("oi_surge_score",           "OI"),
     ]
     parts = []
     for col, label in cols:
@@ -116,9 +118,13 @@ def _scan_currency(currency: str) -> Optional[dict]:
 
     print("  Fetching perp funding (Binance + Bybit + OKX + dYdX)...")
     fsym = f"{currency.upper()}USDT"
-    funding = _df.get_funding_rate(fsym)             # legacy single-venue (kept for basis_pct)
+    funding = _df.get_funding_rate(fsym)               # legacy single-venue (kept for basis_pct)
     funding_hist = _df.get_funding_history(fsym, limit=120)
     aggregated = _df.get_aggregated_funding(currency)  # 4-venue aggregator
+
+    print("  Fetching open interest history (Binance, 30d)...")
+    oi_hist = _df.get_oi_history(fsym, days=30)
+    oi_z = _df.oi_z_score(oi_hist) if oi_hist is not None and not oi_hist.empty else None
 
     btc_history = history if currency.upper() == "BTC" else _df.get_spot_history("BTC", days=400)
     regime = _regime.classify_btc(btc_history) if btc_history is not None and not btc_history.empty else None
@@ -130,8 +136,13 @@ def _scan_currency(currency: str) -> Optional[dict]:
         chain, history, funding, funding_hist,
         regime_multipliers=regime_mults,
         aggregated_funding=aggregated,
+        oi_z=oi_z,
     )
     _print_chain_diagnostics(scored)
+    if oi_z is not None:
+        oi_dir = "build-up" if oi_z > 0 else "unwind"
+        oi_color = "BRIGHT_RED" if abs(oi_z) > 1.5 else ("BRIGHT_YELLOW" if abs(oi_z) > 1.0 else "DIM")
+        print(f"  OI z-score:     {_color(f'{oi_z:+.2f}σ', oi_color, bold=True)}  ({oi_dir} vs 30d)")
 
     # Auto-snapshot today's chain for the backtester to replay later.
     try:
@@ -494,17 +505,20 @@ def _present_scan(scan: dict) -> None:
 
 
 def _funding_basis_dashboard() -> None:
-    _banner("FUNDING / BASIS MONITOR  —  Binance · Bybit · OKX · dYdX")
+    _banner("FUNDING / BASIS / OI MONITOR  —  Binance · Bybit · OKX · dYdX")
     for currency in ("BTC", "ETH"):
         print()
         agg = _df.get_aggregated_funding(currency)
         exchanges = agg.get("exchanges", {})
+        oi_agg = _df.get_aggregated_oi(currency)
+        oi_per_venue = oi_agg.get("exchanges", {})
         if not exchanges:
             print(f"  {currency}: all venues failed to respond")
             continue
         # Cross-venue snapshot table
         print(f"  {_color(currency, 'BRIGHT_CYAN', bold=True)}")
-        header = f"    {'Venue':<10} {'Mark':>12} {'Index':>12} {'Basis':>9} {'Fund (8h)':>11} {'Annualized':>13}"
+        header = (f"    {'Venue':<10} {'Mark':>12} {'Basis':>9} "
+                  f"{'Fund (8h)':>11} {'Annualized':>13} {'OI (native)':>14}")
         print(_color(header, "BOLD", bold=True))
         print("    " + "─" * (len(header) - 4))
         for venue, e in exchanges.items():
@@ -517,10 +531,14 @@ def _funding_basis_dashboard() -> None:
                 "BRIGHT_YELLOW" if abs(annualized) > 0.05 else "WHITE"
             )
             sign = "+" if annualized > 0 else ""
-            print(f"    {venue:<10} ${mark:>10,.2f} ${idx:>10,.2f} "
-                  f"{basis_bps:>+7.1f}bps {rate_8h*100:>+9.4f}% "
-                  f"{_color(f'{sign}{annualized:>10.1%}', ann_color, bold=True)}")
-        # Divergence summary
+            oi_native = float(oi_per_venue.get(venue, {}).get("oi_native") or 0)
+            oi_str = f"{oi_native:>12,.0f}" if oi_native > 0 else f"{'—':>12}"
+            print(f"    {venue:<10} ${mark:>10,.2f} {basis_bps:>+7.1f}bps "
+                  f"{rate_8h*100:>+9.4f}% "
+                  f"{_color(f'{sign}{annualized:>10.1%}', ann_color, bold=True)} "
+                  f"{oi_str}")
+
+        # Divergence + OI surge summary
         div = agg.get("divergence", {})
         if div:
             max_ann = div["max_8h"] * 3 * 365
@@ -534,11 +552,27 @@ def _funding_basis_dashboard() -> None:
             print()
             print(f"    Cross-venue spread: {_color(spread_str, spread_color, bold=True)}")
             print(f"    Range: {min_ann:+.1%} (low) → {max_ann:+.1%} (high) annualized")
+
+        # OI z-score
+        sym_usdt = f"{currency.upper()}USDT"
+        oi_hist = _df.get_oi_history(sym_usdt, days=30)
+        oi_z = _df.oi_z_score(oi_hist) if oi_hist is not None and not oi_hist.empty else None
+        total_oi = float(oi_agg.get("total_native") or 0)
+        if total_oi > 0:
+            print(f"    Total perp OI:       {total_oi:>14,.0f} {currency}")
+        if oi_z is not None:
+            oi_dir = "build-up" if oi_z > 0 else "unwind"
+            oi_color = "BRIGHT_RED" if abs(oi_z) > 1.5 else (
+                "BRIGHT_YELLOW" if abs(oi_z) > 1.0 else "DIM"
+            )
+            oi_str = f"{oi_z:+.2f}σ ({oi_dir} vs 30d)"
+            print(f"    OI z-score (Binance): {_color(oi_str, oi_color, bold=True)}")
     print()
     print(_color("  NOTES", "DIM"))
     print("  • |annualized funding| > 10% sustained → cash-and-carry (long spot, short perp)")
     print("  • Cross-venue spread > 5% annualized → potential perp-spot or perp-perp arb")
-    print("  • Negative funding sustained → crowded shorts; short-vol structures favored")
+    print("  • OI |z| > 1.5 + extreme funding → crowded; fade-the-crowd setup")
+    print("  • Negative funding + OI unwind → liquidations clearing; mean-revert setup")
     print()
 
 
