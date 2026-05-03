@@ -124,10 +124,20 @@ Treat the backtester as a *floor* on long-premium performance and a
 - Goal at 100 trades: confirm PF > 1.0 across at least one regime change
 
 **TODO before Phase 6 can work end-to-end:**
-- [ ] Wire `enforce_exits.sh`-equivalent for `paper_trades_crypto.db`
-  (hourly UTC since crypto is 24/7)
+- [x] Wire `enforce_exits.sh`-equivalent for `paper_trades_crypto.db`
+  (hourly since crypto is 24/7) ✅ — `src/crypto/exit_enforcer.py` +
+  `scripts/enforce_exits_crypto.sh`. Cron line installed at `:05` every
+  hour. Handles long premium / credit spreads / iron condors / calendars
+  via Deribit pricing with same TP/SL/time-exit rules as equity.
 - [ ] Calibration snapshot weekly cron for crypto DB
-- [ ] Update `crontab -l` with the two new lines
+- [x] Update `crontab -l` with the new hourly crypto line
+
+**Current crontab (3 jobs):**
+```
+7 14 * * 1-5  enforce_exits.sh         # equity, weekday afternoons
+13 18 * * 0   calibrate_snapshot.sh    # equity, Sunday evenings
+5 * * * *     enforce_exits_crypto.sh  # crypto, every hour 24/7
+```
 
 ---
 
@@ -267,13 +277,18 @@ options/
 │   └── crypto/
 │       ├── __init__.py
 │       ├── cache.py                      # SQLite HTTP cache
-│       ├── data_fetching.py              # Deribit + Binance + yfinance
-│       ├── scoring.py                    # 7 chain-level signals
-│       ├── strategy.py                   # strategy-aware ranking
+│       ├── data_fetching.py              # Deribit + 4-venue funding/OI + DefiLlama
+│       ├── scoring.py                    # 10 chain-level signals
+│       ├── strategy.py                   # strategy-aware ranking + builders
 │       ├── regime.py                     # bull/chop/bear classifier
 │       ├── chain_snapshot.py             # auto-capture daily chains
 │       ├── backtester.py                 # walk-forward simulator
+│       ├── exit_enforcer.py              # hourly auto-close (Deribit-priced)
 │       └── screener.py                   # interactive crypto sub-menu
+├── scripts/
+│   ├── enforce_exits.sh                  # equity, daily 14:07 ET
+│   ├── enforce_exits_crypto.sh           # crypto, hourly 24/7
+│   └── calibrate_snapshot.sh             # equity, weekly Sun 18:13 ET
 ├── data/
 │   └── crypto_snapshots/                 # gitignored — auto-fills
 │       └── <YYYY-MM-DD>/<CURRENCY>.parquet
