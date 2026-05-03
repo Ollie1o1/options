@@ -159,14 +159,25 @@ new scoring component.
 
 **Estimate**: ~200 LOC, half a day.
 
-### Tier 1.4 — Stablecoin supply tracker
+### Tier 1.4 — Stablecoin supply tracker ✅
 **Why**: USDT/USDC supply expansion has historically led BTC by 1-3 days.
 A slow signal, fits multi-week DTE option positions.
 
-**Build**: Daily pull from CoinGecko or DefiLlama public API. Z-score the
-daily supply changes. Surface as a leading-indicator signal.
+**Built**: DefiLlama public API (free, no auth). Tracks USDT + USDC
+circulating supply with 24h / 7d / 30d deltas, plus 7-day pct-change
+z-score against 120-day distribution. Supply-weighted combined z-score
+feeds the new `score_stablecoin_flow` component. Surfaced in:
+- Chain signals diagnostic line (column "StableFlow")
+- Live scan print: signed z-score + 7d pct change + direction
+- Funding/basis dashboard: dedicated section with per-coin breakdown
+- Backtester chain-quality calc
 
-**Estimate**: ~120 LOC, an evening.
+Magnitude-based scoring (matches funding_z / oi_surge convention) so
+the strategy module's regime-fit handles direction. Boosted in bear
+(1.20×) and bull (1.10×) regimes.
+
+Live state at ship: combined z = −0.19σ (mild contraction), USDT 7d
+−0.11%, USDC 7d −0.61%, 30d USDT +3.06%. No surge signal currently.
 
 ### Tier 1.5 — Calendar spread builder
 **Why**: The system flags "strong contango" (term_structure score 0.96

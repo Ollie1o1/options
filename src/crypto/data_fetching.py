@@ -19,8 +19,12 @@ _BINANCE_FAPI = "https://fapi.binance.com/fapi/v1"
 _BYBIT_BASE   = "https://api.bybit.com/v5/market"
 _OKX_BASE     = "https://www.okx.com/api/v5/public"
 _DYDX_BASE    = "https://indexer.dydx.trade/v4"
+_LLAMA_BASE   = "https://stablecoins.llama.fi"
 _HTTP_TIMEOUT = 10
 _USER_AGENT = "options-screener-crypto/1.0"
+
+# DefiLlama stablecoin IDs.
+_LLAMA_STABLECOIN_IDS = {"USDT": 1, "USDC": 2, "DAI": 3, "FDUSD": 113, "PYUSD": 144}
 
 # Funding cycle hours per exchange. Used to normalize all rates to "per 8h"
 # so they're directly comparable in the dashboard / divergence math.
@@ -514,6 +518,184 @@ def oi_z_score(history: pd.DataFrame) -> Optional[float]:
     if std <= 0:
         return None
     return (latest - mean) / std
+
+
+# ── Stablecoin supply (DefiLlama) ────────────────────────────────────────
+
+def get_stablecoin_snapshot(symbols: Tuple[str, ...] = ("USDT", "USDC")) -> Dict[str, Dict[str, float]]:
+    """Current circulating supply + day/week/month deltas per stablecoin.
+
+    DefiLlama already publishes day/week/month rear-view comparisons in the
+    main `/stablecoins` payload — we don't need a history pull just for the
+    snapshot view. Returns dict::
+
+        {'USDT': {'circulating': 189_526_000_000, 'prev_day': ..., 'prev_week': ...,
+                  'prev_month': ..., 'pct_change_7d': ..., 'pct_change_30d': ...}}
+
+    Empty dict on failure.
+    """
+    cache_key = f"stablecoin_snapshot_{'-'.join(symbols)}"
+    cached = _cache.get("binance_funding", cache_key, ttl=3600)  # 1h — slow signal
+    if cached is not None:
+        return cached
+    data = _http_get(f"{_LLAMA_BASE}/stablecoins", {"includePrices": "true"})
+    if not data or "peggedAssets" not in data:
+        return {}
+    out: Dict[str, Dict[str, float]] = {}
+    targets = set(s.upper() for s in symbols)
+    for asset in data["peggedAssets"]:
+        sym = str(asset.get("symbol", "")).upper()
+        if sym not in targets:
+            continue
+        try:
+            cur     = float((asset.get("circulating") or {}).get("peggedUSD") or 0)
+            prev_d  = float((asset.get("circulatingPrevDay") or {}).get("peggedUSD") or 0)
+            prev_w  = float((asset.get("circulatingPrevWeek") or {}).get("peggedUSD") or 0)
+            prev_m  = float((asset.get("circulatingPrevMonth") or {}).get("peggedUSD") or 0)
+        except (KeyError, ValueError, TypeError):
+            continue
+        if cur <= 0:
+            continue
+        out[sym] = {
+            "circulating": cur,
+            "prev_day": prev_d,
+            "prev_week": prev_w,
+            "prev_month": prev_m,
+            "pct_change_24h": (cur - prev_d) / prev_d if prev_d > 0 else 0.0,
+            "pct_change_7d":  (cur - prev_w) / prev_w if prev_w > 0 else 0.0,
+            "pct_change_30d": (cur - prev_m) / prev_m if prev_m > 0 else 0.0,
+        }
+    if out:
+        _cache.put("binance_funding", cache_key, out)
+    return out
+
+
+def get_stablecoin_history(symbol: str = "USDT", days: int = 90) -> pd.DataFrame:
+    """Daily circulating supply history for a single stablecoin (DefiLlama).
+
+    Returns DataFrame with columns: ts (UTC datetime), circulating (USD),
+    sorted ascending by ts, last `days` rows.
+    """
+    sym = symbol.upper()
+    if sym not in _LLAMA_STABLECOIN_IDS:
+        return pd.DataFrame()
+    cache_key = f"stablecoin_history_{sym}_{days}"
+    cached = _cache.get("binance_funding", cache_key, ttl=3600)
+    if cached is not None:
+        df = pd.DataFrame(cached)
+        if not df.empty and "ts" in df.columns:
+            df["ts"] = pd.to_datetime(df["ts"])
+        return df
+    sid = _LLAMA_STABLECOIN_IDS[sym]
+    data = _http_get(f"{_LLAMA_BASE}/stablecoincharts/all", {"stablecoin": str(sid)})
+    if not data or not isinstance(data, list):
+        return pd.DataFrame()
+    rows = []
+    for item in data:
+        try:
+            ts = int(item["date"])
+            cur = float((item.get("totalCirculating") or {}).get("peggedUSD") or 0)
+        except (KeyError, ValueError, TypeError):
+            continue
+        if cur <= 0:
+            continue
+        rows.append({"ts_unix": ts, "circulating": cur})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("ts_unix").tail(int(days)).reset_index(drop=True)
+    df["ts"] = pd.to_datetime(df["ts_unix"], unit="s", utc=True)
+    _cache.put("binance_funding", cache_key, df.drop(columns=["ts"]).to_dict("records"))
+    return df
+
+
+def stablecoin_flow_z_score(history: pd.DataFrame, window: int = 7) -> Optional[Dict[str, float]]:
+    """Compute z-score of the most-recent `window`-day pct change vs the
+    full distribution of rolling `window`-day pct changes in `history`.
+
+    Returns dict with: latest_pct_change, mean, std, z_score. None if data
+    is too sparse to compute.
+    """
+    if history is None or history.empty or len(history) < window + 30:
+        return None
+    s = history["circulating"].astype(float)
+    pct = s.pct_change(window).dropna()
+    if pct.empty:
+        return None
+    latest = float(pct.iloc[-1])
+    mean = float(pct.mean())
+    std = float(pct.std())
+    if std <= 0:
+        return None
+    return {
+        "latest_pct_change": latest,
+        "mean": mean,
+        "std": std,
+        "z_score": (latest - mean) / std,
+    }
+
+
+def get_aggregated_stablecoin_flow() -> Dict[str, Any]:
+    """Combined USDT + USDC supply flow signal.
+
+    Pulls 90-day supply history for both, computes weighted (by current
+    supply) average of their 7-day pct change z-scores. The combined
+    z-score is what the scoring component reads.
+
+    Returns::
+
+        {
+          'snapshot': {'USDT': {...}, 'USDC': {...}},  # current state
+          'usdt_flow': {z_score, latest_pct_change, ...} or None,
+          'usdc_flow': {...},
+          'combined_z': float or None,        # supply-weighted average z
+          'combined_pct_7d': float or None,   # supply-weighted average 7d pct change
+        }
+    """
+    cache_key = "agg_stablecoin_flow_v1"
+    cached = _cache.get("binance_funding", cache_key, ttl=3600)
+    if cached is not None:
+        return cached
+
+    snapshot = get_stablecoin_snapshot(("USDT", "USDC"))
+    usdt_hist = get_stablecoin_history("USDT", days=120)
+    usdc_hist = get_stablecoin_history("USDC", days=120)
+    usdt_flow = stablecoin_flow_z_score(usdt_hist, window=7) if not usdt_hist.empty else None
+    usdc_flow = stablecoin_flow_z_score(usdc_hist, window=7) if not usdc_hist.empty else None
+
+    weights = {}
+    if "USDT" in snapshot:
+        weights["USDT"] = float(snapshot["USDT"]["circulating"])
+    if "USDC" in snapshot:
+        weights["USDC"] = float(snapshot["USDC"]["circulating"])
+    total_w = sum(weights.values())
+
+    combined_z = None
+    combined_pct = None
+    if total_w > 0:
+        wsum = 0.0
+        zsum = 0.0
+        psum = 0.0
+        if usdt_flow is not None and "USDT" in weights:
+            wsum += weights["USDT"]
+            zsum += float(usdt_flow["z_score"]) * weights["USDT"]
+            psum += float(usdt_flow["latest_pct_change"]) * weights["USDT"]
+        if usdc_flow is not None and "USDC" in weights:
+            wsum += weights["USDC"]
+            zsum += float(usdc_flow["z_score"]) * weights["USDC"]
+            psum += float(usdc_flow["latest_pct_change"]) * weights["USDC"]
+        if wsum > 0:
+            combined_z = zsum / wsum
+            combined_pct = psum / wsum
+
+    out: Dict[str, Any] = {
+        "snapshot": snapshot,
+        "usdt_flow": usdt_flow,
+        "usdc_flow": usdc_flow,
+        "combined_z": combined_z,
+        "combined_pct_7d": combined_pct,
+    }
+    _cache.put("binance_funding", cache_key, out)
+    return out
 
 
 def get_funding_history(symbol: str = "BTCUSDT", limit: int = 100) -> pd.DataFrame:

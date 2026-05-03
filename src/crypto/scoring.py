@@ -24,15 +24,16 @@ import pandas as pd
 from . import data_fetching as _df
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "iv_rank":             1.0 / 9,
-    "vrp":                 1.0 / 9,
-    "term_structure":      1.0 / 9,
-    "skew":                1.0 / 9,
-    "funding_z":           1.0 / 9,
-    "basis":               1.0 / 9,
-    "funding_divergence":  1.0 / 9,
-    "oi_surge":            1.0 / 9,
-    "liquidity":           1.0 / 9,
+    "iv_rank":             1.0 / 10,
+    "vrp":                 1.0 / 10,
+    "term_structure":      1.0 / 10,
+    "skew":                1.0 / 10,
+    "funding_z":           1.0 / 10,
+    "basis":               1.0 / 10,
+    "funding_divergence":  1.0 / 10,
+    "oi_surge":            1.0 / 10,
+    "stablecoin_flow":     1.0 / 10,
+    "liquidity":           1.0 / 10,
 }
 
 
@@ -229,6 +230,26 @@ def score_funding_divergence(aggregated_funding: Optional[Dict[str, Any]]) -> fl
     return _clip01(score)
 
 
+def score_stablecoin_flow(combined_z: Optional[float]) -> float:
+    """Score stablecoin supply flow (USDT + USDC weighted z-score).
+
+    Stablecoin supply expansion historically leads BTC by 1-3 days
+    (capital coming on-chain → buying pressure). Contraction on
+    redemption events leads to selling pressure on a similar lag.
+
+    Like other "magnitude" components, score rises with |z| —
+    extreme moves in EITHER direction are signal. The directional
+    bias is captured by the strategy module's regime fit, not here.
+
+    |z| < 0.5  → 0.5 (no signal)
+    |z| ≈ 1.5  → 0.8 (meaningful flow)
+    |z| ≥ 2.5  → 0.95 (saturated)
+    """
+    if combined_z is None or not math.isfinite(combined_z):
+        return 0.5
+    return _clip01(0.5 + 0.5 * math.tanh(abs(float(combined_z)) / 1.5))
+
+
 def score_oi_surge(oi_z: Optional[float]) -> float:
     """Score open-interest surge magnitude.
 
@@ -281,6 +302,7 @@ def score_chain(
     regime_multipliers: Optional[Dict[str, float]] = None,
     aggregated_funding: Optional[Dict[str, Any]] = None,
     oi_z: Optional[float] = None,
+    stablecoin_z: Optional[float] = None,
 ) -> pd.DataFrame:
     """Score every contract in the chain. Adds per-component columns and quality_score.
 
@@ -314,6 +336,7 @@ def score_chain(
     s_basis              = score_basis(funding)
     s_funding_divergence = score_funding_divergence(aggregated_funding)
     s_oi_surge           = score_oi_surge(oi_z)
+    s_stablecoin_flow    = score_stablecoin_flow(stablecoin_z)
 
     df = chain.copy()
     df["iv_rank_score"]            = s_iv_rank
@@ -324,6 +347,7 @@ def score_chain(
     df["basis_score"]              = s_basis
     df["funding_divergence_score"] = s_funding_divergence
     df["oi_surge_score"]           = s_oi_surge
+    df["stablecoin_flow_score"]    = s_stablecoin_flow
     df["liquidity_score"]          = df.apply(score_liquidity, axis=1)
 
     df["quality_score"] = (
@@ -335,6 +359,7 @@ def score_chain(
         + w["basis"]              * df["basis_score"]
         + w["funding_divergence"] * df["funding_divergence_score"]
         + w["oi_surge"]           * df["oi_surge_score"]
+        + w["stablecoin_flow"]    * df["stablecoin_flow_score"]
         + w["liquidity"]          * df["liquidity_score"]
     )
     return df

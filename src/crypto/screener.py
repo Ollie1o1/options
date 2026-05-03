@@ -73,7 +73,7 @@ def _chain_quality_score(scored_chain: pd.DataFrame) -> float:
         return 0.5
     cols = ["iv_rank_score", "vrp_score", "term_structure_score", "skew_score",
             "funding_z_score", "basis_score", "funding_divergence_score",
-            "oi_surge_score"]
+            "oi_surge_score", "stablecoin_flow_score"]
     vals = [float(scored_chain[c].iloc[0]) for c in cols if c in scored_chain.columns]
     return sum(vals) / len(vals) if vals else 0.5
 
@@ -91,6 +91,7 @@ def _print_chain_diagnostics(scored: pd.DataFrame) -> None:
         ("basis_score",              "Basis"),
         ("funding_divergence_score", "FundDiv"),
         ("oi_surge_score",           "OI"),
+        ("stablecoin_flow_score",    "StableFlow"),
     ]
     parts = []
     for col, label in cols:
@@ -126,6 +127,10 @@ def _scan_currency(currency: str) -> Optional[dict]:
     oi_hist = _df.get_oi_history(fsym, days=30)
     oi_z = _df.oi_z_score(oi_hist) if oi_hist is not None and not oi_hist.empty else None
 
+    print("  Fetching stablecoin supply flow (USDT + USDC)...")
+    stable_flow = _df.get_aggregated_stablecoin_flow()
+    stable_z = stable_flow.get("combined_z") if stable_flow else None
+
     btc_history = history if currency.upper() == "BTC" else _df.get_spot_history("BTC", days=400)
     regime = _regime.classify_btc(btc_history) if btc_history is not None and not btc_history.empty else None
     _print_regime(regime)
@@ -137,12 +142,23 @@ def _scan_currency(currency: str) -> Optional[dict]:
         regime_multipliers=regime_mults,
         aggregated_funding=aggregated,
         oi_z=oi_z,
+        stablecoin_z=stable_z,
     )
     _print_chain_diagnostics(scored)
     if oi_z is not None:
         oi_dir = "build-up" if oi_z > 0 else "unwind"
         oi_color = "BRIGHT_RED" if abs(oi_z) > 1.5 else ("BRIGHT_YELLOW" if abs(oi_z) > 1.0 else "DIM")
         print(f"  OI z-score:     {_color(f'{oi_z:+.2f}σ', oi_color, bold=True)}  ({oi_dir} vs 30d)")
+    if stable_z is not None:
+        stable_pct = stable_flow.get("combined_pct_7d", 0) or 0
+        stable_dir = "expansion" if stable_z > 0 else "contraction"
+        stable_color = "BRIGHT_GREEN" if stable_z > 1.5 else (
+            "BRIGHT_RED" if stable_z < -1.5 else (
+                "BRIGHT_YELLOW" if abs(stable_z) > 1.0 else "DIM"
+            )
+        )
+        print(f"  Stablecoin flow: {_color(f'{stable_z:+.2f}σ', stable_color, bold=True)} "
+              f" (7d {stable_pct:+.3%}, {stable_dir} vs 120d)")
 
     # Auto-snapshot today's chain for the backtester to replay later.
     try:
@@ -504,6 +520,47 @@ def _present_scan(scan: dict) -> None:
             _print_long_premium_table(df, strat_name, currency)
 
 
+def _print_stablecoin_section() -> None:
+    """Macro flow signal — supply expansion leads BTC by 1-3 days."""
+    flow = _df.get_aggregated_stablecoin_flow()
+    if not flow:
+        return
+    snap = flow.get("snapshot") or {}
+    print()
+    print(f"  {_color('STABLECOIN SUPPLY (DefiLlama)', 'BRIGHT_CYAN', bold=True)}")
+    header = f"    {'Coin':<6} {'Supply':>14} {'24h':>9} {'7d':>9} {'30d':>9}"
+    print(_color(header, "BOLD", bold=True))
+    print("    " + "─" * (len(header) - 4))
+    for sym in ("USDT", "USDC"):
+        s = snap.get(sym)
+        if not s:
+            continue
+        cur_b = s["circulating"] / 1e9
+        d24 = s.get("pct_change_24h") or 0
+        d7  = s.get("pct_change_7d")  or 0
+        d30 = s.get("pct_change_30d") or 0
+        d24_color = "BRIGHT_GREEN" if d24 > 0.001 else ("BRIGHT_RED" if d24 < -0.001 else "WHITE")
+        d7_color  = "BRIGHT_GREEN" if d7  > 0.005 else ("BRIGHT_RED" if d7  < -0.005 else "WHITE")
+        d30_color = "BRIGHT_GREEN" if d30 > 0.020 else ("BRIGHT_RED" if d30 < -0.020 else "WHITE")
+        print(f"    {sym:<6} ${cur_b:>12.2f}B "
+              f"{_color(f'{d24:>+8.3%}', d24_color)} "
+              f"{_color(f'{d7:>+8.3%}', d7_color)} "
+              f"{_color(f'{d30:>+8.3%}', d30_color)}")
+    z = flow.get("combined_z")
+    pct7 = flow.get("combined_pct_7d")
+    if z is not None and pct7 is not None:
+        z_color = "BRIGHT_GREEN" if z > 1.5 else (
+            "BRIGHT_RED" if z < -1.5 else (
+                "BRIGHT_YELLOW" if abs(z) > 1.0 else "DIM"
+            )
+        )
+        direction = "expansion" if z > 0 else "contraction"
+        z_str = f"{z:+.2f}σ ({direction} vs 120d)"
+        print()
+        print(f"    Combined 7d flow z-score: {_color(z_str, z_color, bold=True)}")
+        print(f"    Supply-weighted 7d Δ: {pct7:+.3%}")
+
+
 def _funding_basis_dashboard() -> None:
     _banner("FUNDING / BASIS / OI MONITOR  —  Binance · Bybit · OKX · dYdX")
     for currency in ("BTC", "ETH"):
@@ -567,12 +624,14 @@ def _funding_basis_dashboard() -> None:
             )
             oi_str = f"{oi_z:+.2f}σ ({oi_dir} vs 30d)"
             print(f"    OI z-score (Binance): {_color(oi_str, oi_color, bold=True)}")
+    _print_stablecoin_section()
     print()
     print(_color("  NOTES", "DIM"))
     print("  • |annualized funding| > 10% sustained → cash-and-carry (long spot, short perp)")
     print("  • Cross-venue spread > 5% annualized → potential perp-spot or perp-perp arb")
     print("  • OI |z| > 1.5 + extreme funding → crowded; fade-the-crowd setup")
     print("  • Negative funding + OI unwind → liquidations clearing; mean-revert setup")
+    print("  • Stablecoin |z| > 1.5: expansion → bullish lead 1-3d, contraction → bearish")
     print()
 
 
