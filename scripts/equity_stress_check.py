@@ -84,12 +84,33 @@ def main() -> int:
     if target.empty:
         print("UNSAFE  -20%/+10pp scenario row missing from stress grid")
         return 0
-    worst = float(target["pnl_pct_of_book"].iloc[0])
+    stress_usd = float(target["total_pnl_usd"].iloc[0])
+
+    # `pnl_pct_of_book` uses sum-of-entry-prices as denominator, which
+    # understates capital at risk for credit spreads (entry = credit, not
+    # max-loss). For a stress GATE we want stress-dollars / total cap-on-
+    # losses, so a -100% reading means "this scenario eats the entire
+    # capped tail-risk budget".
+    cap_total = 0.0
+    for t in open_trades:
+        strat = (t.get("strategy_name") or "").lower()
+        ml = t.get("max_loss_usd")
+        ep = t.get("entry_price") or 0.0
+        if "iron condor" in strat or "bull put" in strat or "bear call" in strat:
+            cap_total += float(ml) if ml not in (None, 0) else abs(ep) * 100.0
+        elif strat.startswith("long"):
+            cap_total += abs(ep) * 100.0       # max loss = full debit
+        elif "short" in strat:
+            cap_total += abs(ep) * 100.0 * 3.0 # naked short: assume 3× premium adverse
+        else:
+            cap_total += abs(ep) * 100.0
+    cap_total = max(cap_total, 1.0)
+    worst = stress_usd / cap_total
 
     if worst < -threshold:
-        print(f"UNSAFE  worst={worst:+.2%}  threshold={-threshold:+.2%}")
+        print(f"UNSAFE  worst={worst:+.2%}  threshold={-threshold:+.2%}  stress=${stress_usd:,.0f}  cap=${cap_total:,.0f}")
     else:
-        print(f"SAFE    worst={worst:+.2%}  threshold={-threshold:+.2%}")
+        print(f"SAFE    worst={worst:+.2%}  threshold={-threshold:+.2%}  stress=${stress_usd:,.0f}  cap=${cap_total:,.0f}")
     return 0
 
 
