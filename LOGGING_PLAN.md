@@ -1,5 +1,5 @@
 # Trade Logging & Calibration Plan
-**Updated:** 2026-04-30
+**Updated:** 2026-05-05
 **Goal:** Accumulate the closed-trade ledger needed to calibrate `composite_weights`, `credit_spread_weights`, and `iron_condor_weights` so the screener actually picks better contracts. Path to "good data" = enough volume + enough variance + zero anomalies.
 
 ---
@@ -57,6 +57,10 @@ Components with zero variance (always store as constant — already weighted at 
 | `RLIMIT_NOFILE` bump to 8192 | Prevents `[Errno 24] Too many open files` mid-scan on macOS | `src/options_screener.py main()` |
 | Daily exit enforcer | Auto-closes anything past TP/stop/time-exit | `scripts/enforce_exits.sh` |
 | Weekly calibration snapshot | Runs `--calibrate`, appends per-component IC to `logs/calibration_history.tsv` so drift is plottable | `scripts/calibrate_snapshot.sh` |
+| `equity.auto_log_enabled` | Master off-switch for the auto-log driver (default `false`). Flip to `true` in `config.json` to start the M-F 10:30/12:30/14:15 cron loop. | `config.json` |
+| `equity.stress_gate_pct_book` | Skip threshold for the stress gate (% of book the –20%/+10pp loss is allowed to be). Default `100.0`. | `config.json` |
+| Equity auto-log wrapper | Cron-driven: off-switch → weekday → RTH → stress → clock→mode → `run.py [mode] --1 --no-ai` | `scripts/auto_log_equity.sh` |
+| Equity stress check helper | Prints `SAFE` / `UNSAFE` based on portfolio –20%/+10pp scenario vs the configured threshold | `scripts/equity_stress_check.py` |
 
 **Cron lines to install** (one-time, via `crontab -e`):
 
@@ -66,11 +70,29 @@ Components with zero variance (always store as constant — already weighted at 
 
 # Weekly calibration snapshot (Sundays 18:13 ET)
 13 18 * * 0 /Users/ollie/Desktop/options/scripts/calibrate_snapshot.sh >> /Users/ollie/Desktop/options/logs/calibrate.log 2>&1
+
+# Equity auto-log driver — M-F three runs (off-switch in config.json, default dormant)
+30 10 * * 1-5 /Users/ollie/Desktop/options/scripts/auto_log_equity.sh >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
+30 12 * * 1-5 /Users/ollie/Desktop/options/scripts/auto_log_equity.sh >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
+15 14 * * 1-5 /Users/ollie/Desktop/options/scripts/auto_log_equity.sh >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
 ```
 
 ---
 
 ## Per-Session Routine (revised after 4 days of running)
+
+**As of 2026-05-05, this rotation is automated** by
+`scripts/auto_log_equity.sh` running on cron (M-F at 10:30 / 12:30 /
+14:15 ET). The off-switch is `equity.auto_log_enabled` in
+`config.json` (default `false` — flip to `true` to start). The stress
+gate (`equity.stress_gate_pct_book`, default `100.0`) blocks runs
+while the book's –20%/+10pp scenario loss exceeds 100% of book — so
+when the book is over-leveraged, the cron self-suppresses until you
+close some positions.
+
+The manual schedule below is preserved as documentation of what the
+cron does each weekday. You can still run any of these by hand if the
+off-switch is off or you want a one-off scan.
 
 Run scans **during market hours** (10:00–15:30 ET — avoid open/close volatility AND post-close stale-quote fills). Outside RTH every contract gets a synthetic ±5% bid/ask and the liquidity filter kills the scan.
 

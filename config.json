@@ -360,5 +360,9 @@
   "crypto": {
     "auto_log_enabled": false,
     "min_auto_log_score": 0.50
+  },
+  "equity": {
+    "auto_log_enabled": false,
+    "stress_gate_pct_book": 100.0
   }
 }
