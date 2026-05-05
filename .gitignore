@@ -32,6 +32,7 @@ temp_*.py
 # Allow main unit tests
 !tests/
 !tests/*.py
+!tests/**/*.py
 
 # OS specific
 .DS_Store
@@ -47,3 +48,9 @@ paper_trades.db.calibration_marker.json
 
 # Crypto chain snapshot accumulator (user data)
 data/crypto_snapshots/
+
+# Local-only planning + spec docs (kept on disk, never tracked)
+docs/superpowers/
+
+# Runtime state (not source)
+.oi_snapshot.json

@@ -34,10 +34,9 @@ except ImportError:
     HAS_FMT = False
 
 
-_CRYPTO_DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "paper_trades_crypto.db",
-)
+# Fixed absolute path resolution to prevent "ghost" databases when running from different dirs
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_CRYPTO_DB_PATH = os.path.join(_PROJECT_ROOT, "paper_trades_crypto.db")
 
 
 def _banner(text: str) -> None:
@@ -316,7 +315,7 @@ def _print_recommendations_banner(regime_label: str) -> None:
     print(f"  Recommended for {regime_label.upper()}:  {_color(rec_str, 'BRIGHT_GREEN', bold=True)}")
 
 
-def _log_long_premium(row: pd.Series, currency: str) -> None:
+def _log_long_premium(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
     try:
         from src.paper_manager import PaperManager
         pm = PaperManager(db_path=_CRYPTO_DB_PATH)
@@ -342,7 +341,7 @@ def _log_long_premium(row: pd.Series, currency: str) -> None:
         "vrp_score":            float(row.get("vrp_score") or 0),
         "term_structure_score": float(row.get("term_structure_score") or 0),
         "skew_align_score":     float(row.get("skew_score") or 0),
-        "weight_profile":       "crypto_baseline",
+        "weight_profile":       weight_profile,
     }
     try:
         if pm.log_trade_if_new(trade):
@@ -355,7 +354,7 @@ def _log_long_premium(row: pd.Series, currency: str) -> None:
         print(f"  Log failed: {type(e).__name__}: {e}")
 
 
-def _log_calendar(row: pd.Series, currency: str) -> None:
+def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
     """Log a calendar (time spread) to the crypto paper ledger.
 
     The current paper_trades schema doesn't have a back_expiration column,
@@ -390,7 +389,7 @@ def _log_calendar(row: pd.Series, currency: str) -> None:
         "entry_iv": float(row.get("front_iv") or 0),
         "long_strike": strike,                    # same strike (single-strike calendar)
         "spread_width": float(days_between),      # repurposed: days between expirations
-        "weight_profile": "crypto_baseline",
+        "weight_profile": weight_profile,
     }
     try:
         if pm.log_trade_if_new(trade):
@@ -403,7 +402,7 @@ def _log_calendar(row: pd.Series, currency: str) -> None:
         print(f"  Log failed: {type(e).__name__}: {e}")
 
 
-def _log_iron_condor(row: pd.Series, currency: str) -> None:
+def _log_iron_condor(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
     try:
         from src.paper_manager import PaperManager
         pm = PaperManager(db_path=_CRYPTO_DB_PATH)
@@ -423,7 +422,7 @@ def _log_iron_condor(row: pd.Series, currency: str) -> None:
         "max_profit": float(row["max_profit"]),
         "max_risk":   float(row["max_loss"]),
         "quality_score": float(row["score"]),
-        "weight_profile": "crypto_baseline",
+        "weight_profile": weight_profile,
     }
     try:
         if pm.log_iron_condor_if_new(condor):
@@ -438,7 +437,7 @@ def _log_iron_condor(row: pd.Series, currency: str) -> None:
         print(f"  Log failed: {type(e).__name__}: {e}")
 
 
-def _log_credit_spread(row: pd.Series, currency: str) -> None:
+def _log_credit_spread(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
     try:
         from src.paper_manager import PaperManager
         pm = PaperManager(db_path=_CRYPTO_DB_PATH)
@@ -461,7 +460,7 @@ def _log_credit_spread(row: pd.Series, currency: str) -> None:
         "max_profit": float(row["max_profit"]),
         "max_loss": float(row["max_loss"]),
         "quality_score": float(row["score"]),
-        "weight_profile": "crypto_baseline",
+        "weight_profile": weight_profile,
     }
     try:
         if pm.log_spread_if_new(spread):

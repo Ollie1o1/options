@@ -356,5 +356,9 @@
     "rvol": 0.2,
     "momentum": 0.15,
     "liquidity": 0.1
+  },
+  "crypto": {
+    "auto_log_enabled": false,
+    "min_auto_log_score": 0.50
   }
 }

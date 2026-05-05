@@ -1,7 +1,7 @@
 # Crypto Strategist — Build Plan & Progress
 
 **Started:** 2026-05-01
-**Last updated:** 2026-05-02
+**Last updated:** 2026-05-04
 
 This is the running plan for the crypto-mode addition to the options screener.
 Equity mode `[1]` stays as-is; crypto mode `[2]` is the new system.
@@ -129,45 +129,64 @@ Treat the backtester as a *floor* on long-premium performance and a
   `scripts/enforce_exits_crypto.sh`. Cron line installed at `:05` every
   hour. Handles long premium / credit spreads / iron condors / calendars
   via Deribit pricing with same TP/SL/time-exit rules as equity.
-- [ ] Calibration snapshot weekly cron for crypto DB
-- [x] Update `crontab -l` with the new hourly crypto line
+- [x] Calibration snapshot weekly cron for crypto DB ✅ —
+  `scripts/calibrate_snapshot_crypto.sh` (Sun 18:30 ET, after the
+  equity calibrate at 18:13). Crypto-aware integrity check: skips the
+  spread-PnL floor for `Calendar%` rows (they repurpose `spread_width`
+  to encode days-between-expirations). Writes
+  `logs/calibration_crypto_<DATE>.txt` and appends per-component IC to
+  `logs/calibration_history_crypto.tsv` for drift tracking.
+- [x] Update `crontab -l` with the new hourly crypto line + weekly
+  crypto calibrate line
 
-**Current crontab (3 jobs):**
+- [x] Auto-log driver (`src/crypto/auto_logger.py`) installed with cron
+  line `0 */4 * * * auto_log_crypto.sh`. Off-switch defaults to `false`;
+  flip `crypto.auto_log_enabled` to `true` in `config.json` to start the
+  loop. See `## Auto-entry / auto-log cron — ACTIVE (paper-only)` below.
+
+**Current crontab (5 jobs):**
 ```
-7 14 * * 1-5  enforce_exits.sh         # equity, weekday afternoons
-13 18 * * 0   calibrate_snapshot.sh    # equity, Sunday evenings
-5 * * * *     enforce_exits_crypto.sh  # crypto, every hour 24/7
+7 14 * * 1-5  enforce_exits.sh                # equity, weekday afternoons
+13 18 * * 0   calibrate_snapshot.sh           # equity, Sunday evenings
+5 * * * *     enforce_exits_crypto.sh         # crypto, every hour 24/7
+30 18 * * 0   calibrate_snapshot_crypto.sh    # crypto, Sunday evenings
+0 */4 * * *   auto_log_crypto.sh              # crypto auto-log, every 4h (off-switch in config)
 ```
 
 ---
 
-## Tier 1.2–1.5 — IN PROGRESS / TODO
+## Tier 1.2–1.5 — DONE
 
 These add orthogonal signals that the existing system can't see, and
-construct trades the system flags but doesn't execute.
+construct trades the system flags but doesn't execute. All four
+shipped between 2026-05-02 and 2026-05-04.
 
-### Tier 1.2 — Cross-exchange funding aggregation 🚧 NEXT
+### Tier 1.2 — Cross-exchange funding aggregation ✅
 **Why**: Binance funding alone misses divergence — when one venue's funding
 is materially different from others, that's an arb signal AND a leading
 indicator of perp-spot mean reversion.
 
-**Build**: REST pulls from Binance + Bybit + OKX + dYdX. Aggregate into a
-single funding view. Compute cross-exchange divergence (max-min, std,
-z-score). New signal `funding_divergence` for scoring. Display in the
-funding/basis dashboard with all exchanges side-by-side.
+**Built**: REST pulls from Binance + Bybit + OKX + dYdX in
+`data_fetching.fetch_aggregated_funding()`. Returns per-venue rates plus
+aggregate stats (mean, std, max-min spread, divergence z). New
+`score_funding_divergence` component (weight 1/10) lights up when the
+spread between venues is large relative to its rolling distribution.
+Surfaced in:
+- Chain signals diagnostic row (column "FundDiv")
+- Funding/basis dashboard (per-venue rates side-by-side + divergence z)
+- Backtester chain-quality computation
 
-**Estimate**: ~250 LOC, half a day.
-
-### Tier 1.3 — OI tracking + surge detector
+### Tier 1.3 — OI tracking + surge detector ✅
 **Why**: OI surges with rising prices = leverage building (fade signal). OI
 drops with falling prices = liquidations clearing (mean-reversion signal).
 Combined with funding extremes, this is real fade-the-crowd alpha.
 
-**Build**: Pull OI by exchange, persist daily into a small SQLite table,
-compute z-score over 30-day window. Surface in chain signals row + as a
-new scoring component.
-
-**Estimate**: ~200 LOC, half a day.
+**Built**: `data_fetching.fetch_oi_snapshot()` pulls OI from all 4 venues,
+persisted daily to `crypto_cache.db`. `oi_z_score()` computes a 30-day
+rolling z. New `score_oi_surge` component (weight 1/10) feeds the composite
+score, with magnitude-based scoring so the strategy module's regime-fit
+handles direction. Surfaced in chain-signals diagnostic row (column "OI"),
+live scan print, and backtester.
 
 ### Tier 1.4 — Stablecoin supply tracker ✅
 **Why**: USDT/USDC supply expansion has historically led BTC by 1-3 days.
@@ -315,3 +334,95 @@ python3 -m src.crypto.screener
 # Backtest from inside crypto menu
 python3 run.py → [2] → [6] → BTC → 365 → 7
 ```
+
+---
+
+## Auto-entry / auto-log cron — ACTIVE (paper-only)
+
+**Status:** built and installed (2026-05-04). Off-switch defaults to
+`false` — flip `crypto.auto_log_enabled` to `true` in `config.json` to
+start the loop. Driver: `src/crypto/auto_logger.py`. Wrapper:
+`scripts/auto_log_crypto.sh`. Cron: `0 */4 * * *` (every 4 hours).
+
+### Why this is now active for paper
+
+The original deferral was framed around real-money risk (Phase 7). For
+paper-only sample accumulation it is appropriate to enable now: paper
+cannot blow up the account, and the closed-trade volume is itself the
+gate. Real-money activation (Phase 7) still requires the original gates
+plus an auto-log track record.
+
+The intuition-building tradeoff is real but accepted: the bottleneck for
+calibration is closed-trade volume, not screener-decision practice. The
+weekly calibration snapshot replaces the daily review.
+
+### Built decisions
+
+| # | Decision | Value |
+|---|---|---|
+| 1 | Currencies | BTC and ETH |
+| 2 | Cadence | Every 4 hours (6 runs/day) |
+| 3 | Picks per run | 1 per currency (max 12/day before per-day cap) |
+| 4 | Selection rule | Single highest score across all surfaced strategy buckets |
+| 5 | Quality floor | `crypto.min_auto_log_score` (default `0.50`) |
+| 6 | Per-day cap | 4 trades per currency per UTC day |
+| 7 | Concentration cap | Skip if currency already has ≥3 open positions |
+| 8 | Regime sanity | Skip if regime classifier returns `None` |
+| 9 | Off-switch | `crypto.auto_log_enabled` (default `false`) |
+| 10 | Dry-run period | None — writes directly to live ledger |
+
+### Built artifacts
+
+- `src/crypto/auto_logger.py` — driver + safeguards + CLI
+- `scripts/auto_log_crypto.sh` — cron wrapper
+- `tests/crypto/test_auto_logger.py` — 7 unit tests
+- `config.json` — new `crypto.auto_log_enabled` and
+  `crypto.min_auto_log_score` keys
+- crontab line: `0 */4 * * * auto_log_crypto.sh`
+- Auto-logged rows tagged via `weight_profile = 'crypto_auto_v1'` so
+  manual logs (`crypto_baseline`) are distinguishable in IC analysis
+
+### Mandatory safeguards (build alongside the auto-log mode)
+
+1. **Quality floor**: skip a strategy bucket if its top score is below
+   `config["crypto"]["min_auto_log_score"]` (recommended initial: 0.50).
+2. **Stress-test gate**: skip the entire run if the crypto portfolio's
+   current −20%/+20pp scenario loss exceeds 100% of nominal book.
+3. **Per-day cap**: max N new logs per cron run (recommended: 2 per
+   currency = 4 total). Prevents over-logging in calibration windows.
+4. **Regime sanity**: skip if the regime classifier returned UNKNOWN
+   (insufficient history).
+5. **Concentration limit**: skip if the same ticker already has ≥3 open
+   positions in `paper_trades_crypto.db`.
+6. **Dry-run shadow ledger**: first 30 days of cron auto-log writes to
+   `paper_trades_crypto.db.dryrun` instead of the real ledger so you
+   can compare auto-log decisions against your manual decisions before
+   committing to the live ledger.
+7. **Stable score floor**: a 7-day rolling minimum on the score floor —
+   don't auto-log on a regime change day where scores haven't settled.
+
+### Off-switch
+
+The first thing the auto-log mode should check (before anything else):
+read `config["crypto"]["auto_log_enabled"]` (default `false`). One-line
+config change disables the entire auto-log cron without touching
+crontab.
+
+### Why this list of safeguards
+
+Each one corresponds to a specific failure mode we've already seen in
+the equity ledger:
+- **Quality floor** → equity Long Put PF 0.69 was visible because
+  scores were average; auto-logging would have made it worse.
+- **Stress gate** → equity portfolio hit −183% of book stress in
+  late April; user manually backed off `-ss`. Cron wouldn't have.
+- **Per-day cap** → ORCL got logged 6× in a single scan once; dedup
+  filter exists but a quality-floor breach could still over-log.
+- **Concentration** → 23 ICs accumulated in 4 days created the
+  −$37k stress scenario.
+- **Dry-run** → catches the entire class of "system thought it was
+  reasonable but the data was malformed" bugs that have come up
+  three times in this build.
+
+Build the safeguards FIRST, then the auto-log mode, then enable the
+cron. Reverse order = blow up the ledger.
