@@ -332,12 +332,20 @@ _CREDIT_STRUCTURES = {"Bull Put", "Bear Call", "Iron Condor"}
 _SHORT_SINGLE_LEGS = {"Short Put", "Short Call"}
 
 
+def _get_multiplier(ticker: str) -> float:
+    """Return the contract multiplier: 1.0 for crypto, 100.0 for stocks."""
+    if (ticker or "").upper() in ("BTC", "ETH"):
+        return 1.0
+    return 100.0
+
+
 def _sanitize_close_values(
     strategy_name: str,
     entry_price: float,
     exit_price: float,
     pnl_pct: float,
     max_loss_floor: float | None = None,
+    multiplier: float = 100.0,
 ) -> tuple[float, float, float]:
     """Clamp close-time values to physically possible bounds and derive pnl_usd.
 
@@ -378,7 +386,7 @@ def _sanitize_close_values(
     else:
         clamped_pct = max(-1.0, raw_pct)  # loss capped, gain unbounded (long premium)
 
-    pnl_usd = round(float(entry_price) * clamped_pct * 100.0, 2)
+    pnl_usd = round(float(entry_price) * clamped_pct * multiplier, 2)
     return safe_exit, clamped_pct, pnl_usd
 
 
@@ -1166,6 +1174,7 @@ class PaperManager:
                         row["strategy_name"] or "", entry_credit,
                         current_credit_to_close, pnl_realistic,
                         max_loss_floor=max_loss_floor,
+                        multiplier=_get_multiplier(ticker),
                     )
                     with self._get_connection() as conn:
                         conn.execute(
@@ -1218,6 +1227,7 @@ class PaperManager:
                     safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
                         row["strategy_name"] or "", entry_price,
                         current_price, pnl_realistic,
+                        multiplier=_get_multiplier(ticker),
                     )
                     update_query = """
                     UPDATE trades

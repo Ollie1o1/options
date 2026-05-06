@@ -35,7 +35,8 @@ from src.paper_manager import (
 from . import data_fetching as _df
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Fixed absolute path resolution to ensure consistency with the main screener
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _CRYPTO_DB_PATH = os.path.join(_PROJECT_ROOT, "paper_trades_crypto.db")
 _CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config.json")
 

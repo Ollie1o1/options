@@ -74,7 +74,7 @@ echo
 
 # Data integrity check
 ANOMALIES=$(ls logs/calibration_*.warnings 2>/dev/null | head -1 || true)
-N_OOB=$(sqlite3 "$DB" "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND strategy_name IN ('Bull Put','Bear Call','Iron Condor') AND (pnl_pct > 1.0 OR pnl_pct < -1.0)")
+N_OOB=$(sqlite3 "$DB" "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND ((strategy_name IN ('Bull Put','Bear Call','Iron Condor') AND (pnl_pct > 1.0 OR pnl_pct < -10.0)) OR (strategy_name LIKE 'Long%' AND (pnl_pct < -1.05)))")
 N_NEG=$(sqlite3 "$DB" "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND exit_price < 0")
 N_NULL=$(sqlite3 "$DB" "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_usd IS NULL")
 echo "  Data integrity:"

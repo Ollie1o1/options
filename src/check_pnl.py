@@ -83,6 +83,13 @@ except Exception:
 DB_PATH = "paper_trades.db"
 
 
+def _get_multiplier(ticker: str) -> float:
+    """Return the contract multiplier: 1.0 for crypto, 100.0 for stocks."""
+    if (ticker or "").upper() in ("BTC", "ETH"):
+        return 1.0
+    return 100.0
+
+
 def _width() -> int:
     try:
         return max(80, min(shutil.get_terminal_size(fallback=(100, 24)).columns, 120))
@@ -264,8 +271,9 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             is_short = _is_short(r.get("strategy_name", ""))
             pnl_ratio = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
 
-            # We don't have S_entry/S_exit stored, so use pnl_ratio * entry_price * 100 as actual P&L
-            actual_pnl = pnl_ratio * entry_price * 100
+            # We don't have S_entry/S_exit stored, so use pnl_ratio * entry_price * mult as actual P&L
+            mult = _get_multiplier(r.get("ticker", ""))
+            actual_pnl = pnl_ratio * entry_price * mult
 
             # Estimate days held
             try:
@@ -275,10 +283,10 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             except Exception:
                 days_held = 14  # fallback
 
-            # Theta P&L (daily theta * days held * 100 shares)
+            # Theta P&L (daily theta * days held * multiplier)
             # For short positions, theta P&L has opposite sign
             sign_mult = -1.0 if is_short else 1.0
-            theta_pnl = sign_mult * entry_theta * days_held * 100
+            theta_pnl = sign_mult * entry_theta * days_held * mult
 
             # For delta/gamma/vega, we'd need spot price change.
             # Approximate: actual - theta = delta+gamma+vega+residual
@@ -287,10 +295,10 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
 
             # Without spot price data, attribute remaining based on Greek magnitudes
             # Scale gamma to comparable units: gamma * S * typical_5pct_move
-            # (gamma is per-share per $1 move, so raw value is ~0.001-0.05)
+            # (gamma is per-share per $1 move)
             S_approx = float(stock_prices.get(r.get("ticker", ""), 100.0))
             abs_d = abs(entry_delta)
-            abs_g = 0.5 * abs(entry_gamma) * (S_approx * 0.05) ** 2 * 100  # quadratic: 0.5 * gamma * (ΔS)^2 * 100 shares
+            abs_g = 0.5 * abs(entry_gamma) * (S_approx * 0.05) ** 2 * mult  # quadratic: 0.5 * gamma * (ΔS)^2 * mult
             abs_v = abs(entry_vega)
             total_mag = abs_d + abs_g + abs_v
             if total_mag > 0:
@@ -421,10 +429,11 @@ def _print_portfolio_greeks(open_trades: list, width: int):
                 row_gamma += leg_qty * g
                 row_vega  += leg_qty * v
                 row_theta += leg_qty * t
+            mult = _get_multiplier(ticker)
             net_delta        += row_delta
-            net_gamma_dollar += 0.5 * row_gamma * (S * 0.01) ** 2 * 100
-            net_vega         += row_vega * 100
-            net_theta        += row_theta * 100
+            net_gamma_dollar += 0.5 * row_gamma * (S * 0.01) ** 2 * mult
+            net_vega         += row_vega * mult
+            net_theta        += row_theta * mult
             counted += 1
         except Exception as _greeks_exc:
             logging.getLogger(__name__).debug("Greeks computation failed for position: %s", _greeks_exc)
@@ -665,14 +674,15 @@ def view_portfolio():
             # as fully captured (pnl == credit). Guard against that.
             all_legs_priced = bool(leg_marks) and all(lp is not None and lp > 0 for _, lp in leg_marks)
 
+            mult = _get_multiplier(ticker)
             if structure == "single":
                 live_price = leg_marks[0][1] if leg_marks else None
                 live_str = f"${live_price:.2f}" if (live_price is not None and live_price > 0) else None
                 if live_price is not None and live_price > 0:
                     pnl_per = (entry_price - live_price) if short else (live_price - entry_price)
-                    pnl_usd_row = pnl_per * 100
+                    pnl_usd_row = pnl_per * mult
                     pnl_pct_row = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
-                    cost_basis = entry_price * 100
+                    cost_basis = entry_price * mult
                 else:
                     pnl_usd_row = None
                     pnl_pct_row = None
@@ -683,15 +693,15 @@ def view_portfolio():
                     # current_credit_to_close = short_now - long_now
                     current_credit = sum(-qty * lp for qty, lp in leg_marks)
                     pnl_per = entry_price - current_credit  # decay = profit for credit seller
-                    pnl_usd_row = pnl_per * 100
+                    pnl_usd_row = pnl_per * mult
                     pnl_pct_row = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
                     live_str = f"${current_credit:.2f}"
                     # Cost basis ≈ max_loss (true defined risk) for concentration math
                     ml_col = r.get("max_loss_usd")
                     try:
-                        cost_basis = abs(float(ml_col)) if ml_col not in (None, "", 0) else entry_price * 100
+                        cost_basis = abs(float(ml_col)) if ml_col not in (None, "", 0) else entry_price * mult
                     except (TypeError, ValueError):
-                        cost_basis = entry_price * 100
+                        cost_basis = entry_price * mult
                 else:
                     pnl_usd_row = None
                     pnl_pct_row = None
@@ -814,7 +824,8 @@ def view_portfolio():
             ticker_exp: dict = {}
             for r in open_trades:
                 t = r["ticker"]
-                ticker_exp[t] = ticker_exp.get(t, 0.0) + float(r["entry_price"]) * 100
+                mult = _get_multiplier(t)
+                ticker_exp[t] = ticker_exp.get(t, 0.0) + float(r["entry_price"]) * mult
             hot = {t: v / total_cost_usd for t, v in ticker_exp.items() if v / total_cost_usd > 0.40}
             if hot:
                 conc_msg = "  ⚠  Concentration risk: " + ", ".join(
@@ -851,12 +862,13 @@ def view_portfolio():
                 else:
                     total_max_loss += ml_val
             else:
-                # Single-leg: max loss = entry_price * 100 (for longs) or unlimited (shorts)
+                # Single-leg: max loss = entry_price * mult (for longs) or unlimited (shorts)
                 ep = abs(float(r.get("entry_price", 0)))
+                mult = _get_multiplier(r.get("ticker", ""))
                 if _is_short(sn):
                     has_undefined_risk = True
                 else:
-                    total_max_loss += ep * 100
+                    total_max_loss += ep * mult
 
         if total_max_loss > 0 or has_undefined_risk:
             if total_max_loss > 0:
@@ -924,16 +936,17 @@ def view_portfolio():
             # Use it to determine win/loss so the row count matches BY STRATEGY
             # and the IC analytics. Fall back to mark-to-market recomputation
             # only when DB lacks pnl_pct (historical rows).
+            mult = _get_multiplier(ticker)
             if r["pnl_pct"] is not None:
                 pnl_pct = pnl_ratio * 100
-                pnl_usd = pnl_ratio * entry_price * 100
+                pnl_usd = pnl_ratio * entry_price * mult
             elif exit_price > 0 and entry_price > 0:
                 is_short_closed = _is_short(str(r.get("strategy_name", "")))
                 if is_short_closed:
-                    pnl_usd = (entry_price - exit_price) * 100
+                    pnl_usd = (entry_price - exit_price) * mult
                 else:
-                    pnl_usd = (exit_price - entry_price) * 100
-                pnl_pct = pnl_usd / (entry_price * 100) * 100
+                    pnl_usd = (exit_price - entry_price) * mult
+                pnl_pct = pnl_usd / (entry_price * mult) * 100
             else:
                 pnl_usd = 0.0
                 pnl_pct = 0.0
@@ -1010,7 +1023,8 @@ def view_portfolio():
             cum_usd, peak_usd, max_dd_usd = 0.0, 0.0, 0.0
             for r in chrono:
                 ep = float(r["entry_price"]) if r["entry_price"] else 0.0
-                pnl_u = float(r["pnl_pct"]) * ep * 100 if ep > 0 else 0.0
+                mult = _get_multiplier(r.get("ticker", ""))
+                pnl_u = float(r["pnl_pct"]) * ep * mult if ep > 0 else 0.0
                 cum_usd += pnl_u
                 peak_usd = max(peak_usd, cum_usd)
                 max_dd_usd = max(max_dd_usd, peak_usd - cum_usd)
