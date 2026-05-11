@@ -1,0 +1,103 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+
+% Colors
+\definecolor{quantblue}{HTML}{003366}
+\definecolor{quantgold}{HTML}{B8860B}
+
+% Formatting
+\titleformat{\section}{\color{quantblue}\normalfont\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\color{quantblue}\normalfont\large\bfseries}{\thesubsection}{1em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textcolor{gray}{Quant Options Manual v1.0}}
+\lhead{\textcolor{gray}{Confidential - Strategy Document}}
+\rfoot{\thepage}
+
+\title{
+    \vspace{-1in}
+    \textbf{\color{quantblue}The Quantitative Options Screener}\\
+    \large \textit{Professional Trading Manual \& Strategy Guide}
+}
+\author{Chief Systems Engineer \& Lead Quant Researcher}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{tcolorbox}[colback=quantblue!5,colframe=quantblue,title=Executive Summary]
+This manual outlines the mathematical framework and operational procedures for executing and exiting options trades using the proprietary screener. It focuses on maximizing positive expectancy through signal calibration, volatility analysis, and rigorous risk management.
+\end{tcolorbox}
+
+\section{Core Signal Theory}
+Before executing a trade, a professional quant must understand the "why" behind the numbers. Our system focuses on four primary alpha-generating signals.
+
+\subsection{Relative Volume (rvol)}
+\textbf{Significance:} \textit{rvol} is the ratio of current contract volume to its 30-day moving average.
+\begin{itemize}
+    \item \textbf{rvol > 1.5:} This is the "Whale Signal." It indicates institutional accumulation or a massive catalyst brewing. When rvol spikes, the contract is likely to move violently as liquidity is being absorbed by large players.
+    \item \textbf{Strategy:} If rvol is high and the stock is breaking a resistance level, the probability of a "moonshot" (+100\%) increases significantly.
+\end{itemize}
+
+\subsection{Volatility Risk Premium (VRP)}
+VRP is the difference between \textit{Implied Volatility} (what the market expects) and \textit{Realized Volatility} (what actually happened).
+\begin{itemize}
+    \item \textbf{Positive VRP (+0.30 IC):} Our data shows this is our strongest predictor. It means the market is overestimating risk, allowing us to buy "fairly priced" options or sell "overpriced" ones with a statistical edge.
+\end{itemize}
+
+\subsection{The Bollinger Squeeze (is\_squeezing)}
+When the Bollinger Bands move inside the Keltner Channels, price energy is being coiled like a spring.
+\begin{itemize}
+    \item \textbf{Action:} A "Squeeze" followed by an rvol spike is the "Holy Grail" setup for a +100\% directional trade.
+\end{itemize}
+
+\section{The Pre-Trade Checklist}
+Never enter a trade based solely on a high Quality Score. Use this checklist for every sub-\$1,000 contract:
+
+\begin{enumerate}
+    \item \textbf{Quality Score > 0.75:} Ensure the technical signals are aligned.
+    \item \textbf{Spread Pct < 15\%:} Ensure you aren't losing too much to the Bid-Ask spread immediately.
+    \item \textbf{DTE > 21 Days:} For buying calls/puts, never buy "weekly" options unless it is a pure gamble. Professional edge requires at least 21--45 days for the move to develop.
+    \item \textbf{Liquidity Check:} Ensure volume > 100 on the specific contract.
+\end{enumerate}
+
+\section{Exit Strategies \& Risk Management}
+Winning is easy; closing is hard. Follow these three "Hard Rules" to protect your capital.
+
+\subsection{The 21-DTE "Cliff"}
+Time decay (Theta) is non-linear. It accelerates violently in the last 21 days of an option's life.
+\begin{tcolorbox}[colback=red!5,colframe=red!75!black,title=The Exit Rule]
+If a long call/put reaches 21 days to expiration and hasn't hit your profit target, \textbf{close it immediately.} Do not "hope" for a last-minute miracle; the math is against you.
+\end{tcolorbox}
+
+\subsection{Riding the Moonshot (The House Money Rule)}
+To hit +100\% or +200\% gains without losing your shirt:
+\begin{itemize}
+    \item \textbf{Target 1 (+50\%):} Sell 50\% of your position (if holding multiples) or move your stop-loss to entry price.
+    \item \textbf{Target 2 (+100\%):} Close half the remaining position. At this point, your initial investment is 100\% back in your pocket. You are now playing with "House Money."
+    \item \textbf{The Delta 80 Target:} If your contract reaches a Delta of 0.80, it is moving like the stock. Hold until the trend breaks (RSI < 50 or ADX < 20).
+\end{itemize}
+
+\subsection{The Stop-Loss Protocol}
+\begin{itemize}
+    \item \textbf{Hard Stop:} -50\% of entry price.
+    \item \textbf{Reasoning:} If an option is down 50\%, it needs a 100\% rally just to get back to even. The "Quant" move is to salvage the remaining 50\% and redeploy it into a fresh, high-probability scan result.
+\end{itemize}
+
+\section{Conclusion}
+Profitability is a function of discipline, not luck. By using the rvol whale signal, respecting the 21-DTE cliff, and aggressively cutting losses at 50\%, you transform options from "gambling" into a professional quantitative business.
+
+\end{document}

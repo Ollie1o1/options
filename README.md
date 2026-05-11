@@ -24,10 +24,11 @@ A Python-based options screening tool that identifies high-probability trading o
 7. [Paper Trading](#paper-trading)
 8. [Weight-Profile Auto-Logging](#weight-profile-auto-logging)
    - [Calibration tracking](#calibration-tracking)
-9. [Configuration](#configuration)
-10. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
-11. [Project Structure](#project-structure)
-12. [Roadmap](#roadmap)
+9. [Crypto Strategist (BTC / ETH options)](#crypto-strategist-btc--eth-options)
+10. [Configuration](#configuration)
+11. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
+12. [Project Structure](#project-structure)
+13. [Roadmap](#roadmap)
 
 ---
 
@@ -676,17 +677,69 @@ Once the paper-trade ledger has accumulated enough closed trades, the per-compon
 |---|---|
 | `scripts/calibration_status.sh` | One-page dashboard: closed-trade counts, per-strategy progress, apply-gate checklist, top-5 IC components, data integrity. Run anytime, no side effects. |
 | `python3 -m src.backtester --calibrate` | Read-only IC report against `paper_trades.db`. Run anytime to preview recommended weight changes. |
-| `python3 -m src.backtester --calibrate --apply` | Writes recommended weights into `config.json` (only run once you've crossed the gates in `LOGGING_PLAN.md`). |
+| `python3 -m src.backtester --calibrate --apply` | Writes recommended weights into `config.json` (only run once you've crossed the gates in `LOGGING_PLAN.md`). Auto-backs up to `config.bak.<timestamp>.json`. |
+| `docs/CALIBRATION_JOURNAL.md` | Append-only changelog of every `--calibrate --apply` event: IC snapshot, weight Δs, interpretation, revert procedure, known issues at time of apply. |
 | `scripts/enforce_exits.sh` | Wrapper around `--enforce-exits`. Install in cron for automatic daily TP/stop/time-exit closes. |
 | `scripts/calibrate_snapshot.sh` | Weekly snapshot — runs `--calibrate`, appends per-component IC drift to `logs/calibration_history.tsv`, integrity-checks the DB for out-of-bounds PnL or NULL `pnl_usd`. |
 | `logs/calibration_history.tsv` | Time series of per-component IC. Plot to see how signal stability changes as the corpus grows. |
 | `logs/calibration_<date>.warnings` | Created only when integrity-check finds an anomaly. Empty / absent = data is clean. |
+
+**Pre / Post-calibration cohort view.** From the equity screener main menu press `[7] PORTFOLIO` — you'll be prompted to choose:
+- `[1] Pre-calibration` — trades scored under the original hand-tuned weights (entry_id < first_post_entry_id)
+- `[2] Post-calibration` — trades scored under the most recent IC-tuned weights
+- `[A] All trades` (default) — full timeline with the calibration moment marked
+
+The cutoff is encoded by `entry_id` (not by date — since multiple trades can be logged on the same calendar day as a calibration apply). See `CALIBRATION_CUTOFFS` in `src/check_pnl.py` and `scripts/make_pnl_chart.py`. Add a new tuple to both files when you apply a new calibration.
+
+**P&L visualization.** Generate stand-alone SVG equity curves (no matplotlib dependency):
+
+```bash
+python scripts/make_pnl_chart.py                              # all-trade equity + crypto curves
+python scripts/make_pnl_chart.py --equity-only --cohort post  # post-calibration cohort only
+python scripts/make_pnl_chart.py --equity-only --cohort pre   # pre-calibration cohort only
+```
+
+Output lands in `reports/<book>_curve_<cohort>_<date>.svg`. The chart auto-refreshes when you use the menu cohort selector.
 
 Auto-log filters that affect the calibration corpus (toggle in `config.json`):
 
 - `auto_log_skip_long_puts: true` — Long Puts are silently filtered from `--auto-log` because their PF is 0.69 in the historical ledger and they're now disabled going forward. Auto-log line shows `filtered N Long Put(s)` for visibility.
 
 PnL data is auto-sanitized at close time in `paper_manager.py` — `pnl_pct` is clamped to physically-possible bounds per strategy, `exit_price` to ≥0, and `pnl_usd` is always populated. This prevents IC pollution from anomalous closes (e.g. a credit spread storing pnl_pct=+3.58, which actually happened once and silently flipped the sign of `skew_align` IC).
+
+---
+
+## Crypto Strategist (BTC / ETH options)
+
+Equity mode (the screener above) handles US equities via yfinance. A parallel **crypto strategist** lives in `src/crypto/` and screens BTC / ETH options on **Deribit**, with funding-rate / basis / OI / stablecoin-flow signals layered on top. Build plan: `docs/CRYPTO_BUILD_PLAN.md`.
+
+```bash
+python -m src.crypto.screener     # main crypto CLI (BTC / ETH scans, funding-basis, portfolio, calibration, backtest)
+python -m src.crypto.check_pnl    # crypto portfolio viewer (entry / live mark / P/L per position)
+```
+
+| File | What it does |
+|---|---|
+| `src/crypto/screener.py` | Main CLI menu (scan BTC, scan ETH, funding/basis dashboard, portfolio, calibration status, backtest) |
+| `src/crypto/data_fetching.py` | Deribit chain pulls + Binance/Bybit/OKX/dYdX funding aggregation + USDT/USDC stablecoin flow |
+| `src/crypto/scoring.py` | Crypto-specific composite score (IV rank, VRP, term structure, skew, funding-divergence, basis, OI z-score, stablecoin flow) |
+| `src/crypto/strategy.py` | Strategy builders: long single-leg, debit/credit spreads, calendars |
+| `src/crypto/exit_enforcer.py` | TP / stop / time-exit enforcement for crypto positions (per-leg Deribit mark price) |
+| `src/crypto/auto_logger.py` | Auto-log driver for crypto. Runs every 4 hours via cron, gated by regime + chain availability. |
+| `src/crypto/backtester.py` | Walk-forward backtest on accumulated chain snapshots |
+| `src/crypto/check_pnl.py` | Standalone portfolio viewer — open positions with live Deribit marks + closed positions with entry / exit / P&L / reason / win-loss |
+
+Automation (cron — installed alongside equity automation):
+
+```cron
+# Crypto auto-log driver — every 4 hours, both BTC and ETH
+0 */4 * * * /Users/ollie/Desktop/options/scripts/auto_log_crypto.sh >> /Users/ollie/Desktop/options/logs/auto_log_crypto.log 2>&1
+
+# Crypto exit enforcer — hourly (Deribit prices update faster than equity yfinance)
+5 * * * * /Users/ollie/Desktop/options/scripts/enforce_exits_crypto.sh >> /Users/ollie/Desktop/options/logs/enforce_exits_crypto.log 2>&1
+```
+
+Crypto trades land in `paper_trades_crypto.db` (separate ledger from equity). The two books share schema layout but never mix — calibration runs independently per book.
 
 ---
 
@@ -926,10 +979,40 @@ options/
     ├── config_validator.py   # Config.json validation at module load
     ├── types.py              # Shared type definitions and data classes
     ├── api.py                # FastAPI server (/market, /top, /scan, /watchlist)
-    └── bots/
-        ├── __init__.py
-        ├── discord_bot.py    # Discord slash commands (/market, /top, /scan, /watchlist)
-        └── telegram_bot.py   # Telegram command handlers (same 4 commands)
+    ├── bots/
+    │   ├── __init__.py
+    │   ├── discord_bot.py    # Discord slash commands (/market, /top, /scan, /watchlist)
+    │   └── telegram_bot.py   # Telegram command handlers (same 4 commands)
+    └── crypto/               # BTC/ETH options module (Deribit) — separate book from equity
+        ├── screener.py       # Main crypto CLI: scans, funding-basis dashboard, portfolio, calibration, backtest
+        ├── data_fetching.py  # Deribit chain + Binance/Bybit/OKX/dYdX funding + stablecoin flow
+        ├── scoring.py        # Crypto-specific composite (IV rank, VRP, term, skew, funding/basis, OI, stableflow)
+        ├── strategy.py       # Strategy builders: long single-leg, debit/credit spreads, calendars
+        ├── exit_enforcer.py  # TP / stop / time-exit enforcement (per-leg Deribit marks)
+        ├── auto_logger.py    # Auto-log driver (cron, every 4h, gated by regime + chain availability)
+        ├── backtester.py     # Walk-forward backtest over accumulated chain snapshots
+        ├── chain_snapshot.py # Daily chain snapshotting for backtest data accumulation
+        ├── regime.py         # Crypto regime classifier (BEAR / NEUTRAL / BULL based on rvol30d + spot vs 200dMA)
+        ├── cache.py          # Disk-backed cache for Deribit responses
+        └── check_pnl.py      # Standalone portfolio viewer (entry / live mark / P&L / reason)
+
+scripts/
+├── auto_log_equity.sh         # Equity auto-log driver (M-F 10:30 / 12:30 / 14:15 ET) — modes by clock window
+├── auto_log_crypto.sh         # Crypto auto-log driver (every 4h, BTC + ETH)
+├── enforce_exits.sh           # Equity exit enforcer (daily cron)
+├── enforce_exits_crypto.sh    # Crypto exit enforcer (hourly cron)
+├── calibrate_snapshot.sh      # Equity calibration snapshot (Sundays)
+├── calibrate_snapshot_crypto.sh  # Crypto calibration snapshot
+├── calibration_status.sh      # One-page calibration dashboard (read-only)
+├── equity_stress_check.py     # SAFE / UNSAFE gate based on -20%/+10pp scenario vs threshold
+├── make_pnl_chart.py          # Pure-stdlib SVG equity curve generator (equity + crypto, --cohort pre|post|all)
+└── reclassify_legacy_trades.py  # One-shot migration for legacy single-leg rows
+
+docs/
+├── CALIBRATION_JOURNAL.md     # Append-only changelog of every --calibrate --apply event
+├── QUANT_RESEARCH_MANUAL.md   # Strategy/architecture reference manual
+├── DECISION_MATRIX_AND_TROUBLESHOOTING.md  # Tactical command reference + VIX-regime decision matrix
+└── CRYPTO_BUILD_PLAN.md       # Crypto module build plan + progress
 ```
 
 ---
@@ -975,6 +1058,15 @@ options/
 - [x] Discord bot — slash commands: /market, /top, /scan, /watchlist
 - [x] Telegram bot — same 4 commands, Markdown formatting
 - [x] Single-launcher (start_all.py) for all 3 processes with clean Ctrl+C shutdown
+- [x] Crypto strategist (BTC / ETH on Deribit) — full options chain, funding/basis/OI aggregation across Binance/Bybit/OKX/dYdX, stablecoin-flow tracker, separate paper-trade book, hourly exit enforcer, 4-hour auto-log driver
+- [x] Pre / Post-calibration cohort view in portfolio menu — filter by `entry_id` cutoff, dedicated SVG equity curve per cohort
+- [x] Stand-alone SVG equity curve generator (`scripts/make_pnl_chart.py`) — pure stdlib, no matplotlib dependency, supports `--cohort pre|post|all` and crypto book
+- [x] Calibration journal (`docs/CALIBRATION_JOURNAL.md`) — append-only changelog of every `--calibrate --apply` event with IC tables, weight Δs, interpretation, and revert procedure
+- [x] First IC-driven calibration applied 2026-05-11 — `composite_weights` shrunk POP from 0.13 → 0.03, boosted vrp / term_structure / vega_risk to 0.14 / 0.13 / 0.11 (Calibration #1; backup `config.bak.20260511-111722.json`)
+- [ ] Spread-bucket calibration (`recommend_weights_for_structure('spread')` — gated by Bear Call ≥ 30; ETA ~2-3 weeks)
+- [ ] Iron-condor-bucket calibration (gated by IC ≥ 30; ETA late June 2026 as the May-opened ICs mature)
+- [ ] Fix 6 variance-zero scorers (`gamma_pin`, `max_pain`, `oi_change`, `option_rvol`, `pcr`, `sentiment`) — currently returning constants, dropping free signal
+- [ ] Fix crypto auto-log / exit-enforcer same-cycle time-exit race (puts opened and time-exited within the same 5-minute interval)
 - [ ] Real-time alerts (email / SMS)
 - [ ] Backtesting UI improvements
 

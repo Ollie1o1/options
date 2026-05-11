@@ -510,8 +510,68 @@ def _print_portfolio_greeks(open_trades: list, width: int):
         print(note)
 
 
-def view_portfolio():
-    """Display paper portfolio from paper_trades.db."""
+# ── Cohort split (pre / post calibration) ─────────────────────────────────────
+# The entry-date column stores YYYY-MM-DD only, so a same-day calibration apply
+# (like the 2026-05-11 11:17 one) can't be split by date. We use entry_id as
+# the cutoff instead: it's monotonic and assigned at the moment the row is
+# inserted. Each tuple is (first_post_entry_id, human_label, iso_timestamp).
+# Trades with entry_id < first_post_entry_id are PRE; >= are POST.
+CALIBRATION_CUTOFFS = [
+    (220, "Calibration #1", "2026-05-11 11:17:22"),
+]
+
+
+def _cohort_for_entry_id(entry_id: int) -> str:
+    if not CALIBRATION_CUTOFFS:
+        return "post"
+    first_post = CALIBRATION_CUTOFFS[-1][0]
+    return "post" if int(entry_id or 0) >= first_post else "pre"
+
+
+def _filter_by_cohort(rows: list, cohort: Optional[str]) -> list:
+    if cohort not in ("pre", "post"):
+        return rows
+    return [r for r in rows if _cohort_for_entry_id(r.get("entry_id") or 0) == cohort]
+
+
+def view_portfolio_menu() -> None:
+    """Interactive entry point — prompt for cohort filter, then render."""
+    print()
+    print("  PORTFOLIO VIEW — choose cohort:")
+    print("    [1] Pre-calibration  (trades scored under old hand-tuned weights)")
+    print("    [2] Post-calibration (trades scored under IC-tuned weights, 2026-05-11 onward)")
+    print("    [A] All trades (default — includes calibration marker on chart)")
+    try:
+        choice = input("  Choice [A/1/2]: ").strip().upper() or "A"
+    except (EOFError, KeyboardInterrupt):
+        choice = "A"
+        print()
+    cohort = {"1": "pre", "2": "post"}.get(choice)
+    view_portfolio(cohort=cohort)
+
+    # Auto-refresh the SVG chart for the chosen cohort.
+    try:
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "scripts" / "make_pnl_chart.py"
+        args = [sys.executable, str(script), "--equity-only"]
+        if cohort:
+            args += ["--cohort", cohort]
+        else:
+            args += ["--cohort", "all"]
+        print()
+        print("  Refreshing equity curve chart...")
+        subprocess.run(args, check=False)
+    except Exception as e:
+        print(f"  (chart refresh skipped: {e})")
+
+
+def view_portfolio(cohort: Optional[str] = None):
+    """Display paper portfolio from paper_trades.db.
+
+    Args:
+        cohort: None for all trades, 'pre' for trades opened before the
+            calibration cutoff, 'post' for trades opened on/after.
+    """
     width = _width()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -544,15 +604,22 @@ def view_portfolio():
 
     # ── Header ─────────────────────────────────────────────────────────────────
     print()
+    all_rows = _filter_by_cohort(all_rows, cohort)
+    cohort_label = {"pre": "PRE-CALIBRATION", "post": "POST-CALIBRATION"}.get(cohort or "", "")
+    header_text = f"PAPER PORTFOLIO  \u2014  {now_str}"
+    if cohort_label:
+        header_text += f"  [{cohort_label}]"
+
     if HAS_FMT and fmt:
-        print(fmt.draw_box(f"PAPER PORTFOLIO  \u2014  {now_str}", width, double=True))
+        print(fmt.draw_box(header_text, width, double=True))
     else:
         print("=" * width)
-        print(f"  PAPER PORTFOLIO  \u2014  {now_str}")
+        print(f"  {header_text}")
         print("=" * width)
 
     if not all_rows:
-        print("\n  No trades logged yet.\n")
+        msg = "\n  No trades match this cohort filter.\n" if cohort else "\n  No trades logged yet.\n"
+        print(msg)
         return
 
     open_trades  = [r for r in all_rows if r["status"] == "OPEN"]

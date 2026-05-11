@@ -68,8 +68,8 @@
       "short_delta_min": 0.18,
       "short_delta_max": 0.35,
       "long_delta_max": 0.15,
-      "min_credit_to_width": 0.20,
-      "max_net_delta": 0.10
+      "min_credit_to_width": 0.2,
+      "max_net_delta": 0.1
     }
   },
   "moneyness_band": 0.15,
@@ -98,7 +98,7 @@
     "time_exit_dte": 21,
     "min_days_held": 3,
     "short_premium": {
-      "take_profit_ge_21_dte": 0.50,
+      "take_profit_ge_21_dte": 0.5,
       "take_profit_7_to_21_dte": 0.35,
       "take_profit_lt_7_dte": 0.25,
       "stop_loss_premium_multiple": 2.0,
@@ -107,13 +107,13 @@
       "stop_loss_delta_multiple": 2.5
     },
     "spread": {
-      "take_profit": 0.50,
+      "take_profit": 0.5,
       "stop_loss": -1.0
     },
     "long_option": {
-      "take_profit": 1.00,
-      "take_profit_delta": 0.80,
-      "stop_loss": -0.50
+      "take_profit": 1.0,
+      "take_profit_delta": 0.8,
+      "stop_loss": -0.5
     },
     "take_profit": 0.5,
     "stop_loss": -0.25
@@ -134,52 +134,52 @@
   },
   "credit_spread_weights": {
     "pop": 0.25,
-    "credit_to_width": 0.20,
+    "credit_to_width": 0.2,
     "iv_rank": 0.15,
-    "return_on_risk": 0.10,
-    "liquidity": 0.10,
+    "return_on_risk": 0.1,
+    "liquidity": 0.1,
     "theta": 0.08,
     "spread": 0.05,
     "momentum": 0.04,
     "catalyst": 0.03
   },
   "iron_condor_weights": {
-    "pop": 0.30,
-    "credit_to_width": 0.20,
+    "pop": 0.3,
+    "credit_to_width": 0.2,
     "delta_neutral": 0.15,
     "iv_rank": 0.12,
-    "liquidity": 0.10,
+    "liquidity": 0.1,
     "theta": 0.08,
     "spread": 0.05
   },
   "composite_weights": {
-    "pop": 0.13,
+    "pop": 0.0322,
     "em_realism": 0.0,
-    "iv_mispricing": 0.05,
-    "rr": 0.1,
-    "momentum": 0.1,
-    "iv_rank": 0.08,
-    "liquidity": 0.08,
-    "catalyst": 0.0,
-    "theta": 0.06,
-    "ev": 0.07,
-    "trader_pref": 0.0,
-    "iv_edge": 0.08,
-    "skew_align": 0.02,
+    "iv_mispricing": 0.0265,
+    "rr": 0.0491,
+    "momentum": 0.0387,
+    "iv_rank": 0.0662,
+    "liquidity": 0.0198,
+    "catalyst": 0.0136,
+    "theta": 0.0149,
+    "ev": 0.0174,
+    "trader_pref": 0.0293,
+    "iv_edge": 0.0885,
+    "skew_align": 0.0349,
     "gamma_theta": 0.0,
     "pcr": 0.0,
-    "gex": 0.01,
+    "gex": 0.0025,
     "oi_change": 0.0,
     "sentiment": 0.0,
     "option_rvol": 0.0,
-    "vrp": 0.05,
+    "vrp": 0.1401,
     "gamma_pin": 0.0,
-    "max_pain": 0.01,
-    "iv_velocity": 0.05,
-    "gamma_magnitude": 0.03,
-    "vega_risk": 0.03,
-    "term_structure": 0.04,
-    "spread": 0.01
+    "max_pain": 0.0025,
+    "iv_velocity": 0.0907,
+    "gamma_magnitude": 0.0074,
+    "vega_risk": 0.1088,
+    "term_structure": 0.1287,
+    "spread": 0.0881
   },
   "backtest": {
     "profit_target_multiplier_long": 1.5,
@@ -358,8 +358,8 @@
     "liquidity": 0.1
   },
   "crypto": {
-    "auto_log_enabled": false,
-    "min_auto_log_score": 0.50
+    "auto_log_enabled": true,
+    "min_auto_log_score": 0.5
   },
   "equity": {
     "auto_log_enabled": true,

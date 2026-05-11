@@ -3,7 +3,7 @@
 # Computes per-component IC across closed crypto trades, appends a tab-
 # separated history row to logs/calibration_history_crypto.tsv, and
 # writes a human-readable report at logs/calibration_crypto_<DATE>.txt.
-# Read-only — never writes to config.json.
+# Read-only — never writes to config.json (no --apply passed).
 #
 # Install via crontab (Sundays 18:30 ET — after equity's 18:13 calibrate):
 #   30 18 * * 0  /Users/ollie/Desktop/options/scripts/calibrate_snapshot_crypto.sh \
@@ -12,14 +12,16 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs
 
 ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }
 DATE_TAG=$(date +%Y-%m-%d)
 echo "[$(ts)] calibrate_snapshot_crypto.sh starting"
 
-if [[ ! -x venv/bin/python ]]; then
-  echo "[$(ts)] ERROR: venv/bin/python missing — bootstrap the venv first" >&2
+VENV="${HOME}/.venvs/options/bin/python"
+if [[ ! -x "$VENV" ]]; then
+  echo "[$(ts)] ERROR: $VENV missing — bootstrap the venv first" >&2
   exit 1
 fi
 
@@ -36,7 +38,7 @@ REPORT="logs/calibration_crypto_${DATE_TAG}.txt"
 #     so the equity-side floor check `pnl_pct < -(width/credit-1)` is
 #     nonsensical for them. Skip rows where strategy_name LIKE 'Calendar%'.
 #   - Iron condors use the same convention as equity.
-ANOMALIES=$(venv/bin/python - <<'PY'
+ANOMALIES=$("$VENV" - <<'PY'
 import sqlite3, sys
 conn = sqlite3.connect("paper_trades_crypto.db")
 problems = []
@@ -50,7 +52,7 @@ rows = conn.execute("""
    WHERE status='CLOSED'
      AND strategy_name IS NOT NULL
      AND strategy_name NOT LIKE 'Calendar%'
-     AND strategy_name LIKE '%Bear Call%' OR strategy_name LIKE '%Bull Put%' OR strategy_name LIKE '%Iron Condor%'
+     AND (strategy_name LIKE '%Bear Call%' OR strategy_name LIKE '%Bull Put%' OR strategy_name LIKE '%Iron Condor%')
 """).fetchall()
 for r in rows:
     eid, ticker, strat, entry_p, exit_p, pct = r[0], r[1], r[2], r[3], r[4], r[5]
@@ -83,8 +85,7 @@ for r in rows:
                 f"pnl_pct={pct:.3f} floor={floor:.3f} (width={width}, credit={credit})"
             )
 
-# Long premium / calendars: pnl_pct should be in [-1.0, +∞) for calendars
-# (capped loss = full debit), [-1.0, +∞) for long single legs.
+# Long premium / calendars: capped loss at -1.0 (full debit)
 rows = conn.execute("""
   SELECT entry_id, ticker, strategy_name, pnl_pct
     FROM trades
@@ -120,75 +121,38 @@ if [[ -n "$ANOMALIES" ]]; then
   echo "$ANOMALIES" > "logs/calibration_crypto_${DATE_TAG}.warnings"
 fi
 
-# Run the IC analysis via PaperManager.compute_ic() — same path as equity.
-venv/bin/python - <<PY > "$REPORT" 2>&1
-from src.paper_manager import PaperManager
-import json
+# Reuse the same calibration entrypoint equity uses, but pointed at the
+# crypto DB. This is what generates the per-component IC table the awk
+# parser below expects. NEVER pass --apply: crypto IC must not write the
+# shared config.json weights.
+"$VENV" -m src.backtester --calibrate --db paper_trades_crypto.db > "$REPORT" 2>&1
 
-pm = PaperManager(db_path="paper_trades_crypto.db")
-ic = pm.compute_ic()
-
-print("=" * 70)
-print(f"CRYPTO CALIBRATION SNAPSHOT  —  ${DATE_TAG:-}")
-print("=" * 70)
-
-if not isinstance(ic, dict):
-    print("compute_ic() returned non-dict:", ic)
-    raise SystemExit(0)
-
-n = int(ic.get("n_closed", 0))
-print(f"\nClosed trades analysed: {n}")
-print(f"Apply gate: needs >=100 closed for IC analysis to be meaningful")
-print()
-
-if n == 0:
-    print("No closed trades yet. Logged-but-open positions don't contribute.")
-    raise SystemExit(0)
-
-# Top-level overall IC if present
-for k in ("ic", "ic_p", "spearman", "spearman_p"):
-    if k in ic:
-        print(f"  {k:<14}  {ic[k]}")
-
-components = ic.get("components") or {}
-if components:
-    print("\nPer-component IC (sorted by |IC|):")
-    sorted_c = sorted(components.items(), key=lambda x: -abs(float(x[1] or 0)))
-    for comp, val in sorted_c:
-        try:
-            v = float(val)
-        except (TypeError, ValueError):
-            continue
-        marker = "*" if abs(v) >= 0.10 else " "
-        print(f"  {marker} {comp:<22}  IC = {v:+.3f}")
-
-# Per-strategy breakdown
-strategies = pm.get_strategy_breakdown() if hasattr(pm, "get_strategy_breakdown") else None
-if strategies:
-    print("\nPer-strategy breakdown:")
-    for s in strategies:
-        n_s = s.get("n", 0)
-        win = s.get("win_rate", 0) * 100 if isinstance(s.get("win_rate"), (int, float)) else 0
-        pf = s.get("pf", 0) or s.get("profit_factor", 0)
-        print(f"  {str(s.get('strategy_name','?')):<16}  n={n_s:3}  win={win:.0f}%  PF={pf:.2f}x")
-PY
-
-# Append a TSV row per component for plotting drift over time.
+# Append per-component IC rows to the long-form history TSV.
 HIST="logs/calibration_history_crypto.tsv"
 if [[ ! -f "$HIST" ]]; then
   echo -e "date\tn_trades\tcomponent\tic" > "$HIST"
 fi
 
-N_TRADES=$(grep -E "^Closed trades analysed:" "$REPORT" | awk '{print $4}' | head -n1)
+N_TRADES=$(grep -E "^  Closed paper trades:" "$REPORT" | awk '{print $4}' | head -n1)
+# Strip any "/MIN" suffix on the under-threshold form ("13/100").
+N_TRADES="${N_TRADES%%/*}"
 N_TRADES=${N_TRADES:-0}
 
-# Lines like:    "  * vrp_score              IC = +0.267"  --> component, ic
+# Lines like:  "    vrp              IC = +0.267  ↑"  --> component, ic
 awk -v d="$DATE_TAG" -v n="$N_TRADES" '
-  /^[ ]+[\*]?[ ]+[a-z_]+_score[ ]+IC = / {
-    for (i=1; i<=NF; i++) if ($i ~ /_score$/) { component=$i; break }
+  /^    [a-z_]+ +IC = / {
+    component=$1
     for (i=1; i<=NF; i++) if ($i == "=") { ic=$(i+1); break }
-    if (component != "" && ic != "") print d "\t" n "\t" component "\t" ic
+    print d "\t" n "\t" component "\t" ic
   }
 ' "$REPORT" >> "$HIST"
 
-echo "[$(ts)] calibrate_snapshot_crypto.sh done — report: $REPORT  history: $HIST"
+# If no component rows were appended (sample below per-component minimum),
+# write a stub row so the TSV records that calibration ran. Matches the
+# semantics of "we tried, no signal yet."
+ROWS_ADDED=$(awk -v d="$DATE_TAG" 'BEGIN{c=0} $1==d{c++} END{print c}' "$HIST")
+if [[ "$ROWS_ADDED" == "0" ]]; then
+  printf "%s\t%s\t%s\t%s\n" "$DATE_TAG" "$N_TRADES" "_no_component_ic_yet" "0.000" >> "$HIST"
+fi
+
+echo "[$(ts)] calibrate_snapshot_crypto.sh done — report: $REPORT  history: $HIST  rows=$ROWS_ADDED"

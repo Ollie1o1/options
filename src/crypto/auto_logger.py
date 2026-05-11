@@ -145,9 +145,16 @@ def run_currency(
         return f"[auto-log] {currency} skipped: per-day cap {today_n}/{MAX_AUTO_LOGS_PER_DAY}"
 
     from . import screener
+    # Deribit transient outages happen (~1/24h). Retry once with backoff
+    # before losing the whole 4h cycle.
+    import time as _time
     scan = screener._scan_currency(currency)
     if scan is None:
-        return f"[auto-log] {currency} skipped: scan returned no data"
+        _time.sleep(30)
+        print(f"[auto-log] {currency} retry 1/1 after Deribit fetch failure")
+        scan = screener._scan_currency(currency)
+    if scan is None:
+        return f"[auto-log] {currency} skipped: scan returned no data (after retry)"
 
     if scan.get("regime") is None:
         return f"[auto-log] {currency} skipped: regime classifier returned None (insufficient history)"

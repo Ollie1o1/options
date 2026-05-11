@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Crypto paper-trade auto-logger — runs every 4 hours from cron.
+# Crypto paper-trade auto-logger — runs every 4 hours via launchd.
 # Reads the off-switch + safeguards from config.json; dormant by default.
 #
-# Install via crontab (every 4 hours, on the hour):
-#   0 */4 * * *  /Users/ollie/Desktop/options/scripts/auto_log_crypto.sh \
-#     >> /Users/ollie/Desktop/options/logs/auto_log_crypto.log 2>&1
+# Schedule lives in:
+#   ~/Library/LaunchAgents/com.ollie.options.crypto-auto-log.plist
+# launchd is used (not cron) so that runs missed while the Mac was asleep
+# get caught up at wake. Cron silently drops them.
 
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs
 
-if [[ ! -x venv/bin/python ]]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] ERROR: venv/bin/python missing — bootstrap the venv first" >&2
+VENV="${HOME}/.venvs/options/bin/python"
+if [[ ! -x "$VENV" ]]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S %Z')] ERROR: $VENV missing — bootstrap the venv first" >&2
   exit 1
 fi
 
-exec venv/bin/python -m src.crypto.auto_logger
+# caffeinate -i prevents idle sleep for the duration of this process so
+# a slow Deribit fetch can't be killed by the system going to sleep.
+exec /usr/bin/caffeinate -i "$VENV" -m src.crypto.auto_logger

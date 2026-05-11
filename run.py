@@ -184,61 +184,57 @@ _STAMP_PATH = os.path.join(_project_root, "venv", ".provenance_probe_ok")
 _PROBE_BUDGET_S = 6.0
 _PROBE_TIMEOUT_S = 15.0
 
-def _venv_import_is_hanging() -> bool:
+_FALLBACK_VENV = os.path.expanduser("~/.venvs/options/bin/python")
+
+def _probe_imports(python_path: str) -> tuple[str, float]:
+    """Probe how the given interpreter handles the screener's heaviest imports.
+
+    Returns ("ok"|"error"|"slow"|"timeout", elapsed_seconds).
+    """
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        completed = subprocess.run(
+            [python_path, "-c", "import pandas, numpy, yfinance"],
+            timeout=_PROBE_TIMEOUT_S,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired:
+        return "timeout", _time.monotonic() - t0
+    except OSError:
+        return "error", _time.monotonic() - t0
+    elapsed = _time.monotonic() - t0
+    if completed.returncode != 0:
+        return "error", elapsed
+    if elapsed > _PROBE_BUDGET_S:
+        return "slow", elapsed
+    return "ok", elapsed
+
+def _venv_status() -> str:
+    """Return "ok"|"error"|"slow"|"timeout" for the project venv (cached)."""
     if sys.platform != "darwin":
-        return False
-    probe_py = os.path.join(_project_root, "venv", "lib")
-    if not os.path.isdir(probe_py):
-        return False
-    # Cached pass: if we've already verified this venv imports cleanly, trust
-    # the stamp (invalidated when the stamp is older than the venv directory or
-    # older than this run.py file — so probe-logic changes re-trigger).
+        # Non-Darwin: skip the cache + slow check, just probe import success.
+        status, _ = _probe_imports(_venv_python)
+        return status
+    if not os.path.isdir(os.path.join(_project_root, "venv", "lib")):
+        return "error"
     try:
         stamp_mtime = os.path.getmtime(_STAMP_PATH)
         venv_mtime = os.path.getmtime(os.path.join(_project_root, "venv"))
         runpy_mtime = os.path.getmtime(__file__)
         if stamp_mtime >= venv_mtime and stamp_mtime >= runpy_mtime:
-            return False
+            return "ok"
     except OSError:
         pass
-    # Time the heaviest imports the screener pulls in (pandas + numpy + yfinance
-    # cover the bulk of file reads). If they exceed _PROBE_BUDGET_S, surface the
-    # provenance error rather than write a stamp — even though the call would
-    # technically complete within the hard timeout.
-    import time as _time
-    t0 = _time.monotonic()
-    try:
-        completed = subprocess.run(
-            [_venv_python, "-c", "import pandas, numpy, yfinance"],
-            timeout=_PROBE_TIMEOUT_S,
-            capture_output=True,
-        )
-    except subprocess.TimeoutExpired:
-        return True
-    except OSError:
-        return False
-    elapsed = _time.monotonic() - t0
-    if completed.returncode != 0:
-        return False  # real import error — let the screener's traceback show it
-    if elapsed > _PROBE_BUDGET_S:
-        # Imports completed but were slow enough that the screener will feel
-        # sluggish. Surface the diagnostic so the user can rebuild the venv.
-        return True
-    try:
-        open(_STAMP_PATH, "w").close()
-    except OSError:
-        pass
-    return False
+    status, _ = _probe_imports(_venv_python)
+    if status == "ok":
+        try:
+            open(_STAMP_PATH, "w").close()
+        except OSError:
+            pass
+    return status
 
-if os.path.isfile(_venv_python) and _venv_import_is_hanging():
-    print("ERROR: venv imports are slow or hanging — macOS provenance poisoning.")
-    print()
-    print("Cause: this venv was created by a sandboxed shell, so every")
-    print("site-packages file carries the kernel-set com.apple.provenance xattr.")
-    print("macOS Gatekeeper does a per-file security check on import; with")
-    print("~10k files in the venv that adds up to 5-60s+ of pure overhead at")
-    print("every startup. The xattr cannot be removed (kernel-protected) — the")
-    print("only durable fix is to recreate the venv from a non-sandboxed shell.")
+def _print_rebuild_instructions():
     print()
     print("Fix (run from Terminal.app / iTerm / Ghostty — NOT a coding-CLI):")
     print(f"  cd {_project_root}")
@@ -247,8 +243,45 @@ if os.path.isfile(_venv_python) and _venv_import_is_hanging():
     print("  venv/bin/pip install -r requirements-lock.txt")
     print()
     print("Verify by re-running: python3 run.py")
-    print("(Imports should complete in <3s; the probe stamps venv/.provenance_probe_ok.)")
-    sys.exit(1)
+
+_project_venv_status = _venv_status() if os.path.isfile(_venv_python) else "missing"
+
+# If the project venv is unhealthy in any way, try the auto-logger fallback
+# (~/.venvs/options) before giving up. That venv is what cron uses for
+# auto_log_*.sh, so it's typically healthy when the project venv isn't.
+if _project_venv_status != "ok":
+    fb_ok = False
+    if os.path.isfile(_FALLBACK_VENV):
+        fb_status, _ = _probe_imports(_FALLBACK_VENV)
+        fb_ok = fb_status == "ok"
+    if fb_ok:
+        reason = {
+            "missing": "missing",
+            "error":   "broken (imports fail)",
+            "slow":    "slow imports (provenance poisoning)",
+            "timeout": "imports timed out",
+        }.get(_project_venv_status, _project_venv_status)
+        print(f"NOTICE: project venv is {reason} — falling back to {_FALLBACK_VENV}")
+        print("        Rebuild venv/ from your own Terminal when convenient:")
+        print(f"          cd {_project_root} && rm -rf venv && python3 -m venv venv")
+        print("          venv/bin/pip install -r requirements-lock.txt")
+        _venv_python = _FALLBACK_VENV
+    else:
+        if _project_venv_status == "missing":
+            print("ERROR: Virtual environment not found and no fallback at ~/.venvs/options.")
+        elif _project_venv_status in ("slow", "timeout"):
+            print("ERROR: venv imports are slow or hanging — macOS provenance poisoning.")
+            print()
+            print("Cause: this venv was created by a sandboxed shell, so every")
+            print("site-packages file carries the kernel-set com.apple.provenance xattr.")
+            print("macOS Gatekeeper does a per-file security check on import; with")
+            print("~10k files in the venv that adds up to 5-60s+ of pure overhead at")
+            print("every startup. The xattr cannot be removed (kernel-protected) — the")
+            print("only durable fix is to recreate the venv from a non-sandboxed shell.")
+        else:
+            print("ERROR: project venv imports fail (broken install).")
+        _print_rebuild_instructions()
+        sys.exit(1)
 
 # If any equity-side flag was provided, dispatch directly to options_screener
 # (preserves cron + every power-user shortcut). With no flags, route through
@@ -256,21 +289,11 @@ if os.path.isfile(_venv_python) and _venv_import_is_hanging():
 _target_module = "src.launcher" if not _argv else "src.options_screener"
 
 # If not already inside the venv, re-launch with the venv interpreter
-if os.path.isfile(_venv_python) and sys.prefix == sys.base_prefix:
+if sys.prefix == sys.base_prefix:
     sys.exit(subprocess.call(
         [_venv_python, "-m", _target_module] + _argv,
         cwd=_project_root,
     ))
-
-# If the venv doesn't exist yet, give a clear error instead of a cryptic import fail
-if not os.path.isfile(_venv_python):
-    print("ERROR: Virtual environment not found.")
-    print("Set it up with:")
-    if sys.platform == "win32":
-        print("  python -m venv venv && venv\\Scripts\\pip install -r requirements-lock.txt")
-    else:
-        print("  python3 -m venv venv && venv/bin/pip install -r requirements-lock.txt")
-    sys.exit(1)
 
 sys.argv = [sys.argv[0]] + _argv
 if _argv:

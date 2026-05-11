@@ -9,14 +9,16 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs
 
 ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }
 DATE_TAG=$(date +%Y-%m-%d)
 echo "[$(ts)] calibrate_snapshot.sh starting"
 
-if [[ ! -x venv/bin/python ]]; then
-  echo "[$(ts)] ERROR: venv/bin/python missing — bootstrap the venv first" >&2
+VENV="${HOME}/.venvs/options/bin/python"
+if [[ ! -x "$VENV" ]]; then
+  echo "[$(ts)] ERROR: $VENV missing — bootstrap the venv first" >&2
   exit 1
 fi
 
@@ -33,7 +35,7 @@ REPORT="logs/calibration_${DATE_TAG}.txt"
 # flags only positive overages (>1.0, impossible) and negative violations of the
 # structural floor `-(width/credit - 1)` — the previous flat |pnl| > 1.0 rule
 # was truncating real tail losses.
-ANOMALIES=$(venv/bin/python - <<'PY'
+ANOMALIES=$("$VENV" - <<'PY'
 import sqlite3, sys
 conn = sqlite3.connect("paper_trades.db")
 problems = []
@@ -101,7 +103,7 @@ if [[ -n "$ANOMALIES" ]]; then
   echo "$ANOMALIES" > "logs/calibration_${DATE_TAG}.warnings"
 fi
 
-venv/bin/python -m src.backtester --calibrate > "$REPORT" 2>&1
+"$VENV" -m src.backtester --calibrate > "$REPORT" 2>&1
 
 # Extract n_trades and per-component IC into a tab-separated history row so the
 # IC drift can be plotted over time without re-parsing free-text reports.

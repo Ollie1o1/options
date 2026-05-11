@@ -1,10 +1,36 @@
 # Crypto Strategist — Build Plan & Progress
 
 **Started:** 2026-05-01
-**Last updated:** 2026-05-04
+**Last updated:** 2026-05-11
 
 This is the running plan for the crypto-mode addition to the options screener.
 Equity mode `[1]` stays as-is; crypto mode `[2]` is the new system.
+
+---
+
+## Current state (2026-05-11)
+
+```
+paper_trades_crypto.db
+  Closed:        15 trades
+  Open:          0 (last cohort time-exited 2026-05-11 04:05 UTC)
+  Realized P&L:  +$72,243.67
+  Win rate:      53.3%
+  Date span:     2026-05-04 → 2026-05-11
+```
+
+| Component | Status |
+|---|---|
+| Deribit chain + funding/basis/OI/stableflow aggregation | shipped (Tier 1.1–1.5) |
+| Strategy builders (long, debit/credit spreads, calendars) | shipped |
+| Auto-log driver (every 4h) | shipped + cron-installed |
+| Exit enforcer (hourly) | shipped + cron-installed |
+| Calibration snapshots (weekly) | shipped + cron-installed |
+| Portfolio viewer (`python -m src.crypto.check_pnl`) | shipped 2026-05-11 — entry / live Deribit mark / P&L per position, matches equity layout |
+| SVG equity curve | shipped 2026-05-11 (`scripts/make_pnl_chart.py`) |
+| **Open issue:** same-cycle time-exit | unresolved — BTC/ETH puts opened by auto-log at :00 are being time-exited by enforcer at :05 the same hour (DTE threshold firing on contracts already at entry-DTE). Tracked in README roadmap. |
+| **Open issue:** Deribit fetch failures | intermittent (e.g. 2026-05-08 16:05 UTC both BTC and ETH 4h windows returned no data). Auto-log skips cleanly; no crash. Worth a retry shim. |
+| Apply-gate for crypto calibration | ≥100 closed trades. Have 15. ETA 6–8 weeks if same-cycle exit bug is fixed (cohort holds 1–3 days instead of <5 minutes). |
 
 ---
 

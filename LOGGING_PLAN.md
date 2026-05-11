@@ -1,6 +1,8 @@
 # Trade Logging & Calibration Plan
-**Updated:** 2026-05-05
+**Updated:** 2026-05-11
 **Goal:** Accumulate the closed-trade ledger needed to calibrate `composite_weights`, `credit_spread_weights`, and `iron_condor_weights` so the screener actually picks better contracts. Path to "good data" = enough volume + enough variance + zero anomalies.
+
+> **Calibration history:** every `--calibrate --apply` event is journaled in `docs/CALIBRATION_JOURNAL.md` (timestamped IC tables, weight Δs, revert paths). Check there first when investigating a weight change.
 
 ---
 
@@ -14,23 +16,25 @@ One-page dashboard: closed-trade counts, per-strategy progress, apply-gate check
 
 ---
 
-## Current State (snapshot — 2026-04-30 EOD)
+## Current State (snapshot — 2026-05-11 EOD)
 
 ```
-Closed trades: 127     Open positions: 36     Realized P&L: +$9,521
-Calibration shrinkage: 0.68  (system trusts component IC at ~68% strength)
+Closed trades: 183     Open positions: 26     Realized P&L: +$18,841
+Calibration shrinkage: 0.75  (system trusts component IC at ~75% strength)
+composite_weights:     CALIBRATED 2026-05-11 (Calibration #1, entry_id ≥ 220)
+spread / iron-condor weights: NOT yet calibrated (waiting on per-structure samples)
 ```
 
 **Per-strategy closed counts** (the gating constraint for per-structure weights):
 
 | Strategy | Closed | Per-structure threshold | Status |
 |---|---|---|---|
-| Long Call | 57 | 30 | ready |
+| Long Call | 76 | 30 | ready (calibrated 2026-05-11) |
 | Long Put | 38 | 30 | ready BUT auto-log disabled (PF 0.69) |
-| Bull Put | 16 | 30 | need ~14 more |
-| Bear Call | 9 | 30 | need ~21 more |
+| Bull Put | 34 | 30 | ready — preview `recommend_weights_for_structure('spread')` |
+| Bear Call | 20 | 30 | need ~10 more |
 | Short Put | 9 | 30 | not actively logging |
-| Iron Condor | 0 | 30 | gated by 49-DTE time decay (first closes mid-May) |
+| Iron Condor | 6 | 30 | gated by 49-DTE time decay (next wave matures late May / Jun) |
 
 **Confirmed signal-bearing components** (cross-validated by paper IC + synthetic walk-forward backtest, both directions agree):
 

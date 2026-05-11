@@ -9,15 +9,17 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs
 
 ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }
 echo "[$(ts)] enforce_exits.sh starting"
 
-if [[ ! -x venv/bin/python ]]; then
-  echo "[$(ts)] ERROR: venv/bin/python missing — bootstrap the venv first" >&2
+VENV="${HOME}/.venvs/options/bin/python"
+if [[ ! -x "$VENV" ]]; then
+  echo "[$(ts)] ERROR: $VENV missing — bootstrap the venv first" >&2
   exit 1
 fi
 
-venv/bin/python -m src.options_screener --enforce-exits
+"$VENV" -m src.options_screener --enforce-exits
 echo "[$(ts)] enforce_exits.sh done"

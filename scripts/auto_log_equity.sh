@@ -14,19 +14,21 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs
 
 ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }
 
 echo "[$(ts)] auto_log_equity starting"
 
-if [[ ! -x venv/bin/python ]]; then
-  echo "[$(ts)] ERROR: venv/bin/python missing — bootstrap the venv first" >&2
+VENV="${HOME}/.venvs/options/bin/python"
+if [[ ! -x "$VENV" ]]; then
+  echo "[$(ts)] ERROR: $VENV missing — bootstrap the venv first" >&2
   exit 1
 fi
 
 # 1. Off-switch
-ENABLED=$(venv/bin/python - <<'PY'
+ENABLED=$("$VENV" - <<'PY'
 import json, sys
 try:
     with open("config.json") as f:
@@ -65,7 +67,7 @@ if (( HMN < 945 || HMN > 1530 )); then
 fi
 
 # 4. Stress gate
-STRESS=$(venv/bin/python scripts/equity_stress_check.py 2>&1 || true)
+STRESS=$("$VENV" scripts/equity_stress_check.py 2>&1 || true)
 if [[ "$STRESS" != SAFE* ]]; then
   echo "[auto-log-eq] skipped: stress gate $STRESS"
   echo "[$(ts)] auto_log_equity done"
@@ -87,7 +89,7 @@ fi
 # 6. Invoke screener
 echo "[auto-log-eq] mode=$MODE stress=$STRESS"
 echo "[auto-log-eq] invoking: run.py $MODE --1 --no-ai"
-venv/bin/python run.py "$MODE" --1 --no-ai
+"$VENV" run.py "$MODE" --1 --no-ai
 RC=$?
 
 echo "[$(ts)] auto_log_equity done (rc=$RC)"

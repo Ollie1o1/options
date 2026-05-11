@@ -3825,8 +3825,8 @@ def main():
         symbol_input = _num_map[symbol_input]
 
     if symbol_input == "PORTFOLIO":
-        from .check_pnl import view_portfolio
-        view_portfolio()
+        from .check_pnl import view_portfolio_menu
+        view_portfolio_menu()
         sys.exit(0)
 
     # ── MY LIST mode ──────────────────────────────────────────────────────────

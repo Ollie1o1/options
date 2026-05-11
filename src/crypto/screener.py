@@ -713,6 +713,16 @@ def _funding_basis_dashboard() -> None:
 
 
 def _portfolio_view() -> None:
+    """Render the detailed crypto portfolio (entry $ / live $ / P&L) in the same
+    layout as the equity `check_pnl`. Falls back to a one-line summary if the
+    detailed viewer can't be imported (kept for resilience, not a different UX)."""
+    try:
+        from src.crypto.check_pnl import main as _detailed_view
+        _detailed_view()
+        return
+    except Exception as e:
+        print(f"\n  [warn] detailed viewer failed ({type(e).__name__}: {e}); showing summary.")
+
     _banner("CRYPTO PAPER PORTFOLIO")
     if not os.path.exists(_CRYPTO_DB_PATH):
         print(f"\n  No crypto trades logged yet — DB not created at {_CRYPTO_DB_PATH}")

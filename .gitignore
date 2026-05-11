@@ -44,13 +44,27 @@ ic_weights_cache.json
 paper_trades.db-shm
 paper_trades.db-wal
 paper_trades.db.bak-*
+paper_trades.db.bak.*
+paper_trades_crypto.db.bak.*
 paper_trades.db.calibration_marker.json
+config.bak.*.json
 
 # Crypto chain snapshot accumulator (user data)
 data/crypto_snapshots/
 
 # Local-only planning + spec docs (kept on disk, never tracked)
 docs/superpowers/
+
+# Generated reports (regenerable via scripts/make_pnl_chart.py)
+reports/
+
+# Editor/tooling state
+.claude/
+.idea/
+.vscode/
+
+# One-off debug scripts
+debug_ic.py
 
 # Runtime state (not source)
 .oi_snapshot.json
