@@ -197,9 +197,61 @@ def filter_iv_smile_outliers(
 __all__ = [
     "categorize_by_premium",
     "filter_iv_smile_outliers",
+    "filter_lottery_ticket",
     "pick_top_per_bucket",
     "filter_options",
 ]
+
+
+def filter_lottery_ticket(df: "pd.DataFrame", config: dict = None) -> "pd.DataFrame":
+    """
+    Hard gates for Lottery Ticket mode.
+
+    Targets far-OTM cheap options with high leverage potential on extreme
+    moves (earnings surprises, short squeezes, binary events like FDA rulings).
+    Both calls and puts pass through — direction is not assumed.
+
+    Gates applied (all overridable via config["lottery_ticket_filters"]):
+    - abs_delta in [0.03, 0.15]       sweet-spot far OTM leverage
+    - premium  <= $3.00               must be cheap to allow big multiples
+    - volume   >= 5                   minimum interest to enter/exit
+    - openInterest >= 10
+    - spread_pct <= 0.70              allow slightly wider spreads (cheap options)
+    - DTE in [7, 60]                  short enough to be cheap, enough time for event
+    """
+    if df.empty:
+        return df
+
+    lt_cfg = (config or {}).get("lottery_ticket_filters", {})
+    d_min      = float(lt_cfg.get("delta_min",   0.03))
+    d_max      = float(lt_cfg.get("delta_max",   0.15))
+    max_prem   = float(lt_cfg.get("max_premium", 3.00))
+    min_vol    = int(lt_cfg.get("min_volume",    5))
+    min_oi     = int(lt_cfg.get("min_oi",        10))
+    max_spread = float(lt_cfg.get("max_spread",  0.70))
+    min_dte    = float(lt_cfg.get("min_dte",     7))
+    max_dte    = float(lt_cfg.get("max_dte",     60))
+
+    if "abs_delta" in df.columns:
+        df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
+
+    if "premium" in df.columns:
+        df = df[pd.to_numeric(df["premium"], errors="coerce").fillna(999) <= max_prem].copy()
+
+    if "volume" in df.columns:
+        df = df[df["volume"].fillna(0).astype(float) >= min_vol].copy()
+
+    if "openInterest" in df.columns:
+        df = df[df["openInterest"].fillna(0).astype(float) >= min_oi].copy()
+
+    if "spread_pct" in df.columns:
+        df = df[df["spread_pct"].fillna(1.0) <= max_spread].copy()
+
+    if "T_years" in df.columns:
+        dte = df["T_years"] * 365.0
+        df = df[(dte >= min_dte) & (dte <= max_dte)].copy()
+
+    return df
 
 
 def filter_long_gamma(df: "pd.DataFrame") -> "pd.DataFrame":

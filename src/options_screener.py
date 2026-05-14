@@ -125,6 +125,7 @@ from .cli_display import (
     get_display_width, print_executive_summary,
     print_report, print_news_panel,
     print_credit_spreads_report, print_iron_condor_report,
+    print_lottery_ticket_report,
 )
 from .watchlist import (
     load_watchlist, add_to_watchlist, remove_from_watchlist,
@@ -1592,9 +1593,11 @@ def calculate_scores(
 
     df["quality_score"] = df["quality_score"].fillna(0.0).clip(0, 1)
 
-    # PoP soft floor for buyer modes: dampen very low probability trades
+    # PoP soft floor for buyer modes: dampen very low probability trades.
+    # Lottery Ticket is exempt — low PoP is by design for far-OTM options.
     _buyer_modes = {"Single-stock", "Scan", "Watchlist"}
-    if mode in _buyer_modes or mode not in ("Premium Selling", "Credit Spreads", "Iron Condor"):
+    _pop_floor_exempt = {"Premium Selling", "Credit Spreads", "Iron Condor", "Lottery Ticket"}
+    if mode in _buyer_modes or mode not in _pop_floor_exempt:
         _low_pop = df["prob_profit"] < 0.25
         if _low_pop.any():
             df.loc[_low_pop, "quality_score"] *= 0.6
@@ -1684,6 +1687,90 @@ def calculate_scores(
         df["quality_score"] = df["long_gamma_score"]
     else:
         df["long_gamma_score"] = pd.NA
+
+    # Lottery Ticket mode: score far-OTM cheap options for extreme-move potential.
+    # Looks for the kind of options that explode on surprise earnings, short squeezes,
+    # FDA rulings, or sudden macro events — small premium, massive upside if it moves.
+    if mode == "Lottery Ticket":
+        lt_w = config.get("lottery_ticket_weights", {
+            "payoff": 0.25, "catalyst": 0.25, "unusual": 0.20,
+            "iv_cheap": 0.15, "squeeze": 0.10, "otm_sweet": 0.05,
+        })
+
+        # Payoff asymmetry: how many multiples can this option return on a big move?
+        # rr_ratio maps [2, 25] → [0, 1]; RR above 25 is capped at 1.0
+        _rr = pd.to_numeric(df.get("rr_ratio", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        _payoff = np.clip((_rr - 2.0) / 23.0, 0.0, 1.0)
+
+        # Catalyst proximity: earnings nearby = 0.8, macro flag adds bonus, base 0.3
+        _catalyst = pd.to_numeric(
+            df.get("catalyst_score", pd.Series(0.3, index=df.index)), errors="coerce"
+        ).fillna(0.3)
+        # Earnings play (exp beyond earnings date) captures pre-event positioning
+        if "Earnings Play" in df.columns:
+            _catalyst = _catalyst.where(df["Earnings Play"] != "YES", _catalyst.clip(lower=0.6))
+
+        # Unusual activity: rank-normalised relative volume (smart money accumulation)
+        _rvol_lt = pd.to_numeric(
+            df.get("rvol", pd.Series(1.0, index=df.index)), errors="coerce"
+        ).fillna(1.0)
+        _n_lt = len(_rvol_lt)
+        _unusual = (
+            (_rvol_lt.rank(method="average", na_option="keep") - 1.0) / max(_n_lt - 1, 1)
+        ).clip(0, 1) if _n_lt > 1 else pd.Series(0.5, index=df.index)
+        # Whale flag confirms unusual (discrete boost)
+        if "Unusual_Whale" in df.columns:
+            _unusual = _unusual.where(~df["Unusual_Whale"].astype(bool), (_unusual + 0.2).clip(0, 1))
+
+        # IV cheapness: low IV percentile means the option is historically cheap → more upside
+        _iv_pct_lt = pd.to_numeric(
+            df.get("iv_rank_score", pd.Series(0.5, index=df.index)), errors="coerce"
+        ).fillna(0.5)
+        _iv_cheap_lt = (1.0 - _iv_pct_lt).clip(0, 1)
+
+        # Squeeze potential: high short interest + unusual call buying = squeeze setup
+        _si = pd.to_numeric(
+            df.get("short_interest", pd.Series(0.0, index=df.index)), errors="coerce"
+        ).fillna(0.0)
+        # Normalise short interest: 0% → 0, 30%+ → 1.0
+        _si_norm = np.clip(_si / 0.30, 0.0, 1.0)
+        _whale_flag = df.get("Unusual_Whale", pd.Series(False, index=df.index)).astype(float).fillna(0.0)
+        _squeeze_lt = (0.6 * _si_norm + 0.4 * _whale_flag).clip(0, 1)
+
+        # OTM sweet spot: Gaussian centred on abs_delta=0.08 with σ=0.04.
+        # Rewards the delta range where leverage and non-zero probability balance best.
+        _ad_lt = pd.to_numeric(df.get("abs_delta", pd.Series(0.08, index=df.index)), errors="coerce").fillna(0.08)
+        _otm_sweet = np.exp(-0.5 * ((_ad_lt - 0.08) / 0.04) ** 2)
+
+        _lt_sum = sum(lt_w.values()) or 1.0
+        df["lottery_ticket_score"] = (
+            lt_w.get("payoff",    0.25) * _payoff
+            + lt_w.get("catalyst",  0.25) * _catalyst
+            + lt_w.get("unusual",   0.20) * _unusual
+            + lt_w.get("iv_cheap",  0.15) * _iv_cheap_lt
+            + lt_w.get("squeeze",   0.10) * _squeeze_lt
+            + lt_w.get("otm_sweet", 0.05) * _otm_sweet
+        ) / _lt_sum
+
+        # Annotate: expected multiple if stock moves one full expected move
+        if "expected_move" in df.columns and "premium" in df.columns:
+            _em_lt = pd.to_numeric(df["expected_move"], errors="coerce").fillna(0.0)
+            _prem_lt = pd.to_numeric(df["premium"], errors="coerce").fillna(1.0).replace(0, 1.0)
+            _new_delta = (_ad_lt + 0.35).clip(0, 0.70)  # rough post-move delta approximation
+            _intrinsic_at_em = (
+                df.get("strike", pd.Series(0.0, index=df.index)).astype(float).sub(
+                    df.get("underlying", pd.Series(0.0, index=df.index)).astype(float)
+                ).abs()
+            )
+            # Rough option value after 1 EM move (delta * move approximation)
+            _move_value = (_ad_lt * _em_lt * 2.5).clip(lower=_prem_lt * 0.1)
+            df["em_multiple"] = (_move_value / _prem_lt).clip(0, 50).round(1)
+        else:
+            df["em_multiple"] = pd.NA
+
+        df["quality_score"] = df["lottery_ticket_score"]
+    else:
+        df["lottery_ticket_score"] = pd.NA
 
     return df
 
@@ -1860,6 +1947,9 @@ def enrich_and_score(
     if mode == "Long Gamma":
         # No delta target for straddles/strangles — they span the full delta range by design
         pass
+    elif mode == "Lottery Ticket":
+        # filter_lottery_ticket applies its own delta/premium/DTE gates; skip generic filter
+        pass
     elif mode in ("Iron Condor", "Credit Spreads"):
         # Multi-leg modes need the deep-OTM long wings (|delta| < 0.15);
         # find_iron_condors / find_credit_spreads apply their own per-leg delta filters.
@@ -1873,7 +1963,7 @@ def enrich_and_score(
         d_min = fc.get("delta_min", 0.15)
         d_max = fc.get("delta_max", 0.35)
         df = df[(df["abs_delta"] >= d_min) & (df["abs_delta"] <= d_max)].copy()
-    if mode not in ("Premium Selling", "Long Gamma", "Iron Condor", "Credit Spreads"):
+    if mode not in ("Premium Selling", "Long Gamma", "Iron Condor", "Credit Spreads", "Lottery Ticket"):
         df = df[df["rr_ratio"] >= 0.25].copy()
 
     if df.empty:
@@ -2689,6 +2779,12 @@ def _score_fetched_data(
             if not lg_filtered.empty:
                 result["picks"].append(lg_filtered)
                 result["success"] = True
+        elif mode == "Lottery Ticket":
+            from .filters import filter_lottery_ticket
+            lt_filtered = filter_lottery_ticket(df_scored, config)
+            if not lt_filtered.empty:
+                result["picks"].append(lt_filtered)
+                result["success"] = True
         else:
             result["picks"].append(df_scored)
             result["success"] = True
@@ -3136,6 +3232,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
         elif verbose:
             print("\nNo premium selling candidates found.")
+
+    elif mode == "Lottery Ticket":
+        if not picks.empty:
+            final_df = picks.sort_values("lottery_ticket_score", ascending=False)
+            if verbose:
+                print_lottery_ticket_report(final_df, underlying_price, market_trend, volatility_regime)
+        elif verbose:
+            print("\nNo lottery ticket candidates found — try adding more tickers or relaxing filters.")
 
     else:
         # Single stock mode
@@ -3771,6 +3875,7 @@ def main():
             ("6", "IRON",      "Iron Condor analysis \u2014 range-bound"),
             ("7", "PORTFOLIO", "View open position P/L"),
             ("8", "MY LIST",   _wl_desc),
+            ("9", "LOTTERY",   "Lottery Ticket \u2014 far-OTM plays on extreme moves"),
         ]
         for num, cmd, desc in modes:
             n = fmt.colorize(f"[{num}]", fmt.Colors.BRIGHT_YELLOW)
@@ -3788,6 +3893,7 @@ def main():
         print("  [6] IRON       \u2014 Iron Condor analysis")
         print("  [7] PORTFOLIO  \u2014 View open position P/L")
         print(f"  [8] MY LIST    \u2014 {_wl_desc}")
+        print("  [9] LOTTERY    \u2014 Lottery Ticket: far-OTM plays on extreme moves")
     print()
 
     # ── --mode / --ticker CLI bypass ──────────────────────────────────────────
@@ -3795,6 +3901,7 @@ def main():
         "ticker": "TICKER", "all": "ALL", "discover": "DISCOVER",
         "sell": "SELL", "spreads": "SPREADS", "iron": "IRON",
         "portfolio": "PORTFOLIO", "mylist": "MY LIST",
+        "lottery": "LOTTERY",
     }
     if args.ticker:
         symbol_input = args.ticker.upper()
@@ -3820,7 +3927,8 @@ def main():
 
     # ── Number → command mapping ──────────────────────────────────────────────
     _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
-                "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST"}
+                "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST",
+                "9": "LOTTERY"}
     if symbol_input in _num_map:
         symbol_input = _num_map[symbol_input]
 
@@ -3844,6 +3952,7 @@ def main():
     is_premium_selling_mode = (symbol_input == "SELL")
     is_credit_spread_mode = (symbol_input == "SPREADS")
     is_iron_condor_mode = (symbol_input == "IRON")
+    is_lottery_mode = (symbol_input == "LOTTERY")
 
     if is_my_list_mode:
         mode = "Discovery scan"
@@ -3857,6 +3966,8 @@ def main():
         mode = "Credit Spreads"
     elif is_iron_condor_mode:
         mode = "Iron Condor"
+    elif is_lottery_mode:
+        mode = "Lottery Ticket"
     else:
         mode = "Single-stock"
 
@@ -3869,6 +3980,9 @@ def main():
     elif is_my_list_mode:
         tickers = _wl_tickers
         print(f"  Scanning your watchlist: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+    elif is_lottery_mode:
+        tickers = prompt_for_tickers()
+        print(f"  Scanning {len(tickers)} tickers for lottery ticket setups: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
         tickers = prompt_for_tickers()
         print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
