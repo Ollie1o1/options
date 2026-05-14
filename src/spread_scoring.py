@@ -252,12 +252,17 @@ def enrich_iron_condors(
         # iron condor credit/width is naturally lower than vertical: 0.10 floor → 0, 0.30 → 1
         row_out["credit_to_width_score"] = float(np.clip((c2w - 0.10) / 0.20, 0.0, 1.0))
 
-        # Delta neutrality: net_delta near 0 is good. abs(0.00) → 1.0; abs(0.10+) → 0.0
-        row_out["delta_neutral_score"] = float(np.clip(1.0 - abs(net_delta) / 0.10, 0.0, 1.0))
+        # Delta neutrality: net_delta near 0 is good. abs(0.00) → 1.0; abs(max_net_d+) → 0.0
+        # Use the same threshold as the filter so tuning max_net_delta updates scoring too.
+        ic_cfg = config.get("iron_condor", {})
+        max_net_d = float(ic_cfg.get("max_net_delta", 0.10))
+        row_out["delta_neutral_score"] = float(np.clip(1.0 - abs(net_delta) / max(max_net_d, 1e-9), 0.0, 1.0))
 
-        # Combined PoP: 1 - (P(touch put) + P(touch call)) approximated by short deltas.
-        sp_delta = abs(float(sp.get("delta") or 0))
-        sc_delta = float(sc.get("delta") or 0)
+        # Combined PoP: 1 - (P(put ITM) + P(call ITM)) approximated by short deltas.
+        # Events are mutually exclusive for a properly structured condor (put < call strikes).
+        # Use _safe_score to guard against NaN delta (nan is truthy so `nan or 0` != 0).
+        sp_delta = abs(_safe_score(sp.get("delta")) or 0.0)
+        sc_delta = abs(_safe_score(sc.get("delta")) or 0.0)
         pop_combined = max(0.0, 1.0 - (sp_delta + sc_delta))
         row_out["pop_score"] = float(np.clip(pop_combined, 0.0, 1.0))
 
