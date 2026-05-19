@@ -35,6 +35,8 @@ try:
 except Exception:
     HAS_DERIBIT = False
 
+from src.core.pnl import realized_pnl
+
 DB_PATH = _PROJECT_ROOT / "paper_trades_crypto.db"
 
 
@@ -75,6 +77,14 @@ def _short_strategy(row: Dict[str, Any]) -> str:
     if "bull put" in s or "bear call" in s or row.get("long_strike"):
         return "SPREAD"
     return (row.get("type") or "").upper()
+
+
+def _unrealized(entry: float, live: float, qty, side: str,
+                structure: str = "debit"):
+    """Open-position unrealized P&L via core.pnl, scaled by qty."""
+    r = realized_pnl(entry=entry, exit_price=live, qty=qty, side=side,
+                      structure=structure)
+    return r["pnl_usd"], r["pnl_pct"]
 
 
 def _is_short(strategy_name: str) -> bool:
@@ -194,12 +204,12 @@ def _print_open(open_rows: List[sqlite3.Row], chains: Dict[str, Any], width: int
             pnl_pct: Optional[float] = None
             live_str = "       —"
         else:
-            if is_short:
-                pnl_usd = (entry - live)
-                pnl_pct = (entry - live) / entry if entry else None
-            else:
-                pnl_usd = (live - entry)
-                pnl_pct = (live - entry) / entry if entry else None
+            side = "short" if is_short else "long"
+            try:
+                qty = float(r["quantity"]) if r["quantity"] is not None else 1.0
+            except (KeyError, TypeError, IndexError):
+                qty = 1.0
+            pnl_usd, pnl_pct = _unrealized(entry, live, qty, side)
             live_str = f"${live:>8,.2f}"
             total_unreal += pnl_usd
             have_live += 1
