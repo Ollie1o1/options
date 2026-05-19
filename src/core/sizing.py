@@ -16,7 +16,7 @@ def capped_quantity(unit_risk: float, cap_usd: float = 1000.0) -> float:
     """
     if unit_risk <= 0:
         return 0.0
-    target = min(_CAP_TARGET, cap_usd) if cap_usd < _CAP_TARGET else _CAP_TARGET
+    target = min(_CAP_TARGET, cap_usd)
     raw = target / unit_risk
     q = math.floor(raw * 1e4) / 1e4
     return q

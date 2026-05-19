@@ -21,5 +21,12 @@ class TestCappedQuantity(unittest.TestCase):
     def test_zero_unit_risk_returns_zero(self):
         self.assertEqual(capped_quantity(unit_risk=0.0, cap_usd=1000.0), 0.0)
 
+    def test_custom_tighter_cap_is_honored(self):
+        # cap_usd below the 999 target → tighter cap applies
+        q = capped_quantity(unit_risk=100.0, cap_usd=500.0)
+        import math
+        self.assertEqual(q, math.floor(500.0 / 100.0 * 1e4) / 1e4)
+        self.assertLessEqual(q * 100.0, 500.0)
+
 if __name__ == "__main__":
     unittest.main()
