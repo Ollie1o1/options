@@ -245,7 +245,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -324,6 +324,10 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN short_put_strike REAL",
         "ALTER TABLE trades ADD COLUMN long_put_strike REAL",
         "ALTER TABLE trades ADD COLUMN net_delta REAL",
+    ],
+    11: [
+        # Fractional position size; default 1.0 keeps equity/options path inert
+        "ALTER TABLE trades ADD COLUMN quantity REAL DEFAULT 1.0",
     ],
 }
 
