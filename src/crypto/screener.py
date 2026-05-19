@@ -23,6 +23,7 @@ from . import data_fetching as _df
 from . import regime as _regime
 from . import scoring as _scoring
 from . import strategy as _strategy
+from src.core.sizing import capped_quantity
 
 # Reuse the equity formatter for visual consistency. Falls back gracefully if
 # the optional rich/colorama deps are missing.
@@ -315,6 +316,22 @@ def _print_recommendations_banner(regime_label: str) -> None:
     print(f"  Recommended for {regime_label.upper()}:  {_color(rec_str, 'BRIGHT_GREEN', bold=True)}")
 
 
+def _quantity_for(structure: str, entry_price: float,
+                  spread_width, net_credit) -> float:
+    """Per-trade fractional size honoring the $1,000 cap.
+
+    debit  -> unit_risk = premium paid (entry_price)
+    credit -> unit_risk = spread_width - net_credit  (max loss)
+    """
+    if structure == "credit":
+        if spread_width is None or net_credit is None:
+            return 1.0
+        unit_risk = float(spread_width) - float(net_credit)
+    else:
+        unit_risk = float(entry_price)
+    return capped_quantity(unit_risk=unit_risk, cap_usd=1000.0)
+
+
 def _log_long_premium(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
     try:
         from src.paper_manager import PaperManager
@@ -342,6 +359,7 @@ def _log_long_premium(row: pd.Series, currency: str, weight_profile: str = "cryp
         "term_structure_score": float(row.get("term_structure_score") or 0),
         "skew_align_score":     float(row.get("skew_score") or 0),
         "weight_profile":       weight_profile,
+        "quantity":             _quantity_for("debit", entry_price, None, None),
     }
     try:
         if pm.log_trade_if_new(trade):
@@ -390,6 +408,7 @@ def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_b
         "long_strike": strike,                    # same strike (single-strike calendar)
         "spread_width": float(days_between),      # repurposed: days between expirations
         "weight_profile": weight_profile,
+        "quantity":     _quantity_for("debit", net_debit, None, None),
     }
     try:
         if pm.log_trade_if_new(trade):
@@ -423,6 +442,9 @@ def _log_iron_condor(row: pd.Series, currency: str, weight_profile: str = "crypt
         "max_risk":   float(row["max_loss"]),
         "quality_score": float(row["score"]),
         "weight_profile": weight_profile,
+        "quantity":   _quantity_for("credit", float(row["net_credit"]),
+                                    float(row["net_credit"]) + float(row["max_loss"]),
+                                    float(row["net_credit"])),
     }
     try:
         if pm.log_iron_condor_if_new(condor):
@@ -461,6 +483,9 @@ def _log_credit_spread(row: pd.Series, currency: str, weight_profile: str = "cry
         "max_loss": float(row["max_loss"]),
         "quality_score": float(row["score"]),
         "weight_profile": weight_profile,
+        "quantity":   _quantity_for("credit", float(row["net_credit"]),
+                                    float(row["net_credit"]) + float(row["max_loss"]),
+                                    float(row["net_credit"])),
     }
     try:
         if pm.log_spread_if_new(spread):
