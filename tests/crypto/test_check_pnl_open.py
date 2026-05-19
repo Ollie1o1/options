@@ -17,5 +17,12 @@ class TestCheckPnlOpen(unittest.TestCase):
         self.assertAlmostEqual(usd, 40.0, places=6)
         self.assertAlmostEqual(pct, 0.80, places=6)
 
+    def test_unrealized_qty_none_defaults_to_one(self):
+        # qty=None should be treated as 1.0 by core.pnl
+        usd, pct = _unrealized(entry=100.0, live=130.0, qty=None,
+                               side="long", structure="debit")
+        self.assertAlmostEqual(usd, 30.0, places=6)
+        self.assertAlmostEqual(pct, 0.30, places=6)
+
 if __name__ == "__main__":
     unittest.main()

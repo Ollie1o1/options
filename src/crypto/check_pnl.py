@@ -205,11 +205,12 @@ def _print_open(open_rows: List[sqlite3.Row], chains: Dict[str, Any], width: int
             live_str = "       —"
         else:
             side = "short" if is_short else "long"
+            structure = "credit" if is_short else "debit"
             try:
                 qty = float(r["quantity"]) if r["quantity"] is not None else 1.0
             except (KeyError, TypeError, IndexError):
                 qty = 1.0
-            pnl_usd, pnl_pct = _unrealized(entry, live, qty, side)
+            pnl_usd, pnl_pct = _unrealized(entry, live, qty, side, structure=structure)
             live_str = f"${live:>8,.2f}"
             total_unreal += pnl_usd
             have_live += 1
