@@ -34,6 +34,8 @@ from src.paper_manager import (
 
 from . import data_fetching as _df
 
+from src.core.pnl import realized_pnl
+
 
 # Fixed absolute path resolution to ensure consistency with the main screener
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -130,7 +132,16 @@ def _close_row(conn: sqlite3.Connection, entry_id: int, exit_price: float,
                 pnl_pct: float, pnl_usd: float, reason: str,
                 strategy_name: str, entry_price: float,
                 max_loss_floor: Optional[float] = None) -> None:
-    """Sanitize and write the close UPDATE."""
+    """Sanitize and write the close UPDATE.
+
+    Callers pass per-unit pnl_usd.  This function reads the row's ``quantity``
+    and scales pnl_usd once at the persistence layer (single scaling site).
+    """
+    qrow = conn.execute(
+        "SELECT quantity FROM trades WHERE entry_id=?", (entry_id,)
+    ).fetchone()
+    qty = qrow[0] if qrow and qrow[0] is not None else 1.0
+    pnl_usd_scaled = pnl_usd * qty  # callers pass per-unit pnl_usd
     safe_exit, clamped_pct, sanitized_usd = _sanitize_close_values(
         strategy_name or "", entry_price, exit_price, pnl_pct,
         max_loss_floor=max_loss_floor,
@@ -139,7 +150,7 @@ def _close_row(conn: sqlite3.Connection, entry_id: int, exit_price: float,
     conn.execute(
         """UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?,
            pnl_pct=?, pnl_usd=?, exit_reason=? WHERE entry_id=?""",
-        (safe_exit, now, clamped_pct, sanitized_usd, reason, entry_id),
+        (safe_exit, now, clamped_pct, pnl_usd_scaled, reason, entry_id),
     )
 
 
