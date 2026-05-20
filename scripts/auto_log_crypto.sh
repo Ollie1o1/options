@@ -21,4 +21,4 @@ fi
 
 # caffeinate -i prevents idle sleep for the duration of this process so
 # a slow Deribit fetch can't be killed by the system going to sleep.
-exec /usr/bin/caffeinate -i "$VENV" -m src.crypto.auto_logger
+exec /usr/bin/caffeinate -i "$VENV" -m src.crypto log

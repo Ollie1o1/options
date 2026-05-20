@@ -22,4 +22,4 @@ if [[ ! -x "$VENV" ]]; then
   exit 1
 fi
 
-exec /usr/bin/caffeinate -i "$VENV" -m src.crypto.exit_enforcer
+exec /usr/bin/caffeinate -i "$VENV" -m src.crypto exits
