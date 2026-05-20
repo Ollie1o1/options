@@ -31,5 +31,27 @@ class TestBackfill(unittest.TestCase):
         v = sqlite3.connect(p).execute("SELECT pnl_usd FROM trades WHERE entry_id=1").fetchone()[0]
         self.assertEqual(v, 55402.0)
 
+    def test_credit_spread_row_uses_max_loss(self):
+        import math, os, sqlite3, tempfile
+        # Build a fresh DB with one credit-spread row (spread_width=1000, net_credit=250 → max_loss 750)
+        d = tempfile.mkdtemp(); p = os.path.join(d, "c.db")
+        c = sqlite3.connect(p)
+        c.execute("""CREATE TABLE trades (entry_id INTEGER PRIMARY KEY,
+            strategy_name TEXT, entry_price REAL, pnl_pct REAL, pnl_usd REAL,
+            status TEXT, spread_width REAL, net_credit REAL,
+            quantity REAL DEFAULT 1.0)""")
+        # Bear Call: entry_price stores net_credit (250); spread_width=1000; pnl_pct=0.4 means kept 40% of credit
+        c.execute("INSERT INTO trades VALUES (10,'Bear Call',250.0,0.4,5000.0,'CLOSED',1000.0,250.0,1.0)")
+        # Also a NULL-data credit row that should be SKIPPED
+        c.execute("INSERT INTO trades VALUES (11,'Iron Condor',100.0,0.3,3000.0,'CLOSED',NULL,NULL,1.0)")
+        c.commit(); c.close()
+
+        rows = compute_backfill(p)
+        # Only the Bear Call row should appear; the NULL-data Iron Condor is skipped
+        self.assertEqual([r["entry_id"] for r in rows], [10])
+        expected_qty = math.floor(999.0 / 750.0 * 1e4) / 1e4   # max_loss = 1000-250 = 750
+        self.assertAlmostEqual(rows[0]["new_quantity"], expected_qty, places=6)
+        self.assertAlmostEqual(rows[0]["new_pnl_usd"], 0.4 * 250.0 * expected_qty, places=2)
+
 if __name__ == "__main__":
     unittest.main()
