@@ -113,9 +113,8 @@ def _dispatch_log(strategy_name: str, row: pd.Series, currency: str) -> None:
 
 
 def _load_config(config_path: str = "config.json") -> dict:
-    import json
-    with open(config_path) as f:
-        return json.load(f)
+    from src.core.config import load_config
+    return load_config(config_path).raw()
 
 
 def _crypto_cfg(config: dict) -> dict:

@@ -15,6 +15,10 @@ class Config:
             return {} if default is None else default
         return val
 
+    def raw(self) -> dict:
+        """Return the raw underlying dict (use sparingly; prefer section())."""
+        return self._data
+
 
 def load_config(path: str = "config.json") -> Config:
     try:

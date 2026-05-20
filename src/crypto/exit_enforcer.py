@@ -48,11 +48,8 @@ _MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
 
 
 def _load_config() -> Dict[str, Any]:
-    try:
-        with open(_CONFIG_PATH, "r") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
+    from src.core.config import load_config
+    return load_config(_CONFIG_PATH).raw()
 
 
 def _exit_rules() -> Dict[str, Any]:
