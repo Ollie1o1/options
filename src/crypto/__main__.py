@@ -1,6 +1,14 @@
 """Unified crypto entry point: python -m src.crypto {scan,log,exits,pnl,backtest}"""
 from __future__ import annotations
-import argparse, sys
+import argparse, inspect, sys
+
+
+def _call(m, rest):
+    """Call dispatched module main with rest argv only if it accepts a positional arg."""
+    sig = inspect.signature(m)
+    if sig.parameters:
+        return int(m(rest) or 0)
+    return int(m() or 0)
 
 
 def main(argv=None) -> int:
@@ -20,10 +28,7 @@ def main(argv=None) -> int:
         return int(m(rest) or 0)
     if args.verb == "exits":
         from src.crypto.exit_enforcer import main as m
-        try:
-            return int(m(rest) or 0)
-        except TypeError:
-            return int(m() or 0)
+        return _call(m, rest)
     if args.verb == "pnl":
         from src.crypto.check_pnl import main as m
         return int(m() or 0)
@@ -31,12 +36,9 @@ def main(argv=None) -> int:
         try:
             from src.crypto.backtester import main as m
         except ImportError:
-            print("error: src.crypto.backtester has no standalone main()", file=sys.stderr)
+            print("backtest: src.crypto.backtester has no standalone main()", file=sys.stderr)
             return 1
-        try:
-            return int(m(rest) or 0)
-        except TypeError:
-            return int(m() or 0)
+        return _call(m, rest)
     return 2
 
 
