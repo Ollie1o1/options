@@ -88,8 +88,8 @@ fi
 
 # 6. Invoke screener
 echo "[auto-log-eq] mode=$MODE stress=$STRESS"
-echo "[auto-log-eq] invoking: run.py $MODE --1 --no-ai"
-"$VENV" run.py "$MODE" --1 --no-ai
+echo "[auto-log-eq] invoking: run.py $MODE --5 --no-ai"
+"$VENV" run.py "$MODE" --5 --no-ai
 RC=$?
 
 echo "[$(ts)] auto_log_equity done (rc=$RC)"

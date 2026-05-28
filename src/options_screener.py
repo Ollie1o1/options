@@ -627,13 +627,19 @@ def calculate_metrics(
         df["max_gamma_strike"] = pd.NA
         df["gamma_pin_dist_pct"] = pd.NA
 
-    # Max pain distance from current price
+    # Max pain distance from current price. The data-fetch path used by
+    # `enrich_chain_for_scan` writes the strike to `max_pain_strike`, but the
+    # older path in `fetch_options_yfinance` writes it to `max_pain` (no
+    # suffix). Honor either so the dist_pct — and therefore the max_pain_score
+    # — isn't pinned to its NaN-fallback constant.
     if "max_pain_strike" not in df.columns:
         df["max_pain_strike"] = pd.NA
     _mp_price_scalar = float(S_vals[0]) if len(S_vals) > 0 else 0.0
-    if df["max_pain_strike"].notna().any() and _mp_price_scalar > 0:
-        _mp_val = pd.to_numeric(df["max_pain_strike"], errors="coerce")
-        df["max_pain_dist_pct"] = ((_mp_val - _mp_price_scalar) / _mp_price_scalar * 100).abs()
+    _mp_src = pd.to_numeric(df["max_pain_strike"], errors="coerce")
+    if not _mp_src.notna().any() and "max_pain" in df.columns:
+        _mp_src = pd.to_numeric(df["max_pain"], errors="coerce")
+    if _mp_src.notna().any() and _mp_price_scalar > 0:
+        df["max_pain_dist_pct"] = ((_mp_src - _mp_price_scalar) / _mp_price_scalar * 100).abs()
     else:
         df["max_pain_dist_pct"] = pd.NA
 
@@ -1268,14 +1274,14 @@ def calculate_scores(
         cw = load_ic_adjusted_weights(config)
         w = {k: cw.get(k, dw[k]) for k in dw}
 
-        # PCR score (skip if zero weight)
-        if w.get("pcr", 0) > 0:
-            pcr_vals = pd.to_numeric(df.get("pcr", pd.Series(np.nan, index=df.index)), errors="coerce")
-            pcr_score_call = (1 - np.clip(pcr_vals / 2.0, 0, 1)).fillna(0.5)
-            pcr_score_put = np.clip(pcr_vals / 2.0, 0, 1).fillna(0.5)
-            pcr_score = pd.Series(np.where(is_call_series, pcr_score_call, pcr_score_put), index=df.index)
-        else:
-            pcr_score = pd.Series(0.5, index=df.index)
+        # PCR score — always compute. The weight (`w["pcr"]`) only governs how
+        # much this contributes to the composite. Skipping computation when
+        # weight=0 pins the stored column to a constant, which prevents the
+        # calibrator from ever rediscovering signal (self-reinforcing).
+        pcr_vals = pd.to_numeric(df.get("pcr", pd.Series(np.nan, index=df.index)), errors="coerce")
+        pcr_score_call = (1 - np.clip(pcr_vals / 2.0, 0, 1)).fillna(0.5)
+        pcr_score_put = np.clip(pcr_vals / 2.0, 0, 1).fillna(0.5)
+        pcr_score = pd.Series(np.where(is_call_series, pcr_score_call, pcr_score_put), index=df.index)
 
         # GEX score: distance-based sigmoid (replaces binary 0.3/0.7)
         gex_flip = pd.to_numeric(df.get("gex_flip_price", pd.Series(np.nan, index=df.index)), errors="coerce")
@@ -1288,33 +1294,24 @@ def calculate_scores(
         gex_score = pd.Series(np.where(is_call_series, gex_score_call, gex_score_put), index=df.index)
         gex_score = gex_score.where(gex_flip_valid, 0.5)  # neutral when no flip data
 
-        # OI change score (skip if zero weight)
-        if w.get("oi_change", 0) > 0:
-            oi_chg = pd.to_numeric(df.get("oi_change", pd.Series(0, index=df.index)), errors="coerce").fillna(0)
-            oi_change_score = rank_norm(oi_chg)
-        else:
-            oi_change_score = pd.Series(0.5, index=df.index)
+        # OI change score — always compute (see PCR comment re: weight gate).
+        oi_chg = pd.to_numeric(df.get("oi_change", pd.Series(0, index=df.index)), errors="coerce").fillna(0)
+        oi_change_score = rank_norm(oi_chg)
 
-        # Sentiment score (skip if zero weight)
-        if w.get("sentiment", 0) > 0:
-            raw_sent = pd.to_numeric(
-                df.get("sentiment_score", pd.Series(0.0, index=df.index)), errors="coerce"
-            ).fillna(0.0).clip(-1.0, 1.0)
-            sent_call = ((raw_sent + 0.5) / 1.0).clip(0, 1)
-            sent_put = ((0.5 - raw_sent) / 1.0).clip(0, 1)
-            sentiment_score_component = pd.Series(
-                np.where(is_call_series, sent_call, sent_put), index=df.index
-            )
-        else:
-            sentiment_score_component = pd.Series(0.5, index=df.index)
+        # Sentiment score — always compute.
+        raw_sent = pd.to_numeric(
+            df.get("sentiment_score", pd.Series(0.0, index=df.index)), errors="coerce"
+        ).fillna(0.0).clip(-1.0, 1.0)
+        sent_call = ((raw_sent + 0.5) / 1.0).clip(0, 1)
+        sent_put = ((0.5 - raw_sent) / 1.0).clip(0, 1)
+        sentiment_score_component = pd.Series(
+            np.where(is_call_series, sent_call, sent_put), index=df.index
+        )
 
-        # Option RVOL score (skip if zero weight)
-        if w.get("option_rvol", 0) > 0:
-            option_rvol_score = rank_norm(
-                pd.to_numeric(df.get("option_rvol", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
-            ).clip(0, 1)
-        else:
-            option_rvol_score = pd.Series(0.5, index=df.index)
+        # Option RVOL score — always compute.
+        option_rvol_score = rank_norm(
+            pd.to_numeric(df.get("option_rvol", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        ).clip(0, 1)
         df["option_rvol_score"] = option_rvol_score
 
         # Skew combined score: blend directional alignment with percentile rank
@@ -1347,22 +1344,22 @@ def calculate_scores(
         vega_risk_score = (1.0 - vega_risk_raw).clip(0, 1)
         df["vega_risk_score"] = vega_risk_score
 
-        # Gamma pin score (skip if zero weight)
-        if w.get("gamma_pin", 0) > 0:
-            gamma_pin_dist = pd.to_numeric(
-                df.get("gamma_pin_dist_pct", pd.Series(100.0, index=df.index)), errors="coerce"
-            ).fillna(100.0)
-            dte_arr = df["T_years"].values * 365.0
-            gamma_pin_score = pd.Series(
-                np.where(
-                    dte_arr <= 14,
-                    np.clip(1.0 - (gamma_pin_dist.values / 10.0), 0.0, 1.0),
-                    0.5,
-                ),
-                index=df.index,
-            )
-        else:
-            gamma_pin_score = pd.Series(0.5, index=df.index)
+        # Gamma pin score — always compute. Active only for near-expiry trades
+        # (dte ≤ 14) where pin risk is real; longer-dated trades get the neutral
+        # 0.5 directly from the np.where, which is fine — the variance
+        # available to the calibrator comes from the short-dated rows.
+        gamma_pin_dist = pd.to_numeric(
+            df.get("gamma_pin_dist_pct", pd.Series(100.0, index=df.index)), errors="coerce"
+        ).fillna(100.0)
+        dte_arr = df["T_years"].values * 365.0
+        gamma_pin_score = pd.Series(
+            np.where(
+                dte_arr <= 14,
+                np.clip(1.0 - (gamma_pin_dist.values / 10.0), 0.0, 1.0),
+                0.5,
+            ),
+            index=df.index,
+        )
         df["gamma_pin_score"] = gamma_pin_score
 
         # Gamma magnitude score: high gamma near expiry = outsized convexity opportunity
@@ -4151,6 +4148,12 @@ def main():
                     _today_str = datetime.now().strftime("%Y-%m-%d")
                     _inserted = 0
                     _skipped = 0
+                    # Bear Call has been the worst-PF spread strategy in the ledger
+                    # (PF 0.41, n=31). Mirror the long-put skip so we stop feeding
+                    # the calibrator a known-losing cohort. Opt back in via
+                    # config "auto_log_skip_bear_calls": false.
+                    _skip_bear_calls = bool(config.get("auto_log_skip_bear_calls", True))
+                    _skipped_bear_calls = 0
 
                     # Component-score fields carried over from the spread enrichment
                     _spread_score_keys = (
@@ -4171,6 +4174,14 @@ def main():
                         _sym = str(row.get("symbol", "")).upper()
                         try:
                             _is_condor = ("total_credit" in row.index) and not pd.isna(row.get("total_credit"))
+                            # Bear Call detection — credit spread whose legs are calls.
+                            # Skip before any DB write so the cohort never enters
+                            # the calibration ledger.
+                            if (not _is_condor) and _skip_bear_calls:
+                                _spread_type = str(row.get("type", "")).strip().lower()
+                                if _spread_type == "call":
+                                    _skipped_bear_calls += 1
+                                    continue
                             _common_scores = {k: row.get(k) for k in _spread_score_keys if k in row.index}
                             _common_scores["iv_edge_score"] = row.get("iv_advantage_score")
                             _common_scores["weight_profile"] = _weight_profile_id
@@ -4216,7 +4227,11 @@ def main():
                         except Exception as _log_exc:
                             print(f"  Error auto-logging {_sym}: {_log_exc}")
                     _tag = _weight_profile_id or "untagged"
-                    _summary = f"Auto-logged {_inserted} spreads/condors, skipped {_skipped} duplicates (profile: {_tag})"
+                    _bc_suffix = f", filtered {_skipped_bear_calls} Bear Call(s)" if _skipped_bear_calls else ""
+                    _summary = (
+                        f"Auto-logged {_inserted} spreads/condors, "
+                        f"skipped {_skipped} duplicates{_bc_suffix} (profile: {_tag})"
+                    )
                     print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
                     _has_results = False
 

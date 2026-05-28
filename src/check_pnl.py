@@ -593,6 +593,17 @@ def view_portfolio(cohort: Optional[str] = None):
     except Exception as _e:
         print(f"\r  (exit enforcement skipped: {_e})")
 
+    # Cache exit-rule thresholds once so the per-row milestone hint matches the
+    # rule that update_positions() actually enforces. Previously the hint was
+    # hardcoded to 50%, which lied about long options (real TP is 100%).
+    _exit_cfg: Dict[str, Any] = {}
+    try:
+        import json as _json
+        with open("config.json") as _f:
+            _exit_cfg = (_json.load(_f) or {}).get("exit_rules", {}) or {}
+    except Exception:
+        pass
+
     try:
         with closing(sqlite3.connect(DB_PATH)) as conn:
             conn.row_factory = sqlite3.Row
@@ -847,22 +858,50 @@ def view_portfolio(cohort: Optional[str] = None):
                 except Exception:
                     pass
 
-            # 50% max-profit milestone alert (only when live price is available)
+            # Take-profit milestone alert. Threshold mirrors the rule that
+            # paper_manager.update_positions() enforces, so the advisory matches
+            # what auto-close will actually do on the next pass.
             if live_price is not None and live_price > 0:
-                tp_threshold = 0.50  # config.get("exit_rules", {}).get("take_profit", 0.50) if config available
                 if short:
-                    # Short: profit = entry - live (premium decay)
+                    # Short premium: DTE-aware TP ladder
+                    sp_cfg = _exit_cfg.get("short_premium") or {}
+                    try:
+                        _dte_now = _dte(expiry)
+                    except Exception:
+                        _dte_now = 30
+                    if _dte_now >= 21:
+                        tp_threshold = float(sp_cfg.get("take_profit_ge_21_dte", 0.50))
+                    elif _dte_now >= 7:
+                        tp_threshold = float(sp_cfg.get("take_profit_7_to_21_dte", 0.35))
+                    else:
+                        tp_threshold = float(sp_cfg.get("take_profit_lt_7_dte", 0.25))
                     profit_pct = (entry_price - live_price) / entry_price if entry_price > 0 else 0.0
                 else:
-                    # Long: profit = live - entry
+                    # Long option: flat take-profit (config default 1.0 = 100%)
+                    tp_threshold = float((_exit_cfg.get("long_option") or {}).get("take_profit", 1.0))
                     profit_pct = (live_price - entry_price) / entry_price if entry_price > 0 else 0.0
 
                 if profit_pct >= tp_threshold:
-                    milestone_line = f"    ✓ {profit_pct:.0%} profit — consider closing ({tp_threshold:.0%} target reached)"
+                    milestone_line = (
+                        f"    ✓ {profit_pct:.0%} profit — at take-profit "
+                        f"({tp_threshold:.0%}); next exit-rule pass will auto-close"
+                    )
                     if HAS_FMT and fmt:
                         print(fmt.colorize(milestone_line, fmt.Colors.GREEN, bold=True))
                     else:
                         print(milestone_line)
+                elif profit_pct >= 0.5 * tp_threshold and profit_pct >= 0.50:
+                    # Halfway hint — useful for long options where TP=100% means
+                    # +50% is still a notable milestone worth surfacing, just not
+                    # actionable per the auto-close rule.
+                    halfway_line = (
+                        f"    · {profit_pct:.0%} profit — past halfway to TP "
+                        f"({tp_threshold:.0%}); not yet at auto-close threshold"
+                    )
+                    if HAS_FMT and fmt:
+                        print(fmt.colorize(halfway_line, fmt.Colors.DIM))
+                    else:
+                        print(halfway_line)
 
         # Open totals
         if HAS_FMT and fmt:
