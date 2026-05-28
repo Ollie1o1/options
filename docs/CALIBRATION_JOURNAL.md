@@ -7,6 +7,108 @@ evolved over time.
 
 ---
 
+## 2026-05-20 (evening) — multi-method ensemble calibration (long-call only, n=89)
+
+**Command:** ad-hoc multi-method ensemble (not via
+`src.backtester --calibrate --apply` — see "Methodology" below).
+**Backup file:** `config.bak.20260520-ensemble-165352.json`
+**Trigger:** Morning's surgical tuning (`config.bak.20260520-145310.json`) was
+fit on n=33 post-2026-05-11 trades and boosted `pop` / `theta` while cutting
+`spread`. On the larger n=89 long-call-only subset (filtered to match the
+current `auto_log_skip_long_puts` flow), three independent methods agree those
+moves were directionally wrong for long-calls. This calibration replaces the
+surgical tuning with an ensemble-derived weight set whose in-sample composite
+IC is +0.359 (p=0.0006) on the 89-trade long-call cohort, vs +0.269 for the
+morning's surgical weights.
+
+### Methodology — four-method ensemble
+
+Per-factor verdict requires agreement across multiple independent statistical
+methods, not just a single IC:
+
+1. **Bootstrap IC, 2000 resamples** of the 89-trade long-call cohort. 95% CI
+   per factor; `STRONG+` only if entire CI > 0.
+2. **Walk-forward expanding-window IC** — three folds (train ≥ 30, test = 15).
+   Looks for both meaningful test IC magnitude AND ≥ 50% train/test sign
+   agreement.
+3. **Ridge regression with 5-fold CV** for α selection, plus a 1000-resample
+   bootstrap on the coefficients. Reports both β and `P(same sign)` under
+   bootstrap.
+4. **Leave-one-ticker-out** check — drops each of the top 8 tickers in turn,
+   confirms no sign flip on the lead factors.
+
+A factor earns `+++` only when all three statistical methods (bootstrap,
+walk-forward, ridge) agree positive. `---` requires all three negative.
+
+The synthetic backtester (`src.backtest_optimizer`) was also run at scale —
+105 tickers × 5y × DE 300 trials × mask-zero-variance — with 7,471 synthetic
+long-call trades. Its per-factor IC table did *not* agree with the real
+paper-trade IC: synthetic top factors topped out at ±0.06 IC, vs ±0.26 on real
+long-calls. Conclusion: the synthetic backtester's HV-as-IV proxy cannot
+generate the long-call signal at any sample size. The ensemble is derived
+from real paper trades only; synth was used as a non-validating cross-check.
+
+### Weight changes (top deltas vs morning's surgical)
+
+| Factor | Surgical → Ensemble | Δ | Why |
+|---|---|---|---|
+| `spread` | 0.0195 → **0.0768** | +0.057 | +++ across all 3 methods |
+| `momentum` | 0.0378 → **0.0929** | +0.055 | +++ (validates mode-flip in `src.backtest_optimizer`) |
+| `pop` | 0.0878 → **0.0354** | −0.052 | Undoes morning's +0.056 (n=33 was misleading) |
+| `iv_velocity` | 0.0885 → **0.1373** | +0.049 | +++ across all 3 methods |
+| `vega_risk` | 0.1062 → **0.0595** | −0.047 | Only `+` (bootstrap 85%) — not robust enough |
+| `vrp` | 0.1366 → **0.1755** | +0.039 | Strongest +++ |
+| `iv_rank` | 0.0646 → **0.0260** | −0.039 | Walk-forward sign-flips OOS |
+| `iv_edge` | 0.0864 → **0.1195** | +0.033 | +++ |
+| `theta` | 0.0488 → **0.0197** | −0.029 | Undoes morning's +0.034 |
+| `em_realism` | 0.0000 → **0.0275** | +0.028 | Bootstrap STRONG+ on previously-zero factor |
+
+### In-sample composite IC (validation on 89 long-calls)
+
+| Weight set | Composite IC | p-value | Q1 (top 22) win | Q4 (bot 23) win | Skip-bot-25% book |
+|---|---:|---:|---:|---:|---:|
+| Morning surgical (replaced) | +0.269 | 0.011 | 59.1% | 26.1% | $13,455 |
+| Pre-surgical (2026-05-11 cal) | +0.298 | 0.005 | — | — | — |
+| **Ensemble (applied)** | **+0.359** | **0.0006** | **68.2%** | **13.0%** | **$16,963** |
+
+The ensemble's bottom-quartile win rate of 13% is the headline diagnostic.
+Skipping the ensemble's bot-25% on the 89-trade book would have improved P&L
+from $13,089 to $16,963 — a +30% improvement in-sample.
+
+### Caveats
+
+- **In-sample number.** Out-of-sample expectation is roughly half: +10 to +18%
+  improvement to total P&L, mostly via bottom-quartile filtering.
+- **32-day window.** Could be regime-specific. Re-run methodology every ~30
+  new closed long-calls.
+- **Overrides the morning's 2026-05-20 surgical tuning's validation plan** (which
+  asked for 2026-05-25 + ~30 new trades before next calibration). The override
+  is justified because the surgical tuning was n=33 and is contradicted by 3
+  independent methods on n=89.
+- **Replaces, not stacks.** The morning surgical and the ensemble both edit
+  the same `composite_weights` block, so they're mutually exclusive. The
+  surgical is preserved in `config.bak.20260520-145310.json`.
+
+### Validation plan
+
+- Track the next ~30 closed long-call trades under these weights.
+- Re-run `src.calibration_ensemble` (see below) after ~30 new closed trades to
+  check stability of the top factors.
+- If bot-quartile win rate stays < 25% OOS, the ensemble is validated.
+- If bot-quartile win rate jumps to > 40% OOS, the ensemble is overfit and
+  should be reverted via the procedure below.
+
+### Revert procedure
+
+```bash
+cp config.bak.20260520-ensemble-165352.json config.json
+# (or to the morning surgical):
+# cp config.bak.20260520-145310.json config.json
+rm -f ic_weights_cache.json
+```
+
+---
+
 ## 2026-05-11 — first IC-driven directional calibration
 
 **Command:** `python -m src.backtester --calibrate --apply`
@@ -122,6 +224,88 @@ Total budget: 0.9999 (≈ 1.000, conserved).
 cp config.bak.20260511-111722.json config.json
 # or restore the in-DB calibration_marker file from before this run:
 cat paper_trades.db.calibration_marker.json
+```
+
+---
+
+## 2026-05-20 — surgical sign-mismatch tuning (manual, not from `--calibrate`)
+
+**Command:** manual `composite_weights` edit (not `python -m src.backtester --calibrate --apply`)
+**Backup file:** `config.bak.20260520-145310.json`
+**Trigger:** Post-2026-05-11 cohort showed regression — 32 closed trades down
+−$2,058 (34% win rate, avg −$64/trade) vs pre-cal cohort +$94/trade. IC of
+`quality_score` vs realized return on the post-cal cohort was **−0.026 (p=0.71)**
+— no signal. Quintile breakdown non-monotonic, top-half quality lost $2,616
+while bottom-half made $558.
+
+### Post-cal cohort IC by component (n=33)
+
+Decomposed `pnl_pct` against each stored component score (sorted by IC):
+
+| Component | IC | Pre-cal wt | Post-cal wt | Verdict |
+|---|---:|---:|---:|---|
+| gex | −0.377 | 0.010 | 0.003 | strong negative, tiny weight — leave |
+| liquidity | −0.246 | 0.080 | 0.020 | cal already cut — ok |
+| iv_mispricing | −0.235 | 0.050 | 0.026 | cal already cut — ok |
+| skew_align | −0.213 | 0.020 | 0.035 | wrong-sign boost, small |
+| **spread** | **−0.128** | 0.010 | **0.088** | **WRONG-SIGN, heavy weight — fix** |
+| em_realism | −0.115 | 0.000 | 0.000 | n/a |
+| ev | −0.078 | 0.070 | 0.017 | cal already cut |
+| term_structure | −0.038 | 0.040 | 0.129 | low-IC, but matches direction in full ledger — keep |
+| iv_edge | +0.085 | 0.080 | 0.088 | ok |
+| momentum | +0.121 | 0.100 | 0.039 | mild signal, ok |
+| vega_risk | +0.153 | 0.030 | 0.109 | cal correctly boosted |
+| iv_rank | +0.198 | 0.080 | 0.066 | ok |
+| iv_velocity | +0.205 | 0.050 | 0.091 | cal correctly boosted |
+| trader_pref | +0.227 | 0.000 | 0.029 | cal correctly added |
+| vrp | +0.228 | 0.050 | 0.140 | cal correctly boosted, strongest +IC |
+| **pop** | **+0.253** | **0.130** | **0.032** | **cal CUT a positive signal — fix** |
+| **theta** | **+0.265** | **0.060** | **0.015** | **cal CUT a positive signal — fix** |
+| rr | +0.388 | 0.100 | 0.049 | strong positive but score std=0.004 → IC unreliable; leave |
+
+**Sign-mismatch root cause:** 2026-05-11 calibration was fit against the full
+182-trade ledger (≈50/50 long-calls vs credit spreads). The `auto_log_skip_long_puts`
+filter has since funneled new logs into long-calls only. The weights that
+performed well across the mixed ledger don't match the long-call profile —
+specifically, `pop`/`theta`/`rr` matter much more for OTM long-calls than for
+the credit-spread side, and `spread` is uninformative for long calls.
+
+### Manual edits applied (delta ≥ 0.005)
+
+| Component | From | To | Δ |
+|---|---:|---:|---:|
+| `spread` | 0.0881 | **0.0195** | **−0.069** |
+| `pop` | 0.0322 | **0.0878** | **+0.056** |
+| `theta` | 0.0149 | **0.0488** | **+0.034** |
+
+All other components renormalized proportionally to preserve the 0.9999 budget.
+
+### Caveats
+
+- n=33 is small. With n=33, IC noise is ~±0.17 (one SD). The ±0.25 ICs are
+  borderline-significant; ±0.39 (rr) is likely an artifact of low score variance
+  (std=0.004).
+- The signs of the three corrections are individually consistent with how each
+  signal *should* behave for long-call buyers (you want high `pop`, you want
+  cheap `theta`, you don't care about `spread`). Direction confidence > point-
+  estimate confidence.
+- The variance-zero scorer fix shipped the same day ([[project_variance_zero_scorer_fix]])
+  means the next `--calibrate --apply` will have six previously-dead signals
+  available; this manual tuning is the bridge until that next calibration.
+
+### Validation plan
+
+- Watch the next 2 weeks of auto-logged trades against this tuning.
+- If the post-2026-05-20 cohort beats the post-2026-05-11 cohort
+  (avg pnl_pct > 0, win-rate > 40%), the surgical fix is validated.
+- Defer the next `--calibrate --apply` until ≥ 2026-05-25 AND ≥ ~30 new closed
+  trades on these weights so we don't compound short-sample noise.
+
+### Revert procedure
+
+```bash
+cp config.bak.20260520-145310.json config.json
+rm -f ic_weights_cache.json
 ```
 
 ---

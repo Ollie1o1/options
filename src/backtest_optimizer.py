@@ -177,6 +177,49 @@ def strike_for_delta(
     return K
 
 
+def bs_call_price(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return max(S - K, 0.0)
+    import math
+    sq = sigma * math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / sq
+    d2 = d1 - sq
+    return S * _ndtr(d1) - K * math.exp(-r * T) * _ndtr(d2)
+
+
+def bs_call_delta(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Call delta (positive, e.g. +0.30 for a 30-delta call)."""
+    if T <= 0 or sigma <= 0:
+        return 1.0 if S > K else 0.0
+    import math
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    return _ndtr(d1)
+
+
+def strike_for_call_delta(
+    S: float,
+    T: float,
+    r: float,
+    sigma: float,
+    target_delta: float = 0.30,
+    tol: float = 1e-4,
+    max_iter: int = 60,
+) -> float:
+    """Binary search: return K such that call delta ≈ target_delta (positive)."""
+    lo, hi = S * 1.0001, S * 3.0
+    for _ in range(max_iter):
+        K = (lo + hi) * 0.5
+        d = bs_call_delta(S, K, T, r, sigma)
+        if abs(d - target_delta) < tol:
+            return K
+        # For calls: K↑ → delta drops (K=S → ~0.5, K>>S → 0).
+        if d > target_delta:
+            lo = K
+        else:
+            hi = K
+    return K
+
+
 # -- Component score computation -----------------------------------------------
 
 _NEUTRAL = 0.5  # score for factors with no historical signal
@@ -192,10 +235,19 @@ def compute_component_scores(
     hv_ratio: float,       # current HV / 6-month avg HV
     rsi_score: float,      # [0,1] from RSI-14
     vol_rank: float,       # [0,1] volume percentile rank
+    mode: str = "short_put",
 ) -> np.ndarray:
-    """Return a length-27 array of component scores in [0,1]."""
-    prem = bs_put_price(S, K, T, r, sigma)
-    delta = bs_put_delta(S, K, T, r, sigma)
+    """Return a length-27 array of component scores in [0,1].
+
+    `mode` flips direction-sensitive scorers between seller and buyer
+    strategies. Default is `"short_put"` for backwards compatibility.
+    """
+    if mode == "long_call":
+        prem = bs_call_price(S, K, T, r, sigma)
+        delta = bs_call_delta(S, K, T, r, sigma)
+    else:
+        prem = bs_put_price(S, K, T, r, sigma)
+        delta = bs_put_delta(S, K, T, r, sigma)
     theta = bs_theta_daily(S, K, T, r, sigma)
 
     # -- Computable factors ----------------------------------------------------
@@ -219,17 +271,22 @@ def compute_component_scores(
     theta_frac = (abs(theta) * dte / max(prem, 1e-6))
     theta_score = float(np.clip(theta_frac * 3.0, 0, 1))
 
-    # IV edge: how elevated is current vol vs recent average (sellers want high)
-    iv_edge_score = float(np.clip((hv_ratio - 0.8) / 0.8, 0, 1))
-
-    # VRP proxy: positive when HV is elevated above 6m avg (variance risk premium)
-    vrp_score = float(np.clip((hv_ratio - 1.0) / 0.5, 0, 1))
-
-    # Momentum (RSI-14): bearish momentum (low RSI) favours short puts
-    momentum_score = float(np.clip(1.0 - rsi_score * 0.4, 0, 1))
-
-    # Skew alignment: bearish conditions favour put selling
-    skew_align_score = float(np.clip(1.0 - rsi_score * 0.5, 0, 1))
+    if mode == "long_call":
+        # Buyers prefer CHEAP vol relative to baseline.
+        iv_edge_score = float(np.clip((1.0 - hv_ratio) / 0.5, 0, 1))
+        vrp_score = float(np.clip((1.0 - hv_ratio) / 0.5, 0, 1))
+        # Bullish momentum / RSI helps long calls.
+        momentum_score = float(np.clip(rsi_score * 0.6 + 0.4, 0, 1))
+        skew_align_score = float(np.clip(rsi_score * 0.5 + 0.5, 0, 1))
+    else:
+        # IV edge: how elevated is current vol vs recent average (sellers want high)
+        iv_edge_score = float(np.clip((hv_ratio - 0.8) / 0.8, 0, 1))
+        # VRP proxy: positive when HV is elevated above 6m avg (variance risk premium)
+        vrp_score = float(np.clip((hv_ratio - 1.0) / 0.5, 0, 1))
+        # Momentum (RSI-14): bearish momentum (low RSI) favours short puts
+        momentum_score = float(np.clip(1.0 - rsi_score * 0.4, 0, 1))
+        # Skew alignment: bearish conditions favour put selling
+        skew_align_score = float(np.clip(1.0 - rsi_score * 0.5, 0, 1))
 
     # EM realism proxy: longer DTE = more time value to decay
     em_realism_score = float(np.clip(T * 6.0, 0, 1))
@@ -246,7 +303,11 @@ def compute_component_scores(
     iv_mispricing_score = _NEUTRAL
 
     # Term structure: proxy — longer DTE with elevated vol = steeper term structure
-    term_structure_score = float(np.clip((hv_ratio - 0.9) * T * 8.0, 0, 1))
+    if mode == "long_call":
+        # Buyers want a cheap front month vs back; depressed HV is the proxy.
+        term_structure_score = float(np.clip((1.0 - hv_ratio) * T * 8.0, 0, 1))
+    else:
+        term_structure_score = float(np.clip((hv_ratio - 0.9) * T * 8.0, 0, 1))
 
     # Gamma magnitude: BS gamma normalized
     import math as _m
@@ -331,6 +392,43 @@ def simulate_pnl(
         if exit_now or i == len(future_closes) - 1:
             exit_cost = val * (1 + slippage / 2)
             return float((received - exit_cost) / max(entry_price, 1e-8))
+    return 0.0
+
+
+def simulate_long_call_pnl(
+    entry_price: float,
+    future_closes: np.ndarray,
+    K: float,
+    sigma: float,
+    r: float,
+    entry_dte: int,
+    take_profit_mult: float = 1.0,
+    stop_loss_mult: float = 0.5,
+    min_dte: int = EXIT_DTE_MIN,
+    slippage: float = SLIPPAGE_PCT,
+) -> float:
+    """Simulate a long call. Returns pnl_pct as (exit_proceeds - entry_cost) / entry_cost.
+
+    Exits on the first of:
+      - val >= entry_price * (1 + take_profit_mult)   (take profit)
+      - val <= entry_price * (1 - stop_loss_mult)     (stop loss)
+      - dte <= min_dte                                 (time exit)
+      - last bar in the simulation window
+    """
+    if entry_price <= 0:
+        return 0.0
+    entry_cost = entry_price * (1 + slippage / 2)
+    take_val = entry_price * (1.0 + take_profit_mult)
+    stop_val = entry_price * (1.0 - stop_loss_mult)
+
+    for i, S in enumerate(future_closes):
+        dte = entry_dte - i - 1
+        T = max(dte / 365.0, 1 / 365.0)
+        val = bs_call_price(float(S), K, T, r, sigma)
+        exit_now = (val >= take_val) or (val <= stop_val) or (dte <= min_dte)
+        if exit_now or i == len(future_closes) - 1:
+            exit_proceeds = val * (1 - slippage / 2)
+            return float((exit_proceeds - entry_cost) / max(entry_cost, 1e-8))
     return 0.0
 
 
@@ -452,6 +550,108 @@ def backtest_ticker(
         return None
 
 
+def backtest_ticker_long_call(
+    symbol: str,
+    period: str = "5y",
+    r: float = RISK_FREE_RATE,
+    entry_dte: int = ENTRY_DTE,
+    roll_step: int = ROLL_STEP_DAYS,
+    target_delta: float = TARGET_DELTA,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Buyer-side mirror of backtest_ticker — synthetic +0.30Δ long calls."""
+    try:
+        raw = _get_yf().download(symbol, period=period, interval="1d",
+                                 auto_adjust=True, progress=False)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        closes = raw["Close"].dropna().squeeze()
+        if not isinstance(closes, pd.Series) or len(closes) < 300:
+            return None
+        vols = raw.get("Volume", pd.Series(0, index=raw.index))
+        if isinstance(vols, pd.DataFrame):
+            vols = vols.iloc[:, 0]
+        vols = vols.reindex(closes.index).fillna(0)
+
+        warmup = 260
+        step_indices = range(warmup, len(closes) - entry_dte - 5, roll_step)
+
+        scores_list, pnls = [], []
+        for idx in step_indices:
+            S0 = float(closes.iloc[idx])
+            if S0 <= 0:
+                continue
+
+            sigma = _hv_30(closes, idx)
+            if sigma is None:
+                continue
+
+            hv_history = [
+                _hv_30(closes, i)
+                for i in range(max(idx - 252, 30), idx, 5)
+            ]
+            hv_history = [v for v in hv_history if v is not None]
+            hv_pct_rank = float(np.mean(np.array(hv_history) < sigma)) if hv_history else 0.5
+
+            hv_6m = [_hv_30(closes, i) for i in range(max(idx - 130, 30), idx, 5)]
+            hv_6m = [v for v in hv_6m if v is not None]
+            hv_ratio = sigma / max(float(np.mean(hv_6m)), 0.01) if hv_6m else 1.0
+
+            rsi_window = closes.iloc[max(0, idx - 20):idx].diff().dropna()
+            gains = rsi_window.clip(lower=0).rolling(14).mean()
+            losses = (-rsi_window).clip(lower=0).rolling(14).mean()
+            raw_g = float(gains.iloc[-1]) if len(gains) > 0 else 0
+            raw_l = float(losses.iloc[-1]) if len(losses) > 0 else 1e-8
+            avg_g = raw_g if math.isfinite(raw_g) else 0
+            avg_l = raw_l if math.isfinite(raw_l) else 1e-8
+            rsi = 100 - 100 / (1 + avg_g / max(avg_l, 1e-8))
+            rsi_score = float(np.clip(rsi / 100.0, 0, 1))
+
+            vol_window = vols.iloc[max(0, idx - 252):idx]
+            vol_rank = float(np.mean(vol_window < vols.iloc[idx])) if len(vol_window) else 0.5
+
+            T = entry_dte / 365.0
+            try:
+                K = strike_for_call_delta(S0, T, r, sigma, target_delta=target_delta)
+            except Exception:
+                K = S0 * (1 + target_delta * sigma * T ** 0.5)
+            if K <= S0 or K <= 0:
+                continue
+
+            prem = bs_call_price(S0, K, T, r, sigma)
+            if prem <= 0.001:
+                continue
+
+            comp = compute_component_scores(
+                S0, K, T, r, sigma,
+                hv_pct_rank=hv_pct_rank,
+                hv_ratio=float(np.clip(hv_ratio, 0.1, 5.0)),
+                rsi_score=rsi_score,
+                vol_rank=vol_rank,
+                mode="long_call",
+            )
+
+            future = closes.iloc[idx + 1: idx + entry_dte + 1].values
+            if len(future) < entry_dte // 2:
+                continue
+
+            pnl = simulate_long_call_pnl(prem, future, K, sigma, r, entry_dte)
+            if not np.isfinite(pnl):
+                continue
+
+            scores_list.append(comp)
+            pnls.append(pnl)
+
+        if len(scores_list) < 5:
+            return None
+        return np.array(scores_list, np.float64), np.array(pnls, np.float64)
+
+    except Exception as exc:
+        logger.debug("backtest_ticker_long_call(%s) failed: %s", symbol, exc)
+        return None
+
+
 # -- Aggregate backtest --------------------------------------------------------
 
 @dataclass
@@ -483,13 +683,16 @@ def run_backtest(
     tickers: List[str],
     period: str = "5y",
     verbose: bool = True,
+    strategy: str = "short_put",
 ) -> BacktestResult:
     all_scores, all_pnls, all_syms = [], [], []
+
+    sim_fn = backtest_ticker_long_call if strategy == "long_call" else backtest_ticker
 
     for sym in tickers:
         if verbose:
             print(f"  {sym:>6}: ", end="", flush=True)
-        result = backtest_ticker(sym, period=period)
+        result = sim_fn(sym, period=period)
         if result is None:
             if verbose:
                 print("skipped")
@@ -526,6 +729,7 @@ def _objective(
     component_scores: np.ndarray,
     pnl_pct: np.ndarray,
     l2_lambda: float,
+    anchor: Optional[np.ndarray] = None,
 ) -> float:
     w = np.abs(w)
     s = w.sum()
@@ -542,9 +746,12 @@ def _objective(
     if not np.isfinite(ic):
         return 1.0
 
-    # L2: penalise deviation from equal weight (prevents dominance)
-    uniform = np.ones(len(w)) / len(w)
-    l2 = l2_lambda * float(np.sum((w - uniform) ** 2))
+    # L2: penalise deviation from anchor (defaults to uniform when not supplied).
+    # Anchoring on the live current_weights prevents the optimiser from
+    # spreading weight onto dead (zero-variance) factors.
+    if anchor is None:
+        anchor = np.ones(len(w)) / len(w)
+    l2 = l2_lambda * float(np.sum((w - anchor) ** 2))
 
     # Hard cap: any weight > 0.40 incurs quadratic penalty
     cap_pen = 5.0 * float(np.sum(np.maximum(w - 0.40, 0.0) ** 2))
@@ -559,22 +766,55 @@ def optimize_weights(
     l2_lambda: float = 0.10,
     verbose: bool = True,
     current_weights: Optional[Dict[str, float]] = None,
+    mask_zero_variance: bool = False,
 ) -> Dict[str, float]:
     n = len(WEIGHT_KEYS)
-    bounds = [(0.0, 0.5)] * n
-    obj = partial(_objective, component_scores=bt.component_scores,
-                  pnl_pct=bt.pnl_pct, l2_lambda=l2_lambda)
-
     cw_dict = current_weights if current_weights is not None else CURRENT_WEIGHTS
-    x0_current  = np.array([cw_dict.get(k, CURRENT_WEIGHTS[k])  for k in WEIGHT_KEYS], float)
-    x0_research = np.array([RESEARCH_WEIGHTS[k] for k in WEIGHT_KEYS], float)
-    x0_current  /= x0_current.sum()
-    x0_research /= x0_research.sum()
+
+    # Identify columns with no signal — they cannot have a signed effect.
+    if mask_zero_variance:
+        stds = bt.component_scores.std(axis=0)
+        zero_var_mask = stds < 1e-8
+    else:
+        zero_var_mask = np.zeros(n, dtype=bool)
+    live_idx = np.where(~zero_var_mask)[0]
+    frozen_idx = np.where(zero_var_mask)[0]
+
+    # Frozen factors: keep their current absolute weights exactly. This
+    # preserves their relative shares and their fraction of the budget.
+    frozen_final: Dict[str, float] = {}
+    for i in frozen_idx:
+        k = WEIGHT_KEYS[i]
+        frozen_final[k] = float(cw_dict.get(k, CURRENT_WEIGHTS[k]))
+    frozen_total = float(sum(frozen_final.values()))
+    live_budget = max(1.0 - frozen_total, 1e-6)
+
+    if len(live_idx) == 0:
+        out = {k: round(float(cw_dict.get(k, 0.0)), 4) for k in WEIGHT_KEYS}
+        return out
+
+    live_keys = [WEIGHT_KEYS[i] for i in live_idx]
+    live_scores = bt.component_scores[:, live_idx]
+
+    # Build live x0 vectors (normalised within the live sub-space).
+    live_current = np.array([cw_dict.get(k, CURRENT_WEIGHTS[k]) for k in live_keys], float)
+    live_research = np.array([RESEARCH_WEIGHTS[k] for k in live_keys], float)
+    live_current = (live_current / live_current.sum()
+                    if live_current.sum() > 0 else np.ones(len(live_idx)) / len(live_idx))
+    live_research = (live_research / live_research.sum()
+                     if live_research.sum() > 0 else np.ones(len(live_idx)) / len(live_idx))
+
+    bounds = [(0.0, 0.5)] * len(live_idx)
+    obj = partial(_objective, component_scores=live_scores,
+                  pnl_pct=bt.pnl_pct, l2_lambda=l2_lambda,
+                  anchor=live_current)
 
     if verbose:
-        ic_cur = -obj(x0_current)
-        ic_res = -obj(x0_research)
+        ic_cur = -obj(live_current)
+        ic_res = -obj(live_research)
         print(f"  Baseline IC ? current weights: {ic_cur:+.4f}  research weights: {ic_res:+.4f}")
+        if mask_zero_variance and len(frozen_idx) > 0:
+            print(f"  mask_zero_variance: {len(frozen_idx)} factor(s) frozen, {len(live_idx)} live")
 
     if method == "differential_evolution":
         if verbose:
@@ -589,22 +829,29 @@ def optimize_weights(
     else:
         if verbose:
             print("  L-BFGS-B (fast local search, two starting points)...")
-        # Try both starting points and take the better solution
-        r1 = minimize(obj, x0_current,  method="L-BFGS-B", bounds=bounds,
+        r1 = minimize(obj, live_current,  method="L-BFGS-B", bounds=bounds,
                       options={"maxiter": 2000, "ftol": 1e-9})
-        r2 = minimize(obj, x0_research, method="L-BFGS-B", bounds=bounds,
+        r2 = minimize(obj, live_research, method="L-BFGS-B", bounds=bounds,
                       options={"maxiter": 2000, "ftol": 1e-9})
         raw = r1.x if r1.fun <= r2.fun else r2.x
 
     raw = np.abs(raw)
-    raw /= raw.sum()
+    if raw.sum() <= 0:
+        raw = live_current.copy()
+    raw = raw / raw.sum()
 
     opt_ic = -obj(raw)
     if verbose:
-        base_ic = -obj(x0_current)
+        base_ic = -obj(live_current)
         print(f"  Optimised IC: {opt_ic:+.4f}  (? = {opt_ic - base_ic:+.4f})")
 
-    return {k: round(float(v), 4) for k, v in zip(WEIGHT_KEYS, raw)}
+    # Assemble final weights: frozen (verbatim) + live * live_budget.
+    final: Dict[str, float] = {k: 0.0 for k in WEIGHT_KEYS}
+    for k, v in frozen_final.items():
+        final[k] = v
+    for k, w in zip(live_keys, raw):
+        final[k] = float(w) * live_budget
+    return {k: round(float(final[k]), 6) for k in WEIGHT_KEYS}
 
 
 def cross_validate(
@@ -711,9 +958,64 @@ def save_to_config(weights: Dict[str, float], config_path: Path) -> None:
 
 # -- CLI -----------------------------------------------------------------------
 
+def _run_strategy(
+    strategy: str,
+    tickers: List[str],
+    period: str,
+    method: str,
+    trials: int,
+    l2: float,
+    no_cv: bool,
+    config_path: Path,
+    mask_zero_variance: bool,
+) -> Optional[Dict[str, float]]:
+    """Run one full backtest+optimize cycle for a single strategy."""
+    label = "long-call" if strategy == "long_call" else "short-put"
+    print(f"\n[1/4] Generating synthetic {label} backtest...")
+    bt = run_backtest(tickers, period=period, verbose=True, strategy=strategy)
+    pnl = bt.pnl_pct
+    print(f"\n  Trades: {bt.n_trades}  Win rate: {np.mean(pnl > 0):.1%}  "
+          f"Mean P&L: {np.mean(pnl):.3f}  Sharpe: "
+          f"{np.mean(pnl) / max(np.std(pnl), 1e-8):.2f}")
+
+    if bt.n_trades < 30:
+        print(f"\nERROR: Too few trades for {label}. Add more tickers or extend period.")
+        return None
+
+    print(f"\n[2/4] Optimising {label} weights (IC maximisation + L2 regularisation)...")
+    live_current = _load_current_from_config(config_path)
+    optimised = optimize_weights(bt, method=method,
+                                 n_trials=trials, l2_lambda=l2,
+                                 current_weights=live_current,
+                                 mask_zero_variance=mask_zero_variance)
+
+    if not no_cv:
+        print(f"\n[3/4] Walk-forward cross-validation ({label})...")
+        cv = cross_validate(bt, optimised)
+        print(f"  Train IC: {cv['train_ic']:+.4f}  Val IC: {cv['val_ic']:+.4f}  "
+              f"Degradation: {cv['degradation']:+.4f}", end="")
+        if cv["degradation"] < -0.04:
+            print("  ! overfitting detected ? try --l2 0.20")
+        else:
+            print("  ? stable")
+
+    print(f"\n[4/4] Results ({label})")
+    print_comparison(live_current, optimised)
+
+    print("\n  Per-factor IC (each component vs realised P&L):")
+    fics = sorted(bt.factor_ic(), key=lambda x: abs(x[1]), reverse=True)
+    for k, ic in fics:
+        bar_len = int(abs(ic) * 30)
+        bar = ("#" * bar_len).ljust(30)
+        print(f"    {k:<16} {bar} {ic:+.4f}")
+
+    return optimised
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Optimise composite_weights via synthetic short-put backtest."
+        description="Optimise composite_weights via synthetic backtest "
+                    "(short_put, long_call, or both)."
     )
     ap.add_argument("--tickers", nargs="*", default=DEFAULT_UNIVERSE)
     ap.add_argument("--period",  default="5y", choices=["2y", "3y", "5y"])
@@ -722,71 +1024,61 @@ def main() -> None:
     ap.add_argument("--trials",  type=int,   default=300)
     ap.add_argument("--l2",      type=float, default=0.10,
                     help="L2 regularisation (0 = none, 0.5 = strong, default 0.10)")
+    ap.add_argument("--strategy", default="both",
+                    choices=["short_put", "long_call", "both"],
+                    help="Strategy to backtest (default both)")
+    ap.add_argument("--mask-zero-variance", action="store_true",
+                    help="Freeze zero-variance factors at current weight; "
+                         "optimise only live signals")
     ap.add_argument("--save",    action="store_true",
-                    help="Write optimised weights to config.json")
+                    help="Write optimised weights to config.json "
+                         "(requires --strategy short_put or long_call)")
     ap.add_argument("--no-cv",   action="store_true",
                     help="Skip cross-validation")
     args = ap.parse_args()
+
+    if args.save and args.strategy == "both":
+        ap.error("--save requires --strategy short_put or --strategy long_call "
+                 "(cannot save two conflicting weight sets simultaneously)")
 
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     config_path = Path(__file__).parent.parent / "config.json"
 
     print("\n" + "=" * 56)
     print("  OPTIONS SCREENER -- WEIGHT OPTIMIZER")
-    print(f"  Universe: {len(args.tickers)} tickers | {args.period} history | {args.method}")
+    print(f"  Universe: {len(args.tickers)} tickers | {args.period} history | "
+          f"{args.method} | strategy={args.strategy}")
     print("=" * 56)
 
-    # -- 1. Backtest --
-    print("\n[1/4] Generating synthetic short-put backtest...")
-    bt = run_backtest(args.tickers, period=args.period, verbose=True)
-    pnl = bt.pnl_pct
-    print(f"\n  Trades: {bt.n_trades}  Win rate: {np.mean(pnl > 0):.1%}  "
-          f"Mean P&L: {np.mean(pnl):.3f}  Sharpe: "
-          f"{np.mean(pnl) / max(np.std(pnl), 1e-8):.2f}")
+    strategies = ["short_put", "long_call"] if args.strategy == "both" else [args.strategy]
+    results: Dict[str, Dict[str, float]] = {}
+    for strat in strategies:
+        out = _run_strategy(
+            strategy=strat,
+            tickers=args.tickers,
+            period=args.period,
+            method=args.method,
+            trials=args.trials,
+            l2=args.l2,
+            no_cv=args.no_cv,
+            config_path=config_path,
+            mask_zero_variance=args.mask_zero_variance,
+        )
+        if out is not None:
+            results[strat] = out
 
-    if bt.n_trades < 30:
-        print("\nERROR: Too few trades. Add more tickers or extend period.")
-        return
-
-    # -- 2. Optimise --
-    print("\n[2/4] Optimising weights (IC maximisation + L2 regularisation)...")
-    live_current = _load_current_from_config(config_path)
-    optimised = optimize_weights(bt, method=args.method,
-                                 n_trials=args.trials, l2_lambda=args.l2,
-                                 current_weights=live_current)
-
-    # -- 3. Cross-validate --
-    if not args.no_cv:
-        print("\n[3/4] Walk-forward cross-validation...")
-        cv = cross_validate(bt, optimised)
-        print(f"  Train IC: {cv['train_ic']:+.4f}  Val IC: {cv['val_ic']:+.4f}  "
-              f"Degradation: {cv['degradation']:+.4f}", end="")
-        if cv["degradation"] < -0.04:
-            print("  ! overfitting detected ? try --l2 0.20")
-        else:
-            print("  ? stable")
-    else:
-        cv = {}
-
-    # -- 4. Report --
-    print("\n[4/4] Results")
-    print_comparison(live_current, optimised)
-
-    # Factor-level IC table
-    print("\n  Per-factor IC (each component vs realised P&L):")
-    fics = sorted(bt.factor_ic(), key=lambda x: abs(x[1]), reverse=True)
-    for k, ic in fics:
-        bar_len = int(abs(ic) * 30)
-        bar = ("#" * bar_len).ljust(30)
-        print(f"    {k:<16} {bar} {ic:+.4f}")
-
-    # Suggested command
     if not args.save:
-        print("\n  To apply these weights, re-run with --save:")
-        print(f"    python -m src.backtest_optimizer --save --method {args.method} --l2 {args.l2}")
+        print("\n  To apply weights, re-run with --strategy {short_put|long_call} --save:")
+        print(f"    python -m src.backtest_optimizer --strategy {strategies[0]} "
+              f"--save --method {args.method} --l2 {args.l2}")
     else:
-        save_to_config(optimised, config_path)
-        print("\n  Weights saved. Restart the screener to apply them.")
+        # Single-strategy save path (CLI rejected --save with --strategy both above).
+        strat = args.strategy
+        if strat in results:
+            save_to_config(results[strat], config_path)
+            print(f"\n  Weights saved ({strat}). Restart the screener to apply them.")
+        else:
+            print("\n  No optimised weights to save (backtest produced no trades).")
 
     print()
 
