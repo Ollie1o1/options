@@ -245,7 +245,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -328,6 +328,13 @@ _MIGRATIONS = {
     11: [
         # Fractional position size; default 1.0 keeps equity/options path inert
         "ALTER TABLE trades ADD COLUMN quantity REAL DEFAULT 1.0",
+    ],
+    12: [
+        # paper_only=1 marks trades excluded from the Long-Call validation cohort
+        # (e.g. Bear Call, Long Put, Iron Condor). paper_only=0 (default) means the
+        # trade is eligible for real-money edge validation.
+        "ALTER TABLE trades ADD COLUMN paper_only INTEGER DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS idx_paper_only ON trades(paper_only)",
     ],
 }
 

@@ -3,6 +3,9 @@ import sys
 import os
 import json
 import sqlite3
+import shutil
+import tempfile
+import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -110,3 +113,61 @@ def test_is_short_position_detection():
     assert _is_short_position("Short Put") is True
     assert _is_short_position("Credit Spread") is True
     assert _is_short_position("Long Call") is False
+
+
+class SchemaMigrationV12Test(unittest.TestCase):
+    """Verify schema v12 adds paper_only column and idx_paper_only index."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmpdir, "trades.db")
+        self.cfg = os.path.join(self.tmpdir, "config.json")
+        _write_config(self.cfg)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_pm(self):
+        return PaperManager(db_path=self.db, config_path=self.cfg)
+
+    def test_paper_only_column_exists_with_default_zero(self):
+        """After init, paper_only column must exist with a default value of 0."""
+        self._make_pm()
+        with sqlite3.connect(self.db) as conn:
+            info = conn.execute("PRAGMA table_info(trades)").fetchall()
+        col_names = [row[1] for row in info]
+        self.assertIn("paper_only", col_names, "paper_only column not found in trades schema")
+        # Verify default: insert a row via PaperManager then read paper_only
+        pm = self._make_pm()
+        pm.log_trade(_sample_trade())
+        with sqlite3.connect(self.db) as conn:
+            row = conn.execute("SELECT paper_only FROM trades LIMIT 1").fetchone()
+        self.assertIsNotNone(row, "No row found after log_trade")
+        self.assertEqual(row[0], 0, f"Expected paper_only default 0, got {row[0]}")
+
+    def test_logged_trade_has_paper_only_zero(self):
+        """A trade logged via log_trade must have paper_only=0 (cohort-eligible)."""
+        pm = self._make_pm()
+        pm.log_trade(_sample_trade(strategy_name="Long Call"))
+        with sqlite3.connect(self.db) as conn:
+            row = conn.execute(
+                "SELECT paper_only FROM trades WHERE strategy_name='Long Call' LIMIT 1"
+            ).fetchone()
+        self.assertIsNotNone(row, "Trade row not found")
+        self.assertEqual(row[0], 0, f"Long Call trade should have paper_only=0, got {row[0]}")
+
+    def test_idx_paper_only_index_exists(self):
+        """idx_paper_only index must be present after migration."""
+        self._make_pm()
+        with sqlite3.connect(self.db) as conn:
+            indexes = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_paper_only'"
+            ).fetchall()
+        self.assertEqual(
+            len(indexes), 1,
+            "idx_paper_only index not found in sqlite_master"
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
