@@ -524,14 +524,16 @@ class PaperManager:
             pcr_score, sentiment_score_norm, spread_score, trader_pref_score,
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
-            short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta
+            short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
+            paper_only
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?,
+            ?
         )
         """
 
@@ -604,6 +606,7 @@ class PaperManager:
             _float_or_none("short_put_strike"),
             _float_or_none("long_put_strike"),
             _float_or_none("net_delta"),
+            int(trade_dict["paper_only"]) if trade_dict.get("paper_only") is not None else 0,
         )
 
         with self._get_connection() as conn:

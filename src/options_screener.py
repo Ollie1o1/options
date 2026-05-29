@@ -173,6 +173,39 @@ def _strategy_label_for_mode(mode: str, opt_type) -> str:
     return f"Long {t}"
 
 
+def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tuple:
+    """
+    Phase 1 cohort quarantine. Returns one of:
+      ("insert", 0)  → log normally, eligible for the Long-Call validation cohort
+      ("insert", 1)  → log with paper_only=1, excluded from the cohort
+      ("drop", None) → skip auto-log entirely
+
+    Precedence: if a strategy appears in BOTH allowed_strategies and
+    paper_only_strategies (config typo), allowed wins and a warning is logged.
+    """
+    import json, logging
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    al = (cfg.get("auto_log") or {})
+    allowed = set(al.get("allowed_strategies") or [])
+    paper_only = set(al.get("paper_only_strategies") or [])
+    strat = str(trade.get("strategy_name") or "")
+    overlap = allowed & paper_only
+    if strat in overlap:
+        logging.warning(
+            "auto_log config: '%s' appears in both allowed_strategies and "
+            "paper_only_strategies — treating as allowed.", strat
+        )
+    if strat in allowed:
+        return ("insert", 0)
+    if strat in paper_only:
+        return ("insert", 1)
+    return ("drop", None)
+
+
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults."""
     default_config = {
@@ -4251,7 +4284,6 @@ def main():
                     _inserted = 0
                     _skipped = 0
                     _skipped_long_puts = 0
-                    _skip_long_puts = bool(config.get("auto_log_skip_long_puts", True))
                     # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
                     # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
                     # and re-sorted, so positional alignment with picks is not preserved.
@@ -4280,12 +4312,12 @@ def main():
                         if not _entry_price or _entry_price <= 0:
                             continue
                         _strat_name = _strategy_label_for_mode(mode, row['type'])
-                        # Long Put has been the worst-PF strategy in the ledger (PF 0.60,
-                        # 32% win across 31 trades). Skip auto-logging it until the IC
-                        # signal stabilizes or the user explicitly opts back in via
-                        # config "auto_log_skip_long_puts": false.
-                        if _skip_long_puts and _strat_name == "Long Put":
-                            _skipped_long_puts += 1
+                        # Phase 1 allowlist (supersedes the legacy auto_log_skip_long_puts flag).
+                        _decision, _paper_only_flag = apply_auto_log_allowlist(
+                            {"strategy_name": _strat_name}, cfg_path="config.json"
+                        )
+                        if _decision == "drop":
+                            _skipped_long_puts += 1  # reuse counter for the summary line
                             continue
                         _trade = {
                             "date": _today_str,
@@ -4330,6 +4362,7 @@ def main():
                             "spread_score": row.get("spread_score"),
                             "trader_pref_score": row.get("trader_pref_score"),
                             "weight_profile": _weight_profile_id,
+                            "paper_only": _paper_only_flag,
                         }
                         _row_key = (
                             str(row.get("symbol", "")).upper(),
@@ -4351,7 +4384,7 @@ def main():
                     _tag = _weight_profile_id or "untagged"
                     _summary = f"Auto-logged {_inserted} new, skipped {_skipped} duplicates (profile: {_tag})"
                     if _skipped_long_puts:
-                        _summary += f", filtered {_skipped_long_puts} Long Put(s)"
+                        _summary += f", filtered {_skipped_long_puts} disallowed pick(s)"
                     print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  \u2713 {_summary}")
                 # Skip the interactive save-menu loop below; continue to scan-another prompt
                 _has_results = False
