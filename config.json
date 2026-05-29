@@ -120,6 +120,12 @@
   },
   "auto_log_skip_long_puts": true,
   "auto_log_skip_bear_calls": true,
+  "auto_log": {
+    "allowed_strategies": ["Long Call"],
+    "paper_only_strategies": ["Bear Call", "Long Put", "Iron Condor", "Bull Put", "Short Put"],
+    "weight_profile": null,
+    "phase1_start_date": "2026-05-27"
+  },
   "premium_selling_weights": {
     "pop": 0.32,
     "return_on_risk": 0.24,
