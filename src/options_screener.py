@@ -4181,11 +4181,6 @@ def main():
                     _today_str = datetime.now().strftime("%Y-%m-%d")
                     _inserted = 0
                     _skipped = 0
-                    # Bear Call has been the worst-PF spread strategy in the ledger
-                    # (PF 0.41, n=31). Mirror the long-put skip so we stop feeding
-                    # the calibrator a known-losing cohort. Opt back in via
-                    # config "auto_log_skip_bear_calls": false.
-                    _skip_bear_calls = bool(config.get("auto_log_skip_bear_calls", True))
                     _skipped_bear_calls = 0
 
                     # Component-score fields carried over from the spread enrichment
@@ -4206,15 +4201,19 @@ def main():
                     for _, row in _candidates.iterrows():
                         _sym = str(row.get("symbol", "")).upper()
                         try:
+                            # Derive strategy name to feed the allowlist helper.
                             _is_condor = ("total_credit" in row.index) and not pd.isna(row.get("total_credit"))
-                            # Bear Call detection — credit spread whose legs are calls.
-                            # Skip before any DB write so the cohort never enters
-                            # the calibration ledger.
-                            if (not _is_condor) and _skip_bear_calls:
+                            if _is_condor:
+                                _strat_name = "Iron Condor"
+                            else:
                                 _spread_type = str(row.get("type", "")).strip().lower()
-                                if _spread_type == "call":
-                                    _skipped_bear_calls += 1
-                                    continue
+                                _strat_name = "Bear Call" if _spread_type == "call" else "Bull Put"
+                            _decision, _paper_only_flag = apply_auto_log_allowlist(
+                                {"strategy_name": _strat_name}, cfg_path="config.json"
+                            )
+                            if _decision == "drop":
+                                _skipped_bear_calls += 1  # reuse counter for the summary
+                                continue
                             _common_scores = {k: row.get(k) for k in _spread_score_keys if k in row.index}
                             _common_scores["iv_edge_score"] = row.get("iv_advantage_score")
                             _common_scores["weight_profile"] = _weight_profile_id
@@ -4234,6 +4233,7 @@ def main():
                                     "max_risk":     row.get("max_risk", 0),
                                     "net_delta":    row.get("net_delta"),
                                     "quality_score": row.get("quality_score", 0.5),
+                                    "paper_only": _paper_only_flag,
                                 })
                                 if pm.log_iron_condor_if_new(_payload):
                                     _inserted += 1
@@ -4252,6 +4252,7 @@ def main():
                                     "max_profit": row.get("max_profit", 0),
                                     "max_loss":   row.get("max_loss", 0),
                                     "quality_score": row.get("quality_score", 0.5),
+                                    "paper_only": _paper_only_flag,
                                 })
                                 if pm.log_spread_if_new(_payload):
                                     _inserted += 1
@@ -4260,7 +4261,7 @@ def main():
                         except Exception as _log_exc:
                             print(f"  Error auto-logging {_sym}: {_log_exc}")
                     _tag = _weight_profile_id or "untagged"
-                    _bc_suffix = f", filtered {_skipped_bear_calls} Bear Call(s)" if _skipped_bear_calls else ""
+                    _bc_suffix = f", filtered {_skipped_bear_calls} disallowed structure(s)" if _skipped_bear_calls else ""
                     _summary = (
                         f"Auto-logged {_inserted} spreads/condors, "
                         f"skipped {_skipped} duplicates{_bc_suffix} (profile: {_tag})"

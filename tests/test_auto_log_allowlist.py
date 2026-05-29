@@ -144,5 +144,79 @@ class PaperOnlyPersistenceTest(unittest.TestCase):
         self.assertEqual(row[0], 0, f"Expected paper_only=0 (default), got {row[0]}")
 
 
+class SpreadCondorPaperOnlyPersistenceTest(unittest.TestCase):
+    """End-to-end: paper_only=1 written via log_spread / log_iron_condor is read back."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test_spread_trades.db")
+        self.cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(self.cfg_path, "w") as f:
+            json.dump({}, f)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_log_spread_persists_paper_only_1(self):
+        """log_spread with paper_only=1 stores 1 in the DB."""
+        from src.paper_manager import PaperManager
+
+        pm = PaperManager(db_path=self.db_path, config_path=self.cfg_path)
+
+        spread = {
+            "ticker": "SPY",
+            "expiration": "2026-07-18",
+            "short_strike": 540.0,
+            "long_strike": 545.0,
+            "type": "Bear Call",
+            "net_credit": 0.85,
+            "max_profit": 85.0,
+            "max_loss": 415.0,
+            "quality_score": 0.60,
+            "paper_only": 1,
+        }
+        pm.log_spread(spread)
+
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT paper_only FROM trades WHERE ticker='SPY' AND strategy_name='Bear Call' LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+        self.assertIsNotNone(row, "Expected a row to be inserted by log_spread")
+        self.assertEqual(row[0], 1, f"Expected paper_only=1, got {row[0]}")
+
+    def test_log_iron_condor_persists_paper_only_1(self):
+        """log_iron_condor with paper_only=1 stores 1 in the DB."""
+        from src.paper_manager import PaperManager
+
+        pm = PaperManager(db_path=self.db_path, config_path=self.cfg_path)
+
+        condor = {
+            "ticker": "QQQ",
+            "expiration": "2026-07-18",
+            "short_put_strike": 420.0,
+            "long_put_strike": 415.0,
+            "short_call_strike": 480.0,
+            "long_call_strike": 485.0,
+            "total_credit": 1.20,
+            "max_profit": 120.0,
+            "max_risk": 380.0,
+            "quality_score": 0.55,
+            "paper_only": 1,
+        }
+        pm.log_iron_condor(condor)
+
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT paper_only FROM trades WHERE ticker='QQQ' AND strategy_name='Iron Condor' LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+        self.assertIsNotNone(row, "Expected a row to be inserted by log_iron_condor")
+        self.assertEqual(row[0], 1, f"Expected paper_only=1, got {row[0]}")
+
+
 if __name__ == "__main__":
     unittest.main()
