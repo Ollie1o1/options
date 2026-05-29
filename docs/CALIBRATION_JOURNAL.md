@@ -7,6 +7,46 @@ evolved over time.
 
 ---
 
+## 2026-05-29 — Long-Call v1 candidate calibration: EVALUATED, NOT ACTIVATED
+
+**Context:** Phase 1 real-money-readiness work (see
+`docs/superpowers/specs/2026-05-27-real-money-readiness-design.md`). Built a
+true out-of-sample walk-forward harness (`src/walk_forward.py`) and an LC-only
+weight calibration as a candidate.
+
+**Command:** `python -m src.backtest_optimizer --strategy long_call --save
+--mask-zero-variance --no-cv` (synthetic yfinance backtest, 25 tickers × 68
+trades). Optimized weights extracted to `configs/weights/long_call_v1.json`,
+then `config.json` restored to baseline.
+
+**Walk-forward OOS read (real paper ledger, not synthetic):**
+- Harness: `python -m src.walk_forward --strategy "Long Call"` over 94 closed
+  LC trades, 5 folds (train=44, test=10, step=10).
+- **Pooled OOS IC: +0.102 (p=0.480)**; fold IC mean +0.233; 4/5 folds positive;
+  95% CI [-0.054, +0.536].
+- This is the first *uncontaminated* IC for the system — the prior +0.023
+  (p=0.73) was in-sample. Directionally encouraging, but underpowered: only 50
+  out-of-sample observations, p far from significant.
+
+**Decision: STAY ON BASELINE. Defer activation.**
+- `config.json` → `auto_log.weight_profile` remains `null` (baseline weights,
+  checksum unchanged).
+- `configs/weights/long_call_v1.json` is written as a **candidate only** — NOT
+  active. It exists so we can A/B it later without re-running calibration.
+- Rationale: the optimized weights are fit on a tiny in-sample set and the OOS
+  signal can't yet distinguish them from baseline (p=0.48). Activating now would
+  risk overfitting and would contaminate the forward cohort with an unproven
+  config. Baseline already produced the +0.10 OOS read.
+
+**Revisit when:** the Phase 1 forward cohort (post-2026-05-27 LC trades,
+`paper_only=0`) reaches ≥50 trades with a significant OOS read. At that point,
+re-run walk-forward and A/B baseline vs `long_call_v1` before activating either.
+
+**No revert needed** — baseline `config.json` was never changed (only snapshotted
+and restored). Optimizer auto-backup: `config.bak.20260529-122248.json`.
+
+---
+
 ## 2026-05-20 (evening) — multi-method ensemble calibration (long-call only, n=89)
 
 **Command:** ad-hoc multi-method ensemble (not via
