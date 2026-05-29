@@ -36,6 +36,25 @@ except ImportError:
     fmt = None
 
 
+def _print_gate_banner() -> None:
+    """Phase 1 gate banner — printed when reports/GATE_STATUS.md exists."""
+    from pathlib import Path
+    p = Path("reports/GATE_STATUS.md")
+    if not p.exists():
+        return
+    try:
+        lines = p.read_text().splitlines()[:5]
+    except Exception:
+        return
+    if not lines:
+        return
+    border = "═" * 90
+    print(border)
+    for ln in lines:
+        print(ln)
+    print(border)
+
+
 def _c(text: str, color: str = "", bold: bool = False) -> str:
     if HAS_FMT and fmt and color:
         return fmt.colorize(str(text), color, bold=bold)
@@ -255,6 +274,7 @@ def print_regime_dashboard(width: int = 90) -> None:
     Box color: GREEN for RISK_ON, YELLOW for NEUTRAL, RED for RISK_OFF/DEFENSIVE.
     Gracefully handles unavailable data fields.
     """
+    _print_gate_banner()
     try:
         data = fetch_market_regime()
     except Exception:
