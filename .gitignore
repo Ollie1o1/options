@@ -52,6 +52,11 @@ config.bak.*.json
 # Crypto chain snapshot accumulator (user data)
 data/crypto_snapshots/
 
+# Perp-leverage runtime artifacts (OHLCV cache, walk-forward verdict, paper ledger)
+data/leverage_ohlcv/
+paper_trades_leverage.db
+paper_trades_leverage.db.bak.*
+
 # Local-only planning + spec docs (kept on disk, never tracked)
 docs/superpowers/
 

@@ -931,7 +931,7 @@ def main() -> None:
         print("  [3] FUNDING / BASIS MONITOR")
         print("  [4] PORTFOLIO  (paper_trades_crypto.db)")
         print("  [5] CALIBRATION STATUS")
-        print("  [6] BACKTEST  (walk-forward signal validation)  " + _color("[NEW]", "BRIGHT_GREEN", bold=True))
+        print("  [6] BACKTEST  (walk-forward signal validation)")
         print("  [Q] BACK")
         print()
         choice = _prompt("Choice", "Q").upper()

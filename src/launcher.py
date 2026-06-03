@@ -46,8 +46,10 @@ def _show_menu() -> str:
     print(f"  {_color('[1]', 'BRIGHT_YELLOW', bold=True)} STOCKS    "
           "— equity options screener (DISCOVER / SPREADS / IRON / etc.)")
     print(f"  {_color('[2]', 'BRIGHT_YELLOW', bold=True)} CRYPTO    "
-          "— BTC/ETH options on Deribit + perp funding/basis  "
-          + _color('[NEW]', 'BRIGHT_GREEN', bold=True))
+          "— BTC/ETH options on Deribit + perp funding/basis")
+    print(f"  {_color('[3]', 'BRIGHT_YELLOW', bold=True)} LEVERAGE  "
+          "— BTC/ETH perp futures strategy  "
+          + _color('[PRE-VALIDATION — NO EDGE YET]', 'BRIGHT_RED', bold=True))
     print(f"  {_color('[Q]', 'DIM', bold=False)} QUIT")
     print()
     try:
@@ -76,6 +78,10 @@ def main() -> None:
         if choice in ("2", "CRYPTO", "C"):
             from src.crypto.screener import main as _crypto_main
             _crypto_main()
+            return
+        if choice in ("3", "LEVERAGE", "L"):
+            from src.leverage.__main__ import menu as _leverage_menu
+            _leverage_menu()
             return
         if choice in ("Q", "QUIT", "EXIT", ""):
             print("  Goodbye.")
