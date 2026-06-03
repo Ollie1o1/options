@@ -173,6 +173,47 @@ def _strategy_label_for_mode(mode: str, opt_type) -> str:
     return f"Long {t}"
 
 
+def _cohort_min_dte(cfg: dict) -> int:
+    """Minimum DTE-at-entry for a Long Call to be eligible for the validation
+    cohort. Horizon-aware: an explicit auto_log.cohort_min_dte wins; otherwise
+    it derives from the time-exit so the floor can never drift below it —
+    time_exit_dte + cohort_min_runway_days (default 9) so an entry has real
+    swing runway before the time-exit can force-close it."""
+    al = (cfg.get("auto_log") or {})
+    explicit = al.get("cohort_min_dte")
+    if explicit is not None:
+        try:
+            return int(explicit)
+        except (TypeError, ValueError):
+            pass
+    time_exit = (cfg.get("exit_rules") or {}).get("time_exit_dte", 21)
+    runway = al.get("cohort_min_runway_days", 9)
+    try:
+        return int(time_exit) + int(runway)
+    except (TypeError, ValueError):
+        return 30
+
+
+def _trade_dte(trade: dict):
+    """DTE-at-entry for a trade dict. Prefers an explicit 'dte'; else derives
+    from 'expiration' (YYYY-MM-DD) relative to today. Returns None if unknown."""
+    dte = trade.get("dte")
+    if dte is not None:
+        try:
+            return int(dte)
+        except (TypeError, ValueError):
+            pass
+    exp = trade.get("expiration")
+    if exp:
+        from datetime import datetime as _dt, date as _date
+        try:
+            d = _dt.strptime(str(exp)[:10], "%Y-%m-%d").date()
+            return (d - _date.today()).days
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tuple:
     """
     Phase 1 cohort quarantine. Returns one of:
@@ -182,6 +223,12 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
 
     Precedence: if a strategy appears in BOTH allowed_strategies and
     paper_only_strategies (config typo), allowed wins and a warning is logged.
+
+    Cohort horizon guard: an allowed Long Call entered below the cohort DTE
+    floor (see _cohort_min_dte) is logged as paper_only=1 — kept for data but
+    excluded from the gate, because the time-exit would force-close it before
+    the swing thesis can play out (contaminating the IC with 3-day returns).
+    A trade with unknown DTE is left eligible (no false quarantine).
     """
     import json, logging
     try:
@@ -200,6 +247,14 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
             "paper_only_strategies — treating as allowed.", strat
         )
     if strat in allowed:
+        floor = _cohort_min_dte(cfg)
+        dte = _trade_dte(trade)
+        if dte is not None and dte < floor:
+            logging.info(
+                "cohort horizon: %s at %dDTE < floor %dDTE — logging paper_only=1 "
+                "(data only, excluded from gate).", strat, dte, floor
+            )
+            return ("insert", 1)
         return ("insert", 0)
     if strat in paper_only:
         return ("insert", 1)
@@ -3840,6 +3895,19 @@ def main():
         if _cfg_warnings:
             for _cw in _cfg_warnings:
                 print(fmt.format_warning(f"Config: {_cw}") if HAS_ENHANCED_CLI else f"  WARNING: Config: {_cw}")
+    except Exception:
+        pass
+
+    # ── Automation health (catch silent cron death) ────────────────────────
+    try:
+        from .health import automation_health_warnings
+        _health = automation_health_warnings(db_path="paper_trades.db")
+        if _health:
+            hdr = "Automation stale — scheduled jobs may have stopped:"
+            print(fmt.format_warning(hdr) if HAS_ENHANCED_CLI else f"  WARNING: {hdr}")
+            for _hw in _health:
+                print(fmt.colorize(f"    • {_hw}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI
+                      else f"    - {_hw}")
     except Exception:
         pass
 

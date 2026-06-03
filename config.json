@@ -124,7 +124,9 @@
     "allowed_strategies": ["Long Call"],
     "paper_only_strategies": ["Bear Call", "Long Put", "Iron Condor", "Bull Put", "Short Put"],
     "weight_profile": null,
-    "phase1_start_date": "2026-05-27"
+    "phase1_start_date": "2026-05-27",
+    "cohort_min_dte": 30,
+    "cohort_min_runway_days": 9
   },
   "premium_selling_weights": {
     "pop": 0.32,

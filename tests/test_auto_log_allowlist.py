@@ -75,6 +75,71 @@ class AllowlistDecisionTest(unittest.TestCase):
         self.assertEqual(flag, 0)
 
 
+class CohortDteFloorTest(unittest.TestCase):
+    """Long Calls below the cohort DTE floor log as data-only (paper_only=1).
+
+    The floor protects the validation gate from short-horizon calls that would
+    be force-closed by the time-exit before the swing thesis can play out.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.cfg_path = os.path.join(self.tmpdir, "config.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_cfg(self, cfg):
+        with open(self.cfg_path, "w") as f:
+            json.dump(cfg, f)
+
+    def _call(self, trade):
+        from src.options_screener import apply_auto_log_allowlist
+        return apply_auto_log_allowlist(trade, cfg_path=self.cfg_path)
+
+    def test_long_call_below_explicit_floor_is_paper_only(self):
+        self._write_cfg({"auto_log": {"allowed_strategies": ["Long Call"],
+                                       "cohort_min_dte": 30}})
+        action, flag = self._call({"strategy_name": "Long Call", "dte": 14})
+        self.assertEqual((action, flag), ("insert", 1))
+
+    def test_long_call_at_or_above_floor_is_cohort_eligible(self):
+        self._write_cfg({"auto_log": {"allowed_strategies": ["Long Call"],
+                                       "cohort_min_dte": 30}})
+        self.assertEqual(self._call({"strategy_name": "Long Call", "dte": 30}), ("insert", 0))
+        self.assertEqual(self._call({"strategy_name": "Long Call", "dte": 45}), ("insert", 0))
+
+    def test_unknown_dte_does_not_quarantine(self):
+        # Backward-compatible: a trade with no DTE info stays cohort-eligible.
+        self._write_cfg({"auto_log": {"allowed_strategies": ["Long Call"],
+                                       "cohort_min_dte": 30}})
+        self.assertEqual(self._call({"strategy_name": "Long Call"}), ("insert", 0))
+
+    def test_floor_derived_from_time_exit_when_unset(self):
+        # No explicit cohort_min_dte → derive time_exit_dte (21) + runway (9) = 30.
+        self._write_cfg({"auto_log": {"allowed_strategies": ["Long Call"]},
+                         "exit_rules": {"time_exit_dte": 21}})
+        self.assertEqual(self._call({"strategy_name": "Long Call", "dte": 25}), ("insert", 1))
+        self.assertEqual(self._call({"strategy_name": "Long Call", "dte": 31}), ("insert", 0))
+
+    def test_floor_applies_to_expiration_date(self):
+        from datetime import date, timedelta
+        self._write_cfg({"auto_log": {"allowed_strategies": ["Long Call"],
+                                       "cohort_min_dte": 30}})
+        near = (date.today() + timedelta(days=12)).isoformat()
+        far = (date.today() + timedelta(days=40)).isoformat()
+        self.assertEqual(self._call({"strategy_name": "Long Call", "expiration": near}), ("insert", 1))
+        self.assertEqual(self._call({"strategy_name": "Long Call", "expiration": far}), ("insert", 0))
+
+    def test_paper_only_strategy_unaffected_by_floor(self):
+        # A quarantined strategy stays paper_only regardless of DTE.
+        self._write_cfg({"auto_log": {"allowed_strategies": ["Long Call"],
+                                       "paper_only_strategies": ["Long Put"],
+                                       "cohort_min_dte": 30}})
+        self.assertEqual(self._call({"strategy_name": "Long Put", "dte": 45}), ("insert", 1))
+
+
 class PaperOnlyPersistenceTest(unittest.TestCase):
     """End-to-end: paper_only=1 written by log_trade is read back correctly."""
 
