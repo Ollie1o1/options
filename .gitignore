@@ -73,3 +73,10 @@ debug_ic.py
 
 # Runtime state (not source)
 .oi_snapshot.json
+
+# SQLite write-ahead-log sidecars (runtime state)
+*.db-shm
+*.db-wal
+
+# Pre-migration safety backups (timestamped, regenerable)
+*.pre-*
