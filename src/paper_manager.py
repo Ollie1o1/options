@@ -174,6 +174,78 @@ def _classify_structure(row) -> str:
     return "single"
 
 
+def _intrinsic_value(option_type: str, spot: float, strike: float) -> float:
+    """Intrinsic value of a single option at expiry (never negative)."""
+    if (option_type or "").lower() == "call":
+        return max(0.0, float(spot) - float(strike))
+    return max(0.0, float(strike) - float(spot))
+
+
+def _legs_for_row(row) -> List[Tuple[float, str, int]]:
+    """Decompose a trade row into (strike, option_type, qty) legs.
+
+    qty is -1 for short legs, +1 for long legs. Iron condors stored without
+    call (or put) strikes — a known shape in legacy rows — degrade gracefully
+    to whichever legs are present instead of dropping the entire row (which
+    previously left them un-markable and OPEN forever).
+    """
+    structure = _classify_structure(row)
+    if structure == "iron_condor":
+        legs: List[Tuple[float, str, int]] = []
+        for col, opt_t, qty in (
+            ("short_put_strike",  "put",  -1),
+            ("long_put_strike",   "put",  +1),
+            ("short_call_strike", "call", -1),
+            ("long_call_strike",  "call", +1),
+        ):
+            try:
+                v = row[col] if col in row.keys() else None
+            except (KeyError, IndexError):
+                v = None
+            if v in (None, "", 0):
+                continue
+            try:
+                legs.append((float(v), opt_t, qty))
+            except (TypeError, ValueError):
+                continue
+        return legs
+    if structure == "spread":
+        opt_type = str(row["type"] or "").lower()
+        if opt_type not in ("put", "call"):
+            sn = str(row["strategy_name"] or "").lower()
+            opt_type = "put" if "bull put" in sn else "call"
+        ls = row["long_strike"] if "long_strike" in row.keys() else None
+        try:
+            long_strike = float(ls) if ls not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            long_strike = None
+        if long_strike is None:
+            # Legacy SPREAD:long:width:max_loss fallback
+            try:
+                long_strike = float(str(row["strategy_name"] or "").split(":")[1])
+            except (ValueError, IndexError):
+                return []
+        return [
+            (float(row["strike"]), opt_type, -1),
+            (long_strike,          opt_type, +1),
+        ]
+    return [(
+        float(row["strike"]),
+        str(row["type"] or "").lower(),
+        -1 if _is_short_position(row["strategy_name"] or "") else +1,
+    )]
+
+
+def _legs_intrinsic_close_value(legs: List[Tuple[float, str, int]], spot: float) -> float:
+    """Debit required to flatten a multi-leg structure at expiry.
+
+    cost-to-close = sum(-qty * intrinsic). For a credit structure (shorts have
+    qty=-1, longs qty=+1) this is the debit paid to buy it back — 0 when every
+    leg expires out-of-the-money, so the seller keeps the full credit.
+    """
+    return sum(-qty * _intrinsic_value(opt_t, spot, k) for k, opt_t, qty in legs)
+
+
 def _evaluate_multileg_exit(
     rules: dict,
     entry_credit: float,
@@ -972,41 +1044,8 @@ class PaperManager:
             except TimeoutError:
                 logger.warning("Spot price fetch timed out after 30s — proceeding with partial data")
 
-        # Build leg list per row: single = 1 leg, spread = 2, iron condor = 4.
-        # We fetch each unique (ticker, exp, strike, type) once and reuse.
-        def _legs_for_row(row) -> List[Tuple[float, str, int]]:
-            structure = _classify_structure(row)
-            if structure == "iron_condor":
-                try:
-                    return [
-                        (float(row["short_put_strike"]),  "put",  -1),
-                        (float(row["long_put_strike"]),   "put",  +1),
-                        (float(row["short_call_strike"]), "call", -1),
-                        (float(row["long_call_strike"]),  "call", +1),
-                    ]
-                except (TypeError, ValueError):
-                    return []
-            if structure == "spread":
-                opt_type = str(row["type"] or "").lower()
-                if opt_type not in ("put", "call"):
-                    sn = str(row["strategy_name"] or "").lower()
-                    opt_type = "put" if "bull put" in sn else "call"
-                ls = row["long_strike"] if "long_strike" in row.keys() else None
-                try:
-                    long_strike = float(ls) if ls not in (None, "", 0) else None
-                except (TypeError, ValueError):
-                    long_strike = None
-                if long_strike is None:
-                    # Legacy SPREAD:long:width:max_loss fallback
-                    try:
-                        long_strike = float(str(row["strategy_name"] or "").split(":")[1])
-                    except (ValueError, IndexError):
-                        return []
-                return [
-                    (float(row["strike"]), opt_type, -1),
-                    (long_strike,          opt_type, +1),
-                ]
-            return [(float(row["strike"]), str(row["type"] or "").lower(), -1 if _is_short_position(row["strategy_name"] or "") else +1)]
+        # Leg decomposition lives at module scope (_legs_for_row) so it is unit
+        # testable and shared with the expiry-settlement path below.
 
         # Compose unique fetch tasks across every leg of every open row.
         # Tasks are keyed by (ticker, expiration, strike, opt_type) so multi-leg
@@ -1099,8 +1138,56 @@ class PaperManager:
             if ticker not in spot_cache:
                 continue
 
-            # Multi-leg structure path: spreads and iron condors mark-to-market via per-leg prices.
             structure = _classify_structure(row)
+
+            # ── Deterministic expiry settlement ──────────────────────────────
+            # An expired option is worth exactly its intrinsic value. Live option
+            # quotes vanish at/after expiry, so the mark-to-market path below can
+            # never fetch a price for these and they hang OPEN forever (observed:
+            # expired iron condors stuck for weeks). Settle straight off spot.
+            if dte <= 0:
+                spot = spot_cache[ticker]
+                reason = "Expired (settled at intrinsic)"
+                if structure in ("spread", "iron_condor"):
+                    legs = _legs_for_row(row)
+                    if not legs:
+                        continue
+                    try:
+                        nc = row["net_credit"] if "net_credit" in row.keys() else None
+                        entry_credit = float(nc) if nc not in (None, "", 0) else float(entry_price or 0)
+                    except (TypeError, ValueError):
+                        entry_credit = float(entry_price or 0)
+                    if entry_credit <= 0:
+                        continue
+                    close_cost = _legs_intrinsic_close_value(legs, spot)
+                    pnl_raw = (entry_credit - close_cost) / entry_credit
+                    safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
+                        row["strategy_name"] or "", entry_credit, close_cost, pnl_raw,
+                        multiplier=_get_multiplier(ticker),
+                    )
+                else:
+                    is_short = _is_short_position(row["strategy_name"] or "")
+                    intrinsic = _intrinsic_value(option_type, spot, float(strike))
+                    if entry_price and float(entry_price) > 0:
+                        gain = (float(entry_price) - intrinsic) if is_short else (intrinsic - float(entry_price))
+                        pnl_raw = gain / float(entry_price)
+                    else:
+                        pnl_raw = 0.0
+                    safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
+                        row["strategy_name"] or "", entry_price, intrinsic, pnl_raw,
+                        multiplier=_get_multiplier(ticker),
+                    )
+                closed_this_run.append(
+                    f"{ticker} {row['strategy_name']} → {reason} (settle: {pnl_raw:+.1%})"
+                )
+                with self._get_connection() as conn:
+                    conn.execute(
+                        "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, pnl_usd=?, exit_reason=? WHERE entry_id=?",
+                        (safe_exit, now, clamped_pct, pnl_usd, reason, entry_id),
+                    )
+                continue
+
+            # Multi-leg structure path: spreads and iron condors mark-to-market via per-leg prices.
             if structure in ("spread", "iron_condor"):
                 legs = _row_legs.get(entry_id, [])
                 if not legs:

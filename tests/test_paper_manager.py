@@ -169,5 +169,62 @@ class SchemaMigrationV12Test(unittest.TestCase):
         )
 
 
+def _ic_row(**overrides):
+    """A dict-shaped iron-condor row with every column _legs_for_row touches."""
+    row = {
+        "strategy_name": "Iron Condor",
+        "type": "call",
+        "strike": 415.0,
+        "long_strike": None,
+        "short_put_strike": 415.0,
+        "long_put_strike": 390.0,
+        "short_call_strike": 440.0,
+        "long_call_strike": 465.0,
+        "net_credit": 8.0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_intrinsic_value_call_and_put():
+    from src.paper_manager import _intrinsic_value
+    assert _intrinsic_value("call", 110.0, 100.0) == 10.0
+    assert _intrinsic_value("call", 90.0, 100.0) == 0.0
+    assert _intrinsic_value("put", 90.0, 100.0) == 10.0
+    assert _intrinsic_value("put", 110.0, 100.0) == 0.0
+
+
+def test_legs_for_row_full_iron_condor_has_four_legs():
+    from src.paper_manager import _legs_for_row
+    legs = _legs_for_row(_ic_row())
+    assert len(legs) == 4
+    assert sorted(opt for _, opt, _ in legs) == ["call", "call", "put", "put"]
+
+
+def test_legs_for_row_malformed_ic_missing_call_legs_keeps_puts():
+    """Legacy ICs stored without call strikes must NOT collapse to [] (the bug
+    that left them OPEN forever). They degrade to the put legs present."""
+    from src.paper_manager import _legs_for_row
+    legs = _legs_for_row(_ic_row(short_call_strike=None, long_call_strike=None))
+    assert len(legs) == 2, f"expected 2 put legs, got {legs}"
+    assert all(opt == "put" for _, opt, _ in legs)
+
+
+def test_legs_intrinsic_close_value_all_otm_is_zero():
+    """All legs expire worthless -> nothing to pay to flatten -> seller keeps credit."""
+    from src.paper_manager import _legs_for_row, _legs_intrinsic_close_value
+    legs = _legs_for_row(_ic_row())  # SP425? no: 415/390 puts, 440/465 calls
+    # spot inside the wings: 390 < 420 < 440 -> all OTM
+    assert _legs_intrinsic_close_value(legs, 420.0) == 0.0
+
+
+def test_legs_intrinsic_close_value_put_side_breached():
+    """Spot below short put: short put is ITM, debit to buy it back is positive."""
+    from src.paper_manager import _legs_for_row, _legs_intrinsic_close_value
+    legs = _legs_for_row(_ic_row(short_call_strike=None, long_call_strike=None))
+    # short put 415 / long put 390, spot 400 -> short put intrinsic 15, long put 0
+    assert _legs_intrinsic_close_value(legs, 400.0) == 15.0
+
+
 if __name__ == "__main__":
     unittest.main()

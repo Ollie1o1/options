@@ -4382,8 +4382,12 @@ def main():
                             continue
                         _strat_name = _strategy_label_for_mode(mode, row['type'])
                         # Phase 1 allowlist (supersedes the legacy auto_log_skip_long_puts flag).
+                        # Pass expiration so the cohort DTE floor can quarantine
+                        # short-horizon Long Calls (else they slip into the gate).
                         _decision, _paper_only_flag = apply_auto_log_allowlist(
-                            {"strategy_name": _strat_name}, cfg_path="config.json"
+                            {"strategy_name": _strat_name,
+                             "expiration": row["expiration"], "date": _today_str},
+                            cfg_path="config.json",
                         )
                         if _decision == "drop":
                             _skipped_long_puts += 1  # reuse counter for the summary line
