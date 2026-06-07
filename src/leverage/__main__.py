@@ -120,6 +120,14 @@ def _cmd_backtest(args):
                               int(df5.index[0].timestamp() * 1000),
                               int(df5.index[-1].timestamp() * 1000))
     print(f"[strategy: {label}]")
+    if getattr(args, "neutralize_drift", False):
+        import numpy as _np
+        from .backtest import neutralize_drift
+        _mu = float(_np.log(df5["close"].astype(float)).diff().dropna().mean())
+        _ann = _np.exp(_mu * 365 * 24 * 12) - 1.0  # 12 5m-bars/hr
+        df5, df15 = neutralize_drift(df5, df15)
+        print(f"[drift-neutralized] removed mu={_mu:+.2e}/bar (~{_ann:+.0%}/yr) "
+              f"— measuring edge in a zero-drift market.")
     if args.walk_forward:
         wins = walk_forward(df5, df15, params, funding, signal_fn=signal_fn)
         pos = sum(1 for _, _, r in wins if r.expectancy > 0)
@@ -433,6 +441,9 @@ def main(argv: Optional[list] = None):
                     default="reversion")
     bp.add_argument("--walk-forward", action="store_true")
     bp.add_argument("--robustness", action="store_true")
+    bp.add_argument("--neutralize-drift", action="store_true",
+                    help="detrend prices so cumulative drift~0 before backtesting; "
+                         "tests whether the strategy has edge independent of trend")
     op = sub.add_parser("optimize")
     op.add_argument("--symbol", choices=["BTC", "ETH", "ALL"], default="BTC")
     sub.add_parser("status")

@@ -75,6 +75,35 @@ def _funding_cost(sig: Signal, future: pd.DataFrame,
     return rate if sig.side == "long" else -rate
 
 
+def neutralize_drift(df5: pd.DataFrame, df15: pd.DataFrame):
+    """Return (df5', df15') with the sample's deterministic drift removed: each
+    OHLC price is divided by exp(mu * bars_elapsed), where mu is the mean per-5m-bar
+    log return of df5. This pins cumulative drift to ~0 while leaving the bar-to-bar
+    oscillation untouched (subtracting a constant from each log return doesn't change
+    its variance), so ATR, Donchian bands and z-scores all recompute on a structurally
+    identical but trendless path.
+
+    Why: the 2026-06-03 finding was that reversion's apparent edge was pure down-drift
+    capture ('fade rallies' == 'short a bear market'). Run any strategy on the
+    neutralized series to test whether it has edge *independent of the trend*. Both
+    frames share one time origin so their price levels stay mutually consistent."""
+    mu = float(np.log(df5["close"].astype(float)).diff().dropna().mean())
+    t0 = df5.index[0]
+
+    def _detrend(df: pd.DataFrame) -> pd.DataFrame:
+        bars = (df.index - t0).total_seconds() / 300.0  # elapsed 5-minute bars
+        factor = np.exp(-mu * bars)
+        out = df.copy()
+        for col in ("open", "high", "low", "close"):
+            if col in out.columns:
+                out[col] = out[col].to_numpy() * factor
+        out.attrs.update(df.attrs)
+        out.attrs["drift_mu_per_bar"] = mu
+        return out
+
+    return _detrend(df5), _detrend(df15)
+
+
 @dataclass
 class BacktestResult:
     trades: list = field(default_factory=list)
