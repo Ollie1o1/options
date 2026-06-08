@@ -91,9 +91,17 @@ calls to keep the cohort filling.
 
 ## What's blocking real money (in plain terms)
 
-1. **Not enough fresh trades** — 0 of 50 clean cohort trades (just reset). This is now just time.
-2. **Edge not proven yet** — the horizon bug is fixed, so the cohort will finally measure swings, not 3-day noise. Let the clean sample grow.
-3. **No execution layer yet** — position sizing and exit rules (Phase 3) are intentionally NOT built until the edge proves out, to avoid wasting effort on an unproven signal.
+1. **Not enough fresh trades** — the binding constraint. Cohort fills only on days
+   you run the screener (cron retired). At n=2 now.
+2. **Edge not yet proven AND the gate is underpowered** — horizon bug is fixed so
+   the cohort measures swings. But see `docs/VALIDATION_POWER.md`: n=50 only fires
+   READY for a *strong* edge (observed IC ≳ 0.28); a modest 0.10 edge can't clear a
+   frequentist gate without ~780 trades. A READY here means a real, strong signal.
+3. ~~No execution layer~~ **RESOLVED 2026-06-07** — Phase 3 execution stack
+   (`src/execution/`) is built, tested, and **inert** behind `gate==READY` AND
+   `config.live_execution.enabled` (default off). READY → first trade is now
+   same-day: flip the flag, follow `docs/GO_LIVE_RUNBOOK.md`. Check arming with
+   `python -m src.execution.pipeline`.
 4. **Automation now runs at screener startup (cron retired 2026-06-07)** — cron
    was silent since ~2026-05-20 (lost Full Disk Access) and a month of attempts
    never made it reliable, so it is abandoned. `src/maintenance.py` now runs

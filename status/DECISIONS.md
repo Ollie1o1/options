@@ -4,6 +4,28 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-06-07 — Built Phase 3 execution stack now (inert), not after READY
+
+**Why:** Building the execution layer (`src/execution/`: sizing, exits, ticket,
+slippage, pipeline) *before* the gate fires removes the ~2-week build tax between a
+READY verdict and the first trade, without weakening discipline: every live ticket
+is gated behind BOTH `gate==READY` AND `config.live_execution.enabled` (default
+false), enforced by data in `pipeline.build_ticket`/`arm_status`, not by remembering
+to pass a flag. Mirror-mode only (system prints a ticket, human places it, slippage
+tracked) — explicitly NO broker API. Exits reuse `paper_manager._normalize_exit_rules`
+so there's one source of truth. A STOP verdict shelves reusable code, not capital.
+Runbook: `docs/GO_LIVE_RUNBOOK.md`. Arming check: `python -m src.execution.pipeline`.
+
+## 2026-06-07 — Power analysis: n=50 gate is underpowered for a modest edge
+
+**Why:** `scripts/validation_power_analysis.py` → `docs/VALIDATION_POWER.md` shows
+that at n=50 the smallest IC significant at p<0.05 is ~0.28, so the `p<0.05` clause
+binds, not the `IC≥0.08` floor; detecting a ~0.10 edge frequentist-clean needs ~780
+trades. Decision: **leave thresholds unchanged for now** (a READY at n=50 legitimately
+means a strong edge), but read every gate result alongside this doc, and revisit
+adopting a Bayesian tie-breaker (n≥50 AND P(true IC≥0.08) ≥ 0.85) once n≥50. No
+silent gate change — this is the basis for that future human call.
+
 ## 2026-06-07 — Retire cron; self-healing maintenance at screener startup
 
 **Why:** Cron silently died ~2026-05-20 (lost Full Disk Access) and went unnoticed
