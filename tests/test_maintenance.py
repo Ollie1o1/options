@@ -8,15 +8,6 @@ from src import maintenance as m
 
 
 class TestThrottle(unittest.TestCase):
-    def test_exit_enforce_due_when_not_run_today(self):
-        self.assertTrue(m.due_exit_enforce({"last_exit_enforce": "2026-06-06"}, "2026-06-07"))
-
-    def test_exit_enforce_not_due_when_already_run_today(self):
-        self.assertFalse(m.due_exit_enforce({"last_exit_enforce": "2026-06-07"}, "2026-06-07"))
-
-    def test_exit_enforce_due_when_never_run(self):
-        self.assertTrue(m.due_exit_enforce({}, "2026-06-07"))
-
     def test_checkpoint_due_after_7_days(self):
         self.assertTrue(m.due_checkpoint({"last_checkpoint": "2026-05-31"}, "2026-06-07"))
 
@@ -99,7 +90,8 @@ class TestOrchestrator(unittest.TestCase):
         conn.execute("INSERT INTO trades VALUES ('2026-05-28','Long Call','CLOSED',0,70.0,0.1)")
         conn.commit(); conn.close()
 
-    def test_runs_due_steps_and_records_state(self):
+    def test_autolog_fires_in_window_on_weekday_and_records_state(self):
+        # 2026-06-04 is a Thursday; 14:30 is inside the 'ics' window.
         calls = []
         def fake_runner(cmd):
             calls.append(cmd); return 0
@@ -108,14 +100,14 @@ class TestOrchestrator(unittest.TestCase):
             state_path = os.path.join(d, "state.json")
             summary = m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=state_path,
-                now=datetime(2026, 6, 7, 14, 30), runner=fake_runner,
+                now=datetime(2026, 6, 4, 14, 30), runner=fake_runner,
                 checkpoint_fn=lambda **k: None)
-            self.assertTrue(any("--enforce-exits" in " ".join(c) for c in calls))
+            self.assertTrue(any("-ics" in " ".join(c) for c in calls))
             st = m.load_state(state_path)
-            self.assertEqual(st["last_exit_enforce"], "2026-06-07")
+            self.assertEqual(st["last_autolog"]["ics"], "2026-06-04")
             self.assertIn("cohort", summary)
 
-    def test_second_run_same_day_skips_exit_enforce(self):
+    def test_second_run_same_window_skips_autolog(self):
         calls = []
         def fake_runner(cmd):
             calls.append(cmd); return 0
@@ -123,12 +115,39 @@ class TestOrchestrator(unittest.TestCase):
             db = os.path.join(d, "t.db"); self._db(db)
             sp = os.path.join(d, "state.json")
             kw = dict(db_path=db, phase1_start="2026-05-27", state_path=sp,
-                      now=datetime(2026, 6, 7, 16, 0), runner=fake_runner,
+                      now=datetime(2026, 6, 4, 14, 30), runner=fake_runner,
                       checkpoint_fn=lambda **k: None)
             m.run_startup_maintenance(**kw)
             calls.clear()
             m.run_startup_maintenance(**kw)
-            self.assertFalse(any("--enforce-exits" in " ".join(c) for c in calls))
+            self.assertFalse(calls)
+
+    def test_no_autolog_on_weekend(self):
+        # 2026-06-07 is a Sunday — auto-log must not fire.
+        calls = []
+        def fake_runner(cmd):
+            calls.append(cmd); return 0
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 7, 14, 30), runner=fake_runner,
+                checkpoint_fn=lambda **k: None)
+            self.assertFalse(calls)
+
+    def test_checkpoint_runs_when_due_and_records_state(self):
+        ran = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: ran.append(k))
+            self.assertEqual(len(ran), 1)
+            self.assertEqual(m.load_state(sp)["last_checkpoint"], "2026-06-07")
+            self.assertIn("checkpoint", summary["ran"])
 
     def test_runner_exception_does_not_propagate(self):
         def boom(cmd):
@@ -138,7 +157,7 @@ class TestOrchestrator(unittest.TestCase):
             sp = os.path.join(d, "state.json")
             summary = m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
-                now=datetime(2026, 6, 7, 14, 30), runner=boom,
+                now=datetime(2026, 6, 4, 14, 30), runner=boom,
                 checkpoint_fn=lambda **k: None)
             self.assertIn("cohort", summary)
 

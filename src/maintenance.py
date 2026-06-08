@@ -35,12 +35,6 @@ def _days_between(a: str, b: str) -> int:
     return (db - da).days
 
 
-def due_exit_enforce(state: dict, today: str) -> bool:
-    """Exit-enforcement runs at most once per calendar day."""
-    last = (state or {}).get("last_exit_enforce")
-    return (not last) or last != today
-
-
 def due_checkpoint(state: dict, today: str, min_days: int = 7) -> bool:
     """Weekly checkpoint runs only if >= min_days since the last one."""
     last = (state or {}).get("last_checkpoint")
@@ -131,24 +125,19 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             runner: Optional[Callable] = None,
                             checkpoint_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
-    Never raises."""
+    Never raises.
+
+    Note: exit-rule enforcement is NOT run here. The interactive screener startup
+    already enforces exits synchronously via ``PaperManager.update_positions()``;
+    duplicating it would mean a second ~60s market scan on every boot.
+    """
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
     runner = runner or _default_runner
     state = load_state(state_path)
     ran = []
 
-    # 1. Exit-enforcement (once/day) — closes trades that hit their exit rules.
-    try:
-        if due_exit_enforce(state, today):
-            rc = runner([VENV_PY, "-m", "src.options_screener", "--enforce-exits"])
-            if rc == 0:
-                state["last_exit_enforce"] = today
-                ran.append("exit-enforce")
-    except Exception:
-        pass
-
-    # 2. Auto-log (once per window/day, weekdays, in-window only).
+    # 1. Auto-log (once per window/day, weekdays, in-window only).
     try:
         win = autolog_window(now.isoweekday(), now.hour * 100 + now.minute)
         if win and due_autolog(state, win[0], today):
@@ -159,7 +148,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
-    # 3. Weekly checkpoint (>=7 days) — read-only gate refresh.
+    # 2. Weekly checkpoint (>=7 days) — read-only gate refresh.
     try:
         if phase1_start and due_checkpoint(state, today):
             fn = checkpoint_fn or _run_checkpoint
