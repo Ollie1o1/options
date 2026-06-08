@@ -21,13 +21,14 @@ class TestQuantityMigration(unittest.TestCase):
         from src.paper_manager import PaperManager
         d = tempfile.mkdtemp()
         db = os.path.join(d, "pm.db")
-        PaperManager(db_path=db)            # first run: migrates 0 -> 11
+        from src.paper_manager import _SCHEMA_VERSION
+        PaperManager(db_path=db)            # first run: migrates 0 -> current
         PaperManager(db_path=db)            # second run: must be a no-op (no raise)
         conn = sqlite3.connect(db)
         cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
         self.assertEqual(cols.count("quantity"), 1)  # column not duplicated
         v = conn.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(v, 11)
+        self.assertEqual(v, _SCHEMA_VERSION)  # tracks current schema, no magic number
         conn.close()
 
 if __name__ == "__main__":
