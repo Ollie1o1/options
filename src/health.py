@@ -114,15 +114,17 @@ def collect_checks(root: str = ".", db_path: str = "paper_trades.db",
 
     return [
         Check("auto-log", autolog_last, max_age_days=4,
-              hint="cron may have stopped — check Full Disk Access for "
-                   "/usr/sbin/cron (System Settings → Privacy & Security)."),
+              hint="run the screener on a weekday during market hours so "
+                   "startup auto-log fires (cron retired 2026-06-07)."),
         Check("exit-enforcer", _file_mtime(_p("logs", "enforce_exits.log")),
               max_age_days=4,
-              hint="open positions may not be closing on their exit rules."),
+              hint="open positions may not be closing — run the screener so "
+                   "startup exit-enforcement fires."),
         Check("weekly checkpoint",
               _last_tsv_date(_p("reports", "checkpoint_history.tsv")),
               max_age_days=9,
-              hint="gate decision is not refreshing; confirm the Sunday cron line."),
+              hint="gate decision is not refreshing — run the screener "
+                   "(checkpoint refreshes at startup once ≥7 days old)."),
     ]
 
 
