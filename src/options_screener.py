@@ -3898,6 +3898,22 @@ def main():
     except Exception:
         pass
 
+    # ── Startup maintenance (replaces retired cron) ─────────────────────────
+    try:
+        import json as _json
+        from .maintenance import run_startup_maintenance
+        with open("config.json") as _cf:
+            _p1 = (_json.load(_cf).get("auto_log") or {}).get("phase1_start_date")
+        _maint = run_startup_maintenance(db_path="paper_trades.db", phase1_start=_p1)
+        if _maint.get("cohort"):
+            print(fmt.colorize(f"  {_maint['cohort']}", fmt.Colors.BRIGHT_WHITE)
+                  if HAS_ENHANCED_CLI else f"  {_maint['cohort']}")
+        if _maint.get("ran"):
+            print(fmt.colorize(f"    (ran: {', '.join(_maint['ran'])})", fmt.Colors.DIM)
+                  if HAS_ENHANCED_CLI else f"    (ran: {', '.join(_maint['ran'])})")
+    except Exception as _e:
+        print(f"  (startup maintenance skipped: {_e})")
+
     # ── Automation health (catch silent cron death) ────────────────────────
     try:
         from .health import automation_health_warnings
@@ -3939,6 +3955,17 @@ def main():
         # update_positions (30s spot + 30s option prices) so worst case is ~60s.
         try:
             pm.update_positions()
+            # Record that exits were enforced inline so the automation-health
+            # check (which keys off this log's mtime) reflects reality.
+            try:
+                import os as _os
+                from datetime import datetime as _now_dt
+                _os.makedirs("logs", exist_ok=True)
+                with open("logs/enforce_exits.log", "a") as _elog:
+                    _elog.write(f"[{_now_dt.now():%Y-%m-%d %H:%M:%S}] "
+                                "exits enforced inline at screener startup\n")
+            except Exception:
+                pass
         except Exception:
             pass
         _th.join(timeout=6)
