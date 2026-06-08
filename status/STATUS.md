@@ -94,17 +94,23 @@ calls to keep the cohort filling.
 1. **Not enough fresh trades** — 0 of 50 clean cohort trades (just reset). This is now just time.
 2. **Edge not proven yet** — the horizon bug is fixed, so the cohort will finally measure swings, not 3-day noise. Let the clean sample grow.
 3. **No execution layer yet** — position sizing and exit rules (Phase 3) are intentionally NOT built until the edge proves out, to avoid wasting effort on an unproven signal.
-4. **Automation stopped firing ~May 20** — the cron jobs (auto-log, exit enforcer, weekly checkpoint) have been silent since ~2026-05-20, even on days the machine was on. Most likely cause: cron lost Full Disk Access. The startup health warning now surfaces this every run. Fix: System Settings → Privacy & Security → Full Disk Access → enable `/usr/sbin/cron` (and confirm the weekly checkpoint cron line is installed — it currently is not).
+4. **Automation now runs at screener startup (cron retired 2026-06-07)** — cron
+   was silent since ~2026-05-20 (lost Full Disk Access) and a month of attempts
+   never made it reliable, so it is abandoned. `src/maintenance.py` now runs
+   auto-log (once per window/day, in-window weekdays) and the weekly checkpoint
+   (≥7 days) at screener startup; exit-enforcement already ran inline at startup
+   and now logs that it did. Trade-off: **the cohort only fills on days you run
+   the screener** — the new `Forward cohort: X/50 …` startup line makes that cost
+   visible. See `status/DECISIONS.md` (2026-06-07).
 
 ---
 
 ## Your next action
 
-- [ ] Install the weekly checkpoint cron (one-time, in your own terminal — needs Full Disk Access approval):
-  ```
-  0 18 * * 0  /Users/ollie/Desktop/options/scripts/phase1_checkpoint.sh >> /Users/ollie/Desktop/options/logs/phase1_checkpoint.log 2>&1
-  ```
-- [ ] Keep running the screener / auto-log as usual so the cohort grows.
-- [ ] Check this file (or the Sunday `reports/checkpoint_*.md`) weekly.
+- [ ] **Run the screener regularly.** Startup now auto-runs exit-enforcement, the
+  weekly checkpoint, and (in-window, weekdays) auto-log — cron is retired and no
+  longer needed. The cohort only fills on days you run it, so running it *is* the
+  discipline. Watch the `Forward cohort: X/50` line tick up.
+- [ ] Check the Sunday `reports/checkpoint_*.md` (or this file) weekly.
 
 Nothing else to do but let the data accumulate. The discipline *is* the strategy.

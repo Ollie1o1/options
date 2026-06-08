@@ -4,6 +4,31 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-06-07 — Retire cron; self-healing maintenance at screener startup
+
+**Why:** Cron silently died ~2026-05-20 (lost Full Disk Access) and went unnoticed
+for ~12 days; a month of attempts never made it reliable on this Mac (FDA +
+Login-Items friction). Rather than keep fighting it, `src/maintenance.py` now runs
+the jobs at **screener startup**, crash-isolated so a failure can never stop the
+screener: auto-log (once per clock-window/day, weekdays, in-window) and the weekly
+checkpoint (≥7 days). Exit-enforcement was *already* running inline at startup via
+`PaperManager.update_positions()`, so maintenance deliberately does **not** re-run
+it (would mean a second ~60s scan per boot); instead startup now appends to
+`logs/enforce_exits.log` after enforcing, so the automation-health check reflects
+reality instead of false-flagging it stale.
+
+**Trade-off accepted:** the cohort only fills on days the screener is run. Made
+visible by a new startup line: `Forward cohort: X/50 closed clean | open: Y |
+weeks: Z | gate: <DECISION>` (reuses `phase1_checkpoint.compute_checkpoint`, so the
+cohort filter has one definition). Throttle state in `logs/.maintenance_state.json`.
+
+Also added `config.json → live_execution.enabled` (default **false**) — the hard
+switch that Sub-project C (Phase 3 execution stack) will gate live tickets behind.
+
+Plan/spec: `docs/superpowers/{specs,plans}/2026-06-07-*` (local-only, gitignored).
+
+---
+
 ## 2026-06-03 — Cohort DTE floor of 30, and reset the contaminated cohort
 
 **Why:** All 15 forward-cohort Long Calls had been logged at 14–27 DTE, which is *inside*
