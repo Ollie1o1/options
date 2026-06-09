@@ -60,6 +60,34 @@ class VerdictTests(unittest.TestCase):
         v = V.decide(sigs, _rel())
         self.assertEqual(v.confidence, "low")
 
+    def test_single_weighted_signal_reaches_medium_and_can_buy(self):
+        # Only momentum earns weight (mirrors the real backtest result) — BUY
+        # must still be reachable, not structurally capped to WAIT.
+        sigs = {"momentum": _sig("momentum", 0.6)}
+        v = V.decide(sigs, _rel(momentum=0.27))
+        self.assertEqual(v.confidence, "medium")
+        self.assertEqual(v.call, "BUY")
+
+    def test_single_weighted_signal_can_avoid(self):
+        sigs = {"momentum": _sig("momentum", -0.9)}
+        v = V.decide(sigs, _rel(momentum=0.27))
+        self.assertEqual(v.call, "AVOID")
+
+    def test_buy_in_downtrend_damped_to_wait(self):
+        # Momentum up but trend clearly down → no BUY (mirror of bounce damper).
+        sigs = {"momentum": _sig("momentum", 0.6), "trend": _sig("trend", -1.0)}
+        v = V.decide(sigs, _rel(momentum=0.27))   # trend zero weight
+        self.assertEqual(v.call, "WAIT")
+        self.assertIn("trend is down", v.note)
+
+    def test_strong_bounce_damps_avoid_to_wait(self):
+        # Momentum says down (AVOID) but a strong empirical bounce contradicts it.
+        sigs = {"momentum": _sig("momentum", -0.9),
+                "bounce": _sig("bounce", 0.7)}     # bounce has zero weight
+        v = V.decide(sigs, _rel(momentum=0.27))    # only momentum weighted
+        self.assertEqual(v.call, "WAIT")
+        self.assertIn("bounce", v.note)
+
 
 if __name__ == "__main__":
     unittest.main()

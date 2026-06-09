@@ -68,20 +68,38 @@ def decide(signals: Dict[str, Signal], reliability: Dict[str, Any]) -> Verdict:
         if call == "BUY":
             call = "WAIT"
 
-    # ── Confidence: weight that fired × agreement among weighted signals ──
+    # ── Conflict damper ──
+    # A strong empirical bounce base-rate (shown for context, zero verdict
+    # weight) directly contradicts a momentum-driven AVOID. When two honest
+    # readings disagree we decline the strong call and step down to WAIT — this
+    # also keeps the verdict from contradicting the playbook's "what to do".
+    bounce_sig = signals.get("bounce")
+    if call == "AVOID" and bounce_sig is not None and bounce_sig.value > 0.3:
+        call = "WAIT"
+        note = (note + "; " if note else "") + \
+            "strong bounce history offsets the downside — no strong call"
+    trend_sig = signals.get("trend")
+    if call == "BUY" and trend_sig is not None and trend_sig.value < -0.3:
+        call = "WAIT"
+        note = (note + "; " if note else "") + \
+            "momentum up but the primary trend is down — no strong call"
+
+    # ── Confidence: how many independent signals actually earned weight ──
+    # Weights are small by construction (few signals beat the backtest null), so
+    # confidence is keyed to the count of weighted signals that fired, not their
+    # absolute magnitude. One modest-but-real signal = medium; none = low.
+    n_fired = sum(1 for (_, s, w) in weighted if w > 0 and s.value != 0)
     agree = _agreement(weighted)
-    if den >= 1.0 and agree >= 0.6:
-        confidence = "high"
-    elif den >= 0.4 and agree >= 0.4:
+    if n_fired == 0:
+        confidence = "low"
+    elif n_fired == 1:
         confidence = "medium"
     else:
-        confidence = "low"
+        confidence = "high" if agree >= 0.6 else "medium"
     if note and confidence == "high":
-        confidence = "medium"  # never claim high into a binary event
+        confidence = "medium"  # never claim high with a caveat in play
 
-    # Low confidence = little measured edge fired; don't issue a strong
-    # directional call. Cap it to a cautious lean so the verdict and the
-    # playbook can't contradict each other on near-random readings.
+    # No weighted signal fired → no measured edge → don't issue a strong call.
     if confidence == "low":
         if call == "BUY":
             call = "NEUTRAL"

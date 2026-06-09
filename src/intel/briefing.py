@@ -254,7 +254,7 @@ def render(b: Briefing, width: int = 64) -> List[str]:
     if bnc.get("bounce_rate") is not None:
         tag = "ok" if bnc.get("n", 0) >= 10 else "thin"
         body.append(ui.row("BOUNCE",
-                           f"{bnc['bounce_rate']:.0%} higher in 10d after drops like this  [n={bnc.get('n')}, {tag}]"))
+                           f"{bnc['bounce_rate']:.0%} higher in 10d after similar drops  [n={bnc.get('n')}, {tag}]"))
 
     # OPTIONS
     ivr = st.get("iv_rank")
