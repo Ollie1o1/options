@@ -1856,6 +1856,7 @@ def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.Data
         sub["type"] = opt_type
         sub["expiration"] = exp
         sub["symbol"] = symbol.upper()
+        sub["quote_source"] = "yfinance"
         for col in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]:
             if col not in sub.columns:
                 sub[col] = pd.NA
@@ -2165,6 +2166,22 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
         raise RuntimeError(f"No options data frames fetched for {symbol}.")
 
     df = pd.concat(frames, ignore_index=True)
+
+    # --- Data provenance: capture per-contract quote freshness fields --------
+    # quote_as_of = yfinance's lastTradeDate (UTC) when the contract last printed.
+    # quote_age_min = minutes between that print and this fetch.
+    # These thread through scoring/display so the user sees how stale a quote is.
+    _fetched_at = datetime.now(timezone.utc)
+    df["data_fetched_at"] = _fetched_at.isoformat()
+    if "quote_source" not in df.columns:
+        df["quote_source"] = "yfinance"
+    if "lastTradeDate" in df.columns:
+        _qa = pd.to_datetime(df["lastTradeDate"], errors="coerce", utc=True)
+        df["quote_as_of"] = _qa.dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+        df["quote_age_min"] = (_fetched_at - _qa).dt.total_seconds() / 60.0
+    else:
+        df["quote_as_of"] = pd.NA
+        df["quote_age_min"] = np.nan
 
     # Option RVOL: contract-level volume relative to OI-normalized baseline
     _oi_vals = pd.to_numeric(df["openInterest"], errors="coerce").fillna(1)

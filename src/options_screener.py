@@ -1676,6 +1676,16 @@ def calculate_scores(
             _pen_val = float(_spread_penalty.loc[_idx])
             df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + f" -spread({_pen_val:.2f})"
 
+    # Stale-quote penalty: honestly downgrade (do NOT drop) contracts whose
+    # quote is stale per src.data_quality.classify_quote_freshness.
+    if "quote_freshness" in df.columns:
+        _stale_mask = df["quote_freshness"] == "stale"
+        if _stale_mask.any():
+            df.loc[_stale_mask, "quality_score"] += -0.05
+            if "score_drivers" in df.columns:
+                for _idx in df.index[_stale_mask]:
+                    df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + " -stale_quote(-0.05)"
+
     df["quality_score"] = df["quality_score"].fillna(0.0).clip(0, 1)
 
     # PoP soft floor for buyer modes: dampen very low probability trades.
@@ -1901,6 +1911,23 @@ def enrich_and_score(
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     
+    # Data-quality provenance: classify each contract's quote freshness so it
+    # survives all downstream filtering and lands in ScanResult.picks. Pure;
+    # market state and classifier both come from src.data_quality.
+    from src.data_quality import check_market_hours, classify_quote_freshness
+    _market_open = check_market_hours()[0]
+    if "quote_age_min" not in df.columns:
+        df["quote_age_min"] = np.nan
+    if "quote_source" not in df.columns:
+        df["quote_source"] = "yfinance"
+    if "quote_as_of" not in df.columns:
+        df["quote_as_of"] = pd.NA
+    if "data_fetched_at" not in df.columns:
+        df["data_fetched_at"] = pd.NA
+    df["quote_freshness"] = [
+        classify_quote_freshness(a, _market_open) for a in df["quote_age_min"]
+    ]
+
     mb = config.get("moneyness_band", 0.15)
     if "underlying" in df.columns and "strike" in df.columns:
         df = df[(df["strike"] >= df["underlying"] * (1 - mb)) & (df["strike"] <= df["underlying"] * (1 + mb))].copy()
@@ -1928,6 +1955,9 @@ def enrich_and_score(
         df.loc[zero_quote_mask, "ask"] = (lp * 1.05).clip(lower=0.02)
         df.attrs["stale_quotes_active"] = True
         df.attrs["stale_quote_ratio"] = stale_ratio
+        # Provenance: these bid/ask values are reconstructed, not real quotes.
+        if "quote_source" in df.columns:
+            df.loc[zero_quote_mask, "quote_source"] = "yfinance+synthetic_spread"
 
     # Calculate mid only when both bid and ask are valid (> 0)
     valid_bid = (df["bid"].notna()) & (df["bid"] > 0)
@@ -2462,7 +2492,8 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
             "liquidity_score", "momentum_score", "iv_rank_score", "catalyst_score",
             "ret_5d", "rsi_14", "atr_trend",
             "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket",
-            "short_interest", "rvol", "gex_flip_price", "vwap", "high_premium_turnover"
+            "short_interest", "rvol", "gex_flip_price", "vwap", "high_premium_turnover",
+            "quote_source", "quote_as_of", "quote_age_min", "quote_freshness",
         ]
         
         # Filter to existing columns
@@ -3523,49 +3554,12 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
 def _check_market_hours() -> tuple:
     """
     Returns (is_open: bool, message: str) in US Eastern time.
-    Options are liquid 09:30–16:00 ET, Mon–Fri. Outside this window,
-    yfinance data is stale and bid-ask spreads are unreliable.
+
+    Delegates to ``src.data_quality.check_market_hours`` so the market-hours
+    logic has a single implementation shared with the freshness classifier.
     """
-    try:
-        from zoneinfo import ZoneInfo
-        et_zone = ZoneInfo("America/New_York")
-        now_et = datetime.now(et_zone)
-    except Exception:
-        # Fallback: rough UTC-4 (EDT) — acceptable for a warning-only check
-        now_et = datetime.now(timezone(timedelta(hours=-4)))
-
-    weekday = now_et.weekday()  # 0=Mon … 6=Sun
-    hhmm = now_et.hour * 100 + now_et.minute
-    time_str = now_et.strftime("%H:%M ET")
-    date_str = now_et.strftime("%Y-%m-%d")
-
-    # US market holidays (NYSE/CBOE) — update annually
-    _US_MARKET_HOLIDAYS_2026 = {
-        "2026-01-01",  # New Year's Day
-        "2026-01-19",  # MLK Day
-        "2026-02-16",  # Presidents Day
-        "2026-04-03",  # Good Friday
-        "2026-05-25",  # Memorial Day
-        "2026-06-19",  # Juneteenth
-        "2026-07-03",  # Independence Day (observed)
-        "2026-09-07",  # Labor Day
-        "2026-11-26",  # Thanksgiving
-        "2026-12-25",  # Christmas
-    }
-    if date_str in _US_MARKET_HOLIDAYS_2026:
-        return False, f"Markets closed — US market holiday ({time_str}). Data is stale."
-
-    if weekday >= 5:
-        day_name = "Saturday" if weekday == 5 else "Sunday"
-        return False, f"Markets closed — it's {day_name} ({time_str}). Data is stale."
-
-    if hhmm < 930:
-        return False, f"Pre-market ({time_str}). Options open at 09:30 ET — bid/ask spreads not reliable yet."
-
-    if hhmm >= 1600:
-        return False, f"After-hours ({time_str}). Options closed at 16:00 ET — quotes are stale."
-
-    return True, f"Market open ({time_str})"
+    from src.data_quality import check_market_hours
+    return check_market_hours()
 
 
 def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: bool = True, sector_ctx=None) -> "Optional[pd.DataFrame]":

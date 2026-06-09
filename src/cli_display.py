@@ -425,6 +425,22 @@ def format_mechanics_lines(row: pd.Series) -> list:
     else:
         liq.append(f"Cost: {format_money(cost)}")
 
+    # Data-quality: surface quote freshness only when it is NOT fresh.
+    freshness = row.get("quote_freshness", None)
+    if freshness in ("delayed", "stale", "unknown"):
+        age = row.get("quote_age_min", None)
+        if freshness == "unknown" or age is None or (isinstance(age, float) and pd.isna(age)):
+            fresh_txt = "⚠ quote age unknown"
+        else:
+            fresh_txt = f"⚠ quote {int(round(float(age)))}m old"
+        if freshness == "stale":
+            fresh_txt = "⚠ STALE — " + fresh_txt.replace("⚠ ", "")
+        if HAS_ENHANCED_CLI:
+            color = fmt.Colors.RED if freshness == "stale" else fmt.Colors.YELLOW
+            liq.append(fmt.colorize(fresh_txt, color))
+        else:
+            liq.append(fresh_txt)
+
     if liq:
         label = fmt.colorize("Liquidity:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Liquidity:"
         lines.append(f"    \u21b3 {label} {'  '.join(liq)}")
@@ -1108,6 +1124,23 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     print()
 
 
+def format_data_quality_summary(df_picks: pd.DataFrame) -> Optional[str]:
+    """Aggregate quote-freshness counts into one line, e.g.
+    'Data quality: 41 fresh, 6 delayed, 2 stale, 1 unknown'. Pure; returns None
+    when there is no freshness column to report."""
+    if df_picks is None or df_picks.empty or "quote_freshness" not in df_picks.columns:
+        return None
+    counts = df_picks["quote_freshness"].value_counts()
+    parts = []
+    for label in ("fresh", "delayed", "stale", "unknown"):
+        n = int(counts.get(label, 0))
+        if n:
+            parts.append(f"{n} {label}")
+    if not parts:
+        return None
+    return "Data quality: " + ", ".join(parts)
+
+
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
@@ -1163,6 +1196,12 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     vol_str = fmt.colorize(volatility_regime, vol_color) if HAS_ENHANCED_CLI else volatility_regime
     print(f"  Trend: {trend_str}  |  Volatility: {vol_str}  |  RFR: {rfr*100:.2f}%")
     print(f"  Nearest Expiries: {num_expiries}  |  DTE: {min_dte}\u2013{max_dte}d  |  Chain IV: {format_pct(chain_iv_median)}")
+
+    _dq_line = format_data_quality_summary(df_picks)
+    if _dq_line:
+        _n_stale = int((df_picks["quote_freshness"] == "stale").sum())
+        _dq_color = fmt.Colors.YELLOW if _n_stale else fmt.Colors.DIM
+        print(f"  {fmt.colorize(_dq_line, _dq_color) if HAS_ENHANCED_CLI else _dq_line}")
 
     if HAS_ENHANCED_CLI:
         print(fmt.draw_separator(WIDTH))
