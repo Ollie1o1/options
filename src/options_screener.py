@@ -2598,6 +2598,42 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     return default if (not val and default is not None) else val
 
 
+def _run_intel_menu() -> None:
+    """Intel Briefing sub-menu: (a) market overview, (b) single-ticker briefing.
+
+    Robust to bad input: re-prompts on an unrecognized choice, validates the
+    ticker is non-empty alphanumeric, and never raises out to the caller.
+    """
+    try:
+        from .intel import briefing as _brief, market as _market
+    except Exception as exc:  # pragma: no cover
+        print(f"  Intel module unavailable: {exc}")
+        return
+
+    choice = prompt_input(
+        "Intel: [a] market overview  [b] ticker briefing", "a").strip().lower()
+
+    if choice in ("a", "market", "1", "m"):
+        try:
+            _market.print_market_overview(get_display_width())
+        except Exception as exc:
+            print(f"  Could not render market overview: {exc}")
+        return
+
+    if choice in ("b", "ticker", "2", "t"):
+        sym = prompt_input("Enter ticker symbol (e.g. NVDA)", "").strip().upper()
+        if not sym or not sym.isalnum() or len(sym) > 6:
+            print("  No valid ticker entered. Returning.")
+            return
+        try:
+            _brief.print_briefing(sym)
+        except Exception as exc:
+            print(f"  Could not build briefing for {sym}: {exc}")
+        return
+
+    print("  Unrecognized choice. Type 'a' for market or 'b' for a ticker.")
+
+
 def close_trades():
     """Update trade log with closing prices and realized P/L."""
     log_file = "trades_log/entries.csv"
@@ -3975,6 +4011,13 @@ def main():
     except Exception:
         print()
 
+    # ── Sector/asset outlook (cache-first, instant; refreshes in background) ──
+    try:
+        from .outlook.display import print_outlook_box
+        print_outlook_box(WIDTH)
+    except Exception:
+        pass
+
     # ── Market Hours Check ───────────────────────────────────────────────────
     is_open, mkt_msg = _check_market_hours()
     if not is_open:
@@ -4001,6 +4044,7 @@ def main():
             ("7", "PORTFOLIO", "View open position P/L"),
             ("8", "MY LIST",   _wl_desc),
             ("9", "LOTTERY",   "Lottery Ticket \u2014 far-OTM plays on extreme moves"),
+            ("10", "INTEL",    "Intel Briefing \u2014 everything before you buy + what to do"),
         ]
         for num, cmd, desc in modes:
             n = fmt.colorize(f"[{num}]", fmt.Colors.BRIGHT_YELLOW)
@@ -4019,6 +4063,7 @@ def main():
         print("  [7] PORTFOLIO  \u2014 View open position P/L")
         print(f"  [8] MY LIST    \u2014 {_wl_desc}")
         print("  [9] LOTTERY    \u2014 Lottery Ticket: far-OTM plays on extreme moves")
+        print("  [10] INTEL     \u2014 Intel Briefing: everything before you buy + what to do")
     print()
 
     # ── --mode / --ticker CLI bypass ──────────────────────────────────────────
@@ -4026,7 +4071,7 @@ def main():
         "ticker": "TICKER", "all": "ALL", "discover": "DISCOVER",
         "sell": "SELL", "spreads": "SPREADS", "iron": "IRON",
         "portfolio": "PORTFOLIO", "mylist": "MY LIST",
-        "lottery": "LOTTERY",
+        "lottery": "LOTTERY", "intel": "INTEL",
     }
     if args.ticker:
         symbol_input = args.ticker.upper()
@@ -4053,9 +4098,14 @@ def main():
     # ── Number → command mapping ──────────────────────────────────────────────
     _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
                 "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST",
-                "9": "LOTTERY"}
+                "9": "LOTTERY", "10": "INTEL"}
     if symbol_input in _num_map:
         symbol_input = _num_map[symbol_input]
+
+    # ── INTEL mode: pre-trade briefing (market overview or single-ticker) ──────
+    if symbol_input == "INTEL":
+        _run_intel_menu()
+        sys.exit(0)
 
     if symbol_input == "PORTFOLIO":
         from .check_pnl import view_portfolio_menu

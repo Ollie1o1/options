@@ -260,6 +260,253 @@ def fetch_market_regime() -> Dict[str, Any]:
     return result
 
 
+def classify_index_direction(
+    price: Optional[float],
+    ma50: Optional[float],
+    ma200: Optional[float],
+    ret_5d: Optional[float],
+    ret_20d: Optional[float],
+) -> Dict[str, Any]:
+    """Classify an index's trend as UP / NEUTRAL / DOWN with an explainable reason.
+
+    Transparent, rule-based score in [-1, +1] from four drivers:
+      price vs 200d MA (0.40) — the primary "are we in an uptrend" line
+      50d vs 200d MA  (0.30) — trend confirmation (golden / death cross)
+      20d return      (0.20) — medium-term momentum
+      5d return       (0.10) — is it accelerating or rolling over now
+    Verdict: score > +0.3 → UP, < -0.3 → DOWN, else NEUTRAL.
+
+    Degrades gracefully when the 200d MA is unavailable (history < ~1y): it
+    falls back to price-vs-50d plus momentum and flags "limited history".
+    Returns {"verdict": str, "reason": str, "score": float}.
+    """
+    def _sign(x: Optional[float]) -> int:
+        if x is None:
+            return 0
+        return 1 if x > 0 else (-1 if x < 0 else 0)
+
+    if price is None or ma50 is None:
+        return {"verdict": "NEUTRAL", "reason": "insufficient data", "score": 0.0}
+
+    if ma200 is None:
+        # Short-history fallback: no 200d MA available.
+        score = 0.5 * _sign(price - ma50) + 0.3 * _sign(ret_20d) + 0.2 * _sign(ret_5d)
+        parts = [
+            f"{'above' if price >= ma50 else 'below'} 50d ({price / ma50 - 1.0:+.1%})",
+            f"20d {ret_20d:+.1%}" if ret_20d is not None else "20d n/a",
+            "limited history (no 200d)",
+        ]
+    else:
+        score = (
+            0.40 * _sign(price - ma200)
+            + 0.30 * _sign(ma50 - ma200)
+            + 0.20 * _sign(ret_20d)
+            + 0.10 * _sign(ret_5d)
+        )
+        parts = [
+            f"{'above' if price >= ma200 else 'below'} 200d ({price / ma200 - 1.0:+.1%})",
+            "50>200" if ma50 >= ma200 else "50<200",
+            f"20d {ret_20d:+.1%}" if ret_20d is not None else "20d n/a",
+            f"5d {ret_5d:+.1%}" if ret_5d is not None else "5d n/a",
+        ]
+
+    if score > 0.3:
+        verdict = "UP"
+    elif score < -0.3:
+        verdict = "DOWN"
+    else:
+        verdict = "NEUTRAL"
+
+    return {
+        "verdict": verdict,
+        "reason": ", ".join(parts),
+        "score": round(score, 3),
+        "ret_5d": ret_5d,
+        "ret_20d": ret_20d,
+    }
+
+
+def direction_from_closes(closes) -> Dict[str, Any]:
+    """Compute the direction verdict from a sequence of closing prices.
+
+    Derives 50/200-day moving averages and 5/20-day returns from the tail of
+    the series, then defers to classify_index_direction. Accepts a list or a
+    pandas Series. Returns the same dict shape as classify_index_direction.
+    """
+    try:
+        vals = [float(x) for x in list(closes) if x is not None]
+    except (TypeError, ValueError):
+        vals = []
+    if not vals:
+        return {"verdict": "NEUTRAL", "reason": "insufficient data", "score": 0.0}
+
+    price = vals[-1]
+    ma50 = sum(vals[-50:]) / min(len(vals), 50)
+    ma200 = sum(vals[-200:]) / 200 if len(vals) >= 200 else None
+    ret_5d = (price / vals[-6] - 1.0) if len(vals) >= 6 else None
+    ret_20d = (price / vals[-21] - 1.0) if len(vals) >= 21 else None
+    return classify_index_direction(price, ma50, ma200, ret_5d, ret_20d)
+
+
+# Gauges in display order: broad market first, then the semiconductor complex
+# (sector ETF + the two bellwether names most retail semi books are built on).
+# Friendly name aids the user.
+_INDEX_NAMES = {
+    "SPY": "S&P 500",
+    "QQQ": "Nasdaq 100",
+    "IWM": "Russell 2000",
+    "SMH": "Semiconductors",
+    "NVDA": "Nvidia",
+    "AMD": "AMD",
+}
+
+# Symbols above the divider are broad market; below are the semi complex.
+_SEMI_SYMBOLS = ("SMH", "NVDA", "AMD")
+
+
+def fetch_index_directions(symbols=("SPY", "QQQ", "IWM", "SMH", "NVDA", "AMD")) -> Dict[str, Any]:
+    """Fetch ~1y of closes for each index and classify its direction.
+
+    Returns an ordered dict {symbol: {"price", "verdict", "reason", "score"}}.
+    Symbols that fail to fetch are omitted (graceful degradation), so an empty
+    dict means market data was unavailable this run.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    out: Dict[str, Any] = {}
+    if not HAS_YF or not HAS_PD:
+        return out
+
+    def _one(sym: str):
+        closes = _safe_hist(sym, "1y")
+        if closes is None or len(closes) == 0:
+            return sym, None
+        res = direction_from_closes(closes.tolist())
+        res["price"] = float(closes.iloc[-1])
+        return sym, res
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(4, len(symbols))) as pool:
+            for sym, res in pool.map(_one, symbols):
+                if res is not None:
+                    out[sym] = res
+    except Exception:
+        pass
+    return out
+
+
+def print_market_direction(width: int = 100) -> None:
+    """Print a compact, color-coded MARKET DIRECTION box for the broad indices.
+
+    One row per index: friendly name, ticker, last price, an UP/NEUTRAL/DOWN
+    verdict with an arrow, and the plain-English reason. Colors: green=UP,
+    yellow=NEUTRAL, red=DOWN. Silently prints nothing if no data is available.
+    """
+    # The reason string now carries four drivers (200d, cross, 20d, 5d); give it
+    # room so the 5d momentum read is never the part that gets truncated away.
+    width = max(width, 100)
+    data = fetch_index_directions()
+    if not data:
+        return
+
+    # verdict → (color, arrow)
+    if HAS_FMT and fmt:
+        style = {
+            "UP": (fmt.Colors.GREEN, "▲"),
+            "NEUTRAL": (fmt.Colors.YELLOW, "▬"),
+            "DOWN": (fmt.Colors.RED, "▼"),
+        }
+    else:
+        style = {"UP": ("", "^"), "NEUTRAL": ("", "="), "DOWN": ("", "v")}
+
+    inner_width = width - 4
+
+    def _row(sym: str, info: Dict[str, Any]) -> str:
+        name = _INDEX_NAMES.get(sym, sym)
+        price = info.get("price")
+        verdict = info.get("verdict", "NEUTRAL")
+        reason = info.get("reason", "")
+        _, arrow = style.get(verdict, ("", "?"))
+        price_str = f"${price:,.2f}" if price is not None else "n/a"
+        head = f"{name:<13} {sym:<4} {price_str:>11}   {arrow} {verdict:<7}"
+        room = inner_width - len(head) - 2
+        if room > 4 and reason:
+            if len(reason) > room:
+                reason = reason[: room - 1] + "…"
+            return f"{head}  {reason}"
+        return head
+
+    # ── Draw box (mirrors print_regime_dashboard styling) ──────────────────────
+    title = " MARKET DIRECTION "
+    side_len = (width - len(title) - 2) // 2
+    side_r = width - len(title) - 2 - side_len
+    v = BoxChars.VERTICAL if HAS_FMT else "│"
+    if HAS_FMT:
+        top_bar = (
+            BoxChars.TOP_LEFT + BoxChars.HORIZONTAL * side_len + title
+            + BoxChars.HORIZONTAL * side_r + BoxChars.TOP_RIGHT
+        )
+        bot_bar = BoxChars.BOTTOM_LEFT + BoxChars.HORIZONTAL * (width - 2) + BoxChars.BOTTOM_RIGHT
+    else:
+        top_bar = "┌" + "─" * side_len + title + "─" * side_r + "┐"
+        bot_bar = "└" + "─" * (width - 2) + "┘"
+
+    def _pad_line(content: str) -> str:
+        return f"{v}  {content.ljust(inner_width)}{v}"
+
+    print()
+    print(fmt.colorize(top_bar, fmt.Colors.CYAN, bold=True) if (HAS_FMT and fmt) else top_bar)
+    printed_divider = False
+    for sym, info in data.items():
+        # Visual divider where the broad-market block ends and semis begin.
+        if sym in _SEMI_SYMBOLS and not printed_divider:
+            label = " SEMICONDUCTORS "
+            dashes = "─" * max(0, inner_width - len(label))
+            div = label + dashes
+            if HAS_FMT and fmt:
+                print(fmt.colorize(_pad_line(div), fmt.Colors.DIM))
+            else:
+                print(_pad_line(div))
+            printed_divider = True
+        line = _row(sym, info)
+        if HAS_FMT and fmt:
+            color, _ = style.get(info.get("verdict", "NEUTRAL"), ("", ""))
+            print(fmt.colorize(_pad_line(line), color))
+        else:
+            print(_pad_line(line))
+
+    # ── Synthesis: separate the slow trend from the fast momentum, because a
+    # name can be "UP" (above 200d) while actively dipping (negative 5d/20d).
+    verdicts = [i.get("verdict") for i in data.values()]
+    n_up = verdicts.count("UP")
+    n_down = verdicts.count("DOWN")
+    r20 = [i.get("ret_20d") for i in data.values() if i.get("ret_20d") is not None]
+    r5 = [i.get("ret_5d") for i in data.values() if i.get("ret_5d") is not None]
+    avg20 = sum(r20) / len(r20) if r20 else 0.0
+    avg5 = sum(r5) / len(r5) if r5 else 0.0
+    if n_up > n_down:
+        trend = "uptrend intact"
+    elif n_down > n_up:
+        trend = "downtrend"
+    else:
+        trend = "mixed trend"
+    if avg20 < -0.005 and avg5 < 0:
+        mom = f"but short-term momentum NEGATIVE (avg 20d {avg20:+.1%}, 5d {avg5:+.1%}) — pullback"
+    elif avg20 > 0.005 and avg5 > 0:
+        mom = f"and short-term momentum POSITIVE (avg 20d {avg20:+.1%}, 5d {avg5:+.1%})"
+    else:
+        mom = f"momentum flat/mixed (avg 20d {avg20:+.1%}, 5d {avg5:+.1%})"
+    synth = f"Read: {trend}, {mom}"
+    if len(synth) > inner_width:
+        synth = synth[: inner_width - 1] + "…"
+    print(_pad_line(""))
+    if HAS_FMT and fmt:
+        print(fmt.colorize(_pad_line(synth), fmt.Colors.CYAN, bold=True))
+    else:
+        print(_pad_line(synth))
+    print(fmt.colorize(bot_bar, fmt.Colors.CYAN, bold=True) if (HAS_FMT and fmt) else bot_bar)
+
+
 def print_regime_dashboard(width: int = 90) -> None:
     """
     Print a compact one-box market regime dashboard.
@@ -375,8 +622,18 @@ def print_regime_dashboard(width: int = 90) -> None:
         print(bot_bar)
     print()
 
+    # Broad-market direction gauge (SPY / QQQ / IWM) — is the market up or down?
+    try:
+        print_market_direction(width)
+    except Exception:
+        pass
+
 
 __all__ = [
     "fetch_market_regime",
     "print_regime_dashboard",
+    "classify_index_direction",
+    "direction_from_closes",
+    "fetch_index_directions",
+    "print_market_direction",
 ]

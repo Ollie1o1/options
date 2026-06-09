@@ -80,3 +80,6 @@ debug_ic.py
 
 # Pre-migration safety backups (timestamped, regenerable)
 *.pre-*
+
+# Intel briefing reliability cache (regenerated weekly)
+data/intel_reliability.json
