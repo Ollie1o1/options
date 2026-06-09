@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install dependencies (pinned, reproducible)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt -r requirements-dev.txt
+      - name: Run tests (live-network tests deselected)
+        # Live-network tests are marked @pytest.mark.network and deselected here.
+        # _phase*_stress.py files are ignored (not collected by default anyway).
+        run: pytest tests/ -x -q --ignore=tests/_phase3_stress.py -m "not network"
+
+  typecheck:
+    name: mypy (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt -r requirements-dev.txt
+      - name: mypy
+        run: mypy src/ --config-file mypy.ini

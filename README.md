@@ -1,5 +1,7 @@
 # Options Screener — Professional Edition
 
+[![CI](https://github.com/Ollie1o1/options/actions/workflows/ci.yml/badge.svg)](https://github.com/Ollie1o1/options/actions/workflows/ci.yml)
+
 A Python-based options screening tool that identifies high-probability trading opportunities through advanced analytics, institutional-level metrics, and dynamic safety filters. Includes an AI-powered scoring layer that enriches top candidates with qualitative analysis and produces a final weighted ranked list.
 
 ---
@@ -7,7 +9,9 @@ A Python-based options screening tool that identifies high-probability trading o
 ## Table of Contents
 
 1. [Core Philosophy](#core-philosophy)
-2. [Installation](#installation)
+2. [Module Maturity](#module-maturity)
+3. [What You Can Trust Today](#what-you-can-trust-today)
+4. [Installation](#installation)
 3. [Quick Start](#quick-start)
 4. [The Technical Screener](#the-technical-screener)
    - [Scan Modes](#scan-modes)
@@ -45,6 +49,18 @@ The screener finds opportunities where all four forces converge. Consistency com
 
 ---
 
+## Module Maturity
+
+Not every part of this repo is equally proven. These tiers are honest about where each module stands, drawn from the project's own test coverage and validation record.
+
+| Tier | Modules | Why |
+|------|---------|-----|
+| **Stable** | Equity screener core (`src/options_screener.py`, scoring/filters, Greeks & pricing in `utils.py`, paper ledger in `paper_manager.py`) | Exercised daily; covered by the bulk of the test suite. Market data is now provenance-stamped and IV is cross-validated against each contract's mid price (see [What You Can Trust Today](#what-you-can-trust-today)). |
+| **Beta** | AI ranking layer (`ai_rank.py`, `src/ranking.py`), intel briefings (`src/intel`), FastAPI server (`src/api.py`), Discord/Telegram bots (`src/bots`) | Functional but lighter test coverage; depends on external LLM/API availability. Predictive edge is still under out-of-sample evaluation. |
+| **Experimental** | Crypto strategist (`src/crypto`), leverage module (`src/leverage`) | Explicitly pre-validation. The leverage module's own banner reads **"PRE-VALIDATION — NO EDGE YET"** and shows no edge in walk-forward testing — do not trade it with real money. |
+
+---
+
 ## Installation
 
 **Prerequisites:** Python 3.10+, pip (Compatible with Python 3.14+)
@@ -54,8 +70,10 @@ git clone https://github.com/Ollie1o1/options.git
 cd options
 python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements-lock.txt   # pinned, reproducible — recommended
 ```
+
+Install from **`requirements-lock.txt`** (frozen, exact versions) rather than the loose `requirements.txt`. yfinance and several other dependencies routinely break between minor/major versions, so the pinned lock file is the only reproducible install path; `requirements.txt` is a loose fallback for development only.
 
 The technical screener works out of the box — no API keys needed (uses Yahoo Finance). The AI layer requires an OpenRouter API key (see [Setup](#setup)).
 

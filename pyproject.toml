@@ -1,3 +1,13 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Live-network tests carry @pytest.mark.network and are deselected in CI with
+# -m "not network". (Currently no test hits live network — the only HTTP-using
+# test, test_polygon_client, fully mocks requests — but the marker is registered
+# so the CI contract holds as soon as one is added.)
+markers = [
+    "network: test requires live network access (deselected in CI)",
+]
+
 [tool.ruff]
 line-length = 120
 
