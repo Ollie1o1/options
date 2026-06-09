@@ -9,8 +9,15 @@ delegates here so both paths agree.
 from __future__ import annotations
 
 import math
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
+
+logger = logging.getLogger("data_quality")
+
+# Verification tolerance: Yahoo's IV is "verified" when within this fraction of
+# the IV implied by the contract's own mid price.
+IV_VERIFY_TOLERANCE = 0.15
 
 # US market holidays (NYSE/CBOE) — update annually.
 _US_MARKET_HOLIDAYS_2026 = {
@@ -96,3 +103,113 @@ def classify_quote_freshness(quote_age_min, market_open: bool) -> str:
     if age <= 120.0:
         return "delayed"
     return "stale"
+
+
+def implied_vol_from_price(option_type, S, K, T, r, market_price, q: float = 0.0) -> Optional[float]:
+    """
+    Solve implied volatility from a Black-Scholes price using Brent's method.
+
+    Returns the sigma in [0.005, 5.0] that reprices the option to ``market_price``,
+    or None when:
+      - any input is invalid (non-positive S/K/T/price, or NaN), or
+      - the price lies outside the model's range for that bracket (e.g. below
+        intrinsic, or above the maximum achievable price), so no root exists.
+    """
+    from scipy.optimize import brentq
+    from src.utils import bs_price
+
+    try:
+        S = float(S); K = float(K); T = float(T); r = float(r)
+        mp = float(market_price); q = float(q)
+    except (TypeError, ValueError):
+        return None
+    if any(math.isnan(x) for x in (S, K, T, r, mp, q)):
+        return None
+    if S <= 0 or K <= 0 or T <= 0 or mp <= 0:
+        return None
+
+    lo, hi = 0.005, 5.0
+
+    def _f(sigma: float) -> float:
+        return float(bs_price(option_type, S, K, T, r, sigma, q)) - mp
+
+    try:
+        f_lo = _f(lo)
+        f_hi = _f(hi)
+        if not (math.isfinite(f_lo) and math.isfinite(f_hi)):
+            return None
+        if f_lo == 0.0:
+            return lo
+        if f_hi == 0.0:
+            return hi
+        # No sign change -> price is outside the achievable range (below
+        # intrinsic or above the model max): no implied vol exists.
+        if f_lo * f_hi > 0:
+            return None
+        return float(brentq(_f, lo, hi, maxiter=100, xtol=1e-10))
+    except (ValueError, RuntimeError):
+        return None
+
+
+def cross_validate_iv(df, r: float):
+    """
+    Verify Yahoo's reported impliedVolatility against the IV implied by each
+    contract's own mid price.
+
+    For every row with a valid ``mid`` and valid underlying/strike/T_years,
+    solves IV from the mid and adds three columns:
+      - ``iv_solved``       float — solved IV (NaN when unsolvable)
+      - ``iv_residual_pct`` float — (yahoo_iv - iv_solved) / iv_solved (NaN if either missing)
+      - ``iv_verified``     object — True if |residual| <= 15%, False if not,
+                            None when no IV could be solved.
+
+    Pure: does not mutate ``impliedVolatility`` (the caller decides whether to
+    adopt ``iv_solved``). A per-contract dividend yield is read from a
+    ``dividend_yield`` column when present, else 0.
+    """
+    import numpy as np
+    import pandas as pd
+
+    df = df.copy()
+    n = len(df)
+    iv_solved = np.full(n, np.nan, dtype=float)
+    iv_residual = np.full(n, np.nan, dtype=float)
+    iv_verified: list = [None] * n
+
+    if n == 0:
+        df["iv_solved"] = iv_solved
+        df["iv_residual_pct"] = iv_residual
+        df["iv_verified"] = iv_verified
+        return df
+
+    has_div = "dividend_yield" in df.columns
+    types = df.get("type")
+    for pos, (idx, row) in enumerate(df.iterrows()):
+        try:
+            mid = row.get("mid", np.nan)
+            S = row.get("underlying", np.nan)
+            K = row.get("strike", np.nan)
+            T = row.get("T_years", np.nan)
+            opt = row.get("type", "call")
+            q = float(row.get("dividend_yield", 0.0)) if has_div else 0.0
+            if pd.isna(mid) or float(mid) <= 0:
+                continue
+            solved = implied_vol_from_price(opt, S, K, T, r, float(mid), q)
+            if solved is None or solved <= 0:
+                continue
+            iv_solved[pos] = solved
+            yahoo_iv = row.get("impliedVolatility", np.nan)
+            if pd.notna(yahoo_iv) and float(yahoo_iv) > 0:
+                resid = (float(yahoo_iv) - solved) / solved
+                iv_residual[pos] = resid
+                iv_verified[pos] = bool(abs(resid) <= IV_VERIFY_TOLERANCE)
+            else:
+                # Solved but nothing to compare against: treat as unverified-but-usable.
+                iv_verified[pos] = None
+        except Exception:
+            continue
+
+    df["iv_solved"] = iv_solved
+    df["iv_residual_pct"] = iv_residual
+    df["iv_verified"] = iv_verified
+    return df

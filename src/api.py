@@ -92,6 +92,7 @@ def _serialize_picks(picks_df, n: int = 10) -> List[Dict]:
         "premium", "prob_profit", "quality_score", "delta",
         "ev_per_contract", "premium_bucket",
         "quote_source", "quote_as_of", "quote_age_min", "quote_freshness",
+        "iv_solved", "iv_residual_pct", "iv_verified",
     ]
     cols = [c for c in wanted if c in df.columns]
 

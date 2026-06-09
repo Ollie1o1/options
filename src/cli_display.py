@@ -489,6 +489,20 @@ def format_mechanics_lines(row: pd.Series) -> list:
     if vanna is not None and pd.notna(vanna) and abs(float(vanna)) > 0.01:
         grk.append(f"Vanna: {float(vanna):.3f}")
 
+    # IV cross-check provenance: verified vs corrected vs unsolvable.
+    if "iv_verified" in row.index:
+        iv_ver = row.get("iv_verified", None)
+        if bool(row.get("iv_corrected", False)):
+            yh = row.get("iv_yahoo", None)
+            sv = row.get("iv_solved", None)
+            if pd.notna(yh) and pd.notna(sv):
+                iv_txt = f"IV corrected (yahoo {float(yh)*100:.0f}% → solved {float(sv)*100:.0f}%)"
+            else:
+                iv_txt = "IV corrected"
+            grk.append(fmt.colorize(iv_txt, fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else iv_txt)
+        elif iv_ver is True:
+            grk.append(fmt.colorize("IV verified ✓", fmt.Colors.GREEN) if HAS_ENHANCED_CLI else "IV verified ✓")
+
     if grk:
         label = fmt.colorize("Greeks:   ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Greeks:   "
         lines.append(f"{INDENT}{label} {'  '.join(grk)}")
@@ -1141,6 +1155,28 @@ def format_data_quality_summary(df_picks: pd.DataFrame) -> Optional[str]:
     return "Data quality: " + ", ".join(parts)
 
 
+def format_iv_crosscheck_summary(df_picks: pd.DataFrame) -> Optional[str]:
+    """Aggregate IV cross-validation outcomes into one line, e.g.
+    'IV cross-check: 44 verified, 3 corrected, 2 unsolvable'. Pure; returns None
+    when the cross-check did not run (no iv_solved column)."""
+    if df_picks is None or df_picks.empty or "iv_solved" not in df_picks.columns:
+        return None
+    solved = df_picks["iv_solved"].notna()
+    unsolvable = int((~solved).sum())
+    verified = int((df_picks.get("iv_verified") == True).sum())  # noqa: E712
+    corrected = int((solved & (df_picks.get("iv_verified") != True)).sum())  # noqa: E712
+    parts = []
+    if verified:
+        parts.append(f"{verified} verified")
+    if corrected:
+        parts.append(f"{corrected} corrected")
+    if unsolvable:
+        parts.append(f"{unsolvable} unsolvable")
+    if not parts:
+        return None
+    return "IV cross-check: " + ", ".join(parts)
+
+
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
@@ -1202,6 +1238,12 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         _n_stale = int((df_picks["quote_freshness"] == "stale").sum())
         _dq_color = fmt.Colors.YELLOW if _n_stale else fmt.Colors.DIM
         print(f"  {fmt.colorize(_dq_line, _dq_color) if HAS_ENHANCED_CLI else _dq_line}")
+
+    _iv_line = format_iv_crosscheck_summary(df_picks)
+    if _iv_line:
+        _n_corr = int((df_picks["iv_solved"].notna() & (df_picks.get("iv_verified") != True)).sum())  # noqa: E712
+        _iv_color = fmt.Colors.YELLOW if _n_corr else fmt.Colors.DIM
+        print(f"  {fmt.colorize(_iv_line, _iv_color) if HAS_ENHANCED_CLI else _iv_line}")
 
     if HAS_ENHANCED_CLI:
         print(fmt.draw_separator(WIDTH))

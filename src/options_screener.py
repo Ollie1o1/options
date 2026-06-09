@@ -2000,6 +2000,36 @@ def enrich_and_score(
     if df.empty:
         return df
 
+    # IV cross-validation: verify Yahoo's reported IV against the IV implied by
+    # each contract's own mid price (Black-Scholes inversion). The mid price is
+    # more trustworthy than Yahoo's IV field on illiquid strikes, so where IV is
+    # unverified (or missing) and an IV can be solved, adopt the solved IV for
+    # all downstream Greeks/PoP/EV math. Contracts are flagged, never dropped.
+    from src.data_quality import cross_validate_iv
+    if "dividend_yield" not in df.columns:
+        df["dividend_yield"] = dividend_yield
+    df = cross_validate_iv(df, risk_free_rate)
+    df["iv_yahoo"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
+    _solved_ok = df["iv_solved"].notna() & (df["iv_solved"] > 0)
+    _corrected = _solved_ok & (df["iv_verified"] == False)  # noqa: E712
+    df["iv_corrected"] = _corrected
+    if _corrected.any():
+        df.loc[_corrected, "impliedVolatility"] = df.loc[_corrected, "iv_solved"]
+        _ivlog = logging.getLogger(__name__)
+        for _i in df.index[_corrected]:
+            try:
+                _ivlog.info(
+                    "IV corrected %s %s %s: yahoo %.1f%% -> solved %.1f%%",
+                    df.at[_i, "symbol"], df.at[_i, "strike"], df.at[_i, "expiration"],
+                    float(df.at[_i, "iv_yahoo"]) * 100.0, float(df.at[_i, "iv_solved"]) * 100.0,
+                )
+            except Exception:
+                pass
+    # Adopt solved IV where Yahoo had no usable value but a solve succeeded.
+    _yahoo_missing = ~(df["iv_yahoo"] > 0) & _solved_ok
+    if _yahoo_missing.any():
+        df.loc[_yahoo_missing, "impliedVolatility"] = df.loc[_yahoo_missing, "iv_solved"]
+
     df["impliedVolatility"] = pd.to_numeric(df["impliedVolatility"], errors='coerce')
     df["iv_group_median"] = df.groupby(["exp_dt", "type"])["impliedVolatility"].transform(lambda s: s.median(skipna=True))
     df["impliedVolatility"] = df["impliedVolatility"].fillna(df["iv_group_median"])
@@ -2494,6 +2524,7 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = N
             "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket",
             "short_interest", "rvol", "gex_flip_price", "vwap", "high_premium_turnover",
             "quote_source", "quote_as_of", "quote_age_min", "quote_freshness",
+            "iv_solved", "iv_residual_pct", "iv_verified",
         ]
         
         # Filter to existing columns
