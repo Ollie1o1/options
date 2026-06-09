@@ -61,7 +61,11 @@ paper_trades_leverage.db.bak.*
 docs/superpowers/
 
 # Generated reports (regenerable via scripts/make_pnl_chart.py)
-reports/
+# Ignore the contents (not the dir itself) so the public track record below
+# can be re-included — a negation cannot un-ignore a file under an ignored dir.
+reports/*
+# ...except the public paper-trading track record, linked from the README.
+!reports/TRACK_RECORD.md
 
 # Editor/tooling state
 .claude/
