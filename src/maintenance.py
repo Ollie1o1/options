@@ -46,6 +46,17 @@ def due_checkpoint(state: dict, today: str, min_days: int = 7) -> bool:
         return True
 
 
+def due_track_record(state: dict, today: str, min_days: int = 7) -> bool:
+    """Public track-record refresh runs at most weekly (same pattern as checkpoint)."""
+    last = (state or {}).get("last_track_record")
+    if not last:
+        return True
+    try:
+        return _days_between(last, today) >= min_days
+    except ValueError:
+        return True
+
+
 def autolog_window(weekday: int, hhmm: int):
     """weekday: 1=Mon..7=Sun (datetime.isoweekday()). hhmm: e.g. 1430.
     Returns (key, mode_flag) for the active scan window, or None.
@@ -118,6 +129,11 @@ def _run_checkpoint(db_path: str, phase1_start: str) -> None:
     phase1_checkpoint.write_checkpoint(result, output_dir="reports")
 
 
+def _run_track_record(db_path: str) -> None:
+    from scripts.publish_track_record import publish
+    publish(db_path=db_path, reports_dir="reports")
+
+
 def run_startup_maintenance(db_path: str = "paper_trades.db",
                             phase1_start: Optional[str] = None,
                             state_path: str = DEFAULT_STATE_PATH,
@@ -155,6 +171,15 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
             fn(db_path=db_path, phase1_start=phase1_start)
             state["last_checkpoint"] = today
             ran.append("checkpoint")
+    except Exception:
+        pass
+
+    # 3. Weekly public track-record refresh (>=7 days), read-only over the db.
+    try:
+        if due_track_record(state, today):
+            _run_track_record(db_path=db_path)
+            state["last_track_record"] = today
+            ran.append("track_record")
     except Exception:
         pass
 

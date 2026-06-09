@@ -287,6 +287,13 @@ def _rich_table(df: pd.DataFrame, console, verbose_reasoning: bool) -> None:
         padding=(0, 2),
     ))
 
+    # Honest evidence label: read live from validation artifacts, never hardcoded.
+    try:
+        from src.evidence import format_evidence_banner
+        console.print(f"[dim]{format_evidence_banner()}[/dim]")
+    except Exception:
+        pass
+
     # ── Main table ────────────────────────────────────────────────────────
     table = Table(
         box=box.HEAVY_HEAD,

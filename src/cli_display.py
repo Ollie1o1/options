@@ -795,6 +795,13 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
 
     print("\n" + fmt.draw_box("⚡ EXECUTIVE SUMMARY", width, double=True))
 
+    # Honest evidence label for the predictive layer (read from artifacts).
+    try:
+        from .evidence import format_evidence_banner
+        print(fmt.colorize(f"  {format_evidence_banner()}", fmt.Colors.DIM))
+    except Exception:
+        pass
+
     # Market Context
     vix = get_vix_level()
     vix_str = f"{vix:.1f}" if vix else "N/A"

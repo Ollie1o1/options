@@ -61,6 +61,22 @@ Not every part of this repo is equally proven. These tiers are honest about wher
 
 ---
 
+## What You Can Trust Today
+
+This tool separates **verifiable facts** from **unproven predictions**, and labels each honestly.
+
+**Descriptive layer — verifiable (trust the numbers, mind the staleness).**
+Market prices, IV rank/percentile, spreads, open interest, and Greeks are computed from the live chain. As of the trust-data-integrity work, every contract also carries:
+- **Quote provenance & freshness** — `quote_source`, `quote_as_of`, `quote_age_min`, and a `quote_freshness` label (`fresh` / `delayed` / `stale` / `unknown`). Stale quotes are flagged in the output and lightly penalized, never silently served. Aggregate freshness is reported after each scan.
+- **IV cross-validation** — Yahoo's reported implied volatility is verified against the IV implied by each contract's own mid price (Black-Scholes inversion). Where Yahoo's value is wrong, the solved IV is adopted for all downstream Greeks/PoP/EV math and the correction is shown (`IV corrected (yahoo 72% → solved 38%)`) and logged.
+
+**Predictive layer — experimental (do not treat as established).**
+The composite `quality_score`, the AI `final_score`, and the ranked order are **models under evaluation**, not proven edges. The out-of-sample evidence is surfaced live in the output (e.g. `Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=2/50)`) and read from the validation artifacts — it updates as evidence accumulates and will only read READY once the forward-cohort gate fires. See [docs/VALIDATION_POWER.md](docs/VALIDATION_POWER.md) for the power analysis.
+
+**Public track record.** The running paper-trading record (win rate, returns, per-strategy breakdown, full closed-trade table, and gate status) is published to [reports/TRACK_RECORD.md](reports/TRACK_RECORD.md), refreshed weekly. It states the paper/delayed-data/friction caveats plainly.
+
+---
+
 ## Installation
 
 **Prerequisites:** Python 3.10+, pip (Compatible with Python 3.14+)
