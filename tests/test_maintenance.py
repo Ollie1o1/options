@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -177,6 +178,48 @@ class TestOrchestrator(unittest.TestCase):
                 now=datetime(2026, 6, 4, 14, 30), runner=boom,
                 checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
             self.assertIn("cohort", summary)
+
+
+class TestHeadless(unittest.TestCase):
+    """run_headless: the LaunchAgent entry point. Same orchestrator, but it
+    reads phase1_start from config.json itself, prints a summary, and never
+    raises (exit code 0 always — failures are logged, not thrown)."""
+
+    def _setup(self, d):
+        db = os.path.join(d, "t.db")
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE trades (date TEXT, strategy_name TEXT, status TEXT, "
+                     "paper_only INTEGER, quality_score REAL, pnl_pct REAL)")
+        conn.execute("INSERT INTO trades VALUES ('2026-05-28','Long Call','CLOSED',0,70.0,0.1)")
+        conn.commit(); conn.close()
+        cfg = os.path.join(d, "config.json")
+        with open(cfg, "w") as f:
+            json.dump({"auto_log": {"phase1_start_date": "2026-05-27"}}, f)
+        return db, cfg
+
+    def test_headless_runs_and_returns_summary(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            db, cfg = self._setup(d)
+            summary = m.run_headless(
+                db_path=db, config_path=cfg,
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: (calls.append(cmd), 0)[1],
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
+            self.assertIn("cohort", summary)
+            self.assertTrue(any("-ics" in " ".join(c) for c in calls))
+
+    def test_headless_never_raises_on_bad_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            summary = m.run_headless(
+                db_path=os.path.join(d, "missing.db"),
+                config_path=os.path.join(d, "no_such_config.json"),
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
+            self.assertIsInstance(summary, dict)
 
 
 if __name__ == "__main__":

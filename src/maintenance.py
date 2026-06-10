@@ -196,3 +196,47 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         cohort = ""
     return {"cohort": cohort, "ran": ran}
+
+
+# ── Headless entry point (LaunchAgent / manual) ──────────────────────────────
+
+def run_headless(db_path: str = "paper_trades.db",
+                 config_path: str = "config.json",
+                 state_path: str = DEFAULT_STATE_PATH,
+                 now: Optional[datetime] = None,
+                 runner: Optional[Callable] = None,
+                 checkpoint_fn: Optional[Callable] = None,
+                 track_record_fn: Optional[Callable] = None) -> dict:
+    """Run startup maintenance without the interactive screener.
+
+    The LaunchAgent entry: reads phase1_start from config.json itself,
+    delegates to ``run_startup_maintenance`` (which is already crash-isolated
+    per job), and never raises — a scheduler must not crashloop on a bad day.
+    Exit-enforcement is covered transitively: the auto-log subprocess runs the
+    screener, whose startup enforces exits.
+    """
+    try:
+        with open(config_path) as f:
+            phase1_start = (json.load(f).get("auto_log") or {}).get("phase1_start_date")
+    except (OSError, ValueError):
+        phase1_start = None
+    try:
+        return run_startup_maintenance(
+            db_path=db_path, phase1_start=phase1_start, state_path=state_path,
+            now=now, runner=runner, checkpoint_fn=checkpoint_fn,
+            track_record_fn=track_record_fn)
+    except Exception:
+        return {"cohort": "", "ran": []}
+
+
+def main() -> None:
+    summary = run_headless()
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ran = ", ".join(summary.get("ran") or []) or "nothing due"
+    print(f"[{stamp}] maintenance: {ran}")
+    if summary.get("cohort"):
+        print(f"  {summary['cohort']}")
+
+
+if __name__ == "__main__":
+    main()

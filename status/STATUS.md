@@ -1,6 +1,6 @@
 # STATUS — where we are right now
 
-**Last updated:** 2026-06-03
+**Last updated:** 2026-06-10
 **Current phase:** Phase 2 — Forward Observation (cohort **reset clean**)
 **Real money deployed?** ❌ Not yet. Waiting on the gate (see below).
 
@@ -102,23 +102,31 @@ calls to keep the cohort filling.
    `config.live_execution.enabled` (default off). READY → first trade is now
    same-day: flip the flag, follow `docs/GO_LIVE_RUNBOOK.md`. Check arming with
    `python -m src.execution.pipeline`.
-4. **Automation now runs at screener startup (cron retired 2026-06-07)** — cron
-   was silent since ~2026-05-20 (lost Full Disk Access) and a month of attempts
-   never made it reliable, so it is abandoned. `src/maintenance.py` now runs
-   auto-log (once per window/day, in-window weekdays) and the weekly checkpoint
-   (≥7 days) at screener startup; exit-enforcement already ran inline at startup
-   and now logs that it did. Trade-off: **the cohort only fills on days you run
-   the screener** — the new `Forward cohort: X/50 …` startup line makes that cost
-   visible. See `status/DECISIONS.md` (2026-06-07).
+4. **Automation: screener startup + headless LaunchAgent (2026-06-10).** Cron
+   stayed retired. `src/maintenance.py` runs auto-log (once per window/day,
+   in-window weekdays) and the weekly checkpoint (≥7 days) at screener startup;
+   exit-enforcement already ran inline at startup and now logs that it did.
+   **New:** `python -m src.maintenance` is a headless entry point, installed as
+   a LaunchAgent (`scripts/install_launchagent.sh`) firing at 10:20 / 12:20 /
+   14:05 on weekdays — so the cohort fills even on days you don't open the
+   screener. ⚠️ **One-time approval required:** System Settings → General →
+   Login Items & Extensions → "Allow in the Background" — until then the job
+   exits 78 (EX_CONFIG) and does nothing. The startup automation-health check
+   warns if it goes stale, so a silent death gets caught either way.
 
 ---
 
 ## Your next action
 
-- [ ] **Run the screener regularly.** Startup now auto-runs exit-enforcement, the
-  weekly checkpoint, and (in-window, weekdays) auto-log — cron is retired and no
-  longer needed. The cohort only fills on days you run it, so running it *is* the
-  discipline. Watch the `Forward cohort: X/50` line tick up.
+- [ ] **Approve the LaunchAgent (one time):** System Settings → General →
+  Login Items & Extensions → "Allow in the Background" for the options
+  maintenance agent. After that the cohort fills on weekdays automatically;
+  verify with `tail logs/launchagent.log` after the next window.
+- [ ] **Keep running the screener regularly anyway.** Startup still auto-runs
+  exit-enforcement, the weekly checkpoint, and (in-window) auto-log. Watch the
+  `Forward cohort: X/50` line tick up.
 - [ ] Check the Sunday `reports/checkpoint_*.md` (or this file) weekly.
+- [ ] When the gate fires: `python -m src.execution.preflight` is the
+  machine-checked runbook — it must print CLEARED before any real order.
 
 Nothing else to do but let the data accumulate. The discipline *is* the strategy.
