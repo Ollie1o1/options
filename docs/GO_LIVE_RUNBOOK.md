@@ -7,6 +7,15 @@ broker. There is no broker API. Real money is OFF until every box below is check
 
 ## Pre-flight (do NOT skip)
 
+0. **Run the machine-checked preflight first:**
+   ```
+   PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.execution.preflight
+   ```
+   It checks every item below automatically (gate, arming, risk caps,
+   checkpoint freshness, automation health, slippage DB) and prints
+   `CLEARED ✅` or `NOT CLEARED 🔒` with reasons. If it says NOT CLEARED,
+   stop — the rest of this runbook explains *what* it verified.
+
 1. **Gate is READY.** Run the screener; the startup banner / `reports/GATE_STATUS.md`
    must read `READY`. Confirm with:
    ```
