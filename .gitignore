@@ -87,3 +87,6 @@ debug_ic.py
 
 # Intel briefing reliability cache (regenerated weekly)
 data/intel_reliability.json
+
+# Local backups parking lot (DB snapshots, retired configs, one-off scripts)
+backups/
