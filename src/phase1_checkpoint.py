@@ -21,8 +21,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import math
+
 import numpy as np
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import norm, pearsonr, spearmanr
 
 
 def _load_cohort(db_path: str, phase1_start: str):
@@ -65,6 +67,22 @@ def _bootstrap_ci(s: np.ndarray, r: np.ndarray, n_boot: int = 1000, seed: int = 
     return float(np.quantile(boots, 0.025)), float(np.quantile(boots, 0.975))
 
 
+def posterior_ic_above(ic: float, n: int, threshold: float = 0.08) -> Optional[float]:
+    """P(true IC >= threshold | observed ic, n) under a flat prior on the
+    Fisher-z scale: true z ~ Normal(atanh(ic), 1/(n-3)).
+
+    Reporting only — never feeds the gate decision (docs/VALIDATION_POWER.md,
+    DECISIONS.md 2026-06-07: no silent gate change). Returns None when n < 4
+    or ic is not finite.
+    """
+    if n < 4 or ic is None or not math.isfinite(ic):
+        return None
+    z_obs = math.atanh(max(-0.999, min(0.999, float(ic))))
+    z_thr = math.atanh(max(-0.999, min(0.999, float(threshold))))
+    se = 1.0 / math.sqrt(n - 3)
+    return float(1 - norm.cdf((z_thr - z_obs) / se))
+
+
 def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = None) -> dict:
     today = today or datetime.now().strftime("%Y-%m-%d")
     scores, returns = _load_cohort(db_path, phase1_start)
@@ -95,6 +113,7 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
         "n_trades": n, "ic_pearson": ic_p, "p_pearson": p_p,
         "ic_spearman": ic_s, "p_spearman": p_s, "ic_95_ci": [ci_lo, ci_hi],
         "decision": decision,
+        "posterior_ic_ge_008": posterior_ic_above(ic_p, n, threshold=0.08),
     }
 
 
@@ -107,10 +126,18 @@ def _format_markdown(r: dict) -> str:
         "## Forward-cohort IC",
         f"- Pearson IC: **{r['ic_pearson']:+.3f}**  (p={r['p_pearson']:.3f})",
         f"- Spearman IC: {r['ic_spearman']:+.3f}  (p={r['p_spearman']:.3f})",
-        f"- 95% bootstrap CI: [{r['ic_95_ci'][0]:+.3f}, {r['ic_95_ci'][1]:+.3f}]", "",
+        f"- 95% bootstrap CI: [{r['ic_95_ci'][0]:+.3f}, {r['ic_95_ci'][1]:+.3f}]",
+        _posterior_line(r.get("posterior_ic_ge_008")), "",
         f"## Gate decision: **{r['decision']}**", "",
         _decision_explainer(r["decision"]), "",
     ]) + "\n"
+
+
+def _posterior_line(p: Optional[float]) -> str:
+    if p is None:
+        return "- Bayesian P(true IC >= 0.08): n/a (n < 4) — reporting only, gate unchanged"
+    return (f"- Bayesian P(true IC >= 0.08): **{p:.0%}** — reporting only, gate thresholds "
+            f"unchanged (see docs/VALIDATION_POWER.md)")
 
 
 def _decision_explainer(d: str) -> str:

@@ -67,13 +67,14 @@ def pearson_p_value(r: float, n: int) -> float:
 
 def posterior_prob_ic_above(observed_r: float, n: int, threshold: float = 0.08) -> float:
     """P(true IC >= threshold) under a flat prior, using the Fisher-z normal
-    approximation: true z ~ Normal(atanh(observed_r), 1/(n-3))."""
-    if n <= 3:
-        return float("nan")
-    z_obs = math.atanh(max(-0.999, min(0.999, observed_r)))
-    z_thr = math.atanh(max(-0.999, min(0.999, threshold)))
-    se = 1.0 / math.sqrt(n - 3)
-    return float(1 - norm.cdf((z_thr - z_obs) / se))
+    approximation: true z ~ Normal(atanh(observed_r), 1/(n-3)).
+
+    Delegates to the canonical implementation in src.phase1_checkpoint (also
+    reported in the weekly checkpoint) so the math lives in one place.
+    """
+    from src.phase1_checkpoint import posterior_ic_above
+    p = posterior_ic_above(observed_r, n, threshold=threshold)
+    return float("nan") if p is None else p
 
 
 # ── Data access ─────────────────────────────────────────────────────────────

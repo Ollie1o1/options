@@ -259,5 +259,75 @@ class WritesReportAndHistoryAndGateStatus(unittest.TestCase):
                                 "checkpoint_history.tsv has no data rows")
 
 
+class BayesianPosteriorTest(unittest.TestCase):
+    """posterior_ic_above: P(true IC >= threshold) on the Fisher-z scale.
+
+    Reporting only — it must not influence the gate decision.
+    """
+
+    def test_posterior_strong_edge_high(self):
+        from src.phase1_checkpoint import posterior_ic_above
+        p = posterior_ic_above(0.30, 60, threshold=0.08)
+        self.assertGreater(p, 0.90)
+
+    def test_posterior_no_edge_low(self):
+        from src.phase1_checkpoint import posterior_ic_above
+        p = posterior_ic_above(0.00, 60, threshold=0.08)
+        self.assertLess(p, 0.40)
+
+    def test_posterior_at_threshold_is_half(self):
+        from src.phase1_checkpoint import posterior_ic_above
+        p = posterior_ic_above(0.08, 100, threshold=0.08)
+        self.assertAlmostEqual(p, 0.5, places=6)
+
+    def test_posterior_tiny_n_returns_none(self):
+        from src.phase1_checkpoint import posterior_ic_above
+        self.assertIsNone(posterior_ic_above(0.30, 3, threshold=0.08))
+
+    def test_posterior_non_finite_ic_returns_none(self):
+        from src.phase1_checkpoint import posterior_ic_above
+        self.assertIsNone(posterior_ic_above(float("nan"), 60, threshold=0.08))
+
+    def test_matches_power_analysis_script(self):
+        """The script must delegate to the same canonical implementation."""
+        from src.phase1_checkpoint import posterior_ic_above
+        from scripts.validation_power_analysis import posterior_prob_ic_above
+        self.assertAlmostEqual(
+            posterior_ic_above(0.15, 80), posterior_prob_ic_above(0.15, 80), places=12
+        )
+
+
+class CheckpointIncludesPosteriorTest(unittest.TestCase):
+    """compute_checkpoint result carries posterior_ic_ge_008; decision unchanged."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmpdir, "trades.db")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_posterior_in_result_and_markdown(self):
+        from src.phase1_checkpoint import compute_checkpoint, _format_markdown
+        _seed_cohort(self.db, n_trades=60, ic_target=0.35,
+                     start_date="2026-05-27", noise_scale=0.1)
+        result = compute_checkpoint(self.db, "2026-05-27", today="2026-07-10")
+        self.assertIn("posterior_ic_ge_008", result)
+        self.assertIsNotNone(result["posterior_ic_ge_008"])
+        self.assertGreater(result["posterior_ic_ge_008"], 0.5)
+        md = _format_markdown(result)
+        self.assertIn("Bayesian", md)
+        self.assertIn("reporting only", md)
+
+    def test_posterior_none_when_cohort_tiny(self):
+        from src.phase1_checkpoint import compute_checkpoint, _format_markdown
+        _seed_cohort(self.db, n_trades=2, ic_target=0.35, start_date="2026-05-27")
+        result = compute_checkpoint(self.db, "2026-05-27", today="2026-06-10")
+        self.assertIsNone(result["posterior_ic_ge_008"])
+        # markdown must not crash on None
+        _format_markdown(result)
+
+
 if __name__ == "__main__":
     unittest.main()
