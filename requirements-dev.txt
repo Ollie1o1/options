@@ -1,5 +1,8 @@
 pytest>=7.0.0
 pytest-cov>=4.0.0
+# Publishes each pytest failure as a check-run annotation (publicly readable
+# via the GitHub API even where job logs require admin auth).
+pytest-github-actions-annotate-failures>=0.2.0
 ruff
 mypy
 hypothesis

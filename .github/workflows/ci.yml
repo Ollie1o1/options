@@ -18,8 +18,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -30,15 +30,17 @@ jobs:
       - name: Run tests (live-network tests deselected)
         # Live-network tests are marked @pytest.mark.network and deselected here.
         # _phase*_stress.py files are ignored (not collected by default anyway).
-        run: pytest tests/ -x -q --ignore=tests/_phase3_stress.py -m "not network"
+        # No -x: one run surfaces every failure, and the annotate-failures plugin
+        # publishes each as a check-run annotation (publicly readable).
+        run: pytest tests/ -q --ignore=tests/_phase3_stress.py -m "not network"
 
   typecheck:
     name: mypy (non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
