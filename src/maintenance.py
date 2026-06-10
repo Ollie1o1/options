@@ -139,7 +139,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             state_path: str = DEFAULT_STATE_PATH,
                             now: Optional[datetime] = None,
                             runner: Optional[Callable] = None,
-                            checkpoint_fn: Optional[Callable] = None) -> dict:
+                            checkpoint_fn: Optional[Callable] = None,
+                            track_record_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -177,7 +178,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     # 3. Weekly public track-record refresh (>=7 days), read-only over the db.
     try:
         if due_track_record(state, today):
-            _run_track_record(db_path=db_path)
+            fn = track_record_fn or _run_track_record
+            fn(db_path=db_path)
             state["last_track_record"] = today
             ran.append("track_record")
     except Exception:

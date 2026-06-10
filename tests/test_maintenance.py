@@ -101,7 +101,7 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=state_path,
                 now=datetime(2026, 6, 4, 14, 30), runner=fake_runner,
-                checkpoint_fn=lambda **k: None)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
             self.assertTrue(any("-ics" in " ".join(c) for c in calls))
             st = m.load_state(state_path)
             self.assertEqual(st["last_autolog"]["ics"], "2026-06-04")
@@ -116,7 +116,7 @@ class TestOrchestrator(unittest.TestCase):
             sp = os.path.join(d, "state.json")
             kw = dict(db_path=db, phase1_start="2026-05-27", state_path=sp,
                       now=datetime(2026, 6, 4, 14, 30), runner=fake_runner,
-                      checkpoint_fn=lambda **k: None)
+                      checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
             m.run_startup_maintenance(**kw)
             calls.clear()
             m.run_startup_maintenance(**kw)
@@ -133,7 +133,7 @@ class TestOrchestrator(unittest.TestCase):
             m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
                 now=datetime(2026, 6, 7, 14, 30), runner=fake_runner,
-                checkpoint_fn=lambda **k: None)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
             self.assertFalse(calls)
 
     def test_checkpoint_runs_when_due_and_records_state(self):
@@ -144,10 +144,27 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
                 now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
-                checkpoint_fn=lambda **k: ran.append(k))
+                checkpoint_fn=lambda **k: ran.append(k),
+                track_record_fn=lambda **k: None)
             self.assertEqual(len(ran), 1)
             self.assertEqual(m.load_state(sp)["last_checkpoint"], "2026-06-07")
             self.assertIn("checkpoint", summary["ran"])
+
+    def test_track_record_runs_when_due_and_is_injectable(self):
+        ran = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None,
+                track_record_fn=lambda **k: ran.append(k))
+            # injected fn was used (no real reports/TRACK_RECORD.md written)
+            self.assertEqual(len(ran), 1)
+            self.assertEqual(ran[0]["db_path"], db)
+            self.assertEqual(m.load_state(sp)["last_track_record"], "2026-06-07")
+            self.assertIn("track_record", summary["ran"])
 
     def test_runner_exception_does_not_propagate(self):
         def boom(cmd):
@@ -158,7 +175,7 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
                 now=datetime(2026, 6, 4, 14, 30), runner=boom,
-                checkpoint_fn=lambda **k: None)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
             self.assertIn("cohort", summary)
 
 
