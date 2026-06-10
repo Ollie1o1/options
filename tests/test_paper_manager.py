@@ -86,7 +86,12 @@ def test_schema_migration_runs(tmp_path):
 
 
 def test_log_spread(tmp_path):
-    """log_spread creates 1 row with 'Spread' in strategy_name."""
+    """log_spread stores the spread name from `type` as strategy_name (1 row).
+
+    Production passes the spread name in `type` ("Bull Put" / "Bear Call" —
+    see the log_spread docstring); the DB `type` column gets the inferred
+    option type ("put" / "call").
+    """
     db = str(tmp_path / "trades.db")
     cfg = str(tmp_path / "config.json")
     _write_config(cfg)
@@ -96,16 +101,17 @@ def test_log_spread(tmp_path):
         "expiration": "2026-06-20",
         "short_strike": 500.0,
         "long_strike": 495.0,
-        "type": "put",
+        "type": "Bull Put",
         "net_credit": 1.50,
         "max_profit": 150.0,
         "max_loss": 350.0,
         "quality_score": 0.65,
     })
     with sqlite3.connect(db) as conn:
-        rows = conn.execute("SELECT strategy_name FROM trades").fetchall()
+        rows = conn.execute("SELECT strategy_name, type FROM trades").fetchall()
     assert len(rows) == 1
-    assert "SPREAD" in rows[0][0].upper() or "Spread" in rows[0][0]
+    assert rows[0][0] == "Bull Put"
+    assert rows[0][1] == "put"
 
 
 def test_is_short_position_detection():
