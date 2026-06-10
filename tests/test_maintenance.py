@@ -180,6 +180,43 @@ class TestOrchestrator(unittest.TestCase):
             self.assertIn("cohort", summary)
 
 
+class TestChildGuard(unittest.TestCase):
+    """The auto-log subprocess boots the screener, whose startup calls
+    run_startup_maintenance again. Without a guard that recurses: each child
+    sees the window still 'due' (the parent records state only after the child
+    exits) and spawns another full scan — confirmed as a ~170-deep process
+    bomb on 2026-06-10. The child env marker breaks the cycle."""
+
+    def test_runner_env_marks_child(self):
+        env = m._child_env()
+        self.assertEqual(env.get(m.CHILD_ENV_MARKER), "1")
+
+    def test_child_process_skips_all_maintenance(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db")
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE trades (date TEXT, strategy_name TEXT, status TEXT, "
+                         "paper_only INTEGER, quality_score REAL, pnl_pct REAL)")
+            conn.commit(); conn.close()
+            old = os.environ.get(m.CHILD_ENV_MARKER)
+            os.environ[m.CHILD_ENV_MARKER] = "1"
+            try:
+                summary = m.run_startup_maintenance(
+                    db_path=db, phase1_start="2026-05-27",
+                    state_path=os.path.join(d, "state.json"),
+                    now=datetime(2026, 6, 4, 14, 30),  # in 'ics' window: would spawn
+                    runner=lambda cmd: (calls.append(cmd), 0)[1],
+                    checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None)
+            finally:
+                if old is None:
+                    os.environ.pop(m.CHILD_ENV_MARKER, None)
+                else:
+                    os.environ[m.CHILD_ENV_MARKER] = old
+            self.assertEqual(calls, [])           # no recursive spawn
+            self.assertEqual(summary["ran"], [])  # no jobs run in the child
+
+
 class TestHeadless(unittest.TestCase):
     """run_headless: the LaunchAgent entry point. Same orchestrator, but it
     reads phase1_start from config.json itself, prints a summary, and never

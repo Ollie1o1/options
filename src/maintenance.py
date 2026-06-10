@@ -26,6 +26,20 @@ from src import phase1_checkpoint
 VENV_PY = os.path.expanduser("~/.venvs/options/bin/python")
 DEFAULT_STATE_PATH = os.path.join("logs", ".maintenance_state.json")
 
+# The auto-log job spawns `run.py <mode>` — which boots the screener, which
+# calls run_startup_maintenance again. The parent records the window as done
+# only AFTER the child exits, so without a marker the child sees the window
+# still due and spawns another full scan: confirmed as a ~170-deep process
+# bomb on 2026-06-10. Children are marked via this env var and skip all
+# maintenance (the parent owns it).
+CHILD_ENV_MARKER = "OPTIONS_MAINTENANCE_CHILD"
+
+
+def _child_env() -> dict:
+    env = dict(os.environ)
+    env[CHILD_ENV_MARKER] = "1"
+    return env
+
 
 # ── Throttle decisions (pure) ───────────────────────────────────────────────
 
@@ -121,7 +135,7 @@ def _default_runner(cmd) -> int:
     with open(os.path.join("logs", "maintenance.log"), "a") as logf:
         logf.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] $ {' '.join(cmd)}\n")
         logf.flush()
-        return subprocess.call(cmd, stdout=logf, stderr=logf)
+        return subprocess.call(cmd, stdout=logf, stderr=logf, env=_child_env())
 
 
 def _run_checkpoint(db_path: str, phase1_start: str) -> None:
@@ -148,6 +162,11 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     already enforces exits synchronously via ``PaperManager.update_positions()``;
     duplicating it would mean a second ~60s market scan on every boot.
     """
+    # Recursion guard: inside an auto-log child, do nothing — the parent owns
+    # maintenance. Without this, in-window startups spawn scans forever.
+    if os.environ.get(CHILD_ENV_MARKER):
+        return {"cohort": "", "ran": []}
+
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
     runner = runner or _default_runner
