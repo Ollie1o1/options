@@ -429,7 +429,7 @@ def format_mechanics_lines(row: pd.Series) -> list:
     freshness = row.get("quote_freshness", None)
     if freshness in ("delayed", "stale", "unknown"):
         age = row.get("quote_age_min", None)
-        if freshness == "unknown" or age is None or (isinstance(age, float) and pd.isna(age)):
+        if freshness == "unknown" or age is None or pd.isna(age):
             fresh_txt = "⚠ quote age unknown"
         else:
             fresh_txt = f"⚠ quote {int(round(float(age)))}m old"
@@ -1171,7 +1171,10 @@ def format_iv_crosscheck_summary(df_picks: pd.DataFrame) -> Optional[str]:
     solved = df_picks["iv_solved"].notna()
     unsolvable = int((~solved).sum())
     verified = int((df_picks.get("iv_verified") == True).sum())  # noqa: E712
-    corrected = int((solved & (df_picks.get("iv_verified") != True)).sum())  # noqa: E712
+    # "corrected" == a real correction of a present-but-wrong Yahoo IV, matching
+    # the per-pick badge and options_screener's iv_corrected (== False). Rows
+    # solved with no Yahoo IV to compare (iv_verified is None) are neither.
+    corrected = int((solved & (df_picks.get("iv_verified") == False)).sum())  # noqa: E712
     parts = []
     if verified:
         parts.append(f"{verified} verified")
@@ -1248,7 +1251,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
     _iv_line = format_iv_crosscheck_summary(df_picks)
     if _iv_line:
-        _n_corr = int((df_picks["iv_solved"].notna() & (df_picks.get("iv_verified") != True)).sum())  # noqa: E712
+        _n_corr = int((df_picks["iv_solved"].notna() & (df_picks.get("iv_verified") == False)).sum())  # noqa: E712
         _iv_color = fmt.Colors.YELLOW if _n_corr else fmt.Colors.DIM
         print(f"  {fmt.colorize(_iv_line, _iv_color) if HAS_ENHANCED_CLI else _iv_line}")
 

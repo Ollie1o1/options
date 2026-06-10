@@ -106,5 +106,25 @@ class TestDataQualitySummaryLine(unittest.TestCase):
         self.assertIsNone(format_data_quality_summary(pd.DataFrame({"x": [1]})))
 
 
+class TestIVCrosscheckSummary(unittest.TestCase):
+    def test_counts_verified_corrected_unsolvable(self):
+        from src.cli_display import format_iv_crosscheck_summary
+
+        # iv_verified: True (verified), False (corrected), None (solved, no yahoo
+        # to compare — counts as neither), NaN solved (unsolvable).
+        df = pd.DataFrame({
+            "iv_solved": [0.30, 0.25, 0.40, np.nan],
+            "iv_verified": [True, False, None, None],
+        })
+        line = format_iv_crosscheck_summary(df)
+        # 1 verified, 1 corrected (only the False row), 1 unsolvable (NaN solved)
+        self.assertEqual(line, "IV cross-check: 1 verified, 1 corrected, 1 unsolvable")
+
+    def test_none_without_column(self):
+        from src.cli_display import format_iv_crosscheck_summary
+
+        self.assertIsNone(format_iv_crosscheck_summary(pd.DataFrame({"x": [1]})))
+
+
 if __name__ == "__main__":
     unittest.main()
