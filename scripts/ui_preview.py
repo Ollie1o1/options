@@ -33,9 +33,14 @@ SECOND_PICK = dict(FIXTURE_PICK, symbol="AAPL", strike=210.0, type="put",
                    ev_per_contract=-12.0, price_bucket="LOW",
                    iv_surface_residual=0.02, high_premium_turnover=False)
 
+THIRD_PICK = dict(FIXTURE_PICK, symbol="MSFT", strike=480.0, premium=11.30,
+                  quality_score=0.84, prob_profit=0.66, ev_per_contract=88.0,
+                  price_bucket="HIGH", iv_surface_residual=0.0,
+                  high_premium_turnover=False)
+
 
 def df():
-    return pd.DataFrame([FIXTURE_PICK, SECOND_PICK])
+    return pd.DataFrame([FIXTURE_PICK, SECOND_PICK, THIRD_PICK])
 
 
 def main():

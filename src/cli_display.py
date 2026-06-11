@@ -150,18 +150,14 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
         if bucket_df.empty:
             continue
         if HAS_ENHANCED_CLI:
-            try:
-                from . import formatting as fmt
-                print("\n" + fmt.draw_separator(width))
-                print(fmt.colorize(f"  {bucket}", fmt.Colors.BRIGHT_CYAN, bold=True))
-            except Exception:
-                print(f"\n{sep}")
-                print(f"  {bucket}")
+            print("\n" + ui.rule(width, title=bucket))
+            print(fmt.style(header, 'label', bold=True))
+            print(ui.rule(width))
         else:
             print(f"\n{sep}")
             print(f"  {bucket}")
-        print(header)
-        print(sep)
+            print(header)
+            print(sep)
         for _, row in bucket_df.iterrows():
             dte_val = int(row.get("_dte", 0))
             iv_pct_raw = row.get("iv_percentile_30", row.get("iv_percentile", 0))
@@ -180,7 +176,7 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
             print(line)
             rank += 1
             printed_any = True
-        print(sep)
+        print(ui.rule(width) if HAS_ENHANCED_CLI else sep)
 
     if not printed_any:
         print("No contracts matched any DTE bucket.")
@@ -654,25 +650,14 @@ def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_si
 
     # Build box
     width = get_display_width()
-    inner = width - 6
-    border_color = fmt.Colors.BRIGHT_CYAN
-
-    def pad_line(text: str) -> str:
-        clean = _strip_ansi(text)
-        padding = max(0, inner - len(clean))
-        return text + " " * padding
-
-    top_border = fmt.colorize(f"  \u250c\u2500 ORDER TICKET {'─' * (inner - 15)}\u2510", border_color)
-    bot_border = fmt.colorize(f"  \u2514{'─' * inner}\u2518", border_color)
-    v = fmt.colorize("\u2502", border_color)
 
     lines = [
-        f"  {v} {pad_line(fmt.colorize(f'BUY TO OPEN   {occ}', fmt.Colors.BRIGHT_WHITE, bold=True))} {v}",
-        f"  {v} {pad_line(fmt.colorize(desc, fmt.Colors.DIM))} {v}",
-        f"  {v} {pad_line(f'Limit: ${mid:.2f} (mid)  |  Bid: ${bid:.2f}  Ask: ${ask:.2f}')} {v}",
-        f"  {v} {pad_line(f'Spread: ${spread_abs:.2f} ({spread_pct:.1f}%) — {fill_note}')} {v}",
-        f"  {v} {pad_line(sizing_line)} {v}",
-        f"  {v} {pad_line(f'Target: ${target:.2f} (+{tp_pct:.0%})  |  Stop: ${stop:.2f} (-{sl_pct:.0%})')} {v}",
+        fmt.style(f'BUY TO OPEN   {occ}', 'emph'),
+        fmt.style(desc, 'muted'),
+        f'Limit: ${mid:.2f} (mid)  |  Bid: ${bid:.2f}  Ask: ${ask:.2f}',
+        f'Spread: ${spread_abs:.2f} ({spread_pct:.1f}%) \u2014 {fill_note}',
+        sizing_line,
+        f"Target: {fmt.style(f'${target:.2f} (+{tp_pct:.0%})', 'good')}  |  Stop: {fmt.style(f'${stop:.2f} (-{sl_pct:.0%})', 'bad')}",
     ]
     if _is_short_ticket:
         try:
@@ -682,17 +667,10 @@ def print_order_ticket(row: pd.Series, config: Optional[Dict] = None, account_si
         _opt_type = str(row.get('type', '')).lower()
         if _strike > 0 and _opt_type in ('call', 'put'):
             _dir = "above" if _opt_type == 'call' else "below"
-            lines.append(
-                f"  {v} {pad_line(fmt.colorize(f'Also closes on: strike breach (spot {_dir} ${_strike:.2f}) or 21 DTE', fmt.Colors.DIM))} {v}"
-            )
-        lines.append(
-            f"  {v} {pad_line(fmt.colorize('TP tightens near expiry: 35% @ 7–21 DTE, 25% @ <7 DTE', fmt.Colors.DIM))} {v}"
-        )
+            lines.append(fmt.style(f'Also closes on: strike breach (spot {_dir} ${_strike:.2f}) or 21 DTE', 'muted'))
+        lines.append(fmt.style('TP tightens near expiry: 35% @ 7\u201321 DTE, 25% @ <7 DTE', 'muted'))
 
-    print(top_border)
-    for line in lines:
-        print(line)
-    print(bot_border)
+    print(ui.card("ORDER TICKET", lines, width, boxed=True, accent=True))
 
 
 def _format_breakeven_line(row: pd.Series, arrow: str) -> str:
@@ -757,15 +735,14 @@ def _print_strategy_panel(df_picks: pd.DataFrame, width: int) -> None:
     bal_count = counts.get('BALANCED', 0)
     agg_count = counts.get('AGGRESSIVE', 0)
 
-    con_str = fmt.colorize(f"{con_count} Conservative", fmt.Colors.GREEN) if con_count else fmt.colorize("0 Conservative", fmt.Colors.DIM)
-    bal_str = fmt.colorize(f"{bal_count} Balanced", fmt.Colors.YELLOW) if bal_count else fmt.colorize("0 Balanced", fmt.Colors.DIM)
-    agg_str = fmt.colorize(f"{agg_count} Aggressive", fmt.Colors.RED) if agg_count else fmt.colorize("0 Aggressive", fmt.Colors.DIM)
+    con_str = fmt.style(f"{con_count} Conservative", 'good' if con_count else 'muted')
+    bal_str = fmt.style(f"{bal_count} Balanced", 'warn' if bal_count else 'muted')
+    agg_str = fmt.style(f"{agg_count} Aggressive", 'bad' if agg_count else 'muted')
 
-    print(fmt.draw_separator(width))
-    print(f"  Strategy Mix: {con_str}  {bal_str}  {agg_str}")
+    print(ui.kv_line("Mix", [con_str, bal_str, agg_str]))
 
     # Best pick per category
-    for cat, color in [('CONSERVATIVE', fmt.Colors.GREEN), ('AGGRESSIVE', fmt.Colors.RED)]:
+    for cat, cat_style in [('CONSERVATIVE', 'good'), ('AGGRESSIVE', 'bad')]:
         sub = df_cat[df_cat['strategy_category'] == cat]
         if sub.empty:
             continue
@@ -781,12 +758,13 @@ def _print_strategy_panel(df_picks: pd.DataFrame, width: int) -> None:
         thesis_short = thesis.split('|')[0].strip() if thesis else ""
         if len(thesis_short) > 40:
             thesis_short = thesis_short[:39].rstrip() + "…"
-        label = fmt.colorize(f"Best {cat.capitalize()}:", color)
+        label = "Best Cons" if cat == 'CONSERVATIVE' else "Best Aggr"
         pop_str = fmt.format_pop(float(pop))
         rr_str = fmt.format_rr(float(rr))
-        print(f"  {label} {sym} {opt_type} ${strike:.0f}  {stars}  PoP {pop_str}  RR {rr_str}  \"{thesis_short}\"")
+        print(ui.kv_line(label, [fmt.style(f"{sym} {opt_type} ${strike:.0f}", cat_style),
+                                 stars, f"PoP {pop_str}", f"RR {rr_str}",
+                                 fmt.style(f'"{thesis_short}"', 'muted')]))
 
-    print(fmt.draw_separator(width))
     print()
 
 
@@ -818,14 +796,14 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     # Use new formatting
     width = get_display_width()
 
-    print("\n" + fmt.draw_box("EXECUTIVE SUMMARY", width, double=True))
-
     # Honest evidence label for the predictive layer (read from artifacts).
+    _banner_ctx = []
     try:
         from .evidence import format_evidence_banner
-        print(fmt.colorize(f"  {format_evidence_banner()}", fmt.Colors.DIM))
+        _banner_ctx.append(fmt.style(format_evidence_banner(), 'muted'))
     except Exception:
         pass
+    print("\n" + ui.banner("EXECUTIVE SUMMARY", _banner_ctx, width))
 
     # Market Context
     vix = get_vix_level()
@@ -837,7 +815,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     else:
         context_parts.append(mode)
 
-    print(f"\n{fmt.format_header('MARKET CONTEXT', '')}")
+    print("\n" + ui.rule(width, title="MARKET CONTEXT"))
     trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (
         fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW
     )
@@ -871,7 +849,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
             n_simulations=config.get("var_n_simulations", 10_000),
         )
         if _var_data["n_positions"] > 0:
-            print(f"\n{fmt.format_header('PORTFOLIO RISK (OPEN POSITIONS)', '')}")
+            print("\n" + ui.rule(width, title="PORTFOLIO RISK (OPEN POSITIONS)"))
             print(f"   {_var_data['n_positions']} open position(s)  |  "
                   f"{int(config.get('var_confidence', 0.95) * 100)}% 1-day VaR: ${_var_data['var_95']:,.0f}  |  "
                   f"CVaR: ${_var_data['cvar_95']:,.0f}  |  "
@@ -889,7 +867,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
         pass
 
     # Top 3 Opportunities
-    print(f"\n{fmt.format_header('TOP 3 OPPORTUNITIES', '')}")
+    print("\n" + ui.rule(width, title="TOP 3 OPPORTUNITIES"))
 
     top3 = df_picks.nlargest(3, 'quality_score')
 
@@ -905,15 +883,15 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
 
         stars, _ = fmt.format_quality_score(quality)
 
-        # Box for each pick
-        print(fmt.draw_separator(width - 4, fmt.BoxChars.HORIZONTAL))
+        # Row per pick
         _ml = float(row.get("max_loss", 0) or 0)
-        print(f"{fmt.BoxChars.VERTICAL} {i}. {symbol} ${strike} {opt_type} @ ${premium:.2f} • "
-              f"{fmt.format_pop(pop)} PoP • {fmt.format_rr(rr)} RR • {fmt.format_ev(ev, max_loss=_ml)} EV • {stars}")
+        print(ui.kv_line(f"{i}.", [fmt.style(f"{symbol} ${strike} {opt_type} @ ${premium:.2f}", 'emph'),
+                                   f"{fmt.format_pop(pop)} PoP", f"{fmt.format_rr(rr)} RR",
+                                   f"{fmt.format_ev(ev, max_loss=_ml)} EV", stars]))
 
         # Thesis
         thesis = generate_trade_thesis(row) if HAS_ENHANCED_CLI else "Standard setup"
-        print(f"{fmt.BoxChars.VERTICAL}    {fmt.GLYPHS['anchor']} {thesis}")
+        print(_anchor_line("Thesis", thesis))
 
         # Entry/Exit
         if config.get('display', {}).get('show_entry_exit_levels', True):
@@ -933,14 +911,13 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
                 _lo = _exit_cfg.get("long_option", {})
                 _tp = float(_lo.get("take_profit", _exit_cfg.get("take_profit", 0.50)))
                 _sl = abs(float(_lo.get("stop_loss", _exit_cfg.get("stop_loss", -0.50))))
-            print(f"{fmt.BoxChars.VERTICAL}    {fmt.GLYPHS['anchor']} Entry: ≤${levels['entry_price']:.2f} | "
-                  f"Target: ${levels['profit_target']:.2f} (+{_tp:.0%}) | "
-                  f"Stop: ${levels['stop_loss']:.2f} (-{_sl:.0%})")
-
-    print(fmt.draw_separator(width - 4, fmt.BoxChars.HORIZONTAL))
+            _entry_s = fmt.style(f"≤${levels['entry_price']:.2f}", 'emph')
+            _tgt_s = fmt.style(f"${levels['profit_target']:.2f} (+{_tp:.0%})", 'good')
+            _stop_s = fmt.style(f"${levels['stop_loss']:.2f} (-{_sl:.0%})", 'bad')
+            print(_anchor_line("Plan", f"Entry {_entry_s}  →  Target {_tgt_s}  /  Stop {_stop_s}"))
 
     # Warnings
-    print(f"\n{fmt.format_header('⚠ WATCH OUT', '')}")
+    print("\n" + ui.rule(width, title="⚠ WATCH OUT"))
 
     high_spread = df_picks[df_picks['spread_pct'] > 0.20]
     if not high_spread.empty:
@@ -959,7 +936,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     if not low_liquid.empty:
         print(fmt.format_warning(f"{len(low_liquid)} low-liquidity options - execution risk"))
 
-    print("\n" + fmt.draw_separator(width, fmt.BoxChars.D_HORIZONTAL))
+    print("\n" + ui.rule(width))
     print()
 
 
@@ -998,31 +975,17 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
     _ml = float(top.get("max_loss", 0) or 0)
     ev_str = fmt.format_ev(ev, max_loss=_ml)
 
-    line1 = f"BEST SETUP  \u2014  {sym} {opt_type} ${strike:.0f}  exp {exp}   #1/{total}"
-    line2 = f"PoP {pop_str}  RR {rr_str}  EV {ev_str}  {stars}  Score {quality:.2f}"
-    line3 = f'"{thesis_short}"' if thesis_short else ""
+    line1 = (fmt.style(f"{sym} {opt_type} ${strike:.0f}", 'emph')
+             + f"  exp {exp}   " + fmt.style(f"#1/{total}", 'muted'))
+    # stars already carry the numeric score — no duplicate "Score X.XX"
+    line2 = f"PoP {pop_str}  RR {rr_str}  EV {ev_str}  {stars}"
+    line3 = fmt.style(f'"{thesis_short}"', 'muted') if thesis_short else ""
 
-    # Build box manually with double-border
-    inner_w = width - 4  # 2 chars each side: ╔ + space ... space + ╗
-    def pad(s):
-        plain = _strip_ansi(s)
-        pad_len = max(0, inner_w - len(plain))
-        return s + " " * pad_len
-
-    border_h = fmt.BoxChars.D_HORIZONTAL * (width - 2)
-    top_border = fmt.colorize(fmt.BoxChars.D_TOP_LEFT + border_h + fmt.BoxChars.D_TOP_RIGHT, fmt.Colors.BRIGHT_GREEN)
-    bot_border = fmt.colorize(fmt.BoxChars.D_BOTTOM_LEFT + border_h + fmt.BoxChars.D_BOTTOM_RIGHT, fmt.Colors.BRIGHT_GREEN)
-    v = fmt.colorize(fmt.BoxChars.D_VERTICAL, fmt.Colors.BRIGHT_GREEN)
-
-    lines_to_print = [line1, line2]
+    body = [line1, line2]
     if line3:
-        lines_to_print.append(line3)
+        body.append(line3)
 
-    print(top_border)
-    for ln in lines_to_print:
-        colored_ln = fmt.colorize(ln, fmt.Colors.BRIGHT_GREEN, bold=(ln == line1))
-        print(f"{v}  {pad(colored_ln)}{v}")
-    print(bot_border)
+    print(ui.card("BEST SETUP", body, width, boxed=True, accent=True))
     print()
 
 
@@ -1056,10 +1019,8 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
 
     _sort_label = {"quality_score": "Score", "iv_percentile_30": "IV%", "spread_pct": "Spread", "T_years": "DTE", "ev_per_contract": "EV"}.get(sort_col, "Score")
     print()
-    hdr = f"  QUICK COMPARISON  —  Top Picks (sorted: {_sort_label})"
-    print(fmt.colorize(hdr, fmt.Colors.BRIGHT_CYAN, bold=True))
+    print(ui.rule(width, title=f"QUICK COMPARISON — sorted: {_sort_label}"))
     sep_line = "  " + "\u2500" * (width - 4)
-    print(fmt.colorize(sep_line, fmt.Colors.DIM))
 
     # Position sizing import
     _has_sizing = False
@@ -1094,8 +1055,8 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         col_hdr += f" {'SVI':>6}"
     if _has_sizing:
         col_hdr += f" {'Qty':>4}"
-    print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
-    print(fmt.colorize(sep_line, fmt.Colors.DIM))
+    print(fmt.style(col_hdr, 'label', bold=True))
+    print(fmt.style(sep_line, 'muted'))
 
     for rank_i, (_, r) in enumerate(rows.iterrows(), 1):
         strike = r.get("strike", 0)
@@ -1164,9 +1125,9 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
 
         print(line)
 
-    print(fmt.colorize(sep_line, fmt.Colors.DIM))
+    print(fmt.style(sep_line, 'muted'))
     sort_hint = "  Sort: [C]omposite  [I]V Rank  [S]pread  [D]TE  [E]V"
-    print(fmt.colorize(sort_hint, fmt.Colors.DIM))
+    print(fmt.style(sort_hint, 'muted'))
     print()
 
 
@@ -1243,46 +1204,43 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         symbol_name = df_picks.iloc[0]['symbol'] if ("symbol" in df_picks.columns and not df_picks.empty) else "UNKNOWN"
         title = f"OPTIONS SCREENER  \u2014  {symbol_name}"
 
-    print()
-    if HAS_ENHANCED_CLI:
-        print(fmt.draw_box(title, WIDTH, double=True))
-    else:
-        print("=" * WIDTH)
-        print(f"  {title}")
-        print("=" * WIDTH)
-
     # Context lines
-    trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW)
-    vol_color = fmt.Colors.GREEN if volatility_regime == "Low" else (fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW)
+    ctx_lines = []
+    trend_style = 'good' if market_trend == "Bullish" else ('bad' if market_trend == "Bearish" else 'warn')
+    vol_style = 'good' if volatility_regime == "Low" else ('bad' if volatility_regime == "High" else 'warn')
 
     if mode == "Single-stock":
         sp_str = f"${underlying_price:.2f}"
-        print(f"  Stock Price: {fmt.colorize(sp_str, fmt.Colors.BRIGHT_WHITE, bold=True) if HAS_ENHANCED_CLI else sp_str}")
+        ctx_lines.append(f"Stock Price: {fmt.style(sp_str, 'emph') if HAS_ENHANCED_CLI else sp_str}")
     elif mode == "Budget scan":
-        print(f"  Budget: ${budget:.2f}/contract  |  LOW <${budget*0.33:.0f}  |  MED ${budget*0.33:.0f}\u2013${budget*0.66:.0f}  |  HIGH >${budget*0.66:.0f}")
+        ctx_lines.append(f"Budget: ${budget:.2f}/contract  |  LOW <${budget*0.33:.0f}  |  MED ${budget*0.33:.0f}\u2013${budget*0.66:.0f}  |  HIGH >${budget*0.66:.0f}")
     else:
-        print("  Top opportunities across all price ranges  |  LOW / MED / HIGH by premium")
+        ctx_lines.append("Top opportunities across all price ranges  |  LOW / MED / HIGH by premium")
 
-    trend_str = fmt.colorize(market_trend, trend_color, bold=True) if HAS_ENHANCED_CLI else market_trend
-    vol_str = fmt.colorize(volatility_regime, vol_color) if HAS_ENHANCED_CLI else volatility_regime
-    print(f"  Trend: {trend_str}  |  Volatility: {vol_str}  |  RFR: {rfr*100:.2f}%")
-    print(f"  Nearest Expiries: {num_expiries}  |  DTE: {min_dte}\u2013{max_dte}d  |  Chain IV: {format_pct(chain_iv_median)}")
+    trend_str = fmt.style(market_trend, trend_style, bold=True) if HAS_ENHANCED_CLI else market_trend
+    vol_str = fmt.style(volatility_regime, vol_style) if HAS_ENHANCED_CLI else volatility_regime
+    ctx_lines.append(f"Trend: {trend_str}  |  Volatility: {vol_str}  |  RFR: {rfr*100:.2f}%")
+    ctx_lines.append(f"Nearest Expiries: {num_expiries}  |  DTE: {min_dte}\u2013{max_dte}d  |  Chain IV: {format_pct(chain_iv_median)}")
 
     _dq_line = format_data_quality_summary(df_picks)
     if _dq_line:
         _n_stale = int((df_picks["quote_freshness"] == "stale").sum())
-        _dq_color = fmt.Colors.YELLOW if _n_stale else fmt.Colors.DIM
-        print(f"  {fmt.colorize(_dq_line, _dq_color) if HAS_ENHANCED_CLI else _dq_line}")
+        ctx_lines.append(fmt.style(_dq_line, 'warn' if _n_stale else 'muted') if HAS_ENHANCED_CLI else _dq_line)
 
     _iv_line = format_iv_crosscheck_summary(df_picks)
     if _iv_line:
         _n_corr = int((df_picks["iv_solved"].notna() & (df_picks.get("iv_verified") == False)).sum())  # noqa: E712
-        _iv_color = fmt.Colors.YELLOW if _n_corr else fmt.Colors.DIM
-        print(f"  {fmt.colorize(_iv_line, _iv_color) if HAS_ENHANCED_CLI else _iv_line}")
+        ctx_lines.append(fmt.style(_iv_line, 'warn' if _n_corr else 'muted') if HAS_ENHANCED_CLI else _iv_line)
 
+    print()
     if HAS_ENHANCED_CLI:
-        print(fmt.draw_separator(WIDTH))
+        print(ui.banner(title, ctx_lines, WIDTH))
     else:
+        print("=" * WIDTH)
+        print(f"  {title}")
+        print("=" * WIDTH)
+        for _cl in ctx_lines:
+            print(f"  {_cl}")
         print("=" * WIDTH)
 
     # ── Strategy Classification Panel ────────────────────────────────────────
@@ -1581,10 +1539,10 @@ def print_news_panel(news_map: dict, picks_df: pd.DataFrame, width: int = 100) -
     use_color = HAS_ENHANCED_CLI
     print()
     if HAS_ENHANCED_CLI:
-        print(fmt.draw_separator(width))
+        print(ui.rule(width, title="NEWS & EVENTS DIGEST"))
     else:
         print("=" * width)
-    print("  NEWS & EVENTS DIGEST")
+        print("  NEWS & EVENTS DIGEST")
 
     for sym in shown[:6]:  # cap at 6 tickers for output length
         nd = news_map[sym]
