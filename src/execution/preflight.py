@@ -153,10 +153,17 @@ def run_preflight(db_path: str = "paper_trades.db",
         cfg = json.load(f)
     phase1_start = (cfg.get("auto_log") or {}).get("phase1_start_date")
 
-    arm = pipeline.arm_status(db_path, cfg, phase1_start)
+    # An unreadable gate (missing/empty DB: fresh checkout, wrong cwd) is a
+    # blocked gate, not a crash — preflight must always deliver a verdict.
+    try:
+        arm = pipeline.arm_status(db_path, cfg, phase1_start)
+        gate_c, arm_c = gate_check(arm["gate"]), arming_check(arm)
+    except Exception as e:
+        gate_c = CheckResult("gate", False, f"gate unavailable ({e}) — do not trade")
+        arm_c = CheckResult("arming", False, "DISARMED: gate unavailable")
     checks = [
-        gate_check(arm["gate"]),
-        arming_check(arm),
+        gate_c,
+        arm_c,
         risk_caps_check(),
         checkpoint_freshness_check(_last_checkpoint_date()),
         automation_health_check(health.automation_health_warnings(db_path=db_path)),

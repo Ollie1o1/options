@@ -110,17 +110,33 @@ class AggregateTest(unittest.TestCase):
 
 
 class RunPreflightIntegrationTest(unittest.TestCase):
-    """run_preflight against the real repo state must come back NOT CLEARED
-    today (gate GATHERING, live flag off) — the honest answer."""
+    """run_preflight must come back NOT CLEARED — and must never crash, even
+    when the paper-trades DB doesn't exist (fresh checkout / CI / wrong cwd):
+    an unreadable gate is a blocked gate, not a traceback."""
 
-    def test_real_state_not_cleared_today(self):
-        r, checks = preflight.run_preflight(db_path="paper_trades.db",
-                                            config_path="config.json")
+    def _assert_not_cleared(self, r, checks):
         self.assertFalse(r["cleared"])
         names = [c.name for c in checks]
         for expected in ("gate", "arming", "risk caps", "checkpoint freshness",
                          "automation health", "slippage db"):
             self.assertIn(expected, names)
+
+    def test_real_state_not_cleared_today(self):
+        # Works both locally (real DB: gate GATHERING) and in CI (no DB:
+        # gate unavailable) — NOT CLEARED either way.
+        r, checks = preflight.run_preflight(db_path="paper_trades.db",
+                                            config_path="config.json")
+        self._assert_not_cleared(r, checks)
+
+    def test_missing_db_blocks_gate_without_raising(self):
+        import os, tempfile
+        missing = os.path.join(tempfile.mkdtemp(), "no_such.db")
+        r, checks = preflight.run_preflight(db_path=missing,
+                                            config_path="config.json")
+        self._assert_not_cleared(r, checks)
+        gate = next(c for c in checks if c.name == "gate")
+        self.assertFalse(gate.ok)
+        self.assertIn("unavailable", gate.detail)
 
 
 if __name__ == "__main__":
