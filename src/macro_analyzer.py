@@ -16,16 +16,19 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 _DEFAULT_EVENTS: List[Dict] = [
-    # FOMC 2026 (8 meetings)
-    {"name": "FOMC", "date": "2026-01-29"},
-    {"name": "FOMC", "date": "2026-03-19"},
-    {"name": "FOMC", "date": "2026-05-07"},
+    # FOMC 2026 decision days — VERIFIED against federalreserve.gov
+    # fomccalendars.htm on 2026-06-11 (meetings: 1/27-28, 3/17-18, 4/28-29,
+    # 6/16-17, 7/28-29, 9/15-16, 10/27-28, 12/8-9).
+    {"name": "FOMC", "date": "2026-01-28"},
+    {"name": "FOMC", "date": "2026-03-18"},
+    {"name": "FOMC", "date": "2026-04-29"},
     {"name": "FOMC", "date": "2026-06-17"},
     {"name": "FOMC", "date": "2026-07-29"},
     {"name": "FOMC", "date": "2026-09-16"},
-    {"name": "FOMC", "date": "2026-11-04"},
-    {"name": "FOMC", "date": "2026-12-16"},
-    # CPI releases (monthly)
+    {"name": "FOMC", "date": "2026-10-28"},
+    {"name": "FOMC", "date": "2026-12-09"},
+    # CPI releases (8:30 ET) — forward dates VERIFIED against the BLS
+    # release schedule on 2026-06-11.
     {"name": "CPI", "date": "2026-01-15"},
     {"name": "CPI", "date": "2026-02-12"},
     {"name": "CPI", "date": "2026-03-12"},
@@ -33,10 +36,10 @@ _DEFAULT_EVENTS: List[Dict] = [
     {"name": "CPI", "date": "2026-05-13"},
     {"name": "CPI", "date": "2026-06-11"},
     {"name": "CPI", "date": "2026-07-14"},
-    {"name": "CPI", "date": "2026-08-13"},
+    {"name": "CPI", "date": "2026-08-12"},
     {"name": "CPI", "date": "2026-09-11"},
-    {"name": "CPI", "date": "2026-10-13"},
-    {"name": "CPI", "date": "2026-11-12"},
+    {"name": "CPI", "date": "2026-10-14"},
+    {"name": "CPI", "date": "2026-11-10"},
     {"name": "CPI", "date": "2026-12-10"},
     # NFP / Jobs Reports (first Friday of each month)
     {"name": "NFP", "date": "2026-01-09"},
