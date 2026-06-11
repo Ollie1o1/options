@@ -128,5 +128,11 @@ calls to keep the cohort filling.
 - [ ] Check the Sunday `reports/checkpoint_*.md` (or this file) weekly.
 - [ ] When the gate fires: `python -m src.execution.preflight` is the
   machine-checked runbook — it must print CLEARED before any real order.
+- [ ] **Optional, recommended:** grab a free Alpha Vantage key
+  (alphavantage.co/support/#api-key, ~20 seconds), put
+  `ALPHAVANTAGE_API_KEY=...` in `.env`, then run
+  `python -m src.av_options --probe`. If it reports real data, historical
+  option chains backfill into `data/chain_archive.db` at ~25 symbol-days/day.
+  (The daily CBOE chain archive runs automatically either way.)
 
 Nothing else to do but let the data accumulate. The discipline *is* the strategy.

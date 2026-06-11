@@ -75,6 +75,12 @@ The composite `quality_score`, the AI `final_score`, and the ranked order are **
 
 **Public track record.** The running paper-trading record (win rate, returns, per-strategy breakdown, full closed-trade table, and gate status) is published to [reports/TRACK_RECORD.md](reports/TRACK_RECORD.md), refreshed weekly. It states the paper/delayed-data/friction caveats plainly.
 
+**Data sources (free, layered).**
+- **Yahoo Finance** (yfinance) — primary delayed chains, price history, fundamentals.
+- **CBOE delayed quotes** — free second source with exchange-computed IV and Greeks. `python -m src.cross_check TICKER` joins the two chains per contract and reports IV/mid agreement (live check 2026-06-10: 99% mid / 90% IV agreement on AAPL, disagreements confined to near-expiry far-OTM strikes where IV is ill-defined).
+- **Daily chain archive** — startup maintenance snapshots the CBOE chains for the symbols in `config.json → data_archive` into `data/chain_archive.db` once per trading day. This compounds into real per-contract bid/ask/IV/Greeks history for backtesting, replacing model-priced premiums over time.
+- **Alpha Vantage** (optional, free key) — `python -m src.av_options --probe` checks your key; `--backfill SYMBOL --start DATE` drains 15+ years of EOD option history into the same archive at ~25 symbol-days/day.
+
 ---
 
 ## Installation
