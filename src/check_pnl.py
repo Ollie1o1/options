@@ -32,12 +32,15 @@ except ImportError:
 try:
     try:
         from . import formatting as fmt
+        from . import ui
     except (ImportError, ValueError):
         import formatting as fmt
+        import ui
     HAS_FMT = fmt.supports_color()
 except Exception:
     HAS_FMT = False
     fmt = None
+    ui = None
 
 try:
     try:
@@ -326,8 +329,7 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
     sep = "  " + "\u2500" * (width - 2)
     header = f"  P&L ATTRIBUTION  ({counted} closed trades with entry Greeks)"
     if HAS_FMT and fmt:
-        print(fmt.colorize(header, fmt.Colors.BRIGHT_CYAN, bold=True))
-        print(fmt.colorize(sep, fmt.Colors.DIM))
+        print(ui.rule(width, title=f"P&L ATTRIBUTION \u2014 {counted} closed trades with entry Greeks"))
     else:
         print(header)
         print(sep)
@@ -339,10 +341,10 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
     def _attr_line(name, val):
         pct = val / total_abs * 100 if total_abs > 0 else 0
         sign = "+" if val >= 0 else "-"
-        color = ""
         if HAS_FMT and fmt:
-            color = fmt.Colors.GREEN if val >= 0 else fmt.Colors.RED
-            return fmt.colorize(f"    {name:<8} {sign}${abs(val):>8.0f}  ({pct:>+5.0f}%)", color)
+            val_str = fmt.style(f"{sign}${abs(val):>8.0f}  ({pct:>+5.0f}%)",
+                                'good' if val >= 0 else 'bad')
+            return ui.kv_line(name.rstrip(':'), val_str)
         return f"    {name:<8} {sign}${abs(val):>8.0f}  ({pct:>+5.0f}%)"
 
     print(_attr_line("Delta:", total_delta_pnl))
@@ -355,7 +357,7 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
         print(_attr_line("Other:", residual))
 
     if HAS_FMT and fmt:
-        print(fmt.colorize(sep, fmt.Colors.DIM))
+        print(ui.rule(width))
     else:
         print(sep)
 
@@ -443,48 +445,37 @@ def _print_portfolio_greeks(open_trades: list, width: int):
 
     # ── Display ────────────────────────────────────────────────────────────────
     print()
-    sep = "  " + "\u2500" * (width - 2)
-    header = "  PORTFOLIO GREEKS  (uses entry IV when stored  |  long=+  short=−)"
     if HAS_FMT and fmt:
-        print(fmt.colorize(header, fmt.Colors.BRIGHT_CYAN, bold=True))
-        print(fmt.colorize(sep, fmt.Colors.DIM))
+        print(ui.rule(width, title="PORTFOLIO GREEKS \u2014 entry IV when stored | long=+ short=\u2212"))
     else:
-        print(header)
+        print("  PORTFOLIO GREEKS  (uses entry IV when stored  |  long=+  short=\u2212)")
         print("  " + "-" * (width - 2))
 
     # Delta
-    delta_color = (fmt.Colors.GREEN if net_delta > 0.10 else
-                   fmt.Colors.RED if net_delta < -0.10 else fmt.Colors.YELLOW) if HAS_FMT and fmt else ""
-    delta_label = f"  Net Δ: {net_delta:+.2f}"
+    delta_style = 'good' if net_delta > 0.10 else ('bad' if net_delta < -0.10 else 'warn')
     if HAS_FMT and fmt:
-        print(fmt.colorize(delta_label, delta_color))
+        print(ui.kv_line("Net \u0394", fmt.style(f"{net_delta:+.2f}", delta_style)))
     else:
-        print(delta_label)
+        print(f"  Net \u0394: {net_delta:+.2f}")
 
     # Gamma ($ per 1% stock move)
     gd = net_gamma_dollar
-    gcolor = (fmt.Colors.GREEN if gd > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
-    gamma_label = f"  Net Γ ($/1% move): {gd:+.2f}"
     if HAS_FMT and fmt:
-        print(fmt.colorize(gamma_label, gcolor))
+        print(ui.kv_line("Net \u0393", fmt.style(f"{gd:+.2f}", 'good' if gd > 0 else 'bad') + "  ($/1% move)"))
     else:
-        print(gamma_label)
+        print(f"  Net \u0393 ($/1% move): {gd:+.2f}")
 
     # Vega ($ per 1% IV rise)
-    vc = (fmt.Colors.GREEN if net_vega > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
-    vega_label = f"  Net Vega ($/1% IV): {net_vega:+.2f}"
     if HAS_FMT and fmt:
-        print(fmt.colorize(vega_label, vc))
+        print(ui.kv_line("Net Vega", fmt.style(f"{net_vega:+.2f}", 'good' if net_vega > 0 else 'bad') + "  ($/1% IV)"))
     else:
-        print(vega_label)
+        print(f"  Net Vega ($/1% IV): {net_vega:+.2f}")
 
     # Theta ($/day)
-    tc = (fmt.Colors.GREEN if net_theta > 0 else fmt.Colors.RED) if HAS_FMT and fmt else ""
-    theta_label = f"  Net Θ ($/day): {net_theta:+.2f}"
     if HAS_FMT and fmt:
-        print(fmt.colorize(theta_label, tc))
+        print(ui.kv_line("Net \u0398", fmt.style(f"{net_theta:+.2f}", 'good' if net_theta > 0 else 'bad') + "  ($/day)"))
     else:
-        print(theta_label)
+        print(f"  Net \u0398 ($/day): {net_theta:+.2f}")
 
     # Directional bias warnings
     warnings_list = []
@@ -499,13 +490,13 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     for w in warnings_list:
         warn_line = f"  \u26a0 {w}"
         if HAS_FMT and fmt:
-            print(fmt.colorize(warn_line, fmt.Colors.YELLOW, bold=True))
+            print(fmt.style(warn_line, 'warn', bold=True))
         else:
             print(warn_line)
 
     note = f"  [{counted}/{len(open_trades)} positions, entry IV when available]"
     if HAS_FMT and fmt:
-        print(fmt.colorize(note, fmt.Colors.DIM))
+        print(fmt.style(note, 'muted'))
     else:
         print(note)
 
@@ -622,7 +613,7 @@ def view_portfolio(cohort: Optional[str] = None):
         header_text += f"  [{cohort_label}]"
 
     if HAS_FMT and fmt:
-        print(fmt.draw_box(header_text, width, double=True))
+        print(ui.banner(header_text, [], width))
     else:
         print("=" * width)
         print(f"  {header_text}")
@@ -639,7 +630,7 @@ def view_portfolio(cohort: Optional[str] = None):
     # ── Open Positions ─────────────────────────────────────────────────────────
     print()
     if HAS_FMT and fmt:
-        print(fmt.format_header("  OPEN POSITIONS", ""))
+        print(ui.rule(width, title="OPEN POSITIONS"))
     else:
         print("  OPEN POSITIONS")
     print()
@@ -657,8 +648,8 @@ def view_portfolio(cohort: Optional[str] = None):
         sep = "  " + "\u2500" * (width - 2)
 
         if HAS_FMT and fmt:
-            print(fmt.colorize(hdr, fmt.Colors.BOLD))
-            print(fmt.colorize(sep, fmt.Colors.DIM))
+            print(fmt.style(hdr, 'label', bold=True))
+            print(fmt.style(sep, 'muted'))
         else:
             print(hdr)
             print("  " + "-" * (width - 2))
@@ -905,7 +896,7 @@ def view_portfolio(cohort: Optional[str] = None):
 
         # Open totals
         if HAS_FMT and fmt:
-            print(fmt.colorize(sep, fmt.Colors.DIM))
+            print(fmt.style(sep, 'muted'))
         else:
             print("  " + "-" * (width - 2))
 
@@ -1000,7 +991,7 @@ def view_portfolio(cohort: Optional[str] = None):
     # ── Closed Positions ───────────────────────────────────────────────────────
     print()
     if HAS_FMT and fmt:
-        print(fmt.format_header("  CLOSED POSITIONS", ""))
+        print(ui.rule(width, title="CLOSED POSITIONS"))
     else:
         print("  CLOSED POSITIONS")
     print()
@@ -1016,8 +1007,8 @@ def view_portfolio(cohort: Optional[str] = None):
         sep = "  " + "\u2500" * (width - 2)
 
         if HAS_FMT and fmt:
-            print(fmt.colorize(hdr, fmt.Colors.BOLD))
-            print(fmt.colorize(sep, fmt.Colors.DIM))
+            print(fmt.style(hdr, 'label', bold=True))
+            print(fmt.style(sep, 'muted'))
         else:
             print(hdr)
             print("  " + "-" * (width - 2))
@@ -1089,7 +1080,7 @@ def view_portfolio(cohort: Optional[str] = None):
             )
 
         if HAS_FMT and fmt:
-            print(fmt.colorize(sep, fmt.Colors.DIM))
+            print(fmt.style(sep, 'muted'))
         else:
             print("  " + "-" * (width - 2))
 
@@ -1185,7 +1176,7 @@ def view_portfolio(cohort: Optional[str] = None):
                 strat_db_hdr = "  STRATEGY BREAKDOWN"
                 if HAS_FMT and fmt:
                     print(fmt.colorize(strat_db_hdr, fmt.Colors.BRIGHT_CYAN, bold=True))
-                    print(fmt.colorize(sep, fmt.Colors.DIM))
+                    print(fmt.style(sep, 'muted'))
                 else:
                     print(strat_db_hdr)
                     print(sep)
