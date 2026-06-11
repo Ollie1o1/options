@@ -148,13 +148,36 @@ def _run_track_record(db_path: str) -> None:
     publish(db_path=db_path, reports_dir="reports")
 
 
+def _run_chain_archive() -> int:
+    """Snapshot today's option chains (free CBOE) per config → data_archive."""
+    import json as _json
+
+    from src import chain_archive
+    try:
+        with open("config.json") as f:
+            cfg = (_json.load(f).get("data_archive") or {})
+    except (OSError, ValueError):
+        cfg = {}
+    if not cfg.get("enabled", False):
+        return 0
+    symbols = cfg.get("symbols") or []
+    if not symbols:
+        return 0
+    return chain_archive.archive_symbols(
+        symbols,
+        max_dte=int(cfg.get("max_dte", 120)),
+        moneyness_band=float(cfg.get("moneyness_band", 0.15)),
+        min_open_interest=float(cfg.get("min_open_interest", 1)))
+
+
 def run_startup_maintenance(db_path: str = "paper_trades.db",
                             phase1_start: Optional[str] = None,
                             state_path: str = DEFAULT_STATE_PATH,
                             now: Optional[datetime] = None,
                             runner: Optional[Callable] = None,
                             checkpoint_fn: Optional[Callable] = None,
-                            track_record_fn: Optional[Callable] = None) -> dict:
+                            track_record_fn: Optional[Callable] = None,
+                            chain_archive_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -204,6 +227,20 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
+    # 4. Daily chain archive (weekday afternoons, once/day) — free CBOE
+    #    snapshots that compound into a real backtest dataset.
+    try:
+        from src import chain_archive as _ca
+        if _ca.due_chain_archive(state, today, now.isoweekday(),
+                                 now.hour * 100 + now.minute):
+            fn = chain_archive_fn or _run_chain_archive
+            n = fn()
+            state["last_chain_archive"] = today
+            if n:
+                ran.append(f"chain-archive:{n}rows")
+    except Exception:
+        pass
+
     try:
         save_state(state_path, state)
     except Exception:
@@ -225,7 +262,8 @@ def run_headless(db_path: str = "paper_trades.db",
                  now: Optional[datetime] = None,
                  runner: Optional[Callable] = None,
                  checkpoint_fn: Optional[Callable] = None,
-                 track_record_fn: Optional[Callable] = None) -> dict:
+                 track_record_fn: Optional[Callable] = None,
+                 chain_archive_fn: Optional[Callable] = None) -> dict:
     """Run startup maintenance without the interactive screener.
 
     The LaunchAgent entry: reads phase1_start from config.json itself,
@@ -243,7 +281,7 @@ def run_headless(db_path: str = "paper_trades.db",
         return run_startup_maintenance(
             db_path=db_path, phase1_start=phase1_start, state_path=state_path,
             now=now, runner=runner, checkpoint_fn=checkpoint_fn,
-            track_record_fn=track_record_fn)
+            track_record_fn=track_record_fn, chain_archive_fn=chain_archive_fn)
     except Exception:
         return {"cohort": "", "ran": []}
 

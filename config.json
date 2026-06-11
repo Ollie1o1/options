@@ -124,8 +124,16 @@
   "auto_log_skip_long_puts": true,
   "auto_log_skip_bear_calls": true,
   "auto_log": {
-    "allowed_strategies": ["Long Call"],
-    "paper_only_strategies": ["Bear Call", "Long Put", "Iron Condor", "Bull Put", "Short Put"],
+    "allowed_strategies": [
+      "Long Call"
+    ],
+    "paper_only_strategies": [
+      "Bear Call",
+      "Long Put",
+      "Iron Condor",
+      "Bull Put",
+      "Short Put"
+    ],
     "weight_profile": null,
     "phase1_start_date": "2026-05-27",
     "cohort_min_dte": 30,
@@ -394,5 +402,28 @@
   "equity": {
     "auto_log_enabled": true,
     "stress_gate_pct_book": 100.0
+  },
+  "data_archive": {
+    "enabled": true,
+    "symbols": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "AAPL",
+      "NVDA",
+      "MSFT",
+      "AMZN",
+      "GOOGL",
+      "META",
+      "TSLA",
+      "AMD",
+      "ORCL",
+      "INTC",
+      "PLTR",
+      "COIN"
+    ],
+    "max_dte": 120,
+    "moneyness_band": 0.15,
+    "min_open_interest": 1
   }
 }
