@@ -628,6 +628,29 @@ def print_regime_dashboard(width: int = 90) -> None:
     except Exception:
         pass
 
+    # World-news pulse (trust-weighted multi-source; failure-safe, ~8s budget).
+    try:
+        print_world_pulse()
+    except Exception:
+        pass
+
+
+def print_world_pulse() -> None:
+    """One-line world-news pulse under the regime box. Never raises."""
+    try:
+        from src.worldnews import panel, scoring, sources
+        items = sources.fetch_all()
+        if not items:
+            return
+        line = panel.pulse_line(scoring.aggregate(items), sources.fetch_crowd())
+        if HAS_FMT and fmt:
+            print(fmt.colorize(f"  {line}", fmt.Colors.BRIGHT_WHITE))
+        else:
+            print(f"  {line}")
+        print()
+    except Exception:
+        pass
+
 
 __all__ = [
     "fetch_market_regime",
