@@ -1561,11 +1561,11 @@ def print_spreads_report(df_spreads: pd.DataFrame):
 
     if HAS_ENHANCED_CLI:
         print()
-        print(fmt.draw_box("VERTICAL SPREADS REPORT", WIDTH, double=True))
+        print(ui.banner("VERTICAL SPREADS REPORT", [], WIDTH))
 
         hdr = f"  {'Symbol':<7} {'Type':<12} {'Long Strike':<12} {'Short Strike':<13} {'Expiration':<12} {'Cost':<10} {'Max Profit':<12} {'Risk':<10}"
-        print(fmt.colorize(hdr, fmt.Colors.BOLD))
-        print("  " + fmt.draw_separator(WIDTH - 2))
+        print(fmt.style(hdr, 'label', bold=True))
+        print("  " + ui.rule(WIDTH - 2))
 
         for _, row in df_spreads.iterrows():
             exp = pd.to_datetime(row["expiration"]).date()
@@ -1708,8 +1708,7 @@ def _print_spread_detail_card(row, idx: int, total: int, width: int):
     title = f"  [{idx}/{total}]  {sym}  {typ}  ${short_k:.0f}/${long_k:.0f}  exp {exp}"
     if HAS_ENHANCED_CLI:
         print()
-        print(fmt.colorize(title, fmt.Colors.BOLD))
-        print("  " + fmt.draw_separator(width - 2))
+        print(ui.rule(width, title=title.strip()))
     else:
         print(f"\n{title}\n  {'-'*(width-2)}")
 
@@ -1753,7 +1752,7 @@ def print_credit_spreads_report(df_spreads: pd.DataFrame):
     WIDTH = get_display_width()
     print()
     if HAS_ENHANCED_CLI:
-        print(fmt.draw_box("CREDIT SPREADS REPORT  \u2014  INCOME ENGINE", WIDTH, double=True))
+        print(ui.banner("CREDIT SPREADS REPORT \u2014 INCOME ENGINE", [], WIDTH))
     else:
         print("=" * WIDTH)
         print("  CREDIT SPREADS REPORT (INCOME ENGINE)")
@@ -1850,8 +1849,7 @@ def _print_ic_detail_card(row, idx: int, total: int, width: int):
     title = f"  [{idx}/{total}]  {sym}  IC  ${_fmt_strike(lp)}/${_fmt_strike(sp)} - ${_fmt_strike(sc)}/${_fmt_strike(lc)}  exp {exp}"
     if HAS_ENHANCED_CLI:
         print()
-        print(fmt.colorize(title, fmt.Colors.BOLD))
-        print("  " + fmt.draw_separator(width - 2))
+        print(ui.rule(width, title=title.strip()))
     else:
         print(f"\n{title}\n  {'-'*(width-2)}")
 
@@ -1894,7 +1892,7 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
     WIDTH = get_display_width()
     print()
     if HAS_ENHANCED_CLI:
-        print(fmt.draw_box("IRON CONDOR REPORT  \u2014  RANGE-BOUND STRATEGIES", WIDTH, double=True))
+        print(ui.banner("IRON CONDOR REPORT \u2014 RANGE-BOUND STRATEGIES", [], WIDTH))
     else:
         print("=" * WIDTH)
         print("  IRON CONDOR REPORT (RANGE-BOUND STRATEGIES)")
@@ -1970,7 +1968,7 @@ def print_lottery_ticket_report(df: "pd.DataFrame", underlying_price: float, mar
 
     print()
     if HAS_ENHANCED_CLI:
-        print(fmt.draw_box("LOTTERY TICKET REPORT  —  HIGH-LEVERAGE FAR-OTM OPTIONS", WIDTH, double=True))
+        print(ui.banner("LOTTERY TICKET REPORT — HIGH-LEVERAGE FAR-OTM OPTIONS", [], WIDTH))
         trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW)
         vix_color = fmt.Colors.GREEN if volatility_regime == "Low" else (fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW)
         print(fmt.colorize(f"  Market: {market_trend}  |  Vol Regime: {volatility_regime}", fmt.Colors.DIM))
