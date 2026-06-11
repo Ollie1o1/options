@@ -565,6 +565,66 @@ def rgb_fg(r: int, g: int, b: int) -> str:
     return f'\033[38;2;{r};{g};{b}m'
 
 
+# ── Quant-desk semantic theme ────────────────────────────────────────────────
+# Call sites use meaning-names, never raw colors. Truecolor palette on capable
+# terminals, 16-color ANSI fallback otherwise, plain text when color is off.
+
+_THEME_RGB = {
+    'heading': (130, 170, 210),   # steel blue
+    'accent':  (130, 170, 210),
+    'label':   (130, 137, 145),   # gray for row labels
+    'value':   None,              # terminal default fg
+    'good':    (94, 201, 141),
+    'warn':    (214, 164, 82),
+    'bad':     (224, 108, 117),
+    'muted':   (98, 104, 112),    # structure, provenance
+    'emph':    (240, 240, 240),   # headline values
+}
+
+_THEME_ANSI = {
+    'heading': Colors.BRIGHT_CYAN,
+    'accent':  Colors.CYAN,
+    'label':   Colors.DIM,
+    'value':   '',
+    'good':    Colors.GREEN,
+    'warn':    Colors.YELLOW,
+    'bad':     Colors.RED,
+    'muted':   Colors.BRIGHT_BLACK,
+    'emph':    Colors.BRIGHT_WHITE,
+}
+
+_THEME_BOLD = {'heading', 'emph'}
+
+GLYPHS = {
+    'anchor':  '▸',  # actionable lines (thesis/plan/exec)
+    'warn':    '⚠',
+    'cross':   '✗',
+    'check':   '✓',
+    'whale':   '◆',  # replaces 🐋
+    'squeeze': '▲',  # replaces 🔥
+    'dot':     '·',  # segment separator
+    'bullet':  '●',  # status dots
+}
+
+
+def style(text, name: str, bold: bool = None) -> str:
+    """Apply a semantic theme style. Unknown style or color-off → plain text."""
+    text = str(text)
+    if name not in _THEME_ANSI or not supports_color():
+        return text
+    b = (name in _THEME_BOLD) if bold is None else bold
+    rgb = _THEME_RGB.get(name)
+    if rgb and supports_truecolor():
+        prefix = rgb_fg(*rgb)
+    else:
+        prefix = _THEME_ANSI[name]
+    if b:
+        prefix = Colors.BOLD + prefix
+    if not prefix:
+        return text
+    return f"{prefix}{text}{Colors.RESET}"
+
+
 __all__ = [
     'Colors',
     'BoxChars',
@@ -592,4 +652,6 @@ __all__ = [
     'format_iv_rank_bar',
     'supports_truecolor',
     'rgb_fg',
+    'style',
+    'GLYPHS',
 ]
