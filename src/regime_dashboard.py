@@ -29,11 +29,13 @@ except ImportError:
 
 try:
     from . import formatting as fmt
+    from . import ui
     from .formatting import Colors, BoxChars, supports_color, colorize
     HAS_FMT = True
 except ImportError:
     HAS_FMT = False
     fmt = None
+    ui = None
 
 
 def _print_gate_banner() -> None:
@@ -48,11 +50,17 @@ def _print_gate_banner() -> None:
         return
     if not lines:
         return
-    border = "═" * 90
-    print(border)
-    for ln in lines:
-        print(ln)
-    print(border)
+    if HAS_FMT and ui:
+        print(ui.rule(90, title="GATE STATUS"))
+        for ln in lines:
+            print(ln)
+        print(ui.rule(90))
+    else:
+        border = "═" * 90
+        print(border)
+        for ln in lines:
+            print(ln)
+        print(border)
 
 
 def _c(text: str, color: str = "", bold: bool = False) -> str:
@@ -436,37 +444,25 @@ def print_market_direction(width: int = 100) -> None:
             return f"{head}  {reason}"
         return head
 
-    # ── Draw box (mirrors print_regime_dashboard styling) ──────────────────────
-    title = " MARKET DIRECTION "
-    side_len = (width - len(title) - 2) // 2
-    side_r = width - len(title) - 2 - side_len
-    v = BoxChars.VERTICAL if HAS_FMT else "│"
-    if HAS_FMT:
-        top_bar = (
-            BoxChars.TOP_LEFT + BoxChars.HORIZONTAL * side_len + title
-            + BoxChars.HORIZONTAL * side_r + BoxChars.TOP_RIGHT
-        )
-        bot_bar = BoxChars.BOTTOM_LEFT + BoxChars.HORIZONTAL * (width - 2) + BoxChars.BOTTOM_RIGHT
-    else:
-        top_bar = "┌" + "─" * side_len + title + "─" * side_r + "┐"
-        bot_bar = "└" + "─" * (width - 2) + "┘"
-
+    # ── Section: titled rule + rows, color only the verdict-bearing row ────────
     def _pad_line(content: str) -> str:
-        return f"{v}  {content.ljust(inner_width)}{v}"
+        return f"  {content}"
 
     print()
-    print(fmt.colorize(top_bar, fmt.Colors.CYAN, bold=True) if (HAS_FMT and fmt) else top_bar)
+    if HAS_FMT and ui:
+        print(ui.rule(width, title="MARKET DIRECTION"))
+    else:
+        print("-" * width)
+        print("  MARKET DIRECTION")
     printed_divider = False
     for sym, info in data.items():
         # Visual divider where the broad-market block ends and semis begin.
         if sym in _SEMI_SYMBOLS and not printed_divider:
-            label = " SEMICONDUCTORS "
-            dashes = "─" * max(0, inner_width - len(label))
-            div = label + dashes
-            if HAS_FMT and fmt:
-                print(fmt.colorize(_pad_line(div), fmt.Colors.DIM))
+            if HAS_FMT and ui:
+                print(ui.rule(width, title="SEMICONDUCTORS"))
             else:
-                print(_pad_line(div))
+                label = " SEMICONDUCTORS "
+                print(_pad_line(label + "─" * max(0, inner_width - len(label))))
             printed_divider = True
         line = _row(sym, info)
         if HAS_FMT and fmt:
@@ -499,12 +495,12 @@ def print_market_direction(width: int = 100) -> None:
     synth = f"Read: {trend}, {mom}"
     if len(synth) > inner_width:
         synth = synth[: inner_width - 1] + "…"
-    print(_pad_line(""))
     if HAS_FMT and fmt:
-        print(fmt.colorize(_pad_line(synth), fmt.Colors.CYAN, bold=True))
+        print(_pad_line(fmt.style(synth, 'heading')))
+        print(ui.rule(width))
     else:
         print(_pad_line(synth))
-    print(fmt.colorize(bot_bar, fmt.Colors.CYAN, bold=True) if (HAS_FMT and fmt) else bot_bar)
+        print("-" * width)
 
 
 def print_regime_dashboard(width: int = 90) -> None:
@@ -577,49 +573,27 @@ def print_regime_dashboard(width: int = 90) -> None:
     rat_trunc = rationale[:inner_width - 20] if len(rationale) > inner_width - 20 else rationale
     line3 = f"Posture: {posture} \u2014 {rat_trunc}"
 
-    # ── Draw box ───────────────────────────────────────────────────────────────
-    title = " MARKET REGIME "
-    # Top border with centered title
-    side_len = (width - len(title) - 2) // 2
-    side_r = width - len(title) - 2 - side_len
-    top_bar = (
-        BoxChars.TOP_LEFT
-        + BoxChars.HORIZONTAL * side_len
-        + title
-        + BoxChars.HORIZONTAL * side_r
-        + BoxChars.TOP_RIGHT
-    ) if HAS_FMT else (
-        "\u250c" + "\u2500" * side_len + title + "\u2500" * side_r + "\u2510"
-    )
-    bot_bar = (
-        BoxChars.BOTTOM_LEFT + BoxChars.HORIZONTAL * (width - 2) + BoxChars.BOTTOM_RIGHT
-    ) if HAS_FMT else (
-        "\u2514" + "\u2500" * (width - 2) + "\u2518"
-    )
-
-    def _pad_line(content: str) -> str:
-        """Pad a content string to fit inside box borders."""
-        v = BoxChars.VERTICAL if HAS_FMT else "\u2502"
-        padded = f"  {content}"
-        # Pad to inner_width
-        padded = padded.ljust(inner_width + 2)
-        return f"{v}{padded}{v}"
-
+    # ── Section: titled rule + kv rows; posture semantics live on the value ────
     print()
-    if HAS_FMT and fmt and box_color:
-        print(fmt.colorize(top_bar, box_color, bold=True))
-        print(fmt.colorize(_pad_line(line1), box_color))
-        print(fmt.colorize(_pad_line(line2), box_color))
-        # Posture line: color posture label distinctly
-        posture_colored = line3
-        print(fmt.colorize(_pad_line(posture_colored), box_color, bold=True))
-        print(fmt.colorize(bot_bar, box_color, bold=True))
+    if HAS_FMT and fmt and ui:
+        posture_style = ('good' if posture == "RISK_ON"
+                         else 'bad' if posture == "RISK_OFF"
+                         else 'warn')
+        print(ui.rule(width, title="MARKET REGIME"))
+        print(ui.kv_line("Volatility", [f"VIX: {vix_str}", f"VIX3M: {vix3m_str}",
+                                        f"Term: {vts}", f"PCR(SPY): {pcr_str}"]))
+        print(ui.kv_line("SPY", [f"5d: {spy_ret_str}", f"HV30: {spy_hv_str}",
+                                 f"IV Premium: {iv_prem_str}"]))
+        print(ui.kv_line("Posture", [fmt.style(posture, posture_style, bold=True),
+                                     fmt.style(rat_trunc, 'muted')], sep='  \u2014  '))
+        print(ui.rule(width))
     else:
-        print(top_bar)
-        print(_pad_line(line1))
-        print(_pad_line(line2))
-        print(_pad_line(line3))
-        print(bot_bar)
+        print("-" * width)
+        print("  MARKET REGIME")
+        print(f"  {line1}")
+        print(f"  {line2}")
+        print(f"  {line3}")
+        print("-" * width)
     print()
 
     # Broad-market direction gauge (SPY / QQQ / IWM) — is the market up or down?
@@ -643,8 +617,8 @@ def print_world_pulse() -> None:
         if not items:
             return
         line = panel.pulse_line(scoring.aggregate(items), sources.fetch_crowd())
-        if HAS_FMT and fmt:
-            print(fmt.colorize(f"  {line}", fmt.Colors.BRIGHT_WHITE))
+        if HAS_FMT and fmt and ui:
+            print(ui.kv_line("Pulse", fmt.style(line, 'emph')))
         else:
             print(f"  {line}")
         print()
