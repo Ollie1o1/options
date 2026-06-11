@@ -366,6 +366,19 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         label = fmt.colorize("\u26a0 Warns:  ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u26a0 Warns:  "
         lines.append(f"{INDENT}{label} {'  '.join(warns)}")
 
+    # --- Decision context: own-history analogs, events-in-window, cohort tag,
+    #     book overlap, flow/insider overlays (display only; failure-safe) ---
+    try:
+        from src.pick_context import context_lines as _ctx_lines
+        for _cl in _ctx_lines(dict(row)):
+            if HAS_ENHANCED_CLI and ":" in _cl:
+                _lab, _rest = _cl.split(":", 1)
+                lines.append(f"{INDENT}{fmt.colorize(_lab + ':', fmt.Colors.DIM)}{_rest}")
+            else:
+                lines.append(f"{INDENT}{_cl}")
+    except Exception:
+        pass
+
     return lines
 
 
