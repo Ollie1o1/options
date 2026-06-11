@@ -148,6 +148,16 @@ def _run_track_record(db_path: str) -> None:
     publish(db_path=db_path, reports_dir="reports")
 
 
+def _cohort_min_dte(config_path: str = "config.json", default: int = 30) -> int:
+    """The gate cohort's DTE floor from config (auto_log.cohort_min_dte)."""
+    try:
+        with open(config_path) as f:
+            return int((json.load(f).get("auto_log") or {}).get("cohort_min_dte")
+                       or default)
+    except (OSError, ValueError, TypeError):
+        return default
+
+
 def _run_chain_archive() -> int:
     """Snapshot today's option chains (free CBOE) per config → data_archive."""
     import json as _json
@@ -197,10 +207,17 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     ran = []
 
     # 1. Auto-log (once per window/day, weekdays, in-window only).
+    #    The morning discover window is the cohort feeder: it scans with the
+    #    cohort's DTE floor so its Long Calls are actually gate-eligible
+    #    (without this, 7-29 DTE picks all land as paper_only=1 and the
+    #    forward cohort never fills — observed 2026-06-11 at n=3 after 2 weeks).
     try:
         win = autolog_window(now.isoweekday(), now.hour * 100 + now.minute)
         if win and due_autolog(state, win[0], today):
-            rc = runner([VENV_PY, "run.py", win[1], "--5", "--no-ai"])
+            cmd = [VENV_PY, "run.py", win[1], "--5", "--no-ai"]
+            if win[0] == "ds":
+                cmd += ["--min-dte", str(_cohort_min_dte())]
+            rc = runner(cmd)
             if rc == 0:
                 state.setdefault("last_autolog", {})[win[0]] = today
                 ran.append(f"auto-log:{win[0]}")

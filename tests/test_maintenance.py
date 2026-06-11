@@ -108,6 +108,39 @@ class TestOrchestrator(unittest.TestCase):
             self.assertEqual(st["last_autolog"]["ics"], "2026-06-04")
             self.assertIn("cohort", summary)
 
+    def test_ds_window_feeds_cohort_with_dte_floor(self):
+        # 10:30 Thursday = 'ds' window; the scan must carry --min-dte so its
+        # Long Calls are gate-eligible (>=30 DTE), not paper_only data.
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27",
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 10, 30),
+                runner=lambda cmd: (calls.append(cmd), 0)[1],
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: 0)
+            ds_cmds = [c for c in calls if "-ds" in c]
+            self.assertEqual(len(ds_cmds), 1)
+            joined = " ".join(ds_cmds[0])
+            self.assertIn("--min-dte", joined)
+            self.assertIn("30", joined.split("--min-dte")[1])
+
+    def test_ics_window_has_no_dte_override(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27",
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: (calls.append(cmd), 0)[1],
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: 0)
+            self.assertTrue(calls)
+            self.assertNotIn("--min-dte", " ".join(calls[0]))
+
     def test_second_run_same_window_skips_autolog(self):
         calls = []
         def fake_runner(cmd):

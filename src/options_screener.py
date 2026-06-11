@@ -3263,24 +3263,33 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             ticker_contexts[symbol] = result["context"]
 
     # --- Portfolio Protection: Correlation Warning ---
+    # Only the tickers that actually produced picks matter here — correlating
+    # the whole 100+ ticker scan universe just proves SPY≈QQQ and buries the
+    # signal in 60 lines of noise.
     if verbose and len(ticker_histories) > 1:
         print("\n🔎 Checking Portfolio Correlation...")
         try:
-            # Create a combined DF of 'Close' prices
+            pick_symbols = set()
+            for _df in all_picks:
+                if not _df.empty and "symbol" in _df.columns:
+                    pick_symbols.update(_df["symbol"].unique())
+
             price_data = {}
             for t, h in ticker_histories.items():
+                if pick_symbols and t not in pick_symbols:
+                    continue
                 if not h.empty and "Close" in h.columns:
                     # Use last 30 days
                     price_data[t] = h["Close"].tail(30)
-            
+
             if len(price_data) > 1:
                 prices_df = pd.DataFrame(price_data)
                 # Forward fill / Drop NA (using newer pandas syntax)
                 prices_df = prices_df.ffill().dropna()
-                
+
                 if not prices_df.empty and len(prices_df.columns) > 1:
                     corr_matrix = prices_df.corr()
-                    
+
                     # Check for high correlation (> 0.80)
                     # Iterate upper triangle
                     high_corr_pairs = []
@@ -3290,13 +3299,17 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                             c = corr_matrix.iloc[i, j]
                             if c > 0.80:
                                 high_corr_pairs.append((cols[i], cols[j], c))
-                    
+
                     if high_corr_pairs:
-                        print("\n⚠️  PORTFOLIO PROTECTION WARNING: You are making the same bet twice!")
-                        for t1, t2, c in high_corr_pairs:
+                        high_corr_pairs.sort(key=lambda p: -p[2])
+                        print("\n⚠️  PICK OVERLAP WARNING: some picks are the same bet twice!")
+                        for t1, t2, c in high_corr_pairs[:5]:
                             print(f"  - {t1} and {t2} are highly correlated ({c:.2f})")
+                        if len(high_corr_pairs) > 5:
+                            print(f"  … and {len(high_corr_pairs) - 5} more pairs ≥0.80 "
+                                  f"— don't size them as independent positions.")
                     else:
-                        print("✓ Portfolio correlation looks healthy (no pairs > 0.80).")
+                        print("✓ Pick correlation looks healthy (no pairs > 0.80).")
         except Exception as e:
             print(f"⚠️  Could not compute portfolio correlation: {e}")
 
@@ -3350,24 +3363,29 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     except Exception:
         pass
 
-    # Concentration warning across scan results
+    # Concentration warning across scan results \u2014 measured on the contracts a
+    # user would actually consider (top 15 by quality), not the raw candidate
+    # pool, where one liquid chain can contribute 40+ rows and trip a
+    # meaningless "41 picks from MU" warning.
     if verbose and not picks.empty and len(picks) >= 5:
-        call_count = (picks["type"].str.lower() == "call").sum()
-        put_count = (picks["type"].str.lower() == "put").sum()
-        total = len(picks)
+        _top = (picks.sort_values("quality_score", ascending=False).head(15)
+                if "quality_score" in picks.columns else picks.head(15))
+        call_count = (_top["type"].str.lower() == "call").sum()
+        put_count = (_top["type"].str.lower() == "put").sum()
+        total = len(_top)
         if call_count / total > 0.80:
-            msg = f"Concentration warning: {call_count}/{total} picks are CALLS \u2014 portfolio skews heavily bullish"
+            msg = f"Concentration warning: {call_count}/{total} top picks are CALLS \u2014 selection skews heavily bullish"
             print(fmt.colorize(f"  \u26a0\ufe0f  {msg}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0\ufe0f  {msg}")
         elif put_count / total > 0.80:
-            msg = f"Concentration warning: {put_count}/{total} picks are PUTS \u2014 portfolio skews heavily bearish"
+            msg = f"Concentration warning: {put_count}/{total} top picks are PUTS \u2014 selection skews heavily bearish"
             print(fmt.colorize(f"  \u26a0\ufe0f  {msg}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0\ufe0f  {msg}")
-        if "symbol" in picks.columns:
-            symbol_counts = picks["symbol"].value_counts()
+        if "symbol" in _top.columns:
+            symbol_counts = _top["symbol"].value_counts()
             if not symbol_counts.empty:
                 dominant = symbol_counts.index[0]
                 dominant_count = symbol_counts.iloc[0]
                 if dominant_count >= 5:
-                    msg = f"Concentration warning: {dominant_count} picks from {dominant} \u2014 consider diversifying"
+                    msg = f"Concentration warning: {dominant_count}/{total} top picks from {dominant} \u2014 consider diversifying"
                     print(fmt.colorize(f"  \u26a0\ufe0f  {msg}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0\ufe0f  {msg}")
 
     # Generate Final Reports
@@ -3763,6 +3781,8 @@ def main():
     parser.add_argument("--weights", type=str, default=None, metavar="NAME", help="Weight profile name (in configs/weights/) or path to a JSON file; tags logged trades with the profile id")
     parser.add_argument("--auto-log", action="store_true", help="Skip the save-menu prompt and automatically log top-N picks to paper_trades.db")
     parser.add_argument("--log-top", type=int, default=5, metavar="N", help="With --auto-log: number of top-ranked picks to log (default 5)")
+    parser.add_argument("--min-dte", type=int, default=None, metavar="N", help="Override minimum days-to-expiration for this scan (e.g. 30 to feed the validation cohort)")
+    parser.add_argument("--max-dte", type=int, default=None, metavar="N", help="Override maximum days-to-expiration for this scan")
     parser.add_argument("--list-profiles", action="store_true", help="List available weight profiles and exit")
     args, _ = parser.parse_known_args()
 
@@ -3836,6 +3856,8 @@ def main():
                 ("--weights NAME", "Weight profile (configs/weights/<name>.json) — tags logged trades"),
                 ("--auto-log",     "Skip save-menu and auto-log top-N picks to paper_trades.db"),
                 ("--log-top N",    "With --auto-log: how many top picks to log (default 5)"),
+                ("--min-dte N",    "Override minimum DTE for this scan (30 = cohort-eligible calls)"),
+                ("--max-dte N",    "Override maximum DTE for this scan"),
                 ("--list-profiles","List available weight profiles and exit"),
             ]:
                 print(f"  {fmt.colorize(f'{flag:<18}', fmt.Colors.BRIGHT_YELLOW)} {desc}")
@@ -4235,6 +4257,12 @@ def main():
     else:
         default_min_dte = str(f_config.get("min_days_to_expiration", 7))
         default_max_dte = str(f_config.get("max_days_to_expiration", 45))
+    # CLI overrides win everywhere (incl. the interactive prompt defaults) —
+    # the maintenance cohort feeder relies on --min-dte 30.
+    if getattr(args, "min_dte", None) is not None:
+        default_min_dte = str(args.min_dte)
+    if getattr(args, "max_dte", None) is not None:
+        default_max_dte = str(args.max_dte)
 
     if args.auto:
         max_expiries = config.get("max_expirations", 4)

@@ -231,8 +231,10 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
     quality = row.get('quality_score', 0.0)
     drivers = row.get("score_drivers", "")
     if HAS_ENHANCED_CLI:
+        # stars already carry the numeric score (format_quality_score appends
+        # it) — don't print the number twice.
         stars, q_color = fmt.format_quality_score(quality)
-        q_str = f"Quality: {fmt.colorize(f'{quality:.2f}', q_color)} {stars}"
+        q_str = f"Quality: {stars}"
         if drivers:
             q_str += f"  {fmt.colorize(f'[{drivers}]', fmt.Colors.DIM)}"
         val.append(q_str)
@@ -755,7 +757,9 @@ def _print_strategy_panel(df_picks: pd.DataFrame, width: int) -> None:
         rr = best.get('rr_ratio', 0)
         stars, _ = fmt.format_quality_score(quality)
         thesis = generate_trade_thesis(best) if HAS_ENHANCED_CLI else ""
-        thesis_short = thesis.split('|')[0].strip()[:40] if thesis else ""
+        thesis_short = thesis.split('|')[0].strip() if thesis else ""
+        if len(thesis_short) > 40:
+            thesis_short = thesis_short[:39].rstrip() + "…"
         label = fmt.colorize(f"Best {cat.capitalize()}:", color)
         pop_str = fmt.format_pop(float(pop))
         rr_str = fmt.format_rr(float(rr))

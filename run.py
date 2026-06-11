@@ -258,8 +258,8 @@ if _project_venv_status != "ok":
         reason = {
             "missing": "missing",
             "error":   "broken (imports fail)",
-            "slow":    "slow imports (provenance poisoning)",
-            "timeout": "imports timed out",
+            "slow":    "slow to import (provenance poisoning)",
+            "timeout": "timing out on imports",
         }.get(_project_venv_status, _project_venv_status)
         print(f"NOTICE: project venv is {reason} — falling back to {_FALLBACK_VENV}")
         print("        Rebuild venv/ from your own Terminal when convenient:")
