@@ -81,6 +81,11 @@ The composite `quality_score`, the AI `final_score`, and the ranked order are **
 - **Daily chain archive** — startup maintenance snapshots the CBOE chains for the symbols in `config.json → data_archive` into `data/chain_archive.db` once per trading day. This compounds into real per-contract bid/ask/IV/Greeks history for backtesting, replacing model-priced premiums over time.
 - **Alpha Vantage** (optional, free key) — `python -m src.av_options --probe` checks your key; `--backfill SYMBOL --start DATE` drains 15+ years of EOD option history into the same archive at ~25 symbol-days/day.
 
+**Signal overlays (free, documented effects; deliberately NOT in scoring while the validation gate gathers).**
+- **Unusual options activity** — `python -m src.uoa` ranks day-over-day OI jumps and volume spikes from the chain archive (Pan-Poteshman: informed trading leaks into option volume). Needs ≥2 archive days.
+- **Insider cluster buys** — `python -m src.insider TICKER... | --archive-symbols` scans SEC EDGAR Form 4 open-market purchases; ≥2 distinct insider buyers in 90 days is the documented multi-month signal (Cohen-Malloy-Pomorski). Sells are shown but never scored.
+- **World-news pulse** — `python -m src.worldnews` aggregates ~500 headlines/run from 200+ publishers (Google News/CNBC/MarketWatch RSS + StockTwits crowd tags) into a trust- and recency-weighted pulse with bull/bear split, confidence, per-theme breakdown, and the verified FOMC/CPI/NFP risk-event lookahead. A one-line summary prints under the regime dashboard at startup. Honest framing: news at retail speed times *risk*, not direction.
+
 ---
 
 ## Installation
