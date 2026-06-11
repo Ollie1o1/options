@@ -15,6 +15,7 @@ from .oi_snapshot import save_oi_snapshot
 
 try:
     from . import formatting as fmt
+    from . import ui
     from .trade_analysis import (
         generate_trade_thesis, calculate_entry_exit_levels, calculate_confidence_score,
         categorize_by_strategy, assess_risk_factors, format_trade_plan,
@@ -57,6 +58,12 @@ _ANSI_RE = re.compile(r'\033\[[0-9;]*m')
 def _strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences from text."""
     return _ANSI_RE.sub('', text)
+
+
+def _anchor_line(label: str, body: str) -> str:
+    """Actionable row: accent anchor + dim label, body aligned to the kv gutter."""
+    return ("  " + fmt.style(fmt.GLYPHS['anchor'], 'accent') + " "
+            + fmt.style(ui.pad(label, ui.LABEL_W - 2), 'label') + " " + body)
 
 
 def _vol_color(vol: int) -> str:
@@ -242,8 +249,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         val.append(f"Quality: {quality:.2f}" + (f"  [{drivers}]" if drivers else ""))
 
     if val:
-        label = fmt.colorize("Valuation:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Valuation:"
-        lines.append(f"    \u21b3 {label} {'  '.join(val)}")
+        lines.append(ui.kv_line("Valuation", val) if HAS_ENHANCED_CLI
+                     else f"    Valuation: {'  '.join(val)}")
 
     # --- Line 2: Flow & Momentum — PCR, Momentum, Sentiment, Seasonality ---
     flow = []
@@ -279,8 +286,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         flow.append(f"{current_month_name} Hist: {win_rate:.0%}")
 
     if flow:
-        label = fmt.colorize("Flow:     ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Flow:     "
-        lines.append(f"{INDENT}{label} {'  '.join(flow)}")
+        lines.append(ui.kv_line("Flow", flow) if HAS_ENHANCED_CLI
+                     else f"{INDENT}Flow:      {'  '.join(flow)}")
 
     # --- Line 3: Context — Stock price, DTE, BE move, Term structure ---
     ctx = []
@@ -303,8 +310,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
             ctx.append(f"Term: {ts_label} ({tss:+.1%})")
 
     if ctx:
-        label = fmt.colorize("Context:  ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Context:  "
-        lines.append(f"{INDENT}{label} {'  '.join(ctx)}")
+        lines.append(ui.kv_line("Context", ctx) if HAS_ENHANCED_CLI
+                     else f"{INDENT}Context:   {'  '.join(ctx)}")
 
     # --- Line 4: Earnings (conditional) ---
     if row.get("Earnings Play") == "YES":
@@ -333,8 +340,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
             except Exception:
                 pass
 
-        label = fmt.colorize("Earnings: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Earnings: "
-        lines.append(f"{INDENT}{label} {'  '.join(earn)}")
+        lines.append(ui.kv_line("Earnings", earn) if HAS_ENHANCED_CLI
+                     else f"{INDENT}Earnings:  {'  '.join(earn)}")
 
     # --- Line 5: Warnings (conditional) ---
     warns = []
@@ -363,8 +370,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         warns.append(f"{fmt.GLYPHS['whale']} WHALE FLOW")
 
     if warns:
-        label = fmt.colorize("\u26a0 Warns:  ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u26a0 Warns:  "
-        lines.append(f"{INDENT}{label} {'  '.join(warns)}")
+        lines.append(ui.kv_line("\u26a0 Warns", warns) if HAS_ENHANCED_CLI
+                     else f"{INDENT}\u26a0 Warns:   {'  '.join(warns)}")
 
     # --- Decision context: own-history analogs, events-in-window, cohort tag,
     #     book overlap, flow/insider overlays (display only; failure-safe) ---
@@ -373,7 +380,7 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         for _cl in _ctx_lines(dict(row)):
             if HAS_ENHANCED_CLI and ":" in _cl:
                 _lab, _rest = _cl.split(":", 1)
-                lines.append(f"{INDENT}{fmt.colorize(_lab + ':', fmt.Colors.DIM)}{_rest}")
+                lines.append(ui.kv_line(_lab.strip(), _rest.strip()))
             else:
                 lines.append(f"{INDENT}{_cl}")
     except Exception:
@@ -457,8 +464,8 @@ def format_mechanics_lines(row: pd.Series) -> list:
             liq.append(fresh_txt)
 
     if liq:
-        label = fmt.colorize("Liquidity:", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Liquidity:"
-        lines.append(f"    \u21b3 {label} {'  '.join(liq)}")
+        lines.append(ui.kv_line("Liquidity", liq) if HAS_ENHANCED_CLI
+                     else f"    Liquidity: {'  '.join(liq)}")
 
     # --- Line 2: Greeks ---
     grk = []
@@ -519,8 +526,8 @@ def format_mechanics_lines(row: pd.Series) -> list:
             grk.append(fmt.colorize("IV verified ✓", fmt.Colors.GREEN) if HAS_ENHANCED_CLI else "IV verified ✓")
 
     if grk:
-        label = fmt.colorize("Greeks:   ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Greeks:   "
-        lines.append(f"{INDENT}{label} {'  '.join(grk)}")
+        lines.append(ui.kv_line("Greeks", grk) if HAS_ENHANCED_CLI
+                     else f"{INDENT}Greeks:    {'  '.join(grk)}")
 
     # --- Line 3: Yield & Decay (conditional) ---
     yld = []
@@ -550,8 +557,8 @@ def format_mechanics_lines(row: pd.Series) -> list:
         yld.append(bleed_str)
 
     if yld:
-        label = fmt.colorize("Yield:    ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Yield:    "
-        lines.append(f"{INDENT}{label} {'  '.join(yld)}")
+        lines.append(ui.kv_line("Yield", yld) if HAS_ENHANCED_CLI
+                     else f"{INDENT}Yield:     {'  '.join(yld)}")
 
     return lines
 
@@ -728,9 +735,10 @@ def _format_breakeven_line(row: pd.Series, arrow: str) -> str:
         else:
             label_str = f"{prefix_sym}{label}"
 
-        full_line = f"BE: ${breakeven:.2f} | Needs {sign}${required_move:.2f} ({sign}{req_pct:.1f}%)  1\u03c3 EM: ${expected_move:.2f} ({em_pct:.1f}%)  \u2192  {em_ratio:.1f}\u00d7 EM  {label_str}"
-        be_dim = fmt.colorize("Breakevn: ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "Breakevn: "
-        return f"    {arrow} {be_dim}{full_line[4:]}"  # strip leading "BE: " and use dim label
+        body = f"${breakeven:.2f} | Needs {sign}${required_move:.2f} ({sign}{req_pct:.1f}%)  1\u03c3 EM: ${expected_move:.2f} ({em_pct:.1f}%)  \u2192  {em_ratio:.1f}\u00d7 EM  {label_str}"
+        if HAS_ENHANCED_CLI:
+            return ui.kv_line("Breakeven", body)
+        return f"    {arrow} Breakeven: {body}"
     except Exception:
         return ""
 
@@ -1338,9 +1346,8 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
         # Bucket header
         if HAS_ENHANCED_CLI:
-            bucket_color = fmt.Colors.DIM if bucket == "LOW" else (fmt.Colors.BRIGHT_YELLOW if bucket == "MEDIUM" else fmt.Colors.BRIGHT_GREEN)
-            label = fmt.colorize(f"  {bucket} PREMIUM", bucket_color, bold=(bucket == "HIGH"))
-            print(f"\n{label}  \u00b7  Top {len(sub)} Picks")
+            print("\n" + fmt.style(f"  {bucket} PREMIUM", 'heading')
+                  + fmt.style(f"  \u00b7  {len(sub)} pick{'s' if len(sub) != 1 else ''}", 'muted'))
         else:
             print(f"\n  {bucket} PREMIUM  \u00b7  Top {len(sub)} Picks")
 
@@ -1351,20 +1358,16 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
         if HAS_ENHANCED_CLI:
             iv_str = fmt.format_percentage(avg_iv, good=40, bad=80, higher_is_better=False)
             sp_str = fmt.format_spread(float(avg_spread) if pd.notna(avg_spread) else 0.0)
-            print(f"  Summary: Avg IV {iv_str} | Avg Spread {sp_str} | Median |\u0394| {median_delta:.2f}\n")
+            print(ui.kv_line("Summary", [f"Avg IV {iv_str}", f"Avg Spread {sp_str}",
+                                         f"Median |\u0394| {median_delta:.2f}"]))
         else:
             print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |\u0394| {median_delta:.2f}\n")
-
-        # Column headers
-        if is_multi:
-            hdr = f"  {'Rank':<8} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
-        else:
-            hdr = f"  {'Rank':<8} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
-        print(fmt.colorize(hdr, fmt.Colors.BOLD + fmt.Colors.UNDERLINE) if HAS_ENHANCED_CLI else hdr)
-
-        if HAS_ENHANCED_CLI:
-            print("  " + fmt.draw_separator(WIDTH - 2))
-        else:
+            # Column headers (plain-text fallback keeps the tabular layout)
+            if is_multi:
+                hdr = f"  {'Rank':<8} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
+            else:
+                hdr = f"  {'Rank':<8} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
+            print(hdr)
             print("  " + "-" * (WIDTH - 2))
 
         for _, r in sub.iterrows():
@@ -1388,33 +1391,27 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             rank = int(float(r.get("_rank", 0) or 0))
 
             if HAS_ENHANCED_CLI:
-                rank_visible = f"#{rank}/{total_picks}"
-                rank_str = fmt.colorize(f"{rank_visible:<8}", fmt.Colors.DIM)
-                sym_str = fmt.colorize(f"{r['symbol']:<6}", fmt.Colors.BRIGHT_WHITE, bold=True)
-                type_color = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
-                type_str = fmt.colorize(f"{opt_type:<5}", type_color)
-                # Pad before colorize to avoid ANSI breaking alignment
-                exp_padded = f"{str(exp):<12}"
-                exp_str = fmt.colorize(exp_padded, fmt.Colors.YELLOW) if dte < 14 else exp_padded
-                prem_padded = f"${premium:.2f}"
-                prem_color = fmt.Colors.GREEN if premium > 0 else fmt.Colors.YELLOW
-                prem_str = fmt.colorize(f"{prem_padded:<9}", prem_color)
-                iv_color = fmt.Colors.GREEN if iv < chain_iv_median * 0.9 else (fmt.Colors.RED if iv > chain_iv_median * 1.2 else fmt.Colors.YELLOW)
-                iv_str = fmt.colorize(f"{format_pct(iv):<8}", iv_color)
-                oi_str = fmt.colorize(f"{oi:>9,}", _oi_color(oi))
-                vol_str = fmt.colorize(f"{vol:>9,}", _vol_color(vol))
-                # Pad delta before colorize
-                delta_raw = f"{delta:>+7.2f}"
-                d_aligned = (opt_type == "CALL" and delta > 0) or (opt_type != "CALL" and delta < 0)
-                d_color = fmt.Colors.GREEN if d_aligned else fmt.Colors.RED
-                delta_str = fmt.colorize(delta_raw, d_color)
-                mon_color = fmt.Colors.GREEN if moneyness == "ITM" else (fmt.Colors.YELLOW if moneyness == "ATM" else fmt.Colors.DIM)
-                mon_str = fmt.colorize(f"{moneyness:<4}", mon_color)
+                # Card title rule: identity + expiry; data lives in the headline row.
+                title = f"#{rank}/{total_picks}  {r['symbol']} {opt_type} ${strike:g}  exp {exp}  {dte}d"
+                if dte < 14:
+                    title += "  ⚠ <14d"
+                if r.get("high_premium_turnover", False):
+                    title += f"  {fmt.GLYPHS['whale']} WHALE"
+                print()
+                print(ui.rule(WIDTH, title=title))
+
                 stars, _ = fmt.format_quality_score(quality)
-                if is_multi:
-                    print(f"  {rank_str} {sym_str} {whale} {type_str} {strike:>8.2f} {exp_str} {prem_str} {iv_str} {oi_str} {vol_str}  {delta_str}  {mon_str}  {stars}")
-                else:
-                    print(f"  {rank_str} {whale} {type_str} {strike:>8.2f} {exp_str} {prem_str} {iv_str} {oi_str} {vol_str}  {delta_str}  {mon_str}  {stars}")
+                iv_color = fmt.Colors.GREEN if iv < chain_iv_median * 0.9 else (fmt.Colors.RED if iv > chain_iv_median * 1.2 else fmt.Colors.YELLOW)
+                headline = [
+                    stars,
+                    f"Prem {fmt.style(f'${premium:.2f}', 'emph')}",
+                    f"IV {fmt.colorize(format_pct(iv), iv_color)}",
+                    f"OI {fmt.colorize(f'{oi:,}', _oi_color(oi))}",
+                    f"Vol {fmt.colorize(f'{vol:,}', _vol_color(vol))}",
+                    f"Δ {fmt.format_delta(delta, is_call=(opt_type == 'CALL'))}",
+                    fmt.style(moneyness, 'good' if moneyness == 'ITM' else ('warn' if moneyness == 'ATM' else 'muted')),
+                ]
+                print("  " + "   ".join(headline))
             else:
                 rank_plain = f"#{rank}/{total_picks}"
                 rank_plain = f"{rank_plain:<8}"
@@ -1423,14 +1420,13 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 else:
                     print(f"  {rank_plain} {whale} {opt_type:<5} {strike:>8.2f} {exp} {format_money(premium):<9} {format_pct(iv):<8} {oi:>9,} {vol:>9,} {delta:>+7.2f}  {moneyness:<4}")
 
-            arrow = fmt.colorize("\u21b3", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u21b3"
+            arrow = fmt.style(fmt.GLYPHS['anchor'], 'accent') if HAS_ENHANCED_CLI else fmt.GLYPHS['anchor']
 
             if compact:
                 # Compact mode: thesis line only
                 if HAS_ENHANCED_CLI:
                     thesis = generate_trade_thesis(r)
-                    thesis_label = fmt.colorize("Thesis:", fmt.Colors.BRIGHT_CYAN)
-                    print(f"    {arrow} {thesis_label} {fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN)}")
+                    print(_anchor_line("Thesis", thesis))
                 continue
 
             # Risk alerts — before detail rows
@@ -1466,9 +1462,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                     _extra_thesis.append(f"Avg IV crush: -{r['avg_iv_crush']:.0%} post-earnings")
                 if _extra_thesis:
                     thesis += " | " + " | ".join(_extra_thesis)
-                thesis_label = fmt.colorize("Thesis:   ", fmt.Colors.BRIGHT_CYAN)
-                thesis_text = fmt.colorize(thesis, fmt.Colors.BRIGHT_CYAN) if not _extra_thesis else thesis
-                print(f"    {arrow} {thesis_label} {thesis_text}")
+                print(_anchor_line("Thesis", thesis))
                 levels = calculate_entry_exit_levels(r, config)
                 # Context-aware labels mirroring update_positions enforcement
                 try:
@@ -1485,31 +1479,31 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                     _lo = _exit_cfg.get("long_option", {})
                     tp_pct = float(_lo.get("take_profit", _exit_cfg.get("take_profit", 0.50)))
                     sl_pct = abs(float(_lo.get("stop_loss", _exit_cfg.get("stop_loss", -0.50))))
-                entry_str = fmt.colorize(f"\u2264${levels['entry_price']:.2f}", fmt.Colors.BRIGHT_WHITE)
-                target_str = fmt.colorize(f"${levels['profit_target']:.2f} (+{tp_pct:.0%})", fmt.Colors.GREEN)
-                stop_str = fmt.colorize(f"${levels['stop_loss']:.2f} (-{sl_pct:.0%})", fmt.Colors.RED)
+                entry_str = fmt.style(f"\u2264${levels['entry_price']:.2f}", 'emph')
+                target_str = fmt.style(f"${levels['profit_target']:.2f} (+{tp_pct:.0%})", 'good')
+                stop_str = fmt.style(f"${levels['stop_loss']:.2f} (-{sl_pct:.0%})", 'bad')
                 conf_score, conf_label = calculate_confidence_score(r)
                 risks = assess_risk_factors(r)
-                conf_color = fmt.Colors.GREEN if conf_label == "HIGH" else (fmt.Colors.YELLOW if conf_label == "MEDIUM" else fmt.Colors.RED)
-                conf_str = fmt.colorize(f"{conf_label} ({conf_score:.0%})", conf_color, bold=True)
-                print(f"    {arrow} {fmt.colorize('Entry:    ', fmt.Colors.DIM)} {entry_str}  |  Target: {target_str}  |  Stop: {stop_str}")
-                print(f"         Breakeven: ${levels['breakeven']:.2f}  |  Max Loss: ${levels['max_loss']:.0f}  |  Confidence: {conf_str}")
+                conf_style = 'good' if conf_label == "HIGH" else ('warn' if conf_label == "MEDIUM" else 'bad')
+                conf_str = fmt.style(f"{conf_label} ({conf_score:.0%})", conf_style, bold=True)
+                print(_anchor_line("Plan", f"Entry {entry_str}  \u2192  Target {target_str}  /  Stop {stop_str}"))
+                print(ui.kv_line("", [f"Breakeven: ${levels['breakeven']:.2f}",
+                                      f"Max Loss: ${levels['max_loss']:.0f}",
+                                      f"Confidence: {conf_str}"]))
 
                 # Execution guidance
                 exec_guide = generate_execution_guidance(r)
                 if exec_guide:
-                    exec_label = fmt.colorize("Exec:     ", fmt.Colors.DIM)
-                    print(f"         {exec_label}{fmt.colorize(exec_guide, fmt.Colors.YELLOW)}")
+                    print(_anchor_line("Exec", fmt.style(exec_guide, 'warn')))
 
                 # Quality score breakdown
                 qscore_line = explain_quality_score(r)
                 if qscore_line:
-                    score_label = fmt.colorize("Score:    ", fmt.Colors.DIM)
-                    print(f"         {score_label}{qscore_line}")
+                    print(ui.kv_line("Score", qscore_line))
 
                 if risks and risks != ["Standard risks apply"]:
-                    risk_parts = [fmt.colorize(ri, fmt.Colors.BRIGHT_RED) for ri in risks[:2]]
-                    print(f"         Risks: {' | '.join(risk_parts)}")
+                    risk_parts = [fmt.style(ri, 'bad') for ri in risks[:2]]
+                    print(ui.kv_line("Risks", " | ".join(risk_parts)))
 
                 # Scenario P/L matrix
                 scenario = build_scenario_table(r, rfr, WIDTH)
@@ -1517,39 +1511,44 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                     print(scenario)
 
             # Institutional metrics
+            inst = []
             if "short_interest" in r and pd.notna(r["short_interest"]):
                 si_val = r['short_interest'] * 100
                 if HAS_ENHANCED_CLI:
-                    si_color = fmt.Colors.RED if si_val > 20 else (fmt.Colors.YELLOW if si_val > 10 else fmt.Colors.GREEN)
-                    print(f"      \u2022 Short Interest: {fmt.colorize(f'{si_val:.2f}%', si_color)}")
+                    si_style = 'bad' if si_val > 20 else ('warn' if si_val > 10 else 'good')
+                    inst.append(f"Short Int: {fmt.style(f'{si_val:.2f}%', si_style)}")
                 else:
-                    print(f"      \u2022 Short Interest: {si_val:.2f}%")
+                    inst.append(f"Short Interest: {si_val:.2f}%")
             if "rvol" in r and pd.notna(r["rvol"]):
                 rvol_val = r['rvol']
                 if HAS_ENHANCED_CLI:
-                    rvol_color = fmt.Colors.GREEN if rvol_val > 2 else (fmt.Colors.YELLOW if rvol_val > 1.5 else fmt.Colors.DIM)
-                    print(f"      \u2022 RVOL: {fmt.colorize(f'{rvol_val:.2f}x', rvol_color)}")
+                    rvol_style = 'good' if rvol_val > 2 else ('warn' if rvol_val > 1.5 else 'muted')
+                    inst.append(f"RVOL: {fmt.style(f'{rvol_val:.2f}x', rvol_style)}")
                 else:
-                    print(f"      \u2022 RVOL: {rvol_val:.2f}x")
+                    inst.append(f"RVOL: {rvol_val:.2f}x")
             if "gex_flip_price" in r and pd.notna(r["gex_flip_price"]):
                 gex_val = r['gex_flip_price']
                 if HAS_ENHANCED_CLI:
                     spot = float(r.get('underlying', 0) or 0)
-                    gex_color = fmt.Colors.GREEN if spot > gex_val else fmt.Colors.RED
-                    print(f"      \u2022 GEX Flip: {fmt.colorize(f'${gex_val:.2f}', gex_color)}")
+                    inst.append(f"GEX Flip: {fmt.style(f'${gex_val:.2f}', 'good' if spot > gex_val else 'bad')}")
                 else:
-                    print(f"      \u2022 GEX Flip: ${gex_val:.2f}")
+                    inst.append(f"GEX Flip: ${gex_val:.2f}")
             if "vwap" in r and pd.notna(r["vwap"]):
                 vwap_val = r['vwap']
                 if HAS_ENHANCED_CLI:
                     spot = float(r.get('underlying', 0) or 0)
-                    vwap_color = fmt.Colors.GREEN if spot > vwap_val else fmt.Colors.RED
-                    print(f"      \u2022 VWAP: {fmt.colorize(f'${vwap_val:.2f}', vwap_color)}")
+                    inst.append(f"VWAP: {fmt.style(f'${vwap_val:.2f}', 'good' if spot > vwap_val else 'bad')}")
                 else:
-                    print(f"      \u2022 VWAP: ${vwap_val:.2f}")
+                    inst.append(f"VWAP: ${vwap_val:.2f}")
+            if inst:
+                if HAS_ENHANCED_CLI:
+                    print(ui.kv_line("Institut.", inst))
+                else:
+                    for seg in inst:
+                        print(f"      \u2022 {seg}")
 
             if HAS_ENHANCED_CLI:
-                print(fmt.draw_separator(WIDTH, char='·'))
+                print(ui.rule(WIDTH))
             else:
                 print("")  # Newline
 
