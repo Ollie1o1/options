@@ -4889,10 +4889,10 @@ def main():
             if HAS_ENHANCED_CLI:
                 WIDTH = get_display_width()
                 print("\n" + fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL))
-                print(fmt.colorize("  \U0001f44b  Done! Happy trading!", fmt.Colors.BRIGHT_GREEN, bold=True))
+                print(fmt.style("  \u2713  Done! Happy trading!", 'good', bold=True))
                 print(fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL) + "\n")
             else:
-                print("\n\U0001f44b Done! Happy trading!\n")
+                print("\n\u2713 Done! Happy trading!\n")
             break
 
     except KeyboardInterrupt:
