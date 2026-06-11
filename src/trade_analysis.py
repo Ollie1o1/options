@@ -87,7 +87,7 @@ def generate_trade_thesis(row: pd.Series) -> str:
         thesis_parts.append(" • ".join(reasons[:3]))  # Limit to top 3 reasons
 
     if warnings:
-        warning_str = " • ".join([f"⚠️ {w}" for w in warnings[:2]])  # Limit to top 2 warnings
+        warning_str = " • ".join([f"⚠ {w}" for w in warnings[:2]])  # Limit to top 2 warnings
         thesis_parts.append(warning_str)
 
     if not thesis_parts:
@@ -453,7 +453,7 @@ def format_trade_plan(row: pd.Series, config: Dict, include_sizing: bool = False
     lines = []
 
     # Entry/Exit levels
-    lines.append(f"📍 Entry: ≤${levels['entry_price']:.2f} | "
+    lines.append(f"▸ Entry: ≤${levels['entry_price']:.2f} | "
                 f"Target: ${levels['profit_target']:.2f} (+{config.get('exit_rules', {}).get('take_profit', 0.50):.0%}) | "
                 f"Stop: ${levels['stop_loss']:.2f} (-{abs(config.get('exit_rules', {}).get('stop_loss', -0.25)):.0%})")
 

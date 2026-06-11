@@ -367,15 +367,15 @@ def format_header(text: str, emoji: str = "") -> str:
 def format_warning(text: str) -> str:
     """Format a warning message."""
     if supports_color():
-        return colorize(f"⚠️  {text}", Colors.YELLOW, bold=True)
-    return f"⚠️  {text}"
+        return colorize(f"⚠ {text}", Colors.YELLOW, bold=True)
+    return f"⚠ {text}"
 
 
 def format_error(text: str) -> str:
     """Format an error message."""
     if supports_color():
-        return colorize(f"❌ {text}", Colors.RED, bold=True)
-    return f"❌ {text}"
+        return colorize(f"✗ {text}", Colors.RED, bold=True)
+    return f"✗ {text}"
 
 
 def format_success(text: str) -> str:
@@ -388,8 +388,8 @@ def format_success(text: str) -> str:
 def format_info(text: str) -> str:
     """Format an info message."""
     if supports_color():
-        return colorize(f"ℹ️  {text}", Colors.BRIGHT_BLUE)
-    return f"ℹ️  {text}"
+        return colorize(f"· {text}", Colors.BRIGHT_BLUE)
+    return f"· {text}"
 
 
 def truncate(text: str, max_len: int, suffix: str = "...") -> str:

@@ -351,7 +351,7 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         w = fmt.colorize(row["oi_wall_warning"], fmt.Colors.BRIGHT_RED) if HAS_ENHANCED_CLI else row["oi_wall_warning"]
         warns.append(w)
     if row.get("squeeze_play"):
-        warns.append("\U0001f525 SQUEEZE PLAY")
+        warns.append(f"{fmt.GLYPHS['squeeze']} SQUEEZE PLAY")
     if row.get("macro_warning"):
         w = fmt.colorize(row["macro_warning"], fmt.Colors.BRIGHT_RED, bold=True) if HAS_ENHANCED_CLI else row["macro_warning"]
         warns.append(w)
@@ -360,7 +360,7 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
     if row.get("yield_warning"):
         warns.append(row["yield_warning"])
     if row.get("high_premium_turnover"):
-        warns.append("\U0001f40b WHALE FLOW")
+        warns.append(f"{fmt.GLYPHS['whale']} WHALE FLOW")
 
     if warns:
         label = fmt.colorize("\u26a0 Warns:  ", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "\u26a0 Warns:  "
@@ -810,7 +810,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     # Use new formatting
     width = get_display_width()
 
-    print("\n" + fmt.draw_box("⚡ EXECUTIVE SUMMARY", width, double=True))
+    print("\n" + fmt.draw_box("EXECUTIVE SUMMARY", width, double=True))
 
     # Honest evidence label for the predictive layer (read from artifacts).
     try:
@@ -829,7 +829,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     else:
         context_parts.append(mode)
 
-    print(f"\n{fmt.format_header('📊 MARKET CONTEXT', '')}")
+    print(f"\n{fmt.format_header('MARKET CONTEXT', '')}")
     trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (
         fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW
     )
@@ -863,7 +863,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
             n_simulations=config.get("var_n_simulations", 10_000),
         )
         if _var_data["n_positions"] > 0:
-            print(f"\n{fmt.format_header('📉 PORTFOLIO RISK (OPEN POSITIONS)', '')}")
+            print(f"\n{fmt.format_header('PORTFOLIO RISK (OPEN POSITIONS)', '')}")
             print(f"   {_var_data['n_positions']} open position(s)  |  "
                   f"{int(config.get('var_confidence', 0.95) * 100)}% 1-day VaR: ${_var_data['var_95']:,.0f}  |  "
                   f"CVaR: ${_var_data['cvar_95']:,.0f}  |  "
@@ -881,7 +881,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
         pass
 
     # Top 3 Opportunities
-    print(f"\n{fmt.format_header('🏆 TOP 3 OPPORTUNITIES', '')}")
+    print(f"\n{fmt.format_header('TOP 3 OPPORTUNITIES', '')}")
 
     top3 = df_picks.nlargest(3, 'quality_score')
 
@@ -905,7 +905,7 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
 
         # Thesis
         thesis = generate_trade_thesis(row) if HAS_ENHANCED_CLI else "Standard setup"
-        print(f"{fmt.BoxChars.VERTICAL}    💡 {thesis}")
+        print(f"{fmt.BoxChars.VERTICAL}    {fmt.GLYPHS['anchor']} {thesis}")
 
         # Entry/Exit
         if config.get('display', {}).get('show_entry_exit_levels', True):
@@ -925,14 +925,14 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
                 _lo = _exit_cfg.get("long_option", {})
                 _tp = float(_lo.get("take_profit", _exit_cfg.get("take_profit", 0.50)))
                 _sl = abs(float(_lo.get("stop_loss", _exit_cfg.get("stop_loss", -0.50))))
-            print(f"{fmt.BoxChars.VERTICAL}    📍 Entry: ≤${levels['entry_price']:.2f} | "
+            print(f"{fmt.BoxChars.VERTICAL}    {fmt.GLYPHS['anchor']} Entry: ≤${levels['entry_price']:.2f} | "
                   f"Target: ${levels['profit_target']:.2f} (+{_tp:.0%}) | "
                   f"Stop: ${levels['stop_loss']:.2f} (-{_sl:.0%})")
 
     print(fmt.draw_separator(width - 4, fmt.BoxChars.HORIZONTAL))
 
     # Warnings
-    print(f"\n{fmt.format_header('⚠️  WATCH OUT', '')}")
+    print(f"\n{fmt.format_header('⚠ WATCH OUT', '')}")
 
     high_spread = df_picks[df_picks['spread_pct'] > 0.20]
     if not high_spread.empty:
@@ -1374,7 +1374,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 exp = str(r.get("expiration", "N/A"))[:10]
             moneyness = determine_moneyness(r)
             dte = int(float(r.get("T_years", 0) or 0) * 365)
-            whale = "\U0001f40b" if r.get("high_premium_turnover", False) else "  "
+            whale = fmt.GLYPHS['whale'] if r.get("high_premium_turnover", False) else " "
             opt_type = str(r.get("type", "CALL")).upper()
             strike = float(r.get("strike", 0) or 0)
             premium = float(r.get("premium", 0) or 0)
