@@ -52,7 +52,9 @@ def _reason_bucket(reason: str) -> str:
 
 
 def simulate_trade(symbol, entry_date, spot, sdates, rules,
-                   spots=None, target_dte=35, db_path=None) -> Optional[Dict[str, Any]]:
+                   spots=None, target_dte=35, db_path=None,
+                   commission_per_contract=0.65,
+                   contract_multiplier=100) -> Optional[Dict[str, Any]]:
     """Simulate one cohort long-call trade on real marks, exiting via the canonical
     _evaluate_long_single_leg_exit (TP / deep-ITM delta TP / time exit / SL).
     Returns a result dict (ret, exit_reason, days_held) or None if unfillable."""
@@ -72,6 +74,9 @@ def simulate_trade(symbol, entry_date, spot, sdates, rules,
         return None
     entry_cost = c["ask"]
     strike, expiration, entry_iv = c["strike"], c["expiration"], c.get("iv")
+    # Round-trip commission (buy + sell legs) as a fraction of the premium paid.
+    # Real bid/ask already captures the spread, so commission is the only add-on.
+    comm_frac = (2.0 * commission_per_contract / contract_multiplier) / entry_cost
     ei = sdates.index(ed_actual)
     last_ret = None
     for j in range(ei + 1, len(sdates)):
@@ -94,12 +99,16 @@ def simulate_trade(symbol, entry_date, spot, sdates, rules,
             entry_price=entry_cost, current_price=current_price, entry_iv=entry_iv,
             dte=rem_dte, days_held=days_held, rfr=_RFR)
         if should_close:
-            return {"ret": pnl_raw, "exit_reason": _reason_bucket(reason),
+            # Exit DECISION is on gross mark (as the live system triggers); the
+            # RECORDED P&L is net of round-trip commission.
+            return {"ret": pnl_raw - comm_frac, "gross_ret": pnl_raw,
+                    "exit_reason": _reason_bucket(reason),
                     "reason_detail": reason, "days_held": days_held,
                     "entry_date": ed_actual, "exit_date": d}
     if last_ret is None:
         return None
-    return {"ret": last_ret, "exit_reason": "expiry", "days_held": len(sdates) - 1 - ei,
+    return {"ret": last_ret - comm_frac, "gross_ret": last_ret, "exit_reason": "expiry",
+            "days_held": len(sdates) - 1 - ei,
             "entry_date": ed_actual, "exit_date": sdates[-1]}
 
 
@@ -109,6 +118,12 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
     from src import dolt_options as _do
     from src.dolt_validate import _spot_history
     rules = exit_rules(config_path)
+    # Real commission from config (paper_trading.commission_per_contract).
+    try:
+        commission = float(json.load(open(config_path)).get("paper_trading", {})
+                           .get("commission_per_contract", 0.65))
+    except Exception:
+        commission = 0.65
     trades: List[Dict[str, Any]] = []
     for symbol in symbols:
         symbol = symbol.upper()
@@ -121,7 +136,8 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
                 continue
             try:
                 t = simulate_trade(symbol, entry_date, spot, sdates, rules,
-                                   spots=spots, target_dte=target_dte, db_path=db_path)
+                                   spots=spots, target_dte=target_dte, db_path=db_path,
+                                   commission_per_contract=commission)
             except _do.DoltRateLimited:
                 return _summarize(trades, rules, partial=True)
             except _do.DoltQueryError:

@@ -61,6 +61,23 @@ class SimulateTradeTest(unittest.TestCase):
         res = self._run(chains)
         self.assertEqual(res["exit_reason"], "time_exit")
 
+    def test_commission_reduces_net_below_gross(self):
+        # entry ask 2.0; bid doubles → TP; net ret must be gross minus round-trip commission
+        chains = {"2024-03-01": [_contract(1.8, 2.0)]}
+        for i, d in enumerate(self.sdates[1:], start=1):
+            bid = 4.5 if i >= 4 else 2.0
+            chains[d] = [_contract(bid, bid + 0.2, date=d)]
+
+        def fake_near(sym, date, db_path=None):
+            return date, chains.get(date, [])
+        with mock.patch("src.dolt_options.get_chain_near", side_effect=fake_near):
+            res = dc.simulate_trade("X", "2024-03-01", 100.0, self.sdates, RULES,
+                                    commission_per_contract=0.65)
+        self.assertIn("gross_ret", res)
+        self.assertLess(res["ret"], res["gross_ret"])      # net < gross
+        # round-trip comm = 2*0.65/100/entry_ask(2.0) = 0.0065
+        self.assertAlmostEqual(res["gross_ret"] - res["ret"], 0.0065, places=4)
+
     def test_none_when_unfillable(self):
         with mock.patch("src.dolt_options.get_chain_near", return_value=("2024-03-01", [])):
             res = dc.simulate_trade("X", "2024-03-01", 100.0, self.sdates, RULES)
