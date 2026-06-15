@@ -72,6 +72,25 @@ News, sentiment, catalyst, EDGAR insider, and regime-news components are NOT
 reconstructable historically, so they are excluded. A positive IC here validates
 the price-based signals; it does not validate the full production `quality_score`.
 
+## Findings on real marks (2026-06-15, all reproduced from cache)
+
+Every number below was produced by the CLIs above on real DoltHub marks, not estimated.
+
+- **The flat 7%/side spread was wrong both ways.** Real `(ask-bid)/mid`: ATM/ITM
+  ~1.0–1.5%/side, but deep-OTM 3.4–5.9%/side (25% at p75). See `dolt_slippage --table`.
+- **Black-Scholes flattered short premium by ~40 points.** AAPL short-premium walk-forward:
+  −24.5% (BS) vs −65.6% (real fills).
+- **The price/IV/Greek slice of the scorer has no edge.** AAPL+SPY, 70 samples, 2022–2024:
+  IC +0.05 (p=0.66). Consistent with the live paper IC (0.03) and the BS backtest.
+- **The actual long-call cohort is marginally positive.** AAPL+SPY, n=185, 2022–2024,
+  using the canonical exit rules (TP +100% / deep-ITM Δ≥0.80 / time-exit / SL −50%):
+  win 40.5%, **avg +5.3% all-in** (net of real spread + $0.65/contract commission),
+  median −9.5%, PF 1.17. Tail-driven. (Gross, pre-commission: +5.7%.)
+  Caveat: 2 symbols; broaden the basket before trusting it.
+- **Earnings IV crush is real but a modest cohort drag.** AAPL ATM IV drops a median
+  ~24% post-earnings (13 events), yet holding through earnings cost ~1 pt of avg return
+  (+4.8% vs +5.8% clean) — only ~11% of trades touch earnings.
+
 ## Config (`config.json → dolt_options`)
 
 ```json
