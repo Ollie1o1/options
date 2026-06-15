@@ -129,7 +129,6 @@
     ],
     "paper_only_strategies": [
       "Bear Call",
-      "Long Put",
       "Iron Condor",
       "Bull Put",
       "Short Put"

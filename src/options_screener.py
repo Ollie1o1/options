@@ -4476,10 +4476,26 @@ def main():
                     # concentration (e.g. ORCL×6 from a single scan).
                     if "symbol" in _single_legs.columns:
                         _single_legs = _single_legs.drop_duplicates(subset=["symbol"], keep="first")
+                    _today_str = datetime.now().strftime("%Y-%m-%d")
+                    # Drop rows the allowlist would reject entirely (e.g. Long Puts once
+                    # removed from paper_only_strategies) BEFORE taking the top-N. Without
+                    # this, a scan whose top-scored legs are Long Puts logs almost nothing
+                    # and the forward cohort starves — the dropped strategies would silently
+                    # consume the top-N slots. Quarantined (paper_only) strategies are kept.
+                    if not _single_legs.empty and "type" in _single_legs.columns:
+                        def _allowlist_keeps(_row):
+                            _sn = _strategy_label_for_mode(mode, _row.get("type"))
+                            _dec, _ = apply_auto_log_allowlist(
+                                {"strategy_name": _sn,
+                                 "expiration": _row.get("expiration"),
+                                 "date": _today_str},
+                                cfg_path="config.json",
+                            )
+                            return _dec != "drop"
+                        _single_legs = _single_legs[_single_legs.apply(_allowlist_keeps, axis=1)]
                     _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
                     _candidates = _single_legs.head(_top_n)
 
-                    _today_str = datetime.now().strftime("%Y-%m-%d")
                     _inserted = 0
                     _skipped = 0
                     _skipped_long_puts = 0
