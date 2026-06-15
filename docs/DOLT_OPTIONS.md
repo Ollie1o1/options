@@ -82,11 +82,13 @@ Every number below was produced by the CLIs above on real DoltHub marks, not est
   −24.5% (BS) vs −65.6% (real fills).
 - **The price/IV/Greek slice of the scorer has no edge.** AAPL+SPY, 70 samples, 2022–2024:
   IC +0.05 (p=0.66). Consistent with the live paper IC (0.03) and the BS backtest.
-- **The actual long-call cohort is marginally positive.** AAPL+SPY, n=185, 2022–2024,
-  using the canonical exit rules (TP +100% / deep-ITM Δ≥0.80 / time-exit / SL −50%):
-  win 40.5%, **avg +5.3% all-in** (net of real spread + $0.65/contract commission),
-  median −9.5%, PF 1.17. Tail-driven. (Gross, pre-commission: +5.7%.)
-  Caveat: 2 symbols; broaden the basket before trusting it.
+- **The actual long-call cohort is ~breakeven across a real basket.** Using the canonical
+  exit rules (TP +100% / deep-ITM Δ≥0.80 / time-exit / SL −50%), all-in (net of real
+  spread + $0.65/contract commission), 2022–2024:
+    - AAPL+SPY (n=185): avg +5.3%, PF 1.17 — looked encouraging, but…
+    - **AAPL+SPY+QQQ+MSFT (n=326): avg +0.8%, median −17.4%, PF 1.02 — essentially
+      breakeven.** The 2-symbol result did NOT generalize; it was the luck of those names.
+  Tail-driven with a fat left tail. As-is, this strategy has no robust edge after real costs.
 - **Earnings IV crush is real but a modest cohort drag.** AAPL ATM IV drops a median
   ~24% post-earnings (13 events), yet holding through earnings cost ~1 pt of avg return
   (+4.8% vs +5.8% clean) — only ~11% of trades touch earnings.
