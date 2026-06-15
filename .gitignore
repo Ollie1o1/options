@@ -3,6 +3,9 @@
 *.key
 *.pem
 
+# Local data caches / DBs (binary, regenerable — incl. DoltHub + chain archive)
+data/
+
 # Python
 __pycache__/
 *.py[cod]
