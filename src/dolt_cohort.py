@@ -95,10 +95,12 @@ def simulate_trade(symbol, entry_date, spot, sdates, rules,
             dte=rem_dte, days_held=days_held, rfr=_RFR)
         if should_close:
             return {"ret": pnl_raw, "exit_reason": _reason_bucket(reason),
-                    "reason_detail": reason, "days_held": days_held}
+                    "reason_detail": reason, "days_held": days_held,
+                    "entry_date": ed_actual, "exit_date": d}
     if last_ret is None:
         return None
-    return {"ret": last_ret, "exit_reason": "expiry", "days_held": len(sdates) - 1 - ei}
+    return {"ret": last_ret, "exit_reason": "expiry", "days_held": len(sdates) - 1 - ei,
+            "entry_date": ed_actual, "exit_date": sdates[-1]}
 
 
 def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
@@ -126,27 +128,45 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
                 continue
             if t:
                 t["symbol"] = symbol
+                try:
+                    from src import dolt_earnings as _de
+                    t["through_earnings"] = _de.holds_through_earnings(
+                        symbol, t["entry_date"], t["exit_date"], db_path=db_path or _de.DEFAULT_CACHE)
+                except Exception:
+                    t["through_earnings"] = None
                 trades.append(t)
     return _summarize(trades, rules, partial=False)
 
 
-def _summarize(trades, rules, partial: bool) -> Dict[str, Any]:
-    rets = [t["ret"] for t in trades]
+def _stats(rets) -> Dict[str, Any]:
     n = len(rets)
-    out: Dict[str, Any] = {"n": n, "rules": rules, "partial": partial}
-    if not rets:
-        return out
+    if n == 0:
+        return {"n": 0}
     wins = [r for r in rets if r > 0]
-    gross_win = sum(r for r in wins)
+    gross_win = sum(wins)
     gross_loss = -sum(r for r in rets if r <= 0)
-    out.update({
+    return {
+        "n": n,
         "win_rate": round(len(wins) / n, 3),
         "avg_return": round(mean(rets), 3),
         "median_return": round(median(rets), 3),
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
-        "exit_mix": {k: sum(1 for t in trades if t["exit_reason"] == k)
-                     for k in ("take_profit", "tp_delta", "stop_loss", "time_exit", "expiry")},
-    })
+    }
+
+
+def _summarize(trades, rules, partial: bool) -> Dict[str, Any]:
+    rets = [t["ret"] for t in trades]
+    out: Dict[str, Any] = {"n": len(rets), "rules": rules, "partial": partial}
+    if not rets:
+        return out
+    out.update(_stats(rets))
+    out["exit_mix"] = {k: sum(1 for t in trades if t["exit_reason"] == k)
+                       for k in ("take_profit", "tp_delta", "stop_loss", "time_exit", "expiry")}
+    # The headline earnings comparison: clean holds vs holds through earnings.
+    clean = [t["ret"] for t in trades if t.get("through_earnings") is False]
+    thru = [t["ret"] for t in trades if t.get("through_earnings") is True]
+    out["clean_holds"] = _stats(clean)
+    out["through_earnings"] = _stats(thru)
     return out
 
 
