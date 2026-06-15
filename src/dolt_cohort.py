@@ -136,6 +136,11 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
         commission = 0.65
     trades: List[Dict[str, Any]] = []
     _spot_db = db_path or "data/dolt_options.db"
+    import sys
+    _missing = [s.upper() for s in symbols if not _do.symbol_has_data(s, _spot_db)]
+    if _missing:
+        print(f"  [warning] no chain data for {_missing} — absent from DoltHub or unfetched; skipped",
+              file=sys.stderr)
     for symbol in symbols:
         symbol = symbol.upper()
         spots = _spot_history(symbol, db_path=_spot_db)

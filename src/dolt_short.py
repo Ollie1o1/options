@@ -126,6 +126,11 @@ def run_short_backtest(symbols, dates, opt_type="put", target_delta=0.25,
     except Exception:
         commission = 0.65
     spot_db = db_path or "data/dolt_options.db"
+    import sys
+    _missing = [s.upper() for s in symbols if not _do.symbol_has_data(s, spot_db)]
+    if _missing:
+        print(f"  [warning] no chain data for {_missing} — absent from DoltHub or unfetched; skipped",
+              file=sys.stderr)
     trades: List[Dict[str, Any]] = []
     for symbol in symbols:
         symbol = symbol.upper()

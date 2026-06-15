@@ -120,10 +120,12 @@ def compare(symbols, start, end, filters: Dict[str, Optional[Callable]],
 
 
 # Universe segments — different vol character may favor different rules.
+# NOTE: QQQ and IWM are NOT in the DoltHub options dataset (verified empty), so
+# the "index" segment is SPY only. Only symbols with real chain data here.
 SEGMENTS = {
-    "etf":  ["SPY", "QQQ", "IWM"],
-    "tech": ["AAPL", "MSFT", "GOOG"],
-    "semi": ["NVDA", "AMD"],
+    "index": ["SPY"],
+    "tech":  ["AAPL", "MSFT", "GOOG"],
+    "semi":  ["NVDA", "AMD"],
 }
 
 

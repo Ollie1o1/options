@@ -262,6 +262,16 @@ def backfill(symbols, dates, db_path: str = DEFAULT_CACHE, verbose: bool = False
     return fetched
 
 
+def symbol_has_data(symbol: str, db_path: str = DEFAULT_CACHE) -> bool:
+    """True if the cache holds ANY chain rows for the symbol. Some tickers (QQQ,
+    IWM) are absent from the DoltHub options dataset and fetch as all-empty —
+    callers should warn rather than silently produce zero trades."""
+    _ensure_cache(db_path)
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("SELECT 1 FROM dolt_chain WHERE symbol=? LIMIT 1",
+                            (symbol.upper(),)).fetchone() is not None
+
+
 def stats(db_path: str = DEFAULT_CACHE) -> Dict[str, Any]:
     _ensure_cache(db_path)
     with sqlite3.connect(db_path) as conn:
