@@ -173,12 +173,19 @@ def _real_marks_fill(symbol, direction, target_strike, entry_date, exit_date,
     The walk-forward sells premium, so entry = bid (sell-to-open) and
     exit = ask (buy-to-close on the SAME strike+expiration).
     """
+    import datetime as _dt
     from src import dolt_options as _do
     kw = {"db_path": db_path} if db_path else {}
     entry_chain = _do.get_chain(symbol, entry_date, **kw)
     if not entry_chain:
         return None
-    c = _do.nearest_contract(entry_chain, direction, target_strike, entry_date, target_dte)
+    # The contract must outlive the holding period, else it expires mid-hold and
+    # is absent from the exit chain. Require entry-DTE >= calendar hold + buffer,
+    # and target a DTE comfortably past it so weekly expiries don't pick a stub.
+    hold_days = (_dt.date.fromisoformat(exit_date) - _dt.date.fromisoformat(entry_date)).days
+    floor_dte = max(7, hold_days + 3)
+    c = _do.nearest_contract(entry_chain, direction, target_strike, entry_date,
+                             target_dte=max(target_dte, hold_days + 10), min_dte=floor_dte)
     if not c or c.get("bid") is None or c["bid"] <= 0:
         return None
     exit_chain = _do.get_chain(symbol, exit_date, **kw)
