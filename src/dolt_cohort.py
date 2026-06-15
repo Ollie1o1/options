@@ -126,7 +126,7 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
     """Backtest the long-call cohort over (symbols x dates) on real marks.
     ``entry_filter`` (optional) is a research hook applied at entry."""
     from src import dolt_options as _do
-    from src.dolt_validate import _spot_history
+    from src.dolt_stocks import close_history as _spot_history  # RAW prices (match strikes)
     rules = exit_rules(config_path)
     # Real commission from config (paper_trading.commission_per_contract).
     try:
@@ -135,9 +135,10 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
     except Exception:
         commission = 0.65
     trades: List[Dict[str, Any]] = []
+    _spot_db = db_path or "data/dolt_options.db"
     for symbol in symbols:
         symbol = symbol.upper()
-        spots = _spot_history(symbol)
+        spots = _spot_history(symbol, db_path=_spot_db)
         sdates = sorted(spots)
         for entry_date in dates:
             entry_date = _do._clamp_date(entry_date)
