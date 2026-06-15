@@ -54,10 +54,13 @@ def _reason_bucket(reason: str) -> str:
 def simulate_trade(symbol, entry_date, spot, sdates, rules,
                    spots=None, target_dte=35, db_path=None,
                    commission_per_contract=0.65,
-                   contract_multiplier=100) -> Optional[Dict[str, Any]]:
+                   contract_multiplier=100, entry_filter=None) -> Optional[Dict[str, Any]]:
     """Simulate one cohort long-call trade on real marks, exiting via the canonical
     _evaluate_long_single_leg_exit (TP / deep-ITM delta TP / time exit / SL).
-    Returns a result dict (ret, exit_reason, days_held) or None if unfillable."""
+
+    ``entry_filter`` (optional) is called with a context dict; if it returns False
+    the trade is skipped (research hook for regime/IV/trend filters).
+    Returns a result dict (ret, exit_reason, days_held) or None if not taken."""
     from src import dolt_options as _do
     kw = {"db_path": db_path} if db_path else {}
     spots = spots or {}
@@ -72,6 +75,12 @@ def simulate_trade(symbol, entry_date, spot, sdates, rules,
         return None
     if abs(c["strike"] / spot - 1.0) > 0.4:   # split-mismatch guard
         return None
+    if entry_filter is not None:
+        ctx = {"symbol": symbol, "date": ed_actual, "spot": spot,
+               "entry_iv": c.get("iv"), "delta": c.get("delta"),
+               "dte": _dte(ed_actual, c["expiration"]), "sdates": sdates, "spots": spots}
+        if not entry_filter(ctx):
+            return None
     entry_cost = c["ask"]
     strike, expiration, entry_iv = c["strike"], c["expiration"], c.get("iv")
     # Round-trip commission (buy + sell legs) as a fraction of the premium paid.
@@ -113,8 +122,9 @@ def simulate_trade(symbol, entry_date, spot, sdates, rules,
 
 
 def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
-                        config_path="config.json") -> Dict[str, Any]:
-    """Backtest the long-call cohort over (symbols x dates) on real marks."""
+                        config_path="config.json", entry_filter=None) -> Dict[str, Any]:
+    """Backtest the long-call cohort over (symbols x dates) on real marks.
+    ``entry_filter`` (optional) is a research hook applied at entry."""
     from src import dolt_options as _do
     from src.dolt_validate import _spot_history
     rules = exit_rules(config_path)
@@ -137,7 +147,7 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
             try:
                 t = simulate_trade(symbol, entry_date, spot, sdates, rules,
                                    spots=spots, target_dte=target_dte, db_path=db_path,
-                                   commission_per_contract=commission)
+                                   commission_per_contract=commission, entry_filter=entry_filter)
             except _do.DoltRateLimited:
                 return _summarize(trades, rules, partial=True)
             except _do.DoltQueryError:
