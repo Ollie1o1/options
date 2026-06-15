@@ -272,6 +272,26 @@ def symbol_has_data(symbol: str, db_path: str = DEFAULT_CACHE) -> bool:
                             (symbol.upper(),)).fetchone() is not None
 
 
+def coverage(db_path: str = DEFAULT_CACHE) -> List[Dict[str, Any]]:
+    """Per-symbol data-quality audit so you can trust (or distrust) what's cached:
+    fetched days, chain rows, call/put counts, date range, and an EMPTY flag for
+    symbols absent from the DoltHub dataset (e.g. QQQ, IWM)."""
+    _ensure_cache(db_path)
+    out = []
+    with sqlite3.connect(db_path) as conn:
+        syms = [r[0] for r in conn.execute("SELECT DISTINCT symbol FROM dolt_fetched ORDER BY symbol")]
+        for s in syms:
+            days = conn.execute("SELECT COUNT(*) FROM dolt_fetched WHERE symbol=?", (s,)).fetchone()[0]
+            rows = conn.execute("SELECT COUNT(*) FROM dolt_chain WHERE symbol=?", (s,)).fetchone()[0]
+            calls = conn.execute("SELECT COUNT(*) FROM dolt_chain WHERE symbol=? AND type='call'", (s,)).fetchone()[0]
+            puts = conn.execute("SELECT COUNT(*) FROM dolt_chain WHERE symbol=? AND type='put'", (s,)).fetchone()[0]
+            rng = conn.execute("SELECT MIN(date), MAX(date) FROM dolt_chain WHERE symbol=?", (s,)).fetchone()
+            out.append({"symbol": s, "fetched_days": days, "chain_rows": rows,
+                        "calls": calls, "puts": puts, "first": rng[0], "last": rng[1],
+                        "EMPTY": rows == 0})
+    return out
+
+
 def stats(db_path: str = DEFAULT_CACHE) -> Dict[str, Any]:
     _ensure_cache(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -318,9 +338,18 @@ def _cli():
     ap.add_argument("--end")
     ap.add_argument("--weekly", action="store_true", help="Sample Fridays in [start,end]")
     ap.add_argument("--stats", action="store_true")
+    ap.add_argument("--audit", action="store_true", help="Per-symbol data-quality audit")
     ap.add_argument("--db", default=DEFAULT_CACHE)
     args = ap.parse_args()
 
+    if args.audit:
+        print(f"{'symbol':8} {'days':>6} {'rows':>8} {'calls':>7} {'puts':>7}  {'range':<24} flag")
+        for r in coverage(db_path=args.db):
+            flag = "EMPTY — not in dataset" if r["EMPTY"] else ("no puts" if r["puts"] == 0 else "ok")
+            rng = f"{r['first']}..{r['last']}" if r["first"] else "-"
+            print(f"{r['symbol']:8} {r['fetched_days']:>6} {r['chain_rows']:>8} {r['calls']:>7} "
+                  f"{r['puts']:>7}  {rng:<24} {flag}")
+        return
     if args.probe:
         chain = get_chain("AAPL", COVERAGE_MAX, db_path=args.db)
         print(f"AAPL {COVERAGE_MAX}: {len(chain)} contracts")

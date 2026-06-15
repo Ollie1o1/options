@@ -154,6 +154,41 @@ def train_test(symbols, filter_fn, db_path=None,
     return {"train": _row(tr), "test": _row(te)}
 
 
+_ACTION = {
+    "long_call":  "LONG  — buy calls",
+    "short_put":  "SHORT — sell puts",
+    "put_spread": "SHORT — sell put credit spreads (defined risk)",
+    None:         "STAND DOWN — no edge here",
+}
+
+
+def recommend(symbols, start, end, db_path=None, min_pf=1.05, min_n=20) -> Dict[str, Any]:
+    """The system's data-driven verdict for a name/segment: run long calls, short
+    puts, and put spreads on real marks; recommend the highest-PF candidate that
+    clears PF>=min_pf with positive expectancy, else STAND DOWN. The recommendation
+    IS the backtest — nothing hardcoded."""
+    from src import dolt_options as _do
+    from src.dolt_cohort import run_cohort_backtest
+    from src.dolt_short import run_short_backtest
+    from src.dolt_spread import run_spread_backtest
+    dates = _do._date_range(start, end, weekly=True)
+    cands = {
+        "long_call":  run_cohort_backtest(symbols, dates, db_path=db_path),
+        "short_put":  run_short_backtest(symbols, dates, db_path=db_path, opt_type="put"),
+        "put_spread": run_spread_backtest(symbols, dates, db_path=db_path),
+    }
+    eligible = [(k, v) for k, v in cands.items()
+                if v.get("profit_factor") and v.get("n", 0) >= min_n]
+    eligible.sort(key=lambda kv: kv[1]["profit_factor"], reverse=True)
+    best = None
+    for k, v in eligible:
+        if v["profit_factor"] >= min_pf and (v.get("avg_return") or -1) > 0:
+            best = k
+            break
+    return {"best": best, "action": _ACTION[best],
+            "candidates": {k: _row(v) for k, v in cands.items()}}
+
+
 def _fmt(row) -> str:
     def g(k, p=False):
         v = row.get(k)
@@ -174,6 +209,7 @@ def _cli():
     ap.add_argument("--db", default=None)
     ap.add_argument("--sweep", action="store_true", help="Run the standard filter battery")
     ap.add_argument("--segments", action="store_true", help="Per-segment (etf/tech/semi) battery")
+    ap.add_argument("--recommend", action="store_true", help="Long/short verdict for --symbols")
     ap.add_argument("--train-test", metavar="FILTER", help="Train/test a single battery filter")
     args = ap.parse_args()
     syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -191,6 +227,14 @@ def _cli():
         print(f"Train/test: {args.train_test}  ({', '.join(syms)})")
         print(f"  TRAIN 22-23: {_fmt(out['train'])}")
         print(f"  TEST  24   : {_fmt(out['test'])}")
+        return
+
+    if args.recommend:
+        rec = recommend(syms, args.start, args.end, db_path=db)
+        print(f"VERDICT for {syms}, {args.start}..{args.end}:  >>> {rec['action']} <<<")
+        for name, row in rec["candidates"].items():
+            mark = "  <-- chosen" if name == rec["best"] else ""
+            print(f"  {name:12} {_fmt(row)}{mark}")
         return
 
     if args.segments:
