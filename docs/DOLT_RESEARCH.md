@@ -70,6 +70,36 @@ robust, economically-grounded edge in the whole research effort. Extend to semis
 avoid naked tech short puts (use spreads to cap the tail). Returns are on premium —
 real sizing must account for margin/assignment.
 
+## Experiment 4 — defined-risk put spreads + the long/short recommender
+
+**Put credit spread (sell ~25Δ / buy ~10Δ wing), ret on MAX RISK, 2022–2024:**
+
+| segment | naked short put | put credit spread |
+|---|---|---|
+| index (SPY) | PF 2.28 | **PF 4.29** (defined risk, even better) |
+| tech | PF 0.95 | PF 0.63 |
+| semi | PF 1.17 | PF 0.58 |
+
+Defining the risk HELPS on the index (the wing is cheap relative to the rich index
+VRP → bounded loss lifts PF to 4.29) but KILLS the edge on tech/semi (the wing costs
+more than the thinner edge there). So: **index → put spreads (safe + best); semi →
+edge only in NAKED short puts (size carefully); tech → stand down.**
+
+**The recommender (`dolt_research --recommend --symbols ...`)** runs long calls,
+short puts, and put spreads on real marks and outputs LONG / SHORT / STAND-DOWN by
+PF — the verdict IS the backtest. Per-segment verdicts:
+- **index → SHORT (sell put spreads)**, PF 4.29
+- **semi → SHORT (sell puts)**, PF 1.17 (spread loses, so naked)
+- **tech → STAND DOWN** (long call 1.02, short put 0.95, spread 0.63 — nothing clears)
+
+Long calls remain a first-class candidate — the system will pick them whenever they
+win for a given name/regime.
+
+## Data trust
+`dolt_options --audit` prints per-symbol fetched-days / chain-rows / calls / puts /
+date-range with an EMPTY flag. QQQ and IWM show EMPTY (absent from the dataset) — run
+it any time to confirm you're not being misled by missing data.
+
 ## Open research directions (not yet run)
 1. Finer VIX buckets + more symbols (does the overlay's magnitude hold at n>4 names?).
 2. A different strategy class on the same real marks: **defined-risk spreads / short
