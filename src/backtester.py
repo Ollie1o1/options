@@ -165,6 +165,32 @@ def _find_30d_otm_strike(opt_type: str, S: float, sigma: float, T: float,
             return S * 0.95
 
 
+def _real_marks_fill(symbol, direction, target_strike, entry_date, exit_date,
+                     target_dte=30, db_path=None):
+    """Return real fills for a SHORT-premium round trip from DoltHub, or None if
+    the contract isn't available on both dates.
+
+    The walk-forward sells premium, so entry = bid (sell-to-open) and
+    exit = ask (buy-to-close on the SAME strike+expiration).
+    """
+    from src import dolt_options as _do
+    kw = {"db_path": db_path} if db_path else {}
+    entry_chain = _do.get_chain(symbol, entry_date, **kw)
+    if not entry_chain:
+        return None
+    c = _do.nearest_contract(entry_chain, direction, target_strike, entry_date, target_dte)
+    if not c or c.get("bid") is None or c["bid"] <= 0:
+        return None
+    exit_chain = _do.get_chain(symbol, exit_date, **kw)
+    exit_c = next((x for x in exit_chain
+                   if x["strike"] == c["strike"] and x["expiration"] == c["expiration"]
+                   and x["type"] == c["type"]), None)
+    if not exit_c or exit_c.get("ask") is None:
+        return None
+    return {"entry": c["bid"], "exit": exit_c["ask"], "entry_iv": c.get("iv"),
+            "strike": c["strike"], "expiration": c["expiration"]}
+
+
 # ─── Main backtest ──────────────────────────────────────────────────────────────
 
 def run_backtest(
@@ -180,6 +206,7 @@ def run_backtest(
     dte: int = 30,
     exit_dte: int = 21,
     risk_free: float = 0.045,
+    price_source: str = "bs",   # "bs" (Black-Scholes) or "dolt" (real DoltHub marks)
 ) -> Dict[str, Any]:
     """
     Walk-forward backtest for a list of tickers.
@@ -290,6 +317,9 @@ def run_backtest(
             hv_rank_arr = signals_df["hv_rank"].values
             rsi_arr = signals_df["rsi_14"].values
             ret5_arr = signals_df["ret_5d"].values
+            # Calendar date per signal row — needed to look up real DoltHub marks.
+            sig_dates = [d.date().isoformat() if hasattr(d, "date") else str(d)[:10]
+                         for d in signals_df.index]
 
             # Align pre-normalised VIX to signals_df dates for regime tagging.
             vix_aligned: "Optional[pd.Series]" = None
@@ -339,47 +369,72 @@ def run_backtest(
                     momentum_signal = max(0.0, min(1.0, momentum_signal))
                     score = momentum_signal
 
-                    # BS entry pricing (with bid-ask spread cost)
+                    # Entry pricing — Black-Scholes proxy or real DoltHub marks.
                     T_entry = dte / 365.0
                     sigma = max(hv, 0.05)
                     K = _find_30d_otm_strike(direction, S, sigma, T_entry, risk_free, target_delta=0.30)
-                    entry_price_gross = _bs_option_price(direction, S, K, T_entry, risk_free, sigma)
-                    if entry_price_gross <= 0.001:
-                        continue
-                    entry_price = entry_price_gross * (1 - spread_cost_per_side)
 
-                    # Exit at day i+exit_dte — use exit-day realized vol (not entry-day)
-                    exit_idx = min(i + exit_dte, len(close_arr) - 1)
-                    S_exit = float(close_arr[exit_idx])
-                    T_exit = max((dte - exit_dte) / 365.0, 1 / 365.0)
-                    sigma_exit = float(hv_arr[exit_idx]) if exit_idx < len(hv_arr) and hv_arr[exit_idx] > 0 else sigma
-                    exit_price_time = _bs_option_price(direction, S_exit, K, T_exit, risk_free, sigma_exit)
+                    real_used = False
+                    actual_exit_price = None
+                    entry_price_gross = None
+                    if price_source == "dolt":
+                        _exit_i = min(i + exit_dte, len(sig_dates) - 1)
+                        _fill = _real_marks_fill(ticker, direction, K,
+                                                 sig_dates[i], sig_dates[_exit_i],
+                                                 target_dte=dte)
+                        if _fill is not None and _fill["entry"] > 0.001:
+                            entry_price_gross = _fill["entry"]
+                            entry_price = _fill["entry"]        # real bid (spread already in bid/ask)
+                            actual_exit_price = _fill["exit"]   # real ask
+                            real_used = True
 
-                    # Apply TP/SL: check if TP or SL was triggered before time exit
-                    # Short position: profit when option price falls, loss when it rises
-                    actual_exit_price = exit_price_time
-                    tp_price = entry_price * (1 - tp)    # price decays to tp% of entry → buy back at profit
-                    sl_price = entry_price * (1 - sl)    # price rises by |sl|% of entry → buy back at loss (sl is negative)
+                    if not real_used:
+                        if price_source == "dolt":
+                            continue  # no BS fallback in dolt mode — skip uncovered trades
+                        entry_price_gross = _bs_option_price(direction, S, K, T_entry, risk_free, sigma)
+                        if entry_price_gross <= 0.001:
+                            continue
+                        entry_price = entry_price_gross * (1 - spread_cost_per_side)
 
-                    # Scan intra-period for TP/SL hit (simplified: daily check)
-                    for j in range(1, exit_dte + 1):
-                        if i + j >= len(close_arr):
-                            break
-                        S_j = float(close_arr[i + j])
-                        T_j = max((dte - j) / 365.0, 1 / 365.0)
-                        sigma_j = float(hv_arr[i + j]) if (i + j) < len(hv_arr) and hv_arr[i + j] > 0 else sigma
-                        px_j = _bs_option_price(direction, S_j, K, T_j, risk_free, sigma_j)
-                        if px_j <= tp_price:   # short: profit when price drops
-                            actual_exit_price = px_j
-                            break
-                        if px_j >= sl_price:   # short: loss when price rises
-                            actual_exit_price = px_j
-                            break
+                    if not real_used:
+                        # Exit at day i+exit_dte — use exit-day realized vol (not entry-day)
+                        exit_idx = min(i + exit_dte, len(close_arr) - 1)
+                        S_exit = float(close_arr[exit_idx])
+                        T_exit = max((dte - exit_dte) / 365.0, 1 / 365.0)
+                        sigma_exit = float(hv_arr[exit_idx]) if exit_idx < len(hv_arr) and hv_arr[exit_idx] > 0 else sigma
+                        exit_price_time = _bs_option_price(direction, S_exit, K, T_exit, risk_free, sigma_exit)
 
-                    exit_price_after_costs = actual_exit_price * (1 + spread_cost_per_side)
+                        # Apply TP/SL: check if TP or SL was triggered before time exit
+                        # Short position: profit when option price falls, loss when it rises
+                        actual_exit_price = exit_price_time
+                        tp_price = entry_price * (1 - tp)    # price decays to tp% of entry → buy back at profit
+                        sl_price = entry_price * (1 - sl)    # price rises by |sl|% of entry → buy back at loss (sl is negative)
+
+                        # Scan intra-period for TP/SL hit (simplified: daily check)
+                        for j in range(1, exit_dte + 1):
+                            if i + j >= len(close_arr):
+                                break
+                            S_j = float(close_arr[i + j])
+                            T_j = max((dte - j) / 365.0, 1 / 365.0)
+                            sigma_j = float(hv_arr[i + j]) if (i + j) < len(hv_arr) and hv_arr[i + j] > 0 else sigma
+                            px_j = _bs_option_price(direction, S_j, K, T_j, risk_free, sigma_j)
+                            if px_j <= tp_price:   # short: profit when price drops
+                                actual_exit_price = px_j
+                                break
+                            if px_j >= sl_price:   # short: loss when price rises
+                                actual_exit_price = px_j
+                                break
+
+                        exit_price_after_costs = actual_exit_price * (1 + spread_cost_per_side)
+                    else:
+                        # Real marks: bid/ask already include the spread.
+                        S_exit = float(close_arr[min(i + exit_dte, len(close_arr) - 1)])
+                        exit_price_after_costs = actual_exit_price
+
                     pnl_per_share = entry_price - exit_price_after_costs  # short: profit from premium decay
                     pnl_pct = pnl_per_share / entry_price
-                    pnl_pct_gross = (entry_price_gross - actual_exit_price) / entry_price_gross
+                    pnl_pct_gross = (pnl_pct if real_used
+                                     else (entry_price_gross - actual_exit_price) / entry_price_gross)
 
                     # VIX regime for this trade day
                     vix_val = 20.0  # default "Normal"
@@ -517,6 +572,7 @@ def run_backtest(
         "tp": tp,
         "sl": sl,
         "spread_cost_per_side": spread_cost_per_side,
+        "price_source": price_source,
     }
 
 
@@ -847,12 +903,15 @@ def print_backtest_report(results: dict, width: int = 90) -> None:
     exit_dte = results.get("exit_dte", 21)
     lookback = results.get("lookback_days", 252)
     spread_cost = results.get("spread_cost_per_side", 0.07)
+    _src = results.get("price_source", "bs")
+    _price_tag = ("REAL DOLTHUB MARKS" if _src == "dolt"
+                  else "THEORETICAL PRICES — see module docstring")
 
     print()
     header = (
         f"  BACKTEST RESULTS  \u2014  {n_tickers} ticker(s)"
         f"  |  {lookback}d lookback  |  {dte} DTE  |  {exit_dte}d time exit"
-        f"  [THEORETICAL PRICES — see module docstring]"
+        f"  [{_price_tag}]"
     )
     if HAS_FMT and fmt:
         print(fmt.colorize(header, fmt.Colors.BRIGHT_CYAN, bold=True))
@@ -1585,6 +1644,8 @@ def _cli_main() -> None:
                     help="With --calibrate: write recommendation to config.json (with backup)")
     ap.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to paper_trades.db")
     ap.add_argument("--config", default="config.json", help="Path to config.json")
+    ap.add_argument("--price-source", choices=["bs", "dolt"], default="bs",
+                    help="Option pricing: bs=Black-Scholes (default), dolt=real DoltHub marks")
     args = ap.parse_args()
 
     if args.calibrate:
@@ -1602,7 +1663,7 @@ def _cli_main() -> None:
 
     tickers = args.tickers or ["AAPL", "SPY", "NVDA", "QQQ", "TSLA"]
     print(f"Running backtest for: {', '.join(tickers)}")
-    results = run_backtest(tickers)
+    results = run_backtest(tickers, price_source=args.price_source)
     print_backtest_report(results)
     print_paper_trade_ic(db_path=args.db)
 
