@@ -182,7 +182,7 @@ def run_validation(symbols, dates, target_dte=30, exit_dte=21,
             spot = spots.get(entry_date)
             if spot is None:
                 continue
-            chain = _do.get_chain(symbol, entry_date, **kw)
+            entry_date_actual, chain = _do.get_chain_near(symbol, entry_date, **kw)
             if not chain:
                 continue
             atm = _atm(chain, spot, "call")
@@ -194,11 +194,24 @@ def run_validation(symbols, dates, target_dte=30, exit_dte=21,
                 continue
             xi = min(ei + exit_dte, len(sdates) - 1)
             exit_date = sdates[xi]
+            # The contract must outlive the hold, else it expires before exit and
+            # is absent from the exit chain (every sample would drop).
+            hold_days = (_dt.date.fromisoformat(exit_date)
+                         - _dt.date.fromisoformat(entry_date)).days
+            floor_dte = max(7, hold_days + 3)
             target_strike = spot * 1.03   # ~30-delta OTM proxy for the picker
-            c = _do.nearest_contract(chain, "call", target_strike, entry_date, target_dte)
+            c = _do.nearest_contract(chain, "call", target_strike, entry_date_actual,
+                                     target_dte=max(target_dte, hold_days + 10),
+                                     min_dte=floor_dte)
             if not c or not c.get("ask") or c["ask"] <= 0:
                 continue
-            exit_chain = _do.get_chain(symbol, exit_date, **kw)
+            # Moneyness sanity guard: if the nearest strike is far from spot, the
+            # symbol likely had a split (yfinance spot is split-adjusted, DoltHub
+            # strikes are not) — skip rather than score a corrupted sample.
+            if abs(c["strike"] / spot - 1.0) > 0.4:
+                continue
+            # Exit on the nearest available date with data (DoltHub has gaps).
+            _, exit_chain = _do.get_chain_near(symbol, exit_date, **kw)
             exit_c = next((x for x in exit_chain if x["strike"] == c["strike"]
                            and x["expiration"] == c["expiration"] and x["type"] == "call"), None)
             if not exit_c or exit_c.get("bid") is None:

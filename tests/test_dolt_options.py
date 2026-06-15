@@ -111,6 +111,21 @@ class NearestContractTest(unittest.TestCase):
                           target_strike=100.0, asof="2024-03-15", target_dte=30))
 
 
+class DateRangeTest(unittest.TestCase):
+    def test_weekly_from_non_friday_start_yields_fridays(self):
+        # 2023-01-01 is a Sunday; weekly must still return Fridays in range.
+        dates = do._date_range("2023-01-01", "2023-01-31", weekly=True)
+        self.assertTrue(len(dates) >= 4)
+        for d in dates:
+            import datetime as _dt
+            self.assertEqual(_dt.date.fromisoformat(d).weekday(), 4)
+
+    def test_daily_range_inclusive(self):
+        dates = do._date_range("2024-03-01", "2024-03-05", weekly=False)
+        self.assertEqual(dates, ["2024-03-01", "2024-03-02", "2024-03-03",
+                                 "2024-03-04", "2024-03-05"])
+
+
 class BackfillTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

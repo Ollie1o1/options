@@ -175,6 +175,27 @@ def get_chain(symbol: str, date: str, db_path: str = DEFAULT_CACHE) -> List[Dict
     return chain
 
 
+def get_chain_near(symbol: str, date: str, max_skip: int = 4,
+                   db_path: str = DEFAULT_CACHE, direction: int = 1):
+    """Return (actual_date, chain) for the nearest date that HAS data, searching
+    up to `max_skip` days out, preferring `direction` (+1 forward / -1 back).
+    Handles gaps in the DoltHub dataset (some trading days are missing). Returns
+    (None, []) if nothing found in the window."""
+    symbol = symbol.upper()
+    base = _dtmod.date.fromisoformat(_clamp_date(date))
+    offsets = [0]
+    for k in range(1, max_skip + 1):
+        offsets += [direction * k, -direction * k]
+    for off in offsets:
+        d = (base + _dtmod.timedelta(days=off)).isoformat()
+        if d < COVERAGE_MIN or d > COVERAGE_MAX:
+            continue
+        ch = get_chain(symbol, d, db_path=db_path)
+        if ch:
+            return d, ch
+    return None, []
+
+
 # ── Contract selection ──────────────────────────────────────────────────────
 def nearest_contract(chain: List[Dict[str, Any]], opt_type: str, target_strike: float,
                      asof: str, target_dte: int = 30,
@@ -243,15 +264,17 @@ def _config_basket():
 
 
 def _date_range(start: str, end: str, weekly: bool = False):
+    """Calendar dates in [start, end] (coverage-clamped). When weekly, only
+    Fridays. Steps day-by-day so a non-Friday start still yields all Fridays."""
     start = _clamp_date(start or COVERAGE_MIN)
     end = _clamp_date(end or COVERAGE_MAX)
     s = _dtmod.date.fromisoformat(start)
     e = _dtmod.date.fromisoformat(end)
     out, d = [], s
     while d <= e:
-        if not weekly or d.weekday() == 4:  # Friday
+        if not weekly or d.weekday() == 4:  # 4 = Friday
             out.append(d.isoformat())
-        d += _dtmod.timedelta(days=7 if weekly else 1)
+        d += _dtmod.timedelta(days=1)
     return out
 
 
