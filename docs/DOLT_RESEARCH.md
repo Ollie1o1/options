@@ -40,6 +40,36 @@ standalone edge.** The sweep's aggregate PF 1.29 was flattered by AAPL/SPY + 202
   VIX; prefer low-VIX entries. Use as an overlay / position-size gate, not a guarantee.
 - No filter tested turns the cohort into a robustly profitable standalone strategy.
 
+## Experiment 3 — the SELL side + segmentation (the breakthrough)
+
+Data note: QQQ and IWM are NOT in the DoltHub options dataset (verified empty), so
+the real universe is AAPL, SPY, MSFT, NVDA, GOOG, AMD. Earlier "4-symbol" runs were
+really 3 (QQQ contributed 0). Raw prices (split-unadjusted) make NVDA/GOOG/AMD usable.
+
+**Long call vs short put, per segment, 2022–2024, real marks, all-in:**
+
+| segment | symbols | LONG CALL | SHORT PUT |
+|---|---|---|---|
+| index | SPY | PF 1.26 | **PF 2.28** (win 69%, med +12.5%) |
+| tech | AAPL/MSFT/GOOG | PF 1.02 | PF 0.95 (loses — tail risk) |
+| semi | NVDA/AMD | PF 1.08 | PF 1.17 (win 66%, med +54%) |
+
+**Findings (statistically + economically sound):**
+- **Short puts beat long calls almost everywhere** — positive median (you collect the
+  variance risk premium) vs long calls' always-negative median.
+- **Selling index (SPY) puts is the standout (PF 2.28)** — index puts carry the richest
+  VRP (crash-insurance overpay). OOS-robust: train 22-23 PF 1.26 (survives the bear),
+  test 24 strongly positive. THE strategy that stuck.
+- **Tech is a trap**: short puts lose (PF 0.95, avg −2.2% despite 63% wins — fat left
+  tail from growth selloffs); long calls only breakeven. Avoid or use defined-risk.
+- **Semis**: short puts edge long calls (PF 1.17 vs 1.08).
+- Full 6-symbol short put PF 1.07 (positive but tech dilutes the index/semi edge).
+
+**Actionable:** sell ~25-delta SPY puts, 30–45 DTE, canonical stops. Strongest, most
+robust, economically-grounded edge in the whole research effort. Extend to semis;
+avoid naked tech short puts (use spreads to cap the tail). Returns are on premium —
+real sizing must account for margin/assignment.
+
 ## Open research directions (not yet run)
 1. Finer VIX buckets + more symbols (does the overlay's magnitude hold at n>4 names?).
 2. A different strategy class on the same real marks: **defined-risk spreads / short
