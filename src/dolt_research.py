@@ -119,6 +119,27 @@ def compare(symbols, start, end, filters: Dict[str, Optional[Callable]],
     return out
 
 
+# Universe segments — different vol character may favor different rules.
+SEGMENTS = {
+    "etf":  ["SPY", "QQQ", "IWM"],
+    "tech": ["AAPL", "MSFT", "GOOG"],
+    "semi": ["NVDA", "AMD"],
+}
+
+
+def segment_battery() -> Dict[str, Optional[Callable]]:
+    """Focused battery (regime hypothesis only) to limit multiple comparisons."""
+    return {"baseline": None, "low_vix_20": low_vix(20.0),
+            "low_vix_18": low_vix(18.0), "high_vix_22": high_vix(22.0)}
+
+
+def segment_sweep(start, end, db_path=None, segments=None) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Run the focused battery within each segment. Returns {segment: {filter: stats}}."""
+    segments = segments or SEGMENTS
+    return {seg: compare(syms, start, end, segment_battery(), db_path=db_path)
+            for seg, syms in segments.items()}
+
+
 def train_test(symbols, filter_fn, db_path=None,
                train=("2022-01-01", "2023-12-31"),
                test=("2024-01-01", "2024-12-31")) -> Dict[str, Any]:
@@ -150,6 +171,7 @@ def _cli():
     ap.add_argument("--end", default="2024-12-31")
     ap.add_argument("--db", default=None)
     ap.add_argument("--sweep", action="store_true", help="Run the standard filter battery")
+    ap.add_argument("--segments", action="store_true", help="Per-segment (etf/tech/semi) battery")
     ap.add_argument("--train-test", metavar="FILTER", help="Train/test a single battery filter")
     args = ap.parse_args()
     syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -167,6 +189,15 @@ def _cli():
         print(f"Train/test: {args.train_test}  ({', '.join(syms)})")
         print(f"  TRAIN 22-23: {_fmt(out['train'])}")
         print(f"  TEST  24   : {_fmt(out['test'])}")
+        return
+
+    if args.segments:
+        print(f"Per-segment battery, {args.start}..{args.end} (all-in real marks):")
+        res = segment_sweep(args.start, args.end, db_path=db)
+        for seg, battery in res.items():
+            print(f"\n[{seg.upper()}]  {SEGMENTS[seg]}")
+            for name, row in battery.items():
+                print(f"  {name:14} {_fmt(row)}")
         return
 
     if args.sweep:
