@@ -35,6 +35,30 @@ class QueryTest(unittest.TestCase):
                 do._query("SELECT bad")
 
 
+class RateLimitTest(unittest.TestCase):
+    def _resp(self, status, payload=None, text=""):
+        m = mock.Mock()
+        m.status_code = status
+        m.json.return_value = payload or {}
+        m.text = text
+        return m
+
+    def test_403_retries_then_raises_rate_limited(self):
+        # Always 403 → after backoff retries, raise DoltRateLimited (not crash).
+        with mock.patch("src.dolt_options.requests.get", return_value=self._resp(403)), \
+             mock.patch("src.dolt_options.time.sleep"):
+            with self.assertRaises(do.DoltRateLimited):
+                do._query("SELECT 1")
+
+    def test_403_then_success_recovers(self):
+        ok = self._resp(200, {"query_execution_status": "Success", "rows": [{"n": "1"}]})
+        seq = [self._resp(403), ok]
+        with mock.patch("src.dolt_options.requests.get", side_effect=seq), \
+             mock.patch("src.dolt_options.time.sleep"):
+            rows = do._query("SELECT 1")
+        self.assertEqual(rows, [{"n": "1"}])
+
+
 class NormalizeTest(unittest.TestCase):
     def test_normalize_row_types_and_mid(self):
         raw = {"date": "2026-06-12", "act_symbol": "AAPL", "expiration": "2026-07-17",

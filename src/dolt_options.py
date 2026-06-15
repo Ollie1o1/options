@@ -25,7 +25,6 @@ COVERAGE_MIN = "2019-02-09"
 COVERAGE_MAX = "2026-06-12"
 DEFAULT_CACHE = os.path.join("data", "dolt_options.db")
 _THROTTLE_S = 0.30          # polite spacing between live calls
-_MAX_RETRIES = 3
 
 
 class DoltQueryError(RuntimeError):
@@ -33,29 +32,49 @@ class DoltQueryError(RuntimeError):
 
 
 # ── SQL client ──────────────────────────────────────────────────────────────
+# HTTP statuses worth retrying with backoff: rate-limit (403/429) + transient 5xx.
+_RETRY_STATUS = (403, 429, 500, 502, 503, 504)
+_MAX_RETRIES = 5
+
+
+class DoltRateLimited(DoltQueryError):
+    """Raised when DoltHub keeps rate-limiting (403/429) after backoff retries."""
+
+
 def _query(sql: str, timeout: int = 45) -> List[Dict[str, Any]]:
     """Run one SQL query against the DoltHub API. Returns rows (list of dicts).
-    Retries on transient deadline/network errors. Raises DoltQueryError on a
-    real query error. Sends NO auth header (DoltHub 400s if one is present)."""
+    Retries deadline/network errors AND rate-limit/5xx HTTP statuses with
+    exponential backoff. Raises DoltRateLimited if 403/429 persists, else
+    DoltQueryError. Sends NO auth header (DoltHub 400s if one is present)."""
     last_exc: Optional[Exception] = None
+    rate_limited = False
     for attempt in range(_MAX_RETRIES):
         try:
             resp = requests.get(API_BASE, params={"q": sql}, timeout=timeout)
-            if resp.status_code != 200:
-                raise DoltQueryError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-            j = resp.json()
-            status = j.get("query_execution_status")
-            if status == "Success":
-                return j.get("rows") or []
-            msg = j.get("query_execution_message", "")
-            if "deadline" in msg.lower() and attempt < _MAX_RETRIES - 1:
-                last_exc = DoltQueryError(msg)
-                time.sleep(1.0 * (attempt + 1))
+            if resp.status_code == 200:
+                j = resp.json()
+                status = j.get("query_execution_status")
+                if status == "Success":
+                    return j.get("rows") or []
+                msg = j.get("query_execution_message", "")
+                if "deadline" in msg.lower() and attempt < _MAX_RETRIES - 1:
+                    last_exc = DoltQueryError(msg)
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                raise DoltQueryError(msg or f"status={status}")
+            if resp.status_code in _RETRY_STATUS:
+                rate_limited = resp.status_code in (403, 429)
+                last_exc = DoltQueryError(f"HTTP {resp.status_code}")
+                # Longer backoff for rate limits than for plain 5xx.
+                base = 8.0 if rate_limited else 1.5
+                time.sleep(base * (attempt + 1))
                 continue
-            raise DoltQueryError(msg or f"status={status}")
+            raise DoltQueryError(f"HTTP {resp.status_code}: {resp.text[:200]}")
         except requests.RequestException as exc:
             last_exc = exc
             time.sleep(1.0 * (attempt + 1))
+    if rate_limited:
+        raise DoltRateLimited(f"rate-limited after {_MAX_RETRIES} attempts: {last_exc}")
     raise DoltQueryError(f"query failed after {_MAX_RETRIES} attempts: {last_exc}")
 
 

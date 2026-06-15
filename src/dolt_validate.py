@@ -182,7 +182,19 @@ def run_validation(symbols, dates, target_dte=30, exit_dte=21,
             spot = spots.get(entry_date)
             if spot is None:
                 continue
-            entry_date_actual, chain = _do.get_chain_near(symbol, entry_date, **kw)
+            try:
+                entry_date_actual, chain = _do.get_chain_near(symbol, entry_date, **kw)
+            except _do.DoltRateLimited:
+                # Rate-limited: stop fetching, keep whatever we've gathered so far.
+                print(f"  [rate-limited at {symbol} {entry_date}] — returning partial results "
+                      f"({len(samples)} samples so far)")
+                ic = compute_ic(samples)
+                ic["em_realism_mean"] = round(mean(em_samples), 3) if em_samples else None
+                ic["quintiles"] = _quintiles(samples)
+                ic["partial"] = True
+                return ic
+            except _do.DoltQueryError:
+                continue
             if not chain:
                 continue
             atm = _atm(chain, spot, "call")
@@ -211,7 +223,18 @@ def run_validation(symbols, dates, target_dte=30, exit_dte=21,
             if abs(c["strike"] / spot - 1.0) > 0.4:
                 continue
             # Exit on the nearest available date with data (DoltHub has gaps).
-            _, exit_chain = _do.get_chain_near(symbol, exit_date, **kw)
+            try:
+                _, exit_chain = _do.get_chain_near(symbol, exit_date, **kw)
+            except _do.DoltRateLimited:
+                print(f"  [rate-limited at {symbol} {exit_date}] — returning partial results "
+                      f"({len(samples)} samples so far)")
+                ic = compute_ic(samples)
+                ic["em_realism_mean"] = round(mean(em_samples), 3) if em_samples else None
+                ic["quintiles"] = _quintiles(samples)
+                ic["partial"] = True
+                return ic
+            except _do.DoltQueryError:
+                continue
             exit_c = next((x for x in exit_chain if x["strike"] == c["strike"]
                            and x["expiration"] == c["expiration"] and x["type"] == "call"), None)
             if not exit_c or exit_c.get("bid") is None:
