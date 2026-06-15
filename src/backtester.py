@@ -169,7 +169,12 @@ def _find_30d_otm_strike(opt_type: str, S: float, sigma: float, T: float,
 
 def run_backtest(
     tickers: List[str],
-    lookback_days: int = 252,
+    # NOTE: hv_rank uses a rolling 252d percentile, which consumes the first
+    # ~252 rows as NaN warmup. A 252-day lookback therefore leaves ~1 usable
+    # signal row and the backtest silently produces nothing ("Too few signal
+    # rows" for every ticker). Default must comfortably exceed the rank window
+    # so real trades survive — 504d (~2y) leaves ~252 usable rows.
+    lookback_days: int = 504,
     tp: float = 0.50,
     sl: float = -0.25,
     dte: int = 30,
@@ -215,7 +220,7 @@ def run_backtest(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            _vix_raw = yf.Ticker("^VIX").history(period="2y")["Close"]
+            _vix_raw = yf.Ticker("^VIX").history(period="3y")["Close"]
         if not _vix_raw.empty:
             vix_hist = _vix_raw
     except Exception:
@@ -239,7 +244,8 @@ def run_backtest(
             tkr = yf.Ticker(ticker)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                hist = tkr.history(period="2y")
+                # Fetch enough to cover lookback_days plus the rolling-rank warmup.
+                hist = tkr.history(period="3y")
             if hist.empty or len(hist) < lookback_days // 2:
                 all_ticker_results.append({"ticker": ticker, "error": "Insufficient history"})
                 continue
