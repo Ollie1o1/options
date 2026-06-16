@@ -201,7 +201,12 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     extras = []
     surf = row.get("iv_surface_residual", None)
     if surf is not None and pd.notna(surf):
-        extras.append("CHEAP vs surface" if float(surf) < 0 else "RICH vs surface")
+        # Same ±0.15 deadband the Thesis/Quant-read lines use, so VERDICT
+        # never contradicts the detail below it.
+        if float(surf) < -0.15:
+            extras.append("CHEAP vs surface")
+        elif float(surf) > 0.15:
+            extras.append("RICH vs surface")
     vrp = row.get("vrp_regime", None)
     if vrp:
         extras.append(f"VRP {vrp}")
@@ -1416,20 +1421,25 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 if r.get("high_premium_turnover", False):
                     title += f"  {fmt.GLYPHS['whale']} WHALE"
                 print()
-                print(ui.rule(WIDTH, title=title))
+                print(ui.heavy_rule(WIDTH, title=title))
 
                 stars, _ = fmt.format_quality_score(quality)
-                iv_color = fmt.Colors.GREEN if iv < chain_iv_median * 0.9 else (fmt.Colors.RED if iv > chain_iv_median * 1.2 else fmt.Colors.YELLOW)
+                # IV cheap/rich is conveyed by the Valuation meter; keep the
+                # headline neutral so colour stays reserved for EV/warnings.
                 headline = [
                     stars,
                     f"Prem {fmt.style(f'${premium:.2f}', 'emph')}",
-                    f"IV {fmt.colorize(format_pct(iv), iv_color)}",
+                    f"IV {format_pct(iv)}",
                     f"OI {fmt.colorize(f'{oi:,}', _oi_color(oi))}",
                     f"Vol {fmt.colorize(f'{vol:,}', _vol_color(vol))}",
                     f"Δ {fmt.format_delta(delta, is_call=(opt_type == 'CALL'))}",
                     fmt.style(moneyness, 'good' if moneyness == 'ITM' else ('warn' if moneyness == 'ATM' else 'muted')),
                 ]
                 print("  " + "   ".join(headline))
+
+                # Decision zone — the two lines the eye should land on first.
+                for _dz in format_decision_zone(r, config):
+                    print(_dz)
             else:
                 rank_plain = f"#{rank}/{total_picks}"
                 rank_plain = f"{rank_plain:<8}"

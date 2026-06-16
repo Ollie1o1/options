@@ -178,6 +178,30 @@ class DecisionZoneTestCase(unittest.TestCase):
         self.assertIn(f"${lvl['profit_target']:.2f}", body)
         self.assertIn(f"${lvl['stop_loss']:.2f}", body)
 
+    def test_exec_guidance_omits_spread_word(self):
+        import pandas as pd
+        from src.trade_analysis import generate_execution_guidance
+        row = pd.Series({"spread_pct": 0.055, "bid": 4.40, "ask": 4.65,
+                         "premium": 4.53, "volume": 462, "openInterest": 304})
+        g = generate_execution_guidance(row)
+        self.assertIn("LIMIT", g)
+        # spread% is canonical in the Liquidity row + Order Ticket, not here
+        self.assertNotIn("spread", g.lower())
+
+    def test_report_renders_decision_zone_and_heavy_rule(self):
+        import io
+        import contextlib
+        from ui_preview import df
+        from src.cli_display import print_report
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_report(df(), 182.40, 0.043, 3, 14, 45, mode="Discovery scan",
+                         market_trend="Bullish", volatility_regime="Normal",
+                         config={}, compact=False)
+        out = strip(buf.getvalue())
+        self.assertIn("VERDICT", out)
+        self.assertIn("━", out)  # heavy rule on pick boundaries
+
 
 class ScenarioTableTestCase(unittest.TestCase):
     def setUp(self):

@@ -780,15 +780,16 @@ def generate_execution_guidance(row: pd.Series) -> str:
 
     parts = []
 
-    # Limit price guidance based on spread width
+    # Limit-price guidance. Spread % is canonical in the Liquidity row and the
+    # Order Ticket, so keep only the fill-action hint here (no spread restated).
     if spread_pct < 0.03 and mid > 0:
-        parts.append(f"LIMIT @ mid ${mid:.2f} (tight spread, likely fills)")
+        parts.append(f"LIMIT @ mid ${mid:.2f} (likely fills)")
     elif spread_pct < 0.08 and bid > 0:
         limit_px = bid + 0.05
-        parts.append(f"LIMIT @ ${limit_px:.2f} (bid+$0.05, moderate spread)")
+        parts.append(f"LIMIT @ ${limit_px:.2f} (bid+$0.05)")
     elif bid > 0:
         limit_px = bid + 0.10
-        parts.append(f"LIMIT @ ${limit_px:.2f} (wide spread — work the order)")
+        parts.append(f"LIMIT @ ${limit_px:.2f} (work the order)")
     elif mid > 0:
         parts.append(f"LIMIT @ ${mid:.2f} (no bid data, use mid)")
 
