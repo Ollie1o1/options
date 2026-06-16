@@ -89,8 +89,14 @@ def portfolio_guard(picks: List[Dict[str, Any]], mode: str = "Discovery") -> Dic
     return exp
 
 
-def format_guard_lines(picks: List[Dict[str, Any]], mode: str = "Discovery") -> List[str]:
-    """Plain-text panel lines (display-only). Empty list if < 2 picks or no data."""
+def format_guard_lines(picks: List[Dict[str, Any]], mode: str = "Discovery",
+                       corr_pairs: Optional[List] = None) -> List[str]:
+    """Plain-text panel lines (display-only). Empty list if < 2 picks or no data.
+
+    ``corr_pairs`` is an optional list of ``(t1, t2, corr)`` highly-correlated
+    pairs; when present they render in this same panel so concentration risk
+    (Greeks + price correlation) lives in one place.
+    """
     g = portfolio_guard(picks, mode=mode)
     if g["n"] < 2:
         return []
@@ -103,4 +109,10 @@ def format_guard_lines(picks: List[Dict[str, Any]], mode: str = "Discovery") -> 
             lines.append(f"  ⚠ {w}")
     else:
         lines.append("  ✓ reasonably diversified across direction / vol / underlyings")
+    if corr_pairs:
+        for t1, t2, c in sorted(corr_pairs, key=lambda p: -p[2])[:5]:
+            lines.append(f"  ⚠ {t1}/{t2} corr {c:.2f} — same bet twice; "
+                         f"don't size as independent")
+        if len(corr_pairs) > 5:
+            lines.append(f"  … and {len(corr_pairs) - 5} more pairs ≥0.80")
     return lines
