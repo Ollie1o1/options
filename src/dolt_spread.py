@@ -165,7 +165,7 @@ def run_spread_backtest(symbols, dates, short_delta=0.25, long_delta=0.10,
 
 
 def _summarize(trades, partial: bool) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"n": len(trades), "partial": partial}
+    out: Dict[str, Any] = {"n": len(trades), "partial": partial, "trades": trades}
     if not trades:
         return out
     out.update(_stats([t["ret"] for t in trades]))   # ret is on max-risk

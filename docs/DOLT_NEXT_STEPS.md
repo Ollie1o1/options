@@ -71,9 +71,20 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
      (P1.4) would skip the top-selling losses.** All small-n — qualitative, not proven.
 
 ### P1 — turn the signal into a deployable strategy
-3. **Position sizing + risk layer.** Every backtest is 1 contract; returns are per-contract on
-   premium/max-risk. Add fixed-fractional (e.g. risk 1–2% of equity per trade) sizing and
-   report portfolio-level equity curve / max drawdown, not just per-trade PF.
+3. ~~**Position sizing + risk layer.**~~ **DONE 2026-06-15.** New `src/dolt_portfolio.py`:
+   `equity_curve(trades, start_equity, risk_frac)` (sequential fixed-fractional compounding) +
+   `max_concurrent()`, CLI `python -m src.dolt_portfolio --strategy put_spread --symbols SPY`.
+   Required exposing `trades` from `dolt_spread._summarize`.
+   **HEADLINE FINDING — the portfolio view destroys the per-trade story:**
+   - SPY put spread 22-24, risk 2%/trade: 31 trades → end +1.1%, **CAGR +0.3%**, maxDD −0.2%,
+     **maxConcurrent = 27**.
+   - PF 4.29 looked great because it's per-trade on max-risk. But you only get **31 trades in
+     3 years on one index**, and 27 are open AT ONCE (35-DTE spreads opened weekly stack up).
+     To truly cap portfolio risk at 2% you'd size each trade at ~0.07% → returns vanish.
+   - **Conclusion: the index put-spread edge is real per-trade but has NEGLIGIBLE portfolio
+     CAPACITY as a standalone single-name strategy (~0.3% CAGR).** This directly reframes P2.7:
+     you cannot build a real-money program on this alone. Capacity (more names/segments,
+     P3.10) — not a better filter — is the binding constraint.
 4. ~~**VRP / regime timing.**~~ **DONE 2026-06-15.** Added `realized_vol(ctx, lookback)` +
    `vrp_rich(min_ratio)` (entry only when entry_iv / realized_vol ≥ ratio). SPY spread, 22-24:
    - `vrp_rich_1.1`: **PF 4.29 → 4.87** (n=23) — light filter helps modestly, right sign.
