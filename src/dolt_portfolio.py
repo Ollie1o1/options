@@ -95,6 +95,42 @@ def equity_curve(trades: List[Dict[str, Any]], start_equity: float = 100_000.0,
     return out
 
 
+def margin_profile(trades: List[Dict[str, Any]], contract_multiplier: int = 100
+                   ) -> Dict[str, Any]:
+    """Capital actually tied up (P1.5). For a DEFINED-RISK put spread, margin per
+    contract = max_risk * multiplier (the broker holds the max loss). Walks the
+    calendar to find PEAK simultaneous margin across overlapping trades — the real
+    capital the strategy demands — plus return-on-peak-capital and an
+    early-assignment-risk proxy (stop-loss exits = short leg breached ITM).
+
+    Naked short puts are NOT defined risk; their margin is ~broker reg-T (≈20% of
+    notional) and assignment leaves you long shares — handled separately, flagged."""
+    usable = [t for t in trades if t.get("max_risk") and t.get("entry_date") and t.get("exit_date")]
+    # day-by-day open margin via a sweep of (+open, -close) events
+    events = []
+    for t in usable:
+        m = t["max_risk"] * contract_multiplier
+        events.append((t["entry_date"], 1, m))
+        events.append((t["exit_date"], -1, m))
+    events.sort(key=lambda ev: (ev[0], ev[1]))   # closes before opens same day
+    cur = peak = 0.0
+    for _, sign, m in events:
+        cur += sign * m
+        peak = max(peak, cur)
+    total_pnl = sum(t["ret"] * t["max_risk"] * contract_multiplier
+                    for t in usable if t.get("ret") is not None)
+    assignment_risk = sum(1 for t in usable if t.get("exit_reason") == "stop_loss")
+    return {
+        "n": len(usable),
+        "peak_margin": peak,
+        "total_pnl": total_pnl,
+        "return_on_peak_margin": (total_pnl / peak) if peak > 0 else None,
+        "assignment_risk_trades": assignment_risk,
+        "assignment_risk_frac": (assignment_risk / len(usable)) if usable else None,
+        "contract_multiplier": contract_multiplier,
+    }
+
+
 def _run_strategy(strategy, symbols, start, end, db_path=None, entry_filter=None):
     """Run a strategy backtest and return its trade list (P1.3 needs raw trades)."""
     from src import dolt_options as _do
@@ -139,6 +175,12 @@ def _cli():
     print(f"  trades={pf['n']}  end=${pf['end_equity']:,.0f}  total={pct(pf['total_return'])}  "
           f"CAGR={pct(pf['cagr'])}  maxDD={pct(pf['max_drawdown'])}  "
           f"maxConcurrent={pf['max_concurrent']}")
+    mp = margin_profile(trades)
+    if mp["n"]:
+        print(f"  [margin] peakCapital=${mp['peak_margin']:,.0f}  "
+              f"return-on-peak-capital={pct(mp['return_on_peak_margin'])}  "
+              f"assignment-risk={mp['assignment_risk_trades']}/{mp['n']} "
+              f"({pct(mp['assignment_risk_frac'])}) stop-loss exits")
 
 
 if __name__ == "__main__":

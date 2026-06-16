@@ -12,6 +12,11 @@ def _t(ret, entry, exit_):
     return {"ret": ret, "entry_date": entry, "exit_date": exit_}
 
 
+def _tm(ret, entry, exit_, max_risk, exit_reason="take_profit"):
+    return {"ret": ret, "entry_date": entry, "exit_date": exit_,
+            "max_risk": max_risk, "exit_reason": exit_reason}
+
+
 class MaxConcurrentTest(unittest.TestCase):
     def test_non_overlapping(self):
         trades = [_t(0.1, "2024-01-01", "2024-01-05"),
@@ -60,6 +65,35 @@ class EquityCurveTest(unittest.TestCase):
         small = pf.equity_curve(trades, risk_frac=0.01)["end_equity"]
         big = pf.equity_curve(trades, risk_frac=0.05)["end_equity"]
         self.assertGreater(big, small)
+
+
+class MarginProfileTest(unittest.TestCase):
+    def test_peak_margin_sums_overlap(self):
+        # two spreads max_risk 8.5 each, overlapping -> peak = 2 * 850
+        trades = [_tm(0.1, "2024-01-01", "2024-01-10", 8.5),
+                  _tm(0.1, "2024-01-03", "2024-01-08", 8.5)]
+        mp = pf.margin_profile(trades)
+        self.assertAlmostEqual(mp["peak_margin"], 2 * 8.5 * 100, places=4)
+
+    def test_peak_margin_non_overlap(self):
+        trades = [_tm(0.1, "2024-01-01", "2024-01-05", 8.5),
+                  _tm(0.1, "2024-01-06", "2024-01-10", 8.5)]
+        mp = pf.margin_profile(trades)
+        self.assertAlmostEqual(mp["peak_margin"], 8.5 * 100, places=4)
+
+    def test_return_on_peak_capital(self):
+        # single trade ret +0.5 on max_risk 10 -> pnl = 0.5*10*100 = 500; peak = 1000
+        trades = [_tm(0.5, "2024-01-01", "2024-01-05", 10.0)]
+        mp = pf.margin_profile(trades)
+        self.assertAlmostEqual(mp["total_pnl"], 500.0, places=4)
+        self.assertAlmostEqual(mp["return_on_peak_margin"], 0.5, places=6)
+
+    def test_assignment_risk_counts_stop_loss(self):
+        trades = [_tm(0.1, "2024-01-01", "2024-01-05", 8.5, "take_profit"),
+                  _tm(-1.0, "2024-01-02", "2024-01-06", 8.5, "stop_loss")]
+        mp = pf.margin_profile(trades)
+        self.assertEqual(mp["assignment_risk_trades"], 1)
+        self.assertAlmostEqual(mp["assignment_risk_frac"], 0.5, places=6)
 
 
 if __name__ == "__main__":

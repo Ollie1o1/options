@@ -94,8 +94,17 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
      hard. Use a LIGHT threshold (~1.1×) at most.** The `in_drawdown` filter (P0.2, PF 5.43)
      is actually the stronger version of the same "sell rich vol" idea. Both confirm: the edge
      concentrates in elevated-vol entries. Real lever is more data (P3.10), not a tighter filter.
-5. **Assignment / margin mechanics.** Short puts can be assigned; spreads have margin. Model
-   early assignment and the actual capital tied up so the equity curve is real.
+5. ~~**Assignment / margin mechanics.**~~ **DONE 2026-06-15.** `dolt_portfolio.margin_profile()`:
+   for a defined-risk spread, margin/contract = max_risk×100; walks the calendar for PEAK
+   simultaneous capital across overlapping trades + return-on-peak-capital + an
+   early-assignment proxy (stop-loss exits = short leg breached). SPY spread 22-24:
+   - **peak capital ≈ $59,754** (27 concurrent), **return-on-peak-capital +2.2% over 3y**
+     (~0.7%/yr on deployed capital). Confirms the P1.3 capacity wall in dollars.
+   - **assignment-risk = 0/31 stop-loss exits** — the defined-risk wing means the short leg is
+     never force-closed ITM in-sample; early-assignment risk is negligible for the spread
+     (this is the whole reason to pay for the wing vs naked puts). Naked-put margin (reg-T,
+     ~20% notional, real assignment into shares) is flagged in the function docstring as the
+     separate case if the short-put strategy is ever sized.
 
 ### P2 — wire it into the system (the user explicitly wants long/short guidance live)
 6. **Surface the recommender verdict in the live screener.** When scanning a name, show
