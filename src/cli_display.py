@@ -257,11 +257,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         pcr_str = f"PCR: {float(pcr):.2f}"
         if pcr_signal:
             pcr_str += f" ({pcr_signal})"
-        if HAS_ENHANCED_CLI and pcr_signal:
-            pcr_color = fmt.Colors.RED if pcr_signal == "HEAVY HEDGING" else (fmt.Colors.GREEN if pcr_signal == "BULLISH FLOW" else fmt.Colors.DIM)
-            flow.append(fmt.colorize(pcr_str, pcr_color))
-        else:
-            flow.append(pcr_str)
+        # PCR flow signal is informational, not a P&L sign — render neutral.
+        flow.append(pcr_str)
 
     rsi = row.get("rsi_14", pd.NA)
     ret5 = row.get("ret_5d", pd.NA)
@@ -269,12 +266,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         flow.append(f"Momentum: RSI {float(rsi):.0f}, 5d {format_pct(ret5)}")
 
     sentiment = row.get("sentiment_tag", "Neutral")
-    if HAS_ENHANCED_CLI:
-        s_color = fmt.Colors.GREEN if sentiment == "Bullish" else (fmt.Colors.RED if sentiment == "Bearish" else fmt.Colors.YELLOW)
-        sentiment_str = fmt.colorize(sentiment, s_color)
-    else:
-        sentiment_str = sentiment
-    flow.append(f"Sentiment: {sentiment_str}")
+    # Sentiment tag is context, not a directional sign — render neutral.
+    flow.append(f"Sentiment: {sentiment}")
 
     if pd.notna(row.get("seasonal_win_rate")):
         win_rate = row["seasonal_win_rate"]
@@ -299,11 +292,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
     tss = row.get("term_structure_spread", None)
     if tss is not None and pd.notna(tss):
         ts_label = "CONTANGO" if tss > 0.02 else ("BACKWARDATION" if tss < -0.02 else "FLAT")
-        if HAS_ENHANCED_CLI:
-            ts_color = fmt.Colors.GREEN if tss > 0.02 else (fmt.Colors.RED if tss < -0.02 else fmt.Colors.DIM)
-            ctx.append(f"Term: {fmt.colorize(ts_label, ts_color)} ({tss:+.1%})")
-        else:
-            ctx.append(f"Term: {ts_label} ({tss:+.1%})")
+        # Term structure regime is informational, not a P&L sign — neutral.
+        ctx.append(f"Term: {ts_label} ({tss:+.1%})")
 
     if ctx:
         lines.append(ui.kv_line("Context", ctx) if HAS_ENHANCED_CLI
