@@ -152,5 +152,46 @@ class ContextLinesTest(unittest.TestCase):
             pc.context_lines({}, db_path="/no/such.db", with_insider=False), list)
 
 
+class QuantReadTest(unittest.TestCase):
+    def test_positive_ev_cheap_surface(self):
+        line = pc.quant_read_line({
+            "ev_per_contract": 42.0, "ev_gross_per_contract": 60.0,
+            "ev_cost_per_contract": 18.0, "iv_surface_residual": -0.05,
+            "vrp_regime": "RICH"})
+        self.assertIn("POSITIVE EV after cost", line)
+        self.assertIn("CHEAP vs surface", line)
+        self.assertIn("VRP: RICH", line)
+
+    def test_negative_ev_flagged(self):
+        line = pc.quant_read_line({"ev_per_contract": -15.0,
+                                   "ev_gross_per_contract": -3.0,
+                                   "ev_cost_per_contract": 12.0,
+                                   "iv_surface_residual": 0.04})
+        self.assertIn("NEGATIVE EV after cost", line)
+        self.assertIn("RICH vs surface", line)
+
+    def test_none_without_ev(self):
+        self.assertIsNone(pc.quant_read_line({}))
+        self.assertIsNone(pc.quant_read_line({"ev_per_contract": float("nan")}))
+
+    def test_unknown_vrp_omitted(self):
+        line = pc.quant_read_line({"ev_per_contract": 10.0, "vrp_regime": "UNKNOWN"})
+        self.assertNotIn("VRP", line)
+
+
+class NetEvTest(unittest.TestCase):
+    def test_round_trip_deducts_full_spread_and_two_commissions(self):
+        from src.trade_analysis import net_ev_per_contract
+        # gross edge 0.50/share -> $50; spread 10% of $2 prem over 2 sides = $20; comm 2*0.65=1.30
+        ev = net_ev_per_contract(0.50, 2.0, 0.10, commission_per_contract=0.65)
+        self.assertAlmostEqual(ev, 50.0 - 20.0 - 1.30, places=6)
+
+    def test_round_trip_costs_more_than_one_way(self):
+        from src.trade_analysis import net_ev_per_contract
+        rt = net_ev_per_contract(0.50, 2.0, 0.10, round_trip=True)
+        ow = net_ev_per_contract(0.50, 2.0, 0.10, round_trip=False)
+        self.assertLess(rt, ow)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1042,7 +1042,17 @@ def calculate_metrics(
         hv_payoff = np.where(is_call,
             S_vals * _q_disc * norm_cdf(hv_d1) - K_vals * disc * norm_cdf(hv_d2),
             K_vals * disc * norm_cdf(-hv_d2) - S_vals * _q_disc * norm_cdf(-hv_d1))
-    df["ev_per_contract"] = 100.0 * (hv_payoff - prem_vals) - (50.0 * prem_vals * df["spread_pct"].fillna(0.0).values)
+    # Net-of-cost EV: rank by what survives REAL round-trip costs (cost is the wall).
+    # Was: deducted only one half-spread (entry). Now: full round-trip spread crossing
+    # (open + close) plus commission both sides. gross/cost broken out for transparency.
+    from .trade_analysis import net_ev_per_contract as _net_ev
+    _commission = float(config.get("paper_trading", {}).get("commission_per_contract", 0.65))
+    _spread_arr = df["spread_pct"].fillna(0.0).values
+    _gross_edge = hv_payoff - prem_vals
+    df["ev_gross_per_contract"] = 100.0 * _gross_edge
+    df["ev_cost_per_contract"] = (100.0 * prem_vals * _spread_arr) + (2.0 * _commission)
+    df["ev_per_contract"] = _net_ev(_gross_edge, prem_vals, _spread_arr,
+                                    commission_per_contract=_commission)
     # Null out EV where HV was missing (IV fallback produces meaningless ~0 values)
     df["ev_hv_fallback"] = _hv_fallback_mask
     df.loc[_hv_fallback_mask, "ev_per_contract"] = np.nan

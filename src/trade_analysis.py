@@ -10,6 +10,25 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 
 
+def net_ev_per_contract(gross_edge_per_share, premium, spread_pct,
+                        commission_per_contract=0.65, contract_multiplier=100,
+                        round_trip=True):
+    """Expected value per contract AFTER realistic transaction costs.
+
+    The screener's research showed cost is the wall, yet the prior EV deducted
+    only one half-spread (entry). A quant ranks by ROUND-TRIP net EV: you cross
+    the spread to open AND to close, and pay commission both sides.
+
+    - ``gross_edge_per_share`` = fair_value − premium (per share; BS-on-realized-vol edge).
+    - ``spread_pct`` = (ask−bid)/mid; half of it is the cost-vs-mid per side.
+    Works on scalars or NumPy arrays. round_trip=False = held-to-expiry (entry cost only)."""
+    sides = 2 if round_trip else 1
+    gross = gross_edge_per_share * contract_multiplier
+    spread_cost = 0.5 * spread_pct * premium * contract_multiplier * sides
+    commission = commission_per_contract * sides
+    return gross - spread_cost - commission
+
+
 def generate_trade_thesis(row: pd.Series) -> str:
     """
     Generate a concise trade thesis explaining why this option is recommended.

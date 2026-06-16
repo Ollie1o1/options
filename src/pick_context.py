@@ -18,6 +18,7 @@ one dict lookup. Nothing here touches quality_score or any weights.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from datetime import datetime
@@ -248,9 +249,51 @@ def context_lines(row: Dict[str, Any], today: Optional[str] = None,
                 out.append(vl)
         except Exception:
             pass
+
+        # Quant read: net-of-cost EV + cheap/rich vs surface + VRP regime.
+        ql = quant_read_line(row)
+        if ql:
+            out.append(ql)
     except Exception:
         pass
     return out
+
+
+def quant_read_line(row: Dict[str, Any]) -> Optional[str]:
+    """A one-line, decision-time 'quant read' for a pick (display-only): does the
+    edge survive REAL round-trip costs, is it cheap/rich vs the fitted vol surface,
+    and what does the vol-risk-premium regime favor. Synthesizes the session's
+    findings (cost is the wall; relative value + VRP are the real levers) at the
+    point of decision. Never raises; returns None if EV isn't available."""
+    try:
+        net = row.get("ev_per_contract")
+        if net is None or (isinstance(net, float) and math.isnan(net)):
+            return None
+        gross = row.get("ev_gross_per_contract")
+        cost = row.get("ev_cost_per_contract")
+        bits: List[str] = []
+        verdict = "POSITIVE EV after cost" if net > 0 else "NEGATIVE EV after cost — pass or restructure"
+        head = f"net EV {net:+,.0f}/contract"
+        if gross is not None and cost is not None and not (isinstance(gross, float) and math.isnan(gross)):
+            head += f" (gross {gross:+,.0f} − cost {cost:,.0f})"
+        bits.append(f"{verdict}: {head}")
+        # cheap/rich vs the SVI surface (negative residual = cheap)
+        resid = row.get("iv_surface_residual")
+        try:
+            resid = float(resid)
+            if resid <= -0.01:
+                bits.append("CHEAP vs surface")
+            elif resid >= 0.01:
+                bits.append("RICH vs surface")
+        except (TypeError, ValueError):
+            pass
+        # VRP regime stance
+        vrp = row.get("vrp_regime")
+        if vrp and str(vrp).upper() not in ("UNKNOWN", "NONE", ""):
+            bits.append(f"VRP: {vrp}")
+        return "Quant read: " + "  |  ".join(bits)
+    except Exception:
+        return None
 
 
 def reset_caches() -> None:
