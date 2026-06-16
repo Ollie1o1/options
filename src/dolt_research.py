@@ -102,6 +102,40 @@ def drawdown_on(ctx) -> Optional[float]:
     return spot / peak - 1.0
 
 
+def realized_vol(ctx, lookback: int = 20) -> Optional[float]:
+    """Annualized realized vol of spot over the trailing ``lookback`` trading
+    rows up to ctx['date'] (close-to-close, 252d). None if too little history."""
+    import math
+    spots, sdates, date = ctx.get("spots"), ctx.get("sdates"), ctx.get("date")
+    if not spots or not sdates or date not in spots:
+        return None
+    try:
+        i = sdates.index(date)
+    except ValueError:
+        return None
+    win = [spots[d] for d in sdates[max(0, i - lookback): i + 1] if d in spots]
+    if len(win) < 5:
+        return None
+    rets = [math.log(win[k] / win[k - 1]) for k in range(1, len(win)) if win[k - 1] > 0]
+    if len(rets) < 4:
+        return None
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    return math.sqrt(var) * math.sqrt(252)
+
+
+def vrp_rich(min_ratio: float = 1.2, lookback: int = 20) -> Callable:
+    """Entry only when implied vol is RICH vs realized — entry_iv / realized_vol
+    >= min_ratio (variance-risk-premium harvesting; P1.4). Sells expensive vol,
+    skips selling cheap vol (incl. tops just before a fall, where IV hasn't
+    risen yet)."""
+    def f(ctx):
+        iv = ctx.get("entry_iv")
+        rv = realized_vol(ctx, lookback)
+        return iv is not None and rv is not None and rv > 0 and (iv / rv) >= min_ratio
+    return f
+
+
 def in_drawdown(min_dd: float) -> Callable:
     """Entry only when spot is at least ``min_dd`` (e.g. 0.10 = 10%) below its
     trailing peak — i.e. SELLING premium INTO market weakness, the worst-case

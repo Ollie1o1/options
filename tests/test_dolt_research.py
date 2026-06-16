@@ -62,6 +62,27 @@ class FilterTest(unittest.TestCase):
         peak = {"spots": spots, "sdates": sdates, "date": "2024-03-04", "spot": 110}
         self.assertFalse(dr.in_drawdown(0.05)(peak))
 
+    def test_realized_vol(self):
+        # flat series -> ~0 vol; volatile series -> higher
+        flat = {f"2024-03-{d:02d}": 100.0 for d in range(1, 21)}
+        ctx_flat = {"spots": flat, "sdates": sorted(flat), "date": "2024-03-20"}
+        self.assertAlmostEqual(dr.realized_vol(ctx_flat), 0.0, places=6)
+        import math
+        choppy = {f"2024-03-{d:02d}": 100.0 * (1.02 if d % 2 else 0.98) for d in range(1, 21)}
+        ctx_choppy = {"spots": choppy, "sdates": sorted(choppy), "date": "2024-03-20"}
+        self.assertGreater(dr.realized_vol(ctx_choppy), 0.3)
+        self.assertIsNone(dr.realized_vol({"spots": {}, "sdates": [], "date": "x"}))
+
+    def test_vrp_rich(self):
+        # gently drifting series -> small positive realized vol
+        drift = {f"2024-03-{d:02d}": 100.0 * (1.0 + 0.001 * d) for d in range(1, 21)}
+        base = {"spots": drift, "sdates": sorted(drift), "date": "2024-03-20"}
+        rv = dr.realized_vol(base)
+        self.assertGreater(rv, 0)
+        self.assertTrue(dr.vrp_rich(1.2)(dict(base, entry_iv=rv * 2)))    # iv 2x realized -> rich
+        self.assertFalse(dr.vrp_rich(1.2)(dict(base, entry_iv=rv * 1.0))) # iv == realized -> not rich
+        self.assertFalse(dr.vrp_rich(1.2)(dict(base, entry_iv=None)))     # no IV -> abstain
+
     def test_combine(self):
         always = lambda ctx: True
         never = lambda ctx: False

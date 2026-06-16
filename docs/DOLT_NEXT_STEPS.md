@@ -74,10 +74,15 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
 3. **Position sizing + risk layer.** Every backtest is 1 contract; returns are per-contract on
    premium/max-risk. Add fixed-fractional (e.g. risk 1–2% of equity per trade) sizing and
    report portfolio-level equity curve / max drawdown, not just per-trade PF.
-4. **VRP / regime timing.** Sell index put spreads only when vol is RICH (IV ≫ realized, or
-   elevated VIX). The `entry_filter` hook + `dolt_research` filters already support this —
-   add a `realized_vol` helper and a `vrp_rich` filter, then re-run the index spread. Likely
-   pushes PF 4.29 higher and avoids selling cheap vol.
+4. ~~**VRP / regime timing.**~~ **DONE 2026-06-15.** Added `realized_vol(ctx, lookback)` +
+   `vrp_rich(min_ratio)` (entry only when entry_iv / realized_vol ≥ ratio). SPY spread, 22-24:
+   - `vrp_rich_1.1`: **PF 4.29 → 4.87** (n=23) — light filter helps modestly, right sign.
+   - `vrp_rich_1.2` / `1.3`: n collapses to 13–17 and PF goes noisy (2.1 / 3.44) — overfiltering
+     a thin sample. Holdout of 1.2: train PF 1.55 (n=11) → test 2.9 (n=6), too thin to trust.
+   - **Verdict: the VRP thesis has the right sign but the index sample is too small to push
+     hard. Use a LIGHT threshold (~1.1×) at most.** The `in_drawdown` filter (P0.2, PF 5.43)
+     is actually the stronger version of the same "sell rich vol" idea. Both confirm: the edge
+     concentrates in elevated-vol entries. Real lever is more data (P3.10), not a tighter filter.
 5. **Assignment / margin mechanics.** Short puts can be assigned; spreads have margin. Model
    early assignment and the actual capital tied up so the equity curve is real.
 
