@@ -71,7 +71,7 @@ Market prices, IV rank/percentile, spreads, open interest, and Greeks are comput
 - **IV cross-validation** — Yahoo's reported implied volatility is verified against the IV implied by each contract's own mid price (Black-Scholes inversion). Where Yahoo's value is wrong, the solved IV is adopted for all downstream Greeks/PoP/EV math and the correction is shown (`IV corrected (yahoo 72% → solved 38%)`) and logged.
 
 **Predictive layer — experimental (do not treat as established).**
-The composite `quality_score`, the AI `final_score`, and the ranked order are **models under evaluation**, not proven edges. The out-of-sample evidence is surfaced live in the output (e.g. `Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=2/50)`) and read from the validation artifacts — it updates as evidence accumulates and will only read READY once the forward-cohort gate fires. See [docs/VALIDATION_POWER.md](docs/VALIDATION_POWER.md) for the power analysis.
+The composite `quality_score`, the AI `final_score`, and the ranked order are **models under evaluation**, not proven edges. The out-of-sample evidence is surfaced live in the output (e.g. `Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=4/50)`) and read from the validation artifacts — it updates as evidence accumulates and will only read READY once the forward-cohort gate fires. See [docs/VALIDATION_POWER.md](docs/VALIDATION_POWER.md) for the power analysis.
 
 **Public track record.** The running paper-trading record (win rate, returns, per-strategy breakdown, full closed-trade table, and gate status) is published to [reports/TRACK_RECORD.md](reports/TRACK_RECORD.md), refreshed weekly. It states the paper/delayed-data/friction caveats plainly.
 
@@ -80,6 +80,7 @@ The composite `quality_score`, the AI `final_score`, and the ranked order are **
 - **CBOE delayed quotes** — free second source with exchange-computed IV and Greeks. `python -m src.cross_check TICKER` joins the two chains per contract and reports IV/mid agreement (live check 2026-06-10: 99% mid / 90% IV agreement on AAPL, disagreements confined to near-expiry far-OTM strikes where IV is ill-defined).
 - **Daily chain archive** — startup maintenance snapshots the CBOE chains for the symbols in `config.json → data_archive` into `data/chain_archive.db` once per trading day. This compounds into real per-contract bid/ask/IV/Greeks history for backtesting, replacing model-priced premiums over time.
 - **Alpha Vantage** (optional, free key) — `python -m src.av_options --probe` checks your key; `--backfill SYMBOL --start DATE` drains 15+ years of EOD option history into the same archive at ~25 symbol-days/day.
+- **DoltHub** (free, no auth) — ~7 years of real EOD option chains used purely for **backtesting/validation** (`src/dolt`): real-marks backtester, scorer-slice validator, slippage model, and earnings/IV-crush studies. Honest result so far: on real fills the scorer slice shows **no edge** and the multi-symbol cohort is roughly **breakeven** — surfaced display-only via the per-pick `Dolt verdict` line. Not a live data source for scanning.
 
 **Signal overlays (free, documented effects; deliberately NOT in scoring while the validation gate gathers).**
 - **Unusual options activity** — `python -m src.uoa` ranks day-over-day OI jumps and volume spikes from the chain archive (Pan-Poteshman: informed trading leaks into option volume). Needs ≥2 archive days.
@@ -135,6 +136,26 @@ python3 ai_rank.py AAPL TSLA NVDA
 # Package-style entry point (auto-activates venv)
 python3 -m src
 ```
+
+### Shortest: the `options` shell command (optional)
+
+`run.py` already sets its own working directory, so you can wrap it in a one-line
+shell function and launch the screener from **any** directory. Add to `~/.zshrc`
+(or `~/.bashrc`):
+
+```bash
+options() { python3 "$HOME/Desktop/options/run.py" "$@"; }
+```
+
+Then `source ~/.zshrc` once and run:
+
+```bash
+options                                 # opens the menu (auto-activates venv)
+options -ds                             # discovery scan, auto-log top 5
+options --ticker AAPL --auto --no-ai    # single-ticker, unattended
+```
+
+All `run.py` flags (including the `-ds`/`-sps`/`-ics`/`-ss` shortcuts and `--logging-help`) pass straight through.
 
 > **Why does this matter?** The project has ~30 dependencies (pandas, openai, rich, etc.) installed in the `venv/` directory. If you run `python3 -m src.options_screener` without activating the venv first, Python uses your system interpreter which doesn't have these packages — you'll get missing module errors, no colors in the AI table, and broken API calls. The launchers above handle this automatically.
 
@@ -195,6 +216,7 @@ Options:
   --no-color             Disable ANSI color output (useful for piping to a log file)
   --no-ai                Skip AI analysis after scan
   --close-trades         Update the trade log with closing prices and realised P/L
+  --enforce-exits        Run exit-rule enforcement on paper_trades.db and exit (for cron)
   --ui                   Launch the Streamlit web dashboard
   --mode MODE            Skip mode menu: ticker | all | discover | sell | spreads | iron | portfolio | mylist
   --ticker SYM           Ticker symbol (implies --mode ticker)
@@ -207,6 +229,8 @@ Options:
   --weights NAME         Weight profile name (in configs/weights/) or path to JSON; tags logged trades
   --auto-log             Auto-log top-N picks after scan (skips save-menu prompt)
   --log-top N            With --auto-log: how many top picks to log (default 5)
+  --min-dte N            Override minimum days-to-expiration for this scan
+  --max-dte N            Override maximum days-to-expiration for this scan
   --list-profiles        List available weight profiles and exit
   --surface              Show 3D P&L risk surface for the top pick (single-stock mode)
   --surface-mode M       Render mode: braille (default, hi-res Unicode) or ascii
@@ -219,32 +243,45 @@ Options:
 
 ### Terminal Output
 
-The CLI renders a fully colour-coded, responsive interface that adapts to your terminal width (60–120 chars):
+The CLI renders a responsive, colour-coded interface that adapts to your terminal width (60–120 chars). The display follows a deliberate **house style** (`src/ui.py` + `src/formatting.py` semantic theme):
+
+- **Colour discipline** — green/red are reserved for *directional sign only* (EV-after-cost, P&L, CHEAP/RICH vs surface). Amber marks caution (catalyst in window, accelerating theta, <14 DTE, concentration). Everything else stays neutral so the signal actually stands out.
+- **Visual tiering** — each pick is split into a bright **decision zone** (the two lines you act on), neutral supporting rows, and a dimmed depth tier (vanna/charm/GEX + the scenario grid).
+- **Loading spinner** — blocking fetches (VIX, risk-free rate, market data) show an animated spinner instead of a frozen screen. Auto-suppressed when output isn't a terminal, so piped/cron logs stay clean.
 
 **Startup**
 - Market regime dashboard: VIX level, VIX3M term structure, PCR, SPY momentum, IV premium
-- Double-box banner with current date/time
-- Colour-coded mode menu
+- Sector/asset outlook box + world-news pulse
+- Banner with current date/time, then the colour-coded mode menu
 
 **Report — per pick**
 ```
-  CALL   262.50  2026-03-20   $4.03   31.0%    1494    1095   +0.38   OTM  ★★★☆☆
-    ↳ Mechanics: Vol: 1095 OI: 1494 | Spread: 3.7% | Delta: +0.38 | Greeks: Γ … | Cost: $402.50
-    ↳ Analysis:  IV: ██████████████░░░░░░ 72%ile | PoP: 55.2% | RR: 1.4x | EV: $18
-    ↳ Thesis:    High probability (>65%) • Trend aligned | CHEAP vs surface
-    ↳ Entry:     <=3.95  |  Target: $5.93 (+50%)  |  Stop: $2.96 (-25%)
-         Breakeven: $266.45  |  Max Loss: $395  |  Confidence: HIGH (87%)
-         Exec:     LIMIT @ $3.95 (mid-point) | Vol 1095 vs OI 1,494
-         Score:    + PoP +0.14  + RR +0.10  + Vol +0.08
+━ #1/3  MSFT CALL $480  exp 2026-07-17  36d ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ★★★★★ 0.84   Prem $11.30   IV 42.0%   OI 8,450   Vol 1,240   Δ +0.45   OTM
+  VERDICT     POSITIVE EV +88/ct                         ← bright (green = +EV)
+  DO          BUY 1 @ $4.24  ·  tgt $6.36 (+50%)  ·  stop $3.18 (-25%)
+  Liquidity   Vol: 1240  OI: 8450  Spread: 2.1% ($0.09) — tight  Cost: $1,130.00
+  Greeks      Δ +0.45  Γ 0.012  V 0.31  Θ -0.08  V$: $31
+  Valuation   IV: ████████░░░░░░░░ 41%ile  PoP 66.0%  RR 2.1x  EV $88.00 (+21.0%)
+  Flow        PCR: 0.82  Momentum: RSI 58, 5d 2.3%  Sentiment: Bullish
+  Quant read  POSITIVE EV after cost: net EV +88/contract
+  ▸ Thesis    High probability (>65%) • Strong R/R (2.1x)
+  ▸ Plan      Entry ≤$4.24  →  Target $6.36 (+50%)  /  Stop $3.18 (-25%)
+              Breakeven: $484.24  Max Loss: $424  Confidence: HIGH (100%)
+  ░ depth     Vanna/Charm · GEX flip · scenario grid (dimmed)
+```
+The `VERDICT` / `DO` decision zone consolidates the EV-after-cost read and the entry/target/stop plan into the two lines the eye lands on first; the detailed Thesis/Plan/Exec/scenario rows remain below for depth.
+
+**Comparison table** — compact ranked summary after detailed output (EV sign-coloured, SVI cheap/rich; all other columns neutral):
+```
+─ QUICK COMPARISON — sorted: Score ──────────────────────────────────────────
+    #  Ticker Strike        Exp  Score        PoP   R/R   IV%     Δ     ν      EV  Sprd    SVI
+    1  MSFT   $480C       07/17   0.84 [HI]   66%  2.1x   41% +0.45  0.31  $  +88  2.1%
+    2  NVDA   $190C       07/17   0.78 [HI]   62%  2.1x   41% +0.45  0.31  $  +31  2.1%  CHEAP
+    3  AAPL   $210P       07/17   0.55 [HI]   51%  2.1x   41% -0.38  0.31  $  -12  2.1%
 ```
 
-**Comparison table** — compact ranked summary after detailed output:
-```
-  QUICK COMPARISON  —  Top Picks
-    #  Tick  Strike        Exp  Score   PoP   R/R   IV%      EV  Sprd    SVI
-    1  AAPL  $215C       04/17   0.82   62%  2.1x   65%  $  +45  5.0%  CHEAP
-    2  MSFT  $400P       04/17   0.71   55%  1.8x   72%  $  +30  8.0%   RICH
-```
+**Concentration panel** — after the comparison table, a single panel aggregates direction-aware net Greeks and flags when the basket is really one bet (net delta / net vega / single underlying), folding in high price-correlation pairs.
 
 **3D Risk Surface** — high-resolution braille or ASCII surface (activated with `--surface`):
 ```
@@ -590,7 +627,7 @@ For each pick the screener generates:
 Log any pick directly from the CLI and track it going forward:
 
 - Positions auto-update on every launch (fetches live quotes via yfinance) — **synchronously**, so auto-closes actually finalize before the program continues
-- Entry IV and Greeks stored per trade (schema v10 — includes `exit_reason`, full multi-leg columns)
+- Entry IV and Greeks stored per trade (schema v13 — includes `exit_reason`, full multi-leg columns, `paper_only`, and `era`)
 - All 27 per-component scores stored at entry — enables per-component IC analysis after trades close
 - **Multi-leg structures are first-class**: credit spreads (`long_strike`, `spread_width`, `net_credit`) and iron condors (`short_put_strike`, `long_put_strike`, `short_call_strike`, `long_call_strike`, `net_delta`) round-trip through the same log/exit/portfolio path as singles
 - **Real per-leg mark-to-market** for spreads + ICs — every leg is repriced via yfinance and `cost_to_close = Σ(-qty × leg_price)` drives TP/SL/Time exits (no more intrinsic-fraction approximation)
@@ -601,6 +638,19 @@ Log any pick directly from the CLI and track it going forward:
 - Close expired positions with `python -m src.options_screener --close-trades`
 - Enforce exits standalone (e.g. from cron) with `python3 run.py --enforce-exits`
 - View portfolio with `python -m src.check_pnl` (or press `7` / `PORTFOLIO` at the mode menu) — viewer runs exit enforcement before display
+
+**Filtering the portfolio view.** Trades carry an `era` tag — `pre_data` (logged before the DoltHub / data-layer build-out) vs `finalized` (logged 2026-06-16 onward). Filter the viewer to focus on a single era:
+
+```bash
+python -m src.check_pnl --finalized   # only trades logged today onward (alias: --today)
+python -m src.check_pnl --older       # only older pre-data trades (alias: --pre-data)
+python -m src.check_pnl --era finalized | --era pre_data
+python -m src.check_pnl --cohort pre | post   # pre/post-calibration cohort split
+python -m src.check_pnl --menu        # interactive view chooser (All / Finalized / Older / cohorts)
+python -m src.check_pnl               # all trades (default)
+```
+
+The interactive `[7] PORTFOLIO` menu offers the same choices: `[A]` all · `[F]` finalized only · `[O]` older/pre-data · `[1]` pre-calibration · `[2]` post-calibration.
 
 ### Context-aware exit rules
 
