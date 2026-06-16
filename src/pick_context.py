@@ -272,7 +272,15 @@ def quant_read_line(row: Dict[str, Any]) -> Optional[str]:
         gross = row.get("ev_gross_per_contract")
         cost = row.get("ev_cost_per_contract")
         bits: List[str] = []
-        verdict = "POSITIVE EV after cost" if net > 0 else "NEGATIVE EV after cost — pass or restructure"
+        # Honest banding: net<=0 negative; 0<net<cost means costs ate most of the
+        # edge (marginal); net>=cost means the surviving edge beats the toll paid.
+        _cost = cost if (cost is not None and not (isinstance(cost, float) and math.isnan(cost))) else 0.0
+        if net <= 0:
+            verdict = "NEGATIVE EV after cost — pass or restructure"
+        elif net < _cost:
+            verdict = "MARGINAL EV — costs eat most of the edge"
+        else:
+            verdict = "POSITIVE EV after cost"
         head = f"net EV {net:+,.0f}/contract"
         if gross is not None and cost is not None and not (isinstance(gross, float) and math.isnan(gross)):
             head += f" (gross {gross:+,.0f} − cost {cost:,.0f})"

@@ -170,6 +170,18 @@ class QuantReadTest(unittest.TestCase):
         self.assertIn("NEGATIVE EV after cost", line)
         self.assertIn("RICH vs surface", line)
 
+    def test_marginal_ev_when_cost_eats_edge(self):
+        # gross +38, cost 36 -> net +2: surviving edge << toll paid -> MARGINAL
+        line = pc.quant_read_line({"ev_per_contract": 2.0, "ev_gross_per_contract": 38.0,
+                                   "ev_cost_per_contract": 36.0})
+        self.assertIn("MARGINAL EV", line)
+        self.assertNotIn("POSITIVE EV after cost", line)
+
+    def test_solid_positive_when_edge_beats_cost(self):
+        line = pc.quant_read_line({"ev_per_contract": 216.0, "ev_gross_per_contract": 220.0,
+                                   "ev_cost_per_contract": 4.0})
+        self.assertIn("POSITIVE EV after cost", line)
+
     def test_none_without_ev(self):
         self.assertIsNone(pc.quant_read_line({}))
         self.assertIsNone(pc.quant_read_line({"ev_per_contract": float("nan")}))
