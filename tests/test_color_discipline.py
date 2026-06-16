@@ -87,5 +87,49 @@ class AnalysisLineDisciplineTestCase(unittest.TestCase):
             self.assertNotIn(c, ctx, "term structure must not use green/red")
 
 
+class ComparisonDisciplineTestCase(unittest.TestCase):
+    def setUp(self):
+        fmt.set_color_enabled(True)
+        if _SCRIPTS not in sys.path:
+            sys.path.insert(0, _SCRIPTS)
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = None
+
+    def _render(self):
+        import io
+        import contextlib
+        from ui_preview import df
+        from src.cli_display import print_comparison_table
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_comparison_table(df(), mode="Discovery scan")
+        return buf.getvalue()
+
+    def test_sign_color_only_on_ev_or_svi(self):
+        greens, reds = sign_codes()
+        out = self._render()
+        reset = fmt.Colors.RESET
+        # every green/red-colored segment must be an EV ($) or SVI (CHEAP/RICH) cell
+        for code in greens | reds:
+            idx = 0
+            while True:
+                i = out.find(code, idx)
+                if i < 0:
+                    break
+                end = out.find(reset, i)
+                seg = ANSI_RE.sub("", out[i:end if end > 0 else len(out)])
+                self.assertTrue(
+                    any(tok in seg for tok in ("$", "CHEAP", "RICH")),
+                    f"sign color on non-EV/SVI cell: {seg!r}")
+                idx = i + len(code)
+
+    def test_ev_cell_is_sign_colored(self):
+        greens, _ = sign_codes()
+        out = self._render()
+        # the positive-EV rows should carry a green code somewhere
+        self.assertTrue(any(c in out for c in greens), "EV/SVI sign color missing")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1125,10 +1125,9 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         ev = r.get("ev_per_contract", 0) or 0
         spread = (r.get("spread_pct", 0) or 0) * 100
 
-        # Color score — pad before colorize to keep alignment
-        sc_color = fmt.Colors.GREEN if score >= 0.70 else (fmt.Colors.YELLOW if score >= 0.50 else fmt.Colors.RED)
-        score_padded = f"{score:>6.2f}"
-        score_str = fmt.colorize(score_padded, sc_color)
+        # Score is a quality grade, not a P&L sign — keep it neutral so the
+        # only colour in the table is EV-sign and SVI cheap/rich.
+        score_str = f"{score:>6.2f}"
 
         # Confidence badge
         conf_badge = ""
@@ -1136,10 +1135,9 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
             try:
                 _, conf_label = calculate_confidence_score(r)
                 badge_map = {"HIGH": "[HI]", "MEDIUM": "[MD]", "LOW": "[LO]", "VERY LOW": "[LO]"}
-                badge_color_map = {"HIGH": fmt.Colors.GREEN, "MEDIUM": fmt.Colors.YELLOW, "LOW": fmt.Colors.RED, "VERY LOW": fmt.Colors.RED}
                 badge_text = badge_map.get(conf_label, "")
-                badge_clr = badge_color_map.get(conf_label, fmt.Colors.DIM)
-                conf_badge = f" {fmt.colorize(f'{badge_text:>4}', badge_clr)}"
+                # Confidence is a grade, not a sign — render muted, not green/red.
+                conf_badge = f" {fmt.style(f'{badge_text:>4}', 'muted')}"
             except Exception:
                 conf_badge = f" {'':>4}"
 
@@ -1150,6 +1148,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         delta_str = f"{delta_val:>+5.2f}"
         vega_str = f"{vega_val:>5.2f}"
         ev_str = f"${ev:>+5.0f}" if abs(ev) < 10000 else f"{ev/1000:>+4.0f}k"
+        ev_cell = fmt.style_sign(f"{ev_str:>7}", ev)  # pad first, then colour
 
         # Symbol prefix for multi-ticker
         sym = str(r.get("symbol", ""))[:6]
@@ -1159,15 +1158,14 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
             f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8} {score_str}"
             f"{conf_badge}"
             f" {pop_str:>5}"
-            f" {rr_str:>5} {iv_pct:>4.0f}% {delta_str} {vega_str} {ev_str:>7} {spread:>4.1f}%"
+            f" {rr_str:>5} {iv_pct:>4.0f}% {delta_str} {vega_str} {ev_cell} {spread:>4.1f}%"
         )
         if "iv_surface_residual" in rows.columns:
             resid = r.get("iv_surface_residual", 0) or 0
             if abs(resid) > 0.15:
                 tag = "CHEAP" if resid < 0 else "RICH"
-                tag_color = fmt.Colors.GREEN if resid < 0 else fmt.Colors.RED
-                tag_padded = f"{tag:>6}"
-                line += f" {fmt.colorize(tag_padded, tag_color)}"
+                # CHEAP/RICH is a valuation sign — good when cheap, bad when rich.
+                line += f" {fmt.style(f'{tag:>6}', 'good' if resid < 0 else 'bad')}"
             else:
                 line += f" {'':>6}"
         if _has_sizing:
