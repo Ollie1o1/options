@@ -147,12 +147,17 @@ META/AMZN/TSLA confirmed via live probe 2026-06-15). (QQQ, IWM are NOT in the da
    `src/dolt_earnings_sell.py`: short-strangle backtest — sell an OTM call+put in the front
    expiry ~2 days before earnings, buy back the first data day after (real BID/ASK, 4-leg
    commission, return on credit, realized move reported). 5 unit tests green.
-   **CAVEAT:** running it from the local cache yields only **n=1 usable on AAPL** with
-   `realized_move=0.0` (the exit-day spot/chain isn't archived). Earnings dates land on
-   arbitrary days; the local cache only holds the densely-archived dates the cohort/spread
-   backtests use. **A trustworthy sample needs a dedicated earnings-window chain FETCH pass
-   first** (slow, rate-limited — don't run alongside other API jobs). The harness is ready;
-   the data isn't, yet. (Same free-data wall noted elsewhere in this doc.)
+   **2026-06-16 — now produces a REAL sample (n=24).** Two bugs + a data-shape fix were needed:
+   (1) it used split-ADJUSTED spot (yfinance) vs RAW DoltHub strikes → broke moneyness for split
+   names; switched to `dolt_stocks.close_history` (raw), built once in the runner. (2) The
+   archive's **per-snapshot expiry sets are inconsistent** (weeklies churn; only standard
+   MONTHLIES persist across days), so a fixed exit day usually lacked the exact contract — now the
+   entry biases to the front monthly (`min_dte=30`) and the exit SCANS forward for the first day
+   both legs quote (like the spread runner). Fetched ±6d around earnings for AAPL/NVDA/AMZN/TSLA/META.
+   **RESULT (5 names, 2022-24): n=24, win 75%, median +14.1% on credit, avg +1.5%, PF 1.10, mean
+   post-earnings move 7.5%.** Standalone ~breakeven (many small wins, occasional big-gap loss), BUT
+   the losses are idiosyncratic earnings gaps, not market crashes → plausibly UNCORRELATED with the
+   short-market sleeves. This is the market-neutral sleeve for the blend work (below).
 9. ~~**Term-structure / calendar + skew trades.**~~ **FEASIBILITY CONFIRMED 2026-06-15.** Real
     surface verified on a cached SPY snapshot: classic equity put skew (IV 0.64 at low strikes →
     0.18 at high) and a 3-expiry term structure (medIV 0.190→0.162→0.150, i.e. measurable

@@ -54,14 +54,19 @@ def _leg(chain, opt_type, strike, expiration):
 
 def simulate_earnings_strangle(symbol, earnings_date, db_path=None,
                                call_delta=0.20, put_delta=0.20,
-                               entry_offset=2, min_dte=2, max_dte=45,
-                               commission_per_contract=0.65, contract_multiplier=100
-                               ) -> Optional[Dict[str, Any]]:
+                               entry_offset=2, min_dte=30, max_dte=70,
+                               commission_per_contract=0.65, contract_multiplier=100,
+                               spots=None, exit_scan_days=10) -> Optional[Dict[str, Any]]:
     """Sell a strangle ~entry_offset days before earnings, buy it back the first
-    data day after. Return dict with ret-on-credit + raw pnl + realized move."""
+    data day after. Return dict with ret-on-credit + raw pnl + realized move.
+
+    ``spots`` must be RAW (un-split-adjusted) closes — DoltHub strikes are raw, so
+    a split-adjusted spot (e.g. yfinance) breaks the OTM moneyness pick for split
+    names. Built via dolt_stocks.close_history when not supplied."""
     from src import dolt_options as _do
-    from src.dolt_validate import _spot_history
-    spots = _spot_history(symbol)
+    if spots is None:
+        from src.dolt_stocks import close_history
+        spots = close_history(symbol, db_path=db_path or _do.DEFAULT_CACHE)
     # entry chain: a data day at/just before (earnings - entry_offset)
     target_entry = (_dt.date.fromisoformat(earnings_date) - _dt.timedelta(days=entry_offset)).isoformat()
     ed_in, entry_chain = _do.get_chain_near(symbol, target_entry, max_skip=4,
@@ -81,18 +86,28 @@ def simulate_earnings_strangle(symbol, earnings_date, db_path=None,
     if entry_credit <= 0:
         return None
     exp = sc["expiration"]
-    # exit chain: first data day strictly AFTER earnings (the crush)
-    ad_out, exit_chain = _do.get_chain_near(symbol, earnings_date, max_skip=5,
-                                            db_path=db_path or _do.DEFAULT_CACHE, direction=1)
-    if not exit_chain or ad_out is None or ad_out <= earnings_date:
-        # try one day past to force "after"
-        ad_out, exit_chain = _do.get_chain_near(
-            symbol, (_dt.date.fromisoformat(earnings_date) + _dt.timedelta(days=1)).isoformat(),
-            max_skip=5, db_path=db_path or _do.DEFAULT_CACHE, direction=1)
-        if not exit_chain or ad_out is None:
-            return None
-    cc, cp = _leg(exit_chain, "call", sc["strike"], exp), _leg(exit_chain, "put", sp["strike"], exp)
-    if not cc or not cp or cc.get("ask") is None or cp.get("ask") is None:
+    # Exit: scan forward day-by-day from earnings+1 for the FIRST snapshot where
+    # BOTH legs quote. The DoltHub archive's per-snapshot expiry sets are
+    # inconsistent (weeklies churn; only standard monthlies persist), so a single
+    # fixed exit day often lacks the exact contract — scanning tolerates the gaps,
+    # the same way the spread/short runners do. Captures the post-earnings crush
+    # (which lands on day 1) on the first quotable day.
+    cc = cp = None
+    ad_out = None
+    base = _dt.date.fromisoformat(earnings_date)
+    for off in range(1, exit_scan_days + 1):
+        d = (base + _dt.timedelta(days=off)).isoformat()
+        if d > _do.COVERAGE_MAX:
+            break
+        ch = _do.get_chain(symbol, d, db_path=db_path or _do.DEFAULT_CACHE)
+        if not ch:
+            continue
+        _cc = _leg(ch, "call", sc["strike"], exp)
+        _cp = _leg(ch, "put", sp["strike"], exp)
+        if _cc and _cp and _cc.get("ask") is not None and _cp.get("ask") is not None:
+            cc, cp, ad_out = _cc, _cp, d
+            break
+    if cc is None or cp is None or ad_out is None:
         return None
     exit_cost = cc["ask"] + cp["ask"]
     comm = 4.0 * commission_per_contract / contract_multiplier   # 2 legs x open+close
@@ -113,6 +128,7 @@ def run_earnings_sell_backtest(symbols, db_path=None, start=None, end=None,
                                call_delta=0.20, put_delta=0.20) -> Dict[str, Any]:
     from src import dolt_options as _do
     from src.dolt_earnings import earnings_dates
+    from src.dolt_stocks import close_history
     spot_db = db_path or _do.DEFAULT_CACHE
     import sys
     trades: List[Dict[str, Any]] = []
@@ -121,6 +137,7 @@ def run_earnings_sell_backtest(symbols, db_path=None, start=None, end=None,
         if not _do.symbol_has_data(symbol, spot_db):
             print(f"  [warning] no chain data for {symbol}; skipped", file=sys.stderr)
             continue
+        spots = close_history(symbol, db_path=spot_db)   # RAW closes (split-safe), built once
         for ed in earnings_dates(symbol, db_path=spot_db):
             if ed < _do.COVERAGE_MIN or ed > _do.COVERAGE_MAX:
                 continue
@@ -130,7 +147,8 @@ def run_earnings_sell_backtest(symbols, db_path=None, start=None, end=None,
                 continue
             try:
                 t = simulate_earnings_strangle(symbol, ed, db_path=db_path,
-                                               call_delta=call_delta, put_delta=put_delta)
+                                               call_delta=call_delta, put_delta=put_delta,
+                                               spots=spots)
             except _do.DoltRateLimited:
                 return _summarize(trades, partial=True)
             except _do.DoltQueryError:

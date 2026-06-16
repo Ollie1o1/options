@@ -30,30 +30,43 @@ class PickStrangleTest(unittest.TestCase):
 
 class SimulateTest(unittest.TestCase):
     def setUp(self):
-        self.entry_chain = [_c("call", 105, 2.0, 2.1, 0.20), _c("put", 95, 2.0, 2.1, -0.20)]
-        # post-earnings: IV crushed, options much cheaper to buy back
-        self.exit_chain = [_c("call", 105, 0.3, 0.4, 0.10, iv=0.25),
-                           _c("put", 95, 0.3, 0.4, -0.10, iv=0.25)]
+        # expiry ~51 DTE from the 2024-05-01 entry → clears the min_dte=30 monthly bias
+        self.entry_chain = [_c("call", 105, 2.0, 2.1, 0.20, expiration="2024-06-21"),
+                            _c("put", 95, 2.0, 2.1, -0.20, expiration="2024-06-21")]
+        # post-earnings: IV crushed, same contracts much cheaper to buy back
+        self.exit_chain = [_c("call", 105, 0.3, 0.4, 0.10, iv=0.25, expiration="2024-06-21"),
+                           _c("put", 95, 0.3, 0.4, -0.10, iv=0.25, expiration="2024-06-21")]
 
     def test_profitable_crush(self):
-        with mock.patch("src.dolt_validate._spot_history",
-                        return_value={"2024-05-01": 100.0, "2024-05-06": 101.0}), \
-             mock.patch("src.dolt_options.get_chain_near") as gcn:
-            # first call = entry (direction -1), second = exit (direction +1)
-            gcn.side_effect = [("2024-05-01", self.entry_chain),
-                               ("2024-05-06", self.exit_chain)]
+        # entry via get_chain_near (direction -1); exit via the get_chain forward scan
+        with mock.patch("src.dolt_stocks.close_history",
+                        return_value={"2024-05-01": 100.0, "2024-05-04": 101.0}), \
+             mock.patch("src.dolt_options.get_chain_near",
+                        return_value=("2024-05-01", self.entry_chain)), \
+             mock.patch("src.dolt_options.get_chain", return_value=self.exit_chain):
             t = es.simulate_earnings_strangle("AAPL", "2024-05-03", db_path="x")
         self.assertIsNotNone(t)
         # credit 4.0 collected, bought back for 0.8 -> net positive
         self.assertGreater(t["net_pnl"], 0)
         self.assertAlmostEqual(t["credit"], 4.0, places=4)
         self.assertGreater(t["ret"], 0)
+        self.assertEqual(t["exit_date"], "2024-05-04")   # first quotable day in the scan
 
     def test_none_when_entry_after_earnings(self):
-        with mock.patch("src.dolt_validate._spot_history", return_value={"2024-05-04": 100.0}), \
+        with mock.patch("src.dolt_stocks.close_history", return_value={"2024-05-04": 100.0}), \
              mock.patch("src.dolt_options.get_chain_near",
                         return_value=("2024-05-04", self.entry_chain)):
             # entry date 05-04 is AFTER earnings 05-03 -> reject
+            t = es.simulate_earnings_strangle("AAPL", "2024-05-03", db_path="x")
+        self.assertIsNone(t)
+
+    def test_none_when_exit_legs_never_quote(self):
+        # exit scan finds chains but never the matching contract -> reject
+        with mock.patch("src.dolt_stocks.close_history",
+                        return_value={"2024-05-01": 100.0}), \
+             mock.patch("src.dolt_options.get_chain_near",
+                        return_value=("2024-05-01", self.entry_chain)), \
+             mock.patch("src.dolt_options.get_chain", return_value=[_c("call", 999, 1, 1, 0.2)]):
             t = es.simulate_earnings_strangle("AAPL", "2024-05-03", db_path="x")
         self.assertIsNone(t)
 
