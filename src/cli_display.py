@@ -1225,7 +1225,7 @@ def format_iv_crosscheck_summary(df_picks: pd.DataFrame) -> Optional[str]:
     return "IV cross-check: " + ", ".join(parts)
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, corr_pairs: Optional[list] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
@@ -1313,7 +1313,7 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     # ── Portfolio guard: are these picks one concentrated bet? (display-only) ──
     try:
         from src.portfolio_guard import format_guard_lines
-        _gl = format_guard_lines(df_picks.to_dict("records"), mode=mode)
+        _gl = format_guard_lines(df_picks.to_dict("records"), mode=mode, corr_pairs=corr_pairs)
         for _i, _line in enumerate(_gl):
             if _i == 0 and HAS_ENHANCED_CLI and ":" in _line:
                 _lab, _rest = _line.split(":", 1)

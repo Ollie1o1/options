@@ -3283,8 +3283,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Only the tickers that actually produced picks matter here — correlating
     # the whole 100+ ticker scan universe just proves SPY≈QQQ and buries the
     # signal in 60 lines of noise.
-    if verbose and len(ticker_histories) > 1:
-        print("\n🔎 Checking Portfolio Correlation...")
+    # Pick-overlap correlation: computed here, rendered once inside the
+    # portfolio-guard panel (portfolio_guard.format_guard_lines) instead of its
+    # own noisy section. Failure-safe — an empty list just hides correlation.
+    corr_pairs: list = []
+    if len(ticker_histories) > 1:
         try:
             pick_symbols = set()
             for _df in all_picks:
@@ -3296,39 +3299,21 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 if pick_symbols and t not in pick_symbols:
                     continue
                 if not h.empty and "Close" in h.columns:
-                    # Use last 30 days
-                    price_data[t] = h["Close"].tail(30)
+                    price_data[t] = h["Close"].tail(30)  # last 30 days
 
             if len(price_data) > 1:
-                prices_df = pd.DataFrame(price_data)
-                # Forward fill / Drop NA (using newer pandas syntax)
-                prices_df = prices_df.ffill().dropna()
-
+                prices_df = pd.DataFrame(price_data).ffill().dropna()
                 if not prices_df.empty and len(prices_df.columns) > 1:
                     corr_matrix = prices_df.corr()
-
-                    # Check for high correlation (> 0.80)
-                    # Iterate upper triangle
-                    high_corr_pairs = []
                     cols = corr_matrix.columns
                     for i in range(len(cols)):
-                        for j in range(i+1, len(cols)):
+                        for j in range(i + 1, len(cols)):
                             c = corr_matrix.iloc[i, j]
                             if c > 0.80:
-                                high_corr_pairs.append((cols[i], cols[j], c))
-
-                    if high_corr_pairs:
-                        high_corr_pairs.sort(key=lambda p: -p[2])
-                        print("\n⚠️  PICK OVERLAP WARNING: some picks are the same bet twice!")
-                        for t1, t2, c in high_corr_pairs[:5]:
-                            print(f"  - {t1} and {t2} are highly correlated ({c:.2f})")
-                        if len(high_corr_pairs) > 5:
-                            print(f"  … and {len(high_corr_pairs) - 5} more pairs ≥0.80 "
-                                  f"— don't size them as independent positions.")
-                    else:
-                        print("✓ Pick correlation looks healthy (no pairs > 0.80).")
-        except Exception as e:
-            print(f"⚠️  Could not compute portfolio correlation: {e}")
+                                corr_pairs.append((cols[i], cols[j], float(c)))
+                    corr_pairs.sort(key=lambda p: -p[2])
+        except Exception:
+            corr_pairs = []
 
     # Consolidate picks and determine underlying price
     picks = pd.DataFrame()
@@ -3412,7 +3397,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose:
             print("\nNo options found within budget.")
 
@@ -3422,7 +3407,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose:
             print("\nNo discovery picks found.")
             
@@ -3447,7 +3432,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.sort_values("quality_score", ascending=False)
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
+                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose:
             print("\nNo premium selling candidates found.")
 
@@ -3465,7 +3450,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = picks.copy()
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
-                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact)
+                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose:
             print("\nNo suitable options found.")
 
