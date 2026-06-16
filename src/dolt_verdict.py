@@ -37,9 +37,10 @@ DEFAULT_VERDICTS: Dict[str, Dict[str, Any]] = {
     "semi":  {"best": "short_put",
               "label": "SHORT — sell naked puts",
               "caveat": "PF~1.17; spread version loses here; assignment risk (naked)"},
-    "tech":  {"best": None,
-              "label": "STAND DOWN — no edge on real marks",
-              "caveat": "AAPL/MSFT/GOOG: nothing clears PF threshold"},
+    "tech":  {"best": "short_put",
+              "label": "SHORT — sell puts",
+              "caveat": "5-name basket PF 1.14 (n=662, 2022-24); modest + same short-market bet; "
+                        "spreads LOSE here (PF 0.77). Old 3-name 'STAND DOWN' was a thin-sample artifact"},
 }
 
 

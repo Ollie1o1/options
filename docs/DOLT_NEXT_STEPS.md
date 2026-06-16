@@ -159,6 +159,13 @@ META/AMZN/TSLA confirmed via live probe 2026-06-15). (QQQ, IWM are NOT in the da
     backwardation). Skew + term-structure studies ARE buildable on this data. Limit: only ~3
     expiries cached per snapshot day, so calendar-spread granularity is coarse. Not yet built
     (no backtest) — next research item; build on the broadened basket.
+    **Fetched + re-run 2026-06-16:** prefetched META/AMZN/TSLA histories (META starts 2022-07
+    — pre-rename it traded as `FB`, so META options under that symbol don't exist earlier; AMZN/
+    TSLA full). Broadened **5-name tech recommender flipped the verdict: SHORT — sell puts,
+    PF 1.14, win 66%, n=662** (vs the old thin 3-name "STAND DOWN", now known to be a small-sample
+    artifact). put_spread LOSES in tech (PF 0.77); long_call marginal (1.11). Updated the
+    `dolt_verdict` tech default. KEY CAVEAT: this is still the **same short-market bet** as the
+    index/semi sleeves — more breadth, not more diversification (motivates the blend work below).
 10. ~~**Broaden the basket.**~~ **DONE 2026-06-15.** Probed candidates live: **TSLA (~138 rows),
     META (~162), AMZN (~140) all HAVE data** (control SPY ~130). Added **META + AMZN to the
     `tech` segment** in `dolt_research.SEGMENTS` (3→5 names) to thicken the binding-constraint

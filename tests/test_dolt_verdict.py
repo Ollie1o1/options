@@ -43,8 +43,10 @@ class SegmentLookupTest(unittest.TestCase):
 
     def test_verdict_line_contains_label(self):
         line = dv.verdict_line("AAPL", cache_path="/nonexistent.json")
-        self.assertIn("STAND DOWN", line)
+        # AAPL is in the tech segment; the validated 5-name verdict is SHORT puts.
         self.assertIn("tech", line)
+        self.assertIn("SHORT", line)
+        self.assertEqual(dv.verdict_for("AAPL", cache_path="/nonexistent.json")["best"], "short_put")
 
 
 if __name__ == "__main__":
