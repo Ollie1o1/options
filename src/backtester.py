@@ -247,6 +247,34 @@ def run_backtest(
         pass
     spread_cost_per_side = _config.get("backtest", {}).get("spread_cost_per_side", 0.07)
 
+    # P4.11: replace the flat per-side spread haircut with REAL measured slippage
+    # (delta/DTE-bucketed from cached DoltHub chains) when that cache is available.
+    # The flat 7% over-/under-states cost depending on the bucket; the empirical
+    # table is built once here and consulted per-trade, falling back to the config
+    # value when a bucket is thin or the cache is absent. Real-marks trades are
+    # unaffected (their bid/ask already include the spread).
+    _slip_table = None
+    try:
+        import os as _os
+        _slip_db = _config.get("dolt_options", {}).get("cache_path") or "data/dolt_options.db"
+        if _os.path.exists(_slip_db):
+            from src.dolt_slippage import measure_spread_table
+            _t = measure_spread_table(db_path=_slip_db)
+            if _t:
+                _slip_table = _t
+    except Exception:
+        _slip_table = None
+
+    def _haircut(_delta, _dte):
+        """Per-side cost-vs-mid for a contract; real table if available else flat."""
+        if _slip_table is not None:
+            try:
+                from src.dolt_slippage import half_spread_fraction
+                return half_spread_fraction(_delta, int(_dte), table=_slip_table)
+            except Exception:
+                pass
+        return spread_cost_per_side
+
     all_ticker_results = []
 
     # Fetch VIX history once for regime tagging
@@ -401,7 +429,9 @@ def run_backtest(
                         entry_price_gross = _bs_option_price(direction, S, K, T_entry, risk_free, sigma)
                         if entry_price_gross <= 0.001:
                             continue
-                        entry_price = entry_price_gross * (1 - spread_cost_per_side)
+                        _d_entry = bs_delta(direction, S, K, T_entry, risk_free, sigma)
+                        _hc = _haircut(_d_entry, dte)
+                        entry_price = entry_price_gross * (1 - _hc)
 
                     if not real_used:
                         # Exit at day i+exit_dte — use exit-day realized vol (not entry-day)
@@ -432,7 +462,9 @@ def run_backtest(
                                 actual_exit_price = px_j
                                 break
 
-                        exit_price_after_costs = actual_exit_price * (1 + spread_cost_per_side)
+                        _hc_exit = _haircut(bs_delta(direction, S_exit, K, T_exit, risk_free, sigma_exit),
+                                            max(dte - exit_dte, 0))
+                        exit_price_after_costs = actual_exit_price * (1 + _hc_exit)
                     else:
                         # Real marks: bid/ask already include the spread.
                         S_exit = float(close_arr[min(i + exit_dte, len(close_arr) - 1)])

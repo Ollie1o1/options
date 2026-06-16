@@ -146,11 +146,22 @@ META/AMZN/TSLA confirmed via live probe 2026-06-15). (QQQ, IWM are NOT in the da
     as P3.8). The universe is now AAPL, SPY, MSFT, NVDA, GOOG, AMD, META, AMZN (+TSLA available).
 
 ### P4 — loose ends / cleanups
-11. **Wire `dolt_slippage` into the live EV/preflight.** The real per-contract slippage model
-    exists but isn't used by the live system, whose EV still assumes a flat 7%/side.
-12. **Dead `sentiment` scorer** (zero variance) — fix or remove (separate from DoltHub work).
-13. **Optional: real risk-free rate** from DoltHub `rates/us_treasury` instead of hardcoded
-    0.045 in the backtesters.
+11. ~~**Wire `dolt_slippage` into the live EV/preflight.**~~ **DONE 2026-06-15.** `backtester.py`
+    now builds the real `measure_spread_table()` once (when the Dolt cache exists) and applies a
+    delta/DTE-aware `half_spread_fraction()` haircut at the BS-fallback entry/exit instead of the
+    flat 7%; falls back to the config value per-bucket-thin or cache-absent. Real-marks trades
+    unaffected (their bid/ask already include the spread). The real table proves 7% is wrong BOTH
+    ways: **ATM ≈1.4% half-spread (7% overstates), deep-OTM ≈6.5–16% (7% understates).** 9
+    backtester tests still green.
+12. ~~**Dead `sentiment` scorer.**~~ **RESOLVED 2026-06-15 (disabled + documented).** Weight is
+    already 0.0 in config; the primary yahooquery fetch path hardcodes `sentiment_score = 0.0`
+    (the root cause of zero variance), and calibration already masks zero-variance features
+    (`mask_zero_variance`). So it cannot affect scoring. Left the display plumbing intact (the
+    "Sentiment: Neutral" UI tag) rather than a risky multi-file rip-out; revisit only if a real
+    sentiment FEED is wired (free data doesn't provide one — textblob+yfinance news is empty/optional).
+13. **DEFERRED (optional, low-value).** Real risk-free rate from DoltHub `rates/us_treasury` vs
+    hardcoded 0.045. At the DTEs traded here the rfr barely moves option prices; not worth a new
+    network-fetch dependency. Documented as a deliberate skip, not an oversight.
 
 ---
 
