@@ -625,6 +625,20 @@ def style(text, name: str, bold: bool = None) -> str:
     return f"{prefix}{text}{Colors.RESET}"
 
 
+def style_sign(text, value) -> str:
+    """Style by directional sign: >0 green, <0 red, ==0 neutral.
+
+    The ONLY sanctioned path to good/bad coloring of a number. Reserve
+    green/red for EV, P&L, and verdict sign — never decorative metrics.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = 0.0
+    name = 'good' if v > 0 else ('bad' if v < 0 else 'value')
+    return style(text, name)
+
+
 __all__ = [
     'Colors',
     'BoxChars',
@@ -653,5 +667,6 @@ __all__ = [
     'supports_truecolor',
     'rgb_fg',
     'style',
+    'style_sign',
     'GLYPHS',
 ]
