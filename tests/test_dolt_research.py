@@ -39,6 +39,29 @@ class FilterTest(unittest.TestCase):
         ctx2 = {"spots": spots2, "sdates": sorted(spots2), "date": "2024-03-10", "spot": spots2["2024-03-10"]}
         self.assertFalse(dr.trend_up(5)(ctx2))
 
+    def test_drawdown_on(self):
+        # peak 110 at day 5, then falls to 99 at day 10 -> dd = 99/110 - 1
+        spots = {f"2024-03-{d:02d}": v for d, v in
+                 zip(range(1, 11), [100, 104, 108, 110, 109, 106, 103, 101, 100, 99])}
+        sdates = sorted(spots)
+        ctx = {"spots": spots, "sdates": sdates, "date": "2024-03-10", "spot": 99}
+        dd = dr.drawdown_on(ctx)
+        self.assertAlmostEqual(dd, 99 / 110 - 1.0, places=6)
+        # at the peak, drawdown is 0
+        ctx_peak = {"spots": spots, "sdates": sdates, "date": "2024-03-04", "spot": 110}
+        self.assertAlmostEqual(dr.drawdown_on(ctx_peak), 0.0, places=6)
+        self.assertIsNone(dr.drawdown_on({"spots": {}, "sdates": [], "date": "x", "spot": 1}))
+
+    def test_in_drawdown(self):
+        spots = {f"2024-03-{d:02d}": v for d, v in
+                 zip(range(1, 11), [100, 104, 108, 110, 109, 106, 103, 101, 100, 99])}
+        sdates = sorted(spots)
+        deep = {"spots": spots, "sdates": sdates, "date": "2024-03-10", "spot": 99}   # ~10% down
+        self.assertTrue(dr.in_drawdown(0.09)(deep))
+        self.assertFalse(dr.in_drawdown(0.15)(deep))
+        peak = {"spots": spots, "sdates": sdates, "date": "2024-03-04", "spot": 110}
+        self.assertFalse(dr.in_drawdown(0.05)(peak))
+
     def test_combine(self):
         always = lambda ctx: True
         never = lambda ctx: False

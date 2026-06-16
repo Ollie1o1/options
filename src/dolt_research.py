@@ -85,6 +85,33 @@ def low_iv(thresh: float) -> Callable:        # absolute IV ceiling (cheap vol)
     return f
 
 
+def drawdown_on(ctx) -> Optional[float]:
+    """Current drawdown of spot from its trailing peak (<= 0), using the spot
+    history available in ctx. None if it can't be computed."""
+    spots, sdates, date, spot = (ctx.get("spots"), ctx.get("sdates"),
+                                 ctx.get("date"), ctx.get("spot"))
+    if not spots or not sdates or date not in spots or spot is None:
+        return None
+    try:
+        i = sdates.index(date)
+    except ValueError:
+        return None
+    peak = max(spots[d] for d in sdates[: i + 1] if d in spots)
+    if not peak:
+        return None
+    return spot / peak - 1.0
+
+
+def in_drawdown(min_dd: float) -> Callable:
+    """Entry only when spot is at least ``min_dd`` (e.g. 0.10 = 10%) below its
+    trailing peak — i.e. SELLING premium INTO market weakness, the worst-case
+    stress for short premium (P0.2)."""
+    def f(ctx):
+        dd = drawdown_on(ctx)
+        return dd is not None and dd <= -abs(min_dd)
+    return f
+
+
 def combine(*filters) -> Callable:
     def f(ctx):
         return all(flt(ctx) for flt in filters)

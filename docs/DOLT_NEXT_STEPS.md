@@ -56,9 +56,19 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
      both periods — the positive PF rides a handful of large wins vs many small losers, a
      fragile distribution on n=12. Promising, still not deployable on its own. Next: more
      entries (denser cadence / more index data) and the P0.2 drawdown stress before sizing.
-2. **Stress the bull-market bias.** 2022–2024 was net-bullish after the dip — short premium's
-   friend. The one scenario to respect is a sustained crash. Find the worst drawdown windows
-   in the data and report the strategy's behavior there explicitly.
+2. ~~**Stress the bull-market bias.**~~ **DONE 2026-06-15.** New `drawdown_on()` + `in_drawdown(min_dd)`
+   filter in `dolt_research` (selling INTO weakness = the worst case for short premium).
+   SPY put spread, 2022-2024:
+   - **Selling into an established drawdown is the BEST sub-sample**, not the worst:
+     baseline PF 4.29 → in_drawdown_10% **PF 5.43** (win 50%, avg +2.3%). Down 10% ⇒ vol is
+     rich ⇒ you collect more ⇒ mean-reversion helps. (Confirms the P1.4 VRP thesis.)
+   - **The genuine worst case is selling at a TOP as the market begins to fall**: the
+     2022-H1 top→fall window is n=4, win 25%, avg **−0.3%**, **PF 0.01** — a wipeout for
+     those trades, BUT the defined-risk wing capped the damage to −0.3% avg on max risk (no
+     blow-up). That cap is exactly why the spread beats naked puts in a crash.
+   - Full 2022 bear *year* is still net positive (PF 8.23) because most of it is selling into
+     already-elevated vol. **Takeaway: tail is capped by design; a VRP/drawdown timing filter
+     (P1.4) would skip the top-selling losses.** All small-n — qualitative, not proven.
 
 ### P1 — turn the signal into a deployable strategy
 3. **Position sizing + risk layer.** Every backtest is 1 contract; returns are per-contract on
