@@ -238,6 +238,16 @@ def context_lines(row: Dict[str, Any], today: Optional[str] = None,
             sig.append(f"Insider: {ins['label']} (${ins['buy_value']:,.0f}, 90d)")
         if sig:
             out.append("Signals:   " + "  |  ".join(sig))
+
+        # Dolt verdict: per-segment LONG/SHORT/STAND-DOWN from the real-marks
+        # recommender (display-only; only shown for symbols in a known segment).
+        try:
+            from src.dolt_verdict import verdict_line
+            vl = verdict_line(symbol)
+            if vl:
+                out.append(vl)
+        except Exception:
+            pass
     except Exception:
         pass
     return out

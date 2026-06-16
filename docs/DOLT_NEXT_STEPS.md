@@ -107,10 +107,13 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
      separate case if the short-put strategy is ever sized.
 
 ### P2 — wire it into the system (the user explicitly wants long/short guidance live)
-6. **Surface the recommender verdict in the live screener.** When scanning a name, show
-   "LONG / SHORT / STAND DOWN" from `dolt_research.recommend()` (or a cached per-segment
-   lookup) so the day-to-day tool reflects what the backtest learned. Keep long calls as a
-   candidate — do NOT hard-pivot to short-only.
+6. ~~**Surface the recommender verdict in the live screener.**~~ **DONE 2026-06-15.** New
+   `src/dolt_verdict.py`: cached per-segment LONG/SHORT/STAND-DOWN lookup (recommend() is too
+   slow/rate-limited to run live), with built-in validated defaults so it works offline +
+   `--build` to refresh into `data/dolt_verdicts.json`. Wired as ONE display-only line in
+   `pick_context.context_lines` (the existing failure-safe overlay), shown only for symbols in
+   a known DoltHub segment, and it carries the capacity caveat (index = real per-trade edge but
+   ~0.3% CAGR sized). Long calls stay a candidate (the recommender picks per-trade; no hard pivot).
 7. **Strategic real-money decision (USER call, then code).** The gate / cohort feeder /
    real-money path are built around long calls (breakeven). The edge is short index put
    spreads. Decide whether the real-money path should evolve toward the validated strategy.
