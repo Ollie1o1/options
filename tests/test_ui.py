@@ -144,6 +144,41 @@ class UiTestCase(unittest.TestCase):
         self.assertTrue(any(f in out for f in ui.SPINNER_FRAMES))
 
 
+class DecisionZoneTestCase(unittest.TestCase):
+    def setUp(self):
+        fmt.set_color_enabled(False)
+        import os
+        import sys
+        s = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+        if s not in sys.path:
+            sys.path.insert(0, s)
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = None
+
+    def test_decision_zone_has_verdict_and_do(self):
+        from ui_preview import df
+        from src.cli_display import format_decision_zone
+        row = df().iloc[0]  # MSFT positive-EV call
+        lines = [strip(l) for l in format_decision_zone(row, {})]
+        body = "\n".join(lines)
+        self.assertIn("VERDICT", body)
+        self.assertIn("DO", body)
+        self.assertIn("EV", body)        # EV figure present
+        self.assertIn("BUY", body)       # action verb
+
+    def test_decision_zone_uses_real_target_stop(self):
+        from ui_preview import df
+        from src.cli_display import format_decision_zone
+        from src.trade_analysis import calculate_entry_exit_levels
+        row = df().iloc[0]
+        lvl = calculate_entry_exit_levels(row, {})
+        body = strip("\n".join(format_decision_zone(row, {})))
+        # the DO line must show the real computed target and stop, not a flat 2x
+        self.assertIn(f"${lvl['profit_target']:.2f}", body)
+        self.assertIn(f"${lvl['stop_loss']:.2f}", body)
+
+
 class ScenarioTableTestCase(unittest.TestCase):
     def setUp(self):
         fmt.set_color_enabled(False)

@@ -183,6 +183,64 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     print(f"\nTop {n} contracts shown. Run with --export csv to save full results.")
 
 
+def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
+    """Bright two-line decision zone: VERDICT (EV sign) + DO (action).
+
+    Consolidates the EV-after-cost read and the entry/target/stop plan into the
+    two lines the eye should land on first. Every figure here also appears in
+    the supporting rows / order ticket, so nothing here is its sole source.
+    """
+    config = config or {}
+
+    # --- VERDICT: net EV (sign-colored) + cheap/rich vs surface + VRP ---
+    ev = float(row.get("ev_per_contract", 0) or 0)
+    sign_word = "POSITIVE" if ev > 0 else ("NEGATIVE" if ev < 0 else "FLAT")
+    ev_text = f"{sign_word} EV {ev:+.0f}/ct"
+    ev_cell = fmt.style_sign(ev_text, ev) if HAS_ENHANCED_CLI else ev_text
+
+    extras = []
+    surf = row.get("iv_surface_residual", None)
+    if surf is not None and pd.notna(surf):
+        extras.append("CHEAP vs surface" if float(surf) < 0 else "RICH vs surface")
+    vrp = row.get("vrp_regime", None)
+    if vrp:
+        extras.append(f"VRP {vrp}")
+
+    if HAS_ENHANCED_CLI:
+        verdict = ui.kv_line("VERDICT", [ev_cell] + extras)
+    else:
+        verdict = "  VERDICT    " + "  ".join([ev_text] + extras)
+
+    # --- DO: real entry/target/stop levels (reuse the Plan-block math) ---
+    try:
+        from .utils import is_short_position
+    except ImportError:
+        from utils import is_short_position
+    is_short = is_short_position(str(row.get("strategy_name", "")))
+    verb = "SELL" if is_short else "BUY"
+
+    if HAS_ENHANCED_CLI:
+        lvl = calculate_entry_exit_levels(row, config)
+        entry = float(lvl["entry_price"])
+        tgt = float(lvl["profit_target"])
+        stop = float(lvl["stop_loss"])
+    else:
+        entry = float(row.get("premium", 0) or 0)
+        tgt = entry * 2.0
+        stop = entry * 0.5
+
+    tgt_pct = (tgt / entry - 1) * 100 if entry else 0.0
+    stop_pct = (stop / entry - 1) * 100 if entry else 0.0
+    do_text = (f"{verb} 1 @ ${entry:.2f}  ·  tgt ${tgt:.2f} ({tgt_pct:+.0f}%)"
+               f"  ·  stop ${stop:.2f} ({stop_pct:+.0f}%)")
+    if HAS_ENHANCED_CLI:
+        do_line = ui.kv_line("DO", fmt.style(do_text, 'accent'))
+    else:
+        do_line = "  DO         " + do_text
+
+    return [verdict, do_line]
+
+
 def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> list:
     """Return themed sub-lines for analysis."""
     INDENT = "         "
