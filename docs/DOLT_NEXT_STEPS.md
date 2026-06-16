@@ -20,7 +20,17 @@ on real prices. The honest bottom line:
 - A **recommender** (`dolt_research --recommend`) reproduces these verdicts from the
   backtest on demand. Long calls remain a candidate; the system picks them when they win.
 
-All committed to `main`, 86 tests green. Nothing is wired into the LIVE trading path yet.
+**Update 2026-06-15 (P0–P4 worked through):** the index put-spread edge is now **holdout-validated**
+(PF 4.19→4.41 OOS) with a **capped tail** (defined-risk wing holds even when selling at a market
+top). BUT the new **portfolio layer is the headline**: sized responsibly the single-index spread
+makes **~0.3% CAGR / ~0.7%/yr on deployed capital** (only ~31 trades/3yr, 27 open at once) — the
+per-trade PF was hiding a **capacity wall**. The verdict is now surfaced live (display-only) in the
+screener; the basket is broadened (META/AMZN/TSLA have data); earnings-vol-selling + skew tooling is
+built (earnings result pending a data-fetch pass); real slippage replaced the flat 7% in the
+backtester. The one OPEN item is the strategic real-money decision (P2.7) — **yours to make**.
+
+All committed to `main`, **99 tests green**. Nothing is wired into the LIVE trading path (only the
+display-only verdict line). Real money stays OFF until the gate fires / you decide.
 
 ## The toolkit that exists (all CLIs, all read the local cache)
 
@@ -115,10 +125,22 @@ META/AMZN/TSLA confirmed via live probe 2026-06-15). (QQQ, IWM are NOT in the da
    `pick_context.context_lines` (the existing failure-safe overlay), shown only for symbols in
    a known DoltHub segment, and it carries the capacity caveat (index = real per-trade edge but
    ~0.3% CAGR sized). Long calls stay a candidate (the recommender picks per-trade; no hard pivot).
-7. **Strategic real-money decision (USER call, then code).** The gate / cohort feeder /
-   real-money path are built around long calls (breakeven). The edge is short index put
-   spreads. Decide whether the real-money path should evolve toward the validated strategy.
-   This is a decision first, code second.
+7. **Strategic real-money decision (USER call, then code). ⟵ STILL OPEN — the one item that
+   needs you.** The gate / cohort feeder / real-money path are built around long calls
+   (breakeven). The edge is short index put spreads. **This session's evidence sharpens the
+   decision and arguably changes it:** the put-spread edge SURVIVED the holdout (P0.1, PF
+   4.19→4.41) and the tail is capped by design (P0.2), BUT the portfolio view (P1.3/P1.5)
+   shows it makes **~0.3% CAGR / ~0.7%/yr on deployed capital** as a standalone single-index
+   strategy, because you only get ~31 trades/3yr with 27 open at once. So the realistic options:
+   - **(A) Don't pivot the real-money path yet.** Neither long calls (breakeven) nor the single-
+     name spread (real but ~nil capacity) clears the bar for real money. Keep the gate OFF, keep
+     researching. (Most defensible given the data.)
+   - **(B) Pivot to short index spreads anyway, sized tiny**, accepting low capacity for a real
+     (if small) edge — only worthwhile if combined with the capacity work (P3.10 more names +
+     P3.8 earnings selling) to build a portfolio of uncorrelated short-premium sleeves.
+   - **(C) Broaden first, decide later** — run the fetched-history backtest on the expanded
+     basket (META/AMZN/TSLA) + earnings selling, THEN re-evaluate capacity. (Recommended path.)
+   Decision is yours; code follows. Nothing here flips the gate — real money stays OFF until you say.
 
 ### P3 — more research (the brainstormed ideas not yet built)
 8. ~~**Earnings IV-crush SELLING.**~~ **TOOL DONE 2026-06-15, result data-limited.** New
