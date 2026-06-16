@@ -63,5 +63,45 @@ class HarnessWiringTest(unittest.TestCase):
         self.assertEqual(out["low_vix_20"]["profit_factor"], 1.1)
 
 
+class TrainTestStrategyTest(unittest.TestCase):
+    def test_strategy_registry_has_three(self):
+        self.assertEqual(set(dr.STRATEGIES), {"long_call", "short_put", "put_spread"})
+
+    def test_train_test_default_uses_cohort(self):
+        tr = {"n": 50, "win_rate": 0.6, "avg_return": 0.1,
+              "median_return": 0.05, "profit_factor": 1.3}
+        te = {"n": 25, "win_rate": 0.55, "avg_return": 0.08,
+              "median_return": 0.02, "profit_factor": 1.2}
+        with mock.patch("src.dolt_research.run_cohort_backtest", side_effect=[tr, te]) as m:
+            out = dr.train_test(["SPY"], None)
+        self.assertEqual(m.call_count, 2)
+        self.assertEqual(out["train"]["profit_factor"], 1.3)
+        self.assertEqual(out["test"]["profit_factor"], 1.2)
+
+    def test_train_test_put_spread_routes_to_spread_runner(self):
+        tr = {"n": 40, "win_rate": 0.8, "avg_return": 0.2,
+              "median_return": 0.3, "profit_factor": 4.0}
+        te = {"n": 18, "win_rate": 0.75, "avg_return": 0.15,
+              "median_return": 0.2, "profit_factor": 2.5}
+        with mock.patch("src.dolt_research.run_spread_backtest", side_effect=[tr, te]) as ms, \
+             mock.patch("src.dolt_research.run_cohort_backtest") as mc:
+            out = dr.train_test(["SPY"], None, strategy="put_spread")
+        self.assertEqual(ms.call_count, 2)
+        mc.assert_not_called()
+        self.assertEqual(out["train"]["profit_factor"], 4.0)
+        self.assertEqual(out["test"]["profit_factor"], 2.5)
+
+    def test_train_test_short_put_routes_to_short_runner(self):
+        row = {"n": 30, "win_rate": 0.7, "avg_return": 0.1,
+               "median_return": 0.1, "profit_factor": 1.26}
+        with mock.patch("src.dolt_research.run_short_backtest", return_value=row) as ms:
+            out = dr.train_test(["NVDA"], None, strategy="short_put")
+        self.assertEqual(ms.call_count, 2)
+        # short_put must be invoked as puts, not calls
+        for c in ms.call_args_list:
+            self.assertEqual(c.kwargs.get("opt_type"), "put")
+        self.assertEqual(out["test"]["profit_factor"], 1.26)
+
+
 if __name__ == "__main__":
     unittest.main()

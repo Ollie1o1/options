@@ -16,6 +16,8 @@ from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional
 
 from src.dolt_cohort import run_cohort_backtest
+from src.dolt_short import run_short_backtest
+from src.dolt_spread import run_spread_backtest
 
 
 # ── External signals (cached) ───────────────────────────────────────────────
@@ -142,15 +144,30 @@ def segment_sweep(start, end, db_path=None, segments=None) -> Dict[str, Dict[str
             for seg, syms in segments.items()}
 
 
+# Strategy registry: name -> runner with the shared
+# (symbols, dates, db_path=, entry_filter=) contract. short_put is the put
+# variant of the short runner. Lets train_test holdout-validate ANY strategy,
+# not just long calls (P0.1: the winning index put spread must survive a holdout).
+# Late-bound (look up globals at call time) so tests can monkeypatch the runners.
+STRATEGIES: Dict[str, Callable] = {
+    "long_call":  lambda *a, **k: run_cohort_backtest(*a, **k),
+    "short_put":  lambda *a, **k: run_short_backtest(*a, opt_type="put", **k),
+    "put_spread": lambda *a, **k: run_spread_backtest(*a, **k),
+}
+
+
 def train_test(symbols, filter_fn, db_path=None,
                train=("2022-01-01", "2023-12-31"),
-               test=("2024-01-01", "2024-12-31")) -> Dict[str, Any]:
-    """Validate a filter: fit intuition on train, confirm on held-out test."""
+               test=("2024-01-01", "2024-12-31"),
+               strategy="long_call") -> Dict[str, Any]:
+    """Validate a filter/strategy: fit intuition on train, confirm on held-out
+    test. ``strategy`` selects the backtest runner (see STRATEGIES)."""
     from src import dolt_options as _do
-    tr = run_cohort_backtest(symbols, _do._date_range(*train, weekly=True),
-                             db_path=db_path, entry_filter=filter_fn)
-    te = run_cohort_backtest(symbols, _do._date_range(*test, weekly=True),
-                             db_path=db_path, entry_filter=filter_fn)
+    runner = STRATEGIES[strategy]
+    tr = runner(symbols, _do._date_range(*train, weekly=True),
+                db_path=db_path, entry_filter=filter_fn)
+    te = runner(symbols, _do._date_range(*test, weekly=True),
+                db_path=db_path, entry_filter=filter_fn)
     return {"train": _row(tr), "test": _row(te)}
 
 
@@ -211,6 +228,8 @@ def _cli():
     ap.add_argument("--segments", action="store_true", help="Per-segment (etf/tech/semi) battery")
     ap.add_argument("--recommend", action="store_true", help="Long/short verdict for --symbols")
     ap.add_argument("--train-test", metavar="FILTER", help="Train/test a single battery filter")
+    ap.add_argument("--strategy", choices=list(STRATEGIES), default="long_call",
+                    help="Strategy to holdout-validate with --train-test")
     args = ap.parse_args()
     syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     cfg = {}
@@ -223,8 +242,8 @@ def _cli():
     if args.train_test:
         battery = standard_battery()
         flt = battery.get(args.train_test)
-        out = train_test(syms, flt, db_path=db)
-        print(f"Train/test: {args.train_test}  ({', '.join(syms)})")
+        out = train_test(syms, flt, db_path=db, strategy=args.strategy)
+        print(f"Train/test [{args.strategy}]: {args.train_test}  ({', '.join(syms)})")
         print(f"  TRAIN 22-23: {_fmt(out['train'])}")
         print(f"  TEST  24   : {_fmt(out['test'])}")
         return

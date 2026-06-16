@@ -44,10 +44,18 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
 ## What still needs to be done (prioritized)
 
 ### P0 — make the edge trustworthy before any real money
-1. **Walk-forward / holdout the WINNING strategy (index put spreads).** We holdout-validated
-   naked short puts (train PF 1.26 incl. the 2022 bear / strong test), but the put-spread
-   version (PF 4.29) was full-sample only. Run `train_test` on the spread before trusting it.
-   The index n is small (31–65); treat PF 4.29 as promising, not proven.
+1. ~~**Walk-forward / holdout the WINNING strategy (index put spreads).**~~ **DONE 2026-06-15.**
+   `train_test` now takes a `strategy` arg (`STRATEGIES` registry: long_call / short_put /
+   put_spread) and a `--strategy` CLI flag, so any strategy can be holdout-validated, not just
+   long calls. Result for the index put spread (SPY, baseline):
+   - `--train-test baseline --strategy put_spread --symbols SPY`
+   - **TRAIN 22-23** (incl. 2022 bear): n=19, win=47%, avg +1.6%, med −0.2%, **PF 4.19**
+   - **TEST 2024** (held out):          n=12, win=33%, avg +2.2%, med −0.1%, **PF 4.41**
+   - **Verdict: PF SURVIVES the holdout** (4.19→4.41) and survives 2022 in-train. BUT it is
+     NOT proven: **n is tiny (12 OOS trades)**, win rate is LOW (33%) and **median is negative**
+     both periods — the positive PF rides a handful of large wins vs many small losers, a
+     fragile distribution on n=12. Promising, still not deployable on its own. Next: more
+     entries (denser cadence / more index data) and the P0.2 drawdown stress before sizing.
 2. **Stress the bull-market bias.** 2022–2024 was net-bullish after the dip — short premium's
    friend. The one scenario to respect is a sustained crash. Find the worst drawdown windows
    in the data and report the strategy's behavior there explicitly.
