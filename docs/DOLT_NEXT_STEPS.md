@@ -52,6 +52,35 @@ META/AMZN/TSLA confirmed via live probe 2026-06-15). (QQQ, IWM are NOT in the da
 
 ---
 
+## Direction A — sleeve blend (2026-06-16): does diversification beat the capacity wall? NO.
+
+Built `src/dolt_blend.py` (Sleeve abstraction + equal-weight-per-sleeve monthly-rebalanced
+blend + cross-sleeve correlation + annualized Sharpe; 9 tests). Fed it the three real sleeves:
+index put spread + tech short puts (short_market) + earnings strangle (market_neutral).
+
+**Standalone (2022-24, risk 2%/trade):** index_spread Sharpe 3.32 *but +1.1% total* (capacity
+artifact — untradeable), tech_short_put 0.39 (+72% total, −70% maxDD), earnings_strangle 0.11
+(~breakeven). **Correlation (the key output):**
+
+```
+                  index_spread  tech_short_put  earnings_strangle
+index_spread          +1.00          +0.07            +0.70
+tech_short_put        +0.07          +1.00            −0.27
+earnings_strangle     +0.70          −0.27            +1.00
+```
+
+**RESULT: the blend does NOT beat the best single sleeve.** 3-sleeve equal-weight Sharpe 0.16;
+even the best pair (tech + earnings, −0.27 correlated) blends to **0.09 < tech-alone 0.40**.
+Why, decisively: the only market-neutral sleeve (earnings strangle) is (1) too weak standalone
+(Sharpe 0.11) AND (2) **+0.70 correlated with the index spread anyway** — both are short-vol and
+bleed in the same regimes, so it isn't the clean diversifier hypothesized. Adding a near-breakeven
+sleeve dilutes faster than its modest negative correlation helps; a Sharpe-optimal weight would
+just zero it out → hold the best sleeve alone. **Direction A is not supported by this data.** This,
+on top of the capacity wall, points hard at the (C) conclusion: there is no deployable,
+diversified short-premium portfolio in the free EOD data — cost, capacity, and the absence of a
+strong *uncorrelated* sleeve are the wall. (Measurement note: monthly returns are sized sums, not
+mean-of-month, so Sharpe stays consistent with the fixed-fractional dollar curve.)
+
 ## What still needs to be done (prioritized)
 
 ### P0 — make the edge trustworthy before any real money
