@@ -61,6 +61,21 @@ def rule(width: int, title: str = None) -> str:
             + ' ' + fmt.style('─' * suffix_len, 'muted'))
 
 
+def heavy_rule(width: int, title: str = None) -> str:
+    """Heavy horizontal rule (━) for pick boundaries; light rule is `rule`."""
+    if not title:
+        return fmt.style('━' * width, 'heading')
+    prefix = '━ '
+    suffix_len = max(0, width - len(prefix) - visible_len(title) - 1)
+    return (fmt.style(prefix, 'heading') + fmt.style(title, 'heading')
+            + ' ' + fmt.style('━' * suffix_len, 'heading'))
+
+
+def tier(text) -> str:
+    """Dim a depth-tier line (still visible, de-emphasized)."""
+    return fmt.style(str(text), 'muted')
+
+
 def kv_line(label: str, segments, indent: int = 2, sep: str = '  ') -> str:
     """Fixed-gutter labeled row: dim label, joined value segments."""
     if isinstance(segments, str):

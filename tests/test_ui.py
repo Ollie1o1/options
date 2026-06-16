@@ -89,6 +89,21 @@ class UiTestCase(unittest.TestCase):
         self.assertEqual(strip(ui.meter(0.0, width=4)), "░░░░")
         self.assertEqual(strip(ui.meter(1.2, width=4)), "████")
 
+    def test_heavy_rule_uses_heavy_glyph(self):
+        out = strip(ui.heavy_rule(20, title="AAPL"))
+        self.assertTrue(out.startswith("━ AAPL "))
+        self.assertEqual(len(out), 20)
+        self.assertIn("━", out)
+
+    def test_heavy_rule_plain(self):
+        self.assertEqual(strip(ui.heavy_rule(10)), "━" * 10)
+
+    def test_tier_dims_text(self):
+        fmt.set_color_enabled(True)
+        dimmed = ui.tier("depth")
+        self.assertEqual(strip(dimmed), "depth")
+        self.assertNotEqual(dimmed, "depth")  # carries muted styling
+
     def test_clip_no_op_under_limit(self):
         self.assertEqual(ui.clip("short", 40), "short")
 
