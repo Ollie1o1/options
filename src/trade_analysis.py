@@ -704,6 +704,31 @@ def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
     indent = "  "
     col_w = 11
 
+    # Precompute the full price grid so we can detect a worthless wall before
+    # rendering \u2014 a deep OTM strike prices to ~$0 at every move/horizon, which
+    # reads as a broken table rather than information.
+    grid = []  # list of (move_pct, S_new, [price per horizon])
+    for move_pct in moves:
+        S_new = S * (1.0 + move_pct)
+        prices = []
+        for _, T_new in time_horizons:
+            try:
+                price = max(0.0, float(bs_price(opt_type, S_new, K, T_new, rfr, sigma)))
+            except Exception:
+                price = 0.0
+            prices.append(price)
+        grid.append((move_pct, S_new, prices))
+
+    sp_str = f"${S:.2f}"
+    title = f"{indent}Stock Price Scenarios (current: {sp_str})"
+
+    # If every cell rounds to $0.00 the contract is effectively worthless across
+    # the modelled range; show a one-line note instead of a grid of zeros.
+    if all(price < 0.005 for _, _, prices in grid for price in prices):
+        note = (f"{title}\n{indent}  Prices to ~$0.00 across all modelled moves "
+                f"\u2014 effectively worthless at these levels.")
+        return fmt.colorize(note, fmt.Colors.DIM) if (HAS_FMT and fmt) else note
+
     hdr_parts = [f"{'Move':<12}"]
     for t_label, _ in time_horizons:
         hdr_parts.append(f"\u2502  {t_label:<{col_w - 2}}")
@@ -711,8 +736,6 @@ def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
     sep_line = indent + "\u2500" * min(len(hdr_line) - len(indent) + 2, width - len(indent))
 
     lines = []
-    sp_str = f"${S:.2f}"
-    title = f"{indent}Stock Price Scenarios (current: {sp_str})"
     if HAS_FMT and fmt:
         lines.append(fmt.colorize(title, fmt.Colors.DIM + fmt.Colors.BOLD))
         lines.append(fmt.colorize(hdr_line, fmt.Colors.DIM))
@@ -722,16 +745,10 @@ def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
         lines.append(hdr_line)
         lines.append(sep_line)
 
-    for move_pct in moves:
-        S_new = S * (1.0 + move_pct)
+    for move_pct, S_new, prices in grid:
         move_label = f"{move_pct:+.0%}  ${S_new:.0f}"
         row_parts = [f"{move_label:<12}"]
-        for _, T_new in time_horizons:
-            try:
-                price = float(bs_price(opt_type, S_new, K, T_new, rfr, sigma))
-                price = max(0.0, price)
-            except Exception:
-                price = 0.0
+        for price in prices:
             cell_str = f"${price:.2f}"
             if HAS_FMT and fmt:
                 if price > entry_price:

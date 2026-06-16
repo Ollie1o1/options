@@ -89,6 +89,74 @@ class UiTestCase(unittest.TestCase):
         self.assertEqual(strip(ui.meter(0.0, width=4)), "░░░░")
         self.assertEqual(strip(ui.meter(1.2, width=4)), "████")
 
+    def test_clip_no_op_under_limit(self):
+        self.assertEqual(ui.clip("short", 40), "short")
+
+    def test_clip_breaks_on_word_boundary(self):
+        out = ui.clip("High probability (>65%) • Strong R/R (2.1x)", 40)
+        self.assertTrue(out.endswith("…"))
+        self.assertLessEqual(ui.visible_len(out), 40)
+        # never a hard mid-word cut like "(2…"
+        self.assertFalse(out.endswith("(2…"))
+
+    def test_clip_hard_cut_for_single_long_word(self):
+        out = ui.clip("supercalifragilistic", 10)
+        self.assertEqual(out, "supercali…")
+
+    def test_spinner_noop_on_non_tty(self):
+        import io
+        buf = io.StringIO()  # StringIO has no isatty -> disabled
+        with ui.spinner("loading", stream=buf):
+            pass
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_spinner_animates_on_tty(self):
+        import io
+
+        class FakeTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+        buf = FakeTTY()
+        sp = ui.Spinner("load", stream=buf, interval=0.01)
+        sp.start()
+        # let it emit at least one frame
+        import time
+        time.sleep(0.05)
+        sp.stop()
+        out = buf.getvalue()
+        self.assertIn("load", strip(out))
+        self.assertTrue(any(f in out for f in ui.SPINNER_FRAMES))
+
+
+class ScenarioTableTestCase(unittest.TestCase):
+    def setUp(self):
+        fmt.set_color_enabled(False)
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = None
+
+    def _row(self, strike, premium):
+        import pandas as pd
+        return pd.Series({
+            "underlying": 182.40, "strike": strike, "T_years": 0.1,
+            "impliedVolatility": 0.42, "type": "call", "premium": premium,
+        })
+
+    def test_worthless_grid_shows_note_not_zeros(self):
+        from src.trade_analysis import build_scenario_table
+        out = build_scenario_table(self._row(480, 11.30), 0.043, 100)
+        self.assertIn("worthless", out)
+        # collapses to a one-line note, not a grid of zero rows
+        self.assertNotIn("Move", out)
+        self.assertEqual(out.count("$0.00"), 1)  # only in the note text
+
+    def test_normal_grid_renders_table(self):
+        from src.trade_analysis import build_scenario_table
+        out = build_scenario_table(self._row(190, 4.20), 0.043, 100)
+        self.assertIn("Move", out)
+        self.assertNotIn("worthless", out)
+
 
 if __name__ == "__main__":
     unittest.main()

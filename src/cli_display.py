@@ -756,8 +756,7 @@ def _print_strategy_panel(df_picks: pd.DataFrame, width: int) -> None:
         stars, _ = fmt.format_quality_score(quality)
         thesis = generate_trade_thesis(best) if HAS_ENHANCED_CLI else ""
         thesis_short = thesis.split('|')[0].strip() if thesis else ""
-        if len(thesis_short) > 40:
-            thesis_short = thesis_short[:39].rstrip() + "…"
+        thesis_short = ui.clip(thesis_short, 40)
         label = "Best Cons" if cat == 'CONSERVATIVE' else "Best Aggr"
         pop_str = fmt.format_pop(float(pop))
         rr_str = fmt.format_rr(float(rr))

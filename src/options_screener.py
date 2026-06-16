@@ -76,6 +76,7 @@ from .paper_manager import PaperManager
 # Enhanced CLI modules
 try:
     from . import formatting as fmt
+    from . import ui
     from .trade_analysis import (
         generate_trade_thesis,
         calculate_entry_exit_levels,
@@ -93,6 +94,14 @@ except ImportError as e:
     HAS_ENHANCED_CLI = False
     print(f"Enhanced CLI features unavailable: {e}")
     print("Install with: pip install colorama tqdm")
+
+
+def _spinner(label: str):
+    """Animated loading spinner if the enhanced UI is available, else a no-op."""
+    if HAS_ENHANCED_CLI:
+        return ui.spinner(label)
+    import contextlib
+    return contextlib.nullcontext()
 
 # Scan-level warning counter (incremented in except blocks, reported at end of scan)
 _SCAN_WARNINGS = [0]
@@ -3039,9 +3048,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             logger.warning("SectorAnalyzer failed: %s", _sa_exc)
 
     # === FETCH VIX FOR ADAPTIVE WEIGHTING ===
-    if verbose:
-        print("Fetching VIX level for adaptive scoring...")
-    vix_level = get_vix_level()
+    with _spinner("Fetching VIX level for adaptive scoring…"):
+        vix_level = get_vix_level()
     if verbose:
         if vix_level:
             print(f"✓ VIX Level: {vix_level:.2f}")
@@ -3053,9 +3061,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         print(f"✓ Market Regime: {vix_regime.upper()}")
 
     # Fetch risk-free rate automatically
-    if verbose:
-        print("Fetching current risk-free rate...")
-    rfr = get_risk_free_rate()
+    with _spinner("Fetching current risk-free rate…"):
+        rfr = get_risk_free_rate()
     if verbose:
         print(f"Using risk-free rate: {rfr*100:.2f}% (13-week Treasury)")
 
@@ -4031,7 +4038,6 @@ def main():
         import threading as _t
         import io as _io
         import sys as _sys
-        print("  Loading market data...", end="", flush=True)
         _result = [None]
         def _fetch():
             buf = _io.StringIO()
@@ -4043,26 +4049,26 @@ def main():
                 _sys.stdout = _old
             _result[0] = buf.getvalue()
         _th = _t.Thread(target=_fetch, daemon=True)
-        _th.start()
-        # Enforce exits synchronously. yfinance fetches are capped inside
-        # update_positions (30s spot + 30s option prices) so worst case is ~60s.
-        try:
-            pm.update_positions()
-            # Record that exits were enforced inline so the automation-health
-            # check (which keys off this log's mtime) reflects reality.
+        with _spinner("Loading market data…"):
+            _th.start()
+            # Enforce exits synchronously. yfinance fetches are capped inside
+            # update_positions (30s spot + 30s option prices) so worst case is ~60s.
             try:
-                import os as _os
-                from datetime import datetime as _now_dt
-                _os.makedirs("logs", exist_ok=True)
-                with open("logs/enforce_exits.log", "a") as _elog:
-                    _elog.write(f"[{_now_dt.now():%Y-%m-%d %H:%M:%S}] "
-                                "exits enforced inline at screener startup\n")
+                pm.update_positions()
+                # Record that exits were enforced inline so the automation-health
+                # check (which keys off this log's mtime) reflects reality.
+                try:
+                    import os as _os
+                    from datetime import datetime as _now_dt
+                    _os.makedirs("logs", exist_ok=True)
+                    with open("logs/enforce_exits.log", "a") as _elog:
+                        _elog.write(f"[{_now_dt.now():%Y-%m-%d %H:%M:%S}] "
+                                    "exits enforced inline at screener startup\n")
+                except Exception:
+                    pass
             except Exception:
                 pass
-        except Exception:
-            pass
-        _th.join(timeout=6)
-        print("\r" + " " * 30 + "\r", end="")
+            _th.join(timeout=6)
         if _result[0]:
             print(_result[0], end="")
     except Exception:
