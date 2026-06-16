@@ -120,9 +120,16 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
    This is a decision first, code second.
 
 ### P3 — more research (the brainstormed ideas not yet built)
-8. **Earnings IV-crush SELLING.** We measured ~24% post-earnings IV crush and used it as a
-   filter; the bigger trade is to SELL that vol pre-earnings (strangle/IC) and buy it back
-   after. Data is ready (`dolt_earnings` + before/after chains).
+8. ~~**Earnings IV-crush SELLING.**~~ **TOOL DONE 2026-06-15, result data-limited.** New
+   `src/dolt_earnings_sell.py`: short-strangle backtest — sell an OTM call+put in the front
+   expiry ~2 days before earnings, buy back the first data day after (real BID/ASK, 4-leg
+   commission, return on credit, realized move reported). 5 unit tests green.
+   **CAVEAT:** running it from the local cache yields only **n=1 usable on AAPL** with
+   `realized_move=0.0` (the exit-day spot/chain isn't archived). Earnings dates land on
+   arbitrary days; the local cache only holds the densely-archived dates the cohort/spread
+   backtests use. **A trustworthy sample needs a dedicated earnings-window chain FETCH pass
+   first** (slow, rate-limited — don't run alongside other API jobs). The harness is ready;
+   the data isn't, yet. (Same free-data wall noted elsewhere in this doc.)
 9. **Term-structure / calendar + skew trades.** Full surface is available on real marks.
 10. **Broaden the basket** where `--audit` confirms data, ideally adding a few more names per
     segment to firm up the (currently thin) per-segment samples.
