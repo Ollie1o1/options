@@ -185,9 +185,14 @@ def compare(symbols, start, end, filters: Dict[str, Optional[Callable]],
 # Universe segments — different vol character may favor different rules.
 # NOTE: QQQ and IWM are NOT in the DoltHub options dataset (verified empty), so
 # the "index" segment is SPY only. Only symbols with real chain data here.
+# META, AMZN added to tech 2026-06-15 (probed: ~150 chain rows each) to thicken
+# the per-segment sample — the binding constraint everywhere in this research.
+# TSLA also has data (~138 rows) but is its own high-beta animal; left ungrouped
+# until it earns a bucket. Broadened-basket verdicts are PROVISIONAL until a
+# backtest with fetched histories confirms (needs a fetch pass; see P3.10).
 SEGMENTS = {
     "index": ["SPY"],
-    "tech":  ["AAPL", "MSFT", "GOOG"],
+    "tech":  ["AAPL", "MSFT", "GOOG", "META", "AMZN"],
     "semi":  ["NVDA", "AMD"],
 }
 

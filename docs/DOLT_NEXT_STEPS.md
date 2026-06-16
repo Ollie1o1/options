@@ -36,8 +36,9 @@ $PY -m src.dolt_validate --symbols ...    # price-slice scorer IC vs real return
 $PY -m src.dolt_research --sweep | --segments | --recommend --symbols ...
 $PY -m src.dolt_earnings --iv-crush AAPL  # earnings IV-crush study
 ```
-Real universe with data: **AAPL, SPY, MSFT, NVDA, GOOG, AMD**. (QQQ, IWM are NOT in the
-dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a symbol.)
+Real universe with data: **AAPL, SPY, MSFT, NVDA, GOOG, AMD, META, AMZN** (+TSLA available;
+META/AMZN/TSLA confirmed via live probe 2026-06-15). (QQQ, IWM are NOT in the dataset —
+`--audit` shows them EMPTY. Always check `--audit`/probe before adding a symbol.)
 
 ---
 
@@ -130,9 +131,19 @@ dataset — `--audit` shows them EMPTY. Always check `--audit` before adding a s
    backtests use. **A trustworthy sample needs a dedicated earnings-window chain FETCH pass
    first** (slow, rate-limited — don't run alongside other API jobs). The harness is ready;
    the data isn't, yet. (Same free-data wall noted elsewhere in this doc.)
-9. **Term-structure / calendar + skew trades.** Full surface is available on real marks.
-10. **Broaden the basket** where `--audit` confirms data, ideally adding a few more names per
-    segment to firm up the (currently thin) per-segment samples.
+9. ~~**Term-structure / calendar + skew trades.**~~ **FEASIBILITY CONFIRMED 2026-06-15.** Real
+    surface verified on a cached SPY snapshot: classic equity put skew (IV 0.64 at low strikes →
+    0.18 at high) and a 3-expiry term structure (medIV 0.190→0.162→0.150, i.e. measurable
+    backwardation). Skew + term-structure studies ARE buildable on this data. Limit: only ~3
+    expiries cached per snapshot day, so calendar-spread granularity is coarse. Not yet built
+    (no backtest) — next research item; build on the broadened basket.
+10. ~~**Broaden the basket.**~~ **DONE 2026-06-15.** Probed candidates live: **TSLA (~138 rows),
+    META (~162), AMZN (~140) all HAVE data** (control SPY ~130). Added **META + AMZN to the
+    `tech` segment** in `dolt_research.SEGMENTS` (3→5 names) to thicken the binding-constraint
+    sample; TSLA left ungrouped (its own high-beta character). **Broadened-basket verdicts are
+    PROVISIONAL** — the recommender/verdict defaults still reflect the old 3-name tech result
+    until a backtest with FETCHED META/AMZN histories re-confirms (same fetch-pass dependency
+    as P3.8). The universe is now AAPL, SPY, MSFT, NVDA, GOOG, AMD, META, AMZN (+TSLA available).
 
 ### P4 — loose ends / cleanups
 11. **Wire `dolt_slippage` into the live EV/preflight.** The real per-contract slippage model
