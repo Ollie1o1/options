@@ -525,22 +525,40 @@ def _filter_by_cohort(rows: list, cohort: Optional[str]) -> list:
     return [r for r in rows if _cohort_for_entry_id(r.get("entry_id") or 0) == cohort]
 
 
+# ── Era split (pre-data vs finalized) ─────────────────────────────────────────
+# The `era` column marks when a trade was logged relative to the data-layer
+# build-out: 'pre_data' = older trades from before the DoltHub / data work,
+# 'finalized' = logged 2026-06-16 onward. A missing era is treated as 'pre_data'
+# (matches src/portfolio_eras.py), so this stays correct on legacy rows.
+def _era_for_row(r) -> str:
+    return r.get("era") or "pre_data"
+
+
+def _filter_by_era(rows: list, era: Optional[str]) -> list:
+    if era not in ("pre_data", "finalized"):
+        return rows
+    return [r for r in rows if _era_for_row(r) == era]
+
+
 def view_portfolio_menu() -> None:
     """Interactive entry point — prompt for cohort filter, then render."""
     print()
-    print("  PORTFOLIO VIEW — choose cohort:")
+    print("  PORTFOLIO VIEW — choose what to show:")
+    print("    [A] All trades (default — includes calibration marker on chart)")
+    print("    [F] Finalized only (logged today/2026-06-16 onward — post data-layer)")
+    print("    [O] Older / pre-data (before the DoltHub data work)")
     print("    [1] Pre-calibration  (trades scored under old hand-tuned weights)")
     print("    [2] Post-calibration (trades scored under IC-tuned weights, 2026-05-11 onward)")
-    print("    [A] All trades (default — includes calibration marker on chart)")
     try:
-        choice = input("  Choice [A/1/2]: ").strip().upper() or "A"
+        choice = input("  Choice [A/F/O/1/2]: ").strip().upper() or "A"
     except (EOFError, KeyboardInterrupt):
         choice = "A"
         print()
     cohort = {"1": "pre", "2": "post"}.get(choice)
-    view_portfolio(cohort=cohort)
+    era = {"F": "finalized", "O": "pre_data"}.get(choice)
+    view_portfolio(cohort=cohort, era=era)
 
-    # Auto-refresh the SVG chart for the chosen cohort.
+    # Auto-refresh the SVG chart for the chosen cohort (era filters use all).
     try:
         import subprocess
         script = Path(__file__).resolve().parent.parent / "scripts" / "make_pnl_chart.py"
@@ -556,12 +574,14 @@ def view_portfolio_menu() -> None:
         print(f"  (chart refresh skipped: {e})")
 
 
-def view_portfolio(cohort: Optional[str] = None):
+def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
     """Display paper portfolio from paper_trades.db.
 
     Args:
         cohort: None for all trades, 'pre' for trades opened before the
             calibration cutoff, 'post' for trades opened on/after.
+        era: None for all trades, 'finalized' for trades logged 2026-06-16
+            onward (post data-layer), 'pre_data' for older trades.
     """
     width = _width()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -607,10 +627,15 @@ def view_portfolio(cohort: Optional[str] = None):
     # ── Header ─────────────────────────────────────────────────────────────────
     print()
     all_rows = _filter_by_cohort(all_rows, cohort)
+    all_rows = _filter_by_era(all_rows, era)
     cohort_label = {"pre": "PRE-CALIBRATION", "post": "POST-CALIBRATION"}.get(cohort or "", "")
+    era_label = {"finalized": "FINALIZED (today onward)",
+                 "pre_data": "PRE-DATA (older)"}.get(era or "", "")
     header_text = f"PAPER PORTFOLIO  \u2014  {now_str}"
     if cohort_label:
         header_text += f"  [{cohort_label}]"
+    if era_label:
+        header_text += f"  [{era_label}]"
 
     if HAS_FMT and fmt:
         print(ui.banner(header_text, [], width))
@@ -620,7 +645,8 @@ def view_portfolio(cohort: Optional[str] = None):
         print("=" * width)
 
     if not all_rows:
-        msg = "\n  No trades match this cohort filter.\n" if cohort else "\n  No trades logged yet.\n"
+        msg = ("\n  No trades match this filter.\n" if (cohort or era)
+               else "\n  No trades logged yet.\n")
         print(msg)
         return
 
@@ -1265,4 +1291,28 @@ def view_portfolio(cohort: Optional[str] = None):
 
 
 if __name__ == "__main__":
-    view_portfolio()
+    import argparse
+
+    _p = argparse.ArgumentParser(description="Paper portfolio viewer")
+    _p.add_argument("--era", choices=["finalized", "pre_data"], default=None,
+                    help="Filter by era: 'finalized' = logged 2026-06-16 onward, "
+                         "'pre_data' = older trades")
+    _p.add_argument("--finalized", "--today", dest="finalized", action="store_true",
+                    help="Show only trades logged today onward (era=finalized)")
+    _p.add_argument("--pre-data", "--older", dest="pre_data", action="store_true",
+                    help="Show only older pre-data trades (era=pre_data)")
+    _p.add_argument("--cohort", choices=["pre", "post"], default=None,
+                    help="Filter by calibration cohort")
+    _p.add_argument("--menu", action="store_true",
+                    help="Open the interactive view chooser instead")
+    _args = _p.parse_args()
+
+    if _args.menu:
+        view_portfolio_menu()
+    else:
+        _era = _args.era
+        if _args.finalized:
+            _era = "finalized"
+        elif _args.pre_data:
+            _era = "pre_data"
+        view_portfolio(cohort=_args.cohort, era=_era)
