@@ -81,6 +81,29 @@ diversified short-premium portfolio in the free EOD data — cost, capacity, and
 strong *uncorrelated* sleeve are the wall. (Measurement note: monthly returns are sized sums, not
 mean-of-month, so Sharpe stays consistent with the fixed-fractional dollar curve.)
 
+## Delta-hedged vol test (2026-06-16): is there a vol edge independent of direction? DATA CAN'T SAY.
+
+Built `src/dolt_vol.py` — sell an ATM straddle, delta-hedge along the real spot path (rehedge on
+days the chain re-quotes the legs), isolating pure vol P&L. The rigorous "is selling vol an edge"
+test. Two real bugs surfaced and were fixed: (1) `close_history` is RAW, so split days (NVDA −90%
+etc.) inject a fake giant hedge move → added a >40% one-day-move split guard; (2) right-skewed mean
+P&L flagged something deeper. **Root cause = data sparsity: over a 21-day hold the SAME straddle
+re-quotes on only ~4 days in the archive**, so the position runs largely UN-hedged between rehedges
+and the "delta-hedged" P&L is contaminated by directional moves. Result (n=190): median +9.3%, win
+67%, PF 3.1 — *suggestive* of the known VRP/short-vol edge, but the mean/Sharpe can't be trusted
+(too few rehedges) and it's a short-vol bet anyway (would correlate with the other sleeves). **The
+free EOD data cannot support a clean delta-hedged vol study.** Not blended (corrupted P&L would
+mislead). 6 tests. This was the last rigorous question the data could answer → **(C) is final:
+no clean, deployable, uncorrelated edge lives in this data.**
+
+## Live screener now gives the quant read (2026-06-16, verified on a real SPY scan)
+
+The findings are operationalized at decision time (display-only): ranking by ROUND-TRIP net-of-cost
+EV; a per-pick "Quant read" line (net EV after cost + cheap/rich vs SVI surface + VRP regime); and a
+portfolio guard after the comparison table (net Greeks + concentration flags). Verified live on SPY:
+quant-read rendered "POSITIVE EV after cost: net EV +216/contract (gross +220 − cost 4)" and the
+guard flagged "net vega +625 (100% of gross) — concentrated long-vol ... 14/14 picks are SPY".
+
 ## What still needs to be done (prioritized)
 
 ### P0 — make the edge trustworthy before any real money
