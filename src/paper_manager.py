@@ -317,7 +317,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -407,6 +407,15 @@ _MIGRATIONS = {
         # trade is eligible for real-money edge validation.
         "ALTER TABLE trades ADD COLUMN paper_only INTEGER DEFAULT 0",
         "CREATE INDEX IF NOT EXISTS idx_paper_only ON trades(paper_only)",
+    ],
+    13: [
+        # era partitions the book around the 2026-06-16 real-marks/screener overhaul
+        # (net-of-cost EV ranking + quant read + portfolio guard). Every row that
+        # existed before the overhaul backfills to 'pre_data' via the column default;
+        # log_trade tags new trades 'finalized'. Lets P&L be read in the two eras the
+        # user asked for: before vs after the data work.
+        "ALTER TABLE trades ADD COLUMN era TEXT DEFAULT 'pre_data'",
+        "CREATE INDEX IF NOT EXISTS idx_era ON trades(era)",
     ],
 }
 
@@ -597,7 +606,7 @@ class PaperManager:
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
-            paper_only
+            paper_only, era
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -605,7 +614,7 @@ class PaperManager:
             ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?
+            ?, ?
         )
         """
 
@@ -679,6 +688,8 @@ class PaperManager:
             _float_or_none("long_put_strike"),
             _float_or_none("net_delta"),
             int(trade_dict["paper_only"]) if trade_dict.get("paper_only") is not None else 0,
+            # New trades belong to the post-overhaul 'finalized' era unless told otherwise.
+            trade_dict.get("era", "finalized"),
         )
 
         with self._get_connection() as conn:
