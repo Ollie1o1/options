@@ -231,6 +231,14 @@ class ScenarioTableTestCase(unittest.TestCase):
         self.assertIn("Move", out)
         self.assertNotIn("worthless", out)
 
+    def test_scenario_header_uses_theme_muted(self):
+        fmt.set_color_enabled(True)
+        from src.trade_analysis import build_scenario_table
+        out = build_scenario_table(self._row(190, 4.20), 0.043, 100)
+        first = out.split("\n")[0]
+        muted_prefix = ANSI_RE.findall(fmt.style("x", "muted"))[0]
+        self.assertIn(muted_prefix, first)  # title carries theme muted styling
+
 
 if __name__ == "__main__":
     unittest.main()

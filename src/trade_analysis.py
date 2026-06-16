@@ -727,7 +727,7 @@ def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
     if all(price < 0.005 for _, _, prices in grid for price in prices):
         note = (f"{title}\n{indent}  Prices to ~$0.00 across all modelled moves "
                 f"\u2014 effectively worthless at these levels.")
-        return fmt.colorize(note, fmt.Colors.DIM) if (HAS_FMT and fmt) else note
+        return fmt.style(note, 'muted') if (HAS_FMT and fmt) else note
 
     hdr_parts = [f"{'Move':<12}"]
     for t_label, _ in time_horizons:
@@ -737,9 +737,9 @@ def build_scenario_table(row: pd.Series, rfr: float, width: int = 100) -> str:
 
     lines = []
     if HAS_FMT and fmt:
-        lines.append(fmt.colorize(title, fmt.Colors.DIM + fmt.Colors.BOLD))
-        lines.append(fmt.colorize(hdr_line, fmt.Colors.DIM))
-        lines.append(fmt.colorize(sep_line, fmt.Colors.DIM))
+        lines.append(fmt.style(title, 'muted'))
+        lines.append(fmt.style(hdr_line, 'muted'))
+        lines.append(fmt.style(sep_line, 'muted'))
     else:
         lines.append(title)
         lines.append(hdr_line)
