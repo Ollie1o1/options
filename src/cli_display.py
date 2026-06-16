@@ -1258,6 +1258,19 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     _acct = config.get("_account_size", 0) if config else 0
     print_comparison_table(df_picks, mode, account_size=_acct)
 
+    # ── Portfolio guard: are these picks one concentrated bet? (display-only) ──
+    try:
+        from src.portfolio_guard import format_guard_lines
+        _gl = format_guard_lines(df_picks.to_dict("records"), mode=mode)
+        for _i, _line in enumerate(_gl):
+            if _i == 0 and HAS_ENHANCED_CLI and ":" in _line:
+                _lab, _rest = _line.split(":", 1)
+                print(ui.kv_line(_lab.strip(), _rest.strip()))
+            else:
+                print(f"         {_line}" if not _line.startswith("  ") else f"       {_line}")
+    except Exception:
+        pass
+
     # Re-sort prompt (interactive, skipped in non-TTY)
     if HAS_ENHANCED_CLI and len(df_picks) > 1 and sys.stdin.isatty():
         while True:
