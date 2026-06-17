@@ -1,32 +1,32 @@
 # Paper Trading Track Record
 
-_Generated 2026-06-09 23:46 • 334 closed trades_
+_Generated 2026-06-17 13:17 • 380 closed trades_
 
 > **Methodology & caveats.** These are **paper trades**, not live fills. Entries and exits use **delayed retail data** (Yahoo Finance) and a **modeled friction** assumption (spread/slippage), so realized results would differ. The descriptive stats below are real; the **predictive edge of the ranking model is still under out-of-sample evaluation** and is *not* established — see [docs/VALIDATION_POWER.md](../docs/VALIDATION_POWER.md).
 
-_Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=2/50)_
+_Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=4/50)_
 
 ## Summary
 
-- Closed trades: **334**
-- Win rate: **48.2%** (161/334 with a recorded return)
-- Average return: **+3.7%** per trade (paper, pre-tax, modeled friction)
+- Closed trades: **380**
+- Win rate: **48.4%** (184/380 with a recorded return)
+- Average return: **+3.8%** per trade (paper, pre-tax, modeled friction)
 
 ## By strategy
 
 | Strategy | Closed | Win rate | Avg return |
 |----------|-------:|---------:|-----------:|
-| Bear Call | 48 | 58.3% | -6.2% |
-| Bull Put | 61 | 65.6% | +12.7% |
+| Bear Call | 62 | 62.9% | -0.4% |
+| Bull Put | 80 | 61.3% | +10.3% |
 | Iron Condor | 50 | 54.0% | +8.3% |
-| Long Call | 118 | 39.8% | +4.3% |
-| Long Put | 48 | 31.2% | -3.8% |
+| Long Call | 123 | 40.7% | +6.3% |
+| Long Put | 56 | 26.8% | -10.4% |
 | Short Put | 9 | 44.4% | +2.4% |
 
 ## Forward-cohort gate
 
 - Gate decision: **GATHERING**
-- Cohort size: **2** (closed cohort trades accumulated since the gate window opened)
+- Cohort size: **4** (closed cohort trades accumulated since the gate window opened)
 
 ## Closed trades
 
@@ -331,6 +331,7 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-06-02 | AMD | Long Call | $22.50 | $8.30 | -67.6% | Time Exit (13d to expiry) |
 | 2026-06-02 | SLV | Long Put | $1.92 | $5.26 | +167.3% | Take Profit (100%) |
 | 2026-06-02 | AMD | Long Call | $24.30 | $9.00 | -67.1% | Time Exit (13d to expiry) |
+| 2026-06-02 | INTC | Long Put | $10.00 | $9.30 | -13.1% | Time Exit (21d to expiry) |
 | 2026-06-03 | CRM | Long Call | $6.05 | $2.16 | -70.5% | Time Exit (18d to expiry) |
 | 2026-06-03 | QCOM | Long Call | $13.55 | $3.20 | -82.5% | Stop Loss (-50%) |
 | 2026-06-03 | INTC | Long Put | $8.15 | $7.67 | -12.0% | Time Exit (18d to expiry) |
@@ -343,6 +344,10 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-06-08 | GOOGL | Bull Put | $2.10 | $0.10 | +84.5% | Take Profit (50% of credit) |
 | 2026-06-08 | INTC | Bull Put | $0.50 | $0.00 | +64.8% | Take Profit (50% of credit) |
 | 2026-06-08 | NVDA | Bear Call | $0.43 | $0.21 | -2.6% | Take Profit (50% of credit) |
+| 2026-06-08 | META | Bull Put | $2.25 | $2.70 | -30.0% | Time Exit (7d to expiry) |
+| 2026-06-08 | GOOGL | Bull Put | $2.05 | $2.60 | -37.9% | Time Exit (7d to expiry) |
+| 2026-06-08 | TSLA | Bull Put | $2.08 | $3.18 | -64.1% | Time Exit (15d to expiry) |
+| 2026-06-08 | INTC | Bull Put | $0.50 | $0.00 | +58.8% | Take Profit (50% of credit) |
 | 2026-06-08 | QQQ | Bear Call | $0.49 | $0.04 | +45.7% | Take Profit (50% of credit) |
 | 2026-06-08 | TSLA | Bull Put | $1.08 | $0.53 | +29.7% | Take Profit (50% of credit) |
 | 2026-06-08 | AMD | Bull Put | $2.62 | $0.60 | +68.5% | Take Profit (50% of credit) |
@@ -351,18 +356,59 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-06-08 | NVDA | Bear Call | $0.23 | $0.00 | +8.4% | Take Profit (50% of credit) |
 | 2026-06-08 | QQQ | Bear Call | $0.45 | $0.00 | +54.2% | Take Profit (50% of credit) |
 | 2026-06-08 | AMD | Bear Call | $1.30 | $2.75 | -92.3% | Stop Loss (100% of credit) |
+| 2026-06-08 | SPY | Bear Call | $0.51 | $0.06 | +43.9% | Take Profit (50% of credit) |
 | 2026-06-08 | QQQ | Bear Call | $0.49 | $0.21 | +10.1% | Take Profit (50% of credit) |
 | 2026-06-08 | DIA | Bear Call | $0.50 | $0.00 | +60.8% | Take Profit (50% of credit) |
 | 2026-06-08 | IWM | Bull Put | $0.40 | $0.19 | -4.0% | Take Profit (50% of credit) |
+| 2026-06-08 | AAPL | Bull Put | $1.33 | $2.93 | -88.7% | Stop Loss (100% of credit) |
 | 2026-06-08 | QQQ | Bull Put | $0.48 | $0.10 | +32.1% | Take Profit (50% of credit) |
 | 2026-06-08 | INTC | Bear Call | $0.50 | $0.00 | +54.8% | Take Profit (50% of credit) |
 | 2026-06-08 | SPY | Bear Call | $0.46 | $0.18 | +11.7% | Take Profit (50% of credit) |
 | 2026-06-08 | MSFT | Bear Call | $1.18 | $0.50 | +38.2% | Take Profit (50% of credit) |
 | 2026-06-08 | QQQ | Bull Put | $0.56 | $0.00 | +93.6% | Take Profit (50% of credit) |
+| 2026-06-08 | AAPL | Bull Put | $3.30 | $3.76 | -20.8% | Time Exit (7d to expiry) |
+| 2026-06-08 | UNH | Bear Call | $1.17 | $0.80 | +12.7% | Time Exit (7d to expiry) |
 | 2026-06-08 | SPY | Bull Put | $0.39 | $0.13 | +8.7% | Take Profit (50% of credit) |
+| 2026-06-08 | SPY | Bear Call | $0.46 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-06-08 | ORCL | Bull Put | $1.22 | $0.70 | +24.4% | Time Exit (7d to expiry) |
+| 2026-06-08 | NVDA | Bull Put | $1.77 | $2.12 | -32.2% | Time Exit (15d to expiry) |
 | 2026-06-09 | QQQ | Bull Put | $0.56 | $0.00 | +93.6% | Take Profit (50% of credit) |
+| 2026-06-09 | SPY | Bear Call | $0.46 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-06-09 | ORCL | Bull Put | $1.22 | $3.05 | -104.1% | Stop Loss (100% of credit) |
 | 2026-06-09 | INTC | Bull Put | $0.50 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-06-09 | NVDA | Bull Put | $1.77 | $1.64 | -5.1% | Time Exit (11d to expiry) |
+| 2026-06-09 | SPY | Bear Call | $2.66 | $1.30 | +42.6% | Take Profit (50% of credit) |
+| 2026-06-09 | XLF | Bear Call | $0.24 | $0.48 | -108.3% | Stop Loss (100% of credit) |
+| 2026-06-09 | F | Bear Call | $0.19 | $0.09 | -66.3% | Take Profit (50% of credit) |
+| 2026-06-09 | WMT | Bear Call | $1.80 | $1.42 | +8.6% | Time Exit (11d to expiry) |
+| 2026-06-09 | SLV | Bear Call | $0.22 | $0.08 | -39.1% | Take Profit (50% of credit) |
 | 2026-06-09 | QQQ | Bear Call | $0.60 | $0.28 | +15.7% | Take Profit (50% of credit) |
 | 2026-06-09 | NVDA | Bear Call | $0.27 | $0.12 | -25.8% | Take Profit (50% of credit) |
 | 2026-06-09 | SPY | Bear Call | $0.56 | $0.26 | +12.4% | Take Profit (50% of credit) |
+| 2026-06-09 | AAPL | Bear Call | $1.20 | $0.46 | +42.8% | Take Profit (50% of credit) |
 | 2026-06-09 | META | Bear Call | $1.57 | $0.35 | +63.4% | Take Profit (50% of credit) |
+| 2026-06-10 | QQQ | Bull Put | $0.48 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-06-10 | SPY | Bull Put | $0.51 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-06-10 | INTC | Bull Put | $2.45 | $0.95 | +52.0% | Take Profit (50% of credit) |
+| 2026-06-10 | NVDA | Bull Put | $0.97 | $0.42 | +33.7% | Take Profit (50% of credit) |
+| 2026-06-10 | ORCL | Bull Put | $1.28 | $2.82 | -96.1% | Stop Loss (100% of credit) |
+| 2026-06-11 | IWM | Long Call | $3.65 | $9.70 | +159.1% | Take Profit (100%) |
+| 2026-06-11 | GM | Long Put | $1.96 | $1.36 | -37.4% | Time Exit (11d to expiry) |
+| 2026-06-11 | CSCO | Long Put | $3.39 | $1.91 | -50.1% | Time Exit (11d to expiry) |
+| 2026-06-11 | UNH | Long Call | $6.98 | $3.57 | -55.1% | Time Exit (11d to expiry) |
+| 2026-06-11 | AVGO | Long Put | $16.15 | $8.50 | -53.4% | Time Exit (17d to expiry) |
+| 2026-06-11 | ORCL | Long Put | $6.70 | $3.10 | -59.9% | Stop Loss (-50%) |
+| 2026-06-11 | SPY | Long Call | $8.13 | $18.55 | +122.0% | Take Profit (100%) |
+| 2026-06-11 | ORCL | Long Put | $14.40 | $7.16 | -56.4% | Stop Loss (-50%) |
+| 2026-06-11 | DIA | Long Call | $6.90 | $15.00 | +111.2% | Take Profit (100%) |
+| 2026-06-11 | F | Long Put | $0.59 | $0.27 | -73.4% | Stop Loss (-50%) |
+| 2026-06-11 | INTC | Bull Put | $0.50 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-06-11 | ORCL | Bull Put | $1.25 | $3.72 | -100.0% | Stop Loss (100% of credit) |
+| 2026-06-11 | MU | Bull Put | $5.40 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-06-11 | SPY | Bear Call | $0.50 | $0.06 | +43.4% | Take Profit (50% of credit) |
+| 2026-06-11 | AMD | Bull Put | $4.33 | $1.80 | +53.2% | Take Profit (50% of credit) |
+| 2026-06-13 | DIA | Long Put | $5.80 | $2.78 | -58.3% | Stop Loss (-50%) |
+| 2026-06-15 | VZ | Long Call | $1.06 | $0.52 | -61.6% | Stop Loss (-50%) |
+| 2026-06-15 | META | Bear Call | $1.20 | $0.25 | +60.3% | Take Profit (50% of credit) |
+| 2026-06-15 | SPY | Bear Call | $0.48 | $0.23 | +5.0% | Take Profit (50% of credit) |
+| 2026-06-15 | QQQ | Bear Call | $0.97 | $0.48 | +26.8% | Take Profit (50% of credit) |
