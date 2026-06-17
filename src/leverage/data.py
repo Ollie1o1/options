@@ -11,8 +11,8 @@ _FAPI = "https://fapi.binance.com"
 _BYBIT = "https://api.bybit.com"
 _KLINE_LIMIT = 1500
 _DEFAULT_CACHE = "data/leverage_ohlcv"
-_INTERVAL_MIN = {"5m": 5, "15m": 15}
-_BYBIT_INT = {"5m": "5", "15m": "15"}
+_INTERVAL_MIN = {"5m": 5, "15m": 15, "1d": 1440}
+_BYBIT_INT = {"5m": "5", "15m": "15", "1d": "D"}
 
 
 def _klines_to_frame(raw: list) -> pd.DataFrame:
@@ -160,3 +160,28 @@ def load_history(symbol: str, cache_dir: str = _DEFAULT_CACHE,
     df5.attrs["symbol"] = symbol
     df15.attrs["symbol"] = symbol
     return df5, df15
+
+
+def load_daily(symbol: str, cache_dir: str = _DEFAULT_CACHE,
+               fetcher: Optional[Callable] = None,
+               days: int = 1000) -> pd.DataFrame:
+    """Daily OHLCV for the swing strategy. Cache-first with the same Binance→Bybit
+    fallback as load_history; a failed top-up never discards cached history."""
+    fetch = fetcher or _fetch_with_fallback
+    path = os.path.join(cache_dir, symbol, "1d.parquet")
+    cached = _read_cache(path)
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - days * 86_400_000
+    if cached is not None and len(cached):
+        top_start = int(cached.index[-1].timestamp() * 1000) + 1
+        try:
+            fresh = fetch(symbol, "1d", top_start, end_ms)
+        except Exception:
+            fresh = _klines_to_frame([])
+        df = pd.concat([cached, fresh])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+    else:
+        df = fetch(symbol, "1d", start_ms, end_ms).sort_index()
+    _write_cache(path, df)
+    df.attrs["symbol"] = symbol
+    return df

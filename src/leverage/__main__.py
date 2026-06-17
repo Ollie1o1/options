@@ -106,6 +106,60 @@ def _cmd_signal(args):
         print()
 
 
+def _render_swing_signal(sym, sig, equity, sizing):
+    lines = [f"  {sym}: {sig.side.upper()} breakout  ({sig.note})",
+             f"     price ${sig.price:,.0f}  trigger ${sig.trigger_level:,.0f}  "
+             f"ATR ${sig.atr:,.0f}",
+             f"     stop ${sig.stop:,.0f}  (k={sig.stop_k:.2f}xATR, calibrated; "
+             f"risk {sig.risk_pct*100:.1f}%)  — no fixed take-profit; trail + regime exit"]
+    if sizing is not None:
+        lines.append(f"     size: {sizing.eff_leverage:.1f}x on ${equity:,.0f} "
+                     f"(stop = {sizing.risk_frac*100:.1f}% equity risk)")
+    return "\n".join(lines)
+
+
+def _cmd_swing(args):
+    """Daily trend-breakout. Shows a ticket ONLY when today is a fresh breakout;
+    --backtest runs the walk-forward (calibrate stop on train, trade the holdout)."""
+    from . import data as D
+    from . import swing as S
+    syms = ["BTC", "ETH"] if args.symbol == "ALL" else [args.symbol]
+    print("[strategy: daily trend-breakout | calibrated ATR-chandelier stop, no fixed TP]")
+    for key in syms:
+        df = D.load_daily(_SYMBOLS[key], days=args.days)
+        if df is None or len(df) < S.DEFAULT_MA + S.DEFAULT_LOOKBACK + 5:
+            print(f"  {key}: not enough daily history."); continue
+        if args.backtest:
+            wf = S.walk_forward(df, allow_short=(key == "ETH" or args.allow_short))
+            io, oo = wf["in_sample"], wf["out_sample"]
+            print(f"\n  {key} walk-forward  (k_long={wf['k_long']} k_short={wf['k_short']}, "
+                  f"stop calibrated on first 60%)")
+            for tag, s in (("in-sample", io), ("OUT-SAMPLE", oo)):
+                if s.get("n"):
+                    print(f"    {tag:<11} n={s['n']:<3} win={s['win_rate']*100:4.0f}%  "
+                          f"expectancy={s['expectancy_R']:+.2f}R  PF={s['profit_factor']:.2f}  "
+                          f"totalRet={s['total_ret']*100:+.1f}%  maxDD={s['max_drawdown']*100:.1f}%")
+                else:
+                    print(f"    {tag:<11} no trades")
+        else:
+            # live: calibrate k on all available history, show today's signal if any
+            f = S.compute_features(df)
+            k_long = S.calibrate_stop_k(f, "long")
+            k_short = S.calibrate_stop_k(f, "short")
+            sig = S.latest_signal(df, stop_k=(k_long if True else k_short))
+            if sig is None:
+                print(f"  {key}: no breakout on the latest bar — nothing to do.")
+                continue
+            sig_k = k_long if sig.side == "long" else k_short
+            sig = S.latest_signal(df, stop_k=sig_k)
+            sizing = None
+            try:
+                sizing = effective_leverage_size(args.equity, sig.risk_pct, price=sig.price)
+            except Exception:
+                sizing = None
+            print(_render_swing_signal(key, sig, args.equity, sizing))
+
+
 def _cmd_backtest(args):
     from . import data as D
     from .backtest import run_backtest, walk_forward, robustness_sweep
@@ -447,9 +501,15 @@ def main(argv: Optional[list] = None):
     op = sub.add_parser("optimize")
     op.add_argument("--symbol", choices=["BTC", "ETH", "ALL"], default="BTC")
     sub.add_parser("status")
+    swp = sub.add_parser("swing", help="Daily trend-breakout: live signal, or --backtest walk-forward")
+    swp.add_argument("--symbol", choices=["BTC", "ETH", "ALL"], default="ALL")
+    swp.add_argument("--equity", type=float, default=1500.0)
+    swp.add_argument("--days", type=int, default=1000)
+    swp.add_argument("--backtest", action="store_true", help="run the walk-forward instead of the live signal")
+    swp.add_argument("--allow-short", action="store_true", help="allow BTC shorts too (default: shorts ETH-only)")
     args = p.parse_args(argv)
     {"signal": _cmd_signal, "backtest": _cmd_backtest, "paper": _cmd_paper,
-     "status": _cmd_status, "optimize": _cmd_optimize}[args.cmd](args)
+     "status": _cmd_status, "optimize": _cmd_optimize, "swing": _cmd_swing}[args.cmd](args)
 
 
 if __name__ == "__main__":
