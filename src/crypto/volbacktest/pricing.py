@@ -31,3 +31,16 @@ def straddle_theta(S, K, T, r, sigma, q=0.0):
     if T <= 0:
         return 0.0
     return bs_theta("call", S, K, T, r, sigma, q) + bs_theta("put", S, K, T, r, sigma, q)
+
+
+def strangle(S, Kc, Kp, T, r, sigma, q=0.0):
+    """Long OTM call at Kc + long OTM put at Kp (protective wings)."""
+    if T <= 0:
+        return max(S - Kc, 0.0) + max(Kp - S, 0.0)
+    return bs_call(S, Kc, T, r, sigma, q) + bs_put(S, Kp, T, r, sigma, q)
+
+
+def strangle_delta(S, Kc, Kp, T, r, sigma, q=0.0):
+    if T <= 0:
+        return (1.0 if S > Kc else 0.0) + (-1.0 if S < Kp else 0.0)
+    return bs_delta("call", S, Kc, T, r, sigma, q) + bs_delta("put", S, Kp, T, r, sigma, q)

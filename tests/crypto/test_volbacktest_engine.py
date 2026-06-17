@@ -69,6 +69,29 @@ class TestEngine(unittest.TestCase):
         self.assertAlmostEqual(recon, r.net_pnl, places=6)
 
 
+class TestDefinedRisk(unittest.TestCase):
+    def test_wings_cap_the_tail_on_a_large_move(self):
+        # A +60% move: naked short straddle takes a big loss; the capped
+        # (wing_pct=10%) variant's loss is bounded by the wing width.
+        days = 14
+        spot = [100.0] + [160.0] * days        # gap up and stay
+        dvol = [50.0] * (days + 1)
+        naked = simulate_trade(spot, dvol, days, 0.0, 1000.0, ZERO, 1, wing_pct=0.0)
+        capped = simulate_trade(spot, dvol, days, 0.0, 1000.0, ZERO, 1, wing_pct=0.10)
+        self.assertLess(naked.net_pnl, capped.net_pnl)      # capped loses less
+        self.assertLess(capped.net_pnl, 0.0)                # still a loss
+        # capped terminal payout bounded by qty * wing width (K*wing_pct)
+        self.assertLessEqual(capped.terminal_payout, capped.qty * 100.0 * 0.10 + 1e-6)
+
+    def test_wings_reduce_collected_premium(self):
+        spot = [100.0] * 15
+        dvol = [50.0] * 15
+        naked = simulate_trade(spot, dvol, 14, 0.0, 1000.0, ZERO, 1, wing_pct=0.0)
+        capped = simulate_trade(spot, dvol, 14, 0.0, 1000.0, ZERO, 1, wing_pct=0.10)
+        self.assertLess(capped.premium, naked.premium)      # paid for protection
+        self.assertGreater(capped.premium, 0.0)
+
+
 class TestBacktestLoop(unittest.TestCase):
     def test_run_backtest_produces_one_trade_per_entry(self):
         spot = [100.0 for _ in range(120)]

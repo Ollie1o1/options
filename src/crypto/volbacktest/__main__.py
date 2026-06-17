@@ -49,13 +49,14 @@ def _regime_split(S: List[float], dates, trades, dte: int, freq: int) -> Dict[st
 
 
 def _cost_breakeven(S, Vv, dte, freq, r, premium, base_spread, base_slip,
-                    hedge_step) -> Optional[float]:
+                    hedge_step, wing_pct=0.0) -> Optional[float]:
     """Smallest cost multiple of (spread, slip) at which mean net P&L turns <= 0.
     Returns None if still positive at 5x."""
     prev_mean = None
     for mult in [x * 0.25 for x in range(0, 21)]:  # 0.00 .. 5.00
         cost = CostModel(base_spread * mult, base_slip * mult)
-        res = run_backtest(S, Vv, dte, freq, r, premium, cost, hedge_step=hedge_step)
+        res = run_backtest(S, Vv, dte, freq, r, premium, cost,
+                           hedge_step=hedge_step, wing_pct=wing_pct)
         mean = M.summarize([t.net_pnl for t in res.trades]).get("mean", 0.0)
         if mean <= 0 and prev_mean is not None and prev_mean > 0:
             return mult
@@ -97,7 +98,9 @@ def main(argv=None) -> int:
     p.add_argument("--spread", type=float, default=0.04, help="round-trip option spread frac")
     p.add_argument("--slip-bps", type=float, default=2.0, help="spot hedge slippage bps")
     p.add_argument("--r", type=float, default=0.045)
-    p.add_argument("--days", type=int, default=760)
+    p.add_argument("--days", type=int, default=1000, help="history window (DVOL caps ~1000d)")
+    p.add_argument("--wing", type=float, default=0.0,
+                   help="defined-risk wings at K*(1+/-wing); 0 = naked straddle")
     p.add_argument("--cost-stress", action="store_true")
     p.add_argument("--oos", action="store_true")
     a = p.parse_args(argv)
@@ -108,7 +111,8 @@ def main(argv=None) -> int:
         return 1
 
     cost = CostModel(option_spread_frac=a.spread, hedge_slippage_bps=a.slip_bps)
-    res = run_backtest(S, Vv, a.dte, a.freq, a.r, a.premium, cost, hedge_step=a.hedge)
+    res = run_backtest(S, Vv, a.dte, a.freq, a.r, a.premium, cost,
+                       hedge_step=a.hedge, wing_pct=a.wing)
     pnl = [t.net_pnl for t in res.trades]
     if not pnl:
         print("no trades (insufficient aligned data)")
@@ -123,7 +127,7 @@ def main(argv=None) -> int:
     breakeven = None
     if a.cost_stress:
         breakeven = _cost_breakeven(S, Vv, a.dte, a.freq, a.r, a.premium,
-                                    a.spread, a.slip_bps, a.hedge)
+                                    a.spread, a.slip_bps, a.hedge, wing_pct=a.wing)
 
     oos = None
     if a.oos:
@@ -133,7 +137,8 @@ def main(argv=None) -> int:
     regime = _regime_split(S, dates, res.trades, a.dte, a.freq)
     rmse = _mark_rmse(a.currency, dates, Vv)
 
-    header = f"(dte={a.dte} freq={a.freq} hedge={a.hedge}d cost={a.spread:.0%}/{a.slip_bps:.0f}bps) "
+    structure = f"wings±{a.wing:.0%}" if a.wing > 0 else "naked"
+    header = f"({structure} dte={a.dte} freq={a.freq} hedge={a.hedge}d cost={a.spread:.0%}/{a.slip_bps:.0f}bps) "
     print(format_report(a.currency, stats, tstat, ci, breakeven, rmse, regime,
                         trades_per_year=tpy, oos=oos, header_extra=header))
     return 0
