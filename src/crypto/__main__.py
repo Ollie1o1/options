@@ -19,6 +19,7 @@ def main(argv=None) -> int:
     sub.add_parser("exits", help="Enforce TP/SL/time exits")
     sub.add_parser("pnl", help="Show crypto portfolio P&L")
     sub.add_parser("backtest", help="Run the crypto backtester")
+    sub.add_parser("volcarry", help="Delta-hedged vol-carry backtester (DVOL-anchored, real costs)")
     args, rest = p.parse_known_args(argv)
     if args.verb == "scan":
         from src.crypto.screener import main as m
@@ -39,6 +40,9 @@ def main(argv=None) -> int:
             print("backtest: src.crypto.backtester has no standalone main()", file=sys.stderr)
             return 1
         return _call(m, rest)
+    if args.verb == "volcarry":
+        from src.crypto.volbacktest.__main__ import main as m
+        return int(m(rest) or 0)
     return 2
 
 

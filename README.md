@@ -811,6 +811,7 @@ Equity mode (the screener above) handles US equities via yfinance. A parallel **
 ```bash
 python -m src.crypto.screener     # main crypto CLI (BTC / ETH scans, funding-basis, portfolio, calibration, backtest)
 python -m src.crypto.check_pnl    # crypto portfolio viewer (entry / live mark / P/L per position)
+python -m src.crypto volcarry --currency BTC --dte 14 --freq 7 --cost-stress --oos   # delta-hedged vol-carry backtester
 ```
 
 | File | What it does |
@@ -822,6 +823,7 @@ python -m src.crypto.check_pnl    # crypto portfolio viewer (entry / live mark /
 | `src/crypto/exit_enforcer.py` | TP / stop / time-exit enforcement for crypto positions (per-leg Deribit mark price) |
 | `src/crypto/auto_logger.py` | Auto-log driver for crypto. Runs every 4 hours via cron, gated by regime + chain availability. |
 | `src/crypto/backtester.py` | Walk-forward backtest on accumulated chain snapshots |
+| `src/crypto/volbacktest/` | Delta-hedged short-straddle vol-carry backtester. DVOL-anchored marks (real Deribit implied-vol index), real-trade-calibrated costs, daily delta-hedging, Newey-West/bootstrap significance, regime split, cost-stress, optional defined-risk wings (`--wing`). Finding (2.7yr, real costs): **BTC vol-risk-premium is harvestable** (Sharpe ~2.8 naked / ~3.2 with ±15% wings, NW t≈4–5, survives >5× quoted cost, regime-robust, OOS holds); **ETH is not** (Sharpe <0, dies at half the quoted cost). Research tool — not wired to real money. |
 | `src/crypto/check_pnl.py` | Standalone portfolio viewer — open positions with live Deribit marks + closed positions with entry / exit / P&L / reason / win-loss |
 
 Automation (cron — installed alongside equity automation):
