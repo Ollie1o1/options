@@ -159,5 +159,14 @@ class SourceParseTest(unittest.TestCase):
         self.assertAlmostEqual(r["bull_ratio"], 2 / 3)
 
 
+class TopicsTest(unittest.TestCase):
+    def test_policy_topics_present(self):
+        topics = [t.lower() for t in sources.GOOGLE_NEWS_TOPICS]
+        # geopolitics already covered; assert the new policy/political coverage
+        self.assertIn("white house policy", topics)
+        self.assertTrue(any("tariff" in t for t in topics))
+        self.assertTrue(any("middle east" in t for t in topics))
+
+
 if __name__ == "__main__":
     unittest.main()

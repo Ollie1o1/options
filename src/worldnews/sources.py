@@ -16,7 +16,9 @@ from urllib.parse import urlparse
 TIMEOUT_S = 8
 
 GOOGLE_NEWS_TOPICS = ["federal reserve", "inflation", "stock market",
-                      "tariffs trade", "geopolitics conflict"]
+                      "tariffs trade", "geopolitics conflict",
+                      "white house policy", "trump tariffs",
+                      "middle east oil"]
 RSS_FEEDS = {
     "cnbc.com": ("https://search.cnbc.com/rs/search/combinedcms/view.xml"
                  "?partnerId=wrss01&id=100003114"),
