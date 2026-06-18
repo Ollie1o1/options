@@ -54,6 +54,24 @@ class RunTest(unittest.TestCase):
         from src.macro_pulse import context as C
         self.assertEqual(len(C.load_history(self.db)), 1)
 
+    def test_run_ticker_with_prebuilt_ctx_costs_no_ai(self):
+        # Build once (one AI attempt), then a ticker read reusing that ctx
+        ctx = O.build_context(fetch_fn=lambda: list(_ITEMS), scorer=_FakeScorer(),
+                              db_path=self.db, cache_db=self.cache,
+                              today="2026-06-18")
+        calls_after_build = _FakeScorer.calls
+        out = O.run_ticker("AAPL", sector="Technology", ctx=ctx)
+        self.assertIn("AAPL", out)
+        self.assertIn("Technology", out)
+        self.assertEqual(_FakeScorer.calls, calls_after_build)  # no extra AI
+
+    def test_run_ticker_discovery_is_general(self):
+        ctx = O.build_context(fetch_fn=lambda: list(_ITEMS), scorer=_FakeScorer(),
+                              db_path=self.db, cache_db=self.cache,
+                              today="2026-06-18")
+        out = O.run_ticker(None, ctx=ctx)
+        self.assertIn("MARKET", out.upper())
+
 
 if __name__ == "__main__":
     unittest.main()

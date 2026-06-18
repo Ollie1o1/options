@@ -18,9 +18,13 @@ def _today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def run(*, fetch_fn: Optional[Callable[[], list]] = None, scorer=None,
-        db_path: Optional[str] = None, cache_db: Optional[str] = None,
-        persist: bool = True, today: Optional[str] = None) -> str:
+def build_context(*, fetch_fn: Optional[Callable[[], list]] = None, scorer=None,
+                  db_path: Optional[str] = None, cache_db: Optional[str] = None,
+                  persist: bool = True, today: Optional[str] = None):
+    """Fetch → aggregate → enrich → (cache) → synth. Returns the synthesized
+    MacroContext. One AI call per day per distinct news state; cache hits skip
+    both the AI call and the history persist. Shared by every render path so
+    per-ticker reads cost no extra tokens."""
     from src.worldnews import scoring as _scoring, sources as _sources
 
     fetch_fn = fetch_fn or _sources.fetch_all
@@ -40,14 +44,49 @@ def run(*, fetch_fn: Optional[Callable[[], list]] = None, scorer=None,
     cached = _cache.get(key, cache_db)
     if cached is not None:
         _hydrate(ctx, cached)
-        return _panel.render(ctx)
+        return ctx
 
     ctx = _synth.narrate(ctx, scorer=scorer)
     _cache.put(key, _dump(ctx), cache_db)
     if persist:
         theme_scores = {t.theme: t.score for t in ctx.themes}
         _ctx.persist_reading(ctx.pulse, theme_scores, db_path)
+    return ctx
+
+
+def run(*, fetch_fn: Optional[Callable[[], list]] = None, scorer=None,
+        db_path: Optional[str] = None, cache_db: Optional[str] = None,
+        persist: bool = True, today: Optional[str] = None) -> str:
+    ctx = build_context(fetch_fn=fetch_fn, scorer=scorer, db_path=db_path,
+                        cache_db=cache_db, persist=persist, today=today)
     return _panel.render(ctx)
+
+
+def run_ticker(symbol: Optional[str], *, sector: Optional[str] = None,
+               ctx=None, **kw) -> str:
+    """Scan-type-aware read. With a symbol → sector-focused ('how the tape
+    affects AAPL/tech'); without → general market-wide ('discovery'). Reuses a
+    prebuilt ctx when given (no extra fetch/AI), else builds one."""
+    from src.macro_pulse import ticker as _ticker
+
+    if ctx is None:
+        ctx = build_context(**kw)
+    if symbol and sector is None:
+        sector = _lookup_sector(symbol)
+    return _ticker.render_ticker(ctx, symbol, sector)
+
+
+def _lookup_sector(symbol: str) -> Optional[str]:
+    """Best-effort sector via the 24h disk-cached ticker.info. Scans normally
+    pass `sector=` explicitly (already fetched), so this is just a fallback."""
+    try:
+        import yfinance as yf
+
+        from src.data_fetching import _get_info_cached
+        info = _get_info_cached(symbol, yf.Ticker(symbol)) or {}
+        return info.get("sector")
+    except Exception:
+        return None
 
 
 def _dump(ctx) -> dict:
