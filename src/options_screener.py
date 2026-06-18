@@ -2692,7 +2692,16 @@ def _run_intel_menu() -> None:
         return
 
     choice = prompt_input(
-        "Intel: [a] market overview  [b] ticker briefing", "a").strip().lower()
+        "Intel: [a] market overview  [b] ticker briefing  [c] macro pulse",
+        "a").strip().lower()
+
+    if choice in ("c", "macro", "pulse", "3", "p"):
+        try:
+            from src.macro_pulse import run as _macro_run
+            print(_macro_run())
+        except Exception as exc:
+            print(f"  Could not build macro pulse: {exc}")
+        return
 
     if choice in ("a", "market", "1", "m"):
         try:

@@ -7,3 +7,5 @@ fallback. Display-only situational-awareness overlay — never touches scoring.
 
 See docs/superpowers/specs/2026-06-18-macro-pulse-design.md.
 """
+
+from src.macro_pulse.orchestrator import run  # noqa: E402,F401
