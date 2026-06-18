@@ -3491,6 +3491,18 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     if verbose and news_map and not picks.empty:
         print_news_panel(news_map, picks, width=WIDTH)
 
+    # Phase 6: Macro overlay — scan-aware situational awareness + opt-in AI ranking
+    if verbose and not picks.empty:
+        _single = len(tickers) == 1
+        if _single:
+            _macro_universe = [tickers[0]]
+            _macro_focus = tickers[0]
+        else:
+            _macro_universe = (list(dict.fromkeys(picks["symbol"].astype(str).tolist()))
+                               if "symbol" in picks.columns else list(tickers))
+            _macro_focus = None
+        _macro_scan_section(_macro_universe, focus_symbol=_macro_focus)
+
     top_pick = None
     if not picks.empty:
         picks["overall_score"] = picks["quality_score"]
@@ -3684,6 +3696,61 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
         return None
 
 
+def _macro_scan_section(symbols, focus_symbol=None) -> None:
+    """After-scan macro overlay (interactive only — zero cost in headless runs).
+
+    Shows a scan-aware situational-awareness panel: sector-focused when a single
+    ticker is scanned ("how the tape affects AAPL / tech"), general market-wide
+    for discovery scans. Then offers a [1] yes / [2] no opt-in for a single
+    batched AI ranking of the scanned tickers. The deterministic panel reuses the
+    once-a-day cached macro narrative, so default scans add no AI tokens; the AI
+    ranking fires only on an explicit 'yes'.
+    """
+    if not sys.stdin.isatty():
+        return  # headless / auto-log / maintenance → skip entirely (no fetch/AI)
+    try:
+        from src.macro_pulse import orchestrator as _mp
+        from src.macro_pulse import rank as _mpr
+        from src.macro_pulse import ticker as _mpt
+    except Exception:
+        return
+
+    uniq: List[str] = []
+    for s in (symbols or []):
+        s = str(s).upper().strip()
+        if s and s not in uniq:
+            uniq.append(s)
+        if len(uniq) >= 12:  # cap sector lookups / AI prompt size
+            break
+
+    try:
+        ctx = _mp.build_context()
+    except Exception as exc:
+        logger.debug("macro scan section skipped: %s", exc)
+        return
+
+    sectors = {s: _mp._lookup_sector(s) for s in uniq}
+    focus = (focus_symbol or "").upper() or None
+    focus_sector = sectors.get(focus) if focus else None
+    try:
+        print("\n" + _mpt.render_ticker(ctx, focus, focus_sector))
+    except Exception as exc:
+        logger.debug("macro panel render failed: %s", exc)
+        return
+
+    if not uniq:
+        return
+    ans = prompt_input(
+        "Run AI macro ranking of these tickers? [1] yes  [2] no", "2"
+    ).strip().lower()
+    if ans in ("1", "y", "yes"):
+        try:
+            rows = _mpr.rank_tickers(uniq, ctx, sectors=sectors, use_ai=True)
+            print("\n" + _mpr.render_ranking(rows))
+        except Exception as exc:
+            logger.debug("macro ranking failed: %s", exc)
+
+
 def run_top_scan(
     tickers: List[str],
     top_n: int = 10,
@@ -3732,6 +3799,11 @@ def run_top_scan(
     top = combined.head(top_n).copy()
 
     print_top_n_table(top, top_n)
+
+    # Scan-aware macro overlay (general / discovery) + opt-in AI ranking
+    _top_syms = (list(dict.fromkeys(top["symbol"].astype(str).tolist()))
+                 if "symbol" in top.columns else list(tickers))
+    _macro_scan_section(_top_syms, focus_symbol=None)
 
     if export_csv:
         ts = datetime.now().strftime("%Y%m%d_%H%M")
