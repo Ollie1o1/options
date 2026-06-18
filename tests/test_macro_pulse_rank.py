@@ -49,6 +49,16 @@ class DeterministicTest(unittest.TestCase):
         rows = R.rank_tickers(["AAPL", "JPM", "XOM"], _ctx(), sectors=_SECTORS)
         self.assertEqual({r.symbol for r in rows}, {"AAPL", "JPM", "XOM"})
 
+    def test_reason_agrees_with_lean(self):
+        # A net-headwind name must cite a headwind driver, not an offsetting
+        # positive contributor.
+        rows = R.rank_tickers(["XOM"], _ctx(), sectors=_SECTORS)
+        xom = rows[0]
+        if xom.lean == "HEADWIND":
+            self.assertIn("headwind", xom.reason)
+        elif xom.lean == "TAILWIND":
+            self.assertIn("tailwind", xom.reason)
+
 
 class AiTest(unittest.TestCase):
     def test_ai_order_and_reasons_used(self):

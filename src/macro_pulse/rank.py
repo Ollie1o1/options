@@ -64,11 +64,18 @@ def _deterministic_rank(symbols: list[str], ctx: MacroContext,
             c = w * theme_score[th]
             net += c
             contribs.append((th, c))
-        contribs.sort(key=lambda kv: -abs(kv[1]))
+        # Explain the NET lean: pick the biggest contributor that agrees with
+        # the net sign (a negative net should cite what's dragging, not a small
+        # offsetting positive). Fall back to largest-magnitude if none agree.
         if contribs:
-            top = contribs[0][0].replace("_", " ")
-            verb = "tailwind from" if contribs[0][1] >= 0 else "headwind from"
-            reason = f"{verb} {top}"
+            if net >= 0:
+                agree = [c for c in contribs if c[1] >= 0]
+                verb = "tailwind from"
+            else:
+                agree = [c for c in contribs if c[1] < 0]
+                verb = "headwind from"
+            pick = max(agree or contribs, key=lambda kv: abs(kv[1]))
+            reason = f"{verb} {pick[0].replace('_', ' ')}"
         else:
             reason = "no active macro theme touches this name"
         rows.append(RankRow(symbol=sym, sector=sector, score=round(net, 3),
