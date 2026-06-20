@@ -532,6 +532,8 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     df["bb_width_pct"] = bb_width_pct
     df["rvol"] = rvol
     df["short_interest"] = short_interest
+    df["short_interest_dtc"] = pd.NA
+    df["short_interest_trend"] = pd.NA
     df["vwap"] = vwap
     df["fib_50"] = fib_50
     df["fib_618"] = fib_618
@@ -2213,6 +2215,16 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     df["bb_width_pct"] = bb_width_pct
     df["rvol"] = rvol
     df["short_interest"] = short_interest
+    # Enriched SI detail (days-to-cover + MoM trend) from the already-cached
+    # info dict; best-effort, leaves columns NA on any failure.
+    try:
+        from src.short_interest import short_interest_detail as _si_detail
+        _si = _si_detail(_get_info_cached(symbol, tkr))
+        df["short_interest_dtc"] = _si.days_to_cover if _si.days_to_cover is not None else pd.NA
+        df["short_interest_trend"] = _si.trend if _si.trend else pd.NA
+    except Exception:
+        df["short_interest_dtc"] = pd.NA
+        df["short_interest_trend"] = pd.NA
     df["vwap"] = vwap
     df["fib_50"] = fib_50
     df["fib_618"] = fib_618

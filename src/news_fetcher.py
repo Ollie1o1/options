@@ -4,7 +4,7 @@ Sources (all free, no paid API keys required):
   1. Yahoo Finance RSS  — per-ticker feed, real-time headlines
   2. Finviz ticker news — curated financial news with source attribution
   3. yfinance analyst recommendations — upgrade / downgrade history
-  4. Alpha Vantage NEWS_SENTIMENT — optional; set ALPHA_VANTAGE_API_KEY in .env
+  4. Alpha Vantage NEWS_SENTIMENT — optional; set ALPHAVANTAGE_API_KEY in .env
 
 Design principles:
   - Every source is independently try/except-wrapped — one failure never kills the rest
@@ -482,7 +482,7 @@ def fetch_news_and_events(
         ("yf_rss", lambda: _fetch_yf_rss(symbol, max_age_hours=max_age_hours)),
         ("finviz", lambda: _fetch_finviz_news(symbol, max_age_hours=max_age_hours)),
     ]
-    av_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
+    av_key = os.environ.get("ALPHAVANTAGE_API_KEY", "")
     if av_key:
         fetch_fns.append(("alpha_vantage", lambda: _fetch_alpha_vantage(symbol, av_key, max_age_hours=max_age_hours)))
     # Polygon concurrent fetch
@@ -505,9 +505,27 @@ def fetch_news_and_events(
             except Exception:
                 pass
 
-    # Merge, deduplicate, sort newest-first (Polygon items get relevance boost)
+    # Merge, deduplicate, then rank ticker-relevant news above generic feed
+    # noise. All items are already within the max_age window, so sort by a
+    # relevance tier first (keeps AV/Polygon ticker-tagged items above generic
+    # Yahoo SEO headlines) with recency as the within-tier tiebreak.
     all_items = _deduplicate(all_items)
-    all_items.sort(key=lambda x: (x.published, x.relevance), reverse=True)
+
+    def _rank_key(it):
+        rel_tier = 2 if it.relevance >= 0.7 else (1 if it.relevance >= 0.4 else 0)
+        return (rel_tier, it.published)
+
+    all_items.sort(key=_rank_key, reverse=True)
+
+    # Point-in-time archive: persist the full deduped corpus this scan saw
+    # (not just the displayed top-N) so a better sentiment feature can be
+    # engineered later. Best-effort; never affects the live result.
+    if all_items:
+        try:
+            from src.news_archive import archive_items
+            archive_items(all_items, symbol)
+        except Exception:
+            pass
 
     result.items = all_items[:max_headlines]
 

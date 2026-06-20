@@ -608,6 +608,24 @@ def print_regime_dashboard(width: int = 90) -> None:
     except Exception:
         pass
 
+    # Hard macro / rates from FRED (no key; failure-safe).
+    try:
+        from src.macro_rates import print_macro_rates
+        print_macro_rates(width)
+        print()
+    except Exception:
+        pass
+
+    # Point-in-time news archive coverage (factual one-liner).
+    try:
+        from src.news_archive import archive_stats, format_stats_line
+        stats = archive_stats()
+        if stats.get("total"):
+            print(format_stats_line(stats))
+            print()
+    except Exception:
+        pass
+
 
 def print_world_pulse() -> None:
     """One-line world-news pulse under the regime box. Never raises."""

@@ -1540,11 +1540,20 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             inst = []
             if "short_interest" in r and pd.notna(r["short_interest"]):
                 si_val = r['short_interest'] * 100
+                # Append days-to-cover + MoM trend when available (quant detail).
+                extra = ""
+                dtc = r.get("short_interest_dtc") if hasattr(r, "get") else None
+                if dtc is not None and pd.notna(dtc):
+                    extra += f", {float(dtc):.1f}d cover"
+                trend = r.get("short_interest_trend") if hasattr(r, "get") else None
+                if trend is not None and pd.notna(trend):
+                    arrow = {"rising": "↑", "falling": "↓", "flat": "→"}.get(str(trend), "")
+                    extra += f" {arrow}{trend}"
                 if HAS_ENHANCED_CLI:
                     si_style = 'bad' if si_val > 20 else ('warn' if si_val > 10 else 'good')
-                    inst.append(f"Short Int: {fmt.style(f'{si_val:.2f}%', si_style)}")
+                    inst.append(f"Short Int: {fmt.style(f'{si_val:.2f}%', si_style)}{extra}")
                 else:
-                    inst.append(f"Short Interest: {si_val:.2f}%")
+                    inst.append(f"Short Interest: {si_val:.2f}%{extra}")
             if "rvol" in r and pd.notna(r["rvol"]):
                 rvol_val = r['rvol']
                 if HAS_ENHANCED_CLI:
