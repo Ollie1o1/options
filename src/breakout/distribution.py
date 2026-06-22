@@ -5,6 +5,7 @@ unconditional baseline and the featureful parametric model — produces the same
 object and is scored the same way. Quantiles and tail probabilities read off the
 empirical sample."""
 from __future__ import annotations
+import math
 import numpy as np
 
 
@@ -41,3 +42,34 @@ def baseline_distribution(close: np.ndarray, t: int, horizon: int,
         return Distribution(np.zeros(n))
     rng = np.random.default_rng(seed)
     return Distribution(rng.choice(fwd, size=n, replace=True))
+
+
+DEFAULT_PARAMS = {"df": 4.0, "drift_gain": 0.5, "skew_gain": 3.0, "vol_floor": 0.005}
+
+
+def _f(features: dict, key: str, default: float = 0.0) -> float:
+    v = features.get(key)
+    return float(v) if v is not None else default
+
+
+def parametric_distribution(features: dict, horizon: int, params: dict | None = None,
+                            n: int = 4000, seed: int = 0) -> Distribution:
+    """Skew Student-t forward-return distribution conditioned on features.
+
+    scale = daily vol * sqrt(horizon); location = drift_gain * 1-month momentum;
+    right-skew (upper tail fattened) rises with trend and proximity to the 52w
+    high, left-skew with proximity to the 52w low. Hand-set params (v1) keep it
+    interpretable and overfit-resistant."""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    rng = np.random.default_rng(seed)
+    vol = max(_f(features, "vol_20", 0.015), p["vol_floor"])
+    scale = vol * math.sqrt(horizon)
+    loc = p["drift_gain"] * _f(features, "mom_1m", 0.0)
+    # skew driver: positive when bullish/near-high, negative when bearish/near-low
+    drive = (_f(features, "trend_200", 0.0)
+             + _f(features, "dist_52w_high", -0.2)   # ~0 near high (bullish)
+             + _f(features, "dist_52w_low", 0.2))    # large near high
+    gamma = math.exp(p["skew_gain"] * 0.1 * math.tanh(drive))
+    z = rng.standard_t(p["df"], size=n)
+    z = np.where(z >= 0, z * gamma, z / gamma)       # gamma>1 fattens upper tail
+    return Distribution(loc + scale * z)
