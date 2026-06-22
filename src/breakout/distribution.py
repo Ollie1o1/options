@@ -72,7 +72,9 @@ def parametric_distribution(features: dict, horizon: int, params: dict | None = 
     gamma = math.exp(p["skew_gain"] * 0.1 * math.tanh(drive))
     z = rng.standard_t(p["df"], size=n)
     z = np.where(z >= 0, z * gamma, z / gamma)       # gamma>1 fattens upper tail
-    return Distribution(loc + scale * z)
+    samples = loc + scale * z
+    samples = np.maximum(samples, -1.0)   # a simple return cannot be below -100%
+    return Distribution(samples)
 
 
 def make_distribution(series, t: int, horizon: int, model: str, seed: int = 0) -> Distribution:

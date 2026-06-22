@@ -51,6 +51,13 @@ class ParametricTests(unittest.TestCase):
         d = parametric_distribution({}, 21, seed=5)
         self.assertIsInstance(d.point(), float)
 
+    def test_returns_never_below_total_loss(self):
+        # extreme vol must not produce impossible (< -100%) simple returns
+        d = parametric_distribution(self._feat(0.0, vol=0.50), 63, n=20000, seed=9)
+        self.assertGreaterEqual(d.samples.min(), -1.0)
+        lo, hi = d.band(0.1, 0.9)
+        self.assertGreaterEqual(lo, -1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
