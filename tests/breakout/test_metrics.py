@@ -13,7 +13,7 @@ class MetricTests(unittest.TestCase):
         self.assertAlmostEqual(M.brier_score(np.array([0.0, 1.0]), np.array([1.0, 0.0])), 1.0)
 
     def test_auc_perfect_ranking_is_one(self):
-        self.assertAlmostEqual(M.auc(np.array([0.1, 0.4, 0.35, 0.8]),
+        self.assertAlmostEqual(M.auc(np.array([0.1, 0.2, 0.6, 0.8]),
                                      np.array([0, 0, 1, 1])), 1.0, places=6)
 
     def test_auc_single_class_is_none(self):
