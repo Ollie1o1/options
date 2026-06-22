@@ -30,9 +30,10 @@ class FeatureMathTests(unittest.TestCase):
     def test_vector_has_all_keys(self):
         c, h, l, v = _ramp(300)
         fv = F.feature_vector(c, h, l, v, len(c) - 1)
-        for k in ("trend_20", "mom_12_1", "vol_20", "dist_52w_high",
-                  "rsi_14", "bollinger_b", "atr_14", "vol_surge", "gap_freq"):
-            self.assertIn(k, fv)
+        self.assertEqual(set(fv.keys()), {
+            "trend_20", "trend_50", "trend_200", "mom_12_1", "mom_3m", "mom_1m",
+            "vol_20", "vol_60", "dist_52w_high", "dist_52w_low", "rsi_14",
+            "bollinger_b", "atr_14", "vol_surge", "gap_freq"})
 
 
 class NoLookAheadTests(unittest.TestCase):

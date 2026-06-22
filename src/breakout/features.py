@@ -29,6 +29,9 @@ def mom_12_1(close, t):
 
 
 def realized_vol(close: np.ndarray, t: int, window: int) -> Optional[float]:
+    """Return the DAILY standard deviation of log returns over the window ending
+    at t (NOT annualized). The parametric model scales by sqrt(horizon) to obtain
+    the horizon-period vol."""
     if t < window:
         return None
     seg = close[t - window: t + 1]

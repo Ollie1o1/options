@@ -34,6 +34,13 @@ class MetricTests(unittest.TestCase):
         y = (rng.random(20000) < p).astype(float)
         self.assertLess(M.expected_calibration_error(p, y, 10), 0.03)
 
+    def test_pinball_loss_median_is_half_mae(self):
+        pred = np.array([0.0, 0.0, 0.0])
+        realized = np.array([1.0, -1.0, 0.5])
+        # at q=0.5 pinball loss = 0.5 * mean(|realized - pred|)
+        self.assertAlmostEqual(M.pinball_loss(pred, realized, 0.5),
+                               0.5 * np.mean(np.abs(realized - pred)), places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

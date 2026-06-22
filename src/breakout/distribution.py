@@ -73,3 +73,13 @@ def parametric_distribution(features: dict, horizon: int, params: dict | None = 
     z = rng.standard_t(p["df"], size=n)
     z = np.where(z >= 0, z * gamma, z / gamma)       # gamma>1 fattens upper tail
     return Distribution(loc + scale * z)
+
+
+def make_distribution(series, t: int, horizon: int, model: str, seed: int = 0) -> Distribution:
+    """Build the forward-return distribution for a Series at index t under the
+    chosen model ('baseline' or 'parametric')."""
+    from src.breakout import features as _F
+    if model == "baseline":
+        return baseline_distribution(series.close, t, horizon, seed=seed)
+    fv = _F.feature_vector(series.close, series.high, series.low, series.volume, t)
+    return parametric_distribution(fv, horizon, seed=seed)

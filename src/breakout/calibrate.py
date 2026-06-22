@@ -14,7 +14,6 @@ def fit_isotonic(probs: np.ndarray, outcomes: np.ndarray) -> Tuple[np.ndarray, n
     y = outcomes[order].copy()
     w = np.ones_like(y)
     # pool-adjacent-violators
-    i = 0
     blocks = [[y[k], w[k], x[k]] for k in range(len(y))]
     merged = []
     for b in blocks:

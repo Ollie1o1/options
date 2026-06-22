@@ -40,7 +40,6 @@ def auc(scores, labels) -> Optional[float]:
     ranks = np.empty(len(scores), dtype=float)
     ranks[order] = np.arange(1, len(scores) + 1)
     # average ties
-    _, inv, counts = np.unique(scores, return_inverse=True, return_counts=True)
     tie_mean = np.array([ranks[scores == s].mean() for s in scores])
     sum_pos = tie_mean[labels == 1].sum()
     n_pos, n_neg = len(pos), len(neg)

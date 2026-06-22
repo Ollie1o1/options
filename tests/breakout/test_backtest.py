@@ -4,12 +4,11 @@ from __future__ import annotations
 import unittest
 import numpy as np
 from src.breakout.data import Series
-from src.breakout.backtest import collect_samples, run_backtest
+from src.breakout.backtest import collect_samples, run_backtest, _score
 
 
 def _series_from_close(close):
     close = np.asarray(close, dtype=float)
-    dates = [f"2010-{1 + i // 21:02d}".replace("2010-13", "2011-01") for i in range(len(close))]
     dates = [f"d{i:05d}" for i in range(len(close))]  # opaque but ordered
     return Series(dates, close, close + 1, close - 1, np.full(len(close), 1000.0))
 
@@ -37,6 +36,20 @@ class BacktestTests(unittest.TestCase):
         r = run_backtest(s, model="baseline", step=21, seed=1)
         self.assertGreaterEqual(r["EOM"]["brier"], 0.0)
         self.assertLessEqual(r["EOM"]["brier"], 1.0)
+
+    def test_score_rewards_skillful_model(self):
+        import numpy as np
+        rng = np.random.default_rng(0)
+        n = 400
+        outcomes = (rng.random(n) < 0.3).astype(float)          # 30% breakout base rate
+        # oracle: high prob exactly when a breakout happened, low when not (+ mild noise)
+        up_probs = np.clip(0.15 + 0.7 * outcomes + rng.normal(0, 0.05, n), 0, 1)
+        samples = {"up_probs": up_probs, "up_outcomes": outcomes,
+                   "los": np.full(n, -0.2), "his": np.full(n, 0.2),
+                   "realized": np.zeros(n)}
+        baseline_probs = np.full(n, outcomes.mean())            # uninformative constant
+        r = _score(samples, baseline_probs)
+        self.assertGreater(r["skill_vs_baseline"], 0.2)         # skillful model beats baseline
 
 
 if __name__ == "__main__":

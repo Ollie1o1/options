@@ -9,18 +9,11 @@ import numpy as np
 
 from src.breakout.data import Series, HORIZONS
 from src.breakout import features as F
-from src.breakout.distribution import baseline_distribution, parametric_distribution
+from src.breakout.distribution import baseline_distribution, parametric_distribution, make_distribution
 from src.breakout import metrics as M
 from src.breakout.calibrate import fit_isotonic, apply_isotonic
 
 UP_THRESHOLD = 0.10
-
-
-def _distribution(series: Series, t: int, horizon: int, model: str, seed: int):
-    if model == "baseline":
-        return baseline_distribution(series.close, t, horizon, seed=seed)
-    fv = F.feature_vector(series.close, series.high, series.low, series.volume, t)
-    return parametric_distribution(fv, horizon, seed=seed)
 
 
 def collect_samples(series_by_ticker: Dict[str, Series], horizon: int, model: str,
@@ -29,7 +22,7 @@ def collect_samples(series_by_ticker: Dict[str, Series], horizon: int, model: st
     for s in series_by_ticker.values():
         n = len(s.close)
         for t in range(start, n - horizon, step):
-            d = _distribution(s, t, horizon, model, seed)
+            d = make_distribution(s, t, horizon, model, seed)
             fwd = float(s.close[t + horizon] / s.close[t] - 1.0)
             up_probs.append(d.prob_ge(UP_THRESHOLD))
             up_outcomes.append(1.0 if fwd >= UP_THRESHOLD else 0.0)

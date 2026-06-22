@@ -46,6 +46,9 @@ def render_backtest(result: dict) -> str:
 
 
 def render_forecasts(rows: List[dict], top: int = 10) -> str:
+    if not rows:
+        return "  No forecast data — run `python -m src.breakout --update-data` first."
+
     def _fmt(r):
         lo, hi = r["band"]
         return [r["ticker"], r["horizon"], f"{r['point']:+.1%}",
@@ -55,5 +58,6 @@ def render_forecasts(rows: List[dict], top: int = 10) -> str:
     out = [ui.rule(80, "BREAKOUT CANDIDATES (highest upper-tail probability)"),
            ui.table(_FORECAST_COLS, [_fmt(r) for r in ups]), "",
            ui.rule(80, "BREAKDOWN CANDIDATES (highest lower-tail probability)"),
-           ui.table(_FORECAST_COLS, [_fmt(r) for r in downs])]
+           ui.table(_FORECAST_COLS, [_fmt(r) for r in downs]),
+           "  P(-10%) is model-raw; calibration is scored for P(+10%) only."]
     return "\n".join(out)
