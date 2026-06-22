@@ -1,10 +1,8 @@
 # tests/breakout/test_report.py
 """Tests for breakout rendering — smoke + color discipline."""
 from __future__ import annotations
-import re, unittest
+import unittest
 from src.breakout.report import render_backtest, render_forecasts
-
-_ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
 class ReportTests(unittest.TestCase):
@@ -24,12 +22,16 @@ class ReportTests(unittest.TestCase):
         self.assertIn("AAA", out)
         self.assertIn("BBB", out)
 
-    def test_no_raw_ansi_escapes(self):
-        out = render_backtest({"EOW": {"n": 1, "brier": 0.2, "ece": 0.0,
-                                       "auc": None, "coverage": 0.8,
-                                       "skill_vs_baseline": 0.0}})
-        # color must come through fmt.style, not hand-rolled escapes in this module
-        self.assertEqual(len(_ANSI.findall(out.replace("\033[0m", ""))), 0)
+    def test_report_source_has_no_raw_color(self):
+        import os
+        path = os.path.join(os.path.dirname(__file__), "..", "..",
+                            "src", "breakout", "report.py")
+        with open(os.path.abspath(path)) as f:
+            src = f.read()
+        # report.py must route all color through src/ui.py / fmt.style,
+        # never hand-roll ANSI escapes or raw Colors.* constants.
+        self.assertNotIn("\\033[", src)
+        self.assertNotIn("Colors.", src)
 
 
 if __name__ == "__main__":
