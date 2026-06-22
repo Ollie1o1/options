@@ -42,18 +42,24 @@ def collect_samples(series_by_ticker: Dict[str, Series], horizon: int, model: st
 def _score(samples: dict, baseline_probs: np.ndarray) -> dict:
     p, y = samples["up_probs"], samples["up_outcomes"]
     half = len(p) // 2
-    if half >= 5:  # calibrate on first half, score on second
+    # Always evaluate on a held-out second half; calibrate only when the
+    # first half is large enough to fit a meaningful isotonic map.
+    if half >= 5:
         cal = fit_isotonic(p[:half], y[:half])
-        ps, ys = np.array([apply_isotonic(cal, x) for x in p[half:]]), y[half:]
-        bl = baseline_probs[half:]
+        ps = np.array([apply_isotonic(cal, x) for x in p[half:]])
     else:
-        ps, ys, bl = p, y, baseline_probs
+        ps = p[half:]
+    ys = y[half:]
+    bl = baseline_probs[half:]
+    los = samples["los"][half:]
+    his = samples["his"][half:]
+    realized = samples["realized"][half:]
     return {
         "n": int(len(ys)),
         "brier": M.brier_score(ps, ys),
         "ece": M.expected_calibration_error(ps, ys),
         "auc": M.auc(ps, ys),
-        "coverage": M.band_coverage(samples["los"], samples["his"], samples["realized"]),
+        "coverage": M.band_coverage(los, his, realized),
         "skill_vs_baseline": M.skill_score(M.brier_score(ps, ys), M.brier_score(bl, ys)),
     }
 
