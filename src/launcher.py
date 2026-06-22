@@ -1,57 +1,63 @@
-"""Top-level dispatcher between equity options and crypto modes.
+"""Top-level dispatcher between equity options, crypto, leverage, and breakout.
 
 Behavior:
-  - With no flags: show interactive menu [1] STOCKS [2] CRYPTO [Q] QUIT.
+  - With no flags: show the interactive quant-desk menu.
   - With ANY argv flags: forward to src.options_screener.main() unchanged
     (preserves cron, --enforce-exits, --default-scoring shortcuts, every
-    historical CLI behavior). The crypto mode is opt-in via the menu only.
+    historical CLI behavior). Other modes are opt-in via the menu only.
 
 Equity callers (cron, run.py with shortcut flags) hit the second path and
 never see the menu — zero behavior change for the existing screener.
+
+The menu renders through src/ui.py + fmt.style (the quant-desk theme), the
+same components the rest of the screener uses — never raw Colors.
 """
 from __future__ import annotations
 
 import sys
 
-# Use the same formatter as both screeners so colors/banners match.
 try:
+    from src import ui
     from src import formatting as fmt
-    HAS_FMT = True
-except ImportError:
+    HAS_UI = True
+except ImportError:  # extremely defensive — ui is core
+    ui = None  # type: ignore
     fmt = None  # type: ignore
-    HAS_FMT = False
+    HAS_UI = False
+
+WIDTH = 74
 
 
-def _banner(text: str) -> None:
-    bar = "═" * 80
-    if HAS_FMT and fmt:
-        print(fmt.colorize(bar, fmt.Colors.BRIGHT_CYAN))
-        print(fmt.colorize(f"  {text}", fmt.Colors.BRIGHT_CYAN, bold=True))
-        print(fmt.colorize(bar, fmt.Colors.BRIGHT_CYAN))
-    else:
-        print(bar)
-        print(f"  {text}")
-        print(bar)
-
-
-def _color(text: str, color_attr: str, bold: bool = False) -> str:
-    if HAS_FMT and fmt:
-        return fmt.colorize(text, getattr(fmt.Colors, color_attr), bold=bold)
-    return text
+def _row(key: str, name: str, desc: str, tag: str = "", muted_key: bool = False) -> str:
+    """One aligned menu row: [key]  NAME       description            [tag]."""
+    if not HAS_UI:
+        pad_name = name.ljust(9)
+        return f"  [{key}]  {pad_name}  {desc}" + (f"   [{tag}]" if tag else "")
+    key_style = "muted" if muted_key else "accent"
+    k = fmt.style(f"[{key}]", key_style, bold=not muted_key)
+    n = fmt.style(ui.pad(name, 9), "heading")
+    d = fmt.style(desc, "muted")
+    row = f"  {k}  {n}  {d}"
+    if tag:
+        row += "  " + fmt.style(f"[{tag}]", "warn")
+    return row
 
 
 def _show_menu() -> str:
-    _banner("OPTIONS SCREENER  +  CRYPTO STRATEGIST")
+    if HAS_UI:
+        print()
+        print(ui.banner("OPTIONS SCREENER  ·  QUANT DESK", width=WIDTH))
+    else:
+        print("\n" + "=" * WIDTH + "\n  OPTIONS SCREENER  ·  QUANT DESK\n" + "=" * WIDTH)
     print()
-    print(f"  {_color('[1]', 'BRIGHT_YELLOW', bold=True)} STOCKS    "
-          "— equity options screener (DISCOVER / SPREADS / IRON / etc.)")
-    print(f"  {_color('[2]', 'BRIGHT_YELLOW', bold=True)} CRYPTO    "
-          "— BTC/ETH options on Deribit + perp funding/basis")
-    print(f"  {_color('[3]', 'BRIGHT_YELLOW', bold=True)} LEVERAGE  "
-          "— BTC/ETH perp futures strategy  "
-          + _color('[PRE-VALIDATION — NO EDGE YET]', 'BRIGHT_RED', bold=True))
-    print(f"  {_color('[Q]', 'DIM', bold=False)} QUIT")
+    print(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
+    print(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
+    print(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
+    print(_row("4", "BREAKOUT", "stock breakout/breakdown probabilities",
+               tag="no edge vs vol"))
+    print(_row("Q", "QUIT", "", muted_key=True))
     print()
+    print(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
     try:
         choice = input("  Choice [1]: ").strip() or "1"
     except (EOFError, KeyboardInterrupt):
@@ -83,10 +89,14 @@ def main() -> None:
             from src.leverage.__main__ import menu as _leverage_menu
             _leverage_menu()
             return
+        if choice in ("4", "BREAKOUT", "B"):
+            from src.breakout.engine import menu as _breakout_menu
+            _breakout_menu()
+            return
         if choice in ("Q", "QUIT", "EXIT", ""):
             print("  Goodbye.")
             return
-        print(f"  Unknown choice: {choice!r} — pick 1, 2, or Q")
+        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, or Q")
 
 
 if __name__ == "__main__":

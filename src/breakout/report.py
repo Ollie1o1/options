@@ -22,7 +22,7 @@ _FORECAST_COLS = [
     {"h": "Ticker",   "w": 7,  "align": "left"},
     {"h": "Hzn",      "w": 5,  "align": "left"},
     {"h": "Median",   "w": 8,  "align": "right"},
-    {"h": "80% band", "w": 12, "align": "right"},
+    {"h": "80% band", "w": 15, "align": "right"},
     {"h": "P(+10%)",  "w": 8,  "align": "right"},
     {"h": "P(-10%)",  "w": 8,  "align": "right"},
 ]

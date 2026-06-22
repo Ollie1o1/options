@@ -65,6 +65,49 @@ def _load_all(db_path: str, tickers: List[str]) -> Dict[str, Series]:
     return out
 
 
+def menu(config_path: str = "config.json", db_path: str = DEFAULT_DB) -> None:
+    """Interactive breakout sub-menu (reached from the launcher's basic UI)."""
+    from src import ui
+    from src import formatting as fmt
+    universe = load_universe(config_path)
+    W = 74
+
+    def _row(key, desc):
+        return "  " + fmt.style(f"[{key}]", "accent", bold=True) + "  " + desc
+
+    while True:
+        print()
+        print(ui.rule(W, "BREAKOUT / BREAKDOWN OUTLOOK"))
+        print(_row("1", "Live leaderboards — most likely to break out / break down"))
+        print(_row("2", "Backtest — featureful model vs vol baseline"))
+        print(_row("3", "Backtest — baseline only (vol-only control)"))
+        print(_row("4", "Refresh price data (yfinance, ~slow)"))
+        print(_row("B", fmt.style("Back", "muted")))
+        print(ui.rule(W))
+        try:
+            choice = (input("  Choice [1]: ").strip() or "1").upper()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("B", "Q", "BACK", "QUIT"):
+            return
+        if choice == "4":
+            print("  refreshing price cache…")
+            res = update_universe(db_path, universe, _yf_fetcher)
+            print(f"  updated {sum(1 for v in res.values() if v)} / {len(universe)} tickers")
+            continue
+        series = _load_all(db_path, universe)
+        if not series:
+            print("  No cached data yet — choose [4] to refresh first.")
+            continue
+        if choice == "2":
+            print(R.render_backtest(B.run_backtest(series, model="parametric")))
+        elif choice == "3":
+            print(R.render_backtest(B.run_backtest(series, model="baseline")))
+        else:  # "1" / default → live
+            print(R.render_forecasts(live_forecasts(series, model="parametric")))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Breakout/breakdown probability engine")
     p.add_argument("--backtest", action="store_true")
