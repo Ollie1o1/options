@@ -1,4 +1,5 @@
-"""Top-level dispatcher between equity options, crypto, leverage, and breakout.
+"""Top-level dispatcher between equity options, crypto, leverage, and the
+read-only research tools (breakout / vol-intelligence / equity-VRP).
 
 Behavior:
   - With no flags: show the interactive quant-desk menu.
@@ -53,8 +54,8 @@ def _show_menu() -> str:
     print(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
     print(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
     print(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
-    print(_row("4", "BREAKOUT", "stock breakout/breakdown probabilities",
-               tag="no edge vs vol"))
+    print(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
+               tag="read-only"))
     print(_row("Q", "QUIT", "", muted_key=True))
     print()
     print(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
@@ -64,6 +65,41 @@ def _show_menu() -> str:
         print()
         return "Q"
     return choice.upper()
+
+
+def _research_menu() -> None:
+    """Read-only research/analytics tools (no scores, no trades, no real money)."""
+    while True:
+        if HAS_UI:
+            print()
+            print(ui.rule(WIDTH, "RESEARCH / ANALYTICS  (read-only)"))
+        else:
+            print("\n-- RESEARCH / ANALYTICS (read-only) --")
+        print(_row("1", "BREAKOUT", "breakout/breakdown probabilities", tag="no edge vs vol"))
+        print(_row("2", "VOL-INTEL", "IV movers + implied-vs-realized (VRP)", tag="monitor"))
+        print(_row("3", "EQUITY-VRP", "delta-hedged short-straddle backtest",
+                   tag="no single-name edge"))
+        print(_row("B", "BACK", "", muted_key=True))
+        print(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
+        try:
+            choice = (input("  Choice [1]: ").strip() or "1").upper()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("B", "BACK", "Q", "QUIT", ""):
+            return
+        if choice in ("1", "BREAKOUT"):
+            from src.breakout.engine import menu as _breakout_menu
+            _breakout_menu()
+        elif choice in ("2", "VOL-INTEL", "VOL"):
+            from src.vol_intel.engine import main as _vol_main
+            _vol_main([])
+        elif choice in ("3", "EQUITY-VRP", "VRP"):
+            print("  running equity-VRP backtest over dolt chains…")
+            from src.equity_vol.report import main as _evrp_main
+            _evrp_main([])
+        else:
+            print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, or B")
 
 
 def main() -> None:
@@ -89,10 +125,9 @@ def main() -> None:
             from src.leverage.__main__ import menu as _leverage_menu
             _leverage_menu()
             return
-        if choice in ("4", "BREAKOUT", "B"):
-            from src.breakout.engine import menu as _breakout_menu
-            _breakout_menu()
-            return
+        if choice in ("4", "RESEARCH", "R"):
+            _research_menu()
+            continue
         if choice in ("Q", "QUIT", "EXIT", ""):
             print("  Goodbye.")
             return
