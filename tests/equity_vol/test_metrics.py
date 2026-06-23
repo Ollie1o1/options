@@ -6,7 +6,7 @@ from src.equity_vol import metrics as M
 
 class MetricTests(unittest.TestCase):
     def test_sharpe_basic(self):
-        self.assertAlmostEqual(M.sharpe([1.0, 1.0, 1.0, 1.0]), None if False else M.sharpe([1, 1, 1, 1]))
+        self.assertIsNone(M.sharpe([1.0, 1.0, 1.0, 1.0]))
         self.assertIsNone(M.sharpe([2.0]))                       # too few
         self.assertIsNone(M.sharpe([3.0, 3.0, 3.0]))             # zero std
 

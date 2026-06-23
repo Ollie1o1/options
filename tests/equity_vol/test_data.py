@@ -68,6 +68,11 @@ class DbTests(unittest.TestCase):
         self.assertNotIn("2022-04-04", px)
         self.assertEqual(px["2022-01-03"], 100.0)
 
+    def test_straddle_entries_rejects_too_close(self):
+        # with a 90-day freq, the ~monthly snapshots collapse to a single entry
+        entries = straddle_entries(self.db, "AAA", target_dte=30, freq_days=90)
+        self.assertEqual(len(entries), 1)
+
     def test_straddle_entries_spaced_and_real_marks(self):
         entries = straddle_entries(self.db, "AAA", target_dte=30, freq_days=28)
         self.assertGreaterEqual(len(entries), 2)

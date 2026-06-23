@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from src.equity_vol.data import Entry, days_between, straddle_entries
+from src.equity_vol.data import Entry, days_between, straddle_entries, closes as _closes
 from src.equity_vol.pricing import straddle_delta
 from src.equity_vol.costs import CostModel
 
@@ -75,8 +75,6 @@ def run_backtest(db_path: str, symbols: List[str], target_dte: int = 30,
                  cost: CostModel = CostModel()) -> List[TradeResult]:
     results: List[TradeResult] = []
     for sym in symbols:
-        px = {}
-        from src.equity_vol.data import closes as _closes
         px = _closes(db_path, sym)
         for e in straddle_entries(db_path, sym, target_dte, freq_days):
             tr = simulate_straddle(e, px, r=r, cost=cost)

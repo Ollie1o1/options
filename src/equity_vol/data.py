@@ -69,7 +69,8 @@ def pick_entry(rows: List[Dict[str, Any]], spot: float, date: str,
     ivs = [float(x["iv"]) for x in (c, p) if x["iv"] and float(x["iv"]) > 0]
     if not ivs:
         return None
-    return Entry(symbol=str(rows and ""), date=date, expiration=best_exp, strike=strike,
+    # symbol unknown here; straddle_entries (the only caller) overrides it
+    return Entry(symbol="", date=date, expiration=best_exp, strike=strike,
                  spot=float(spot), straddle_bid=float(c["bid"]) + float(p["bid"]),
                  straddle_ask=float(c["ask"]) + float(p["ask"]),
                  iv=sum(ivs) / len(ivs), dte=exp_dte[best_exp])
