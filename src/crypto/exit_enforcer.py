@@ -103,6 +103,39 @@ def _dte_now(expiration: str) -> float:
     return max(0.0, (d - now).total_seconds() / 86400.0)
 
 
+# Minimum position age before an automated *time-exit* may fire. Guards the
+# same-cycle open->time-exit race: a position auto-logged near expiry (dte
+# already <= time_exit_dte at entry) was being force-closed within minutes by
+# the very next enforcement pass, polluting the ledger with ~0-hold trades
+# (observed firing 8+ times in paper_trades_crypto, 2026-06). TP/SL exits are
+# NOT gated — only the calendar-driven time-exit.
+MIN_TIME_EXIT_AGE_S = 3600
+
+
+def _position_age_seconds(row) -> float:
+    """Seconds of UTC wall-clock since the position's entry (`date` column).
+
+    Fail-open: returns +inf when the entry timestamp is missing or unparseable,
+    so a legacy/corrupt row is never stranded OPEN forever."""
+    try:
+        raw = str(row["date"]).replace(" UTC", "").strip()
+    except (KeyError, IndexError, TypeError):
+        return float("inf")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            t = _dt.datetime.strptime(raw, fmt).replace(tzinfo=_dt.timezone.utc)
+            return (_dt.datetime.now(_dt.timezone.utc) - t).total_seconds()
+        except ValueError:
+            continue
+    return float("inf")
+
+
+def _time_exit_allowed(row) -> bool:
+    """True unless the position is younger than ``MIN_TIME_EXIT_AGE_S`` — the
+    hard guardrail that blocks the same-cycle open->time-exit race."""
+    return _position_age_seconds(row) >= MIN_TIME_EXIT_AGE_S
+
+
 def _classify_row(row: sqlite3.Row) -> str:
     """Determine structure: 'iron_condor' | 'spread' | 'calendar' | 'single'."""
     strategy = str(row["strategy_name"] or "").lower()
@@ -228,7 +261,7 @@ def _evaluate_single(conn: sqlite3.Connection, row: sqlite3.Row,
     dte = _dte_now(expiration)
 
     # Time-exit takes priority if very close to expiry.
-    if dte <= rules["time_exit_dte"]:
+    if dte <= rules["time_exit_dte"] and _time_exit_allowed(row):
         # Use intrinsic value as exit (best approximation if mark unavailable).
         if leg is not None:
             exit_price = float(leg.get("mark_price") or leg.get("mid_price") or 0)
@@ -299,7 +332,7 @@ def _evaluate_spread(conn: sqlite3.Connection, row: sqlite3.Row,
     else:
         cost_to_close = float("nan")
 
-    if dte <= rules["time_exit_dte"]:
+    if dte <= rules["time_exit_dte"] and _time_exit_allowed(row):
         # Settle at intrinsic
         spot = _df.get_index_price(ticker) or 0
         if leg_type == "put":
@@ -375,7 +408,7 @@ def _evaluate_iron_condor(conn: sqlite3.Connection, row: sqlite3.Row,
     cost_to_close = sum(-qty * price for qty, price in legs)
 
     dte = _dte_now(expiration)
-    if dte <= rules["time_exit_dte"]:
+    if dte <= rules["time_exit_dte"] and _time_exit_allowed(row):
         spot = _df.get_index_price(ticker) or 0
         # intrinsic settlement
         ic_legs = [
@@ -432,7 +465,7 @@ def _evaluate_calendar(conn: sqlite3.Connection, row: sqlite3.Row,
     back_leg  = _chain_lookup(chain, back_inst)
 
     front_dte = _dte_now(front_exp)
-    if front_dte <= rules["time_exit_dte"]:
+    if front_dte <= rules["time_exit_dte"] and _time_exit_allowed(row):
         # Front expires roughly worthless if OTM; settle at intrinsic vs back leg residual.
         spot = _df.get_index_price(ticker) or 0
         if opt_type == "call":
