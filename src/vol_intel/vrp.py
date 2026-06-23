@@ -41,6 +41,9 @@ def rv_percentile(symbol: str, ohlcv_db: str, window: int = 20,
     if s is None or len(s.close) < window + 5:
         return None
     closes = pd.Series(s.close)
+    # start at the index that leaves at most `lookback` trailing RV observations
+    # in hist (full series when history is shorter than lookback). Do not "simplify"
+    # the subtraction — vrp.py is reused by the Track-4 backtest on long series.
     start = max(window, len(closes) - lookback)
     hist = []
     for t in range(start, len(closes)):
