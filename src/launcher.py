@@ -41,7 +41,7 @@ def _row(key: str, name: str, desc: str, tag: str = "", muted_key: bool = False)
     row = f"  {k}  {n}  {d}"
     if tag:
         row += "  " + fmt.style(f"[{tag}]", "warn")
-    return row
+    return row.rstrip()
 
 
 def _show_menu() -> str:

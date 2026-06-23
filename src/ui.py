@@ -138,7 +138,9 @@ def table(cols, rows, indent: int = 2) -> str:
             pad(cell, c['w'], c.get('align', 'left'))
             for cell, c in zip(r, cols)))
     out.append(sep)
-    return '\n'.join(out)
+    # rstrip drops trailing padding on a left-aligned final column (no visible
+    # change on screen; keeps piped output / copy-paste clean).
+    return '\n'.join(line.rstrip() for line in out)
 
 
 def meter(pct, width: int = 16, style_name: str = None) -> str:

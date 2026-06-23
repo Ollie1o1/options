@@ -185,6 +185,12 @@ _PROBE_BUDGET_S = 6.0
 _PROBE_TIMEOUT_S = 15.0
 
 _FALLBACK_VENV = os.path.expanduser("~/.venvs/options/bin/python")
+# Both probe verdicts are cached. Freshness is anchored on pyvenv.cfg (rewritten
+# only when the venv is (re)created), NOT the venv directory mtime — writing a
+# stamp into venv/ bumps the directory's mtime past the stamp, which silently
+# self-invalidated the cache and forced the slow 15s probe on every launch.
+_STAMP_BAD = os.path.join(_project_root, "venv", ".provenance_probe_bad")
+_PYVENV_CFG = os.path.join(_project_root, "venv", "pyvenv.cfg")
 
 def _probe_imports(python_path: str) -> tuple[str, float]:
     """Probe how the given interpreter handles the screener's heaviest imports.
@@ -210,28 +216,48 @@ def _probe_imports(python_path: str) -> tuple[str, float]:
         return "slow", elapsed
     return "ok", elapsed
 
+def _probe_stamp_fresh(path: str) -> bool:
+    """A cached probe verdict is fresh if it post-dates the venv's identity file
+    (pyvenv.cfg) and this launcher. Anchored on pyvenv.cfg — NOT the venv
+    directory mtime, which the stamp-write itself bumps (self-invalidating)."""
+    try:
+        sm = os.path.getmtime(path)
+        anchor = (os.path.getmtime(_PYVENV_CFG) if os.path.exists(_PYVENV_CFG)
+                  else os.path.getmtime(os.path.join(_project_root, "venv")))
+        return sm >= anchor and sm >= os.path.getmtime(__file__)
+    except OSError:
+        return False
+
+
 def _venv_status() -> str:
-    """Return "ok"|"error"|"slow"|"timeout" for the project venv (cached)."""
+    """Return "ok"|"error"|"slow"|"timeout" for the project venv (cached both ways)."""
     if sys.platform != "darwin":
         # Non-Darwin: skip the cache + slow check, just probe import success.
         status, _ = _probe_imports(_venv_python)
         return status
     if not os.path.isdir(os.path.join(_project_root, "venv", "lib")):
         return "error"
+    if _probe_stamp_fresh(_STAMP_PATH):
+        return "ok"
+    if _probe_stamp_fresh(_STAMP_BAD):
+        try:
+            cached = open(_STAMP_BAD).read().strip()
+        except OSError:
+            cached = ""
+        return cached or "slow"
+    status, _ = _probe_imports(_venv_python)
     try:
-        stamp_mtime = os.path.getmtime(_STAMP_PATH)
-        venv_mtime = os.path.getmtime(os.path.join(_project_root, "venv"))
-        runpy_mtime = os.path.getmtime(__file__)
-        if stamp_mtime >= venv_mtime and stamp_mtime >= runpy_mtime:
-            return "ok"
+        if status == "ok":
+            open(_STAMP_PATH, "w").close()
+            if os.path.exists(_STAMP_BAD):
+                os.remove(_STAMP_BAD)
+        else:
+            with open(_STAMP_BAD, "w") as fh:
+                fh.write(status)
+            if os.path.exists(_STAMP_PATH):
+                os.remove(_STAMP_PATH)
     except OSError:
         pass
-    status, _ = _probe_imports(_venv_python)
-    if status == "ok":
-        try:
-            open(_STAMP_PATH, "w").close()
-        except OSError:
-            pass
     return status
 
 def _print_rebuild_instructions():
