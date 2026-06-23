@@ -54,6 +54,14 @@ class DbTests(unittest.TestCase):
     def test_closes(self):
         self.assertEqual(closes(self.db, "AAA")["2022-01-03"], 100.0)
 
+    def test_closes_skips_null_close(self):
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT INTO stocks_close VALUES ('AAA','2022-04-04',NULL)")
+        con.commit(); con.close()
+        px = closes(self.db, "AAA")     # must not raise on the NULL row
+        self.assertNotIn("2022-04-04", px)
+        self.assertEqual(px["2022-01-03"], 100.0)
+
     def test_straddle_entries_spaced_and_real_marks(self):
         entries = straddle_entries(self.db, "AAA", target_dte=30, freq_days=28)
         self.assertGreaterEqual(len(entries), 2)

@@ -34,7 +34,9 @@ def closes(db_path: str, symbol: str) -> Dict[str, float]:
         rows = conn.execute(
             "SELECT date, close FROM stocks_close WHERE symbol=? ORDER BY date",
             (symbol,)).fetchall()
-    return {d: float(c) for d, c in rows}
+    # real dolt data has occasional NULL closes — skip them (a missing hedge
+    # date is simply absent from the path, not a zero price).
+    return {d: float(c) for d, c in rows if c is not None}
 
 
 def pick_entry(rows: List[Dict[str, Any]], spot: float, date: str,
