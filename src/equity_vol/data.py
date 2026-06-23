@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 TARGET_DTE = 30
 FREQ_DAYS = 28
+MAX_ATM_MONEYNESS = 0.30   # reject entries whose nearest strike is >30% off spot (stale/split data)
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,11 @@ def pick_entry(rows: List[Dict[str, Any]], spot: float, date: str,
     best_exp = min(exp_dte, key=lambda e: abs(exp_dte[e] - target_dte))
     leg = [r for r in valid if r["expiration"] == best_exp]
     strike = min({float(r["strike"]) for r in leg}, key=lambda k: abs(k - float(spot)))
+    # Moneyness sanity: a real ATM straddle has strike ~ spot. A strike far off
+    # spot means stale / split-mismatched data (e.g. pre-split strikes vs a
+    # post-split close) — skip it rather than book a fake 20x intrinsic.
+    if abs(strike - float(spot)) / float(spot) > MAX_ATM_MONEYNESS:
+        return None
     calls = [r for r in leg if str(r["type"]).lower() == "call" and float(r["strike"]) == strike]
     puts = [r for r in leg if str(r["type"]).lower() == "put" and float(r["strike"]) == strike]
     if not calls or not puts:

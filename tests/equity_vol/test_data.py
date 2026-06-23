@@ -32,6 +32,12 @@ class PureTests(unittest.TestCase):
         rows = [_row("call", 100, "2022-02-01", 5.0, 5.4, 0.30)]  # no put at 100
         self.assertIsNone(pick_entry(rows, spot=100, date="2022-01-02"))
 
+    def test_pick_entry_rejects_split_mismatch_strike(self):
+        # pre-split strikes (~2800) vs a post-split spot (~140) -> skip, not a fake ATM
+        rows = [_row("call", 2800, "2022-02-01", 5.0, 5.4, 0.30),
+                _row("put", 2800, "2022-02-01", 4.0, 4.4, 0.30)]
+        self.assertIsNone(pick_entry(rows, spot=140, date="2022-01-02"))
+
 
 class DbTests(unittest.TestCase):
     def setUp(self):
