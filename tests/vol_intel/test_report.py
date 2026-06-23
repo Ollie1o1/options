@@ -28,6 +28,18 @@ class ReportTests(unittest.TestCase):
         self.assertIn("13", out)
         self.assertIn("Track-4", out)
 
+    def test_vrp_empty_shows_no_data(self):
+        out = render_vrp([])
+        self.assertIn("no realized-vol data", out)
+
+    def test_vrp_positive_only_in_rich_not_cheap(self):
+        rows = [{"symbol": "AAA", "iv": 0.3, "rv": 0.2, "vrp": 0.10, "label": "RICH"}]
+        out = render_vrp(rows)
+        rich_part, cheap_part = out.split("CHEAP = buy-vol", 1)
+        self.assertIn("AAA", rich_part)        # appears in RICH
+        self.assertNotIn("AAA", cheap_part)    # NOT mislabeled under CHEAP
+        self.assertIn("(none)", cheap_part)    # CHEAP block empty
+
     def test_report_source_has_no_raw_color(self):
         path = os.path.join(os.path.dirname(__file__), "..", "..",
                             "src", "vol_intel", "report.py")

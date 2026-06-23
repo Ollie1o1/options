@@ -40,17 +40,22 @@ def render_iv_movers(rows: List[dict], top: int = 10) -> str:
 
 def render_vrp(rows: List[dict], top: int = 10) -> str:
     have = [r for r in rows if r.get("vrp") is not None]
-    rich = sorted(have, key=lambda r: r["vrp"], reverse=True)[:top]
-    cheap = sorted(have, key=lambda r: r["vrp"])[:top]
+    if not have:
+        return ui.rule(W, "IMPLIED vs REALIZED") + "\n  no realized-vol data available yet."
+    rich = sorted([r for r in have if r["vrp"] > 0], key=lambda r: r["vrp"], reverse=True)[:top]
+    cheap = sorted([r for r in have if r["vrp"] < 0], key=lambda r: r["vrp"])[:top]
 
     def _fmt(r):
         return [r["symbol"], _pct(r.get("iv")), _pct(r.get("rv")),
                 _vp(r.get("vrp")), r.get("label", "-")]
 
-    return "\n".join([ui.rule(W, "IMPLIED vs REALIZED - RICH = sell-vol candidate"),
-                      ui.table(_VRP_COLS, [_fmt(r) for r in rich]), "",
-                      ui.rule(W, "CHEAP = buy-vol candidate"),
-                      ui.table(_VRP_COLS, [_fmt(r) for r in cheap])])
+    def _block(title, block_rows):
+        if not block_rows:
+            return ui.rule(W, title) + "\n  (none)"
+        return ui.rule(W, title) + "\n" + ui.table(_VRP_COLS, [_fmt(r) for r in block_rows])
+
+    return "\n".join([_block("IMPLIED vs REALIZED - RICH = sell-vol candidate", rich), "",
+                      _block("CHEAP = buy-vol candidate", cheap)])
 
 
 def render_report(movers: List[dict], vrp_rows: List[dict], n_cov: int) -> str:

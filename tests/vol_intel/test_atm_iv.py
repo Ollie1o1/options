@@ -25,6 +25,9 @@ class AtmIvPureTests(unittest.TestCase):
     def test_none_on_empty(self):
         self.assertIsNone(atm_iv([], spot=100))
 
+    def test_constant(self):
+        self.assertEqual(TARGET_DTE, 30)
+
 
 class IvMoveTests(unittest.TestCase):
     def setUp(self):
@@ -48,8 +51,17 @@ class IvMoveTests(unittest.TestCase):
         self.assertAlmostEqual(out["AAA"]["prev_iv"], 0.30, places=6)
         self.assertAlmostEqual(out["AAA"]["d_iv"], 0.10, places=6)
 
-    def test_constant(self):
-        self.assertEqual(TARGET_DTE, 30)
+    def test_d_iv_none_when_no_prior_snapshot(self):
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT INTO chain_snapshots VALUES (?,?,?,?,?,?,?)",
+                    ("BBB", "2026-06-22", "call", 50, "2026-07-22", 0.6, 50))
+        con.execute("INSERT INTO chain_snapshots VALUES (?,?,?,?,?,?,?)",
+                    ("BBB", "2026-06-22", "put", 50, "2026-07-22", 0.6, 50))
+        con.commit(); con.close()
+        out = {r["symbol"]: r for r in iv_move(self.db, "2026-06-22")}
+        self.assertIsNone(out["BBB"]["prev_iv"])
+        self.assertIsNone(out["BBB"]["d_iv"])
 
 
 if __name__ == "__main__":
