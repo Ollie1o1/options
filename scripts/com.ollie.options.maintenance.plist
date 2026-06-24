@@ -4,9 +4,10 @@
   Headless cohort-filling maintenance for the options screener.
 
   Template: __REPO__ and __PYTHON__ are substituted by scripts/install_launchagent.sh.
-  Fires inside each of the three auto-log windows (see src/maintenance.autolog_window):
-  ds 10:15-11:30, sps 12:15-13:30, ics 14:00-15:00, Mon-Fri. The maintenance
-  throttle makes repeat fires idempotent (once per window per day).
+  Fires at 10:20 / 12:20 / 14:05, Mon-Fri. The first weekday fire inside the RTH
+  band (see src/maintenance.due_autolog_windows) catches up EVERY working
+  strategy not yet logged today (long calls, spreads, short puts, iron condors);
+  the later fires are idempotent retries (once per strategy per day).
 
   IMPORTANT (macOS): after installation the job will report status 78 (EX_CONFIG)
   until you approve it under System Settings -> General -> Login Items & Extensions

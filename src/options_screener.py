@@ -103,6 +103,64 @@ def _spinner(label: str):
     import contextlib
     return contextlib.nullcontext()
 
+
+def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None):
+    """Render the market-regime dashboard to a string while paper-trade exits
+    are enforced in the background. Returns the captured dashboard text
+    ('' on failure).
+
+    Race-free by construction: the dashboard renders SYNCHRONOUSLY in the
+    calling thread inside ``redirect_stdout`` (a guaranteed-restore context
+    manager), so the global ``sys.stdout`` is always handed back before the
+    caller prints anything else. Only the non-printing ``update_positions()``
+    runs in the daemon thread.
+
+    The previous design inverted this: it rendered the dashboard in a daemon
+    thread that reassigned the global ``sys.stdout`` and restored it only in its
+    own ``finally``. When ``fetch_market_regime`` overran the 6s join, the thread
+    was abandoned mid-render with stdout still pointing at a dead buffer — so the
+    mode menu printed afterwards vanished into that buffer and the UI looked
+    blank/frozen. ``fetch_market_regime`` already caps itself at ~6s internally,
+    so the external thread+timeout bought nothing and only created the race."""
+    import io as _io
+    import threading as _t
+    spinner_factory = spinner_factory or _spinner
+
+    def _enforce_exits():
+        try:
+            pm.update_positions()
+            # Record that exits were enforced inline so the automation-health
+            # check (which keys off this log's mtime) reflects reality.
+            try:
+                import os as _os
+                from datetime import datetime as _now_dt
+                _os.makedirs("logs", exist_ok=True)
+                with open("logs/enforce_exits.log", "a") as _elog:
+                    _elog.write(f"[{_now_dt.now():%Y-%m-%d %H:%M:%S}] "
+                                "exits enforced inline at screener startup\n")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    buf = _io.StringIO()
+    try:
+        from .regime_dashboard import print_regime_dashboard
+        exit_thread = _t.Thread(target=_enforce_exits, daemon=True)
+        with spinner_factory("Loading market data…"):
+            exit_thread.start()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    print_regime_dashboard(width)
+            except Exception:
+                pass
+            # Exits must finish before we move on so auto-closes complete; capped
+            # by update_positions' own ~60s internal yfinance timeouts.
+            exit_thread.join(timeout=60)
+    except Exception:
+        pass
+    return buf.getvalue()
+
 # Scan-level warning counter (incremented in except blocks, reported at end of scan)
 _SCAN_WARNINGS = [0]
 
@@ -2691,37 +2749,46 @@ def _run_intel_menu() -> None:
         print(f"  Intel module unavailable: {exc}")
         return
 
-    choice = prompt_input(
-        "Intel: [a] market overview  [b] ticker briefing  [c] macro pulse",
-        "a").strip().lower()
-
-    if choice in ("c", "macro", "pulse", "3", "p"):
+    # Loop so several briefings can be run in one sitting; [x] returns to the
+    # mode menu. Non-interactive callers (--mode intel, pipes) run one briefing
+    # and return so they can never spin on the default choice.
+    _interactive = sys.stdin.isatty()
+    while True:
         try:
-            from src.macro_pulse import run as _macro_run
-            print(_macro_run())
-        except Exception as exc:
-            print(f"  Could not build macro pulse: {exc}")
-        return
-
-    if choice in ("a", "market", "1", "m"):
-        try:
-            _market.print_market_overview(get_display_width())
-        except Exception as exc:
-            print(f"  Could not render market overview: {exc}")
-        return
-
-    if choice in ("b", "ticker", "2", "t"):
-        sym = prompt_input("Enter ticker symbol (e.g. NVDA)", "").strip().upper()
-        if not sym or not sym.isalnum() or len(sym) > 6:
-            print("  No valid ticker entered. Returning.")
+            choice = prompt_input(
+                "Intel: [a] market overview  [b] ticker briefing  [c] macro pulse  [x] back",
+                "a").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
             return
-        try:
-            _brief.print_briefing(sym)
-        except Exception as exc:
-            print(f"  Could not build briefing for {sym}: {exc}")
-        return
 
-    print("  Unrecognized choice. Type 'a' for market or 'b' for a ticker.")
+        if choice in ("x", "back", "q", "quit"):
+            return
+        elif choice in ("c", "macro", "pulse", "3", "p"):
+            try:
+                from src.macro_pulse import run as _macro_run
+                print(_macro_run())
+            except Exception as exc:
+                print(f"  Could not build macro pulse: {exc}")
+        elif choice in ("a", "market", "1", "m"):
+            try:
+                _market.print_market_overview(get_display_width())
+            except Exception as exc:
+                print(f"  Could not render market overview: {exc}")
+        elif choice in ("b", "ticker", "2", "t"):
+            sym = prompt_input("Enter ticker symbol (e.g. NVDA)", "").strip().upper()
+            if not sym or not sym.isalnum() or len(sym) > 6:
+                print("  No valid ticker entered.")
+            else:
+                try:
+                    _brief.print_briefing(sym)
+                except Exception as exc:
+                    print(f"  Could not build briefing for {sym}: {exc}")
+        else:
+            print("  Unrecognized choice. Type a / b / c, or x to go back.")
+
+        if not _interactive:
+            return
 
 
 def close_trades():
@@ -4070,7 +4137,8 @@ def main():
         from .maintenance import run_startup_maintenance
         with open("config.json") as _cf:
             _p1 = (_json.load(_cf).get("auto_log") or {}).get("phase1_start_date")
-        _maint = run_startup_maintenance(db_path="paper_trades.db", phase1_start=_p1)
+        _maint = run_startup_maintenance(db_path="paper_trades.db", phase1_start=_p1,
+                                         background=True)
         if _maint.get("cohort"):
             print(fmt.colorize(f"  {_maint['cohort']}", fmt.Colors.BRIGHT_WHITE)
                   if HAS_ENHANCED_CLI else f"  {_maint['cohort']}")
@@ -4093,52 +4161,15 @@ def main():
     except Exception:
         pass
 
-    # ── Regime Dashboard + Portfolio Update (parallel) ─────────────────────
-    # Regime dashboard runs in a background thread for the UX; exit enforcement
-    # runs synchronously so auto-closes actually complete before we move on.
-    # Previously the update was a 2-second daemon thread that got killed before
-    # yfinance finished, so stop-loss/take-profit never actually fired.
+    # ── Regime Dashboard + Portfolio Update (overlapped, race-free) ────────
+    # update_positions() does no printing → it runs in the daemon thread, while
+    # the regime dashboard renders synchronously here so the global sys.stdout is
+    # always restored before the mode menu prints. See the helper for the race
+    # the old thread-renders-and-redirects-stdout design caused (blank UI).
     pm = PaperManager(db_path="paper_trades.db", config_path="config.json")
-    try:
-        from .regime_dashboard import print_regime_dashboard
-        import threading as _t
-        import io as _io
-        import sys as _sys
-        _result = [None]
-        def _fetch():
-            buf = _io.StringIO()
-            _old = _sys.stdout
-            _sys.stdout = buf
-            try:
-                print_regime_dashboard(WIDTH)
-            finally:
-                _sys.stdout = _old
-            _result[0] = buf.getvalue()
-        _th = _t.Thread(target=_fetch, daemon=True)
-        with _spinner("Loading market data…"):
-            _th.start()
-            # Enforce exits synchronously. yfinance fetches are capped inside
-            # update_positions (30s spot + 30s option prices) so worst case is ~60s.
-            try:
-                pm.update_positions()
-                # Record that exits were enforced inline so the automation-health
-                # check (which keys off this log's mtime) reflects reality.
-                try:
-                    import os as _os
-                    from datetime import datetime as _now_dt
-                    _os.makedirs("logs", exist_ok=True)
-                    with open("logs/enforce_exits.log", "a") as _elog:
-                        _elog.write(f"[{_now_dt.now():%Y-%m-%d %H:%M:%S}] "
-                                    "exits enforced inline at screener startup\n")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            _th.join(timeout=6)
-        if _result[0]:
-            print(_result[0], end="")
-    except Exception:
-        print()
+    _dash = _render_regime_with_exit_enforcement(pm, WIDTH)
+    if _dash:
+        print(_dash, end="")
 
     # ── Sector/asset outlook (cache-first, instant; refreshes in background) ──
     try:
@@ -4158,675 +4189,301 @@ def main():
             print("  Quotes are 15+ min delayed. Use results for planning, not live execution.")
     print()
 
-    # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
-    _wl = load_watchlist()
-    _wl_desc = f"Scan your {len(_wl)} saved ticker(s)" if _wl else "(empty \u2014 type ADD AAPL to begin)"
-    if HAS_ENHANCED_CLI:
-        print("\n" + fmt.draw_separator(WIDTH))
-        modes = [
-            ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
-            ("2", "ALL",       "Budget-based multi-stock scan"),
-            ("3", "DISCOVER",  "Top 100 most-traded tickers \u2014 no budget limit"),
-            ("4", "SELL",      "Premium Selling \u2014 income via short puts"),
-            ("5", "SPREADS",   "Credit Spread analysis"),
-            ("6", "IRON",      "Iron Condor analysis \u2014 range-bound"),
-            ("7", "PORTFOLIO", "View open position P/L"),
-            ("8", "MY LIST",   _wl_desc),
-            ("9", "LOTTERY",   "Lottery Ticket \u2014 far-OTM plays on extreme moves"),
-            ("10", "INTEL",    "Intel Briefing \u2014 everything before you buy + what to do"),
-        ]
-        for num, cmd, desc in modes:
-            n = fmt.colorize(f"[{num}]", fmt.Colors.BRIGHT_YELLOW)
-            c = fmt.colorize(f"{cmd:<10}", fmt.Colors.BRIGHT_WHITE, bold=True)
-            d = fmt.colorize(f"\u2014 {desc}", fmt.Colors.DIM)
-            print(f"  {n} {c} {d}")
-        print(fmt.draw_separator(WIDTH))
-    else:
-        print("\nModes:")
-        print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")
-        print("  [2] ALL        \u2014 Budget-based multi-stock scan")
-        print("  [3] DISCOVER   \u2014 Top 100 most-traded tickers (no budget limit)")
-        print("  [4] SELL       \u2014 Premium Selling analysis (short puts)")
-        print("  [5] SPREADS    \u2014 Credit Spread analysis")
-        print("  [6] IRON       \u2014 Iron Condor analysis")
-        print("  [7] PORTFOLIO  \u2014 View open position P/L")
-        print(f"  [8] MY LIST    \u2014 {_wl_desc}")
-        print("  [9] LOTTERY    \u2014 Lottery Ticket: far-OTM plays on extreme moves")
-        print("  [10] INTEL     \u2014 Intel Briefing: everything before you buy + what to do")
-    print()
-
-    # ── --mode / --ticker CLI bypass ──────────────────────────────────────────
-    _mode_map_cli = {
-        "ticker": "TICKER", "all": "ALL", "discover": "DISCOVER",
-        "sell": "SELL", "spreads": "SPREADS", "iron": "IRON",
-        "portfolio": "PORTFOLIO", "mylist": "MY LIST",
-        "lottery": "LOTTERY", "intel": "INTEL",
-    }
-    if args.ticker:
-        symbol_input = args.ticker.upper()
-    elif args.mode:
-        symbol_input = _mode_map_cli.get(args.mode.lower(), "DISCOVER")
-    else:
-        symbol_input = prompt_input("Enter number, ticker, or command (default: 3)", "3").upper()
-
-    # ── Watchlist commands ────────────────────────────────────────────────────
-    if symbol_input.startswith("ADD "):
-        add_to_watchlist(symbol_input[4:].strip())
-        sys.exit(0)
-    if symbol_input.startswith("REMOVE "):
-        remove_from_watchlist(symbol_input[7:].strip())
-        sys.exit(0)
-    if symbol_input in ("SHOW LIST", "SHOW"):
-        wl_cur = load_watchlist()
-        if wl_cur:
-            print(f"  Your watchlist ({len(wl_cur)} tickers): " + ", ".join(wl_cur))
+    # ── Interactive session loop ────────────────────────────────────────────
+    # Re-show the mode menu after each action so a scan / intel / portfolio /
+    # ticker returns the user here instead of exiting. Automation (cron, --auto,
+    # --mode, --ticker, --auto-log) runs exactly one cycle and exits unchanged.
+    _interactive = (sys.stdin.isatty() and not args.auto and not args.mode
+                    and not args.ticker and not getattr(args, "auto_log", False))
+    while True:
+        # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
+        _wl = load_watchlist()
+        _wl_desc = f"Scan your {len(_wl)} saved ticker(s)" if _wl else "(empty \u2014 type ADD AAPL to begin)"
+        if HAS_ENHANCED_CLI:
+            print("\n" + fmt.draw_separator(WIDTH))
+            modes = [
+                ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
+                ("2", "ALL",       "Budget-based multi-stock scan"),
+                ("3", "DISCOVER",  "Top 100 most-traded tickers \u2014 no budget limit"),
+                ("4", "SELL",      "Premium Selling \u2014 income via short puts"),
+                ("5", "SPREADS",   "Credit Spread analysis"),
+                ("6", "IRON",      "Iron Condor analysis \u2014 range-bound"),
+                ("7", "PORTFOLIO", "View open position P/L"),
+                ("8", "MY LIST",   _wl_desc),
+                ("9", "LOTTERY",   "Lottery Ticket \u2014 far-OTM plays on extreme moves"),
+                ("10", "INTEL",    "Intel Briefing \u2014 everything before you buy + what to do"),
+                ("Q", "QUIT",      "Exit the screener"),
+            ]
+            for num, cmd, desc in modes:
+                n = fmt.colorize(f"[{num}]", fmt.Colors.BRIGHT_YELLOW)
+                c = fmt.colorize(f"{cmd:<10}", fmt.Colors.BRIGHT_WHITE, bold=True)
+                d = fmt.colorize(f"\u2014 {desc}", fmt.Colors.DIM)
+                print(f"  {n} {c} {d}")
+            print(fmt.draw_separator(WIDTH))
         else:
-            print("  Watchlist is empty. Type ADD AAPL to begin.")
-        sys.exit(0)
+            print("\nModes:")
+            print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")
+            print("  [2] ALL        \u2014 Budget-based multi-stock scan")
+            print("  [3] DISCOVER   \u2014 Top 100 most-traded tickers (no budget limit)")
+            print("  [4] SELL       \u2014 Premium Selling analysis (short puts)")
+            print("  [5] SPREADS    \u2014 Credit Spread analysis")
+            print("  [6] IRON       \u2014 Iron Condor analysis")
+            print("  [7] PORTFOLIO  \u2014 View open position P/L")
+            print(f"  [8] MY LIST    \u2014 {_wl_desc}")
+            print("  [9] LOTTERY    \u2014 Lottery Ticket: far-OTM plays on extreme moves")
+            print("  [10] INTEL     \u2014 Intel Briefing: everything before you buy + what to do")
+            print("  [Q] QUIT       \u2014 Exit the screener")
+        print()
 
-    # ── Number → command mapping ──────────────────────────────────────────────
-    _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
-                "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST",
-                "9": "LOTTERY", "10": "INTEL"}
-    if symbol_input in _num_map:
-        symbol_input = _num_map[symbol_input]
-
-    # ── INTEL mode: pre-trade briefing (market overview or single-ticker) ──────
-    if symbol_input == "INTEL":
-        _run_intel_menu()
-        sys.exit(0)
-
-    if symbol_input == "PORTFOLIO":
-        from .check_pnl import view_portfolio_menu
-        view_portfolio_menu()
-        sys.exit(0)
-
-    # ── MY LIST mode ──────────────────────────────────────────────────────────
-    is_my_list_mode = (symbol_input in ("MY LIST", "MYLIST"))
-    if is_my_list_mode:
-        _wl_tickers = load_watchlist()
-        if not _wl_tickers:
-            print("  Your watchlist is empty. Type ADD AAPL to add a ticker first.")
-            sys.exit(0)
-        symbol_input = "DISCOVER"  # reuse discovery flow with custom ticker list
-
-    is_budget_mode = (symbol_input == "ALL")
-    is_discovery_mode = (symbol_input in ("DISCOVER", "")) or is_my_list_mode
-    is_ticker_mode = (symbol_input == "TICKER")  # user chose [1] — will prompt for symbol
-    is_premium_selling_mode = (symbol_input == "SELL")
-    is_credit_spread_mode = (symbol_input == "SPREADS")
-    is_iron_condor_mode = (symbol_input == "IRON")
-    is_lottery_mode = (symbol_input == "LOTTERY")
-
-    if is_my_list_mode:
-        mode = "Discovery scan"
-    elif is_discovery_mode:
-        mode = "Discovery scan"
-    elif is_budget_mode:
-        mode = "Budget scan"
-    elif is_premium_selling_mode:
-        mode = "Premium Selling"
-    elif is_credit_spread_mode:
-        mode = "Credit Spreads"
-    elif is_iron_condor_mode:
-        mode = "Iron Condor"
-    elif is_lottery_mode:
-        mode = "Lottery Ticket"
-    else:
-        mode = "Single-stock"
-
-    budget = None
-    tickers = []
-
-    if _watchlist_tickers and not is_my_list_mode:
-        tickers = _watchlist_tickers
-        print(f"  Using --watchlist tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
-    elif is_my_list_mode:
-        tickers = _wl_tickers
-        print(f"  Scanning your watchlist: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
-    elif is_lottery_mode:
-        tickers = prompt_for_tickers()
-        print(f"  Scanning {len(tickers)} tickers for lottery ticket setups: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
-    elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
-        tickers = prompt_for_tickers()
-        print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
-    elif is_budget_mode:
-        try:
-            budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
-            if budget <= 0:
-                print("Budget must be greater than 0.")
-                sys.exit(1)
-        except Exception:
-            print("Invalid budget amount.")
-            sys.exit(1)
-        scan_type = prompt_input("Enter 1 for TARGETED or 2 for DISCOVERY", "1")
-        if scan_type == "2":
-            tickers = prompt_for_tickers()
+        # ── --mode / --ticker CLI bypass ──────────────────────────────────────────
+        _mode_map_cli = {
+            "ticker": "TICKER", "all": "ALL", "discover": "DISCOVER",
+            "sell": "SELL", "spreads": "SPREADS", "iron": "IRON",
+            "portfolio": "PORTFOLIO", "mylist": "MY LIST",
+            "lottery": "LOTTERY", "intel": "INTEL",
+        }
+        if args.ticker:
+            symbol_input = args.ticker.upper()
+        elif args.mode:
+            symbol_input = _mode_map_cli.get(args.mode.lower(), "DISCOVER")
         else:
-            default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
-            tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
-            tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-    elif is_ticker_mode:
-        ticker_sym = prompt_input("Enter stock ticker symbol", "AAPL").upper()
-        if not ticker_sym.isalnum():
-            print("Please enter a valid alphanumeric ticker.")
-            sys.exit(1)
-        tickers = [ticker_sym]
-    else:
-        if not symbol_input.isalnum():
-            print("Please enter a valid alphanumeric ticker.")
-            sys.exit(1)
-        tickers = [symbol_input]
-    
-    logger = setup_logging()
-    print("\nFetching market context (SPY/VIX)...")
-    market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
-    if HAS_ENHANCED_CLI:
-        trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW)
-        vix_color = fmt.Colors.GREEN if volatility_regime == "Low" else (fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW)
-        trend_str = fmt.colorize(market_trend, trend_color, bold=True)
-        vol_str = fmt.colorize(volatility_regime, vix_color)
-        print(f"\u2713 Market Trend: {trend_str} | Volatility: {vol_str}")
-        if macro_risk_active:
-            print(fmt.format_warning("Macro risk active \u2014 elevated market uncertainty"))
-    else:
-        print(f"\u2713 Market Trend: {market_trend} | Volatility: {volatility_regime}")
-
-    f_config = config.get("filters", {})
-    if is_iron_condor_mode:
-        default_min_dte = str(f_config.get("min_days_to_expiration_iron", 30))
-        default_max_dte = str(f_config.get("max_days_to_expiration_iron", 60))
-    else:
-        default_min_dte = str(f_config.get("min_days_to_expiration", 7))
-        default_max_dte = str(f_config.get("max_days_to_expiration", 45))
-    # CLI overrides win everywhere (incl. the interactive prompt defaults) —
-    # the maintenance cohort feeder relies on --min-dte 30.
-    if getattr(args, "min_dte", None) is not None:
-        default_min_dte = str(args.min_dte)
-    if getattr(args, "max_dte", None) is not None:
-        default_max_dte = str(args.max_dte)
-
-    if args.auto:
-        max_expiries = config.get("max_expirations", 4)
-        min_dte = int(default_min_dte)
-        max_dte = int(default_max_dte)
-        trader_profile = "swing"
-    else:
-        try:
-            max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
-        except Exception:
-            print("Invalid number for expirations.")
-            sys.exit(1)
-        try:
-            min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
-            max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
-        except Exception:
-            print("Invalid DTE inputs.")
-            sys.exit(1)
-        profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
-        trader_profile = "day" if profile_choice == "2" else "swing"
-
-    # Account size for position sizing in order tickets
-    if not args.auto:
-        _acct_input = prompt_input("Account size in USD for position sizing (Enter to skip)", "").strip()
-        if _acct_input:
             try:
-                config["_account_size"] = float(_acct_input)
-            except ValueError:
-                pass
+                symbol_input = prompt_input(
+                    "Enter number, ticker, command, or Q to quit (default: 3)", "3").upper()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
 
-    _is_single_stock = (mode == "Single-stock")
-    _repeat_count = 0
+        # ── Quit ──────────────────────────────────────────────────────────────────
+        if symbol_input in ("Q", "QUIT", "EXIT"):
+            break
 
-    try:
-        while True:
-            show_surface = getattr(args, 'surface', False) or getattr(args, 'surface_greek', None) is not None
-            surface_mode = getattr(args, 'surface_mode', 'braille')
-            surface_greek = getattr(args, 'surface_greek', None)
-            surface_type = surface_greek if surface_greek else 'pnl'
-            show_contours = not getattr(args, 'no_contours', False)
-            scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, custom_weights=_custom_weights, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
-            if scan_results is None:
-                sys.exit(0)
+        # ── Watchlist commands ────────────────────────────────────────────────────
+        if symbol_input.startswith("ADD "):
+            add_to_watchlist(symbol_input[4:].strip())
+            if _interactive:
+                continue
+            return
+        if symbol_input.startswith("REMOVE "):
+            remove_from_watchlist(symbol_input[7:].strip())
+            if _interactive:
+                continue
+            return
+        if symbol_input in ("SHOW LIST", "SHOW"):
+            wl_cur = load_watchlist()
+            if wl_cur:
+                print(f"  Your watchlist ({len(wl_cur)} tickers): " + ", ".join(wl_cur))
+            else:
+                print("  Watchlist is empty. Type ADD AAPL to begin.")
+            if _interactive:
+                continue
+            return
 
-            picks = scan_results.picks
+        # ── Number → command mapping ──────────────────────────────────────────────
+        _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
+                    "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST",
+                    "9": "LOTTERY", "10": "INTEL"}
+        if symbol_input in _num_map:
+            symbol_input = _num_map[symbol_input]
 
-            # ── AI Analysis ────────────────────────────────────────────────
-            _ai_ranked = None
-            if not picks.empty and not getattr(args, 'no_ai', False):
-                _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True,
-                                               sector_ctx=scan_results.market_context.get("sector_ctx"))
+        # ── INTEL mode: pre-trade briefing (market overview or single-ticker) ──────
+        if symbol_input == "INTEL":
+            _run_intel_menu()
+            if _interactive:
+                continue
+            return
 
-            # Pull spread/condor results for the save menu
-            _credit_spreads = scan_results.credit_spreads
-            _iron_condors   = scan_results.iron_condors
-            _has_results = (
-                not picks.empty
-                or (isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty)
-                or (isinstance(_iron_condors,   pd.DataFrame) and not _iron_condors.empty)
-            )
+        if symbol_input == "PORTFOLIO":
+            from .check_pnl import view_portfolio_menu
+            view_portfolio_menu()
+            if _interactive:
+                continue
+            return
 
-            # ── Auto-export if --export csv was passed ──────────────────────
-            if getattr(args, "export", None) and str(args.export).lower() == "csv" and not picks.empty:
-                _ts = datetime.now().strftime("%Y%m%d_%H%M")
-                _auto_fname = f"scan_results_{_ts}.csv"
-                _export_cols = [
-                    "symbol", "type", "strike", "expiration",
-                    "bid", "ask", "premium", "delta", "impliedVolatility",
-                    "iv_rank_30", "prob_profit", "ev_per_contract",
-                    "quality_score", "score_drivers",
-                ]
-                _auto_df = picks[[c for c in _export_cols if c in picks.columns]].copy()
-                _auto_df.to_csv(_auto_fname, index=False)
-                _msg = f"Auto-exported {len(_auto_df)} rows to {_auto_fname}"
-                print(fmt.format_success(_msg) if HAS_ENHANCED_CLI else f"  \u2713 {_msg}")
+        # ── MY LIST mode ──────────────────────────────────────────────────────────
+        is_my_list_mode = (symbol_input in ("MY LIST", "MYLIST"))
+        if is_my_list_mode:
+            _wl_tickers = load_watchlist()
+            if not _wl_tickers:
+                print("  Your watchlist is empty. Type ADD AAPL to add a ticker first.")
+                if _interactive:
+                    continue
+                return
+            symbol_input = "DISCOVER"  # reuse discovery flow with custom ticker list
 
-            # ── Auto-launch 3D visualizer if --viz was passed ─────────────
-            if getattr(args, 'viz', False) and _has_results and not picks.empty:
+        is_budget_mode = (symbol_input == "ALL")
+        is_discovery_mode = (symbol_input in ("DISCOVER", "")) or is_my_list_mode
+        is_ticker_mode = (symbol_input == "TICKER")  # user chose [1] — will prompt for symbol
+        is_premium_selling_mode = (symbol_input == "SELL")
+        is_credit_spread_mode = (symbol_input == "SPREADS")
+        is_iron_condor_mode = (symbol_input == "IRON")
+        is_lottery_mode = (symbol_input == "LOTTERY")
+
+        if is_my_list_mode:
+            mode = "Discovery scan"
+        elif is_discovery_mode:
+            mode = "Discovery scan"
+        elif is_budget_mode:
+            mode = "Budget scan"
+        elif is_premium_selling_mode:
+            mode = "Premium Selling"
+        elif is_credit_spread_mode:
+            mode = "Credit Spreads"
+        elif is_iron_condor_mode:
+            mode = "Iron Condor"
+        elif is_lottery_mode:
+            mode = "Lottery Ticket"
+        else:
+            mode = "Single-stock"
+
+        budget = None
+        tickers = []
+
+        if _watchlist_tickers and not is_my_list_mode:
+            tickers = _watchlist_tickers
+            print(f"  Using --watchlist tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+        elif is_my_list_mode:
+            tickers = _wl_tickers
+            print(f"  Scanning your watchlist: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+        elif is_lottery_mode:
+            tickers = prompt_for_tickers()
+            print(f"  Scanning {len(tickers)} tickers for lottery ticket setups: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+        elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
+            tickers = prompt_for_tickers()
+            print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+        elif is_budget_mode:
+            try:
+                budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
+                if budget <= 0:
+                    print("Budget must be greater than 0.")
+                    sys.exit(1)
+            except Exception:
+                print("Invalid budget amount.")
+                sys.exit(1)
+            scan_type = prompt_input("Enter 1 for TARGETED or 2 for DISCOVERY", "1")
+            if scan_type == "2":
+                tickers = prompt_for_tickers()
+            else:
+                default_tickers = "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,AMZN,GOOGL,META"
+                tickers_input = prompt_input("Enter comma-separated tickers to scan", default_tickers)
+                tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+        elif is_ticker_mode:
+            ticker_sym = prompt_input("Enter stock ticker symbol", "AAPL").upper()
+            if not ticker_sym.isalnum():
+                print("Please enter a valid alphanumeric ticker.")
+                sys.exit(1)
+            tickers = [ticker_sym]
+        else:
+            if not symbol_input.isalnum():
+                print("Please enter a valid alphanumeric ticker.")
+                sys.exit(1)
+            tickers = [symbol_input]
+    
+        logger = setup_logging()
+        print("\nFetching market context (SPY/VIX)...")
+        market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
+        if HAS_ENHANCED_CLI:
+            trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW)
+            vix_color = fmt.Colors.GREEN if volatility_regime == "Low" else (fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW)
+            trend_str = fmt.colorize(market_trend, trend_color, bold=True)
+            vol_str = fmt.colorize(volatility_regime, vix_color)
+            print(f"\u2713 Market Trend: {trend_str} | Volatility: {vol_str}")
+            if macro_risk_active:
+                print(fmt.format_warning("Macro risk active \u2014 elevated market uncertainty"))
+        else:
+            print(f"\u2713 Market Trend: {market_trend} | Volatility: {volatility_regime}")
+
+        f_config = config.get("filters", {})
+        if is_iron_condor_mode:
+            default_min_dte = str(f_config.get("min_days_to_expiration_iron", 30))
+            default_max_dte = str(f_config.get("max_days_to_expiration_iron", 60))
+        else:
+            default_min_dte = str(f_config.get("min_days_to_expiration", 7))
+            default_max_dte = str(f_config.get("max_days_to_expiration", 45))
+        # CLI overrides win everywhere (incl. the interactive prompt defaults) —
+        # the maintenance cohort feeder relies on --min-dte 30.
+        if getattr(args, "min_dte", None) is not None:
+            default_min_dte = str(args.min_dte)
+        if getattr(args, "max_dte", None) is not None:
+            default_max_dte = str(args.max_dte)
+
+        if args.auto:
+            max_expiries = config.get("max_expirations", 4)
+            min_dte = int(default_min_dte)
+            max_dte = int(default_max_dte)
+            trader_profile = "swing"
+        else:
+            try:
+                max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
+            except Exception:
+                print("Invalid number for expirations.")
+                sys.exit(1)
+            try:
+                min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
+                max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
+            except Exception:
+                print("Invalid DTE inputs.")
+                sys.exit(1)
+            profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
+            trader_profile = "day" if profile_choice == "2" else "swing"
+
+        # Account size for position sizing in order tickets
+        if not args.auto:
+            _acct_input = prompt_input("Account size in USD for position sizing (Enter to skip)", "").strip()
+            if _acct_input:
                 try:
-                    from .visualizer_3d import OptionsVisualizer
-                    _viz_cfg = load_config("config.json")
-                    _viz = OptionsVisualizer(scan_results, config=_viz_cfg)
-                    _viz.show()
-                    msg = "3D Visualizer opened in browser"
-                    print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
-                except ImportError:
-                    print(fmt.format_warning("Plotly required for --viz: pip install plotly") if HAS_ENHANCED_CLI else "  plotly required for --viz")
-                except Exception as _viz_exc:
-                    logger.warning("Visualizer failed: %s", _viz_exc)
+                    config["_account_size"] = float(_acct_input)
+                except ValueError:
+                    pass
 
-            # ── Auto-log mode: bypass interactive save menu ──────────────────
-            if _has_results and getattr(args, "auto_log", False):
-                # Pick exactly one result source — prefer single-leg picks, otherwise
-                # the first non-empty spread/condor DF that the scan produced.
-                _log_src = picks if not picks.empty else (
-                    _credit_spreads if isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty
-                    else _iron_condors
+        _is_single_stock = (mode == "Single-stock")
+        _repeat_count = 0
+
+        try:
+            while True:
+                show_surface = getattr(args, 'surface', False) or getattr(args, 'surface_greek', None) is not None
+                surface_mode = getattr(args, 'surface_mode', 'braille')
+                surface_greek = getattr(args, 'surface_greek', None)
+                surface_type = surface_greek if surface_greek else 'pnl'
+                show_contours = not getattr(args, 'no_contours', False)
+                scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, custom_weights=_custom_weights, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+                if scan_results is None:
+                    sys.exit(0)
+
+                picks = scan_results.picks
+
+                # ── AI Analysis ────────────────────────────────────────────────
+                _ai_ranked = None
+                if not picks.empty and not getattr(args, 'no_ai', False):
+                    _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True,
+                                                   sector_ctx=scan_results.market_context.get("sector_ctx"))
+
+                # Pull spread/condor results for the save menu
+                _credit_spreads = scan_results.credit_spreads
+                _iron_condors   = scan_results.iron_condors
+                _has_results = (
+                    not picks.empty
+                    or (isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty)
+                    or (isinstance(_iron_condors,   pd.DataFrame) and not _iron_condors.empty)
                 )
-                _is_spread_src = (
-                    isinstance(_log_src, pd.DataFrame) and not _log_src.empty
-                    and ("short_strike" in _log_src.columns or "net_credit" in _log_src.columns or "total_credit" in _log_src.columns)
-                )
 
-                if _is_spread_src:
-                    # ── Spreads / iron condors path ─────────────────────────
-                    _spreads = _log_src.copy()
-                    if "quality_score" in _spreads.columns:
-                        _spreads = _spreads.sort_values("quality_score", ascending=False)
-                    # One row per ticker — keep highest-scored structure per symbol
-                    if "symbol" in _spreads.columns:
-                        _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
-                    _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
-                    _candidates = _spreads.head(_top_n)
-                    _today_str = datetime.now().strftime("%Y-%m-%d")
-                    _inserted = 0
-                    _skipped = 0
-                    _skipped_bear_calls = 0
+                # ── Auto-export if --export csv was passed ──────────────────────
+                if getattr(args, "export", None) and str(args.export).lower() == "csv" and not picks.empty:
+                    _ts = datetime.now().strftime("%Y%m%d_%H%M")
+                    _auto_fname = f"scan_results_{_ts}.csv"
+                    _export_cols = [
+                        "symbol", "type", "strike", "expiration",
+                        "bid", "ask", "premium", "delta", "impliedVolatility",
+                        "iv_rank_30", "prob_profit", "ev_per_contract",
+                        "quality_score", "score_drivers",
+                    ]
+                    _auto_df = picks[[c for c in _export_cols if c in picks.columns]].copy()
+                    _auto_df.to_csv(_auto_fname, index=False)
+                    _msg = f"Auto-exported {len(_auto_df)} rows to {_auto_fname}"
+                    print(fmt.format_success(_msg) if HAS_ENHANCED_CLI else f"  \u2713 {_msg}")
 
-                    # Component-score fields carried over from the spread enrichment
-                    _spread_score_keys = (
-                        "pop_score", "ev_score", "rr_score", "liquidity_score",
-                        "momentum_score", "iv_rank_score", "theta_score",
-                        "iv_advantage_score", "vrp_score", "iv_mispricing_score",
-                        "skew_align_score", "vega_risk_score", "term_structure_score",
-                        "catalyst_score", "em_realism_score", "gamma_theta_score",
-                        "gex_score", "gamma_magnitude_score", "gamma_pin_score",
-                        "iv_velocity_score", "max_pain_score", "oi_change_score",
-                        "option_rvol_score", "pcr_score", "sentiment_score_norm",
-                        "spread_score", "trader_pref_score",
-                        "entry_iv", "entry_delta", "entry_gamma", "entry_vega", "entry_theta",
-                    )
-                    # iv_edge_score has the source name iv_advantage_score in scoring, but the
-                    # paper_trades column is iv_edge_score. Map at insert time below.
-                    for _, row in _candidates.iterrows():
-                        _sym = str(row.get("symbol", "")).upper()
-                        try:
-                            # Derive strategy name to feed the allowlist helper.
-                            _is_condor = ("total_credit" in row.index) and not pd.isna(row.get("total_credit"))
-                            if _is_condor:
-                                _strat_name = "Iron Condor"
-                            else:
-                                _spread_type = str(row.get("type", "")).strip().lower()
-                                _strat_name = "Bear Call" if _spread_type == "call" else "Bull Put"
-                            _decision, _paper_only_flag = apply_auto_log_allowlist(
-                                {"strategy_name": _strat_name}, cfg_path="config.json"
-                            )
-                            if _decision == "drop":
-                                _skipped_bear_calls += 1  # reuse counter for the summary
-                                continue
-                            _common_scores = {k: row.get(k) for k in _spread_score_keys if k in row.index}
-                            _common_scores["iv_edge_score"] = row.get("iv_advantage_score")
-                            _common_scores["weight_profile"] = _weight_profile_id
-
-                            if _is_condor:
-                                _payload = dict(_common_scores)
-                                _payload.update({
-                                    "date": _today_str,
-                                    "ticker": _sym,
-                                    "expiration": row["expiration"],
-                                    "short_put_strike": row.get("short_put_strike", 0),
-                                    "long_put_strike":  row.get("long_put_strike", 0),
-                                    "short_call_strike": row.get("short_call_strike", 0),
-                                    "long_call_strike":  row.get("long_call_strike", 0),
-                                    "total_credit": row.get("total_credit", 0),
-                                    "max_profit":   row.get("max_profit", 0),
-                                    "max_risk":     row.get("max_risk", 0),
-                                    "net_delta":    row.get("net_delta"),
-                                    "quality_score": row.get("quality_score", 0.5),
-                                    "paper_only": _paper_only_flag,
-                                })
-                                if pm.log_iron_condor_if_new(_payload):
-                                    _inserted += 1
-                                else:
-                                    _skipped += 1
-                            else:
-                                _payload = dict(_common_scores)
-                                _payload.update({
-                                    "date": _today_str,
-                                    "ticker": _sym,
-                                    "expiration": row["expiration"],
-                                    "short_strike": row.get("short_strike", 0),
-                                    "long_strike":  row.get("long_strike", 0),
-                                    "type": row.get("type", "Spread"),
-                                    "net_credit": row.get("net_credit", 0),
-                                    "max_profit": row.get("max_profit", 0),
-                                    "max_loss":   row.get("max_loss", 0),
-                                    "quality_score": row.get("quality_score", 0.5),
-                                    "paper_only": _paper_only_flag,
-                                })
-                                if pm.log_spread_if_new(_payload):
-                                    _inserted += 1
-                                else:
-                                    _skipped += 1
-                        except Exception as _log_exc:
-                            print(f"  Error auto-logging {_sym}: {_log_exc}")
-                    _tag = _weight_profile_id or "untagged"
-                    _bc_suffix = f", filtered {_skipped_bear_calls} disallowed structure(s)" if _skipped_bear_calls else ""
-                    _summary = (
-                        f"Auto-logged {_inserted} spreads/condors, "
-                        f"skipped {_skipped} duplicates{_bc_suffix} (profile: {_tag})"
-                    )
-                    print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
-                    _has_results = False
-
-                # ── Single-leg path (original) ──────────────────────────────
-                elif isinstance(_log_src, pd.DataFrame) and not _log_src.empty and "symbol" in _log_src.columns:
-                    _single_legs = _log_src.copy()
-                    if not _single_legs.empty and "quality_score" in _single_legs.columns:
-                        _single_legs = _single_legs.sort_values("quality_score", ascending=False)
-                    # One row per ticker — keep the highest-scored leg per symbol to avoid
-                    # concentration (e.g. ORCL×6 from a single scan).
-                    if "symbol" in _single_legs.columns:
-                        _single_legs = _single_legs.drop_duplicates(subset=["symbol"], keep="first")
-                    _today_str = datetime.now().strftime("%Y-%m-%d")
-                    # Drop rows the allowlist would reject entirely (e.g. Long Puts once
-                    # removed from paper_only_strategies) BEFORE taking the top-N. Without
-                    # this, a scan whose top-scored legs are Long Puts logs almost nothing
-                    # and the forward cohort starves — the dropped strategies would silently
-                    # consume the top-N slots. Quarantined (paper_only) strategies are kept.
-                    if not _single_legs.empty and "type" in _single_legs.columns:
-                        def _allowlist_keeps(_row):
-                            _sn = _strategy_label_for_mode(mode, _row.get("type"))
-                            _dec, _ = apply_auto_log_allowlist(
-                                {"strategy_name": _sn,
-                                 "expiration": _row.get("expiration"),
-                                 "date": _today_str},
-                                cfg_path="config.json",
-                            )
-                            return _dec != "drop"
-                        _single_legs = _single_legs[_single_legs.apply(_allowlist_keeps, axis=1)]
-                    _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
-                    _candidates = _single_legs.head(_top_n)
-
-                    _inserted = 0
-                    _skipped = 0
-                    _skipped_long_puts = 0
-                    # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
-                    # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
-                    # and re-sorted, so positional alignment with picks is not preserved.
-                    _ai_lookup = {}
-                    if isinstance(_ai_ranked, pd.DataFrame) and not _ai_ranked.empty:
-                        _ai_cols_present = [c for c in ("ai_score", "ai_confidence") if c in _ai_ranked.columns]
-                        if _ai_cols_present:
-                            for _r in _ai_ranked.itertuples(index=False):
-                                _r_dict = _r._asdict() if hasattr(_r, "_asdict") else {}
-                                try:
-                                    _key = (
-                                        str(_r_dict.get("symbol", "")).upper(),
-                                        float(_r_dict.get("strike", 0)),
-                                        str(_r_dict.get("expiration", "")),
-                                        str(_r_dict.get("type", "")).lower(),
-                                    )
-                                except (TypeError, ValueError):
-                                    continue
-                                _ai_lookup[_key] = {c: _r_dict.get(c) for c in _ai_cols_present}
-                    for _idx, row in _candidates.iterrows():
-                        _entry_price = (
-                            safe_float(row.get("ask") or None)
-                            or safe_float(row.get("lastPrice"))
-                            or safe_float(row.get("premium"), 0.0)
-                        )
-                        if not _entry_price or _entry_price <= 0:
-                            continue
-                        _strat_name = _strategy_label_for_mode(mode, row['type'])
-                        # Phase 1 allowlist (supersedes the legacy auto_log_skip_long_puts flag).
-                        # Pass expiration so the cohort DTE floor can quarantine
-                        # short-horizon Long Calls (else they slip into the gate).
-                        _decision, _paper_only_flag = apply_auto_log_allowlist(
-                            {"strategy_name": _strat_name,
-                             "expiration": row["expiration"], "date": _today_str},
-                            cfg_path="config.json",
-                        )
-                        if _decision == "drop":
-                            _skipped_long_puts += 1  # reuse counter for the summary line
-                            continue
-                        _trade = {
-                            "date": _today_str,
-                            "ticker": row["symbol"],
-                            "expiration": row["expiration"],
-                            "strike": row["strike"],
-                            "type": str(row["type"]).capitalize(),
-                            "entry_price": _entry_price,
-                            "quality_score": row.get("quality_score", 0.5),
-                            "strategy_name": _strat_name,
-                            "entry_iv": row.get("impliedVolatility"),
-                            "entry_delta": row.get("delta"),
-                            "entry_gamma": row.get("gamma"),
-                            "entry_vega": row.get("vega"),
-                            "entry_theta": row.get("theta"),
-                            "dividend_yield": row.get("dividend_yield"),
-                            "pop_score": row.get("pop_score"),
-                            "ev_score": row.get("ev_score"),
-                            "rr_score": row.get("rr_score"),
-                            "liquidity_score": row.get("liquidity_score"),
-                            "momentum_score": row.get("momentum_score"),
-                            "iv_rank_score": row.get("iv_rank_score"),
-                            "theta_score": row.get("theta_score"),
-                            "iv_edge_score": row.get("iv_advantage_score"),
-                            "vrp_score": row.get("vrp_score"),
-                            "iv_mispricing_score": row.get("iv_mispricing_score"),
-                            "skew_align_score": row.get("skew_align_score"),
-                            "vega_risk_score": row.get("vega_risk_score"),
-                            "term_structure_score": row.get("term_structure_score"),
-                            "catalyst_score": row.get("catalyst_score"),
-                            "em_realism_score": row.get("em_realism_score"),
-                            "gamma_theta_score": row.get("gamma_theta_score"),
-                            "gex_score": row.get("gex_score"),
-                            "gamma_magnitude_score": row.get("gamma_magnitude_score"),
-                            "gamma_pin_score": row.get("gamma_pin_score"),
-                            "iv_velocity_score": row.get("iv_velocity_score"),
-                            "max_pain_score": row.get("max_pain_score"),
-                            "oi_change_score": row.get("oi_change_score"),
-                            "option_rvol_score": row.get("option_rvol_score"),
-                            "pcr_score": row.get("pcr_score"),
-                            "sentiment_score_norm": row.get("sentiment_score_norm"),
-                            "spread_score": row.get("spread_score"),
-                            "trader_pref_score": row.get("trader_pref_score"),
-                            "weight_profile": _weight_profile_id,
-                            "paper_only": _paper_only_flag,
-                        }
-                        _row_key = (
-                            str(row.get("symbol", "")).upper(),
-                            float(row.get("strike", 0) or 0),
-                            str(row.get("expiration", "")),
-                            str(row.get("type", "")).lower(),
-                        )
-                        _row_ai = _ai_lookup.get(_row_key, {})
-                        _trade["ai_score"] = _row_ai.get("ai_score")
-                        _trade["ai_confidence"] = _row_ai.get("ai_confidence")
-                        try:
-                            if pm.log_trade_if_new(_trade):
-                                _inserted += 1
-                            else:
-                                _skipped += 1
-                        except Exception as _log_exc:
-                            print(f"  Error auto-logging {row.get('symbol')}: {_log_exc}")
-
-                    _tag = _weight_profile_id or "untagged"
-                    _summary = f"Auto-logged {_inserted} new, skipped {_skipped} duplicates (profile: {_tag})"
-                    if _skipped_long_puts:
-                        _summary += f", filtered {_skipped_long_puts} disallowed pick(s)"
-                    print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  \u2713 {_summary}")
-                # Skip the interactive save-menu loop below; continue to scan-another prompt
-                _has_results = False
-
-            # ── Collapsed post-scan prompt (loops so V → P → L all work in one sitting) ──
-            if _has_results:
-              while True:
-                if HAS_ENHANCED_CLI:
-                    save_label = fmt.colorize("Save/Export?", fmt.Colors.BRIGHT_CYAN)
-                    p_opt = fmt.colorize("[P]", fmt.Colors.BRIGHT_YELLOW) + " Paper trade top pick"
-                    c_opt = fmt.colorize("[C]", fmt.Colors.BRIGHT_YELLOW) + " CSV"
-                    l_opt = fmt.colorize("[L]", fmt.Colors.BRIGHT_YELLOW) + " Log trades"
-                    v_opt = fmt.colorize("[V]", fmt.Colors.BRIGHT_YELLOW) + " 3D Visualizer"
-                    skip_opt = fmt.colorize("[Enter]", fmt.Colors.DIM) + " Skip"
-                    print(f"\n  {save_label}  {p_opt}  \u00b7  {c_opt}  \u00b7  {l_opt}  \u00b7  {v_opt}  \u00b7  {skip_opt}")
-                else:
-                    print("\n  Save/Export?  [P] Paper trade top pick  [C] CSV  [L] Log trades  [V] 3D Visualizer  [Enter] Skip")
-                save_choice = prompt_input("Choice", "").strip().upper()
-
-                if save_choice == "":
-                    break  # Enter → done with save menu
-
-                if save_choice == "P":
-                    if mode in ("Credit Spreads", "Iron Condor"):
-                        msg = "Paper trading for spreads/condors is not supported — use [L] Log trades instead."
-                        print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  \u26a0  {msg}")
-                    elif not picks.empty:
-                        # Use AI-ranked top pick when available, otherwise fall back to quality_score.
-                        # Match on (symbol, strike, expiration, type) — _ai_ranked indices are not
-                        # aligned with picks indices after reset_index inside combine_scores.
-                        top_pick_row = None
-                        if _ai_ranked is not None and not _ai_ranked.empty and "final_score" in _ai_ranked.columns:
-                            _best = _ai_ranked.sort_values("final_score", ascending=False).iloc[0]
-                            try:
-                                _match = picks[
-                                    (picks["symbol"].astype(str).str.upper() == str(_best.get("symbol", "")).upper())
-                                    & (picks["strike"].astype(float) == float(_best.get("strike", 0)))
-                                    & (picks["expiration"].astype(str) == str(_best.get("expiration", "")))
-                                    & (picks["type"].astype(str).str.lower() == str(_best.get("type", "")).lower())
-                                ]
-                                if not _match.empty:
-                                    top_pick_row = _match.iloc[0]
-                            except (KeyError, ValueError, TypeError):
-                                top_pick_row = None
-                        if top_pick_row is None:
-                            top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
-                        today_str = datetime.now().strftime("%Y-%m-%d")
-                        trade_dict = {
-                            "date": today_str,
-                            "ticker": top_pick_row["symbol"],
-                            "expiration": top_pick_row["expiration"],
-                            "strike": top_pick_row["strike"],
-                            "type": str(top_pick_row["type"]).capitalize(),
-                            "entry_price": (
-                                safe_float(top_pick_row.get("ask") or None)
-                                or safe_float(top_pick_row.get("lastPrice"))
-                                or safe_float(top_pick_row.get("premium"), 0.0)
-                            ),
-                            "quality_score": top_pick_row["quality_score"],
-                            "strategy_name": _strategy_label_for_mode(mode, top_pick_row['type']),
-                            "entry_iv": top_pick_row.get("impliedVolatility"),
-                            "entry_delta": top_pick_row.get("delta"),
-                            "entry_gamma": top_pick_row.get("gamma"),
-                            "entry_vega": top_pick_row.get("vega"),
-                            "entry_theta": top_pick_row.get("theta"),
-                            "dividend_yield": top_pick_row.get("dividend_yield"),
-                            # Component scores — enable backtester IC analysis once 30+ trades close
-                            "pop_score": top_pick_row.get("pop_score"),
-                            "ev_score": top_pick_row.get("ev_score"),
-                            "rr_score": top_pick_row.get("rr_score"),
-                            "liquidity_score": top_pick_row.get("liquidity_score"),
-                            "momentum_score": top_pick_row.get("momentum_score"),
-                            "iv_rank_score": top_pick_row.get("iv_rank_score"),
-                            "theta_score": top_pick_row.get("theta_score"),
-                            "iv_edge_score": top_pick_row.get("iv_advantage_score"),
-                            "vrp_score": top_pick_row.get("vrp_score"),
-                            "iv_mispricing_score": top_pick_row.get("iv_mispricing_score"),
-                            "skew_align_score": top_pick_row.get("skew_align_score"),
-                            "vega_risk_score": top_pick_row.get("vega_risk_score"),
-                            "term_structure_score": top_pick_row.get("term_structure_score"),
-                            # v7: remaining 14 components — full IC coverage
-                            "catalyst_score": top_pick_row.get("catalyst_score"),
-                            "em_realism_score": top_pick_row.get("em_realism_score"),
-                            "gamma_theta_score": top_pick_row.get("gamma_theta_score"),
-                            "gex_score": top_pick_row.get("gex_score"),
-                            "gamma_magnitude_score": top_pick_row.get("gamma_magnitude_score"),
-                            "gamma_pin_score": top_pick_row.get("gamma_pin_score"),
-                            "iv_velocity_score": top_pick_row.get("iv_velocity_score"),
-                            "max_pain_score": top_pick_row.get("max_pain_score"),
-                            "oi_change_score": top_pick_row.get("oi_change_score"),
-                            "option_rvol_score": top_pick_row.get("option_rvol_score"),
-                            "pcr_score": top_pick_row.get("pcr_score"),
-                            "sentiment_score_norm": top_pick_row.get("sentiment_score_norm"),
-                            "spread_score": top_pick_row.get("spread_score"),
-                            "trader_pref_score": top_pick_row.get("trader_pref_score"),
-                            "weight_profile": _weight_profile_id,
-                        }
-                        # AI-score lookup via stable key (see auto-log path comment).
-                        if _ai_ranked is not None and not _ai_ranked.empty:
-                            try:
-                                _m = _ai_ranked[
-                                    (_ai_ranked["symbol"].astype(str).str.upper() == str(top_pick_row.get("symbol", "")).upper())
-                                    & (_ai_ranked["strike"].astype(float) == float(top_pick_row.get("strike", 0)))
-                                    & (_ai_ranked["expiration"].astype(str) == str(top_pick_row.get("expiration", "")))
-                                    & (_ai_ranked["type"].astype(str).str.lower() == str(top_pick_row.get("type", "")).lower())
-                                ]
-                                if not _m.empty:
-                                    if "ai_score" in _m.columns:
-                                        trade_dict["ai_score"] = _m["ai_score"].iloc[0]
-                                    if "ai_confidence" in _m.columns:
-                                        trade_dict["ai_confidence"] = _m["ai_confidence"].iloc[0]
-                            except (KeyError, ValueError, TypeError):
-                                pass
-                        pm.log_trade(trade_dict)
-                        msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
-                        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
-                        # Offer inline portfolio view
-                        _view = prompt_input("View portfolio? (y/n)", "n").strip().lower()
-                        if _view in ("y", "yes"):
-                            try:
-                                from .check_pnl import view_portfolio
-                                view_portfolio()
-                            except Exception as _pnl_exc:
-                                print(f"  Could not load portfolio: {_pnl_exc}")
-
-                elif save_choice == "C":
-                    # Export best available data: AI-ranked picks > raw picks > spreads > condors
-                    if _ai_ranked is not None and not _ai_ranked.empty:
-                        export_df = _ai_ranked
-                    elif not picks.empty:
-                        export_df = picks
-                    elif isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty:
-                        export_df = _credit_spreads
-                    else:
-                        export_df = _iron_condors
-                    csv_file = export_to_csv(export_df, mode, budget)
-                    if csv_file:
-                        msg = f"Results exported to: {csv_file}"
-                        print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
-
-                elif save_choice == "V":
+                # ── Auto-launch 3D visualizer if --viz was passed ─────────────
+                if getattr(args, 'viz', False) and _has_results and not picks.empty:
                     try:
                         from .visualizer_3d import OptionsVisualizer
                         _viz_cfg = load_config("config.json")
@@ -4835,171 +4492,580 @@ def main():
                         msg = "3D Visualizer opened in browser"
                         print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
                     except ImportError:
-                        msg = "Plotly required for visualizer: pip install plotly"
-                        print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  {msg}")
+                        print(fmt.format_warning("Plotly required for --viz: pip install plotly") if HAS_ENHANCED_CLI else "  plotly required for --viz")
                     except Exception as _viz_exc:
-                        msg = f"Visualizer error: {_viz_exc}"
-                        print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  {msg}")
+                        logger.warning("Visualizer failed: %s", _viz_exc)
 
-                elif save_choice == "L":
-                    log_src = picks if not picks.empty else (
+                # ── Auto-log mode: bypass interactive save menu ──────────────────
+                if _has_results and getattr(args, "auto_log", False):
+                    # Pick exactly one result source — prefer single-leg picks, otherwise
+                    # the first non-empty spread/condor DF that the scan produced.
+                    _log_src = picks if not picks.empty else (
                         _credit_spreads if isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty
                         else _iron_condors
                     )
-                    if isinstance(log_src, pd.DataFrame) and not log_src.empty:
-                        picks_to_log = select_trades_to_log(log_src)
-                        if not picks_to_log.empty:
-                            log_trade_entry(picks_to_log, mode)
-                            
-                            # Also log to PaperManager for portfolio visibility
-                            today_str = datetime.now().strftime("%Y-%m-%d")
-                            # Stable-key AI lookup (see auto-log path).
-                            _ai_lookup_l = {}
-                            if isinstance(_ai_ranked, pd.DataFrame) and not _ai_ranked.empty:
-                                _ai_cols_l = [c for c in ("ai_score", "ai_confidence") if c in _ai_ranked.columns]
-                                if _ai_cols_l:
-                                    for _r in _ai_ranked.itertuples(index=False):
-                                        _r_dict = _r._asdict() if hasattr(_r, "_asdict") else {}
-                                        try:
-                                            _key = (
-                                                str(_r_dict.get("symbol", "")).upper(),
-                                                float(_r_dict.get("strike", 0)),
-                                                str(_r_dict.get("expiration", "")),
-                                                str(_r_dict.get("type", "")).lower(),
-                                            )
-                                        except (TypeError, ValueError):
-                                            continue
-                                        _ai_lookup_l[_key] = {c: _r_dict.get(c) for c in _ai_cols_l}
-                            for _idx_l, row in picks_to_log.iterrows():
-                                try:
-                                    if "short_strike" in row or "net_credit" in row:
-                                        # It's a Credit Spread
-                                        pm.log_spread({
-                                            "date": today_str,
-                                            "ticker": row["symbol"],
-                                            "expiration": row["expiration"],
-                                            "short_strike": row["short_strike"],
-                                            "long_strike": row["long_strike"],
-                                            "type": row["type"],
-                                            "net_credit": row["net_credit"],
-                                            "max_profit": row.get("max_profit", 0),
-                                            "max_loss": row.get("max_loss", 0),
-                                            "quality_score": row.get("quality_score", 0.5)
-                                        })
-                                    elif "total_credit" in row:
-                                        # Iron Condor — persist all four legs so the
-                                        # portfolio viewer can render strikes and mark
-                                        # to market. log_iron_condor_if_new dedups on
-                                        # the (ticker, exp, 4 strikes) tuple.
-                                        pm.log_iron_condor_if_new({
-                                            "date": today_str,
-                                            "ticker": row["symbol"],
-                                            "expiration": row["expiration"],
-                                            "short_put_strike": row["short_put_strike"],
-                                            "long_put_strike":  row["long_put_strike"],
-                                            "short_call_strike": row["short_call_strike"],
-                                            "long_call_strike":  row["long_call_strike"],
-                                            "total_credit": row["total_credit"],
-                                            "max_profit": row.get("max_profit", 0),
-                                            "max_risk":   row.get("max_risk", 0),
-                                            "net_delta":  row.get("net_delta"),
-                                            "quality_score": row.get("quality_score", 0.5),
-                                        })
+                    _is_spread_src = (
+                        isinstance(_log_src, pd.DataFrame) and not _log_src.empty
+                        and ("short_strike" in _log_src.columns or "net_credit" in _log_src.columns or "total_credit" in _log_src.columns)
+                    )
+
+                    if _is_spread_src:
+                        # ── Spreads / iron condors path ─────────────────────────
+                        _spreads = _log_src.copy()
+                        if "quality_score" in _spreads.columns:
+                            _spreads = _spreads.sort_values("quality_score", ascending=False)
+                        # One row per ticker — keep highest-scored structure per symbol
+                        if "symbol" in _spreads.columns:
+                            _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
+                        _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                        _candidates = _spreads.head(_top_n)
+                        _today_str = datetime.now().strftime("%Y-%m-%d")
+                        _inserted = 0
+                        _skipped = 0
+                        _skipped_bear_calls = 0
+
+                        # Component-score fields carried over from the spread enrichment
+                        _spread_score_keys = (
+                            "pop_score", "ev_score", "rr_score", "liquidity_score",
+                            "momentum_score", "iv_rank_score", "theta_score",
+                            "iv_advantage_score", "vrp_score", "iv_mispricing_score",
+                            "skew_align_score", "vega_risk_score", "term_structure_score",
+                            "catalyst_score", "em_realism_score", "gamma_theta_score",
+                            "gex_score", "gamma_magnitude_score", "gamma_pin_score",
+                            "iv_velocity_score", "max_pain_score", "oi_change_score",
+                            "option_rvol_score", "pcr_score", "sentiment_score_norm",
+                            "spread_score", "trader_pref_score",
+                            "entry_iv", "entry_delta", "entry_gamma", "entry_vega", "entry_theta",
+                        )
+                        # iv_edge_score has the source name iv_advantage_score in scoring, but the
+                        # paper_trades column is iv_edge_score. Map at insert time below.
+                        for _, row in _candidates.iterrows():
+                            _sym = str(row.get("symbol", "")).upper()
+                            try:
+                                # Derive strategy name to feed the allowlist helper.
+                                _is_condor = ("total_credit" in row.index) and not pd.isna(row.get("total_credit"))
+                                if _is_condor:
+                                    _strat_name = "Iron Condor"
+                                else:
+                                    _spread_type = str(row.get("type", "")).strip().lower()
+                                    _strat_name = "Bear Call" if _spread_type == "call" else "Bull Put"
+                                _decision, _paper_only_flag = apply_auto_log_allowlist(
+                                    {"strategy_name": _strat_name}, cfg_path="config.json"
+                                )
+                                if _decision == "drop":
+                                    _skipped_bear_calls += 1  # reuse counter for the summary
+                                    continue
+                                _common_scores = {k: row.get(k) for k in _spread_score_keys if k in row.index}
+                                _common_scores["iv_edge_score"] = row.get("iv_advantage_score")
+                                _common_scores["weight_profile"] = _weight_profile_id
+
+                                if _is_condor:
+                                    _payload = dict(_common_scores)
+                                    _payload.update({
+                                        "date": _today_str,
+                                        "ticker": _sym,
+                                        "expiration": row["expiration"],
+                                        "short_put_strike": row.get("short_put_strike", 0),
+                                        "long_put_strike":  row.get("long_put_strike", 0),
+                                        "short_call_strike": row.get("short_call_strike", 0),
+                                        "long_call_strike":  row.get("long_call_strike", 0),
+                                        "total_credit": row.get("total_credit", 0),
+                                        "max_profit":   row.get("max_profit", 0),
+                                        "max_risk":     row.get("max_risk", 0),
+                                        "net_delta":    row.get("net_delta"),
+                                        "quality_score": row.get("quality_score", 0.5),
+                                        "paper_only": _paper_only_flag,
+                                    })
+                                    if pm.log_iron_condor_if_new(_payload):
+                                        _inserted += 1
                                     else:
-                                        # It's a single option
-                                        trade_dict = {
-                                            "date": today_str,
-                                            "ticker": row["symbol"],
-                                            "expiration": row["expiration"],
-                                            "strike": row["strike"],
-                                            "type": str(row["type"]).capitalize(),
-                                            "entry_price": (
-                                                safe_float(row.get("ask") or None)
-                                                or safe_float(row.get("lastPrice"))
-                                                or safe_float(row.get("premium"), 0.0)
-                                            ),
-                                            "quality_score": row.get("quality_score", 0.5),
-                                            "strategy_name": _strategy_label_for_mode(mode, row['type']),
-                                            "entry_iv": row.get("impliedVolatility"),
-                                            "entry_delta": row.get("delta"),
-                                            "entry_gamma": row.get("gamma"),
-                                            "entry_vega": row.get("vega"),
-                                            "entry_theta": row.get("theta"),
-                                            "pop_score": row.get("pop_score"),
-                                            "ev_score": row.get("ev_score"),
-                                            "rr_score": row.get("rr_score"),
-                                            "liquidity_score": row.get("liquidity_score"),
-                                            "momentum_score": row.get("momentum_score"),
-                                            "iv_rank_score": row.get("iv_rank_score"),
-                                            "theta_score": row.get("theta_score"),
-                                            "iv_edge_score": row.get("iv_advantage_score"),
-                                            "vrp_score": row.get("vrp_score"),
-                                            "iv_mispricing_score": row.get("iv_mispricing_score"),
-                                            "skew_align_score": row.get("skew_align_score"),
-                                            "vega_risk_score": row.get("vega_risk_score"),
-                                            "term_structure_score": row.get("term_structure_score"),
-                                            "catalyst_score": row.get("catalyst_score"),
-                                            "em_realism_score": row.get("em_realism_score"),
-                                            "gamma_theta_score": row.get("gamma_theta_score"),
-                                            "gex_score": row.get("gex_score"),
-                                            "gamma_magnitude_score": row.get("gamma_magnitude_score"),
-                                            "gamma_pin_score": row.get("gamma_pin_score"),
-                                            "iv_velocity_score": row.get("iv_velocity_score"),
-                                            "max_pain_score": row.get("max_pain_score"),
-                                            "oi_change_score": row.get("oi_change_score"),
-                                            "option_rvol_score": row.get("option_rvol_score"),
-                                            "pcr_score": row.get("pcr_score"),
-                                            "sentiment_score_norm": row.get("sentiment_score_norm"),
-                                            "spread_score": row.get("spread_score"),
-                                            "trader_pref_score": row.get("trader_pref_score"),
-                                            "weight_profile": _weight_profile_id,
-                                        }
-                                        _row_key_l = (
-                                            str(row.get("symbol", "")).upper(),
-                                            float(row.get("strike", 0) or 0),
-                                            str(row.get("expiration", "")),
-                                            str(row.get("type", "")).lower(),
+                                        _skipped += 1
+                                else:
+                                    _payload = dict(_common_scores)
+                                    _payload.update({
+                                        "date": _today_str,
+                                        "ticker": _sym,
+                                        "expiration": row["expiration"],
+                                        "short_strike": row.get("short_strike", 0),
+                                        "long_strike":  row.get("long_strike", 0),
+                                        "type": row.get("type", "Spread"),
+                                        "net_credit": row.get("net_credit", 0),
+                                        "max_profit": row.get("max_profit", 0),
+                                        "max_loss":   row.get("max_loss", 0),
+                                        "quality_score": row.get("quality_score", 0.5),
+                                        "paper_only": _paper_only_flag,
+                                    })
+                                    if pm.log_spread_if_new(_payload):
+                                        _inserted += 1
+                                    else:
+                                        _skipped += 1
+                            except Exception as _log_exc:
+                                print(f"  Error auto-logging {_sym}: {_log_exc}")
+                        _tag = _weight_profile_id or "untagged"
+                        _bc_suffix = f", filtered {_skipped_bear_calls} disallowed structure(s)" if _skipped_bear_calls else ""
+                        _summary = (
+                            f"Auto-logged {_inserted} spreads/condors, "
+                            f"skipped {_skipped} duplicates{_bc_suffix} (profile: {_tag})"
+                        )
+                        print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
+                        _has_results = False
+
+                    # ── Single-leg path (original) ──────────────────────────────
+                    elif isinstance(_log_src, pd.DataFrame) and not _log_src.empty and "symbol" in _log_src.columns:
+                        _single_legs = _log_src.copy()
+                        if not _single_legs.empty and "quality_score" in _single_legs.columns:
+                            _single_legs = _single_legs.sort_values("quality_score", ascending=False)
+                        # One row per ticker — keep the highest-scored leg per symbol to avoid
+                        # concentration (e.g. ORCL×6 from a single scan).
+                        if "symbol" in _single_legs.columns:
+                            _single_legs = _single_legs.drop_duplicates(subset=["symbol"], keep="first")
+                        _today_str = datetime.now().strftime("%Y-%m-%d")
+                        # Drop rows the allowlist would reject entirely (e.g. Long Puts once
+                        # removed from paper_only_strategies) BEFORE taking the top-N. Without
+                        # this, a scan whose top-scored legs are Long Puts logs almost nothing
+                        # and the forward cohort starves — the dropped strategies would silently
+                        # consume the top-N slots. Quarantined (paper_only) strategies are kept.
+                        if not _single_legs.empty and "type" in _single_legs.columns:
+                            def _allowlist_keeps(_row):
+                                _sn = _strategy_label_for_mode(mode, _row.get("type"))
+                                _dec, _ = apply_auto_log_allowlist(
+                                    {"strategy_name": _sn,
+                                     "expiration": _row.get("expiration"),
+                                     "date": _today_str},
+                                    cfg_path="config.json",
+                                )
+                                return _dec != "drop"
+                            _single_legs = _single_legs[_single_legs.apply(_allowlist_keeps, axis=1)]
+                        _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                        _candidates = _single_legs.head(_top_n)
+
+                        _inserted = 0
+                        _skipped = 0
+                        _skipped_long_puts = 0
+                        # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
+                        # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
+                        # and re-sorted, so positional alignment with picks is not preserved.
+                        _ai_lookup = {}
+                        if isinstance(_ai_ranked, pd.DataFrame) and not _ai_ranked.empty:
+                            _ai_cols_present = [c for c in ("ai_score", "ai_confidence") if c in _ai_ranked.columns]
+                            if _ai_cols_present:
+                                for _r in _ai_ranked.itertuples(index=False):
+                                    _r_dict = _r._asdict() if hasattr(_r, "_asdict") else {}
+                                    try:
+                                        _key = (
+                                            str(_r_dict.get("symbol", "")).upper(),
+                                            float(_r_dict.get("strike", 0)),
+                                            str(_r_dict.get("expiration", "")),
+                                            str(_r_dict.get("type", "")).lower(),
                                         )
-                                        _row_ai_l = _ai_lookup_l.get(_row_key_l, {})
-                                        trade_dict["ai_score"] = _row_ai_l.get("ai_score")
-                                        trade_dict["ai_confidence"] = _row_ai_l.get("ai_confidence")
-                                        pm.log_trade(trade_dict)
-                                except Exception as _log_exc:
-                                    print(f"  Error logging to DB: {_log_exc}")
+                                    except (TypeError, ValueError):
+                                        continue
+                                    _ai_lookup[_key] = {c: _r_dict.get(c) for c in _ai_cols_present}
+                        for _idx, row in _candidates.iterrows():
+                            _entry_price = (
+                                safe_float(row.get("ask") or None)
+                                or safe_float(row.get("lastPrice"))
+                                or safe_float(row.get("premium"), 0.0)
+                            )
+                            if not _entry_price or _entry_price <= 0:
+                                continue
+                            _strat_name = _strategy_label_for_mode(mode, row['type'])
+                            # Phase 1 allowlist (supersedes the legacy auto_log_skip_long_puts flag).
+                            # Pass expiration so the cohort DTE floor can quarantine
+                            # short-horizon Long Calls (else they slip into the gate).
+                            _decision, _paper_only_flag = apply_auto_log_allowlist(
+                                {"strategy_name": _strat_name,
+                                 "expiration": row["expiration"], "date": _today_str},
+                                cfg_path="config.json",
+                            )
+                            if _decision == "drop":
+                                _skipped_long_puts += 1  # reuse counter for the summary line
+                                continue
+                            _trade = {
+                                "date": _today_str,
+                                "ticker": row["symbol"],
+                                "expiration": row["expiration"],
+                                "strike": row["strike"],
+                                "type": str(row["type"]).capitalize(),
+                                "entry_price": _entry_price,
+                                "quality_score": row.get("quality_score", 0.5),
+                                "strategy_name": _strat_name,
+                                "entry_iv": row.get("impliedVolatility"),
+                                "entry_delta": row.get("delta"),
+                                "entry_gamma": row.get("gamma"),
+                                "entry_vega": row.get("vega"),
+                                "entry_theta": row.get("theta"),
+                                "dividend_yield": row.get("dividend_yield"),
+                                "pop_score": row.get("pop_score"),
+                                "ev_score": row.get("ev_score"),
+                                "rr_score": row.get("rr_score"),
+                                "liquidity_score": row.get("liquidity_score"),
+                                "momentum_score": row.get("momentum_score"),
+                                "iv_rank_score": row.get("iv_rank_score"),
+                                "theta_score": row.get("theta_score"),
+                                "iv_edge_score": row.get("iv_advantage_score"),
+                                "vrp_score": row.get("vrp_score"),
+                                "iv_mispricing_score": row.get("iv_mispricing_score"),
+                                "skew_align_score": row.get("skew_align_score"),
+                                "vega_risk_score": row.get("vega_risk_score"),
+                                "term_structure_score": row.get("term_structure_score"),
+                                "catalyst_score": row.get("catalyst_score"),
+                                "em_realism_score": row.get("em_realism_score"),
+                                "gamma_theta_score": row.get("gamma_theta_score"),
+                                "gex_score": row.get("gex_score"),
+                                "gamma_magnitude_score": row.get("gamma_magnitude_score"),
+                                "gamma_pin_score": row.get("gamma_pin_score"),
+                                "iv_velocity_score": row.get("iv_velocity_score"),
+                                "max_pain_score": row.get("max_pain_score"),
+                                "oi_change_score": row.get("oi_change_score"),
+                                "option_rvol_score": row.get("option_rvol_score"),
+                                "pcr_score": row.get("pcr_score"),
+                                "sentiment_score_norm": row.get("sentiment_score_norm"),
+                                "spread_score": row.get("spread_score"),
+                                "trader_pref_score": row.get("trader_pref_score"),
+                                "weight_profile": _weight_profile_id,
+                                "paper_only": _paper_only_flag,
+                            }
+                            _row_key = (
+                                str(row.get("symbol", "")).upper(),
+                                float(row.get("strike", 0) or 0),
+                                str(row.get("expiration", "")),
+                                str(row.get("type", "")).lower(),
+                            )
+                            _row_ai = _ai_lookup.get(_row_key, {})
+                            _trade["ai_score"] = _row_ai.get("ai_score")
+                            _trade["ai_confidence"] = _row_ai.get("ai_confidence")
+                            try:
+                                if pm.log_trade_if_new(_trade):
+                                    _inserted += 1
+                                else:
+                                    _skipped += 1
+                            except Exception as _log_exc:
+                                print(f"  Error auto-logging {row.get('symbol')}: {_log_exc}")
 
-                            msg = f"Logged {len(picks_to_log)} trades."
-                            print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
+                        _tag = _weight_profile_id or "untagged"
+                        _summary = f"Auto-logged {_inserted} new, skipped {_skipped} duplicates (profile: {_tag})"
+                        if _skipped_long_puts:
+                            _summary += f", filtered {_skipped_long_puts} disallowed pick(s)"
+                        print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  \u2713 {_summary}")
+                    # Skip the interactive save-menu loop below; continue to scan-another prompt
+                    _has_results = False
 
+                # ── Collapsed post-scan prompt (loops so V → P → L all work in one sitting) ──
+                if _has_results:
+                  while True:
+                    if HAS_ENHANCED_CLI:
+                        save_label = fmt.colorize("Save/Export?", fmt.Colors.BRIGHT_CYAN)
+                        p_opt = fmt.colorize("[P]", fmt.Colors.BRIGHT_YELLOW) + " Paper trade top pick"
+                        c_opt = fmt.colorize("[C]", fmt.Colors.BRIGHT_YELLOW) + " CSV"
+                        l_opt = fmt.colorize("[L]", fmt.Colors.BRIGHT_YELLOW) + " Log trades"
+                        v_opt = fmt.colorize("[V]", fmt.Colors.BRIGHT_YELLOW) + " 3D Visualizer"
+                        skip_opt = fmt.colorize("[Enter]", fmt.Colors.DIM) + " Skip"
+                        print(f"\n  {save_label}  {p_opt}  \u00b7  {c_opt}  \u00b7  {l_opt}  \u00b7  {v_opt}  \u00b7  {skip_opt}")
+                    else:
+                        print("\n  Save/Export?  [P] Paper trade top pick  [C] CSV  [L] Log trades  [V] 3D Visualizer  [Enter] Skip")
+                    save_choice = prompt_input("Choice", "").strip().upper()
+
+                    if save_choice == "":
+                        break  # Enter → done with save menu
+
+                    if save_choice == "P":
+                        if mode in ("Credit Spreads", "Iron Condor"):
+                            msg = "Paper trading for spreads/condors is not supported — use [L] Log trades instead."
+                            print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  \u26a0  {msg}")
+                        elif not picks.empty:
+                            # Use AI-ranked top pick when available, otherwise fall back to quality_score.
+                            # Match on (symbol, strike, expiration, type) — _ai_ranked indices are not
+                            # aligned with picks indices after reset_index inside combine_scores.
+                            top_pick_row = None
+                            if _ai_ranked is not None and not _ai_ranked.empty and "final_score" in _ai_ranked.columns:
+                                _best = _ai_ranked.sort_values("final_score", ascending=False).iloc[0]
+                                try:
+                                    _match = picks[
+                                        (picks["symbol"].astype(str).str.upper() == str(_best.get("symbol", "")).upper())
+                                        & (picks["strike"].astype(float) == float(_best.get("strike", 0)))
+                                        & (picks["expiration"].astype(str) == str(_best.get("expiration", "")))
+                                        & (picks["type"].astype(str).str.lower() == str(_best.get("type", "")).lower())
+                                    ]
+                                    if not _match.empty:
+                                        top_pick_row = _match.iloc[0]
+                                except (KeyError, ValueError, TypeError):
+                                    top_pick_row = None
+                            if top_pick_row is None:
+                                top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            trade_dict = {
+                                "date": today_str,
+                                "ticker": top_pick_row["symbol"],
+                                "expiration": top_pick_row["expiration"],
+                                "strike": top_pick_row["strike"],
+                                "type": str(top_pick_row["type"]).capitalize(),
+                                "entry_price": (
+                                    safe_float(top_pick_row.get("ask") or None)
+                                    or safe_float(top_pick_row.get("lastPrice"))
+                                    or safe_float(top_pick_row.get("premium"), 0.0)
+                                ),
+                                "quality_score": top_pick_row["quality_score"],
+                                "strategy_name": _strategy_label_for_mode(mode, top_pick_row['type']),
+                                "entry_iv": top_pick_row.get("impliedVolatility"),
+                                "entry_delta": top_pick_row.get("delta"),
+                                "entry_gamma": top_pick_row.get("gamma"),
+                                "entry_vega": top_pick_row.get("vega"),
+                                "entry_theta": top_pick_row.get("theta"),
+                                "dividend_yield": top_pick_row.get("dividend_yield"),
+                                # Component scores — enable backtester IC analysis once 30+ trades close
+                                "pop_score": top_pick_row.get("pop_score"),
+                                "ev_score": top_pick_row.get("ev_score"),
+                                "rr_score": top_pick_row.get("rr_score"),
+                                "liquidity_score": top_pick_row.get("liquidity_score"),
+                                "momentum_score": top_pick_row.get("momentum_score"),
+                                "iv_rank_score": top_pick_row.get("iv_rank_score"),
+                                "theta_score": top_pick_row.get("theta_score"),
+                                "iv_edge_score": top_pick_row.get("iv_advantage_score"),
+                                "vrp_score": top_pick_row.get("vrp_score"),
+                                "iv_mispricing_score": top_pick_row.get("iv_mispricing_score"),
+                                "skew_align_score": top_pick_row.get("skew_align_score"),
+                                "vega_risk_score": top_pick_row.get("vega_risk_score"),
+                                "term_structure_score": top_pick_row.get("term_structure_score"),
+                                # v7: remaining 14 components — full IC coverage
+                                "catalyst_score": top_pick_row.get("catalyst_score"),
+                                "em_realism_score": top_pick_row.get("em_realism_score"),
+                                "gamma_theta_score": top_pick_row.get("gamma_theta_score"),
+                                "gex_score": top_pick_row.get("gex_score"),
+                                "gamma_magnitude_score": top_pick_row.get("gamma_magnitude_score"),
+                                "gamma_pin_score": top_pick_row.get("gamma_pin_score"),
+                                "iv_velocity_score": top_pick_row.get("iv_velocity_score"),
+                                "max_pain_score": top_pick_row.get("max_pain_score"),
+                                "oi_change_score": top_pick_row.get("oi_change_score"),
+                                "option_rvol_score": top_pick_row.get("option_rvol_score"),
+                                "pcr_score": top_pick_row.get("pcr_score"),
+                                "sentiment_score_norm": top_pick_row.get("sentiment_score_norm"),
+                                "spread_score": top_pick_row.get("spread_score"),
+                                "trader_pref_score": top_pick_row.get("trader_pref_score"),
+                                "weight_profile": _weight_profile_id,
+                            }
+                            # AI-score lookup via stable key (see auto-log path comment).
+                            if _ai_ranked is not None and not _ai_ranked.empty:
+                                try:
+                                    _m = _ai_ranked[
+                                        (_ai_ranked["symbol"].astype(str).str.upper() == str(top_pick_row.get("symbol", "")).upper())
+                                        & (_ai_ranked["strike"].astype(float) == float(top_pick_row.get("strike", 0)))
+                                        & (_ai_ranked["expiration"].astype(str) == str(top_pick_row.get("expiration", "")))
+                                        & (_ai_ranked["type"].astype(str).str.lower() == str(top_pick_row.get("type", "")).lower())
+                                    ]
+                                    if not _m.empty:
+                                        if "ai_score" in _m.columns:
+                                            trade_dict["ai_score"] = _m["ai_score"].iloc[0]
+                                        if "ai_confidence" in _m.columns:
+                                            trade_dict["ai_confidence"] = _m["ai_confidence"].iloc[0]
+                                except (KeyError, ValueError, TypeError):
+                                    pass
+                            pm.log_trade(trade_dict)
+                            msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
+                            print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                            # Offer inline portfolio view
+                            _view = prompt_input("View portfolio? (y/n)", "n").strip().lower()
+                            if _view in ("y", "yes"):
+                                try:
+                                    from .check_pnl import view_portfolio
+                                    view_portfolio()
+                                except Exception as _pnl_exc:
+                                    print(f"  Could not load portfolio: {_pnl_exc}")
+
+                    elif save_choice == "C":
+                        # Export best available data: AI-ranked picks > raw picks > spreads > condors
+                        if _ai_ranked is not None and not _ai_ranked.empty:
+                            export_df = _ai_ranked
+                        elif not picks.empty:
+                            export_df = picks
+                        elif isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty:
+                            export_df = _credit_spreads
+                        else:
+                            export_df = _iron_condors
+                        csv_file = export_to_csv(export_df, mode, budget)
+                        if csv_file:
+                            msg = f"Results exported to: {csv_file}"
+                            print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"\n  \U0001f4c4 {msg}")
+
+                    elif save_choice == "V":
+                        try:
+                            from .visualizer_3d import OptionsVisualizer
+                            _viz_cfg = load_config("config.json")
+                            _viz = OptionsVisualizer(scan_results, config=_viz_cfg)
+                            _viz.show()
+                            msg = "3D Visualizer opened in browser"
+                            print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                        except ImportError:
+                            msg = "Plotly required for visualizer: pip install plotly"
+                            print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  {msg}")
+                        except Exception as _viz_exc:
+                            msg = f"Visualizer error: {_viz_exc}"
+                            print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  {msg}")
+
+                    elif save_choice == "L":
+                        log_src = picks if not picks.empty else (
+                            _credit_spreads if isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty
+                            else _iron_condors
+                        )
+                        if isinstance(log_src, pd.DataFrame) and not log_src.empty:
+                            picks_to_log = select_trades_to_log(log_src)
+                            if not picks_to_log.empty:
+                                log_trade_entry(picks_to_log, mode)
+                            
+                                # Also log to PaperManager for portfolio visibility
+                                today_str = datetime.now().strftime("%Y-%m-%d")
+                                # Stable-key AI lookup (see auto-log path).
+                                _ai_lookup_l = {}
+                                if isinstance(_ai_ranked, pd.DataFrame) and not _ai_ranked.empty:
+                                    _ai_cols_l = [c for c in ("ai_score", "ai_confidence") if c in _ai_ranked.columns]
+                                    if _ai_cols_l:
+                                        for _r in _ai_ranked.itertuples(index=False):
+                                            _r_dict = _r._asdict() if hasattr(_r, "_asdict") else {}
+                                            try:
+                                                _key = (
+                                                    str(_r_dict.get("symbol", "")).upper(),
+                                                    float(_r_dict.get("strike", 0)),
+                                                    str(_r_dict.get("expiration", "")),
+                                                    str(_r_dict.get("type", "")).lower(),
+                                                )
+                                            except (TypeError, ValueError):
+                                                continue
+                                            _ai_lookup_l[_key] = {c: _r_dict.get(c) for c in _ai_cols_l}
+                                for _idx_l, row in picks_to_log.iterrows():
+                                    try:
+                                        if "short_strike" in row or "net_credit" in row:
+                                            # It's a Credit Spread
+                                            pm.log_spread({
+                                                "date": today_str,
+                                                "ticker": row["symbol"],
+                                                "expiration": row["expiration"],
+                                                "short_strike": row["short_strike"],
+                                                "long_strike": row["long_strike"],
+                                                "type": row["type"],
+                                                "net_credit": row["net_credit"],
+                                                "max_profit": row.get("max_profit", 0),
+                                                "max_loss": row.get("max_loss", 0),
+                                                "quality_score": row.get("quality_score", 0.5)
+                                            })
+                                        elif "total_credit" in row:
+                                            # Iron Condor — persist all four legs so the
+                                            # portfolio viewer can render strikes and mark
+                                            # to market. log_iron_condor_if_new dedups on
+                                            # the (ticker, exp, 4 strikes) tuple.
+                                            pm.log_iron_condor_if_new({
+                                                "date": today_str,
+                                                "ticker": row["symbol"],
+                                                "expiration": row["expiration"],
+                                                "short_put_strike": row["short_put_strike"],
+                                                "long_put_strike":  row["long_put_strike"],
+                                                "short_call_strike": row["short_call_strike"],
+                                                "long_call_strike":  row["long_call_strike"],
+                                                "total_credit": row["total_credit"],
+                                                "max_profit": row.get("max_profit", 0),
+                                                "max_risk":   row.get("max_risk", 0),
+                                                "net_delta":  row.get("net_delta"),
+                                                "quality_score": row.get("quality_score", 0.5),
+                                            })
+                                        else:
+                                            # It's a single option
+                                            trade_dict = {
+                                                "date": today_str,
+                                                "ticker": row["symbol"],
+                                                "expiration": row["expiration"],
+                                                "strike": row["strike"],
+                                                "type": str(row["type"]).capitalize(),
+                                                "entry_price": (
+                                                    safe_float(row.get("ask") or None)
+                                                    or safe_float(row.get("lastPrice"))
+                                                    or safe_float(row.get("premium"), 0.0)
+                                                ),
+                                                "quality_score": row.get("quality_score", 0.5),
+                                                "strategy_name": _strategy_label_for_mode(mode, row['type']),
+                                                "entry_iv": row.get("impliedVolatility"),
+                                                "entry_delta": row.get("delta"),
+                                                "entry_gamma": row.get("gamma"),
+                                                "entry_vega": row.get("vega"),
+                                                "entry_theta": row.get("theta"),
+                                                "pop_score": row.get("pop_score"),
+                                                "ev_score": row.get("ev_score"),
+                                                "rr_score": row.get("rr_score"),
+                                                "liquidity_score": row.get("liquidity_score"),
+                                                "momentum_score": row.get("momentum_score"),
+                                                "iv_rank_score": row.get("iv_rank_score"),
+                                                "theta_score": row.get("theta_score"),
+                                                "iv_edge_score": row.get("iv_advantage_score"),
+                                                "vrp_score": row.get("vrp_score"),
+                                                "iv_mispricing_score": row.get("iv_mispricing_score"),
+                                                "skew_align_score": row.get("skew_align_score"),
+                                                "vega_risk_score": row.get("vega_risk_score"),
+                                                "term_structure_score": row.get("term_structure_score"),
+                                                "catalyst_score": row.get("catalyst_score"),
+                                                "em_realism_score": row.get("em_realism_score"),
+                                                "gamma_theta_score": row.get("gamma_theta_score"),
+                                                "gex_score": row.get("gex_score"),
+                                                "gamma_magnitude_score": row.get("gamma_magnitude_score"),
+                                                "gamma_pin_score": row.get("gamma_pin_score"),
+                                                "iv_velocity_score": row.get("iv_velocity_score"),
+                                                "max_pain_score": row.get("max_pain_score"),
+                                                "oi_change_score": row.get("oi_change_score"),
+                                                "option_rvol_score": row.get("option_rvol_score"),
+                                                "pcr_score": row.get("pcr_score"),
+                                                "sentiment_score_norm": row.get("sentiment_score_norm"),
+                                                "spread_score": row.get("spread_score"),
+                                                "trader_pref_score": row.get("trader_pref_score"),
+                                                "weight_profile": _weight_profile_id,
+                                            }
+                                            _row_key_l = (
+                                                str(row.get("symbol", "")).upper(),
+                                                float(row.get("strike", 0) or 0),
+                                                str(row.get("expiration", "")),
+                                                str(row.get("type", "")).lower(),
+                                            )
+                                            _row_ai_l = _ai_lookup_l.get(_row_key_l, {})
+                                            trade_dict["ai_score"] = _row_ai_l.get("ai_score")
+                                            trade_dict["ai_confidence"] = _row_ai_l.get("ai_confidence")
+                                            pm.log_trade(trade_dict)
+                                    except Exception as _log_exc:
+                                        print(f"  Error logging to DB: {_log_exc}")
+
+                                msg = f"Logged {len(picks_to_log)} trades."
+                                print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
+
+                    else:
+                        _msg = "Unknown choice — press P / C / L / V or Enter to skip"
+                        print(fmt.format_warning(_msg) if HAS_ENHANCED_CLI else f"  {_msg}")
+                    # Loop back and re-prompt so V → P → L all work in one sitting
+
+                # ── Scan-another shortcut (single-stock only, AFTER save menu) ──
+                if _is_single_stock and _repeat_count < 5:
+                    _another = prompt_input("Scan another ticker? (enter symbol or Enter to quit)", "").upper().strip()
+                    if _another and _another.isalnum() and 1 <= len(_another) <= 6:
+                        tickers = [_another]
+                        _repeat_count += 1
+                        continue  # loop back
+
+                # Done message
+                if HAS_ENHANCED_CLI:
+                    WIDTH = get_display_width()
+                    print("\n" + fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL))
+                    print(fmt.style("  \u2713  Done! Happy trading!", 'good', bold=True))
+                    print(fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL) + "\n")
                 else:
-                    _msg = "Unknown choice — press P / C / L / V or Enter to skip"
-                    print(fmt.format_warning(_msg) if HAS_ENHANCED_CLI else f"  {_msg}")
-                # Loop back and re-prompt so V → P → L all work in one sitting
+                    print("\n\u2713 Done! Happy trading!\n")
+                break
 
-            # ── Scan-another shortcut (single-stock only, AFTER save menu) ──
-            if _is_single_stock and _repeat_count < 5:
-                _another = prompt_input("Scan another ticker? (enter symbol or Enter to quit)", "").upper().strip()
-                if _another and _another.isalnum() and 1 <= len(_another) <= 6:
-                    tickers = [_another]
-                    _repeat_count += 1
-                    continue  # loop back
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+        except Exception as e:
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
-            # Done message
-            if HAS_ENHANCED_CLI:
-                WIDTH = get_display_width()
-                print("\n" + fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL))
-                print(fmt.style("  \u2713  Done! Happy trading!", 'good', bold=True))
-                print(fmt.draw_separator(WIDTH, fmt.BoxChars.D_HORIZONTAL) + "\n")
-            else:
-                print("\n\u2713 Done! Happy trading!\n")
+        # Automation (cron / --auto / --mode / --ticker) runs exactly one cycle.
+        # Interactive sessions fall through and re-display the mode menu.
+        if not _interactive:
             break
-
-    except KeyboardInterrupt:
-        print("\nCancelled.")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
 
 
 if __name__ == "__main__":

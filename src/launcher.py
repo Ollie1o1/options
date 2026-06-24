@@ -44,6 +44,14 @@ def _row(key: str, name: str, desc: str, tag: str = "", muted_key: bool = False)
     return row.rstrip()
 
 
+def _loading(msg: str) -> None:
+    """Immediate feedback before a heavy lazy import / scan, so the screen never
+    sits frozen between the menu choice and the first output of the sub-tool.
+    Flushed so it shows before the multi-second import blocks."""
+    line = f"  {msg}"
+    print(fmt.style(line, "muted") if HAS_UI else line, flush=True)
+
+
 def _show_menu() -> str:
     if HAS_UI:
         print()
@@ -89,13 +97,15 @@ def _research_menu() -> None:
         if choice in ("B", "BACK", "Q", "QUIT", ""):
             return
         if choice in ("1", "BREAKOUT"):
+            _loading("Loading breakout engine…")
             from src.breakout.engine import menu as _breakout_menu
             _breakout_menu()
         elif choice in ("2", "VOL-INTEL", "VOL"):
+            _loading("Loading vol-intelligence…")
             from src.vol_intel.engine import main as _vol_main
             _vol_main([])
         elif choice in ("3", "EQUITY-VRP", "VRP"):
-            print("  running equity-VRP backtest over dolt chains…")
+            _loading("Running equity-VRP backtest over dolt chains…")
             from src.equity_vol.report import main as _evrp_main
             _evrp_main([])
         else:
@@ -114,17 +124,20 @@ def main() -> None:
     while True:
         choice = _show_menu()
         if choice in ("1", "STOCKS", "S"):
+            _loading("Loading equity options screener…")
             from src.options_screener import main as _stocks_main
             _stocks_main()
-            return
+            continue  # back to the top menu, not exit
         if choice in ("2", "CRYPTO", "C"):
+            _loading("Loading crypto screener…")
             from src.crypto.screener import main as _crypto_main
             _crypto_main()
-            return
+            continue
         if choice in ("3", "LEVERAGE", "L"):
+            _loading("Loading leverage menu…")
             from src.leverage.__main__ import menu as _leverage_menu
             _leverage_menu()
-            return
+            continue
         if choice in ("4", "RESEARCH", "R"):
             _research_menu()
             continue

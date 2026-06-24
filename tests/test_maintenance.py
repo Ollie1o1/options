@@ -19,21 +19,37 @@ class TestThrottle(unittest.TestCase):
         self.assertTrue(m.due_checkpoint({}, "2026-06-07"))
 
 
-class TestAutologWindow(unittest.TestCase):
-    def test_ds_window(self):
-        self.assertEqual(m.autolog_window(weekday=3, hhmm=1030), ("ds", "-ds"))
+class TestDueAutologWindows(unittest.TestCase):
+    """Catch-up model: a single market-hours launch returns EVERY working
+    strategy not yet logged today, decoupled from per-clock slots."""
 
-    def test_sps_window(self):
-        self.assertEqual(m.autolog_window(weekday=3, hhmm=1300), ("sps", "-sps"))
+    KEYS = {"ds", "sps", "ss", "ics"}
 
-    def test_ics_window(self):
-        self.assertEqual(m.autolog_window(weekday=3, hhmm=1430), ("ics", "-ics"))
+    def _keys(self, windows):
+        return {w[0] for w in windows}
 
-    def test_no_window_between(self):
-        self.assertIsNone(m.autolog_window(weekday=3, hhmm=1145))
+    def test_all_working_strategies_due_on_fresh_weekday(self):
+        # 1030 Wednesday, empty state -> all four working strategies are due.
+        got = m.due_autolog_windows({}, weekday=3, hhmm=1030, today="2026-06-24")
+        self.assertEqual(self._keys(got), self.KEYS)
 
-    def test_weekend_never(self):
-        self.assertIsNone(m.autolog_window(weekday=6, hhmm=1030))
+    def test_short_put_window_included(self):
+        # The user-requested fix: short puts (-ss) must be a logged strategy.
+        got = m.due_autolog_windows({}, weekday=3, hhmm=1400, today="2026-06-24")
+        flags = {w[1] for w in got}
+        self.assertIn("-ss", flags)
+
+    def test_already_logged_windows_excluded(self):
+        st = {"last_autolog": {"ds": "2026-06-24", "ics": "2026-06-24"}}
+        got = m.due_autolog_windows(st, weekday=3, hhmm=1400, today="2026-06-24")
+        self.assertEqual(self._keys(got), {"sps", "ss"})
+
+    def test_empty_outside_rth_band(self):
+        self.assertEqual(m.due_autolog_windows({}, weekday=3, hhmm=945, today="2026-06-24"), [])
+        self.assertEqual(m.due_autolog_windows({}, weekday=3, hhmm=1630, today="2026-06-24"), [])
+
+    def test_empty_on_weekend(self):
+        self.assertEqual(m.due_autolog_windows({}, weekday=6, hhmm=1200, today="2026-06-27"), [])
 
     def test_autolog_due_per_window_per_day(self):
         st = {"last_autolog": {"ds": "2026-06-07"}}
@@ -91,8 +107,9 @@ class TestOrchestrator(unittest.TestCase):
         conn.execute("INSERT INTO trades VALUES ('2026-05-28','Long Call','CLOSED',0,70.0,0.1)")
         conn.commit(); conn.close()
 
-    def test_autolog_fires_in_window_on_weekday_and_records_state(self):
-        # 2026-06-04 is a Thursday; 14:30 is inside the 'ics' window.
+    def test_autolog_catches_up_all_working_strategies(self):
+        # 2026-06-04 is a Thursday, 14:30 (in RTH band): one launch logs ALL
+        # four working strategies, not just the clock-matched one.
         calls = []
         def fake_runner(cmd):
             calls.append(cmd); return 0
@@ -103,10 +120,40 @@ class TestOrchestrator(unittest.TestCase):
                 db_path=db, phase1_start="2026-05-27", state_path=state_path,
                 now=datetime(2026, 6, 4, 14, 30), runner=fake_runner,
                 checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
-            self.assertTrue(any("-ics" in " ".join(c) for c in calls))
+            flags = {f for c in calls for f in c if f in ("-ds", "-sps", "-ss", "-ics")}
+            self.assertEqual(flags, {"-ds", "-sps", "-ss", "-ics"})
             st = m.load_state(state_path)
+            self.assertEqual(set(st["last_autolog"]), {"ds", "sps", "ss", "ics"})
             self.assertEqual(st["last_autolog"]["ics"], "2026-06-04")
             self.assertIn("cohort", summary)
+
+    def test_background_spawns_detached_and_skips_inline_runner(self):
+        # Interactive startup must NOT block on scans: it spawns a detached
+        # catch-up instead of calling the runner inline.
+        calls, spawned = [], []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: (calls.append(cmd), 0)[1],
+                background=True, spawn_fn=lambda: spawned.append(True),
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+            self.assertEqual(calls, [])           # no inline scans
+            self.assertEqual(len(spawned), 1)     # detached catch-up fired once
+            self.assertTrue(any("queued" in r for r in summary["ran"]))
+
+    def test_run_catchup_runs_due_windows_and_records_state(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            sp = os.path.join(d, "state.json")
+            summary = m.run_catchup(
+                state_path=sp, now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: (calls.append(cmd), 0)[1])
+            self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
+            self.assertEqual(set(m.load_state(sp)["last_autolog"]),
+                             {"ds", "sps", "ss", "ics"})
 
     def test_ds_window_feeds_cohort_with_dte_floor(self):
         # 10:30 Thursday = 'ds' window; the scan must carry --min-dte so its
@@ -138,10 +185,11 @@ class TestOrchestrator(unittest.TestCase):
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
                 checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
                 chain_archive_fn=lambda: 0)
-            self.assertTrue(calls)
-            self.assertNotIn("--min-dte", " ".join(calls[0]))
+            ics_cmds = [c for c in calls if "-ics" in c]
+            self.assertEqual(len(ics_cmds), 1)
+            self.assertNotIn("--min-dte", " ".join(ics_cmds[0]))
 
-    def test_second_run_same_window_skips_autolog(self):
+    def test_second_run_same_day_skips_autolog(self):
         calls = []
         def fake_runner(cmd):
             calls.append(cmd); return 0
@@ -326,6 +374,40 @@ class TestHeadless(unittest.TestCase):
                 state_path=os.path.join(d, "state.json"),
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+            self.assertIsInstance(summary, dict)
+
+    def test_headless_enforces_exits_every_run(self):
+        """Exit enforcement must run directly on every headless invocation,
+        not only transitively when an auto-log window happens to be open —
+        otherwise trades that hit a stop/take-profit/time-exit on a day with
+        no auto-log window (or while the cron/LaunchAgent skips auto-log)
+        never close."""
+        enforced = []
+        with tempfile.TemporaryDirectory() as d:
+            db, cfg = self._setup(d)
+            # 09:00 weekday: NOT an auto-log window, so no child screener spawns.
+            summary = m.run_headless(
+                db_path=db, config_path=cfg,
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 9, 0),
+                runner=lambda cmd: 0,
+                enforce_exits_fn=lambda **k: enforced.append(k),
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+            self.assertEqual(len(enforced), 1, "exits must be enforced exactly once per headless run")
+            self.assertEqual(enforced[0]["db_path"], db)
+
+    def test_headless_exit_enforcement_failure_does_not_propagate(self):
+        with tempfile.TemporaryDirectory() as d:
+            db, cfg = self._setup(d)
+            def _boom(**k):
+                raise RuntimeError("yfinance down")
+            summary = m.run_headless(
+                db_path=db, config_path=cfg,
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 9, 0),
+                runner=lambda cmd: 0,
+                enforce_exits_fn=_boom,
                 checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
             self.assertIsInstance(summary, dict)
 
