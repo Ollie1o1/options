@@ -41,6 +41,13 @@ class RatesSnapshot:
     dff: Optional[float]
     vixcls: Optional[float]
     as_of: dict = field(default_factory=dict)
+    # Populated only by the yfinance fallback (FRED has no key but its CSV
+    # endpoint times out from some networks). Yahoo has no clean 2Y, so the
+    # fallback reports the 3-month bill and the 10y-3m slope instead — which
+    # is the curve inversion signal the Fed actually favours.
+    dgs3mo: Optional[float] = None
+    t10y3m: Optional[float] = None
+    source: str = "FRED"
 
 
 def parse_fred_csv(text: str) -> list:
@@ -106,6 +113,50 @@ def _http_fetch(series_id: str) -> str:
     return resp.text
 
 
+def _yahoo_fetch(symbol: str) -> Optional[float]:
+    """Latest close for a Yahoo index symbol, or None. Best-effort, no raise."""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(symbol).history(period="5d")
+        series = hist["Close"].dropna()
+        if len(series):
+            return float(series.iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def yahoo_rates_fallback(fetcher: Callable[[str], Optional[float]] = _yahoo_fetch) -> RatesSnapshot:
+    """Build a rates snapshot from yfinance Treasury indices when FRED is down.
+
+    CBOE yield indices (^TNX/^IRX/^FVX/^TYX) quote 10x the percentage, so they
+    are divided by 10. ^VIX is already the index level. Yahoo has no 2-year, so
+    we report the 3-month bill and the 10y-3m slope.
+    """
+    def pct(sym):
+        v = fetcher(sym)
+        if v is None:
+            return None
+        # ^TNX & friends sometimes quote 10x the percent (CBOE convention,
+        # e.g. 43.9 == 4.39%) and sometimes already-in-percent (4.39),
+        # depending on the yfinance build. No Treasury yield is ~>20%, so a
+        # value above 20 is the 10x form and gets scaled down.
+        return round(v / 10.0 if v > 20 else v, 4)
+
+    dgs10 = pct("^TNX")
+    dgs3mo = pct("^IRX")
+    vix = fetcher("^VIX")
+    t10y3m = round(dgs10 - dgs3mo, 4) if (dgs10 is not None and dgs3mo is not None) else None
+    stamp = time.strftime("%Y-%m-%d")
+    as_of = {k: stamp for k, v in (("DGS10", dgs10), ("DGS3MO", dgs3mo),
+                                   ("VIX", vix)) if v is not None}
+    return RatesSnapshot(
+        dgs10=dgs10, dgs2=None, t10y2y=None, dff=None,
+        vixcls=(round(float(vix), 2) if vix is not None else None),
+        dgs3mo=dgs3mo, t10y3m=t10y3m, source="yahoo", as_of=as_of,
+    )
+
+
 def _read_cache() -> Optional[dict]:
     try:
         with open(_CACHE_PATH) as fh:
@@ -125,17 +176,22 @@ def _write_cache(snap: RatesSnapshot) -> None:
                 "_ts": time.time(),
                 "dgs10": snap.dgs10, "dgs2": snap.dgs2, "t10y2y": snap.t10y2y,
                 "dff": snap.dff, "vixcls": snap.vixcls, "as_of": snap.as_of,
+                "dgs3mo": snap.dgs3mo, "t10y3m": snap.t10y3m, "source": snap.source,
             }, fh)
     except Exception:
         pass
 
 
 def fetch_rates_snapshot(fetcher: Callable[[str], str] = _http_fetch,
-                         use_cache: bool = True) -> RatesSnapshot:
+                         use_cache: bool = True,
+                         yahoo_fetcher: Callable[[str], Optional[float]] = _yahoo_fetch
+                         ) -> RatesSnapshot:
     """Fetch the latest value of each macro series into a RatesSnapshot.
 
     ``fetcher`` is injected for testing; it maps a series id to raw CSV text.
     Any series that fails to fetch or has no valid observation is left None.
+    When FRED yields nothing at all, fall back to yfinance Treasury yields via
+    ``yahoo_fetcher`` so the panel still populates.
     """
     if use_cache:
         cached = _read_cache()
@@ -144,6 +200,8 @@ def fetch_rates_snapshot(fetcher: Callable[[str], str] = _http_fetch,
                 dgs10=cached.get("dgs10"), dgs2=cached.get("dgs2"),
                 t10y2y=cached.get("t10y2y"), dff=cached.get("dff"),
                 vixcls=cached.get("vixcls"), as_of=cached.get("as_of", {}),
+                dgs3mo=cached.get("dgs3mo"), t10y3m=cached.get("t10y3m"),
+                source=cached.get("source", "FRED"),
             )
 
     values: dict = {}
@@ -168,10 +226,19 @@ def fetch_rates_snapshot(fetcher: Callable[[str], str] = _http_fetch,
         t10y2y=values.get("T10Y2Y"), dff=values.get("DFF"),
         vixcls=values.get("VIXCLS"), as_of=as_of,
     )
-    # Never cache a total failure — a transient FRED outage must not poison
-    # the panel for the whole TTL window.
+    # FRED gave us nothing — fall back to yfinance Treasury yields so the panel
+    # still populates (FRED's CSV endpoint times out from some networks).
     has_any = any(v is not None for v in
                   (snap.dgs10, snap.dgs2, snap.t10y2y, snap.dff, snap.vixcls))
+    if not has_any:
+        try:
+            snap = yahoo_rates_fallback(yahoo_fetcher)
+            has_any = any(v is not None for v in (snap.dgs10, snap.dgs3mo, snap.vixcls))
+        except Exception:
+            pass
+
+    # Never cache a total failure — a transient outage must not poison the
+    # panel for the whole TTL window.
     if use_cache and has_any:
         _write_cache(snap)
     return snap
@@ -199,8 +266,24 @@ def format_rates_panel(snap: RatesSnapshot, width: int = 100) -> list:
         curve_note = "  (inverted)" if snap.t10y2y < 0 else "  (normal)"
 
     lines = [header]
-    if all(v is None for v in (snap.dgs10, snap.dgs2, snap.t10y2y, snap.dff, snap.vixcls)):
-        lines.append("  rates: N/A (FRED unreachable)")
+    if all(v is None for v in (snap.dgs10, snap.dgs2, snap.t10y2y,
+                               snap.dff, snap.vixcls, snap.dgs3mo)):
+        lines.append("  rates: N/A (FRED + Yahoo unreachable)")
+        return lines
+
+    if snap.source == "yahoo":
+        # Yahoo has no clean 2Y; report the 3M bill and the 10y-3m slope.
+        slope_note = ""
+        if snap.t10y3m is not None:
+            slope_note = "  (inverted)" if snap.t10y3m < 0 else "  (normal)"
+        lines.append(
+            f"  10Y {_fmt(snap.dgs10)}   3M {_fmt(snap.dgs3mo)}   "
+            f"10y-3m {_fmt(snap.t10y3m, suffix='pp')}{slope_note}"
+        )
+        lines.append(
+            f"  VIX {_fmt(snap.vixcls, suffix='', nd=1)}   "
+            f"as of {stamp}  (via Yahoo — FRED unreachable)"
+        )
         return lines
 
     lines.append(

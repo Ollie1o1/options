@@ -438,5 +438,19 @@
     "universe": ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX",
                  "JPM","BAC","WFC","GS","XOM","CVX","UNH","LLY","JNJ","PG","KO","WMT",
                  "HD","CAT","BA","COIN","PLTR","SMCI","RIVN","SPY","QQQ","IWM"]
+  },
+  "leverage_selector": {
+    "enabled": true,
+    "funding_rate_daily": null,
+    "carry_spread_annual": 0.05,
+    "maintenance_margin": 0.005,
+    "max_leverage": 50,
+    "fallback_risk_free": 0.045,
+    "_note": "funding_rate_daily null => derived LIVE each scan from the fetched short rate (^IRX) + carry_spread_annual; set a positive number only to pin a manual override. maintenance_margin and max_leverage are venue constants.",
+    "venues_note": "synthetic equity perps via USDC/USDT from a Phantom wallet: gTrade (Base/Arbitrum), xStocks tokenized equities (Solana) collateralised on Kamino, Ostium RWA perps (Arbitrum)"
+  },
+  "data_providers": {
+    "finnhub_api_key": "",
+    "_note": "Free Finnhub key (finnhub.io/register) enables reliable earnings dates + dividend yields; falls back to yfinance when blank. Env FINNHUB_API_KEY overrides this."
   }
 }

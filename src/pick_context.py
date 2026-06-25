@@ -254,6 +254,16 @@ def context_lines(row: Dict[str, Any], today: Optional[str] = None,
         ql = quant_read_line(row)
         if ql:
             out.append(ql)
+
+        # Leverage read: risk-matched option-vs-leverage vehicle selector
+        # (display-only; single-leg directional picks only).
+        try:
+            from src.leverage_selector import leverage_vehicle_line
+            ll = leverage_vehicle_line(row)
+            if ll:
+                out.append(ll)
+        except Exception:
+            pass
     except Exception:
         pass
     return out

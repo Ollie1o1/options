@@ -1257,6 +1257,18 @@ def check_seasonality(ticker: yf.Ticker) -> Optional[float]:
 
 def get_next_earnings_date(ticker: yf.Ticker) -> Optional[datetime]:
     try:
+        # Prefer Finnhub's earnings calendar when a free key is configured —
+        # Yahoo's earnings dates are unreliable. Falls through to yfinance below
+        # when no key is present or the lookup yields nothing.
+        try:
+            from src import earnings_provider as _ep
+            _key = _ep.resolve_api_key()
+            if _key:
+                _fh = _ep.next_earnings_date(ticker.ticker, api_key=_key)
+                if _fh is not None:
+                    return _fh
+        except Exception:
+            pass
         try:
             # Earnings calendar moves quarterly — disk-cache 12h across runs.
             ed = _yf_cached(ticker.ticker, "earnings_dates_1",

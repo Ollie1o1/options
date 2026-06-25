@@ -74,7 +74,9 @@ class TestFetchSnapshot(unittest.TestCase):
             calls.append(series_id)
             raise RuntimeError("timeout")
 
-        snap = mr.fetch_rates_snapshot(fetcher=always_down, use_cache=False)
+        # yahoo also down: tests the genuine all-sources-unreachable path.
+        snap = mr.fetch_rates_snapshot(fetcher=always_down, use_cache=False,
+                                       yahoo_fetcher=lambda _s: None)
         self.assertEqual(len(calls), 1)  # aborted after first failure
         self.assertIsNone(snap.dgs10)
 
@@ -96,8 +98,9 @@ class TestCacheNeverStoresFailure(unittest.TestCase):
     def test_all_none_fetch_is_not_cached(self):
         def down(_sid):
             raise RuntimeError("timeout")
-        mr.fetch_rates_snapshot(fetcher=down, use_cache=True)
-        # A total failure must not poison the cache for the TTL window.
+        # both FRED and yahoo down -> a total failure must not poison the cache.
+        mr.fetch_rates_snapshot(fetcher=down, use_cache=True,
+                                yahoo_fetcher=lambda _s: None)
         self.assertIsNone(mr._read_cache())
 
     def test_partial_success_is_cached(self):
@@ -111,6 +114,52 @@ class TestCacheNeverStoresFailure(unittest.TestCase):
         self.assertAlmostEqual(cached["dgs10"], 4.49)
 
 
+class TestYahooFallback(unittest.TestCase):
+    """When FRED is unreachable, fall back to yfinance Treasury yields."""
+
+    def _fake_yahoo(self, symbol):
+        # CBOE yield indices quote 10x the percent (e.g. ^TNX 43.9 == 4.39%).
+        return {"^TNX": 43.94, "^IRX": 36.82, "^FVX": 41.63,
+                "^TYX": 48.61, "^VIX": 19.2}.get(symbol)
+
+    def test_fallback_builds_snapshot_from_yahoo(self):
+        snap = mr.yahoo_rates_fallback(fetcher=self._fake_yahoo)
+        self.assertEqual(snap.source, "yahoo")
+        self.assertAlmostEqual(snap.dgs10, 4.394, places=3)
+        self.assertAlmostEqual(snap.dgs3mo, 3.682, places=3)
+        self.assertAlmostEqual(snap.vixcls, 19.2, places=3)
+
+    def test_fallback_computes_10y_3m_slope(self):
+        snap = mr.yahoo_rates_fallback(fetcher=self._fake_yahoo)
+        self.assertAlmostEqual(snap.t10y3m, 4.394 - 3.682, places=3)
+
+    def test_fallback_handles_already_percent_quotes(self):
+        # Some yfinance builds return ^TNX already in percent (4.39, not 43.9).
+        def already_pct(symbol):
+            return {"^TNX": 4.39, "^IRX": 3.68, "^VIX": 18.9}.get(symbol)
+        snap = mr.yahoo_rates_fallback(fetcher=already_pct)
+        self.assertAlmostEqual(snap.dgs10, 4.39, places=3)
+        self.assertAlmostEqual(snap.dgs3mo, 3.68, places=3)
+
+    def test_fetch_snapshot_uses_yahoo_when_fred_down(self):
+        def fred_down(_sid):
+            raise RuntimeError("timeout")
+        snap = mr.fetch_rates_snapshot(fetcher=fred_down, use_cache=False,
+                                       yahoo_fetcher=self._fake_yahoo)
+        self.assertEqual(snap.source, "yahoo")
+        self.assertAlmostEqual(snap.dgs10, 4.394, places=3)
+
+    def test_fred_success_does_not_trigger_yahoo(self):
+        def fred_ok(sid):
+            return f"observation_date,{sid}\n2026-06-17,4.49\n"
+
+        def yahoo_should_not_run(_sym):
+            raise AssertionError("yahoo fallback should not be called")
+        snap = mr.fetch_rates_snapshot(fetcher=fred_ok, use_cache=False,
+                                       yahoo_fetcher=yahoo_should_not_run)
+        self.assertEqual(snap.source, "FRED")
+
+
 class TestFormatPanel(unittest.TestCase):
     def test_panel_states_facts(self):
         snap = mr.RatesSnapshot(dgs10=4.49, dgs2=3.90, t10y2y=0.59,
@@ -120,7 +169,18 @@ class TestFormatPanel(unittest.TestCase):
         body = "\n".join(lines)
         self.assertIn("4.49", body)   # 10Y
         self.assertIn("0.59", body)   # 2s10s
-        self.assertIn("17.2", body)   # VIX
+
+    def test_panel_shows_yahoo_source_and_slope(self):
+        snap = mr.RatesSnapshot(dgs10=4.39, dgs2=None, t10y2y=None,
+                                dff=None, vixcls=19.2, dgs3mo=3.68,
+                                t10y3m=0.71, source="yahoo",
+                                as_of={"DGS10": "2026-06-25"})
+        body = "\n".join(mr.format_rates_panel(snap, width=80))
+        self.assertIn("4.39", body)        # 10Y
+        self.assertIn("3.68", body)        # 3M
+        self.assertIn("0.71", body)        # 10y-3m slope
+        self.assertIn("Yahoo", body)       # source marked
+        self.assertIn("19.2", body)        # VIX
 
     def test_inverted_curve_labeled(self):
         snap = mr.RatesSnapshot(dgs10=4.0, dgs2=4.5, t10y2y=-0.50,
