@@ -3427,16 +3427,21 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     # --- Portfolio GEX Gate ---
     try:
-        from .portfolio_risk import RiskAggregator
+        from .portfolio_risk import RiskAggregator, risk_off_filters_picks
         _risk = RiskAggregator(config=config)
         _risk_off, _risk_reason = _risk.is_risk_off_required(config)
+        _filters_picks = risk_off_filters_picks(config)
         if _risk_off and verbose:
             _warn_msg = f"RISK-OFF MODE: {_risk_reason}"
+            if not _filters_picks:
+                _warn_msg += " — advisory only (picks kept for research)"
             if HAS_ENHANCED_CLI:
                 print(fmt.format_warning(_warn_msg))
             else:
                 print(f"  ⚠️  {_warn_msg}")
-        if _risk_off and not picks.empty and "abs_delta" in picks.columns:
+        # Only trim picks when enforcement is enabled; in paper/research mode the
+        # picks are validation data, so RISK-OFF stays advisory.
+        if _risk_off and _filters_picks and not picks.empty and "abs_delta" in picks.columns:
             picks = picks[picks["abs_delta"] < 0.30].copy()
     except Exception:
         pass

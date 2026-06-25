@@ -268,6 +268,7 @@
   "correlation_size_reduction": 0.5,
   "correlation_aware_sizing": true,
   "portfolio_gex_limit": 50000.0,
+  "portfolio_gex_filter_picks": false,
   "var_confidence": 0.95,
   "var_n_simulations": 10000,
   "var_jump_intensity": 2.0,

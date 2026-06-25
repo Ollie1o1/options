@@ -36,6 +36,21 @@ _IV_CACHE: dict = {}          # {key: (iv_value, timestamp)}
 _IV_CACHE_TTL = 900           # 15 minutes
 
 
+def risk_off_filters_picks(config: Optional[Dict] = None) -> bool:
+    """Whether RISK-OFF mode should FILTER the scan's picks, or just warn.
+
+    In paper/research mode the picks are data for validating the screener, not
+    live orders, so erasing them on portfolio exposure is counter-productive —
+    real risk enforcement belongs in the execution/preflight layer. Set
+    ``portfolio_gex_filter_picks: false`` in config to make RISK-OFF advisory
+    (warn but keep all picks). Defaults to True to preserve enforcement.
+    """
+    try:
+        return bool((config or {}).get("portfolio_gex_filter_picks", True))
+    except Exception:
+        return True
+
+
 class RiskAggregator:
     """Aggregate portfolio Greeks, GEX, and VaR across open paper trades."""
 
