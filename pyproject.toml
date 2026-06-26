@@ -1,5 +1,11 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path before collection so `from src...` imports
+# resolve regardless of invocation (`pytest` console script does not add cwd,
+# unlike `python -m pytest`). Without this, the alphabetically-first test
+# package collected (tests/breakout) fails with "No module named 'src'" because
+# no earlier test has yet run its sys.path bootstrap → exit 2 on CI.
+pythonpath = ["."]
 # Live-network tests carry @pytest.mark.network and are deselected in CI with
 # -m "not network". (Currently no test hits live network — the only HTTP-using
 # test, test_polygon_client, fully mocks requests — but the marker is registered
