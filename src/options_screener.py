@@ -381,6 +381,19 @@ def load_config(config_path: str = "config.json") -> Dict:
         return default_config
 
 
+def ai_scoring_disabled(config: Optional[Dict]) -> bool:
+    """True when AI scoring is turned off in config (``ai_scoring.enabled: false``).
+
+    Lets a user disable the AI ranking persistently — equivalent to passing
+    --no-ai on every run, which interactive sessions can't do. Defaults to
+    enabled (False) so absence preserves existing behavior. Never raises.
+    """
+    try:
+        return not bool((config or {}).get("ai_scoring", {}).get("enabled", True))
+    except Exception:
+        return False
+
+
 _IC_WEIGHTS_CACHE: dict | None = None
 _IC_RECALIB_RUNNING: bool = False
 _IC_RECALIB_LOCK = _threading.Lock()
@@ -4039,6 +4052,11 @@ def main():
         sys.exit(0)
 
     config = load_config("config.json")
+
+    # Config-level AI kill switch: honor ai_scoring.enabled=false as if --no-ai
+    # were passed, so the AI ranking stays off in interactive runs too.
+    if ai_scoring_disabled(config):
+        args.no_ai = True
 
     # ── Config validation ─────────────────────────────────────────────────────
     _cw = config.get("composite_weights", {})
