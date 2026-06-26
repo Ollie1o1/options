@@ -1,9 +1,11 @@
-pytest>=7.0.0
-pytest-cov>=4.0.0
+# Pinned for reproducible CI — unbounded >= let CI pull breaking new versions
+# without a code change. Bump deliberately, same discipline as requirements-lock.txt.
+pytest==9.1.1
+pytest-cov==7.1.0
 # Publishes each pytest failure as a check-run annotation (publicly readable
 # via the GitHub API even where job logs require admin auth).
-pytest-github-actions-annotate-failures>=0.2.0
-ruff
-mypy
-hypothesis
-pytest-benchmark
+pytest-github-actions-annotate-failures==0.4.2
+ruff==0.15.20
+mypy==2.1.0
+hypothesis==6.155.7
+pytest-benchmark==5.2.3
