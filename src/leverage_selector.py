@@ -95,6 +95,21 @@ def _num(v: Any) -> Optional[float]:
         return None
 
 
+_TRADING_DAYS = 252.0
+
+
+def _bs_vega_per_contract(spot: float, strike: float, T: float, iv: float,
+                          r: float) -> Optional[float]:
+    """Black-Scholes vega for one contract (100 shares), in $ per 1.0 of
+    absolute vol (i.e. multiply by a residual expressed as a vol fraction to get
+    the dollar over/under-payment). None when inputs are degenerate."""
+    if spot <= 0 or strike <= 0 or T <= 0 or iv <= 0:
+        return None
+    d1 = (math.log(spot / strike) + (r + 0.5 * iv * iv) * T) / (iv * math.sqrt(T))
+    phi = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    return spot * phi * math.sqrt(T) * 100.0
+
+
 def leverage_vehicle(row: Dict[str, Any],
                      config: Optional[Dict[str, Any]] = None,
                      rate_fetcher=None) -> Optional[Dict[str, Any]]:
@@ -148,7 +163,30 @@ def leverage_vehicle(row: Dict[str, Any],
         daily_funding, funding_annual = _daily_funding(s, rate_fetcher)
         funding_cost = notional * daily_funding * dte
 
-        vehicle = _verdict(row)
+        # Dollar vol tax skipped by going leverage: |residual| priced through
+        # BS vega. Only when IV is present (real scan rows carry it); else None
+        # and the verdict falls back to the sign threshold.
+        iv = _num(row.get("impliedVolatility"))
+        resid = _num(row.get("iv_surface_residual"))
+        vol_tax_usd = None
+        if iv is not None and iv > 0 and resid is not None:
+            rf = _live_risk_free(rate_fetcher, float(s.get("fallback_risk_free", 0.045)))
+            vega = _bs_vega_per_contract(spot, _num(row.get("strike")) or spot,
+                                         dte / 365.0, iv, rf)
+            if vega is not None:
+                vol_tax_usd = vega * resid
+
+        # Liquidation safety vs the name's own daily vol: how many daily sigmas
+        # of adverse move it takes to hit the liq wick. < ~1.5 is dangerous.
+        liq_sigma_ratio = None
+        liq_tight = False
+        if iv is not None and iv > 0:
+            daily_sigma = iv / math.sqrt(_TRADING_DAYS)
+            if daily_sigma > 0:
+                liq_sigma_ratio = liq_move_frac / daily_sigma
+                liq_tight = liq_sigma_ratio < 1.5
+
+        vehicle = _verdict(row, vol_tax_usd=vol_tax_usd, funding_cost=funding_cost)
 
         return {
             "direction": direction,
@@ -161,6 +199,9 @@ def leverage_vehicle(row: Dict[str, Any],
             "funding_cost": funding_cost,
             "funding_annual": funding_annual,
             "vehicle": vehicle,
+            "vol_tax_usd": vol_tax_usd,
+            "liq_sigma_ratio": liq_sigma_ratio,
+            "liq_tight": liq_tight,
             "premium": risk_matched_margin,
             "spot": spot,
             "dte": dte,
@@ -169,15 +210,23 @@ def leverage_vehicle(row: Dict[str, Any],
         return None
 
 
-def _verdict(row: Dict[str, Any]) -> str:
-    """LEVERAGE / OPTION / TOSS-UP from IV richness.
+def _verdict(row: Dict[str, Any], vol_tax_usd: Optional[float] = None,
+             funding_cost: Optional[float] = None) -> str:
+    """LEVERAGE / OPTION / TOSS-UP from IV richness, magnitude-aware.
 
-    Primary signal is the SVI surface residual (negative = cheap, positive = rich);
-    VRP regime nudges only when the residual is flat/absent.
+    Primary signal is the SVI surface residual (negative = cheap, positive =
+    rich). When the contract is RICH *and* we can price the trade in dollars,
+    leverage only wins if the vol tax you skip (`vol_tax_usd`) exceeds the
+    funding you'd pay (`funding_cost`) — a thin richness that funding would eat
+    is a TOSS-UP, not a leverage call. Without dollar inputs (e.g. IV missing)
+    it falls back to the sign threshold. VRP regime nudges only when the
+    residual is flat/absent.
     """
     resid = _num(row.get("iv_surface_residual"))
     if resid is not None:
         if resid >= 0.01:
+            if vol_tax_usd is not None and funding_cost is not None:
+                return "LEVERAGE" if vol_tax_usd > funding_cost else "TOSS-UP"
             return "LEVERAGE"
         if resid <= -0.01:
             return "OPTION"
@@ -209,12 +258,30 @@ def leverage_vehicle_line(row: Dict[str, Any],
         funding = (f"funding ~${v['funding_cost']:,.0f} over hold "
                    f"(live {v['funding_annual'] * 100:.1f}%/yr)")
 
+        vol_tax = v.get("vol_tax_usd")
         if v["vehicle"] == "LEVERAGE":
             tail = "IV RICH -> leverage favored: skip the vol tax; risk is the liq wick, not premium"
+            if vol_tax is not None:
+                tail = (f"IV RICH -> leverage favored: vol tax skipped ~${vol_tax:,.0f} "
+                        f"> funding ~${v['funding_cost']:,.0f}; risk is the liq wick")
         elif v["vehicle"] == "OPTION":
             tail = "IV CHEAP -> option favored: cheap convexity + defined risk"
         else:
             tail = "toss-up: option = defined risk, leverage = no theta"
+            if vol_tax is not None and vol_tax > 0:
+                tail = (f"toss-up: rich, but funding ~${v['funding_cost']:,.0f} eats the "
+                        f"~${vol_tax:,.0f} vol tax — leverage edge is washed")
+
+        # Liquidation-vs-volatility caveat: a leverage call is dangerous when the
+        # liq wick sits inside ~1.5 daily sigma of this name's own vol.
+        if v.get("liq_tight") and v.get("liq_sigma_ratio") is not None:
+            tail += (f"  [liq tight: ~{v['liq_sigma_ratio']:.1f}x daily sigma to liq"
+                     f"{' — size down' if v['vehicle'] == 'LEVERAGE' else ''}]")
+
+        # Short-DTE picks often have no SVI fit; say so rather than implying a
+        # surface-based read.
+        if _num(row.get("iv_surface_residual")) is None:
+            tail += "  (no surface fit — VRP-only read)"
 
         return f"Leverage read: {head}  |  {funding}  |  {tail}"
     except Exception:
