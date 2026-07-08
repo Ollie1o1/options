@@ -200,7 +200,28 @@ def run_catchup(db_path: str = "paper_trades.db",
             cur.setdefault("last_autolog", {})[win[0]] = today
             save_state(state_path, cur)
             ran.append(win[0])
+    # Crypto swing paper track rides the same heartbeat, but fully isolated:
+    # it runs only AFTER the options windows are marked, and any failure (crypto
+    # exchange down, import error) is swallowed so it can never touch the options
+    # cohort. Crypto is a satellite — it must never jeopardise the options gate.
+    try:
+        if _run_swing_paper() is not None:
+            ran.append("swing-paper")
+    except Exception:
+        pass
     return {"ran": ran}
+
+
+def _run_swing_paper() -> Optional[dict]:
+    """Best-effort: log/resolve the daily swing-breakout paper track. Returns the
+    summary dict, or None if nothing happened / it could not run. Never raises to
+    the caller (the caller also guards) — crypto is isolated from options."""
+    from src.leverage.paper import PaperLedger
+    from src.leverage.swing_paper import run_swing_paper, _SYMBOLS
+    from src.leverage import data as D
+    summ = run_swing_paper(list(_SYMBOLS.keys()), 1500.0, PaperLedger(),
+                           lambda k: D.load_daily(_SYMBOLS[k], days=1000))
+    return summ if (summ["opened"] or summ["closed"]) else None
 
 
 def _run_checkpoint(db_path: str, phase1_start: str) -> None:

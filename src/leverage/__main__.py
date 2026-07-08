@@ -129,6 +129,19 @@ def _cmd_swing(args):
     from . import data as D
     from . import swing as S
     syms = ["BTC", "ETH"] if args.symbol == "ALL" else [args.symbol]
+    if getattr(args, "paper", False):
+        from .paper import PaperLedger
+        from .swing_paper import run_swing_paper
+        ledger = PaperLedger()
+        summ = run_swing_paper(syms, args.equity, ledger,
+                               lambda k: D.load_daily(_SYMBOLS[k], days=args.days))
+        for sym, side, px, lev, liq in summ["opened"]:
+            print(f"  paper OPEN  {sym} {side.upper()} @ {px:,.0f}  {lev:.1f}x  liq ~{liq:,.0f}")
+        for sym, reason, px in summ["closed"]:
+            print(f"  paper CLOSE {sym} @ {px:,.0f}  ({reason})")
+        if not summ["opened"] and not summ["closed"]:
+            print("  swing paper: nothing to do (no new breakout, no open position resolved).")
+        return
     print("[strategy: daily trend-breakout | calibrated ATR-chandelier stop, no fixed TP]")
     for key in syms:
         df = D.load_daily(_SYMBOLS[key], days=args.days)
@@ -544,6 +557,7 @@ def main(argv: Optional[list] = None):
     swp.add_argument("--equity", type=float, default=1500.0)
     swp.add_argument("--days", type=int, default=1000)
     swp.add_argument("--backtest", action="store_true", help="run the walk-forward instead of the live signal")
+    swp.add_argument("--paper", action="store_true", help="log today's breakout to the perp paper ledger and resolve open swing positions")
     swp.add_argument("--allow-short", action="store_true", help="allow BTC shorts too (default: shorts ETH-only)")
     vp = sub.add_parser("validate", help="net-of-cost candidate survivor report")
     vp.add_argument("--days", type=int, default=1000)

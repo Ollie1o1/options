@@ -40,6 +40,20 @@ class PaperLedger:
                  sig.session))
             return cur.lastrowid
 
+    def open_swing_position(self, symbol: str, side: str, ts, entry: float,
+                            stop: float, qty, notional, eff_leverage) -> int:
+        """Log a daily swing-breakout entry. The swing Signal has no fixed
+        target/session, so target/liq are left null and session is tagged
+        'swing' to distinguish it from the intraday ledger rows."""
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO perp_trades (symbol, side, ts, entry, stop, target, "
+                "liq_price, qty, notional, eff_leverage, session, status) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?, 'swing', 'open')",
+                (symbol, side, str(ts), entry, stop, None, None, qty, notional,
+                 eff_leverage))
+            return cur.lastrowid
+
     def close_position(self, trade_id: int, exit_price: float,
                        reason: str) -> None:
         with self._conn() as c:
