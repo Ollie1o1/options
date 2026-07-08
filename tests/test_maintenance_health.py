@@ -76,6 +76,27 @@ class ComputeHealthTest(unittest.TestCase):
         self.assertIsNone(autolog.last_run)
         self.assertIn(rep.worst, ("STALE", "CRITICAL"))
 
+    def test_autolog_fresh_but_background_stale_does_not_claim_cohort_loss(self):
+        # auto-log current today, but checkpoint/archive long behind: the banner
+        # must NOT claim cohort days were missed, and must say auto-log is current.
+        now = date(2026, 7, 7)
+        rep = H.compute_health(_state(autolog=ALL_WINDOWS, checkpoint="2026-06-22",
+                                      track="2026-06-24", archive="2026-06-25"), now)
+        autolog = [j for j in rep.jobs if j.name == "auto-log"][0]
+        self.assertEqual(autolog.severity, "OK")
+        self.assertNotEqual(rep.worst, "OK")  # background jobs still flag
+        banner = H.health_banner(rep)
+        self.assertIn("cohort auto-log is current", banner)
+        self.assertNotIn("cohort filling missed", banner)
+
+    def test_background_jobs_capped_below_critical(self):
+        # archive 8 business days stale would be CRITICAL on raw daily cadence,
+        # but is capped at STALE so it never shouts as loud as a starving cohort.
+        now = date(2026, 7, 7)
+        rep = H.compute_health(_state(autolog=ALL_WINDOWS, archive="2026-06-25"), now)
+        archive = [j for j in rep.jobs if j.name == "chain-archive"][0]
+        self.assertEqual(archive.severity, "STALE")
+
     def test_missing_state_file_is_critical(self):
         rep = H.compute_health({}, date(2026, 7, 7))
         self.assertIn(rep.worst, ("STALE", "CRITICAL"))

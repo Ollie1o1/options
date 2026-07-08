@@ -644,6 +644,17 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
         print(f"  {header_text}")
         print("=" * width)
 
+    # Staleness guard: warn here too, since the portfolio viewer is where the
+    # book actually gets looked at. Silent when maintenance is fresh.
+    try:
+        from src.maintenance import load_state, DEFAULT_STATE_PATH
+        from src.maintenance_health import compute_health, health_banner
+        _hb = health_banner(compute_health(load_state(DEFAULT_STATE_PATH), datetime.now()))
+        if _hb:
+            print(_hb)
+    except Exception:
+        pass
+
     if not all_rows:
         msg = ("\n  No trades match this filter.\n" if (cohort or era)
                else "\n  No trades logged yet.\n")

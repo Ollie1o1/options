@@ -4168,6 +4168,18 @@ def main():
         if _maint.get("ran"):
             print(fmt.colorize(f"    (ran: {', '.join(_maint['ran'])})", fmt.Colors.DIM)
                   if HAS_ENHANCED_CLI else f"    (ran: {', '.join(_maint['ran'])})")
+        # Staleness guard: loud, escalating banner when maintenance has fallen
+        # behind (silent when fresh). Catches the machine-was-asleep case that
+        # otherwise stalls the gate invisibly.
+        try:
+            from .maintenance import load_state, DEFAULT_STATE_PATH
+            from .maintenance_health import compute_health, health_banner
+            _banner = health_banner(compute_health(load_state(DEFAULT_STATE_PATH),
+                                                   datetime.now()))
+            if _banner:
+                print(_banner)
+        except Exception:
+            pass
     except Exception as _e:
         print(f"  (startup maintenance skipped: {_e})")
 

@@ -407,6 +407,15 @@ def run_headless(db_path: str = "paper_trades.db",
 
 def main() -> None:
     import sys
+    if "--health" in sys.argv[1:]:
+        # On-demand staleness report — no scan, no network.
+        from src.maintenance_health import compute_health, health_lines, health_banner
+        rep = compute_health(load_state(DEFAULT_STATE_PATH), datetime.now())
+        print("\n".join(health_lines(rep)))
+        banner = health_banner(rep)
+        if banner:
+            print("\n" + banner)
+        return
     if "--catchup" in sys.argv[1:]:
         # Detached multi-window auto-log fired by an interactive launch.
         summary = run_catchup()

@@ -42,6 +42,13 @@ _THRESH = {
 _RANK = {"OK": 0, "WARN": 1, "STALE": 2, "CRITICAL": 3}
 _NEVER = 99  # sentinel business-day age when a job has no recorded run
 
+# Per-job severity ceiling. Only auto-log — the cohort/gate filler — can reach
+# CRITICAL; the read-only refreshes (checkpoint/archive) top out at STALE and the
+# cosmetic public publish at WARN, so a stale archive never shouts as loudly as a
+# starving cohort.
+_MAX_SEV = {"auto-log": "CRITICAL", "checkpoint": "STALE",
+            "track-record": "WARN", "chain-archive": "STALE"}
+
 
 @dataclass(frozen=True)
 class JobHealth:
@@ -106,8 +113,12 @@ def _job(name: str, cadence: str, last_run: Optional[str], today: date) -> JobHe
             last_run = None
     else:
         stale = _NEVER
+    sev = _severity(stale, cadence)
+    cap = _MAX_SEV.get(name, "CRITICAL")
+    if _RANK[sev] > _RANK[cap]:
+        sev = cap
     return JobHealth(name=name, cadence=cadence, last_run=last_run,
-                     business_days_stale=stale, severity=_severity(stale, cadence))
+                     business_days_stale=stale, severity=sev)
 
 
 def compute_health(state: dict, now) -> HealthReport:
@@ -149,15 +160,24 @@ def health_banner(report: HealthReport) -> str:
     autolog = next(j for j in report.jobs if j.name == "auto-log")
     color = _SEV_COLOR.get(report.worst, "BRIGHT_YELLOW")
     rule = "=" * 78
-    head = _c(f"⚠ AUTOMATION {report.worst} — daily maintenance has not run", color, bold=True)
-    last = autolog.last_run or "never"
-    missed = report.autolog_missed_days
-    lines = [
-        _c(rule, color),
-        "  " + head,
-        f"  auto-log last ran {last} ({autolog.business_days_stale} business days ago)",
-        f"  ≈ {missed} trading day(s) of cohort filling missed — the n≥50 gate is that far behind",
-    ]
+    lines = [_c(rule, color)]
+
+    if autolog.severity != "OK":
+        # The important case: the cohort filler itself is behind.
+        head = _c(f"⚠ AUTOMATION {report.worst} — cohort auto-log is behind", color, bold=True)
+        lines += [
+            "  " + head,
+            f"  auto-log last ran {autolog.last_run or 'never'} "
+            f"({autolog.business_days_stale} business days ago)",
+            f"  ≈ {report.autolog_missed_days} trading day(s) of cohort filling missed "
+            f"— the n≥50 gate is that far behind",
+        ]
+    else:
+        # Auto-log is current; only the background refreshes have fallen behind.
+        head = _c(f"⚠ MAINTENANCE {report.worst} — background jobs behind "
+                  f"(cohort auto-log is current)", color, bold=True)
+        lines.append("  " + head)
+
     others = [j for j in report.jobs
               if j.name != "auto-log" and j.severity != "OK"]
     for j in others:
