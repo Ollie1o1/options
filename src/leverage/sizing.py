@@ -24,7 +24,8 @@ def effective_leverage_size(equity: float, stop_distance_pct: float,
                             risk_cap: float = 0.02,
                             min_leverage: float = 2.0,
                             lev_hard_cap: float = 5.0,
-                            price: Optional[float] = None) -> Optional[Sizing]:
+                            price: Optional[float] = None,
+                            min_notional: float = 0.0) -> Optional[Sizing]:
     """Size a trade so leverage is DERIVED from the stop, not chosen.
 
     risk_frac = min(quarter-Kelly, risk_cap).
@@ -34,6 +35,10 @@ def effective_leverage_size(equity: float, stop_distance_pct: float,
     setup is un-leveraged buy-and-hold (an explicit non-goal), so it is skipped
     rather than force-sized. The preferred 3-6x band is informational (surfaced
     in the ticket); 2.5x setups are acceptable, per the spec's own example.
+
+    Returns None when the sized notional is below `min_notional` (the venue's
+    minimum order size) — a small account that cannot meet the minimum should
+    not fake a position.
     """
     if stop_distance_pct <= 0 or equity <= 0:
         return None
@@ -48,6 +53,8 @@ def effective_leverage_size(equity: float, stop_distance_pct: float,
     if eff_lev < min_leverage:
         return None  # un-leveraged -> skip
     notional = equity * eff_lev
+    if min_notional > 0.0 and notional < min_notional:
+        return None  # can't meet the venue's minimum at this risk budget
     qty = (notional / price) if price else None
     return Sizing(risk_frac=risk_frac, risk_usd=risk_frac * equity,
                   eff_leverage=eff_lev, notional=notional, qty=qty)

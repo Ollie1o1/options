@@ -92,3 +92,13 @@ Verify current chain support before use; this space moves monthly.
   assumption is the venue `carry_spread_annual` (the platform's markup over the
   base). A true live per-pair funding feed from the **gTrade subgraph** /
   xStocks APIs would replace that spread with the venue's actual quoted funding.
+
+## Crypto leverage candidate signals (2026-07-07)
+
+`python -m src.leverage validate` runs four daily-horizon candidates
+(trend_breakout, funding_contrarian, trend_carry, xsect_momentum) through a
+net-of-cost walk-forward harness over the `universe.py` set (BTC/ETH/SOL) and
+prints a PROMOTE / DEAD / UNDERPOWERED verdict each. Bar: OOS net-positive,
+PF>=1.2, survives 1.5x cost, n>=20. Nothing is wired to the live ticket / paper
+ledger yet — that is a deliberate follow-up gated on which candidates survive.
+First run (700d, 2026-07-07): all four DEAD — no candidate cleared the cost wall.

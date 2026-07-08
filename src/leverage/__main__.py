@@ -22,6 +22,11 @@ from .signals import Params, generate_signals
 from .ticket import render
 from .risk import liquidation_price, passes_liquidation_safety
 from .sizing import effective_leverage_size
+from . import universe as UNI
+from .candidates import (TrendCandidate, FundingContrarianCandidate,
+                         TrendCarryCandidate)
+from .xsect import CrossSectionalCandidate
+from .validate import evaluate, render_report
 
 _SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 _GATE_N = 100
@@ -478,6 +483,39 @@ def menu() -> None:
         handler()
 
 
+def build_reports(frames, funding, costs):
+    """Run every candidate through the harness. Pure — no network — so it is
+    unit-testable with synthetic frames."""
+    candidates = [TrendCandidate(), FundingContrarianCandidate(),
+                  TrendCarryCandidate(), CrossSectionalCandidate()]
+    return [evaluate(c, frames, funding, costs) for c in candidates]
+
+
+def _cmd_validate(args):
+    """Load the universe's daily data + funding, run every candidate through the
+    net-of-cost walk-forward harness, print the survivor table."""
+    from . import data as D
+    keys = UNI.symbols()
+    frames, funding, costs = {}, {}, {}
+    for key in keys:
+        sym = UNI.perp_symbol(key)
+        df = D.load_daily(sym, days=args.days)
+        if df is None or len(df) < 200:
+            continue
+        frames[key] = df
+        costs[key] = UNI.cost_frac(key)
+        end_ms = int(df.index[-1].timestamp() * 1000)
+        start_ms = int(df.index[0].timestamp() * 1000)
+        try:
+            raw = D.fetch_funding(sym, start_ms, end_ms)
+            funding[key] = raw["rate"] if "rate" in getattr(raw, "columns", []) else None
+        except Exception:
+            funding[key] = None
+    if not frames:
+        print("  No leverage data available."); return
+    print(render_report(build_reports(frames, funding, costs)))
+
+
 def main(argv: Optional[list] = None):
     p = argparse.ArgumentParser(prog="python -m src.leverage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -507,9 +545,12 @@ def main(argv: Optional[list] = None):
     swp.add_argument("--days", type=int, default=1000)
     swp.add_argument("--backtest", action="store_true", help="run the walk-forward instead of the live signal")
     swp.add_argument("--allow-short", action="store_true", help="allow BTC shorts too (default: shorts ETH-only)")
+    vp = sub.add_parser("validate", help="net-of-cost candidate survivor report")
+    vp.add_argument("--days", type=int, default=1000)
     args = p.parse_args(argv)
     {"signal": _cmd_signal, "backtest": _cmd_backtest, "paper": _cmd_paper,
-     "status": _cmd_status, "optimize": _cmd_optimize, "swing": _cmd_swing}[args.cmd](args)
+     "status": _cmd_status, "optimize": _cmd_optimize, "swing": _cmd_swing,
+     "validate": _cmd_validate}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -37,5 +37,28 @@ class TestEffectiveLeverageSize(unittest.TestCase):
         self.assertAlmostEqual(s.qty, 0.1, places=6)          # 6000/60000
 
 
+class TestMinNotionalGate(unittest.TestCase):
+    # stop_distance_pct=0.005 -> eff_lev=0.02/0.005=4 (in the 2-5 band, so the
+    # min_leverage early-return does NOT fire) -> notional = equity*4.
+    def test_rejects_below_min_notional(self):
+        # equity 20 -> notional 80 < $100 venue minimum -> None via the gate
+        s = effective_leverage_size(equity=20.0, stop_distance_pct=0.005,
+                                    price=60000.0, min_notional=100.0)
+        self.assertIsNone(s)
+
+    def test_allows_when_notional_meets_minimum(self):
+        # equity 5000 -> notional 20000 >= minimum -> sized
+        s = effective_leverage_size(equity=5000.0, stop_distance_pct=0.005,
+                                    price=60000.0, min_notional=100.0)
+        self.assertIsNotNone(s)
+        self.assertGreaterEqual(s.notional, 100.0)
+
+    def test_default_min_notional_is_noop(self):
+        # no min_notional passed -> unchanged behaviour
+        s = effective_leverage_size(equity=20.0, stop_distance_pct=0.005,
+                                    price=60000.0)
+        self.assertIsNotNone(s)
+
+
 if __name__ == "__main__":
     unittest.main()
