@@ -111,5 +111,45 @@ class TestGreeksByName(unittest.TestCase):
         self.assertIn("others", out)
 
 
+class TestSparkline(unittest.TestCase):
+    def test_monotonic_rising(self):
+        s = ui.sparkline([1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(ui.visible_len(s), 8)
+        self.assertTrue(s.strip()[0] in "▁▂")
+        self.assertIn("█", s)
+
+    def test_nan_becomes_space(self):
+        s = ui.sparkline([1, float("nan"), 3])
+        self.assertEqual(ui.visible_len(s), 3)
+        self.assertIn(" ", s)
+
+    def test_flat_series_midlevel(self):
+        s = ui.sparkline([5, 5, 5])
+        self.assertEqual(ui.visible_len(s), 3)
+
+    def test_empty_series(self):
+        self.assertEqual(ui.sparkline([]), "")
+
+    def test_all_nan_series(self):
+        self.assertEqual(ui.sparkline([float("nan"), None]), "  ")
+
+
+class TestBrailleChart(unittest.TestCase):
+    def test_returns_height_rows(self):
+        lines = ui.braille_chart(list(range(200)), width=40, height=5)
+        self.assertEqual(len(lines), 5)
+        # braille block chars are U+2800..U+28FF
+        joined = "".join(lines)
+        self.assertTrue(any(0x2800 <= ord(c) <= 0x28FF for c in joined))
+
+    def test_too_short_returns_empty(self):
+        self.assertEqual(ui.braille_chart([1.0], width=40, height=5), [])
+        self.assertEqual(ui.braille_chart([], width=40, height=5), [])
+
+    def test_flat_series_does_not_crash(self):
+        lines = ui.braille_chart([3.0, 3.0, 3.0, 3.0], width=20, height=4)
+        self.assertEqual(len(lines), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

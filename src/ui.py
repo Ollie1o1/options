@@ -212,6 +212,104 @@ def heat_cell(text, value, span, glyph: bool = True) -> str:
     return f"{prefix}{text}{fmt.Colors.RESET}"
 
 
+_SPARK_BARS = '▁▂▃▄▅▆▇█'
+
+
+def _is_finite(v) -> bool:
+    return v is not None and isinstance(v, (int, float)) and math.isfinite(float(v))
+
+
+def sparkline(series, style_name: str = None) -> str:
+    """Single-line block sparkline over a numeric series.
+
+    None/NaN render as a space. A flat series renders at mid-level. Empty → ''.
+    """
+    vals = list(series)
+    if not vals:
+        return ''
+    finite = [float(v) for v in vals if _is_finite(v)]
+    if not finite:
+        return ' ' * len(vals)
+    lo, hi = min(finite), max(finite)
+    span = (hi - lo) or 1.0
+    out = []
+    for v in vals:
+        if not _is_finite(v):
+            out.append(' ')
+            continue
+        idx = int(round((float(v) - lo) / span * (len(_SPARK_BARS) - 1)))
+        out.append(_SPARK_BARS[max(0, min(len(_SPARK_BARS) - 1, idx))])
+    bar = ''.join(out)
+    return fmt.style(bar, style_name) if style_name else bar
+
+
+def _downsample(vals, n):
+    """Bucket-average `vals` down to at most n points (mean per bucket)."""
+    if len(vals) <= n:
+        return vals
+    out = []
+    step = len(vals) / n
+    for i in range(n):
+        a = int(i * step)
+        b = int((i + 1) * step) or a + 1
+        chunk = vals[a:b] or vals[a:a + 1]
+        out.append(sum(chunk) / len(chunk))
+    return out
+
+
+def braille_chart(series, width: int = 72, height: int = 5, style_name: str = 'good'):
+    """Multi-row braille line chart of a 1-D numeric series.
+
+    Downsamples to fit width*2 pixels. Returns styled lines; [] if <2 finite
+    points.
+    """
+    from .visual_surface import BrailleCanvas
+    finite = [float(v) for v in series if _is_finite(v)]
+    if len(finite) < 2:
+        return []
+    pts = _downsample(finite, width * 2)
+    canvas = BrailleCanvas(width, height)
+    lo, hi = min(pts), max(pts)
+    span = (hi - lo) or 1.0
+    n = len(pts)
+    color = ''
+    if fmt.supports_color():
+        rgb = fmt._THEME_RGB.get(style_name)
+        if rgb and fmt.supports_truecolor():
+            color = fmt.rgb_fg(*rgb)
+        else:
+            color = fmt._THEME_ANSI.get(style_name, '')
+
+    def _px(i, v):
+        x = int(round(i / (n - 1) * (canvas.pw - 1)))
+        y = int(round((1 - (v - lo) / span) * (canvas.ph - 1)))
+        return x, y
+
+    def _seg(x0, y0, x1, y1):
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+        while True:
+            canvas.set_pixel(x0, y0, color)
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x0 += sx
+            if e2 < dx:
+                err += dx
+                y0 += sy
+
+    prev = _px(0, pts[0])
+    for i in range(1, n):
+        cur = _px(i, pts[i])
+        _seg(prev[0], prev[1], cur[0], cur[1])
+        prev = cur
+    return canvas.render_lines()
+
+
 class Spinner:
     """Animated single-line progress indicator for blocking work.
 
