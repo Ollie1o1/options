@@ -148,8 +148,11 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
 
         params, fit_quality = _fit_single_expiry(k, iv_valid, T)
         if params is None:
+            # Routine on thin / short-DTE expiries and already handled below by
+            # setting residuals to NaN. DEBUG, not INFO: the root logger prints
+            # bare messages at INFO, so this would interleave with the report.
             import logging
-            logging.getLogger(__name__).info(
+            logging.getLogger(__name__).debug(
                 "SVI fit failed for expiry %s (%d valid points, T=%.3f) — residuals set to NaN",
                 exp, valid.sum(), T,
             )
