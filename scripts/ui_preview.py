@@ -2,8 +2,9 @@
 """Render every display surface from fixture data — no network.
 
 Usage: FORCE_COLOR=1 PYTHONPATH=$PWD ~/.venvs/options/bin/python scripts/ui_preview.py [surface]
-Surfaces: desk | report | summary | ticket | dashboard | all (default)
+Surfaces: desk | tearsheet | report | summary | ticket | dashboard | all (default)
 """
+import os
 import sys
 
 import pandas as pd
@@ -113,12 +114,31 @@ def preview_desk():
     print(mh.health_banner(mh.compute_health(stale, date(2026, 7, 7)), width=100))
 
 
+def preview_tearsheet():
+    """Render the fixture tearsheet to a temp file and print its path. No network."""
+    import json
+    import tempfile
+    from src.tearsheet import render_html
+
+    fixture = os.path.join("tests", "fixtures", "tearsheet_nvda.json")
+    with open(fixture) as f:
+        data = json.load(f)
+    out = os.path.join(tempfile.gettempdir(), "tearsheet_preview.html")
+    with open(out, "w") as f:
+        f.write(render_html(data))
+    print("\n=== tearsheet ===")
+    print("  wrote {}".format(out))
+    print("  open with: open {}".format(out))
+
+
 def main():
     surface = sys.argv[1] if len(sys.argv) > 1 else "all"
     from src.cli_display import (print_report, print_executive_summary,
                                  print_order_ticket)
     if surface in ("desk", "all"):
         preview_desk()
+    if surface in ("tearsheet", "all"):
+        preview_tearsheet()
     if surface in ("report", "all"):
         print_report(df(), 182.40, 0.043, 3, 14, 45, mode="Discovery scan",
                      market_trend="Bullish", volatility_regime="Normal",

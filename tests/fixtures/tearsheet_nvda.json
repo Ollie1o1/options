@@ -1,0 +1,190 @@
+{
+  "context": [
+    {
+      "badge": "IC +0.03",
+      "badge_kind": "bad",
+      "label": "Quality score",
+      "value": "0.78"
+    }
+  ],
+  "cost_waterfall": [
+    [
+      "Gross edge",
+      6.0
+    ],
+    [
+      "Entry spread",
+      -9.0
+    ],
+    [
+      "Exit spread",
+      -9.0
+    ]
+  ],
+  "evidence": {
+    "as_of": "2026-06-15",
+    "cohort_n": 2,
+    "gate_decision": "GATHERING",
+    "n_oos": 2400,
+    "p_value": 0.41,
+    "pooled_ic": 0.03
+  },
+  "greeks": {
+    "delta": 0.45,
+    "gamma": 0.012,
+    "theta": -0.08,
+    "vega": 0.31
+  },
+  "liquidity": {
+    "oi": 8450,
+    "quote_freshness": "fresh",
+    "spread_pct": 0.021,
+    "volume": 1240
+  },
+  "meta": {
+    "config_sha": "4f1a9c",
+    "dte": 36,
+    "expiration": "2026-07-17",
+    "generated_at": "2026-07-09T14:22:00",
+    "mode": "Discovery scan",
+    "n_picks": 9,
+    "opt_type": "call",
+    "rank": 3,
+    "rfr": 0.043,
+    "sidecar": "nvda.json",
+    "spot": 182.4,
+    "strike": 190.0,
+    "ticker": "NVDA",
+    "vix": 17.2,
+    "vix_regime": "normal"
+  },
+  "name": {
+    "closes": [
+      180.0,
+      181.5,
+      182.4
+    ],
+    "max_pain": 185.0,
+    "oi_change": 320,
+    "pcr": 0.82,
+    "resistances": [
+      {
+        "label": "swing",
+        "level": 191.5,
+        "pct": 0.05
+      }
+    ],
+    "ret_5d": 0.023,
+    "rsi": 58.0,
+    "supports": [
+      {
+        "label": "50d MA",
+        "level": 174.2,
+        "pct": -0.045
+      }
+    ]
+  },
+  "narrative": {
+    "history": "NVDA calls: 4 trades, -$180",
+    "portfolio_fit": [
+      "3rd long-vega NVDA position"
+    ],
+    "thesis": "Momentum is constructive.",
+    "vehicle": "perp > option"
+  },
+  "panels": {
+    "context": {
+      "reason": "",
+      "status": "ok"
+    },
+    "decision": {
+      "reason": "",
+      "status": "ok"
+    },
+    "evidence": {
+      "reason": "",
+      "status": "ok"
+    },
+    "name": {
+      "reason": "",
+      "status": "ok"
+    },
+    "narrative": {
+      "reason": "",
+      "status": "ok"
+    },
+    "vol": {
+      "reason": "",
+      "status": "ok"
+    }
+  },
+  "stats": {
+    "breakeven": 194.2,
+    "max_loss": 420.0,
+    "pop": 0.62
+  },
+  "stress": {
+    "moves": [
+      -0.05,
+      0.0,
+      0.05
+    ],
+    "rows": [
+      {
+        "iv": 0.1,
+        "pnls": [
+          -288.0,
+          -12.0,
+          180.0
+        ]
+      },
+      {
+        "iv": -0.1,
+        "pnls": [
+          -612.0,
+          -240.0,
+          150.0
+        ]
+      }
+    ],
+    "worst": "-$1,240 @ -5% spot / +10pp IV"
+  },
+  "verdict": {
+    "cost": 18.0,
+    "decision": "SKIP",
+    "gross_ev": 6.0,
+    "net_ev": -12.0,
+    "reason": ""
+  },
+  "vol": {
+    "cone": [
+      {
+        "current": 0.32,
+        "median": 0.3,
+        "p25": 0.2,
+        "p75": 0.4,
+        "pctile": 0.78,
+        "window": 30
+      }
+    ],
+    "expected_move": 11.13,
+    "hv": 0.38,
+    "iv": 0.42,
+    "iv_rank": 0.41,
+    "required_move": 11.8,
+    "skew_rank": 0.83,
+    "skew_vp": 4.1,
+    "svi_residual": 0.18,
+    "term": [
+      [
+        9,
+        0.3
+      ],
+      [
+        44,
+        0.37
+      ]
+    ],
+    "vrp": 0.04
+  }
+}
