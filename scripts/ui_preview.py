@@ -76,6 +76,13 @@ def preview_desk():
         {"QQQ": [-312.0, -4.1], "SPY": [-198.0, -2.0],
          "AAPL": [-121.0, 1.2], "TSLA": [88.0, -0.6]}, width=100)
 
+    print("\n=== P&L attribution waterfall ===")
+    attrib = [{"entry_delta": 0.45, "entry_theta": -0.08, "entry_gamma": 0.012,
+               "entry_vega": 0.31, "entry_price": 5.0, "pnl_pct": 0.2,
+               "ticker": "AAPL", "strategy_name": "long_call",
+               "date": "2026-06-01", "exit_date": "2026-06-15"} for _ in range(5)]
+    check_pnl._print_pnl_attribution(attrib, {"AAPL": 190.0}, width=100)
+
     print("\n=== equity curve ===")
     trades = [{"pnl_pct": (0.12 if i % 3 else -0.18), "entry_price": 5.0,
                "ticker": "AAPL", "exit_date": f"2026-06-{(i % 28) + 1:02d}",

@@ -174,6 +174,42 @@ class TestSparkline(unittest.TestCase):
         self.assertEqual(ui.sparkline([float("nan"), None]), "  ")
 
 
+class TestWaterfall(unittest.TestCase):
+    def test_returns_a_line_per_item_plus_total(self):
+        lines = ui.waterfall([("Delta", 300.0), ("Theta", -120.0)], bar_w=20)
+        self.assertEqual(len(lines), 3)
+        self.assertIn("Delta", lines[0])
+        self.assertIn("Theta", lines[1])
+        self.assertIn("Total", lines[2])
+
+    def test_total_equals_sum_of_items(self):
+        lines = ui.waterfall([("A", 300.0), ("B", -120.0), ("C", 20.0)], bar_w=20)
+        self.assertIn("+200", lines[-1].replace(",", ""))
+
+    def test_segments_step_from_running_total(self):
+        # B starts where A ended: its bar must not begin at column zero.
+        lines = ui.waterfall([("A", 100.0), ("B", 100.0)], bar_w=20)
+        bar_a = lines[0].split("A", 1)[1]
+        bar_b = lines[1].split("B", 1)[1]
+        self.assertLess(bar_a.index("█"), bar_b.index("█"))
+
+    def test_bars_stay_within_bar_width(self):
+        lines = ui.waterfall([("A", 1000.0), ("B", -3000.0)], bar_w=16)
+        for ln in lines:
+            self.assertLessEqual(ln.count("█"), 16)
+
+    def test_all_zero_returns_empty(self):
+        self.assertEqual(ui.waterfall([("A", 0.0), ("B", 0.0)], bar_w=20), [])
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(ui.waterfall([], bar_w=20), [])
+
+    def test_every_nonzero_item_draws_at_least_one_block(self):
+        # A tiny component next to a huge one must still be visible.
+        lines = ui.waterfall([("Big", 10000.0), ("Tiny", 1.0)], bar_w=20)
+        self.assertIn("█", lines[1])
+
+
 class TestBrailleChart(unittest.TestCase):
     def test_returns_height_rows(self):
         lines = ui.braille_chart(list(range(200)), width=40, height=5)
@@ -301,6 +337,51 @@ class TestSkewRead(unittest.TestCase):
         from src import cli_display
         read = cli_display._skew_read_from_picks(self._row(iv_skew=0.04, iv_skew_rank=0.87))
         self.assertIn("87%", read)
+
+
+class TestAttributionWaterfall(ColorMixin, unittest.TestCase):
+    def _trades(self, n=5):
+        return [{
+            "entry_delta": 0.45, "entry_theta": -0.08, "entry_gamma": 0.012,
+            "entry_vega": 0.31, "entry_price": 5.0, "pnl_pct": 0.2,
+            "ticker": "AAPL", "strategy_name": "long_call",
+            "date": "2026-06-01", "exit_date": "2026-06-15",
+        } for _ in range(n)]
+
+    def _render(self, rich=True):
+        from src import check_pnl
+        with unittest.mock.patch.object(check_pnl, "HAS_FMT", rich), \
+                unittest.mock.patch.object(check_pnl, "_HAS_UI_CP", rich):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                check_pnl._print_pnl_attribution(self._trades(), {"AAPL": 190.0}, width=100)
+            return buf.getvalue()
+
+    def test_waterfall_rows_and_total(self):
+        self.force_color_on()
+        out = self._render(rich=True)
+        self.assertIn("ATTRIBUTION", out.upper())
+        for name in ("Delta", "Gamma", "Theta", "Vega", "Total"):
+            self.assertIn(name, out)
+        self.assertIn("█", out)
+
+    def test_states_that_only_theta_is_measured(self):
+        self.force_color_on()
+        out = self._render(rich=True)
+        self.assertIn("Theta is measured", out)
+        self.assertIn("Greek magnitude", out)
+
+    def test_plain_branch_keeps_numeric_lines(self):
+        out = self._render(rich=False)
+        self.assertIn("Delta:", out)
+        self.assertNotIn("█", out)
+
+    def test_no_trades_prints_nothing(self):
+        from src import check_pnl
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            check_pnl._print_pnl_attribution([], {}, width=100)
+        self.assertEqual(buf.getvalue(), "")
 
 
 class TestTermCurve(unittest.TestCase):

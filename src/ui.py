@@ -253,6 +253,52 @@ def sparkline(series, style_name: str = None) -> str:
     return fmt.style(bar, style_name) if style_name else bar
 
 
+def waterfall(items, bar_w: int = 28, total_label: str = 'Total'):
+    """Signed contribution waterfall: each bar starts where the last one ended.
+
+    `items` is [(label, value)]. Returns one line per item plus a total line.
+    Bars share one scale spanning the running total's full excursion, so segment
+    lengths are directly comparable. A non-zero item always draws >=1 block, so
+    small contributors stay visible next to large ones. [] if everything is 0.
+    """
+    items = [(str(l), float(v)) for l, v in items]
+    if not items or all(v == 0 for _, v in items):
+        return []
+
+    # Running-total excursion fixes the axis; always include the 0 baseline.
+    cum, bounds = 0.0, [0.0]
+    for _, v in items:
+        cum += v
+        bounds.append(cum)
+    lo, hi = min(bounds), max(bounds)
+    span = (hi - lo) or 1.0
+    max_abs = max(abs(v) for _, v in items) or 1.0
+    label_w = max(len(l) for l, _ in items + [(total_label, 0.0)])
+
+    def _col(x):
+        return int(round((x - lo) / span * bar_w))
+
+    def _row(label, value, start, end, style_name=None):
+        c0, c1 = _col(start), _col(end)
+        left = min(c0, c1)
+        fill = max(1, abs(c1 - c0)) if value else 1
+        left = min(left, bar_w - fill)          # never overflow the track
+        bar = ' ' * left + '█' * fill + ' ' * max(0, bar_w - left - fill)
+        if style_name:
+            bar = fmt.style(bar, style_name)
+        else:
+            bar = heat_cell(bar, value, max_abs, glyph=False)
+        return f"  {pad(label, label_w)}  {bar}  {value:>+10,.0f}"
+
+    out, run = [], 0.0
+    for label, value in items:
+        out.append(_row(label, value, run, run + value))
+        run += value
+    out.append(_row(total_label, run, 0.0, run,
+                    style_name='good' if run >= 0 else 'bad'))
+    return out
+
+
 def _downsample(vals, n):
     """Bucket-average `vals` down to at most n points (mean per bucket)."""
     if len(vals) <= n:
