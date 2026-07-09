@@ -80,5 +80,36 @@ class TestStressHeatmap(unittest.TestCase):
         self.assertNotIn("█", mild)
 
 
+class TestGreeksByName(unittest.TestCase):
+    def test_breakdown_renders_sorted_bars(self):
+        from src import check_pnl
+        rows = {"QQQ": [-312.0, -4.1], "SPY": [-198.0, -2.0], "AAPL": [-121.0, 1.2]}
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            check_pnl._print_greeks_by_ticker(rows, width=100)
+        out = buf.getvalue()
+        # Largest |vega| name appears first, all names present, delta shown.
+        self.assertLess(out.index("QQQ"), out.index("SPY"))
+        self.assertIn("AAPL", out)
+        self.assertIn("-312", out)
+        self.assertIn("VEGA BY UNDERLYING", out.upper())
+
+    def test_single_name_prints_nothing(self):
+        from src import check_pnl
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            check_pnl._print_greeks_by_ticker({"SPY": [-198.0, -2.0]}, width=100)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_overflow_names_roll_into_others(self):
+        from src import check_pnl
+        rows = {f"T{i}": [float(-100 - i), 0.5] for i in range(10)}
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            check_pnl._print_greeks_by_ticker(rows, width=100, top=8)
+        out = buf.getvalue()
+        self.assertIn("others", out)
+
+
 if __name__ == "__main__":
     unittest.main()

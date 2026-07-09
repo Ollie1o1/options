@@ -42,6 +42,9 @@ except Exception:
     fmt = None
     ui = None
 
+# `ui` is always bound above (to None on failure), so test the value, not the name.
+_HAS_UI_CP = ui is not None
+
 try:
     try:
         from .utils import is_short_position as _is_short
@@ -362,6 +365,39 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
         print(sep)
 
 
+def _print_greeks_by_ticker(by_ticker: dict, width: int, top: int = 8):
+    """Per-underlying net vega as sorted, sign-colored bars, with net delta.
+
+    Display-only. `by_ticker` maps ticker -> [vega, delta]. Silent when fewer
+    than two names carry vega (the aggregate line already says it all).
+    """
+    items = [(t, v[0], v[1]) for t, v in by_ticker.items()]
+    items = [x for x in items if abs(x[1]) > 1e-9]
+    if len(items) < 2:
+        return
+    items.sort(key=lambda x: -abs(x[1]))
+    shown = items[:top]
+    rest = items[top:]
+    max_abs = max(abs(v) for _, v, _ in shown) or 1.0
+    bar_w = 14
+
+    print()
+    if HAS_FMT and fmt and _HAS_UI_CP:
+        print(ui.rule(width, title="VEGA BY UNDERLYING — $/1% IV  (long=+ short=−)"))
+    else:
+        print("  Vega by underlying ($/1% IV):")
+    for tkr, vega, delta in shown:
+        fill = int(round(abs(vega) / max_abs * bar_w))
+        bar = "█" * fill + " " * (bar_w - fill)
+        if HAS_FMT and fmt and _HAS_UI_CP:
+            bar = ui.heat_cell(bar, vega, max_abs, glyph=False)
+        print(f"  {tkr:<6} {bar} {vega:>+8.0f}   Δ {delta:>+6.2f}")
+    if rest:
+        other_v = sum(v for _, v, _ in rest)
+        other_d = sum(d for _, _, d in rest)
+        print(f"  {'others':<6} {' ' * bar_w} {other_v:>+8.0f}   Δ {other_d:>+6.2f}")
+
+
 def _print_portfolio_greeks(open_trades: list, width: int):
     """
     Compute and display aggregate portfolio Greeks for open positions.
@@ -391,6 +427,7 @@ def _print_portfolio_greeks(open_trades: list, width: int):
     net_vega = 0.0
     net_theta = 0.0
     counted = 0
+    by_ticker: dict = {}  # ticker -> [net_vega, net_delta]
 
     for r in open_trades:
         ticker = r["ticker"]
@@ -436,6 +473,9 @@ def _print_portfolio_greeks(open_trades: list, width: int):
             net_gamma_dollar += 0.5 * row_gamma * (S * 0.01) ** 2 * mult
             net_vega         += row_vega * mult
             net_theta        += row_theta * mult
+            slot = by_ticker.setdefault(ticker, [0.0, 0.0])
+            slot[0] += row_vega * mult
+            slot[1] += row_delta
             counted += 1
         except Exception as _greeks_exc:
             logging.getLogger(__name__).debug("Greeks computation failed for position: %s", _greeks_exc)
@@ -493,6 +533,8 @@ def _print_portfolio_greeks(open_trades: list, width: int):
             print(fmt.style(warn_line, 'warn', bold=True))
         else:
             print(warn_line)
+
+    _print_greeks_by_ticker(by_ticker, width)
 
     note = f"  [{counted}/{len(open_trades)} positions, entry IV when available]"
     if HAS_FMT and fmt:
