@@ -324,5 +324,75 @@ class TestZonesThreeToFive(unittest.TestCase):
         self.assertIn("pick_context blew up", out)
 
 
+from src.tearsheet import collect  # noqa: E402
+
+
+def _row():
+    return {
+        "symbol": "NVDA", "type": "call", "strike": 190.0, "expiration": "2026-07-17",
+        "T_years": 36 / 365.0, "underlying": 182.40, "premium": 4.20,
+        "bid": 4.15, "ask": 4.24, "spread_pct": 0.021, "volume": 1240,
+        "openInterest": 8450, "impliedVolatility": 0.42, "hv_30d": 0.38,
+        "iv_percentile_30": 0.41, "delta": 0.45, "gamma": 0.012, "vega": 0.31,
+        "theta": -0.08, "prob_profit": 0.62, "max_loss": 420.0, "breakeven": 194.20,
+        "ev_per_contract": -12.0, "ev_gross_per_contract": 6.0,
+        "ev_cost_per_contract": 18.0, "iv_surface_residual": 0.18,
+        "iv_skew": 0.041, "iv_skew_rank": 0.83, "expected_move": 11.13,
+        "required_move": 11.80, "quality_score": 0.78, "rsi_14": 58.0,
+        "ret_5d": 0.023, "pcr": 0.82, "oi_change": 320, "quote_freshness": "fresh",
+        "strategy_name": "long_call",
+    }
+
+
+def _ctx():
+    return {"mode": "Discovery scan", "rank": 3, "n_picks": 9, "spot": 182.40,
+            "rfr": 0.043, "vix": 17.2, "vix_regime": "normal",
+            "config": {}, "config_sha": "4f1a9c"}
+
+
+class TestCollect(unittest.TestCase):
+    def test_build_produces_json_serialisable_data(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        json.dumps(data)   # must not raise
+
+    def test_nan_becomes_none_not_nan(self):
+        r = _row()
+        r["ev_per_contract"] = float("nan")
+        data = collect.build(r, _ctx(), slow=False)
+        self.assertIsNone(data["verdict"]["net_ev"])
+        self.assertNotIn("NaN", json.dumps(data))
+
+    def test_cost_waterfall_sums_to_net_ev(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        total = sum(v for _, v in data["cost_waterfall"])
+        self.assertAlmostEqual(total, data["verdict"]["net_ev"], places=2)
+
+    def test_context_zone_lists_the_quality_score(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        labels = [c["label"] for c in data["context"]]
+        self.assertIn("Quality score", labels)
+
+    def test_every_zone_has_a_panel_status(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        for zone in ("decision", "vol", "name", "narrative", "context"):
+            self.assertIn(zone, data["panels"])
+
+    def test_failing_builder_marks_panel_unavailable(self):
+        panels = {}
+        out = collect._safe("vol", lambda: 1 / 0, panels, default={})
+        self.assertEqual(out, {})
+        self.assertEqual(panels["vol"]["status"], "unavailable")
+        self.assertIn("division", panels["vol"]["reason"].lower())
+
+    def test_build_output_renders(self):
+        self.assertIn("<!DOCTYPE html>", R.render(collect.build(_row(), _ctx(), slow=False)))
+
+    def test_indeterminate_verdict_when_ev_is_nan(self):
+        r = _row()
+        r["ev_per_contract"] = float("nan")
+        out = R.render(collect.build(r, _ctx(), slow=False))
+        self.assertIn("INDETERMINATE", out)
+
+
 if __name__ == "__main__":
     unittest.main()
