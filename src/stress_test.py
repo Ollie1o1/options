@@ -37,6 +37,13 @@ except ImportError:
     fmt = None
 
 try:
+    from . import ui
+    _HAS_UI = True
+except ImportError:
+    ui = None
+    _HAS_UI = False
+
+try:
     from .utils import is_short_position as _is_short_position
 except ImportError:
     def _is_short_position(strategy_name: str) -> bool:  # type: ignore[misc]
@@ -468,17 +475,26 @@ def print_stress_test(
     iv_shocks = sorted(df["iv_shock"].unique())
     stock_moves = sorted(df["stock_move"].unique())
 
-    # Book value for coloring (pct_of_book threshold)
-    # Color: RED if loss >10% of book, YELLOW if 0-10% loss, GREEN if profit
-    def _cell_color(pnl_pct: float) -> str:
-        if not HAS_FMT or not fmt:
-            return ""
-        if pnl_pct < -0.10:
-            return fmt.Colors.RED
-        elif pnl_pct < 0.0:
-            return fmt.Colors.YELLOW
-        else:
-            return fmt.Colors.GREEN
+    # ── Pass 1: gather every cell's P&L to fix a shared, symmetric heat scale ──
+    # The grade is relative to the worst |P&L| on the grid, so red and green
+    # depths are magnitude-comparable rather than bucketed by a fixed threshold.
+    cells = {}  # (iv, sm) -> pnl_usd
+    min_pnl = float("inf")
+    min_scenario = None
+    max_pnl = float("-inf")
+    for iv in iv_shocks:
+        for sm in stock_moves:
+            subset = df[(df["stock_move"] == sm) & (df["iv_shock"] == iv)]
+            if subset.empty:
+                continue
+            pnl_usd = float(subset["total_pnl_usd"].iloc[0])
+            cells[(iv, sm)] = pnl_usd
+            if pnl_usd < min_pnl:
+                min_pnl = pnl_usd
+                min_scenario = (sm, iv)
+            if pnl_usd > max_pnl:
+                max_pnl = pnl_usd
+    span = max(abs(min_pnl), abs(max_pnl), 1.0) if cells else 1.0
 
     # Column header
     move_labels = [f"{int(m*100):+d}%" for m in stock_moves]
@@ -488,10 +504,7 @@ def print_stress_test(
     else:
         print(col_header)
 
-    min_pnl = float("inf")
-    min_scenario = None
-    max_pnl = float("-inf")
-
+    # ── Pass 2: render graded cells ───────────────────────────────────────────
     for iv in iv_shocks:
         # IV shocks are *additive* in vol points (sigma + dIV). Label as "pp"
         # (percentage points) so users don't read "+10%" as multiplicative ×1.10.
@@ -503,28 +516,17 @@ def print_stress_test(
             iv_label = f"IV {int(iv*100)}pp"
         row_parts = [f"  {iv_label:<12}"]
         for sm in stock_moves:
-            subset = df[(df["stock_move"] == sm) & (df["iv_shock"] == iv)]
-            if subset.empty:
+            if (iv, sm) not in cells:
                 row_parts.append(f"  {'—':>8}")
                 continue
-            pnl_usd = float(subset["total_pnl_usd"].iloc[0])
-            pnl_pct = float(subset["pnl_pct_of_book"].iloc[0])
-
-            if pnl_usd < min_pnl:
-                min_pnl = pnl_usd
-                min_scenario = (sm, iv)
-            if pnl_usd > max_pnl:
-                max_pnl = pnl_usd
-
-            # Format cell
+            pnl_usd = cells[(iv, sm)]
             if abs(pnl_usd) >= 1000:
-                cell = f"{pnl_usd:>+8,.0f}"
+                cell = f"{pnl_usd:>+7,.0f}"
             else:
-                cell = f"{pnl_usd:>+8.0f}"
-
-            color = _cell_color(pnl_pct)
-            if HAS_FMT and fmt and color:
-                row_parts.append("  " + fmt.colorize(f"{cell:>8}", color))
+                cell = f"{pnl_usd:>+7.0f}"
+            if HAS_FMT and fmt and _HAS_UI:
+                # heat_cell prefixes a 1-char shade glyph → cell stays width 8.
+                row_parts.append("  " + ui.heat_cell(cell, pnl_usd, span, glyph=True))
             else:
                 row_parts.append(f"  {cell:>8}")
 

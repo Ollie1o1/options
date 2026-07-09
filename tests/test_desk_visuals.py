@@ -70,5 +70,15 @@ class TestHeatCell(ColorOffMixin, unittest.TestCase):
         self.assertEqual(out, "+9k")
 
 
+class TestStressHeatmap(unittest.TestCase):
+    def test_worst_cell_more_saturated_than_mild(self):
+        # The larger loss must carry the denser shade glyph on a shared span.
+        span = 85000
+        worst = ui.heat_cell(" -85,909", -85909, span, glyph=True)
+        mild = ui.heat_cell(" -10,866", -10866, span, glyph=True)
+        self.assertIn("█", worst)
+        self.assertNotIn("█", mild)
+
+
 if __name__ == "__main__":
     unittest.main()
