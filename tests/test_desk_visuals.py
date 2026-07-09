@@ -246,6 +246,63 @@ class TestEquityCurve(ColorMixin, unittest.TestCase):
         self.assertEqual(self._render(self._rows(4), rich=True), "")
 
 
+class TestSkewRead(unittest.TestCase):
+    """`iv_skew` is the 25Δ risk reversal (put_IV − call_IV) computed upstream
+    from the FULL chain, then broadcast to every row of its expiry."""
+
+    def _row(self, **kw):
+        import pandas as pd
+        base = {"expiration": "2026-07-17", "impliedVolatility": 0.30,
+                "T_years": 9 / 365, "quality_score": 0.8, "iv_skew": 0.0}
+        base.update(kw)
+        return pd.DataFrame([base])
+
+    def test_put_skew_labelled(self):
+        from src import cli_display
+        read = cli_display._skew_read_from_picks(self._row(iv_skew=0.045))
+        self.assertIsNotNone(read)
+        self.assertIn("put-skew", read.lower())
+        self.assertIn("4.5", read)  # vol points
+
+    def test_call_skew_labelled(self):
+        from src import cli_display
+        read = cli_display._skew_read_from_picks(self._row(iv_skew=-0.032))
+        self.assertIn("call-skew", read.lower())
+
+    def test_near_zero_is_flat(self):
+        from src import cli_display
+        read = cli_display._skew_read_from_picks(self._row(iv_skew=0.003))
+        self.assertIn("flat", read.lower())
+
+    def test_exact_zero_is_the_not_computed_sentinel(self):
+        # options_screener seeds iv_skew=0.0 and fillna(0.0) when an expiry
+        # lacks a call or a put — that is "unknown", not "flat".
+        from src import cli_display
+        self.assertIsNone(cli_display._skew_read_from_picks(self._row(iv_skew=0.0)))
+
+    def test_missing_column_returns_none(self):
+        import pandas as pd
+        from src import cli_display
+        self.assertIsNone(cli_display._skew_read_from_picks(pd.DataFrame([{"quality_score": 1.0}])))
+        self.assertIsNone(cli_display._skew_read_from_picks(pd.DataFrame()))
+
+    def test_uses_top_pick_by_quality_score(self):
+        import pandas as pd
+        from src import cli_display
+        df = pd.DataFrame([
+            {"quality_score": 0.4, "iv_skew": -0.05},
+            {"quality_score": 0.9, "iv_skew": 0.06},   # the top pick
+        ])
+        read = cli_display._skew_read_from_picks(df)
+        self.assertIn("put-skew", read.lower())
+        self.assertIn("6.0", read)
+
+    def test_rank_appended_when_present(self):
+        from src import cli_display
+        read = cli_display._skew_read_from_picks(self._row(iv_skew=0.04, iv_skew_rank=0.87))
+        self.assertIn("87%", read)
+
+
 class TestTermCurve(unittest.TestCase):
     def test_curve_from_picks(self):
         import pandas as pd

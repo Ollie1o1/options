@@ -26,6 +26,7 @@ FIXTURE_PICK = {
     "high_premium_turnover": True, "abs_delta": 0.45,
     "quote_freshness": "fresh", "oi_change": 320,
     "iv_surface_residual": -0.18, "strategy_name": "long_call",
+    "iv_skew": 0.041, "iv_skew_rank": 0.83,
 }
 
 SECOND_PICK = dict(FIXTURE_PICK, symbol="AAPL", strike=210.0, type="put",
@@ -90,6 +91,19 @@ def preview_desk():
     ivs = [v for _, v in curve]
     print("  IV term  " + ui.sparkline(ivs) + "  " +
           " · ".join(f"{d}d {v:.0%}" for d, v in curve))
+
+    print("\n=== 25-delta skew read ===")
+    for skew, rank in ((0.045, 0.87), (-0.032, 0.12), (0.003, None)):
+        row = {"quality_score": 0.8, "iv_skew": skew}
+        if rank is not None:
+            row["iv_skew_rank"] = rank
+        print(ui.kv_line("Skew 25Δ", cli_display._skew_read_from_picks(pd.DataFrame([row]))))
+
+    print("\n=== staleness banner ===")
+    from datetime import date
+    from src import maintenance_health as mh
+    stale = {"last_autolog": {k: "2026-06-26" for k in ("ds", "sps", "ss", "ics")}}
+    print(mh.health_banner(mh.compute_health(stale, date(2026, 7, 7)), width=100))
 
 
 def main():
