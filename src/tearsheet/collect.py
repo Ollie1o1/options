@@ -4,6 +4,7 @@ The ONLY module in this package that performs IO. Everything it returns is plain
 JSON: no NaN, no numpy scalars, no pandas objects, no datetimes.
 """
 import math
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 
 _ZONE_IDS = ("decision", "vol", "name", "narrative", "context")
@@ -165,6 +166,64 @@ def _narrative_block(row, ctx):
 
     return {"thesis": thesis, "vehicle": vehicle, "portfolio_fit": fit,
             "history": history}
+
+
+def _earnings(sym):
+    """`next_earnings_date(symbol, ...)` — Finnhub with a yfinance fallback."""
+    from src.earnings_provider import next_earnings_date
+    return next_earnings_date(sym)
+
+
+def _insider(sym):
+    """`pick_context.insider_summary` wraps edgar + parse_form4 + cluster_score
+    behind a disk cache. Do NOT call src.insider.edgar directly: it has no
+    ticker-level entry point, and pick_context already owns the caching."""
+    from src.pick_context import insider_summary
+    return insider_summary(sym)
+
+
+def _news(sym):
+    """worldnews has no per-ticker pulse; `fetch_google_news` takes topics."""
+    from src.worldnews.sources import fetch_google_news
+    items = fetch_google_news([sym]) or []
+    return "; ".join(str(i.get("title", ""))[:80] for i in items[:3]) or None
+
+
+def gather_slow(sym, budget_s: float = 2.5, _fns=None):
+    """Run the networked panels concurrently under one wall-clock budget.
+
+    Returns (values, panel_status). A panel that exceeds the budget is
+    `not_fetched`; a panel that raises is `unavailable`. Those are different
+    facts and the page says which.
+
+    The pool is NOT used as a context manager: `__exit__` joins running threads,
+    which would silently blow the budget while looking correct.
+    """
+    fns = _fns if _fns is not None else {
+        "earnings": lambda: _earnings(sym),
+        "insider": lambda: _insider(sym),
+        "news": lambda: _news(sym),
+    }
+    values, panels = {}, {}
+    pool = ThreadPoolExecutor(max_workers=max(1, len(fns)))
+    try:
+        futures = {pool.submit(fn): name for name, fn in fns.items()}
+        wait(list(futures), timeout=budget_s)
+        for fut, name in futures.items():
+            if not fut.done():
+                fut.cancel()
+                panels[name] = {"status": "not_fetched",
+                                "reason": "exceeded {}s budget".format(budget_s)}
+                continue
+            try:
+                values[name] = _jsonable(fut.result(timeout=0))
+                panels[name] = {"status": "ok", "reason": ""}
+            except Exception as exc:  # noqa: BLE001
+                panels[name] = {"status": "unavailable",
+                                "reason": "{}: {}".format(type(exc).__name__, exc)}
+    finally:
+        pool.shutdown(wait=False)
+    return values, panels
 
 
 def build(row: dict, ctx: dict, slow: bool = True) -> dict:

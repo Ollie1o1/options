@@ -394,5 +394,36 @@ class TestCollect(unittest.TestCase):
         self.assertIn("INDETERMINATE", out)
 
 
+class TestSlowTier(unittest.TestCase):
+    def test_slow_panels_that_exceed_budget_are_marked_not_fetched(self):
+        import time
+        slow = {"earnings": lambda: time.sleep(5), "news": lambda: "ok"}
+        vals, panels = collect.gather_slow("NVDA", budget_s=0.4, _fns=slow)
+        self.assertEqual(panels["earnings"]["status"], "not_fetched")
+        self.assertIn("budget", panels["earnings"]["reason"])
+        self.assertEqual(panels["news"]["status"], "ok")
+        self.assertEqual(vals["news"], "ok")
+
+    def test_slow_panel_that_raises_is_unavailable_not_not_fetched(self):
+        vals, panels = collect.gather_slow(
+            "NVDA", budget_s=1.0, _fns={"insider": lambda: 1 / 0})
+        self.assertEqual(panels["insider"]["status"], "unavailable")
+
+    def test_budget_is_respected_overall(self):
+        # A `with ThreadPoolExecutor(...)` block joins running threads on exit,
+        # which would silently blow the wall-clock budget while looking correct.
+        import time
+        t0 = time.time()
+        collect.gather_slow("NVDA", budget_s=0.3,
+                            _fns={"a": lambda: time.sleep(5), "b": lambda: time.sleep(5)})
+        self.assertLess(time.time() - t0, 2.5)
+
+    def test_slow_disabled_marks_all_three_not_fetched(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        for pid in ("earnings", "insider", "news"):
+            self.assertEqual(data["panels"][pid]["status"], "not_fetched")
+            self.assertEqual(data["panels"][pid]["reason"], "disabled")
+
+
 if __name__ == "__main__":
     unittest.main()
