@@ -425,5 +425,48 @@ class TestSlowTier(unittest.TestCase):
             self.assertEqual(data["panels"][pid]["reason"], "disabled")
 
 
+import tempfile  # noqa: E402
+
+
+class TestWriteAndReRender(unittest.TestCase):
+    def test_writes_html_and_sidecar(self):
+        from src.tearsheet import write_tearsheet
+        with tempfile.TemporaryDirectory() as d:
+            html_p, json_p = write_tearsheet(_fixture(), out_dir=d)
+            self.assertTrue(os.path.exists(html_p))
+            self.assertTrue(os.path.exists(json_p))
+            with open(html_p) as f:
+                self.assertIn("<!DOCTYPE html>", f.read())
+
+    def test_sidecar_round_trips_to_identical_html(self):
+        # Reproducibility: the sidecar must regenerate the exact page.
+        from src.tearsheet import write_tearsheet
+        with tempfile.TemporaryDirectory() as d:
+            html_p, json_p = write_tearsheet(_fixture(), out_dir=d)
+            with open(json_p) as f:
+                reloaded = json.load(f)
+            with open(html_p) as f:
+                original = f.read()
+            self.assertEqual(R.render(reloaded), original)
+
+    def test_package_does_not_shadow_the_render_submodule(self):
+        # Exporting a function named `render` on the package would make
+        # `from src.tearsheet import render` yield a function, not the module.
+        import src.tearsheet as pkg
+        from src.tearsheet import render as mod
+        self.assertTrue(hasattr(pkg, "render_html"))
+        self.assertTrue(hasattr(mod, "decide_verdict"))
+
+    def test_cli_from_sidecar_writes_html_without_opening(self):
+        from src.tearsheet.__main__ import main
+        with tempfile.TemporaryDirectory() as d:
+            side = os.path.join(d, "x.json")
+            with open(side, "w") as f:
+                json.dump(_fixture(), f)
+            rc = main(["--from", side, "--no-open"])
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(os.path.join(d, "x.html")))
+
+
 if __name__ == "__main__":
     unittest.main()
