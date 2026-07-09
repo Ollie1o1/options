@@ -1223,6 +1223,32 @@ def format_iv_crosscheck_summary(df_picks: pd.DataFrame) -> Optional[str]:
     return "IV cross-check: " + ", ".join(parts)
 
 
+def _iv_term_curve_from_picks(df_picks):
+    """(dte, median_IV) per expiration, derived from the picks themselves.
+
+    This is a *delta-controlled* term structure: the picks are already filtered
+    to a delta band, so comparing their median IV across expiries is apples to
+    apples without touching the data layer. [] if <2 usable expiries.
+    """
+    if df_picks is None or df_picks.empty:
+        return []
+    if "expiration" not in df_picks.columns or "impliedVolatility" not in df_picks.columns:
+        return []
+    curve = []
+    for exp, grp in df_picks.groupby("expiration"):
+        ivs = pd.to_numeric(grp["impliedVolatility"], errors="coerce").dropna()
+        ivs = ivs[(ivs > 0.01) & (ivs < 5.0)]
+        if ivs.empty:
+            continue
+        try:
+            dte = int(round(float(grp["T_years"].iloc[0]) * 365))
+        except Exception:
+            continue
+        curve.append((dte, float(ivs.median())))
+    curve.sort(key=lambda x: x[0])
+    return curve if len(curve) >= 2 else []
+
+
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, corr_pairs: Optional[list] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
@@ -1303,6 +1329,25 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     df_picks = df_picks.copy()
     df_picks["_rank"] = df_picks["quality_score"].rank(ascending=False, method="first").astype(int)
     total_picks = len(df_picks)
+
+    # ── Term-structure sparkline (display-only) ──────────────────────────────
+    try:
+        _curve = _iv_term_curve_from_picks(df_picks)
+        if _curve and HAS_ENHANCED_CLI:
+            _ivs = [v for _, v in _curve]
+            _spark = ui.sparkline(_ivs)
+            _front, _back = _ivs[0], _ivs[-1]
+            if _back > _front * 1.02:
+                _shape = "contango"
+            elif _back < _front * 0.98:
+                _shape = "backwardation"
+            else:
+                _shape = "flat"
+            _seg = [f"{d}d {v:.0%}" for d, v in _curve]
+            print(ui.kv_line("IV term", [f"{_spark}  {_shape}",
+                                         fmt.style(" · ".join(_seg), 'muted')]))
+    except Exception:
+        pass
 
     # ── Comparison table FIRST for quick scanning ────────────────────────────
     _acct = config.get("_account_size", 0) if config else 0

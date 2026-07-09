@@ -179,5 +179,44 @@ class TestEquityCurve(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "")
 
 
+class TestTermCurve(unittest.TestCase):
+    def test_curve_from_picks(self):
+        import pandas as pd
+        from src import cli_display
+        df = pd.DataFrame([
+            {"expiration": "2026-07-17", "impliedVolatility": 0.30, "T_years": 9 / 365},
+            {"expiration": "2026-07-17", "impliedVolatility": 0.32, "T_years": 9 / 365},
+            {"expiration": "2026-08-21", "impliedVolatility": 0.36, "T_years": 44 / 365},
+        ])
+        curve = cli_display._iv_term_curve_from_picks(df)
+        self.assertEqual(len(curve), 2)
+        self.assertEqual(curve[0][0], 9)      # sorted by dte ascending
+        self.assertAlmostEqual(curve[0][1], 0.31, places=2)  # median of front
+
+    def test_single_expiry_returns_empty(self):
+        import pandas as pd
+        from src import cli_display
+        df = pd.DataFrame([
+            {"expiration": "2026-07-17", "impliedVolatility": 0.30, "T_years": 9 / 365},
+        ])
+        self.assertEqual(cli_display._iv_term_curve_from_picks(df), [])
+
+    def test_missing_columns_returns_empty(self):
+        import pandas as pd
+        from src import cli_display
+        self.assertEqual(cli_display._iv_term_curve_from_picks(pd.DataFrame()), [])
+        self.assertEqual(
+            cli_display._iv_term_curve_from_picks(pd.DataFrame([{"expiration": "2026-07-17"}])), [])
+
+    def test_absurd_ivs_filtered_out(self):
+        import pandas as pd
+        from src import cli_display
+        df = pd.DataFrame([
+            {"expiration": "2026-07-17", "impliedVolatility": 0.0, "T_years": 9 / 365},
+            {"expiration": "2026-08-21", "impliedVolatility": 9.9, "T_years": 44 / 365},
+        ])
+        self.assertEqual(cli_display._iv_term_curve_from_picks(df), [])
+
+
 if __name__ == "__main__":
     unittest.main()
