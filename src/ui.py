@@ -4,6 +4,7 @@ Primitives shared by every display surface: rules, fixed-gutter kv rows,
 banners, cards, tables, and meters. All width math is ANSI-aware — pad on
 stripped width, then emit — so colored cells never break alignment.
 """
+import math
 import re
 import sys
 import threading
@@ -152,6 +153,63 @@ def meter(pct, width: int = 16, style_name: str = None) -> str:
     filled = int(round(pct * width))
     bar = '█' * filled + '░' * (width - filled)
     return fmt.style(bar, style_name) if style_name else bar
+
+
+def _lerp(a, b, t: float):
+    """Linear-interpolate two RGB triples; t in [0,1]."""
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def _heat_prefix(value, span) -> str:
+    """ANSI fg prefix on a diverging loss→neutral→gain scale, symmetric about 0.
+
+    `span` is the |value| that saturates the color. '' when color is
+    unavailable or span <= 0.
+    """
+    if not fmt.supports_color():
+        return ''
+    try:
+        v = float(value)
+        s = float(span)
+    except (TypeError, ValueError):
+        return ''
+    if s <= 0:
+        return ''
+    t = max(-1.0, min(1.0, v / s))
+    if fmt.supports_truecolor():
+        neutral = fmt._THEME_RGB['muted']
+        if t >= 0:
+            r, g, b = _lerp(neutral, fmt._THEME_RGB['good'], t)
+        else:
+            r, g, b = _lerp(neutral, fmt._THEME_RGB['bad'], -t)
+        return fmt.rgb_fg(r, g, b)
+    if v > 0:
+        return fmt._THEME_ANSI['good']
+    if v < 0:
+        return fmt._THEME_ANSI['bad']
+    return fmt._THEME_ANSI['muted']
+
+
+_HEAT_SHADES = ' ░▒▓█'
+
+
+def heat_cell(text, value, span, glyph: bool = True) -> str:
+    """`text` colored on the diverging heat scale.
+
+    When glyph=True, prefix a shade char whose density tracks |value|/span.
+    Plain text when color is off.
+    """
+    prefix = _heat_prefix(value, span)
+    text = str(text)
+    if glyph:
+        try:
+            mag = 0.0 if float(span) <= 0 else min(1.0, abs(float(value)) / float(span))
+        except (TypeError, ValueError):
+            mag = 0.0
+        text = _HEAT_SHADES[min(4, int(round(mag * 4)))] + text
+    if not prefix:
+        return text
+    return f"{prefix}{text}{fmt.Colors.RESET}"
 
 
 class Spinner:
