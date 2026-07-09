@@ -3114,7 +3114,62 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
                 "history": None, "success": False, "error": str(e)}
 
 
-def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False):
+_MULTILEG_MODES = ("Credit Spreads", "Iron Condor", "Vertical Spreads")
+
+
+def _config_sha(config) -> str:
+    """Short content hash of the active config, for the tearsheet footer."""
+    import hashlib
+    import json as _json
+    try:
+        blob = _json.dumps(config, sort_keys=True, default=str).encode()
+        return hashlib.sha256(blob).hexdigest()[:6]
+    except Exception:
+        return "unknown"
+
+
+def offer_tearsheet(picks_df, ctx, interactive: bool, preselect=None):
+    """Offer to open an HTML tearsheet for one pick. Returns the path or None.
+
+    Automation-safe by omission: with interactive=False and no preselect this
+    returns immediately, prints nothing, and never touches input(). Cron and
+    --auto runs must never be able to block here.
+    """
+    if picks_df is None or len(picks_df) == 0:
+        return None
+    if preselect is None and not interactive:
+        return None
+    if ctx.get("mode") in _MULTILEG_MODES:
+        print("  tearsheet not supported for multi-leg structures")
+        return None
+
+    n = len(picks_df)
+    choice = preselect
+    if choice is None:
+        try:
+            raw = input("\n  Open a tearsheet?  [pick number 1-{}, Enter/n = no] > ".format(n))
+        except (EOFError, KeyboardInterrupt):
+            return None
+        raw = (raw or "").strip()
+        if not raw.isdigit():
+            return None          # any non-number is "no"; never re-prompt
+        choice = int(raw)
+    if not (1 <= int(choice) <= n):
+        return None              # out-of-range is "no", not an error
+
+    from src.tearsheet import build, write_tearsheet
+    sort_col = "quality_score" if "quality_score" in picks_df.columns else None
+    ranked = picks_df.sort_values(sort_col, ascending=False) if sort_col else picks_df
+    row = ranked.iloc[int(choice) - 1].to_dict()
+    data = build(row, dict(ctx, rank=int(choice), n_picks=n))
+    html_path, _ = write_tearsheet(data)
+    print("  tearsheet: {}".format(html_path))
+    import webbrowser
+    webbrowser.open("file://" + os.path.abspath(html_path))
+    return html_path
+
+
+def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, interactive: bool = False, tearsheet_pick: Optional[int] = None):
     # Determine mode booleans for internal logic
 
     # === LOAD CONFIGURATION ===
@@ -3578,6 +3633,18 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             num_tickers=len(tickers)
         )
 
+    # Phase 7: optional HTML tearsheet for one pick.
+    # One hook covers every single-leg mode, because they all fall through here.
+    if verbose and not picks.empty:
+        try:
+            _ts_ctx = {"mode": mode, "spot": underlying_price, "rfr": rfr,
+                       "vix": get_vix_level(), "vix_regime": volatility_regime,
+                       "config": config, "config_sha": _config_sha(config)}
+            offer_tearsheet(picks, _ts_ctx, interactive=interactive,
+                            preselect=tearsheet_pick)
+        except Exception as _ts_exc:
+            logging.getLogger(__name__).debug("tearsheet skipped: %s", _ts_exc)
+
     # Phase 5: News & Events digest — shown after picks so it doesn't interrupt the report flow
     if verbose and news_map and not picks.empty:
         print_news_panel(news_map, picks, width=WIDTH)
@@ -3939,6 +4006,10 @@ def main():
     parser.add_argument("--enforce-exits", action="store_true", help="Run exit-rule enforcement on paper_trades.db and exit (suitable for cron)")
     parser.add_argument("--ui", action="store_true", help="Launch Streamlit dashboard")
     parser.add_argument("--no-ai", action="store_true", help="Skip AI analysis after scan")
+    parser.add_argument("--tearsheet", type=int, metavar="N", default=None,
+                        help="render an HTML tearsheet for pick N and skip the prompt")
+    parser.add_argument("--no-tearsheet", action="store_true",
+                        help="never offer the tearsheet")
     parser.add_argument("--top", type=int, default=None, metavar="N", help="Run top-N cross-ticker scan and exit")
     parser.add_argument("--export", type=str, default=None, metavar="FORMAT", help="Export results to file (csv)")
     parser.add_argument("--watchlist", type=str, default=None, metavar="NAME", help="Use named watchlist from config as ticker input")
@@ -4022,6 +4093,8 @@ def main():
                 ("--export csv",   "Export top scan results to scan_results_YYYYMMDD_HHMM.csv"),
                 ("--watchlist N",  "Use named watchlist from config (liquid_large_cap, sector_etfs, high_iv, income)"),
                 ("--no-cache",    "Disable all caching (requests, AI scores, IV history)"),
+                ("--tearsheet N",  "Open an HTML tearsheet for pick N (skips the prompt)"),
+                ("--no-tearsheet", "Never offer the HTML tearsheet"),
                 ("--surface",      "Show 3D P&L risk surface for top pick (braille hi-res by default)"),
                 ("--surface-mode", "Surface render: ascii or braille (default: braille)"),
                 ("--surface-greek","Show greek surface: delta, gamma, vega, theta"),
@@ -4487,7 +4560,7 @@ def main():
                 surface_greek = getattr(args, 'surface_greek', None)
                 surface_type = surface_greek if surface_greek else 'pnl'
                 show_contours = not getattr(args, 'no_contours', False)
-                scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, custom_weights=_custom_weights, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False))
+                scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, custom_weights=_custom_weights, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False), interactive=(_interactive and not getattr(args, 'no_tearsheet', False)), tearsheet_pick=(None if getattr(args, 'no_tearsheet', False) else getattr(args, 'tearsheet', None)))
                 if scan_results is None:
                     sys.exit(0)
 

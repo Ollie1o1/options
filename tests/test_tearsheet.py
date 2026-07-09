@@ -274,11 +274,34 @@ class TestZonesThreeToFive(unittest.TestCase):
         out = R.render(_fixture())
         self.assertIn("no edge", out)
 
-    def test_high_ic_is_not_badged_no_edge(self):
+    def test_high_and_significant_ic_is_badged_has_edge(self):
         d = _fixture()
         d["evidence"] = dict(d["evidence"], pooled_ic=0.31, p_value=0.001)
         d["context"] = []          # the context badges carry their own text
-        self.assertNotIn("no edge", R.render(d))
+        out = R.render(d)
+        self.assertNotIn("no edge", out)
+        self.assertIn("has edge", out)
+        self.assertIn("statistically significant", out)
+
+    def test_high_but_insignificant_ic_is_underpowered_not_an_edge(self):
+        # The real walk-forward artifact reports IC +0.10 at p=0.48 on n=94.
+        # A large IC with a large p-value is a coin flip wearing a decimal point.
+        _txt, badge = R._ic_badge(0.10214, 0.48029)
+        self.assertIn("underpowered", badge)
+        self.assertNotIn("has edge", badge)
+
+    def test_live_evidence_values_do_not_claim_skill(self):
+        d = _fixture()
+        d["evidence"] = dict(d["evidence"], pooled_ic=0.10214, p_value=0.48029, n_oos=94)
+        out = R.render(d)
+        self.assertIn("underpowered", out)
+        self.assertIn("not significant", out)
+        self.assertNotIn("statistically significant", out)
+
+    def test_missing_p_value_never_claims_an_edge(self):
+        _txt, badge = R._ic_badge(0.31, None)
+        self.assertIn("underpowered", badge)
+        self.assertFalse(R._has_scorer_edge(0.31, None))
 
     def test_missing_evidence_fails_closed(self):
         # An absent track record is not a good track record.
@@ -290,9 +313,7 @@ class TestZonesThreeToFive(unittest.TestCase):
         self.assertIn("no edge", out)
 
     def test_missing_evidence_is_never_badged_validated_for_the_scorer(self):
-        d = _fixture()
-        d["evidence"] = dict(d["evidence"], pooled_ic=None)
-        _txt, badge = R._ic_badge(None)
+        _txt, badge = R._ic_badge(None, None)
         self.assertIn("no edge", badge)
         self.assertNotIn("has edge", badge)
 
@@ -466,6 +487,60 @@ class TestWriteAndReRender(unittest.TestCase):
             rc = main(["--from", side, "--no-open"])
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.exists(os.path.join(d, "x.html")))
+
+
+import io  # noqa: E402
+from contextlib import redirect_stdout  # noqa: E402
+
+
+class TestScreenerIntegration(unittest.TestCase):
+    def test_offer_is_silent_and_none_when_not_interactive(self):
+        import pandas as pd
+        from src.options_screener import offer_tearsheet
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            out = offer_tearsheet(pd.DataFrame([_row()]), _ctx(),
+                                  interactive=False, preselect=None)
+        self.assertIsNone(out)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_offer_never_calls_input_when_not_interactive(self):
+        import builtins
+        import pandas as pd
+        from src.options_screener import offer_tearsheet
+        original = builtins.input
+
+        def _boom(*a):
+            raise AssertionError("input() reached in non-interactive mode")
+
+        builtins.input = _boom
+        try:
+            offer_tearsheet(pd.DataFrame([_row()]), _ctx(), interactive=False, preselect=None)
+        finally:
+            builtins.input = original
+
+    def test_multileg_mode_is_refused(self):
+        import pandas as pd
+        from src.options_screener import offer_tearsheet
+        ctx = dict(_ctx(), mode="Iron Condor")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            out = offer_tearsheet(pd.DataFrame([_row()]), ctx, interactive=True, preselect=1)
+        self.assertIsNone(out)
+        self.assertIn("multi-leg", buf.getvalue())
+
+    def test_invalid_selection_is_treated_as_no(self):
+        import pandas as pd
+        from src.options_screener import offer_tearsheet
+        out = offer_tearsheet(pd.DataFrame([_row()]), _ctx(),
+                              interactive=True, preselect=99)
+        self.assertIsNone(out)
+
+    def test_empty_picks_returns_none(self):
+        import pandas as pd
+        from src.options_screener import offer_tearsheet
+        self.assertIsNone(offer_tearsheet(pd.DataFrame(), _ctx(),
+                                          interactive=True, preselect=1))
 
 
 if __name__ == "__main__":

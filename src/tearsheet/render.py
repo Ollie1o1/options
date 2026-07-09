@@ -267,34 +267,49 @@ def _zone_vol(data) -> str:
 
 
 _IC_EDGE_THRESHOLD = 0.05
+_P_VALUE_THRESHOLD = 0.05
 
 
 def _badge(text, kind) -> str:
     return '<span class="badge k-{k}">{t}</span>'.format(k=_esc(kind), t=_esc(text))
 
 
-def _ic_badge(pooled_ic):
-    """Missing evidence fails closed: an unknown IC is badged as no edge.
+def _finite_or_none(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
-    An absent track record is not a good track record.
+
+def _has_scorer_edge(pooled_ic, p_value) -> bool:
+    """An edge requires BOTH magnitude and significance.
+
+    A large IC with p=0.48 is a coin flip wearing a decimal point. The project's
+    own walk-forward reports an IC of +0.10 at p=0.48 on n=94 — reporting that as
+    'has edge' would make this panel certify the very noise it exists to expose.
     """
-    try:
-        ic = float(pooled_ic)
-    except (TypeError, ValueError):
-        ic = None
-    if ic is None or not math.isfinite(ic):
+    ic = _finite_or_none(pooled_ic)
+    p = _finite_or_none(p_value)
+    return (ic is not None and ic >= _IC_EDGE_THRESHOLD
+            and p is not None and p < _P_VALUE_THRESHOLD)
+
+
+def _ic_badge(pooled_ic, p_value=None):
+    """(display_text, badge_html). Missing evidence fails closed.
+
+    An absent track record is not a good track record. Neither is an
+    insignificant one.
+    """
+    ic = _finite_or_none(pooled_ic)
+    if ic is None:
         return "unknown", _badge("no edge", "bad")
+    txt = _num(ic, "{:+.2f}")
     if ic < _IC_EDGE_THRESHOLD:
-        return _num(ic, "{:+.2f}"), _badge("no edge", "bad")
-    return _num(ic, "{:+.2f}"), _badge("has edge", "ok")
-
-
-def _has_scorer_edge(pooled_ic) -> bool:
-    try:
-        ic = float(pooled_ic)
-    except (TypeError, ValueError):
-        return False
-    return math.isfinite(ic) and ic >= _IC_EDGE_THRESHOLD
+        return txt, _badge("no edge", "bad")
+    if _has_scorer_edge(pooled_ic, p_value):
+        return txt, _badge("has edge", "ok")
+    return txt, _badge("underpowered", "warn")
 
 
 def _zone_name(data) -> str:
@@ -319,11 +334,15 @@ def _zone_name(data) -> str:
 
 def _zone_evidence(data) -> str:
     e = data.get("evidence", {})
-    ic_txt, ic_badge = _ic_badge(e.get("pooled_ic"))
+    ic_txt, ic_badge = _ic_badge(e.get("pooled_ic"), e.get("p_value"))
     gate = _esc(e.get("gate_decision") or "UNKNOWN")
+    p_txt = _num(e.get("p_value"), "{:.3f}")
     rows = (
         '<tr><td>Scorer OOS IC</td><td class="n m">{}</td><td class="n">{}</td></tr>'.format(
             ic_txt, ic_badge),
+        '<tr><td>p-value</td><td class="n m">{}</td><td class="n mut">{}</td></tr>'.format(
+            p_txt, "significant" if _has_scorer_edge(e.get("pooled_ic"), e.get("p_value"))
+            else "not significant"),
         '<tr><td>Walk-forward n</td><td class="n m">{}</td><td class="n mut">{}</td></tr>'.format(
             _num(e.get("n_oos"), "{:,.0f}"), _esc(e.get("as_of") or "n/a")),
         '<tr><td>Cohort gate</td><td class="n m">{} / 50</td><td class="n">{}</td></tr>'.format(
@@ -331,11 +350,11 @@ def _zone_evidence(data) -> str:
         '<tr><td>Cost model</td><td class="n m">round-trip</td><td class="n">{}</td></tr>'.format(
             _badge("validated", "ok")),
     )
-    # Conditional, not hardcoded: if the scorer ever earns an edge, this panel
-    # must stop claiming it has none.
-    if _has_scorer_edge(e.get("pooled_ic")):
-        caption = ("The ranking that surfaced this pick has measured out-of-sample "
-                   "skill. The cost and Greeks arithmetic above is independent of it.")
+    # Conditional, not hardcoded — and gated on significance, not magnitude alone.
+    if _has_scorer_edge(e.get("pooled_ic"), e.get("p_value")):
+        caption = ("The ranking that surfaced this pick has statistically significant "
+                   "out-of-sample skill. The cost and Greeks arithmetic above is "
+                   "independent of it.")
     else:
         caption = ("The ranking that surfaced this pick has no demonstrated "
                    "out-of-sample skill. The cost and Greeks arithmetic above does.")
