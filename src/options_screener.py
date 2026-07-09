@@ -2106,9 +2106,15 @@ def enrich_and_score(
     if _corrected.any():
         df.loc[_corrected, "impliedVolatility"] = df.loc[_corrected, "iv_solved"]
         _ivlog = logging.getLogger(__name__)
+        # One summary line at INFO; the per-contract detail is DEBUG. The root
+        # logger prints bare messages at INFO, so a per-contract loop here spews
+        # dozens of lines through the middle of the report. Each corrected pick
+        # already carries an "IV corrected (yahoo X% → solved Y%)" provenance tag.
+        _ivlog.info("IV corrected on %d/%d contracts (Yahoo IV failed cross-check)",
+                    int(_corrected.sum()), len(df))
         for _i in df.index[_corrected]:
             try:
-                _ivlog.info(
+                _ivlog.debug(
                     "IV corrected %s %s %s: yahoo %.1f%% -> solved %.1f%%",
                     df.at[_i, "symbol"], df.at[_i, "strike"], df.at[_i, "expiration"],
                     float(df.at[_i, "iv_yahoo"]) * 100.0, float(df.at[_i, "iv_solved"]) * 100.0,

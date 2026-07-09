@@ -23,6 +23,16 @@ def visible_len(text) -> int:
     return len(_ANSI_RE.sub('', str(text)))
 
 
+def _title_style(title: str) -> str:
+    """Style a panel title as a heading, unless the caller already styled it.
+
+    Callers that need a semantic color the kit doesn't own (e.g. a severity
+    banner) pass pre-styled text; re-wrapping it would emit a dead escape.
+    """
+    title = str(title)
+    return title if _ANSI_RE.search(title) else fmt.style(title, 'heading')
+
+
 def clip(text, max_len: int, ellipsis: str = '…') -> str:
     """Truncate to max_len visible chars, preferring a word boundary.
 
@@ -58,7 +68,7 @@ def rule(width: int, title: str = None) -> str:
         return fmt.style('─' * width, 'muted')
     prefix = '─ '
     suffix_len = max(0, width - len(prefix) - visible_len(title) - 1)
-    return (fmt.style(prefix, 'muted') + fmt.style(title, 'heading')
+    return (fmt.style(prefix, 'muted') + _title_style(title)
             + ' ' + fmt.style('─' * suffix_len, 'muted'))
 
 
@@ -112,7 +122,7 @@ def card(title: str, body_lines, width: int, boxed: bool = False,
         return '\n'.join(out)
     inner = width - 4  # "│ " + body + " │"
     top_fill = max(0, width - visible_len(title) - 5)
-    top = (fmt.style('┌─ ', border) + fmt.style(title, 'heading')
+    top = (fmt.style('┌─ ', border) + _title_style(title)
            + ' ' + fmt.style('─' * top_fill + '┐', border))
     v = fmt.style('│', border)
     out = [top]
@@ -241,6 +251,52 @@ def sparkline(series, style_name: str = None) -> str:
         out.append(_SPARK_BARS[max(0, min(len(_SPARK_BARS) - 1, idx))])
     bar = ''.join(out)
     return fmt.style(bar, style_name) if style_name else bar
+
+
+def waterfall(items, bar_w: int = 28, total_label: str = 'Total'):
+    """Signed contribution waterfall: each bar starts where the last one ended.
+
+    `items` is [(label, value)]. Returns one line per item plus a total line.
+    Bars share one scale spanning the running total's full excursion, so segment
+    lengths are directly comparable. A non-zero item always draws >=1 block, so
+    small contributors stay visible next to large ones. [] if everything is 0.
+    """
+    items = [(str(l), float(v)) for l, v in items]
+    if not items or all(v == 0 for _, v in items):
+        return []
+
+    # Running-total excursion fixes the axis; always include the 0 baseline.
+    cum, bounds = 0.0, [0.0]
+    for _, v in items:
+        cum += v
+        bounds.append(cum)
+    lo, hi = min(bounds), max(bounds)
+    span = (hi - lo) or 1.0
+    max_abs = max(abs(v) for _, v in items) or 1.0
+    label_w = max(len(l) for l, _ in items + [(total_label, 0.0)])
+
+    def _col(x):
+        return int(round((x - lo) / span * bar_w))
+
+    def _row(label, value, start, end, style_name=None):
+        c0, c1 = _col(start), _col(end)
+        left = min(c0, c1)
+        fill = max(1, abs(c1 - c0)) if value else 1
+        left = min(left, bar_w - fill)          # never overflow the track
+        bar = ' ' * left + '█' * fill + ' ' * max(0, bar_w - left - fill)
+        if style_name:
+            bar = fmt.style(bar, style_name)
+        else:
+            bar = heat_cell(bar, value, max_abs, glyph=False)
+        return f"  {pad(label, label_w)}  {bar}  {value:>+10,.0f}"
+
+    out, run = [], 0.0
+    for label, value in items:
+        out.append(_row(label, value, run, run + value))
+        run += value
+    out.append(_row(total_label, run, 0.0, run,
+                    style_name='good' if run >= 0 else 'bad'))
+    return out
 
 
 def _downsample(vals, n):

@@ -1249,6 +1249,49 @@ def _iv_term_curve_from_picks(df_picks):
     return curve if len(curve) >= 2 else []
 
 
+def _skew_read_from_picks(df_picks):
+    """One-line 25Δ risk-reversal read for the top pick's expiry, or None.
+
+    `iv_skew` (put_25Δ_IV − call_25Δ_IV) is computed upstream across the *full*
+    chain and broadcast to every row of its expiry, so the picks carry a real
+    skew rather than one inferred from a handful of delta-filtered contracts.
+    Exactly 0.0 is the upstream "could not compute" sentinel (an expiry missing
+    a call or a put), not a genuinely flat surface — so it renders nothing.
+    """
+    if df_picks is None or df_picks.empty or "iv_skew" not in df_picks.columns:
+        return None
+    row = df_picks.iloc[0]
+    if "quality_score" in df_picks.columns:
+        try:
+            row = df_picks.loc[pd.to_numeric(df_picks["quality_score"],
+                                             errors="coerce").idxmax()]
+        except (ValueError, TypeError):
+            pass
+    try:
+        skew = float(row["iv_skew"])
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(skew) or skew == 0.0:
+        return None
+
+    vp = skew * 100.0  # vol points
+    if skew > 0.01:
+        label = "put-skewed (downside bid)"
+    elif skew < -0.01:
+        label = "call-skewed (upside bid)"
+    else:
+        label = "flat"
+    out = f"{vp:+.1f}vp  {label}"
+
+    rank = row.get("iv_skew_rank", None)
+    try:
+        if rank is not None and math.isfinite(float(rank)):
+            out += f"   rank {float(rank):.0%}"
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
 def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, corr_pairs: Optional[list] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
@@ -1346,6 +1389,14 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             _seg = [f"{d}d {v:.0%}" for d, v in _curve]
             print(ui.kv_line("IV term", [f"{_spark}  {_shape}",
                                          fmt.style(" · ".join(_seg), 'muted')]))
+    except Exception:
+        pass
+
+    # ── 25Δ skew read (display-only) ─────────────────────────────────────────
+    try:
+        _skew = _skew_read_from_picks(df_picks)
+        if _skew and HAS_ENHANCED_CLI:
+            print(ui.kv_line("Skew 25Δ", _skew))
     except Exception:
         pass
 

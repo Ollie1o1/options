@@ -350,14 +350,32 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             return ui.kv_line(name.rstrip(':'), val_str)
         return f"    {name:<8} {sign}${abs(val):>8.0f}  ({pct:>+5.0f}%)"
 
-    print(_attr_line("Delta:", total_delta_pnl))
-    print(_attr_line("Gamma:", total_gamma_pnl))
-    print(_attr_line("Theta:", total_theta_pnl))
-    print(_attr_line("Vega:", total_vega_pnl))
+    components = [
+        ("Delta", total_delta_pnl),
+        ("Gamma", total_gamma_pnl),
+        ("Theta", total_theta_pnl),
+        ("Vega", total_vega_pnl),
+    ]
 
     residual = total_actual_pnl - (total_delta_pnl + total_gamma_pnl + total_theta_pnl + total_vega_pnl)
     if abs(residual) > 1.0:
-        print(_attr_line("Other:", residual))
+        components.append(("Other", residual))
+
+    rows = ui.waterfall(components, bar_w=min(30, max(12, width - 40))) \
+        if (HAS_FMT and fmt and _HAS_UI_CP) else []
+    if rows:
+        for ln in rows:
+            print(ln)
+        # Theta is measured (daily theta x days held); delta/gamma/vega are NOT.
+        # Entry/exit spot is not stored, so `actual - theta` is split across them
+        # in proportion to Greek magnitude. Say so rather than implying a
+        # measured decomposition.
+        print(fmt.style(
+            "  Theta is measured; Δ/Γ/Vega split the remainder by "
+            "Greek magnitude (entry/exit spot not stored).", 'muted'))
+    else:
+        for _name, _val in components:
+            print(_attr_line(_name + ":", _val))
 
     if HAS_FMT and fmt:
         print(ui.rule(width))
