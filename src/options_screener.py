@@ -3161,7 +3161,10 @@ def offer_tearsheet(picks_df, ctx, interactive: bool, preselect=None):
     sort_col = "quality_score" if "quality_score" in picks_df.columns else None
     ranked = picks_df.sort_values(sort_col, ascending=False) if sort_col else picks_df
     row = ranked.iloc[int(choice) - 1].to_dict()
-    data = build(row, dict(ctx, rank=int(choice), n_picks=n))
+    # Sibling picks give the tearsheet a real IV term structure (>=2 expiries on
+    # this name). A single row can only ever produce one point, which is not a curve.
+    siblings = ranked.to_dict("records")
+    data = build(row, dict(ctx, rank=int(choice), n_picks=n, sibling_rows=siblings))
     html_path, _ = write_tearsheet(data)
     print("  tearsheet: {}".format(html_path))
     import webbrowser

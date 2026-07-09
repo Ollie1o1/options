@@ -543,5 +543,178 @@ class TestScreenerIntegration(unittest.TestCase):
                                           interactive=True, preselect=1))
 
 
+def _fixture_full(**over):
+    d = _fixture()
+    d["greeks_full"] = {
+        "first": {"delta": 0.45, "gamma": 0.012, "vega": 0.31, "theta": -0.08},
+        "second": {"rho": -0.021, "vanna": 0.0043, "charm": -0.0011},
+        "dollar": {"vega_dollar": 31.0, "gamma_theta_ratio": 0.15,
+                   "theta_burn_rate": 0.019, "abs_delta": 0.45},
+    }
+    d["quote"] = {"premium": 4.20, "bid": 4.15, "ask": 4.24, "mid": 4.195,
+                  "spread_pct": 0.021, "volume": 1240, "oi": 8450, "oi_change": 320,
+                  "liquidity_flag": "GOOD", "spread_flag": "OK",
+                  "quote_freshness": "fresh", "iv_confidence": "high",
+                  "iv_surface_confidence": 0.91, "prob_touch": 0.78,
+                  "rr_ratio": 2.1, "annualized_return": 0.34, "be_dist_pct": 0.052,
+                  "max_pain_dist_pct": 0.014, "gamma_pin_dist_pct": 0.028,
+                  "strategy_name": "long_call"}
+    d["ticket"] = {"entry_price": 4.20, "profit_target": 6.30, "stop_loss": 2.52,
+                   "breakeven": 194.20, "max_loss": 420.0, "potential_profit": 210.0,
+                   "risk_reward_ratio": 0.5, "guidance": "Use a limit at mid."}
+    d["events"] = {"earnings": "2026-07-30",
+                   "insider": {"n_buyers": 2, "n_buys": 3, "buy_value": 1.2e6,
+                               "sell_value": 8.7e7, "score": 0.1,
+                               "label": "net selling", "window_days": 90},
+                   "news": ["Apple secures chip deal", "Apple analyst raises target"]}
+    d["narrative"] = dict(d["narrative"],
+                          thesis_caveat="rests on seasonal — see zone V, no demonstrated edge",
+                          history={"n": 4, "win_rate": 0.25, "avg_pnl_pct": -0.09})
+    d["name"] = dict(d["name"], uoa={"n_unusual": 12, "net_call_share": 0.61,
+                                     "call_oi_added": 53105.0, "put_oi_added": 55789.0,
+                                     "date": "2026-07-09"})
+    d["panels"] = dict(d["panels"], **{k: {"status": "ok", "reason": ""}
+                                       for k in ("earnings", "insider", "news")})
+    for k, v in over.items():
+        d[k] = v
+    return d
+
+
+def _pane(html, name):
+    """Extract one tab pane's markup, so assertions can't be satisfied by the
+    Raw tab's JSON dump of the whole snapshot."""
+    start = html.index('<div class="tabpane tp-{}">'.format(name))
+    end = html.index('<div class="tabpane', start + 10) if '<div class="tabpane' in html[start + 10:] \
+        else html.index('</div><div class="demote"', start)
+    return html[start:end]
+
+
+class TestDetailDeck(unittest.TestCase):
+    def test_all_five_tabs_render(self):
+        out = R.render(_fixture_full())
+        for pane in ("tp-greeks", "tp-execution", "tp-chain", "tp-events", "tp-raw"):
+            self.assertIn(pane, out)
+
+    def test_tabs_are_pure_css_no_javascript(self):
+        out = R.render(_fixture_full())
+        self.assertIn('type="radio" name="tsdeck"', out)
+        self.assertNotIn('onclick="showTab', out)
+
+    def test_second_order_greeks_are_shown(self):
+        out = R.render(_fixture_full())
+        for label in ("rho", "vanna", "charm", "Vega $/1% IV"):
+            self.assertIn(label, out)
+
+    def test_order_ticket_and_exit_plan_present(self):
+        out = R.render(_fixture_full())
+        self.assertIn("Order ticket", out)
+        self.assertIn("Exit plan", out)
+        self.assertIn("Profit target", out)
+        self.assertIn("Stop loss", out)
+
+    def test_events_tab_renders_the_slow_tier(self):
+        # Assert against the EVENTS pane specifically. Asserting against the whole
+        # document would be satisfied by the Raw tab's JSON dump of the sidecar.
+        pane = _pane(R.render(_fixture_full()), "events")
+        self.assertIn("2026-07-30", pane)                  # earnings
+        self.assertIn("net selling", pane)                 # insider label
+        self.assertIn("Apple secures chip deal", pane)     # news
+        self.assertIn("buyer(s)", pane)                    # formatted, not a dict repr
+
+    def test_no_raw_dict_reprs_reach_the_page(self):
+        out = R.render(_fixture_full())
+        self.assertNotIn("{'n_buyers'", out)
+        self.assertNotIn("{'call_oi_added'", out)
+        self.assertNotIn("'win_rate':", out)
+
+    def test_uoa_and_insider_are_sentences(self):
+        self.assertIn("call-led", R._fmt_uoa({"n_unusual": 12, "net_call_share": 0.61,
+                                              "call_oi_added": 1.0, "put_oi_added": 2.0}))
+        self.assertIn("buyer(s)", R._fmt_insider({"n_buyers": 2, "n_buys": 3,
+                                                  "buy_value": 1.0, "sell_value": 2.0,
+                                                  "label": "x", "window_days": 90}))
+        self.assertIn("win rate", R._fmt_history({"n": 4, "win_rate": 0.25}))
+
+    def test_no_caveat_hides_behind_a_tab(self):
+        # The rendered evidence panel and the demoted no-edge zone must sit
+        # OUTSIDE the deck. (The Raw tab necessarily contains the sidecar's text,
+        # so this asserts on structure, not on substrings.)
+        out = R.render(_fixture_full())
+        deck_start = out.index('<div class="deck">')
+        deck_end = out.index('<div class="demote">')
+        deck = out[deck_start:deck_end]
+        self.assertNotIn('<div class="eye" style="margin-bottom:4px">Model evidence</div>', deck)
+        self.assertNotIn('class="demote"', deck)
+        # ...and they really are above it, in the always-visible scroll.
+        head = out[:deck_start]
+        self.assertIn("Model evidence", head)
+        self.assertLess(out.index("Model evidence"), deck_start)
+
+    def test_print_css_expands_every_tab(self):
+        out = R.render(_fixture_full())
+        self.assertIn("@media print", out)
+        self.assertIn(".tabpane { display:block !important;", out)
+
+    def test_a_failing_tab_does_not_kill_the_page(self):
+        d = _fixture_full()
+        d["greeks_full"] = "not-a-dict"     # will blow up _greek_rows
+        out = R.render(d)
+        self.assertIn("<!DOCTYPE html>", out)
+        self.assertIn("unavailable", out)
+
+    def test_events_tab_shows_not_fetched_placeholder(self):
+        d = _fixture_full()
+        d["panels"]["news"] = {"status": "not_fetched", "reason": "exceeded 2.5s budget"}
+        out = R.render(d)
+        self.assertIn("not fetched", out)
+        self.assertIn("exceeded 2.5s budget", out)
+
+
+class TestTermStructureHonesty(unittest.TestCase):
+    def test_single_expiry_says_why_instead_of_drawing_nothing(self):
+        d = _fixture()
+        d["vol"] = dict(d["vol"], term=[[14, 0.23]])
+        out = R.render(d)
+        self.assertIn("no term curve", out)
+        self.assertIn("need ≥2", out)
+
+    def test_two_expiries_draw_a_curve(self):
+        d = _fixture()
+        d["vol"] = dict(d["vol"], term=[[14, 0.23], [44, 0.31]])
+        out = R.render(d)
+        self.assertNotIn("no term curve", out)
+        self.assertIn("44d", out)
+
+
+class TestCollectDetail(unittest.TestCase):
+    def test_jsonable_recurses_into_dicts(self):
+        out = collect._jsonable({"a": {"b": [1, float("nan")]}})
+        self.assertEqual(out, {"a": {"b": [1, None]}})
+        self.assertIsInstance(out["a"], dict)
+
+    def test_term_curve_built_from_sibling_picks(self):
+        siblings = [dict(_row(), T_years=14 / 365, impliedVolatility=0.23),
+                    dict(_row(), T_years=44 / 365, impliedVolatility=0.31)]
+        curve = collect._term_from_siblings(_row(), {"sibling_rows": siblings})
+        self.assertEqual([c[0] for c in curve], [14, 44])
+
+    def test_term_curve_ignores_other_tickers(self):
+        siblings = [dict(_row(), symbol="MSFT", T_years=99 / 365, impliedVolatility=0.5)]
+        curve = collect._term_from_siblings(_row(), {"sibling_rows": siblings})
+        self.assertEqual([c[0] for c in curve], [36])   # falls back to the row itself
+
+    def test_thesis_caveat_flags_no_edge_signals(self):
+        self.assertIn("seasonal", collect._thesis_caveat("Strong seasonality (100% win)"))
+        self.assertIsNone(collect._thesis_caveat("Cheap vs surface, wide gamma"))
+
+    def test_build_populates_the_detail_blocks(self):
+        d = collect.build(_row(), _ctx(), slow=False)
+        self.assertIn("rho", d["greeks_full"]["second"])
+        self.assertIn("mid", d["quote"])
+        self.assertIn("entry_price", d["ticket"])
+        self.assertEqual(set(d["events"]), {"earnings", "insider", "news"})
+        json.dumps(d)
+
+
 if __name__ == "__main__":
     unittest.main()
