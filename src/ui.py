@@ -23,6 +23,16 @@ def visible_len(text) -> int:
     return len(_ANSI_RE.sub('', str(text)))
 
 
+def _title_style(title: str) -> str:
+    """Style a panel title as a heading, unless the caller already styled it.
+
+    Callers that need a semantic color the kit doesn't own (e.g. a severity
+    banner) pass pre-styled text; re-wrapping it would emit a dead escape.
+    """
+    title = str(title)
+    return title if _ANSI_RE.search(title) else fmt.style(title, 'heading')
+
+
 def clip(text, max_len: int, ellipsis: str = '…') -> str:
     """Truncate to max_len visible chars, preferring a word boundary.
 
@@ -58,7 +68,7 @@ def rule(width: int, title: str = None) -> str:
         return fmt.style('─' * width, 'muted')
     prefix = '─ '
     suffix_len = max(0, width - len(prefix) - visible_len(title) - 1)
-    return (fmt.style(prefix, 'muted') + fmt.style(title, 'heading')
+    return (fmt.style(prefix, 'muted') + _title_style(title)
             + ' ' + fmt.style('─' * suffix_len, 'muted'))
 
 
@@ -112,7 +122,7 @@ def card(title: str, body_lines, width: int, boxed: bool = False,
         return '\n'.join(out)
     inner = width - 4  # "│ " + body + " │"
     top_fill = max(0, width - visible_len(title) - 5)
-    top = (fmt.style('┌─ ', border) + fmt.style(title, 'heading')
+    top = (fmt.style('┌─ ', border) + _title_style(title)
            + ' ' + fmt.style('─' * top_fill + '┐', border))
     v = fmt.style('│', border)
     out = [top]

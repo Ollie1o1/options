@@ -27,6 +27,11 @@ try:  # colour when a TTY formatter is available; plain text otherwise
 except Exception:  # pragma: no cover
     _fmt = None
 
+try:  # the shared component kit; banner falls back to bare rules without it
+    from src import ui as _ui
+except Exception:  # pragma: no cover
+    _ui = None
+
 # The working auto-log windows that must run every RTH weekday (mirrors
 # maintenance.WORKING_AUTOLOG_WINDOWS). If any is missing from state, the
 # cohort feeder has not fully run and auto-log is treated as not-run.
@@ -140,53 +145,66 @@ def compute_health(state: dict, now) -> HealthReport:
                         autolog_missed_days=autolog.business_days_stale, now=today)
 
 
-def _c(text: str, attr: str, bold: bool = False) -> str:
+def _style(text: str, name: str, bold: bool = None) -> str:
+    """Semantic style, or plain text when formatting is unavailable."""
     if _fmt is None:
         return text
     try:
-        return _fmt.colorize(text, getattr(_fmt.Colors, attr), bold=bold)
+        return _fmt.style(text, name, bold=bold)
     except Exception:
         return text
 
 
-_SEV_COLOR = {"WARN": "BRIGHT_YELLOW", "STALE": "BRIGHT_YELLOW",
-              "CRITICAL": "BRIGHT_RED"}
+def _glyph(name: str, fallback: str = "") -> str:
+    if _fmt is None:
+        return fallback
+    return _fmt.GLYPHS.get(name, fallback)
 
 
-def health_banner(report: HealthReport) -> str:
-    """A loud, escalating banner — empty string when everything is fresh."""
+_SEV_STYLE = {"WARN": "warn", "STALE": "warn", "CRITICAL": "bad"}
+
+
+def health_banner(report: HealthReport, width: int = 100) -> str:
+    """A loud, escalating banner — empty string when everything is fresh.
+
+    Rendered as a boxed `ui.card` so the banner sits on the same component kit
+    as every other panel. Falls back to bare rules if `ui` is unavailable.
+    """
     if report.worst == "OK":
         return ""
     autolog = next(j for j in report.jobs if j.name == "auto-log")
-    color = _SEV_COLOR.get(report.worst, "BRIGHT_YELLOW")
-    rule = "=" * 78
-    lines = [_c(rule, color)]
+    sev = _SEV_STYLE.get(report.worst, "warn")
+    warn = _glyph("warn", "!")
 
+    body: List[str] = []
     if autolog.severity != "OK":
         # The important case: the cohort filler itself is behind.
-        head = _c(f"⚠ AUTOMATION {report.worst} — cohort auto-log is behind", color, bold=True)
-        lines += [
-            "  " + head,
-            f"  auto-log last ran {autolog.last_run or 'never'} "
+        title = f"{warn} AUTOMATION {report.worst} — cohort auto-log is behind"
+        body += [
+            f"auto-log last ran {autolog.last_run or 'never'} "
             f"({autolog.business_days_stale} business days ago)",
-            f"  ≈ {report.autolog_missed_days} trading day(s) of cohort filling missed "
+            f"≈ {report.autolog_missed_days} trading day(s) of cohort filling missed "
             f"— the n≥50 gate is that far behind",
         ]
     else:
         # Auto-log is current; only the background refreshes have fallen behind.
-        head = _c(f"⚠ MAINTENANCE {report.worst} — background jobs behind "
-                  f"(cohort auto-log is current)", color, bold=True)
-        lines.append("  " + head)
+        title = (f"{warn} MAINTENANCE {report.worst} — background jobs behind "
+                 f"(cohort auto-log is current)")
 
-    others = [j for j in report.jobs
-              if j.name != "auto-log" and j.severity != "OK"]
-    for j in others:
-        lines.append(f"  {j.name} last ran {j.last_run or 'never'} "
-                     f"({j.business_days_stale} business days ago) [{j.severity}]")
-    lines.append("  Launch during market hours to catch up, or run "
-                 "`python -m src.maintenance --health` for detail.")
-    lines.append(_c(rule, color))
-    return "\n".join(lines)
+    for j in report.jobs:
+        if j.name == "auto-log" or j.severity == "OK":
+            continue
+        body.append(f"{j.name} last ran {j.last_run or 'never'} "
+                    f"({j.business_days_stale} business days ago) [{j.severity}]")
+    body.append("Launch during market hours to catch up, or run "
+                "`python -m src.maintenance --health` for detail.")
+
+    styled_title = _style(title, sev, bold=True)
+    if _ui is not None:
+        # ui.card pads on visible width, so a pre-styled (ANSI) title aligns.
+        return _ui.card(styled_title, body, width, boxed=True)
+    rule = _style("─" * width, sev)
+    return "\n".join([rule, "  " + styled_title] + ["  " + b for b in body] + [rule])
 
 
 def health_lines(report: HealthReport) -> List[str]:

@@ -116,6 +116,41 @@ class TestGreeksByName(unittest.TestCase):
         self.assertIn("others", out)
 
 
+class TestPreStyledTitle(ColorMixin, unittest.TestCase):
+    """A caller-styled title must survive rule()/card() unchanged.
+
+    The staleness banner needs a severity color the kit does not own; wrapping
+    it again in 'heading' would emit a dead escape whose only effect is to be
+    immediately overridden.
+    """
+
+    def setUp(self):
+        self.force_color_on()
+
+    def test_rule_does_not_restyle_ansi_title(self):
+        styled = fmt.style("DANGER", "bad", bold=True)
+        out = ui.rule(60, title=styled)
+        self.assertIn(styled, out)
+        self.assertNotIn(fmt.style(styled, "heading"), out)
+
+    def test_card_does_not_restyle_ansi_title(self):
+        styled = fmt.style("DANGER", "bad", bold=True)
+        out = ui.card(styled, ["body"], 60, boxed=True)
+        self.assertIn(styled, out)
+        # heading's steel-blue must not appear anywhere in the title region
+        self.assertNotIn("38;2;130;170;210", out.splitlines()[0])
+
+    def test_plain_title_still_gets_heading_style(self):
+        out = ui.rule(60, title="PLAIN")
+        self.assertIn("38;2;130;170;210", out)
+
+    def test_widths_unaffected_by_prestyled_title(self):
+        plain = ui.card("DANGER", ["body"], 60, boxed=True)
+        styled = ui.card(fmt.style("DANGER", "bad"), ["body"], 60, boxed=True)
+        self.assertEqual([ui.visible_len(l) for l in plain.splitlines()],
+                         [ui.visible_len(l) for l in styled.splitlines()])
+
+
 class TestSparkline(unittest.TestCase):
     def test_monotonic_rising(self):
         s = ui.sparkline([1, 2, 3, 4, 5, 6, 7, 8])
