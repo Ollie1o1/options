@@ -12,11 +12,19 @@ _SLOW_IDS = ("earnings", "insider", "news")
 
 
 def _jsonable(v):
-    """NaN/inf -> None; numpy scalars -> python. Keeps the sidecar valid JSON."""
+    """NaN/inf -> None; numpy scalars -> python; dicts/lists recurse.
+
+    Recursion matters: without it a dict returned by e.g. `cluster_score` gets
+    str()'d into "{'n_buyers': 0, ...}" and that literal lands on the page.
+    """
     if v is None:
         return None
     if isinstance(v, bool):
         return v
+    if isinstance(v, dict):
+        return {str(k): _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple, set)):
+        return [_jsonable(x) for x in v]
     item = getattr(v, "item", None)
     if callable(item):
         try:
@@ -110,6 +118,104 @@ def _context(row):
     return out
 
 
+_NO_EDGE_TERMS = ("seasonal", "sentiment", "breakout")
+
+
+def _greeks_full(row):
+    """First order, second order, and dollar-space exposures.
+
+    The row already carries rho/vanna/charm/vega_dollar/gamma_theta_ratio; the
+    page was showing four of them.
+    """
+    return {
+        "first": {"delta": _f(row, "delta"), "gamma": _f(row, "gamma"),
+                  "vega": _f(row, "vega"), "theta": _f(row, "theta")},
+        "second": {"rho": _f(row, "rho"), "vanna": _f(row, "vanna"),
+                   "charm": _f(row, "charm")},
+        "dollar": {"vega_dollar": _f(row, "vega_dollar"),
+                   "gamma_theta_ratio": _f(row, "gamma_theta_ratio"),
+                   "theta_burn_rate": _f(row, "Theta_Burn_Rate"),
+                   "abs_delta": _f(row, "abs_delta")},
+    }
+
+
+def _quote(row):
+    """Everything needed to actually price and place the order."""
+    bid, ask = _f(row, "bid"), _f(row, "ask")
+    mid = (bid + ask) / 2.0 if (bid is not None and ask is not None) else None
+    return {"premium": _f(row, "premium"), "bid": bid, "ask": ask, "mid": mid,
+            "spread_pct": _f(row, "spread_pct"), "volume": _f(row, "volume"),
+            "oi": _f(row, "openInterest"), "oi_change": _f(row, "oi_change"),
+            "liquidity_flag": row.get("liquidity_flag"),
+            "spread_flag": row.get("spread_flag"),
+            "quote_freshness": row.get("quote_freshness"),
+            "iv_confidence": row.get("iv_confidence"),
+            "iv_surface_confidence": _f(row, "iv_surface_confidence"),
+            "prob_touch": _f(row, "prob_touch"), "rr_ratio": _f(row, "rr_ratio"),
+            "annualized_return": _f(row, "annualized_return"),
+            "be_dist_pct": _f(row, "be_dist_pct"),
+            "max_pain_dist_pct": _f(row, "max_pain_dist_pct"),
+            "gamma_pin_dist_pct": _f(row, "gamma_pin_dist_pct"),
+            "strategy_name": row.get("strategy_name")}
+
+
+def _ticket(row, config):
+    """Limit price, profit target, stop, and the execution guidance line."""
+    from src.trade_analysis import calculate_entry_exit_levels, generate_execution_guidance
+    import pandas as pd
+    series = pd.Series(row)
+    lv = calculate_entry_exit_levels(series, config or {})
+    try:
+        guidance = generate_execution_guidance(series)
+    except Exception:
+        guidance = None
+    return {k: _jsonable(lv.get(k)) for k in
+            ("entry_price", "profit_target", "stop_loss", "breakeven",
+             "max_loss", "potential_profit", "risk_reward_ratio")} | {
+        "guidance": _jsonable(guidance)}
+
+
+def _term_from_siblings(row, ctx):
+    """(dte, median IV) per expiry across the scan's other picks on this name.
+
+    A single pick yields one point, and a one-point curve cannot be drawn. Rather
+    than emit a blank chart under a heading, we return whatever we have and let
+    the renderer say why it is not a curve.
+    """
+    sym = row.get("symbol")
+    rows = [r for r in (ctx.get("sibling_rows") or []) if r.get("symbol") == sym]
+    if not rows:
+        rows = [row]
+    buckets = {}
+    for r in rows:
+        try:
+            dte = int(round(float(r.get("T_years") or 0) * 365))
+            iv = float(r.get("impliedVolatility"))
+        except (TypeError, ValueError):
+            continue
+        if not (0.01 < iv < 5.0) or dte <= 0:
+            continue
+        buckets.setdefault(dte, []).append(iv)
+    curve = [[d, sorted(v)[len(v) // 2]] for d, v in sorted(buckets.items())]
+    return curve
+
+
+def _thesis_caveat(thesis):
+    """Name the no-edge signals a thesis leans on, if any.
+
+    The live thesis read 'Strong seasonality (100% win rate)' — seasonality sits
+    in this page's own no-demonstrated-edge zone. Say so next to the sentence.
+    """
+    if not thesis:
+        return None
+    low = str(thesis).lower()
+    hits = [t for t in _NO_EDGE_TERMS if t in low]
+    if not hits:
+        return None
+    return "rests on {} — see zone V, no demonstrated edge".format(
+        " and ".join(hits))
+
+
 def _name_block(row, sym, spot, allow_network):
     """Price history + levels. With allow_network=False the chart degrades to
     empty rather than reaching for yfinance."""
@@ -124,10 +230,8 @@ def _name_block(row, sym, spot, allow_network):
     if closes:
         from src.levels import support_resistance_levels
         levels = support_resistance_levels(closes, current=spot)
-    uoa = None
     try:
-        flow = pick_context.flow_summary(sym)
-        uoa = str(flow) if flow else None
+        uoa = _jsonable(pick_context.flow_summary(sym)) or None
     except Exception:
         uoa = None
     return {"closes": closes[-130:], "supports": levels.get("supports", []),
@@ -147,25 +251,29 @@ def _narrative_block(row, ctx):
 
     try:
         from src.leverage_selector import leverage_vehicle_line
-        vehicle = leverage_vehicle_line(row, ctx.get("config"))
+        # Feed it the rate the scan already resolved. Its default rate_fetcher is
+        # a LIVE get_risk_free_rate() call — a hidden network hop inside what is
+        # documented as a tier-2 local panel.
+        rfr = ctx.get("rfr")
+        fetcher = (lambda: float(rfr)) if rfr else None
+        vehicle = leverage_vehicle_line(row, ctx.get("config"), rate_fetcher=fetcher)
     except Exception:
         vehicle = None
 
     dte = int(round(float(row.get("T_years") or 0) * 365))
     try:
-        stats = pick_context.analog_stats(
-            row.get("strategy_name", "long_call"), dte, row.get("delta"))
-        history = str(stats) if stats else None
+        history = _jsonable(pick_context.analog_stats(
+            row.get("strategy_name", "long_call"), dte, row.get("delta"))) or None
     except Exception:
         history = None
 
     try:
-        fit = list(pick_context.open_book(row.get("symbol")) or [])
+        fit = [str(x) for x in (pick_context.open_book(row.get("symbol")) or [])]
     except Exception:
         fit = []
 
-    return {"thesis": thesis, "vehicle": vehicle, "portfolio_fit": fit,
-            "history": history}
+    return {"thesis": thesis, "thesis_caveat": _thesis_caveat(thesis),
+            "vehicle": vehicle, "portfolio_fit": fit, "history": history}
 
 
 def _earnings(sym):
@@ -259,7 +367,7 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
         "iv_rank": _f(row, "iv_percentile_30"),
         "svi_residual": _f(row, "iv_surface_residual"),
         "cone": _vol_cone(sym) if slow else [],
-        "term": [[dte, iv]],
+        "term": _term_from_siblings(row, ctx),
         "skew_vp": (_f(row, "iv_skew") or 0) * 100.0,
         "skew_rank": _f(row, "iv_skew_rank"),
         "expected_move": _f(row, "expected_move"),
@@ -280,8 +388,11 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
         slow_panels = {k: {"status": "not_fetched", "reason": "disabled"}
                        for k in _SLOW_IDS}
     panels.update(slow_panels)
-    for key in _SLOW_IDS:
-        narrative[key] = slow_vals.get(key)
+    events = {key: slow_vals.get(key) for key in _SLOW_IDS}
+
+    greeks_full = _safe("greeks", lambda: _greeks_full(row), panels, {})
+    quote = _safe("quote", lambda: _quote(row), panels, {})
+    ticket = _safe("ticket", lambda: _ticket(row, ctx.get("config")), panels, {})
 
     base = "{}_{:g}{}_{}".format(sym, float(row["strike"]),
                                  str(row.get("type", "c"))[0].upper(),
@@ -307,4 +418,6 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
                       "quote_freshness": row.get("quote_freshness", "unknown")},
         "stress": stress, "vol": vol, "name": name, "narrative": narrative,
         "evidence": evidence, "context": _context(row), "panels": panels,
+        "greeks_full": greeks_full, "quote": quote, "ticket": ticket,
+        "events": events,
     }

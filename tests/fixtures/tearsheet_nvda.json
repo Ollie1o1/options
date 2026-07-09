@@ -21,6 +21,22 @@
       -9.0
     ]
   ],
+  "events": {
+    "earnings": "2026-07-30",
+    "insider": {
+      "buy_value": 1200000.0,
+      "label": "net selling",
+      "n_buyers": 2,
+      "n_buys": 3,
+      "score": 0.1,
+      "sell_value": 87000000.0,
+      "window_days": 90
+    },
+    "news": [
+      "Apple secures chip deal",
+      "Apple analyst raises target"
+    ]
+  },
   "evidence": {
     "as_of": "2026-06-15",
     "cohort_n": 2,
@@ -34,6 +50,25 @@
     "gamma": 0.012,
     "theta": -0.08,
     "vega": 0.31
+  },
+  "greeks_full": {
+    "dollar": {
+      "abs_delta": 0.45,
+      "gamma_theta_ratio": 0.15,
+      "theta_burn_rate": 0.019,
+      "vega_dollar": 31.0
+    },
+    "first": {
+      "delta": 0.45,
+      "gamma": 0.012,
+      "theta": -0.08,
+      "vega": 0.31
+    },
+    "second": {
+      "charm": -0.0011,
+      "rho": -0.021,
+      "vanna": 0.0043
+    }
   },
   "liquidity": {
     "oi": 8450,
@@ -82,14 +117,26 @@
         "level": 174.2,
         "pct": -0.045
       }
-    ]
+    ],
+    "uoa": {
+      "call_oi_added": 53105.0,
+      "date": "2026-07-09",
+      "n_unusual": 12,
+      "net_call_share": 0.61,
+      "put_oi_added": 55789.0
+    }
   },
   "narrative": {
-    "history": "NVDA calls: 4 trades, -$180",
+    "history": {
+      "avg_pnl_pct": -0.09,
+      "n": 4,
+      "win_rate": 0.25
+    },
     "portfolio_fit": [
       "3rd long-vega NVDA position"
     ],
     "thesis": "Momentum is constructive.",
+    "thesis_caveat": "rests on seasonal \u2014 see zone V, no demonstrated edge",
     "vehicle": "perp > option"
   },
   "panels": {
@@ -101,7 +148,15 @@
       "reason": "",
       "status": "ok"
     },
+    "earnings": {
+      "reason": "",
+      "status": "ok"
+    },
     "evidence": {
+      "reason": "",
+      "status": "ok"
+    },
+    "insider": {
       "reason": "",
       "status": "ok"
     },
@@ -113,10 +168,36 @@
       "reason": "",
       "status": "ok"
     },
+    "news": {
+      "reason": "",
+      "status": "ok"
+    },
     "vol": {
       "reason": "",
       "status": "ok"
     }
+  },
+  "quote": {
+    "annualized_return": 0.34,
+    "ask": 4.24,
+    "be_dist_pct": 0.052,
+    "bid": 4.15,
+    "gamma_pin_dist_pct": 0.028,
+    "iv_confidence": "high",
+    "iv_surface_confidence": 0.91,
+    "liquidity_flag": "GOOD",
+    "max_pain_dist_pct": 0.014,
+    "mid": 4.195,
+    "oi": 8450,
+    "oi_change": 320,
+    "premium": 4.2,
+    "prob_touch": 0.78,
+    "quote_freshness": "fresh",
+    "rr_ratio": 2.1,
+    "spread_flag": "OK",
+    "spread_pct": 0.021,
+    "strategy_name": "long_call",
+    "volume": 1240
   },
   "stats": {
     "breakeven": 194.2,
@@ -148,6 +229,16 @@
       }
     ],
     "worst": "-$1,240 @ -5% spot / +10pp IV"
+  },
+  "ticket": {
+    "breakeven": 194.2,
+    "entry_price": 4.2,
+    "guidance": "Use a limit at mid.",
+    "max_loss": 420.0,
+    "potential_profit": 210.0,
+    "profit_target": 6.3,
+    "risk_reward_ratio": 0.5,
+    "stop_loss": 2.52
   },
   "verdict": {
     "cost": 18.0,

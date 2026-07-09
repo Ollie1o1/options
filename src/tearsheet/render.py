@@ -8,7 +8,7 @@ import math
 
 from . import charts, theme
 
-_ZONES = ("decision", "vol", "name", "narrative", "context")
+_ZONES = ("decision", "vol", "name", "narrative", "detail", "context")
 
 
 def _esc(v) -> str:
@@ -123,6 +123,39 @@ td.n { text-align:right; }
 .toggle { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif; font-size:10px;
   letter-spacing:.1em; text-transform:uppercase; color:var(--muted); border:1px solid var(--rule);
   padding:4px 9px; border-radius:20px; background:transparent; }
+.cols3 { display:grid; grid-template-columns:repeat(3,1fr); gap:22px; }
+@media (max-width:760px){ .cols3{grid-template-columns:1fr} }
+
+/* Tabbed detail deck: radio + :checked, no JavaScript. */
+.deck { margin-top:4px; }
+.tabin { position:absolute; opacity:0; pointer-events:none; }
+.tabbar { display:flex; gap:2px; border-bottom:1px solid var(--rule); margin-bottom:12px; }
+.tablab { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif; font-size:9.5px;
+  letter-spacing:.14em; text-transform:uppercase; font-weight:600; color:var(--muted);
+  padding:7px 12px; border:1px solid transparent; border-bottom:none; border-radius:3px 3px 0 0; }
+.tablab:hover { color:var(--ink); }
+.tabpane { display:none; }
+#tab-greeks:checked ~ .tabbar label[for="tab-greeks"],
+#tab-execution:checked ~ .tabbar label[for="tab-execution"],
+#tab-chain:checked ~ .tabbar label[for="tab-chain"],
+#tab-events:checked ~ .tabbar label[for="tab-events"],
+#tab-raw:checked ~ .tabbar label[for="tab-raw"] {
+  color:var(--ink-strong); border-color:var(--rule); background:var(--panel); }
+#tab-greeks:checked ~ .tp-greeks,
+#tab-execution:checked ~ .tp-execution,
+#tab-chain:checked ~ .tp-chain,
+#tab-events:checked ~ .tp-events,
+#tab-raw:checked ~ .tp-raw { display:block; }
+.raw { font-family:ui-monospace,Menlo,monospace; font-size:10px; line-height:1.45;
+  background:var(--panel); border:1px solid var(--rule); border-radius:4px; padding:10px;
+  max-height:420px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+
+/* Paper never hides anything: printing expands every tab. */
+@media print {
+  .tabbar, .toggle { display:none; }
+  .tabpane { display:block !important; page-break-inside:avoid; margin-bottom:14px; }
+  .raw { max-height:none; }
+}
 """
 
 _JS = """
@@ -255,8 +288,15 @@ def _zone_vol(data) -> str:
                 ("VRP", _num(v.get("vrp"), "{:+.1%}")),
                 ("IV rank", _num(v.get("iv_rank"), "{:.0%}")),
                 ("vs SVI", rich))) + "</table>")
+    term = v.get("term") or []
+    if len(term) >= 2:
+        term_html = charts.term_curve(term)
+    else:
+        # A heading over a blank chart reads as "no term structure". Say why.
+        term_html = ('<div class="ph">no term curve — this scan surfaced only '
+                     'one expiry for this name (need ≥2)</div>')
     right = ('<div class="eye" style="margin-bottom:4px">Term structure &amp; skew</div>'
-             + charts.term_curve(v.get("term"))
+             + term_html
              + "<table>" + _rows((
                  ("Skew 25Δ", "{}vp".format(_num(v.get("skew_vp"), "{:+.1f}"))),
                  ("Skew rank", _num(v.get("skew_rank"), "{:.0%}")),
@@ -312,6 +352,46 @@ def _ic_badge(pooled_ic, p_value=None):
     return txt, _badge("underpowered", "warn")
 
 
+def _fmt_uoa(uoa) -> str:
+    """flow_summary() -> a sentence, not a repr of its dict."""
+    if not isinstance(uoa, dict):
+        return "n/a"
+    share = uoa.get("net_call_share")
+    lean = "n/a"
+    if isinstance(share, (int, float)):
+        lean = "call-led" if share > 0.55 else ("put-led" if share < 0.45 else "balanced")
+    return "{} unusual · {} (calls {:+,.0f} / puts {:+,.0f} OI)".format(
+        _num(uoa.get("n_unusual"), "{:,.0f}"), lean,
+        float(uoa.get("call_oi_added") or 0), float(uoa.get("put_oi_added") or 0))
+
+
+def _fmt_insider(ins) -> str:
+    """cluster_score() -> a sentence, not a repr of its dict."""
+    if not isinstance(ins, dict):
+        return "n/a"
+    return "{} · {} buyer(s) / {} buy(s) over {}d · bought {} vs sold {}".format(
+        _esc(ins.get("label") or "no signal"),
+        _num(ins.get("n_buyers"), "{:,.0f}"), _num(ins.get("n_buys"), "{:,.0f}"),
+        _num(ins.get("window_days"), "{:,.0f}"),
+        _num(ins.get("buy_value"), "${:,.0f}"), _num(ins.get("sell_value"), "${:,.0f}"))
+
+
+def _fmt_history(h) -> str:
+    """analog_stats() -> a sentence, not a repr of its dict."""
+    if not isinstance(h, dict):
+        return "no prior trades"
+    n = h.get("n") or h.get("count")
+    parts = []
+    if n is not None:
+        parts.append("{} comparable trade(s)".format(_num(n, "{:,.0f}")))
+    for key, label, fmt in (("win_rate", "win rate", "{:.0%}"),
+                            ("avg_pnl_pct", "avg", "{:+.1%}"),
+                            ("median_pnl_pct", "median", "{:+.1%}")):
+        if h.get(key) is not None:
+            parts.append("{} {}".format(label, _num(h[key], fmt)))
+    return " · ".join(parts) if parts else "no prior trades"
+
+
 def _zone_name(data) -> str:
     n = data["name"]
     left = charts.price_with_bands(n.get("closes"), n.get("supports"), n.get("resistances"))
@@ -325,7 +405,7 @@ def _zone_name(data) -> str:
     right = ('<div class="eye" style="margin-bottom:4px">Flow &amp; positioning</div><table>'
              + _rows((("Put/call ratio", _num(n.get("pcr"))),
                       ("OI change (1d)", _num(n.get("oi_change"), "{:+,.0f}")),
-                      ("Unusual activity", _esc(n.get("uoa") or "n/a")),
+                      ("Unusual activity", _fmt_uoa(n.get("uoa"))),
                       ("Max pain", _num(n.get("max_pain"))))) + "</table>")
     return ('<div class="thin"></div><h5>III &middot; The name &mdash; {t}</h5>'
             '<div class="cols"><div>{l}</div><div>{r}</div></div>').format(
@@ -374,16 +454,192 @@ def _zone_narrative(data) -> str:
     if _panel_ok(data, "narrative"):
         nar = data.get("narrative", {})
         fit = nar.get("portfolio_fit") or []
-        left = '<p class="lede">{}</p><table>'.format(_esc(nar.get("thesis")))
+        left = '<p class="lede">{}</p>'.format(_esc(nar.get("thesis")))
+        caveat = nar.get("thesis_caveat")
+        if caveat:
+            # The thesis may lean on a signal this very page marks as no-edge.
+            left += '<div class="eye" style="margin:-4px 0 8px">⚠ {}</div>'.format(_esc(caveat))
+        if fit:
+            counts = {}
+            for f in fit:
+                counts[f] = counts.get(f, 0) + 1
+            fit_txt = "{} open on this name: {}".format(
+                len(fit), ", ".join("{}×{}".format(v, k) for k, v in sorted(counts.items())))
+        else:
+            fit_txt = "no open positions on this name"
+        left += "<table>"
         left += _rows((("Vehicle verdict", nar.get("vehicle") or "n/a"),
-                       ("Portfolio fit", "; ".join(fit) if fit else "no concentration flag"),
-                       ("Your history", nar.get("history") or "no prior trades")))
+                       ("Portfolio fit", fit_txt),
+                       ("Your history", _fmt_history(nar.get("history")))))
         left += "</table>"
     else:
         left = _placeholder(data, "narrative")
     return ('<div class="thin"></div><h5>IV &middot; Narrative &amp; provenance</h5>'
             '<div class="cols"><div>{l}</div><div>{r}</div></div>').format(
                 l=left, r=_zone_evidence(data))
+
+
+def _greek_rows(data):
+    g = data.get("greeks_full") or {}
+    first, second, dollar = g.get("first", {}), g.get("second", {}), g.get("dollar", {})
+    return ("<table>" + _rows((
+        ("Δ delta", _num(first.get("delta"), "{:+.4f}")),
+        ("Γ gamma", _num(first.get("gamma"), "{:+.5f}")),
+        ("ν vega", _num(first.get("vega"), "{:+.4f}")),
+        ("Θ theta", _num(first.get("theta"), "{:+.4f}") + " /day"),
+    )) + "</table>",
+        "<table>" + _rows((
+            ("ρ rho", _num(second.get("rho"), "{:+.4f}")),
+            ("vanna", _num(second.get("vanna"), "{:+.5f}")),
+            ("charm", _num(second.get("charm"), "{:+.5f}")),
+        )) + "</table>",
+        "<table>" + _rows((
+            ("Vega $/1% IV", _num(dollar.get("vega_dollar"), "${:+,.2f}")),
+            ("Γ/Θ ratio", _num(dollar.get("gamma_theta_ratio"), "{:,.3f}")),
+            ("Θ burn rate", _num(dollar.get("theta_burn_rate"), "{:.2%}") + " /day"),
+            ("|Δ|", _num(dollar.get("abs_delta"), "{:.4f}")),
+        )) + "</table>")
+
+
+def _tab_greeks(data) -> str:
+    a, b, c = _greek_rows(data)
+    return ('<div class="cols3">'
+            '<div><div class="eye">First order</div>{}</div>'
+            '<div><div class="eye">Second order</div>{}</div>'
+            '<div><div class="eye">Dollar exposure</div>{}</div></div>').format(a, b, c)
+
+
+def _tab_execution(data) -> str:
+    """Order ticket + exit plan. The stress grid deliberately is NOT repeated
+    here: it is decision-grade and stays in the always-visible zone I."""
+    t = data.get("ticket") or {}
+    left = ('<div class="eye" style="margin-bottom:4px">Order ticket</div><table>'
+            + _rows((("Limit price", _num(t.get("entry_price"), "${:,.2f}")),
+                     ("Breakeven", _num(t.get("breakeven"), "{:,.2f}")),
+                     ("Max loss", _num(t.get("max_loss"), "${:,.0f}")),
+                     ("Potential profit", _num(t.get("potential_profit"), "${:,.0f}")),
+                     ("Risk / reward", _num(t.get("risk_reward_ratio"), "{:,.2f}x"))))
+            + "</table>")
+    right = ('<div class="eye" style="margin-bottom:4px">Exit plan</div><table>'
+             + _rows((("Profit target", _num(t.get("profit_target"), "${:,.2f}")),
+                      ("Stop loss", _num(t.get("stop_loss"), "${:,.2f}"))))
+             + "</table>")
+    if t.get("guidance"):
+        right += '<div class="eye" style="margin-top:6px;line-height:1.5">{}</div>'.format(
+            _esc(t["guidance"]))
+    return '<div class="cols"><div>{}</div><div>{}</div></div>'.format(left, right)
+
+
+def _tab_chain(data) -> str:
+    q = data.get("quote") or {}
+    m = data.get("meta") or {}
+    left = "<table>" + _rows((
+        ("Contract", "{} {:g}{} {}".format(m.get("ticker"), float(m.get("strike") or 0),
+                                           str(m.get("opt_type", "c"))[0].upper(),
+                                           m.get("expiration"))),
+        ("Strategy", _esc(q.get("strategy_name") or "n/a")),
+        ("DTE", _num(m.get("dte"), "{:,.0f}")),
+        ("Premium", _num(q.get("premium"), "${:,.2f}")),
+        ("Bid / Ask", "{} / {}".format(_num(q.get("bid"), "${:,.2f}"),
+                                       _num(q.get("ask"), "${:,.2f}"))),
+        ("Mid", _num(q.get("mid"), "${:,.2f}")),
+        ("Spread", _num(q.get("spread_pct"), "{:.2%}")),
+    )) + "</table>"
+    right = "<table>" + _rows((
+        ("Volume", _num(q.get("volume"), "{:,.0f}")),
+        ("Open interest", _num(q.get("oi"), "{:,.0f}")),
+        ("OI change", _num(q.get("oi_change"), "{:+,.0f}")),
+        ("Liquidity", _esc(q.get("liquidity_flag") or "n/a")),
+        ("Spread flag", _esc(q.get("spread_flag") or "n/a")),
+        ("Quote", _esc(q.get("quote_freshness") or "n/a")),
+        ("IV confidence", _esc(q.get("iv_confidence") or "n/a")),
+        ("SVI fit quality", _num(q.get("iv_surface_confidence"), "{:.0%}")),
+    )) + "</table>"
+    third = "<table>" + _rows((
+        ("Prob. of touch", _num(q.get("prob_touch"), "{:.0%}")),
+        ("Risk / reward", _num(q.get("rr_ratio"), "{:,.2f}x")),
+        ("Annualised return", _num(q.get("annualized_return"), "{:+.1%}")),
+        ("Breakeven distance", _num(q.get("be_dist_pct"), "{:+.2%}")),
+        ("Max-pain distance", _num(q.get("max_pain_dist_pct"), "{:+.2%}")),
+        ("Gamma-pin distance", _num(q.get("gamma_pin_dist_pct"), "{:+.2%}")),
+    )) + "</table>"
+    return ('<div class="cols3"><div><div class="eye">Contract</div>{}</div>'
+            '<div><div class="eye">Liquidity &amp; quote</div>{}</div>'
+            '<div><div class="eye">Derived</div>{}</div></div>').format(left, right, third)
+
+
+def _event_panel(data, pid, title, body_fn) -> str:
+    if not _panel_ok(data, pid):
+        return '<div><div class="eye">{}</div>{}</div>'.format(
+            _esc(title), _placeholder(data, pid))
+    return '<div><div class="eye">{}</div>{}</div>'.format(_esc(title), body_fn())
+
+
+def _tab_events(data) -> str:
+    """The slow tier. Collected under a 2.5s budget — and, until now, discarded."""
+    ev = data.get("events") or {}
+
+    def _earn():
+        val = ev.get("earnings")
+        return '<div class="lede">{}</div>'.format(
+            _esc(val) if val else "no earnings date before expiry")
+
+    def _ins():
+        return '<div class="lede">{}</div>'.format(_fmt_insider(ev.get("insider")))
+
+    def _news():
+        items = ev.get("news")
+        if isinstance(items, str):
+            items = [x.strip() for x in items.split(";") if x.strip()]
+        if not items:
+            return '<div class="lede">no recent headlines</div>'
+        return "<ul style='margin:4px 0;padding-left:16px;font-size:12.5px'>" + "".join(
+            "<li>{}</li>".format(_esc(i)) for i in items[:5]) + "</ul>"
+
+    return ('<div class="cols3">{}{}{}</div>').format(
+        _event_panel(data, "earnings", "Earnings", _earn),
+        _event_panel(data, "insider", "Insider (EDGAR, 90d)", _ins),
+        _event_panel(data, "news", "News", _news))
+
+
+def _tab_raw(data) -> str:
+    import json as _json
+    safe = {k: v for k, v in data.items() if k != "name"}   # drop the long close series
+    blob = _json.dumps(safe, indent=2, sort_keys=True)
+    return ('<div class="eye" style="margin-bottom:4px">Sidecar snapshot '
+            "(price series omitted) &mdash; this is exactly what regenerates the page</div>"
+            '<pre class="raw">{}</pre>').format(_esc(blob))
+
+
+_TABS = (("greeks", "Greeks", _tab_greeks),
+         ("execution", "Execution", _tab_execution),
+         ("chain", "Chain &amp; quote", _tab_chain),
+         ("events", "Events", _tab_events),
+         ("raw", "Raw", _tab_raw))
+
+
+def _zone_detail(data) -> str:
+    """Tabbed depth. Pure CSS (radio + :checked) so it works offline with no JS.
+
+    Nothing that QUALIFIES the trade lives here — the verdict, cost wall, model
+    evidence and the no-edge zone all stay in the always-visible scroll. Only
+    depth hides behind a tab. Print CSS expands every tab.
+    """
+    inputs, labels, panes = [], [], []
+    for i, (key, label, fn) in enumerate(_TABS):
+        checked = " checked" if i == 0 else ""
+        inputs.append('<input type="radio" name="tsdeck" id="tab-{k}" class="tabin"{c}>'
+                      .format(k=key, c=checked))
+        labels.append('<label for="tab-{k}" class="tablab">{l}</label>'.format(k=key, l=label))
+        try:
+            body = fn(data)
+        except Exception as exc:  # a bad tab must not kill the page
+            body = '<div class="ph">unavailable — {}: {}</div>'.format(
+                _esc(type(exc).__name__), _esc(exc))
+        panes.append('<div class="tabpane tp-{k}">{b}</div>'.format(k=key, b=body))
+    return ('<div class="thin"></div><h5>VI &middot; Detail</h5>'
+            '<div class="deck">{i}<div class="tabbar">{l}</div>{p}</div>').format(
+                i="".join(inputs), l="".join(labels), p="".join(panes))
 
 
 def _zone_context(data) -> str:
@@ -428,9 +684,11 @@ _BUILDERS = {
     "vol": _zone_vol,
     "name": _zone_name,
     "narrative": _zone_narrative,   # embeds _zone_evidence beside the thesis
+    "detail": _zone_detail,
     "context": _zone_context,
 }
 
 # Zones that render even when their panel failed, because they carry something
-# the page must never lose. Zone IV holds the model-evidence panel.
-_ALWAYS_RENDERED = frozenset({"narrative"})
+# the page must never lose. Zone IV holds the model-evidence panel; zone VI
+# degrades per-tab rather than vanishing wholesale.
+_ALWAYS_RENDERED = frozenset({"narrative", "detail"})
