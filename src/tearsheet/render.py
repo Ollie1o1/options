@@ -1,0 +1,212 @@
+"""TearsheetData -> HTML. A pure function: no network, no DB, no clock.
+
+Purity is load-bearing. It is what makes `--from <sidecar>.json` reproduce a
+page byte-for-byte months later, and what lets the tests run without mocks.
+"""
+import html as _html
+import math
+
+from . import charts, theme
+
+_ZONES = ("decision", "vol", "name", "narrative", "context")
+
+
+def _esc(v) -> str:
+    return _html.escape("" if v is None else str(v))
+
+
+def _num(v, fmt="{:,.2f}", dash="—"):
+    if v is None:
+        return dash
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return dash
+    if not math.isfinite(f):
+        return dash
+    return fmt.format(f)
+
+
+def _panel_ok(data, pid) -> bool:
+    return data.get("panels", {}).get(pid, {}).get("status") == "ok"
+
+
+def _placeholder(data, pid) -> str:
+    p = data.get("panels", {}).get(pid, {})
+    status = p.get("status", "unavailable")
+    reason = _esc(p.get("reason", ""))
+    word = "not fetched" if status == "not_fetched" else "unavailable"
+    return ('<div class="ph">{w}{sep}{r}</div>'
+            .format(w=word, sep=" — " if reason else "", r=reason))
+
+
+def decide_verdict(net_ev, gross_ev, cost, waterfall):
+    """(decision, reason). TAKE iff net_ev > 0; zero is SKIP.
+
+    Never consults the quality score: its out-of-sample IC is ~0.03. When net EV
+    is missing or non-finite (the HV-fallback path sets it to NaN) the verdict is
+    INDETERMINATE rather than a silent fallback to a signal with no edge.
+    """
+    try:
+        v = float(net_ev)
+    except (TypeError, ValueError):
+        v = None
+    if v is None or not math.isfinite(v):
+        return "INDETERMINATE", (
+            "Net expected value is unavailable for this contract, so no verdict "
+            "is offered. It is never inferred from the quality score.")
+    if v > 0:
+        return "TAKE", (
+            "Net expected value is {} per contract after the {} round-trip cost."
+            .format(_num(v, "${:+,.0f}"), _num(cost, "${:,.0f}")))
+    negatives = [(l, x) for l, x in (waterfall or []) if x < 0]
+    worst = min(negatives, key=lambda t: t[1])[0] if negatives else "transaction cost"
+    return "SKIP", (
+        "Net expected value is {} per contract. The gross edge of {} does not "
+        "survive the {} round-trip cost; the largest single drag is {}."
+        .format(_num(v, "${:+,.0f}"), _num(gross_ev, "${:+,.0f}"),
+                _num(cost, "${:,.0f}"), worst))
+
+
+_CSS = """
+*, *::before, *::after { box-sizing: border-box; }
+body { margin:0; padding:28px; background:var(--paper); color:var(--ink);
+  font-family:"Iowan Old Style","Charter",Palatino,Georgia,serif;
+  transition:background .18s ease,color .18s ease; }
+.sheet { max-width:1040px; margin:0 auto; }
+.m,.n { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums; }
+.eye { font-family:ui-sans-serif,system-ui,sans-serif; font-size:8.5px; letter-spacing:.22em;
+  text-transform:uppercase; color:var(--muted); }
+h1 { font-size:26px; margin:3px 0 0; color:var(--ink-strong); font-weight:600; }
+h5 { font-family:ui-sans-serif,system-ui,sans-serif; font-size:9.5px; letter-spacing:.18em;
+  text-transform:uppercase; margin:0 0 8px; font-weight:700; }
+.rule { height:2px; background:var(--rule-hard); margin:14px 0 10px; }
+.thin { height:1px; background:var(--rule); margin:14px 0; }
+.g{color:var(--good)} .b{color:var(--bad)} .w{color:var(--warn)} .mut{color:var(--muted)}
+.verdict { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif; font-weight:700;
+  letter-spacing:.16em; text-transform:uppercase; font-size:12px; color:var(--paper);
+  padding:5px 12px; border-radius:3px; }
+.v-take{background:var(--good)} .v-skip{background:var(--bad)} .v-ind{background:var(--warn)}
+.lede { font-size:14.5px; line-height:1.5; margin-top:9px; max-width:64ch; }
+.strip { display:grid; grid-template-columns:repeat(6,1fr); border-top:1px solid var(--rule-hard);
+  border-bottom:1px solid var(--rule); margin-top:14px; }
+.strip>div { padding:8px 10px; border-right:1px solid var(--rule); }
+.strip>div:last-child{border-right:none}
+.sv { font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
+  font-size:16px; margin-top:2px; }
+.cols { display:grid; grid-template-columns:1.15fr 1fr; gap:26px; }
+@media (max-width:760px){ .cols,.strip{grid-template-columns:1fr} }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+td { padding:3px 0; }
+td.n { text-align:right; }
+.heat { display:grid; gap:2px; font-size:10px; }
+.heat div { padding:4px 2px; text-align:center; font-family:ui-monospace,Menlo,monospace;
+  border-radius:2px; background:var(--hl); color:var(--ink); }
+[data-theme="dark"] .heat div { background:var(--hd); }
+.heat .rh { text-align:left; color:var(--muted); background:none !important; }
+.badge { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif; font-size:8px;
+  padding:1px 5px; border-radius:8px; border:1px solid; }
+.k-bad{border-color:var(--chip-bad-bd);color:var(--bad);background:var(--chip-bad-bg)}
+.k-ok{border-color:var(--chip-ok-bd);color:var(--good);background:var(--chip-ok-bg)}
+.k-warn{border-color:var(--chip-wn-bd);color:var(--warn);background:var(--chip-wn-bg)}
+.demote { opacity:.7; background:var(--panel); padding:16px 20px 6px; border-top:1px solid var(--rule);
+  margin-top:16px; border-radius:4px; }
+.ph { border:1px dashed var(--rule); border-radius:3px; padding:8px 10px; color:var(--muted);
+  font-family:ui-sans-serif,system-ui,sans-serif; font-size:11px; }
+.foot { font-family:ui-monospace,Menlo,monospace; font-size:9.5px; color:var(--muted);
+  margin-top:18px; border-top:1px solid var(--rule); padding-top:8px; line-height:1.6; }
+.wf { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+.wf > div { margin:2px 0; }
+.wfl { display:inline-block; width:96px; }
+.wfbar { display:inline-block; height:9px; vertical-align:middle; border-radius:1px; margin-right:6px; }
+.wftot { border-top:1px solid var(--rule); margin-top:4px; padding-top:4px; }
+.toggle { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif; font-size:10px;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--muted); border:1px solid var(--rule);
+  padding:4px 9px; border-radius:20px; background:transparent; }
+"""
+
+_JS = """
+(function () {
+  var root = document.documentElement;
+  function apply(t) {
+    root.setAttribute('data-theme', t);
+    var el = document.getElementById('tglabel');
+    if (el) el.textContent = t === 'dark' ? '\\u25d1 Light' : '\\u25d0 Dark';
+  }
+  var saved = null;
+  try { saved = localStorage.getItem('tearsheet-theme'); } catch (e) {}
+  var prefers = window.matchMedia
+    && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  apply(saved || prefers);
+  window.flipTheme = function () {
+    var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    apply(next);
+    try { localStorage.setItem('tearsheet-theme', next); } catch (e) {}
+  };
+})();
+"""
+
+
+def _masthead(m):
+    return (
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start">'
+        '<div><div class="eye">{mode} &middot; pick {rank} of {n} &middot; {typ} &middot; {dte} DTE</div>'
+        '<h1>{tkr} {strike:g}{tl} &mdash; {exp}</h1></div>'
+        '<div style="text-align:right">'
+        '<button class="toggle" onclick="flipTheme()"><span id="tglabel">◐ Dark</span></button>'
+        '<div class="eye" style="margin-top:6px">Generated {gen}</div>'
+        '<div class="eye m">spot {spot} &middot; rfr {rfr} &middot; VIX {vix} ({reg})</div>'
+        "</div></div>"
+    ).format(mode=_esc(m.get("mode")), rank=_esc(m.get("rank")), n=_esc(m.get("n_picks")),
+             typ=_esc(m.get("opt_type")), dte=_esc(m.get("dte")), tkr=_esc(m.get("ticker")),
+             strike=float(m.get("strike") or 0), tl=_esc((m.get("opt_type") or "c")[0].upper()),
+             exp=_esc(m.get("expiration")), gen=_esc(m.get("generated_at")),
+             spot=_num(m.get("spot")), rfr=_num(m.get("rfr"), "{:.2%}"),
+             vix=_num(m.get("vix"), "{:.1f}"), reg=_esc(m.get("vix_regime")))
+
+
+def _verdict_block(data):
+    v = data["verdict"]
+    decision, reason = decide_verdict(v.get("net_ev"), v.get("gross_ev"),
+                                      v.get("cost"), data.get("cost_waterfall"))
+    cls = {"TAKE": "v-take", "SKIP": "v-skip"}.get(decision, "v-ind")
+    s = data.get("stats", {})
+    cells = (("Net EV", _num(v.get("net_ev"), "${:+,.0f}")),
+             ("Gross EV", _num(v.get("gross_ev"), "${:+,.0f}")),
+             ("RT cost", _num(v.get("cost"), "${:,.0f}")),
+             ("POP", _num(s.get("pop"), "{:.0%}")),
+             ("Max loss", _num(s.get("max_loss"), "${:,.0f}")),
+             ("Breakeven", _num(s.get("breakeven"), "{:,.2f}")))
+    strip = "".join('<div><div class="eye">{k}</div><div class="sv">{val}</div></div>'
+                    .format(k=_esc(k), val=_esc(val)) for k, val in cells)
+    return ('<div class="rule"></div>'
+            '<span class="verdict {c}">{d}</span>'
+            '<p class="lede">{r}</p>'
+            '<div class="strip">{s}</div>').format(c=cls, d=_esc(decision),
+                                                   r=_esc(reason), s=strip)
+
+
+def render(data: dict) -> str:
+    """The complete HTML document. Pure."""
+    body = [_masthead(data.get("meta", {})), _verdict_block(data)]
+    for zone in _ZONES:
+        if _panel_ok(data, zone) and zone in _BUILDERS:
+            body.append(_BUILDERS[zone](data))
+        elif not _panel_ok(data, zone):
+            body.append('<div class="thin"></div>' + _placeholder(data, zone))
+    meta = data.get("meta", {})
+    body.append('<div class="foot">{}</div>'.format(_esc(
+        "{} · config sha {} · regenerate: python -m src.tearsheet --from {}".format(
+            meta.get("sidecar", ""), meta.get("config_sha", ""), meta.get("sidecar", "")))))
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>{title}</title><style>{tokens}{css}</style></head>"
+        '<body><div class="sheet">{body}</div><script>{js}</script></body></html>'
+    ).format(title=_esc("{} {} tearsheet".format(
+        meta.get("ticker", ""), meta.get("expiration", ""))),
+        tokens=theme.css_tokens(), css=_CSS, body="".join(body), js=_JS)
+
+
+# Zone builders are registered here; Tasks 4-5 populate this map.
+_BUILDERS = {}
