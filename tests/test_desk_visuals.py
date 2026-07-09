@@ -3,43 +3,48 @@ import io
 import os
 import sys
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-# Force color ON for deterministic prefix tests. Must precede the src imports:
-# formatting.supports_color() memoizes its answer on first call.
-os.environ["FORCE_COLOR"] = "1"
-os.environ["COLORTERM"] = "truecolor"
 
 from src import ui  # noqa: E402
 from src import formatting as fmt  # noqa: E402
 
 
-class ColorOffMixin:
-    """Turn color off for one test, restoring the memoized flag afterwards.
+class ColorMixin:
+    """Pin color state per-test rather than trusting import order.
 
-    `fmt.supports_color()` caches into `fmt._COLOR_ENABLED`, so flipping the
-    env var alone is a no-op once anything has rendered.
+    `fmt.supports_color()` memoizes into `fmt._COLOR_ENABLED` on first call, so
+    a module-level env var only wins if this module imports first. Under the
+    full suite (and under pytest's non-TTY run) it does not. Both helpers
+    restore the previous flag on cleanup so neighbouring modules are unaffected.
     """
 
-    def force_color_off(self):
-        prev_flag = fmt._COLOR_ENABLED
-        prev_env = os.environ.get("NO_COLOR")
-        fmt._COLOR_ENABLED = None
-        os.environ["NO_COLOR"] = "1"
+    def force_color_on(self):
+        prev = fmt._COLOR_ENABLED
+        prev_ct = os.environ.get("COLORTERM")
+        fmt._COLOR_ENABLED = True
+        os.environ["COLORTERM"] = "truecolor"
 
         def _restore():
-            fmt._COLOR_ENABLED = prev_flag
-            if prev_env is None:
-                os.environ.pop("NO_COLOR", None)
+            fmt._COLOR_ENABLED = prev
+            if prev_ct is None:
+                os.environ.pop("COLORTERM", None)
             else:
-                os.environ["NO_COLOR"] = prev_env
+                os.environ["COLORTERM"] = prev_ct
 
         self.addCleanup(_restore)
 
+    def force_color_off(self):
+        prev = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+        self.addCleanup(lambda: setattr(fmt, "_COLOR_ENABLED", prev))
 
-class TestHeatCell(ColorOffMixin, unittest.TestCase):
+
+class TestHeatCell(ColorMixin, unittest.TestCase):
+    def setUp(self):
+        self.force_color_on()
     def test_positive_value_is_green_ish(self):
         out = ui.heat_cell("+9k", 9000, 9000, glyph=False)
         self.assertIn("+9k", out)
@@ -151,7 +156,7 @@ class TestBrailleChart(unittest.TestCase):
         self.assertEqual(len(lines), 4)
 
 
-class TestEquityCurve(unittest.TestCase):
+class TestEquityCurve(ColorMixin, unittest.TestCase):
     def _rows(self, n=30):
         return [{
             "pnl_pct": (0.1 if i % 3 else -0.15),
@@ -161,22 +166,49 @@ class TestEquityCurve(unittest.TestCase):
             "date": None,
         } for i in range(n)]
 
-    def test_renders_curve_and_underwater(self):
+    def _render(self, rows, rich: bool):
+        """Render the panel with check_pnl's import-time capability flags pinned.
+
+        HAS_FMT is evaluated at import, so it cannot be steered by env vars here.
+        """
         from src import check_pnl
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            check_pnl._print_equity_curve(self._rows(30), width=100)
-        out = buf.getvalue()
+        with unittest.mock.patch.object(check_pnl, "HAS_FMT", rich), \
+                unittest.mock.patch.object(check_pnl, "_HAS_UI_CP", rich):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                check_pnl._print_equity_curve(rows, width=100)
+            return buf.getvalue()
+
+    def test_renders_curve_and_underwater(self):
+        self.force_color_on()
+        out = self._render(self._rows(30), rich=True)
         self.assertIn("EQUITY", out.upper())
         self.assertTrue(any(0x2800 <= ord(c) <= 0x28FF for c in out))
         self.assertIn("Underwater", out)
 
+    def test_plain_branch_has_no_braille(self):
+        out = self._render(self._rows(30), rich=False)
+        self.assertIn("EQUITY", out.upper())
+        self.assertIn("max DD", out)
+        self.assertFalse(any(0x2800 <= ord(c) <= 0x28FF for c in out))
+
+    def test_underwater_strip_encodes_depth_not_height(self):
+        """Deepest drawdown must be the TALLEST bar, since red = bad."""
+        self.force_color_on()
+        # Rises, then one big loss at the end → deepest drawdown is last.
+        rows = [{"pnl_pct": 0.1, "entry_price": 5.0, "ticker": "AAPL",
+                 "exit_date": f"2026-06-{i + 1:02d}", "date": None}
+                for i in range(11)]
+        rows.append({"pnl_pct": -0.9, "entry_price": 5.0, "ticker": "AAPL",
+                     "exit_date": "2026-06-28", "date": None})
+        out = self._render(rows, rich=True)
+        strip = [ln for ln in out.splitlines() if "Underwater" in ln][0]
+        bars = [c for c in strip if c in "▁▂▃▄▅▆▇█"]
+        self.assertEqual(bars[-1], "█")   # deepest drawdown = full bar
+        self.assertEqual(bars[0], "▁")    # at the peak = empty bar
+
     def test_too_few_trades_prints_nothing(self):
-        from src import check_pnl
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            check_pnl._print_equity_curve(self._rows(4), width=100)
-        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(self._render(self._rows(4), rich=True), "")
 
 
 class TestTermCurve(unittest.TestCase):
