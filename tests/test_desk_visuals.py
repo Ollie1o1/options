@@ -151,5 +151,33 @@ class TestBrailleChart(unittest.TestCase):
         self.assertEqual(len(lines), 4)
 
 
+class TestEquityCurve(unittest.TestCase):
+    def _rows(self, n=30):
+        return [{
+            "pnl_pct": (0.1 if i % 3 else -0.15),
+            "entry_price": 5.0,
+            "ticker": "AAPL",
+            "exit_date": f"2026-06-{(i % 28) + 1:02d}",
+            "date": None,
+        } for i in range(n)]
+
+    def test_renders_curve_and_underwater(self):
+        from src import check_pnl
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            check_pnl._print_equity_curve(self._rows(30), width=100)
+        out = buf.getvalue()
+        self.assertIn("EQUITY", out.upper())
+        self.assertTrue(any(0x2800 <= ord(c) <= 0x28FF for c in out))
+        self.assertIn("Underwater", out)
+
+    def test_too_few_trades_prints_nothing(self):
+        from src import check_pnl
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            check_pnl._print_equity_curve(self._rows(4), width=100)
+        self.assertEqual(buf.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

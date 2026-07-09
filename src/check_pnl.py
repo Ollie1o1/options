@@ -365,6 +365,52 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
         print(sep)
 
 
+def _print_equity_curve(closed_trades: list, width: int, min_trades: int = 10):
+    """Inline braille cumulative realized-P&L curve + underwater drawdown strip.
+
+    Display-only. Mirrors the chronological USD equity series used for max-DD,
+    so the curve and the analytics line can never disagree.
+    """
+    chrono = sorted(
+        [r for r in closed_trades if r.get("pnl_pct") is not None],
+        key=lambda r: (r.get("exit_date") or r.get("date") or "")
+    )
+    if len(chrono) < min_trades:
+        return
+    cum = 0.0
+    peak = 0.0
+    equity = []
+    depth = []
+    for r in chrono:
+        ep = float(r["entry_price"]) if r.get("entry_price") else 0.0
+        mult = _get_multiplier(r.get("ticker", ""))
+        pnl_u = float(r["pnl_pct"]) * ep * mult if ep > 0 else 0.0
+        cum += pnl_u
+        peak = max(peak, cum)
+        equity.append(cum)
+        # Depth below the running peak, as a positive magnitude: a sparkline
+        # cannot draw below its baseline, so height encodes how far underwater
+        # we are. Taller red bar = deeper drawdown.
+        depth.append(peak - cum)
+    max_dd = max(depth) if depth else 0.0
+
+    print()
+    title = f"EQUITY CURVE — cumulative realized P&L ({len(chrono)} trades)"
+    if HAS_FMT and fmt and _HAS_UI_CP:
+        print(ui.rule(width, title=title))
+        for ln in ui.braille_chart(equity, width=min(72, width - 6), height=5,
+                                   style_name=('good' if cum >= 0 else 'bad')):
+            print("  " + ln)
+        end_style = 'good' if cum >= 0 else 'bad'
+        print(ui.kv_line("Final", fmt.style(f"${cum:+,.0f}", end_style)
+                         + fmt.style(f"   peak ${peak:+,.0f}", 'muted')))
+        uw = ui.sparkline(depth, style_name='bad')
+        print(ui.kv_line("Underwater", uw + fmt.style(f"   max DD -${max_dd:,.0f}", 'muted')))
+    else:
+        print(f"  {title}")
+        print(f"  Final: ${cum:+,.0f}   peak ${peak:+,.0f}   max DD -${max_dd:,.0f}")
+
+
 def _print_greeks_by_ticker(by_ticker: dict, width: int, top: int = 8):
     """Per-underlying net vega as sorted, sign-colored bars, with net delta.
 
@@ -1216,6 +1262,8 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
                 print(fmt.colorize(analytics, pf_color))
             else:
                 print(analytics)
+
+            _print_equity_curve(closed_trades, width)
 
             # Per-strategy breakdown (only if > 1 strategy present)
             from collections import defaultdict
