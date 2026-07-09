@@ -266,5 +266,63 @@ class TestZonesOneTwo(unittest.TestCase):
         self.assertNotIn("Vol complex", out)
 
 
+class TestZonesThreeToFive(unittest.TestCase):
+    def test_evidence_panel_always_present(self):
+        self.assertIn("Model evidence", R.render(_fixture()))
+
+    def test_low_ic_is_badged_no_edge(self):
+        out = R.render(_fixture())
+        self.assertIn("no edge", out)
+
+    def test_high_ic_is_not_badged_no_edge(self):
+        d = _fixture()
+        d["evidence"] = dict(d["evidence"], pooled_ic=0.31, p_value=0.001)
+        d["context"] = []          # the context badges carry their own text
+        self.assertNotIn("no edge", R.render(d))
+
+    def test_missing_evidence_fails_closed(self):
+        # An absent track record is not a good track record.
+        d = _fixture()
+        d["evidence"] = {"pooled_ic": None, "p_value": None, "n_oos": 0,
+                         "cohort_n": 0, "gate_decision": "UNKNOWN", "as_of": None}
+        out = R.render(d)
+        self.assertIn("unknown", out)
+        self.assertIn("no edge", out)
+
+    def test_missing_evidence_is_never_badged_validated_for_the_scorer(self):
+        d = _fixture()
+        d["evidence"] = dict(d["evidence"], pooled_ic=None)
+        _txt, badge = R._ic_badge(None)
+        self.assertIn("no edge", badge)
+        self.assertNotIn("has edge", badge)
+
+    def test_context_zone_is_demoted_and_badged(self):
+        out = R.render(_fixture())
+        self.assertIn("no demonstrated edge", out)
+        self.assertIn("demote", out)
+        self.assertIn("IC +0.03", out)
+
+    def test_name_zone_renders_levels(self):
+        out = R.render(_fixture())
+        self.assertIn("174.20", out)   # support level
+        self.assertIn("Max pain", out)
+
+    def test_narrative_thesis_is_escaped(self):
+        d = _fixture()
+        d["narrative"] = dict(d["narrative"], thesis="<b>boom</b>")
+        out = R.render(d)
+        self.assertNotIn("<b>boom</b>", out)
+
+    def test_evidence_survives_a_failed_narrative_panel(self):
+        # Evidence is rendered inside zone IV. If a narrative failure could take
+        # it down with it, the page would silently drop its own honesty panel.
+        d = _fixture()
+        d["panels"]["narrative"] = {"status": "unavailable", "reason": "pick_context blew up"}
+        out = R.render(d)
+        self.assertIn("Model evidence", out)
+        self.assertIn("no edge", out)
+        self.assertIn("pick_context blew up", out)
+
+
 if __name__ == "__main__":
     unittest.main()

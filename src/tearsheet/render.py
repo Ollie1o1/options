@@ -266,11 +266,127 @@ def _zone_vol(data) -> str:
             '<div class="cols"><div>{}</div><div>{}</div></div>').format(left, right)
 
 
+_IC_EDGE_THRESHOLD = 0.05
+
+
+def _badge(text, kind) -> str:
+    return '<span class="badge k-{k}">{t}</span>'.format(k=_esc(kind), t=_esc(text))
+
+
+def _ic_badge(pooled_ic):
+    """Missing evidence fails closed: an unknown IC is badged as no edge.
+
+    An absent track record is not a good track record.
+    """
+    try:
+        ic = float(pooled_ic)
+    except (TypeError, ValueError):
+        ic = None
+    if ic is None or not math.isfinite(ic):
+        return "unknown", _badge("no edge", "bad")
+    if ic < _IC_EDGE_THRESHOLD:
+        return _num(ic, "{:+.2f}"), _badge("no edge", "bad")
+    return _num(ic, "{:+.2f}"), _badge("has edge", "ok")
+
+
+def _has_scorer_edge(pooled_ic) -> bool:
+    try:
+        ic = float(pooled_ic)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(ic) and ic >= _IC_EDGE_THRESHOLD
+
+
+def _zone_name(data) -> str:
+    n = data["name"]
+    left = charts.price_with_bands(n.get("closes"), n.get("supports"), n.get("resistances"))
+    sup = (n.get("supports") or [{}])
+    res = (n.get("resistances") or [{}])
+    left += "<table>" + _rows((
+        ("RSI(14)", _num(n.get("rsi"), "{:.0f}")),
+        ("5d return", _num(n.get("ret_5d"), "{:+.1%}")),
+        ("Support", _num(sup[0].get("level"))),
+        ("Resistance", _num(res[0].get("level"))))) + "</table>"
+    right = ('<div class="eye" style="margin-bottom:4px">Flow &amp; positioning</div><table>'
+             + _rows((("Put/call ratio", _num(n.get("pcr"))),
+                      ("OI change (1d)", _num(n.get("oi_change"), "{:+,.0f}")),
+                      ("Unusual activity", _esc(n.get("uoa") or "n/a")),
+                      ("Max pain", _num(n.get("max_pain"))))) + "</table>")
+    return ('<div class="thin"></div><h5>III &middot; The name &mdash; {t}</h5>'
+            '<div class="cols"><div>{l}</div><div>{r}</div></div>').format(
+                t=_esc(data.get("meta", {}).get("ticker")), l=left, r=right)
+
+
+def _zone_evidence(data) -> str:
+    e = data.get("evidence", {})
+    ic_txt, ic_badge = _ic_badge(e.get("pooled_ic"))
+    gate = _esc(e.get("gate_decision") or "UNKNOWN")
+    rows = (
+        '<tr><td>Scorer OOS IC</td><td class="n m">{}</td><td class="n">{}</td></tr>'.format(
+            ic_txt, ic_badge),
+        '<tr><td>Walk-forward n</td><td class="n m">{}</td><td class="n mut">{}</td></tr>'.format(
+            _num(e.get("n_oos"), "{:,.0f}"), _esc(e.get("as_of") or "n/a")),
+        '<tr><td>Cohort gate</td><td class="n m">{} / 50</td><td class="n">{}</td></tr>'.format(
+            _num(e.get("cohort_n"), "{:,.0f}"), _badge(gate.lower(), "warn")),
+        '<tr><td>Cost model</td><td class="n m">round-trip</td><td class="n">{}</td></tr>'.format(
+            _badge("validated", "ok")),
+    )
+    # Conditional, not hardcoded: if the scorer ever earns an edge, this panel
+    # must stop claiming it has none.
+    if _has_scorer_edge(e.get("pooled_ic")):
+        caption = ("The ranking that surfaced this pick has measured out-of-sample "
+                   "skill. The cost and Greeks arithmetic above is independent of it.")
+    else:
+        caption = ("The ranking that surfaced this pick has no demonstrated "
+                   "out-of-sample skill. The cost and Greeks arithmetic above does.")
+    return ('<div class="eye" style="margin-bottom:4px">Model evidence</div>'
+            "<table>{}</table>"
+            '<div class="eye" style="margin-top:6px;line-height:1.5">{}</div>').format(
+                "".join(rows), _esc(caption))
+
+
+def _zone_narrative(data) -> str:
+    """Zone IV. ALWAYS rendered, even when the narrative panel failed.
+
+    The evidence panel lives in this zone's right column. If a narrative failure
+    could take zone IV down with it, the page would silently drop the very panel
+    that qualifies everything above it. Only the left column degrades.
+    """
+    if _panel_ok(data, "narrative"):
+        nar = data.get("narrative", {})
+        fit = nar.get("portfolio_fit") or []
+        left = '<p class="lede">{}</p><table>'.format(_esc(nar.get("thesis")))
+        left += _rows((("Vehicle verdict", nar.get("vehicle") or "n/a"),
+                       ("Portfolio fit", "; ".join(fit) if fit else "no concentration flag"),
+                       ("Your history", nar.get("history") or "no prior trades")))
+        left += "</table>"
+    else:
+        left = _placeholder(data, "narrative")
+    return ('<div class="thin"></div><h5>IV &middot; Narrative &amp; provenance</h5>'
+            '<div class="cols"><div>{l}</div><div>{r}</div></div>').format(
+                l=left, r=_zone_evidence(data))
+
+
+def _zone_context(data) -> str:
+    items = data.get("context") or []
+    if not items:
+        return ""
+    rows = "".join(
+        '<tr><td>{l}</td><td class="n m">{v}</td><td class="n">{b}</td></tr>'.format(
+            l=_esc(i.get("label")), v=_esc(i.get("value")),
+            b=_badge(i.get("badge", ""), i.get("badge_kind", "bad")))
+        for i in items)
+    return ('<div class="demote"><h5 class="mut">V &middot; Context &mdash; '
+            "no demonstrated edge</h5><table>{}</table></div>").format(rows)
+
+
 def render(data: dict) -> str:
     """The complete HTML document. Pure."""
     body = [_masthead(data.get("meta", {})), _verdict_block(data)]
     for zone in _ZONES:
-        if _panel_ok(data, zone) and zone in _BUILDERS:
+        if zone in _ALWAYS_RENDERED:
+            body.append(_BUILDERS[zone](data))     # degrades internally
+        elif _panel_ok(data, zone) and zone in _BUILDERS:
             body.append(_BUILDERS[zone](data))
         elif not _panel_ok(data, zone):
             body.append('<div class="thin"></div>' + _placeholder(data, zone))
@@ -291,4 +407,11 @@ def render(data: dict) -> str:
 _BUILDERS = {
     "decision": _zone_decision,
     "vol": _zone_vol,
+    "name": _zone_name,
+    "narrative": _zone_narrative,   # embeds _zone_evidence beside the thesis
+    "context": _zone_context,
 }
+
+# Zones that render even when their panel failed, because they carry something
+# the page must never lose. Zone IV holds the model-evidence panel.
+_ALWAYS_RENDERED = frozenset({"narrative"})
