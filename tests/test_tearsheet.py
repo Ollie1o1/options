@@ -235,5 +235,36 @@ class TestRenderShell(unittest.TestCase):
         self.assertIn("not fetched", out)
 
 
+class TestZonesOneTwo(unittest.TestCase):
+    def test_heat_grid_cells_carry_both_inks(self):
+        grid = R._heat_grid(_fixture()["stress"])
+        cells = re.findall(r'style="--hl:(#[0-9a-f]{6});--hd:(#[0-9a-f]{6})"', grid)
+        self.assertEqual(len(cells), 6)  # 2 iv rows x 3 moves
+
+    def test_every_heat_cell_in_document_has_both_inks(self):
+        out = R.render(_fixture())
+        for style in re.findall(r'class="hc"\s+style="([^"]*)"', out):
+            self.assertIn("--hl:", style)
+            self.assertIn("--hd:", style)
+
+    def test_decision_zone_shows_cost_wall_and_greeks(self):
+        out = R.render(_fixture())
+        self.assertIn("Cost wall", out)
+        self.assertIn("0.45", out)      # delta
+        self.assertIn("8,450", out)     # open interest
+
+    def test_vol_zone_shows_skew_and_rich_cheap(self):
+        out = R.render(_fixture())
+        self.assertIn("RICH", out.upper())
+        self.assertIn("4.1", out)       # skew vol points
+
+    def test_vol_zone_absent_when_panel_unavailable(self):
+        d = _fixture()
+        d["panels"]["vol"] = {"status": "unavailable", "reason": "no SVI fit"}
+        out = R.render(d)
+        self.assertIn("no SVI fit", out)
+        self.assertNotIn("Vol complex", out)
+
+
 if __name__ == "__main__":
     unittest.main()

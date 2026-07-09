@@ -186,6 +186,86 @@ def _verdict_block(data):
                                                    r=_esc(reason), s=strip)
 
 
+def _heat_grid(stress) -> str:
+    """Spot x IV grid. Each cell carries BOTH inks; CSS picks one."""
+    moves = stress.get("moves") or []
+    rows = stress.get("rows") or []
+    if not moves or not rows:
+        return ""
+    span = max((abs(p) for r in rows for p in r["pnls"]), default=1.0) or 1.0
+    cols = "64px " + " ".join(["1fr"] * len(moves))
+    out = ['<div class="heat" style="grid-template-columns:{}">'.format(cols)]
+    out.append('<div class="rh"></div>')
+    for m in moves:
+        out.append('<div class="rh eye">{:+.0%}</div>'.format(float(m)))
+    for r in rows:
+        iv = float(r["iv"])
+        label = "IV flat" if iv == 0 else "IV {:+.0f}pp".format(iv * 100)
+        out.append('<div class="rh">{}</div>'.format(_esc(label)))
+        for pnl in r["pnls"]:
+            hl, hd = theme.heat_inks(pnl, span)
+            out.append('<div class="hc" style="--hl:{hl};--hd:{hd}">{v}</div>'.format(
+                hl=hl, hd=hd, v=_num(pnl, "{:+,.0f}")))
+    out.append("</div>")
+    return "".join(out)
+
+
+def _rows(pairs) -> str:
+    return "".join('<tr><td>{}</td><td class="n m">{}</td></tr>'.format(_esc(k), _esc(v))
+                   for k, v in pairs)
+
+
+def _zone_decision(data) -> str:
+    g, l = data["greeks"], data["liquidity"]
+    left = (
+        '<div class="eye" style="margin-bottom:5px">Cost wall &mdash; where the edge goes</div>'
+        + charts.waterfall_bars(data.get("cost_waterfall"))
+        + '<div class="eye" style="margin:12px 0 4px">Greeks (per contract)</div><table>'
+        + _rows((("Delta", _num(g.get("delta"))), ("Gamma", _num(g.get("gamma"), "{:.3f}")),
+                 ("Vega", _num(g.get("vega"))), ("Theta", _num(g.get("theta")) + " /day")))
+        + '</table><div class="eye" style="margin:12px 0 4px">Liquidity</div><table>'
+        + _rows((("Spread", _num(l.get("spread_pct"), "{:.1%}")),
+                 ("Open interest", _num(l.get("oi"), "{:,.0f}")),
+                 ("Volume", _num(l.get("volume"), "{:,.0f}")),
+                 ("Quote", _esc(l.get("quote_freshness")))))
+        + "</table>")
+    right = (
+        '<div class="eye" style="margin-bottom:5px">Stress &mdash; P&amp;L across spot &times; IV</div>'
+        + _heat_grid(data.get("stress", {}))
+        + '<div class="eye" style="margin-top:5px">worst {}</div>'.format(
+            _esc(data.get("stress", {}).get("worst", "n/a"))))
+    return ('<div class="thin"></div><h5>I &middot; Decision-grade</h5>'
+            '<div class="cols"><div>{}</div><div>{}</div></div>').format(left, right)
+
+
+def _zone_vol(data) -> str:
+    v = data["vol"]
+    resid = v.get("svi_residual")
+    if resid is None:
+        rich = "no surface fit"
+    elif float(resid) > 0:
+        rich = "RICH +{:.2f}σ vs surface".format(float(resid))
+    else:
+        rich = "CHEAP {:.2f}σ vs surface".format(float(resid))
+    left = ('<div class="eye" style="margin-bottom:4px">Vol cone</div>'
+            + charts.vol_cone(v.get("cone"), v.get("iv"))
+            + "<table>" + _rows((
+                ("IV / HV30", "{} / {}".format(_num(v.get("iv"), "{:.1%}"),
+                                               _num(v.get("hv"), "{:.1%}"))),
+                ("VRP", _num(v.get("vrp"), "{:+.1%}")),
+                ("IV rank", _num(v.get("iv_rank"), "{:.0%}")),
+                ("vs SVI", rich))) + "</table>")
+    right = ('<div class="eye" style="margin-bottom:4px">Term structure &amp; skew</div>'
+             + charts.term_curve(v.get("term"))
+             + "<table>" + _rows((
+                 ("Skew 25Δ", "{}vp".format(_num(v.get("skew_vp"), "{:+.1f}"))),
+                 ("Skew rank", _num(v.get("skew_rank"), "{:.0%}")),
+                 ("Expected move", _num(v.get("expected_move"))),
+                 ("Required move", _num(v.get("required_move"))))) + "</table>")
+    return ('<div class="thin"></div><h5>II &middot; Vol complex</h5>'
+            '<div class="cols"><div>{}</div><div>{}</div></div>').format(left, right)
+
+
 def render(data: dict) -> str:
     """The complete HTML document. Pure."""
     body = [_masthead(data.get("meta", {})), _verdict_block(data)]
@@ -208,5 +288,7 @@ def render(data: dict) -> str:
         tokens=theme.css_tokens(), css=_CSS, body="".join(body), js=_JS)
 
 
-# Zone builders are registered here; Tasks 4-5 populate this map.
-_BUILDERS = {}
+_BUILDERS = {
+    "decision": _zone_decision,
+    "vol": _zone_vol,
+}
