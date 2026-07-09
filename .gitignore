@@ -93,3 +93,6 @@ data/intel_reliability.json
 
 # Local backups parking lot (DB snapshots, retired configs, one-off scripts)
 backups/
+
+# Superpowers brainstorming session artifacts
+.superpowers/
