@@ -11,7 +11,23 @@ import os
 import sys
 import webbrowser
 
+from .collect import SCHEMA
 from .render import render
+
+
+def _check_schema(data) -> None:
+    """Say so when the sidecar was not written by this renderer.
+
+    `render` reads its keys directly; a sidecar from another version can still
+    produce a page, but one with holes in it. A quiet partial render is the one
+    failure mode this package exists to prevent.
+    """
+    found = (data.get("meta") or {}).get("schema")
+    if found == SCHEMA:
+        return
+    where = "no schema" if found is None else "schema {}".format(found)
+    print("warning: sidecar declares {}, this renderer writes schema {} — "
+          "panels may be missing or stale".format(where, SCHEMA))
 
 
 def main(argv=None) -> int:
@@ -23,6 +39,7 @@ def main(argv=None) -> int:
 
     with open(args.src) as f:
         data = json.load(f)
+    _check_schema(data)
     out = os.path.splitext(args.src)[0] + ".html"
     with open(out, "w") as f:
         f.write(render(data))

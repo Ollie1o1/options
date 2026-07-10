@@ -40,25 +40,56 @@ def _placeholder(data, pid) -> str:
             .format(w=word, sep=" — " if reason else "", r=reason))
 
 
-def decide_verdict(net_ev, gross_ev, cost, waterfall):
-    """(decision, reason). TAKE iff net_ev > 0; zero is SKIP.
+_CONTRACT_MULTIPLIER = 100.0
+
+
+def decide_verdict(net_ev, gross_ev, cost, waterfall, noise=0.0):
+    """(decision, reason). One of TAKE / MARGINAL / SKIP / INDETERMINATE.
 
     Never consults the quality score: its out-of-sample IC is ~0.03. When net EV
     is missing or non-finite (the HV-fallback path sets it to NaN) the verdict is
     INDETERMINATE rather than a silent fallback to a signal with no edge.
+
+    Three things this refuses to conflate:
+
+    * A contract with **no gross edge** was mispriced against you before a single
+      cent of cost. Blaming the spread there is a misattribution — and it implies
+      a better fill could rescue a trade that no fill can.
+    * A net EV inside `noise` is a **point estimate smaller than its own error
+      bar**. Net EV is Black-Scholes over an implied vol this project's own
+      cross-check corrects on most scans; +$1 is not an edge.
+    * A negative net EV inside `noise` is still a SKIP. Symmetry would call it
+      unresolvable, but a trade you cannot justify is a pass.
     """
-    try:
-        v = float(net_ev)
-    except (TypeError, ValueError):
-        v = None
-    if v is None or not math.isfinite(v):
+    v = _finite_or_none(net_ev)
+    if v is None:
         return "INDETERMINATE", (
             "Net expected value is unavailable for this contract, so no verdict "
             "is offered. It is never inferred from the quality score.")
-    if v > 0:
+
+    band = abs(_finite_or_none(noise) or 0.0)
+    gross = _finite_or_none(gross_ev)
+
+    if gross is not None and gross <= 0:
+        return "SKIP", (
+            "This contract is priced above its model-fair value even at mid: the "
+            "gross edge is {} per contract before any transaction cost. The "
+            "round-trip cost is not what breaks it.".format(_num(gross, "${:+,.0f}")))
+
+    if v > band:
         return "TAKE", (
-            "Net expected value is {} per contract after the {} round-trip cost."
-            .format(_num(v, "${:+,.0f}"), _num(cost, "${:,.0f}")))
+            "Net expected value is {} per contract after the {} round-trip cost, "
+            "clear of the {} band implied by this contract's vol uncertainty."
+            .format(_num(v, "${:+,.0f}"), _num(cost, "${:,.0f}"),
+                    _num(band, "±${:,.0f}")))
+
+    if v > 0:
+        return "MARGINAL", (
+            "Net expected value is {} per contract — positive, but inside the {} "
+            "noise band this contract's vega implies for a one-sigma error in its "
+            "implied vol. The sign of the edge is not resolvable from this data."
+            .format(_num(v, "${:+,.0f}"), _num(band, "±${:,.0f}")))
+
     negatives = [(l, x) for l, x in (waterfall or []) if x < 0]
     worst = min(negatives, key=lambda t: t[1])[0] if negatives else "transaction cost"
     return "SKIP", (
@@ -66,6 +97,62 @@ def decide_verdict(net_ev, gross_ev, cost, waterfall):
         "survive the {} round-trip cost; the largest single drag is {}."
         .format(_num(v, "${:+,.0f}"), _num(gross_ev, "${:+,.0f}"),
                 _num(cost, "${:,.0f}"), worst))
+
+
+def fill_to_flip(net_ev, target, assumed_fill, multiplier=_CONTRACT_MULTIPLIER):
+    """The entry fill (per share) at which net EV would reach `target`.
+
+    The cost model charges a half-spread on entry, i.e. it assumes you pay the
+    ask. Net EV moves one-for-one with what you actually pay, so every cent of
+    price improvement is worth `multiplier` cents of expectation. Returns None
+    when no positive price gets there — some contracts are simply not buyable.
+    """
+    net = _finite_or_none(net_ev)
+    fill = _finite_or_none(assumed_fill)
+    tgt = _finite_or_none(target) or 0.0
+    if net is None or fill is None:
+        return None
+    price = fill - (tgt - net) / multiplier
+    return price if price > 0 else None
+
+
+def _flip_line(decision, verdict, quote) -> str:
+    """The one actionable number on a page that says don't.
+
+    A SKIP is a statement about a price, not about a contract. Say which price.
+
+    The quoted fill is floored to the cent below the exact break-even, so that a
+    limit order actually placed at it lands on the TAKE side of the band rather
+    than back on its boundary.
+    """
+    if decision not in ("SKIP", "MARGINAL"):
+        return ""
+    noise = abs(_finite_or_none(verdict.get("noise")) or 0.0)
+    fill = _finite_or_none(verdict.get("assumed_fill"))
+    if fill is None:
+        return ""
+    exact = fill_to_flip(verdict.get("net_ev"), noise, fill)
+    if exact is None:
+        return ('<div class="flip">No entry price makes this a TAKE &mdash; the '
+                "expectation is negative before the contract is even paid for.</div>")
+    # Largest whole cent STRICTLY below the exact break-even, so a limit order
+    # placed at it clears the band (TAKE is net > band, strict) rather than
+    # landing back on its boundary. ceil(x)-1 == floor(x) off a cent boundary and
+    # steps down a cent when the break-even sits exactly on one.
+    price = (math.ceil(exact * 100.0) - 1) / 100.0
+    if price <= 0:
+        return ('<div class="flip">No entry price makes this a TAKE &mdash; the '
+                "expectation is negative before the contract is even paid for.</div>")
+    bid = _finite_or_none((quote or {}).get("bid"))
+    if bid is not None and price < bid:
+        return ('<div class="flip">No fill inside the current quote makes this a TAKE: '
+                "it would take {p} against a {b} bid. Passing is the only price."
+                "</div>".format(p=_num(price, "${:,.2f}"), b=_num(bid, "${:,.2f}")))
+    return ('<div class="flip">Becomes a <strong>TAKE</strong> at a fill of {p} or '
+            "better. The cost model assumes you pay {f}; each cent of price "
+            "improvement is worth {m} of expectation.</div>".format(
+                p=_num(price, "${:,.2f}"), f=_num(fill, "${:,.2f}"),
+                m=_num(_CONTRACT_MULTIPLIER / 100.0, "${:,.0f}")))
 
 
 _CSS = """
@@ -86,14 +173,20 @@ h5 { font-family:ui-sans-serif,system-ui,sans-serif; font-size:9.5px; letter-spa
 .verdict { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif; font-weight:700;
   letter-spacing:.16em; text-transform:uppercase; font-size:12px; color:var(--paper);
   padding:5px 12px; border-radius:3px; }
-.v-take{background:var(--good)} .v-skip{background:var(--bad)} .v-ind{background:var(--warn)}
+.v-take{background:var(--good)} .v-skip{background:var(--bad)}
+.v-marg{background:var(--warn)} .v-ind{background:var(--muted)}
 .lede { font-size:14.5px; line-height:1.5; margin-top:9px; max-width:64ch; }
-.strip { display:grid; grid-template-columns:repeat(6,1fr); border-top:1px solid var(--rule-hard);
-  border-bottom:1px solid var(--rule); margin-top:14px; }
-.strip>div { padding:8px 10px; border-right:1px solid var(--rule); }
+.flip { margin-top:10px; max-width:64ch; font-size:12.5px; line-height:1.55;
+  border-left:3px solid var(--accent); background:var(--panel); padding:9px 13px;
+  border-radius:0 3px 3px 0; }
+.strip { display:grid; grid-template-columns:repeat(7,minmax(0,1fr));
+  border-top:1px solid var(--rule-hard); border-bottom:1px solid var(--rule); margin-top:16px; }
+.strip>div { padding:9px 11px; border-right:1px solid var(--rule); }
 .strip>div:last-child{border-right:none}
 .sv { font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
-  font-size:16px; margin-top:2px; }
+  font-size:16px; margin-top:3px; color:var(--ink-strong); }
+.sv.g{color:var(--good)} .sv.b{color:var(--bad)}
+@media (max-width:900px){ .strip{grid-template-columns:repeat(3,minmax(0,1fr))} }
 .cols { display:grid; grid-template-columns:1.15fr 1fr; gap:26px; }
 @media (max-width:760px){ .cols,.strip{grid-template-columns:1fr} }
 table { width:100%; border-collapse:collapse; font-size:12px; }
@@ -198,25 +291,40 @@ def _masthead(m):
              vix=_num(m.get("vix"), "{:.1f}"), reg=_esc(m.get("vix_regime")))
 
 
+_VERDICT_CLASS = {"TAKE": "v-take", "SKIP": "v-skip", "MARGINAL": "v-marg"}
+
+
+def _sv_tone(v, invert=False):
+    """Green/red ink for a signed headline number. Neutral when unknown."""
+    f = _finite_or_none(v)
+    if f is None or f == 0:
+        return ""
+    good = (f < 0) if invert else (f > 0)
+    return " g" if good else " b"
+
+
 def _verdict_block(data):
     v = data["verdict"]
     decision, reason = decide_verdict(v.get("net_ev"), v.get("gross_ev"),
-                                      v.get("cost"), data.get("cost_waterfall"))
-    cls = {"TAKE": "v-take", "SKIP": "v-skip"}.get(decision, "v-ind")
+                                      v.get("cost"), data.get("cost_waterfall"),
+                                      noise=v.get("noise"))
+    cls = _VERDICT_CLASS.get(decision, "v-ind")
     s = data.get("stats", {})
-    cells = (("Net EV", _num(v.get("net_ev"), "${:+,.0f}")),
-             ("Gross EV", _num(v.get("gross_ev"), "${:+,.0f}")),
-             ("RT cost", _num(v.get("cost"), "${:,.0f}")),
-             ("POP", _num(s.get("pop"), "{:.0%}")),
-             ("Max loss", _num(s.get("max_loss"), "${:,.0f}")),
-             ("Breakeven", _num(s.get("breakeven"), "{:,.2f}")))
-    strip = "".join('<div><div class="eye">{k}</div><div class="sv">{val}</div></div>'
-                    .format(k=_esc(k), val=_esc(val)) for k, val in cells)
+    cells = (("Net EV", _num(v.get("net_ev"), "${:+,.0f}"), _sv_tone(v.get("net_ev"))),
+             ("Noise band", _num(v.get("noise"), "±${:,.0f}"), ""),
+             ("Gross EV", _num(v.get("gross_ev"), "${:+,.0f}"), _sv_tone(v.get("gross_ev"))),
+             ("RT cost", _num(v.get("cost"), "${:,.0f}"), ""),
+             ("POP", _num(s.get("pop"), "{:.0%}"), ""),
+             ("Max loss", _num(s.get("max_loss"), "${:,.0f}"), ""),
+             ("Breakeven", _num(s.get("breakeven"), "{:,.2f}"), ""))
+    strip = "".join('<div><div class="eye">{k}</div><div class="sv{t}">{val}</div></div>'
+                    .format(k=_esc(k), val=_esc(val), t=tone) for k, val, tone in cells)
     return ('<div class="rule"></div>'
             '<span class="verdict {c}">{d}</span>'
-            '<p class="lede">{r}</p>'
-            '<div class="strip">{s}</div>').format(c=cls, d=_esc(decision),
-                                                   r=_esc(reason), s=strip)
+            '<p class="lede">{r}</p>{flip}'
+            '<div class="strip">{s}</div>').format(
+                c=cls, d=_esc(decision), r=_esc(reason), s=strip,
+                flip=_flip_line(decision, v, data.get("quote") or {}))
 
 
 def _heat_grid(stress) -> str:
@@ -603,8 +711,18 @@ def _tab_events(data) -> str:
 
 
 def _tab_raw(data) -> str:
+    """The sidecar, minus the 130 daily closes that would drown it.
+
+    Only `name.closes` is dropped. Dropping the whole `name` block — as this
+    once did — silently took RSI, put/call, max pain and the flow summary with
+    it, under a caption that claimed only the price series had gone.
+    """
     import json as _json
-    safe = {k: v for k, v in data.items() if k != "name"}   # drop the long close series
+    safe = dict(data)
+    name = safe.get("name")
+    if isinstance(name, dict) and name.get("closes"):
+        safe["name"] = dict(name, closes="<{} daily closes omitted>".format(
+            len(name["closes"])))
     blob = _json.dumps(safe, indent=2, sort_keys=True)
     return ('<div class="eye" style="margin-bottom:4px">Sidecar snapshot '
             "(price series omitted) &mdash; this is exactly what regenerates the page</div>"

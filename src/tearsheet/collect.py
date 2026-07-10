@@ -4,11 +4,25 @@ The ONLY module in this package that performs IO. Everything it returns is plain
 JSON: no NaN, no numpy scalars, no pandas objects, no datetimes.
 """
 import math
-from concurrent.futures import ThreadPoolExecutor, wait
+import threading
+import time
 from datetime import datetime
 
 _ZONE_IDS = ("decision", "vol", "name", "narrative", "context")
 _SLOW_IDS = ("earnings", "insider", "news")
+
+# Bump when a key the renderer reads is renamed or removed. `python -m
+# src.tearsheet --from <old sidecar>` warns rather than raising a bare KeyError.
+SCHEMA = 1
+
+# How wrong a stored implied vol plausibly is, in IV points, by the confidence
+# data_fetching assigns it. "Low" means an HV proxy stood in for a real IV.
+_IV_SIGMA_POINTS = {"high": 1.0, "medium": 1.5, "low": 2.5}
+_DEFAULT_IV_SIGMA_POINTS = _IV_SIGMA_POINTS["low"]
+
+# With no vega to scale, fall back to a quarter of the round-trip cost: the only
+# other number on the page that is denominated in the same dollars.
+_COST_FRACTION_FALLBACK = 0.25
 
 
 def _jsonable(v):
@@ -40,6 +54,47 @@ def _jsonable(v):
 
 def _f(row, key, default=None):
     return _jsonable(row.get(key, default))
+
+
+def _num(v):
+    """Finite float or None. Tolerates NumPy scalars and stringly-typed cells."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _ev_noise(row) -> float:
+    """Half-width of the band inside which net EV's sign is not resolvable.
+
+    Net EV is Black-Scholes arithmetic over one uncertain input: the implied vol.
+    `vega_dollar` is what one IV point is worth to this contract, so the error
+    bar on net EV is just vega times how wrong that vol plausibly is — and
+    `iv_confidence` already tells us how wrong. A screener that reports +$1 of
+    edge on a contract whose vega moves $30 per IV point is reporting noise.
+    """
+    sigma = _IV_SIGMA_POINTS.get(
+        str(row.get("iv_confidence") or "").strip().lower(), _DEFAULT_IV_SIGMA_POINTS)
+    vega_dollar = _num(row.get("vega_dollar"))
+    if vega_dollar:
+        return abs(vega_dollar) * sigma
+    cost = _num(row.get("ev_cost_per_contract"))
+    return abs(cost) * _COST_FRACTION_FALLBACK if cost else 0.0
+
+
+def _assumed_fill(row):
+    """The entry price the cost model charges you: mid plus a half-spread.
+
+    `net_ev_per_contract` deducts `0.5 * spread_pct * premium` on entry, which is
+    exactly the distance from mid to ask. Naming it lets the page answer "at what
+    price would this be worth doing" instead of only "it isn't".
+    """
+    premium = _num(row.get("premium"))
+    spread_pct = _num(row.get("spread_pct"))
+    if premium is None:
+        return None
+    return premium * (1.0 + (spread_pct or 0.0) / 2.0)
 
 
 def _safe(panel_id, fn, panels, default):
@@ -304,8 +359,18 @@ def gather_slow(sym, budget_s: float = 2.5, _fns=None):
     `not_fetched`; a panel that raises is `unavailable`. Those are different
     facts and the page says which.
 
-    The pool is NOT used as a context manager: `__exit__` joins running threads,
-    which would silently blow the budget while looking correct.
+    Deliberately NOT a ThreadPoolExecutor. Two of its properties defeat a
+    wall-clock budget:
+
+    * `Future.cancel()` returns False and does nothing once the call is running,
+      so "cancelling" an overrunning fetch abandons it, it does not stop it.
+    * The executor registers an atexit hook that joins its workers, and its
+      workers are non-daemon. `shutdown(wait=False)` does not opt out.
+
+    Together those mean the budget bounds the page but not the process: EDGAR's
+    own timeout is 20s, so an abandoned fetch used to hold the screener open for
+    another 17.5s after the page had already said "not fetched". Daemon threads
+    let the interpreter leave without them.
     """
     fns = _fns if _fns is not None else {
         "earnings": lambda: _earnings(sym),
@@ -313,24 +378,37 @@ def gather_slow(sym, budget_s: float = 2.5, _fns=None):
         "news": lambda: _news(sym),
     }
     values, panels = {}, {}
-    pool = ThreadPoolExecutor(max_workers=max(1, len(fns)))
-    try:
-        futures = {pool.submit(fn): name for name, fn in fns.items()}
-        wait(list(futures), timeout=budget_s)
-        for fut, name in futures.items():
-            if not fut.done():
-                fut.cancel()
-                panels[name] = {"status": "not_fetched",
-                                "reason": "exceeded {}s budget".format(budget_s)}
-                continue
-            try:
-                values[name] = _jsonable(fut.result(timeout=0))
-                panels[name] = {"status": "ok", "reason": ""}
-            except Exception as exc:  # noqa: BLE001
-                panels[name] = {"status": "unavailable",
-                                "reason": "{}: {}".format(type(exc).__name__, exc)}
-    finally:
-        pool.shutdown(wait=False)
+    results = {}
+    threads = []
+
+    def _runner(name, fn):
+        try:
+            results[name] = ("ok", fn())
+        except BaseException as exc:  # noqa: BLE001 - a bad panel must not kill the page
+            results[name] = ("error", exc)
+
+    for name, fn in fns.items():
+        t = threading.Thread(target=_runner, args=(name, fn),
+                             name="tearsheet-{}".format(name), daemon=True)
+        t.start()
+        threads.append(t)
+
+    deadline = time.monotonic() + budget_s
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+
+    for name in fns:
+        if name not in results:
+            panels[name] = {"status": "not_fetched",
+                            "reason": "exceeded {}s budget".format(budget_s)}
+            continue
+        status, payload = results[name]
+        if status == "ok":
+            values[name] = _jsonable(payload)
+            panels[name] = {"status": "ok", "reason": ""}
+        else:
+            panels[name] = {"status": "unavailable",
+                            "reason": "{}: {}".format(type(payload).__name__, payload)}
     return values, panels
 
 
@@ -398,7 +476,8 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
                                  str(row.get("type", "c"))[0].upper(),
                                  str(row["expiration"]).replace("-", ""))
     return {
-        "meta": {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "meta": {"schema": SCHEMA,
+                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                  "ticker": sym, "strike": _f(row, "strike"),
                  "opt_type": row.get("type", "call"), "expiration": row.get("expiration"),
                  "dte": dte, "mode": ctx.get("mode"), "rank": ctx.get("rank"),
@@ -408,7 +487,8 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
                  "config_sha": ctx.get("config_sha", "unknown"),
                  "sidecar": base + ".json"},
         "verdict": {"decision": "", "reason": "", "net_ev": net,
-                    "gross_ev": gross, "cost": cost},
+                    "gross_ev": gross, "cost": cost,
+                    "noise": _ev_noise(row), "assumed_fill": _assumed_fill(row)},
         "stats": {"pop": _f(row, "prob_profit"), "max_loss": _f(row, "max_loss"),
                   "breakeven": _f(row, "breakeven")},
         "cost_waterfall": waterfall,

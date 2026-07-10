@@ -178,6 +178,125 @@ class TestVerdict(unittest.TestCase):
                                    ["Commission", -1.3]])
         self.assertIn("Entry spread", why)
 
+    def test_negative_gross_edge_is_never_blamed_on_transaction_costs(self):
+        # UNH 420P on 2026-07-10: the contract is mispriced against you BEFORE
+        # a single cent of cost. Saying "costs ate the edge" misattributes the
+        # cause and implies a better fill could rescue it.
+        _, why = R.decide_verdict(-240.0, -200.0, 40.0,
+                                  [["Gross edge", -200.0], ["Entry spread", -20.0],
+                                   ["Exit spread", -20.0]])
+        self.assertNotIn("does not survive", why)
+        self.assertIn("before", why.lower())
+
+    def test_negative_gross_edge_is_skip(self):
+        d, _ = R.decide_verdict(-240.0, -200.0, 40.0, [])
+        self.assertEqual(d, "SKIP")
+
+    def test_zero_gross_edge_is_skip_with_no_edge_reason(self):
+        d, why = R.decide_verdict(-40.0, 0.0, 40.0, [])
+        self.assertEqual(d, "SKIP")
+        self.assertNotIn("does not survive", why)
+
+    def test_net_ev_above_the_noise_band_is_take(self):
+        d, _ = R.decide_verdict(216.0, 257.0, 41.0, [], noise=45.0)
+        self.assertEqual(d, "TAKE")
+
+    def test_net_ev_inside_the_noise_band_is_marginal_not_take(self):
+        # WMT 113P on 2026-07-10: net EV +$8 on a contract whose vega is worth
+        # ~$10 per IV point. The sign is not resolvable from this data.
+        d, why = R.decide_verdict(8.0, 50.0, 42.0, [], noise=25.0)
+        self.assertEqual(d, "MARGINAL")
+        self.assertIn("noise", why.lower())
+
+    def test_noise_band_never_rescues_a_negative_net_ev(self):
+        # Symmetry would say "unresolvable"; a trade you cannot justify is a pass.
+        d, _ = R.decide_verdict(-5.0, 40.0, 45.0, [], noise=100.0)
+        self.assertEqual(d, "SKIP")
+
+    def test_zero_noise_preserves_the_old_take_boundary(self):
+        self.assertEqual(R.decide_verdict(1.0, 42.0, 41.0, [], noise=0.0)[0], "TAKE")
+
+
+class TestFlipPrice(unittest.TestCase):
+    """The single actionable number on a page that says SKIP."""
+
+    def test_fill_to_flip_is_below_the_assumed_fill(self):
+        # net EV -28 at an assumed $2.84 fill; each cent of price improvement is
+        # worth $1 per contract, so $0.28 better clears zero and $0.53 clears +25.
+        self.assertAlmostEqual(R.fill_to_flip(-28.0, 25.0, 2.84), 2.31, places=2)
+
+    def test_fill_to_flip_of_a_winner_is_above_the_assumed_fill(self):
+        self.assertAlmostEqual(R.fill_to_flip(216.0, 45.0, 5.15), 6.86, places=2)
+
+    def test_fill_to_flip_is_none_without_a_fill_reference(self):
+        self.assertIsNone(R.fill_to_flip(-28.0, 25.0, None))
+        self.assertIsNone(R.fill_to_flip(None, 25.0, 2.84))
+        self.assertIsNone(R.fill_to_flip(float("nan"), 25.0, 2.84))
+
+    def test_fill_to_flip_is_none_when_the_price_would_be_negative(self):
+        # A -$900 net EV on a $1.20 contract cannot be fixed by any fill.
+        self.assertIsNone(R.fill_to_flip(-900.0, 0.0, 1.20))
+
+    def test_flip_line_quotes_a_reachable_price_inside_the_quote(self):
+        # -$5 net, $10 band: $0.16 of price improvement clears it, and $2.68 is
+        # still above the $2.60 bid, so the fill is obtainable.
+        line = R._flip_line("SKIP", {"net_ev": -5.0, "noise": 10.0, "assumed_fill": 2.84},
+                            {"bid": 2.60, "ask": 3.08})
+        self.assertIn("2.68", line)
+        self.assertIn("TAKE", line)
+
+    def test_flip_line_says_when_no_fill_inside_the_quote_helps(self):
+        # XOM 140C on 2026-07-10 in miniature: the required fill is under the bid.
+        line = R._flip_line("SKIP", {"net_ev": -128.0, "noise": 25.0, "assumed_fill": 5.25},
+                            {"bid": 5.00, "ask": 5.50})
+        self.assertIn("no fill", line.lower())
+        self.assertIn("5.00", line)     # names the bid it would have to beat
+        self.assertIn("3.71", line)     # ...and the price it would have taken
+
+    def test_flip_line_refuses_to_price_a_contract_with_no_gross_edge(self):
+        line = R._flip_line("SKIP", {"net_ev": -900.0, "noise": 0.0, "assumed_fill": 1.20}, {})
+        self.assertIn("No entry price", line)
+
+    def test_a_take_page_carries_no_flip_line(self):
+        self.assertEqual(R._flip_line("TAKE", {"net_ev": 216.0, "noise": 45.0,
+                                               "assumed_fill": 5.15}, {"bid": 5.0}), "")
+
+    def test_flip_line_is_empty_without_a_fill_reference(self):
+        self.assertEqual(R._flip_line("SKIP", {"net_ev": -28.0, "noise": 25.0}, {}), "")
+
+    def test_a_marginal_page_carries_a_flip_line(self):
+        line = R._flip_line("MARGINAL", {"net_ev": 8.0, "noise": 25.0, "assumed_fill": 2.17},
+                            {"bid": 1.90, "ask": 2.29})
+        self.assertIn("TAKE", line)
+        self.assertIn("1.99", line)
+
+    def test_reachable_flip_at_a_mid_cent_breakeven_is_not_called_unreachable(self):
+        # WMT 113P, 2026-07-10: break-even fill ≈ $2.052. Flooring a full cent to
+        # $2.04 wrongly reads as below the $2.05 bid; the bid itself clears the
+        # band, so the honest answer is "$2.05 or better", a TAKE.
+        line = R._flip_line("MARGINAL",
+                            {"net_ev": 8.0, "noise": 27.5, "assumed_fill": 2.24715},
+                            {"bid": 2.05, "ask": 2.29})
+        self.assertIn("TAKE", line)
+        self.assertIn("2.05", line)
+        self.assertNotIn("no fill", line.lower())
+
+    def test_the_quoted_reachable_price_actually_clears_the_band(self):
+        fill, noise, net, bid = 2.24715, 27.5, 8.0, 2.05
+        line = R._flip_line("MARGINAL", {"net_ev": net, "noise": noise,
+                                         "assumed_fill": fill}, {"bid": bid})
+        price = float(re.search(r"\$(\d+\.\d\d)", line).group(1))
+        self.assertGreater(net + (fill - price) * 100.0, noise)
+
+    def test_flip_price_clears_the_band_after_rounding_to_the_cent(self):
+        # A price that only *equals* the band leaves the page MARGINAL. The quoted
+        # fill must still be a TAKE once a human rounds it to a real limit order.
+        fill, noise, net = 2.84, 25.0, -28.0
+        line = R._flip_line("SKIP", {"net_ev": net, "noise": noise, "assumed_fill": fill}, {})
+        price = float(re.search(r"\$(\d+\.\d\d)", line).group(1))
+        improved_net = net + (fill - price) * 100.0
+        self.assertGreater(improved_net, noise)
+
 
 class TestRenderShell(unittest.TestCase):
     def test_is_a_full_document(self):
@@ -207,6 +326,32 @@ class TestRenderShell(unittest.TestCase):
         d = _fixture()
         d["verdict"] = dict(d["verdict"], net_ev=25.0)
         self.assertIn("TAKE", R.render(d))
+
+    def test_marginal_verdict_gets_its_own_class_not_the_take_class(self):
+        d = _fixture()
+        d["verdict"] = dict(d["verdict"], net_ev=5.0, noise=40.0)
+        out = R.render(d)
+        self.assertIn('<span class="verdict v-marg">MARGINAL</span>', out)
+        self.assertNotIn('<span class="verdict v-take">', out)
+
+    def test_skip_page_carries_the_flip_price(self):
+        d = _fixture()
+        d["verdict"] = dict(d["verdict"], noise=4.0, assumed_fill=4.24)
+        d["quote"] = {"bid": 4.00, "ask": 4.30}
+        out = R.render(d)
+        self.assertIn('class="flip"', out)
+        self.assertIn("4.07", out)      # -12 net, $4 band → $0.17 improvement
+
+    def test_take_page_carries_no_flip_price(self):
+        d = _fixture()
+        d["verdict"] = dict(d["verdict"], net_ev=250.0, noise=4.0, assumed_fill=4.24)
+        self.assertNotIn('class="flip"', R.render(d))
+
+    def test_noise_band_is_shown_in_the_headline_strip(self):
+        d = _fixture()
+        d["verdict"] = dict(d["verdict"], noise=25.0)
+        out = R.render(d)
+        self.assertIn("Noise band", out)
 
     def test_ticker_is_escaped(self):
         d = _fixture()
@@ -361,7 +506,7 @@ def _row():
         "iv_skew": 0.041, "iv_skew_rank": 0.83, "expected_move": 11.13,
         "required_move": 11.80, "quality_score": 0.78, "rsi_14": 58.0,
         "ret_5d": 0.023, "pcr": 0.82, "oi_change": 320, "quote_freshness": "fresh",
-        "strategy_name": "long_call",
+        "strategy_name": "long_call", "vega_dollar": 31.0, "iv_confidence": "High",
     }
 
 
@@ -414,6 +559,49 @@ class TestCollect(unittest.TestCase):
         out = R.render(collect.build(r, _ctx(), slow=False))
         self.assertIn("INDETERMINATE", out)
 
+    def test_sidecar_declares_its_schema_version(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        self.assertEqual(data["meta"]["schema"], collect.SCHEMA)
+
+
+class TestNoiseBand(unittest.TestCase):
+    """Net EV is a Black-Scholes point estimate. Its error bar is vega-sized."""
+
+    def test_band_is_vega_dollars_times_the_iv_uncertainty(self):
+        # $31 per IV point, high-confidence IV -> a one-point band.
+        self.assertAlmostEqual(collect._ev_noise(_row()), 31.0, places=6)
+
+    def test_a_less_trusted_iv_widens_the_band(self):
+        high = collect._ev_noise(dict(_row(), iv_confidence="High"))
+        low = collect._ev_noise(dict(_row(), iv_confidence="Low"))
+        self.assertGreater(low, high)
+
+    def test_missing_iv_confidence_assumes_the_worst(self):
+        r = _row()
+        r.pop("iv_confidence")
+        self.assertEqual(collect._ev_noise(r),
+                         collect._ev_noise(dict(_row(), iv_confidence="Low")))
+
+    def test_band_falls_back_to_a_fraction_of_cost_without_vega(self):
+        r = _row()
+        r.pop("vega_dollar")
+        self.assertAlmostEqual(collect._ev_noise(r), 0.25 * 18.0, places=6)
+
+    def test_band_is_zero_when_nothing_is_known(self):
+        self.assertEqual(collect._ev_noise({}), 0.0)
+
+    def test_build_carries_the_band_and_the_assumed_fill(self):
+        v = collect.build(_row(), _ctx(), slow=False)["verdict"]
+        self.assertAlmostEqual(v["noise"], 31.0, places=6)
+        # The cost model charges a half-spread on entry: it assumes you pay the ask.
+        self.assertAlmostEqual(v["assumed_fill"], 4.20 * (1 + 0.021 / 2), places=6)
+
+    def test_a_thinly_traded_contract_lands_marginal_not_take(self):
+        # +$8 of net EV against a $31 band is a coin flip, not a trade.
+        r = dict(_row(), ev_per_contract=8.0, ev_gross_per_contract=26.0)
+        out = R.render(collect.build(r, _ctx(), slow=False))
+        self.assertIn("MARGINAL", out)
+
 
 class TestSlowTier(unittest.TestCase):
     def test_slow_panels_that_exceed_budget_are_marked_not_fetched(self):
@@ -438,6 +626,21 @@ class TestSlowTier(unittest.TestCase):
         collect.gather_slow("NVDA", budget_s=0.3,
                             _fns={"a": lambda: time.sleep(5), "b": lambda: time.sleep(5)})
         self.assertLess(time.time() - t0, 2.5)
+
+    def test_overrun_workers_are_daemons_so_the_process_can_still_exit(self):
+        # The budget bounds the PAGE. It only bounds the PROCESS if the abandoned
+        # worker cannot hold interpreter shutdown open: `Future.cancel()` is a
+        # no-op on an already-running call, and ThreadPoolExecutor registers an
+        # atexit hook that joins its workers. EDGAR's own timeout is 20s.
+        import threading
+        import time
+        before = set(threading.enumerate())
+        collect.gather_slow("NVDA", budget_s=0.2,
+                            _fns={"slow": lambda: time.sleep(3)})
+        spawned = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+        self.assertTrue(spawned, "expected the overrunning worker to still be alive")
+        for t in spawned:
+            self.assertTrue(t.daemon, "worker {!r} would block interpreter exit".format(t.name))
 
     def test_slow_disabled_marks_all_three_not_fetched(self):
         data = collect.build(_row(), _ctx(), slow=False)
@@ -483,10 +686,40 @@ class TestWriteAndReRender(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             side = os.path.join(d, "x.json")
             with open(side, "w") as f:
-                json.dump(_fixture(), f)
+                json.dump(dict(_fixture(), meta=dict(_fixture()["meta"], schema=1)), f)
             rc = main(["--from", side, "--no-open"])
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.exists(os.path.join(d, "x.html")))
+
+    def _render_sidecar(self, meta_over):
+        from src.tearsheet.__main__ import main
+        d = _fixture()
+        d["meta"] = dict(d["meta"], **meta_over)
+        with tempfile.TemporaryDirectory() as tmp:
+            side = os.path.join(tmp, "x.json")
+            with open(side, "w") as f:
+                json.dump(d, f)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = main(["--from", side, "--no-open"])
+        return rc, buf.getvalue()
+
+    def test_cli_warns_when_the_sidecar_predates_the_current_schema(self):
+        # A sidecar written before `meta.schema` existed still renders — but the
+        # page may quietly lack keys the current renderer expects, and a silent
+        # partial render is exactly what this package refuses elsewhere.
+        rc, out = self._render_sidecar({})       # no schema key at all
+        self.assertEqual(rc, 0)
+        self.assertIn("schema", out.lower())
+
+    def test_cli_warns_on_a_sidecar_from_the_future(self):
+        rc, out = self._render_sidecar({"schema": 99})
+        self.assertEqual(rc, 0)
+        self.assertIn("99", out)
+
+    def test_cli_is_quiet_on_a_current_sidecar(self):
+        _rc, out = self._render_sidecar({"schema": collect.SCHEMA})
+        self.assertNotIn("schema", out.lower())
 
 
 import io  # noqa: E402
@@ -661,6 +894,16 @@ class TestDetailDeck(unittest.TestCase):
         out = R.render(d)
         self.assertIn("<!DOCTYPE html>", out)
         self.assertIn("unavailable", out)
+
+    def test_raw_tab_drops_the_price_series_and_nothing_else(self):
+        # The caption promises "price series omitted". It used to drop the whole
+        # `name` block — rsi, pcr, max pain and the flow summary went with it.
+        d = _fixture_full()
+        d["name"] = dict(d["name"], closes=[float(i) for i in range(130)])
+        pane = _pane(R.render(d), "raw")
+        self.assertIn("max_pain", pane)
+        self.assertIn("rsi", pane)
+        self.assertNotIn("127.0", pane)      # a close that appears nowhere else
 
     def test_events_tab_shows_not_fetched_placeholder(self):
         d = _fixture_full()

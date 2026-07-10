@@ -123,8 +123,68 @@ def print_score_breakdown(score_drivers_str: str) -> str:
     return out or score_drivers_str
 
 
+def _ev_noise_for_row(row) -> float:
+    """Vega-sized error bar on this row's net EV. Mirrors tearsheet.collect."""
+    sigma = {"high": 1.0, "medium": 1.5, "low": 2.5}.get(
+        str(row.get("iv_confidence") or "").strip().lower(), 2.5)
+    try:
+        vd = float(row.get("vega_dollar"))
+        if math.isfinite(vd) and vd:
+            return abs(vd) * sigma
+    except (TypeError, ValueError):
+        pass
+    try:
+        cost = float(row.get("ev_cost_per_contract"))
+        if math.isfinite(cost):
+            return abs(cost) * 0.25
+    except (TypeError, ValueError):
+        pass
+    return 0.0
+
+
+from .tearsheet.render import decide_verdict  # the one verdict rule, shared
+
+
+def _verdict_for_row(row):
+    """(decision, net_ev) using the SAME rule the tearsheet renders on.
+
+    The top-N table ranks by quality_score (IC ~0.04, no demonstrated edge). The
+    verdict here is the cost-aware net-EV read, so a pick that ranks high on a
+    signal with no edge but loses money after the spread is visibly flagged.
+    """
+    net = row.get("ev_per_contract")
+    gross = row.get("ev_gross_per_contract")
+    cost = row.get("ev_cost_per_contract")
+    decision, _ = decide_verdict(net, gross, cost, None, noise=_ev_noise_for_row(row))
+    try:
+        net_f = float(net)
+        net_f = net_f if math.isfinite(net_f) else None
+    except (TypeError, ValueError):
+        net_f = None
+    return decision, net_f
+
+
+_VERDICT_ABBR = {"TAKE": "TAKE", "SKIP": "SKIP", "MARGINAL": "MARG",
+                 "INDETERMINATE": "INDET"}
+
+
+def _style_verdict(decision: str) -> str:
+    label = _VERDICT_ABBR.get(decision, decision[:5])
+    if not HAS_ENHANCED_CLI:
+        return f"{label:<5}"
+    role = {"TAKE": "good", "SKIP": "bad", "MARGINAL": "warn",
+            "INDETERMINATE": "muted"}.get(decision, "muted")
+    return fmt.style(f"{label:<5}", role, bold=(decision in ("TAKE", "SKIP")))
+
+
 def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
-    """Print a ranked cross-ticker table grouped by DTE bucket."""
+    """Print a ranked cross-ticker table grouped by DTE bucket.
+
+    Ranks by quality_score but shows the round-trip net-EV verdict beside it, so
+    a high-ranked pick that does not survive its transaction cost — the common
+    case, since the scorer has no demonstrated directional edge — is visible at
+    the point of selection rather than only inside a tearsheet.
+    """
     if contracts.empty:
         print("No contracts to display.")
         return
@@ -134,8 +194,8 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
 
     header = (
         f"{'Rank':<5} {'Ticker':<7} {'Type':<5} {'Strike':>7} {'Expiry':<12} "
-        f"{'DTE':>4} {'Delta':>6} {'IV%':>6} {'PoP%':>6} {'Prem':>7} "
-        f"{'Score':>7}  Score Drivers"
+        f"{'DTE':>4} {'Delta':>6} {'IV%ile':>6} {'PoP%':>6} {'Prem':>7} "
+        f"{'Net EV':>7} {'Call':<5} {'Score':>6}  Drivers"
     )
 
     dte_bucket_order = ["Short (1-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"]
@@ -145,6 +205,7 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
 
     rank = 1
     printed_any = False
+    rejected = 0
     for bucket in dte_bucket_order:
         bucket_df = contracts[contracts["_bucket"] == bucket]
         if bucket_df.empty:
@@ -166,12 +227,19 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
             prem = row.get("premium", 0) or 0
             delta = row.get("delta", 0) or 0
             score = row.get("quality_score", 0) or 0
-            drivers = str(row.get("score_drivers", ""))[:30]
+            drivers = str(row.get("score_drivers", ""))[:24]
+            decision, net_ev = _verdict_for_row(row)
+            if decision in ("SKIP", "INDETERMINATE"):
+                rejected += 1
+            net_txt = "  n/a" if net_ev is None else f"{net_ev:+.0f}"
+            net_cell = (fmt.style_sign(f"{net_txt:>7}", net_ev) if
+                        (HAS_ENHANCED_CLI and net_ev is not None) else f"{net_txt:>7}")
             line = (
                 f"{rank:<5} {str(row.get('symbol','')):<7} {str(row.get('type','')):<5} "
                 f"{row.get('strike', 0):>7.1f} {str(row.get('expiration', '')):<12} "
-                f"{dte_val:>4} {delta:>6.2f} IV{iv_pct*100:>4.0f}% {pop*100:>5.1f}% "
-                f"${prem:>6.2f} {score:>7.3f}  {drivers}"
+                f"{dte_val:>4} {delta:>6.2f} {iv_pct*100:>5.0f}% {pop*100:>5.1f}% "
+                f"${prem:>6.2f} {net_cell} {_style_verdict(decision)} "
+                f"{score:>6.3f}  {drivers}"
             )
             print(line)
             rank += 1
@@ -180,6 +248,12 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
 
     if not printed_any:
         print("No contracts matched any DTE bucket.")
+    total = rank - 1
+    if rejected and total:
+        msg = (f"{rejected} of {total} ranked pick{'s' if total != 1 else ''} "
+               f"do not clear their round-trip cost by net EV (Call = SKIP/INDET). "
+               f"Rank is quality_score; the verdict is cost-aware.")
+        print("\n" + (fmt.style(msg, "warn") if HAS_ENHANCED_CLI else msg))
     print(f"\nTop {n} contracts shown. Run with --export csv to save full results.")
 
 
