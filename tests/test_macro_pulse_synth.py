@@ -22,8 +22,10 @@ def _ctx():
 class _FakeScorer:
     def __init__(self, raw):
         self._raw = raw
+        self.calls = 0
 
     def safe_chat_complete(self, system, user, max_tokens=400):
+        self.calls += 1
         return self._raw
 
 
@@ -52,6 +54,57 @@ class SynthTest(unittest.TestCase):
         out = S.narrate(_ctx(), scorer=_FakeScorer("not json at all"))
         self.assertEqual(out.narrative_source, "deterministic")
         self.assertTrue(out.headline)
+
+
+class SynthNoAiTest(unittest.TestCase):
+    """The macro panel is shown BEFORE the user answers the AI-ranking prompt,
+    so building it must not fire an AI request. `use_ai=False` keeps the panel
+    fully functional on the deterministic template with zero network calls."""
+
+    def test_use_ai_false_makes_no_ai_call_even_with_a_scorer(self):
+        scorer = _FakeScorer(json.dumps({"headline": "should never be used"}))
+        out = S.narrate(_ctx(), scorer=scorer, use_ai=False)
+        self.assertEqual(scorer.calls, 0)
+        self.assertEqual(out.narrative_source, "deterministic")
+        self.assertTrue(out.headline)
+
+    def test_use_ai_false_does_not_construct_a_default_scorer(self):
+        # scorer=None must NOT lazily build an AIScorer (that is the network hop
+        # the user saw fire before the prompt).
+        import src.ai_scorer as ai_scorer
+
+        built = []
+        orig = ai_scorer.AIScorer.__init__
+
+        def _spy(self, *a, **k):
+            built.append(1)
+            return orig(self, *a, **k)
+
+        ai_scorer.AIScorer.__init__ = _spy
+        try:
+            out = S.narrate(_ctx(), scorer=None, use_ai=False)
+        finally:
+            ai_scorer.AIScorer.__init__ = orig
+        self.assertEqual(built, [])
+        self.assertEqual(out.narrative_source, "deterministic")
+
+    def test_use_ai_true_is_still_the_default(self):
+        scorer = _FakeScorer(json.dumps({"headline": "AI read", "themes": [],
+                                         "what_would_flip": "x"}))
+        out = S.narrate(_ctx(), scorer=scorer)
+        self.assertEqual(scorer.calls, 1)
+        self.assertEqual(out.narrative_source, "ai")
+
+
+class BuildContextNoAiTest(unittest.TestCase):
+    def test_build_context_use_ai_false_never_calls_ai(self):
+        from src.macro_pulse import orchestrator as O
+
+        scorer = _FakeScorer(json.dumps({"headline": "nope"}))
+        # Empty news → deterministic path regardless, but assert no AI attempt.
+        O.build_context(fetch_fn=lambda: [], scorer=scorer, use_ai=False,
+                        persist=False, cache_db=":memory:", db_path=":memory:")
+        self.assertEqual(scorer.calls, 0)
 
 
 if __name__ == "__main__":

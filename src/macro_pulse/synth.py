@@ -81,7 +81,13 @@ def _deterministic_narrate(ctx: MacroContext) -> MacroContext:
     return ctx
 
 
-def narrate(ctx: MacroContext, *, scorer=None) -> MacroContext:
+def narrate(ctx: MacroContext, *, scorer=None, use_ai: bool = True) -> MacroContext:
+    """Synthesize the narrative. With ``use_ai=False`` this is purely local — no
+    scorer is constructed and no request is sent — so callers that render the
+    panel BEFORE the user has consented to AI (the pre-scan macro read) cost
+    zero tokens and make no network call."""
+    if not use_ai:
+        return _deterministic_narrate(ctx)
     try:
         if scorer is None:
             from src.ai_scorer import AIScorer

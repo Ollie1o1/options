@@ -20,11 +20,15 @@ def _today_str() -> str:
 
 def build_context(*, fetch_fn: Optional[Callable[[], list]] = None, scorer=None,
                   db_path: Optional[str] = None, cache_db: Optional[str] = None,
-                  persist: bool = True, today: Optional[str] = None):
+                  persist: bool = True, today: Optional[str] = None,
+                  use_ai: bool = True):
     """Fetch → aggregate → enrich → (cache) → synth. Returns the synthesized
     MacroContext. One AI call per day per distinct news state; cache hits skip
     both the AI call and the history persist. Shared by every render path so
-    per-ticker reads cost no extra tokens."""
+    per-ticker reads cost no extra tokens.
+
+    ``use_ai=False`` forces a deterministic narrative with no request at all —
+    for panels shown before the user opts into AI."""
     from src.worldnews import scoring as _scoring, sources as _sources
 
     fetch_fn = fetch_fn or _sources.fetch_all
@@ -46,7 +50,7 @@ def build_context(*, fetch_fn: Optional[Callable[[], list]] = None, scorer=None,
         _hydrate(ctx, cached)
         return ctx
 
-    ctx = _synth.narrate(ctx, scorer=scorer)
+    ctx = _synth.narrate(ctx, scorer=scorer, use_ai=use_ai)
     _cache.put(key, _dump(ctx), cache_db)
     if persist:
         theme_scores = {t.theme: t.score for t in ctx.themes}

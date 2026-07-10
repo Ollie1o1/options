@@ -3914,7 +3914,10 @@ def _macro_scan_section(symbols, focus_symbol=None) -> None:
             break
 
     try:
-        ctx = _mp.build_context()
+        # Deterministic narrative only: this panel is shown BEFORE the AI-ranking
+        # prompt below, so building it must not fire an AI request. The opt-in
+        # AI call is the ranking, gated on an explicit 'yes'.
+        ctx = _mp.build_context(use_ai=False)
     except Exception as exc:
         logger.debug("macro scan section skipped: %s", exc)
         return
