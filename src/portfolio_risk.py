@@ -35,6 +35,29 @@ import time as _time
 _IV_CACHE: dict = {}          # {key: (iv_value, timestamp)}
 _IV_CACHE_TTL = 900           # 15 minutes
 
+# Spot prices are shared across every open position: a 60-position book with 29
+# unique tickers used to fire 60 sequential yfinance calls, and the whole book
+# is priced twice per session (startup update_positions + the in-scan GEX gate).
+# A process-wide short-TTL cache collapses that to one fetch per ticker per
+# minute — the dominant post-input stall on a single-ticker scan.
+_SPOT_CACHE: dict = {}        # {ticker: (spot, timestamp)}
+_SPOT_CACHE_TTL = 60          # seconds; spot moves, so keep this short
+
+# The fully priced positions frame (spot + per-leg option-chain IV for every
+# open trade) is the single most expensive thing on the interactive scan path,
+# and `run_scan` asks for it TWICE per single-ticker scan — the RISK-OFF GEX
+# gate and the executive-summary VaR line. Memoizing the whole frame collapses
+# those two ~7s passes into one, keyed on the open-book signature so a closed
+# position invalidates it.
+_POSITIONS_CACHE: dict = {}   # {(db_path, rfr_key, book_signature): (df, timestamp)}
+_POSITIONS_CACHE_TTL = 60     # seconds
+
+
+def reset_spot_cache() -> None:
+    """Drop every cached spot AND the priced-positions memo. Tests + forced refresh."""
+    _SPOT_CACHE.clear()
+    _POSITIONS_CACHE.clear()
+
 
 def risk_off_filters_picks(config: Optional[Dict] = None) -> bool:
     """Whether RISK-OFF mode should FILTER the scan's picks, or just warn.
@@ -79,8 +102,8 @@ class RiskAggregator:
             logger.debug("Could not load open trades: %s", exc)
             return []
 
-    def _fetch_spot(self, ticker: str) -> Optional[float]:
-        """Fetch current spot price via fast_info, with history fallback."""
+    def _fetch_spot_uncached(self, ticker: str) -> Optional[float]:
+        """The raw network hop: fast_info, with a 5d-history fallback."""
         try:
             tkr = _get_yf().Ticker(ticker)
             fi = getattr(tkr, "fast_info", None)
@@ -96,6 +119,22 @@ class RiskAggregator:
         except Exception:
             pass
         return None
+
+    def _fetch_spot(self, ticker: str) -> Optional[float]:
+        """Spot price, deduplicated and cached per ticker for `_SPOT_CACHE_TTL`.
+
+        A failed fetch returns None and is NOT cached, so a transient outage does
+        not pin a whole ticker to "no spot" for the TTL.
+        """
+        cached = _SPOT_CACHE.get(ticker)
+        if cached is not None:
+            spot, ts = cached
+            if _time.monotonic() - ts < _SPOT_CACHE_TTL:
+                return spot
+        spot = self._fetch_spot_uncached(ticker)
+        if spot is not None and spot > 0:
+            _SPOT_CACHE[ticker] = (spot, _time.monotonic())
+        return spot
 
     _FALLBACK_IV = 0.30
 
@@ -176,6 +215,24 @@ class RiskAggregator:
         if not trades:
             return pd.DataFrame()
 
+        # Serve a recent identical computation (same book, same rfr) from the memo
+        # so the two per-scan callers don't each re-price the whole portfolio.
+        signature = tuple(sorted(
+            (str(t.get("ticker")), str(t.get("expiration")),
+             float(safe_float(t.get("strike")) or 0.0), (t.get("type") or "call").lower())
+            for t in trades))
+        cache_key = (self.db_path, round(float(rfr), 4), signature)
+        cached = _POSITIONS_CACHE.get(cache_key)
+        if cached is not None:
+            df_cached, ts = cached
+            if _time.monotonic() - ts < _POSITIONS_CACHE_TTL:
+                return df_cached.copy()
+
+        # One spot per ticker per call: resolves duplicates even when a ticker
+        # fails (None is not written to the cross-call TTL cache, so without this
+        # a dead ticker held in N positions would be retried N times).
+        call_spots: Dict[str, Optional[float]] = {}
+
         rows = []
         for t in trades:
             ticker = t.get("ticker", "")
@@ -186,13 +243,17 @@ class RiskAggregator:
             if not ticker or not expiration or strike <= 0:
                 continue
 
-            spot = self._fetch_spot(ticker)
-            if spot is None or spot <= 0:
-                continue
-
+            # Expiry is a free local check — do it BEFORE the network fetch so an
+            # already-expired position costs no yfinance round-trip.
             T = self._dte(expiration)
             if T <= 0:
                 # Skip already-expired positions — their Greeks are meaningless
+                continue
+
+            if ticker not in call_spots:
+                call_spots[ticker] = self._fetch_spot(ticker)
+            spot = call_spots[ticker]
+            if spot is None or spot <= 0:
                 continue
 
             sigma, iv_source = self._get_current_iv(ticker, expiration, strike, opt_type)
@@ -224,8 +285,12 @@ class RiskAggregator:
             rows.append(row)
 
         if not rows:
+            # Every position failed to price (e.g. a transient data outage). Do
+            # NOT memoize emptiness — the next call should get a fresh attempt.
             return pd.DataFrame()
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        _POSITIONS_CACHE[cache_key] = (df, _time.monotonic())
+        return df.copy()
 
     def get_portfolio_greeks(self, rfr: Optional[float] = None) -> Dict:
         """
