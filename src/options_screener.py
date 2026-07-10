@@ -104,6 +104,16 @@ def _spinner(label: str):
     return contextlib.nullcontext()
 
 
+# How long startup will WAIT for background exit-enforcement before showing the
+# menu. Exit enforcement (auto-closing positions past their stops) runs in a
+# daemon thread and is idempotent, so overrunning it is safe to leave running in
+# the background — but blocking the interactive menu on it is not. update_positions
+# already parallelizes its fetches; a healthy run finishes in a few seconds. The
+# old 60s bound (matched to update_positions' worst-case internal yfinance
+# timeouts) turned a rate-limited data feed into a minute-long startup hang.
+_EXIT_ENFORCE_JOIN_TIMEOUT = 12.0
+
+
 def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None):
     """Render the market-regime dashboard to a string while paper-trade exits
     are enforced in the background. Returns the captured dashboard text
@@ -154,9 +164,11 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None):
                     print_regime_dashboard(width)
             except Exception:
                 pass
-            # Exits must finish before we move on so auto-closes complete; capped
-            # by update_positions' own ~60s internal yfinance timeouts.
-            exit_thread.join(timeout=60)
+            # Give exits a bounded grace to complete so a fast, healthy run has
+            # them done before the menu — but never hang the menu on a slow data
+            # feed. The thread is a daemon and idempotent, so if it overruns it
+            # simply finishes in the background.
+            exit_thread.join(timeout=_EXIT_ENFORCE_JOIN_TIMEOUT)
     except Exception:
         pass
     return buf.getvalue()
@@ -3117,6 +3129,23 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
 _MULTILEG_MODES = ("Credit Spreads", "Iron Condor", "Vertical Spreads")
 
 
+def _retry_waves_for(n_tickers: int) -> list:
+    """Cool-down seconds per serial retry wave, scaled to batch size.
+
+    The waves exist to let a big PARALLEL fetch storm subside before retrying —
+    with dozens of tickers, waiting 20s then 45s meaningfully improves the hit
+    rate. A single interactive ticker is not a storm: the inner fetch already
+    made four attempts, so one short wave is a reasonable last try, and a 65s
+    cool-down just to fail is far worse than failing fast and letting the user
+    re-run.
+    """
+    if n_tickers <= 2:
+        return [8]
+    if n_tickers < 30:
+        return [15, 30]
+    return [20, 45]
+
+
 def _config_sha(config) -> str:
     """Short content hash of the active config, for the tearsheet footer."""
     import hashlib
@@ -3277,7 +3306,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             "too many requests" in m
             or "rate limited" in m
             or "no options expirations available" in m
-            or "no options data frames fetched" in m
+            or "no options data" in m
             or "could not resolve host" in m
             or "could not fetch price history" in m
             or "failed to perform" in m
@@ -3318,7 +3347,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # After the parallel storm subsides, Yahoo tends to serve the same tickers cleanly.
     # Up to two retry waves: first after 20s cooldown (spacing 1.5s), second after another 45s if any remain.
     import time as _time
-    for _wave_idx, _wave_cooldown in enumerate([20, 45]):
+    for _wave_idx, _wave_cooldown in enumerate(_retry_waves_for(len(tickers))):
         _retry_syms = [
             s for s in tickers
             if isinstance(raw_results.get(s), dict) and _is_transient_err(raw_results[s].get("error", ""))
@@ -3920,11 +3949,13 @@ def run_top_scan(
     min_dte: int = 7,
     max_dte: int = 45,
     max_expiries: int = 4,
+    tearsheet_pick: Optional[int] = None,
 ) -> Optional[pd.DataFrame]:
     """Fetch and score contracts across all tickers, return top_n sorted by quality_score.
 
     Groups results into DTE buckets: Short (7-14), Standard (15-30), Swing (31-45).
-    Prints a ranked table and optionally saves a CSV.
+    Prints a ranked table and optionally saves a CSV. With `tearsheet_pick` set,
+    writes an HTML tearsheet for that rank (1-based) after the table.
     """
     from .cli_display import print_top_n_table
 
@@ -3973,6 +4004,8 @@ def run_top_scan(
             "symbol", "type", "strike", "expiration", "T_years",
             "bid", "ask", "premium", "delta", "impliedVolatility",
             "iv_rank_30", "prob_profit", "ev_per_contract",
+            "ev_gross_per_contract", "ev_cost_per_contract",
+            "vega_dollar", "iv_confidence",
             "quality_score", "score_drivers",
         ]
         export_df = top[[c for c in export_cols if c in top.columns]].copy()
@@ -3981,6 +4014,23 @@ def run_top_scan(
             export_df.drop(columns=["T_years"], inplace=True, errors="ignore")
         export_df.to_csv(fname, index=False)
         print(f"\nExported {len(export_df)} rows to {fname}")
+
+    if tearsheet_pick is not None and 1 <= tearsheet_pick <= len(top):
+        try:
+            from src.tearsheet import build, write_tearsheet
+            row = top.iloc[tearsheet_pick - 1].to_dict()
+            ctx = {"mode": mode, "rank": tearsheet_pick, "n_picks": len(top),
+                   "spot": row.get("underlying"), "rfr": rfr, "vix": vix_level,
+                   "vix_regime": vix_regime, "config": config,
+                   "config_sha": _config_sha(config),
+                   "sibling_rows": top.to_dict("records")}
+            data = build(row, ctx)
+            html_path, _ = write_tearsheet(data)
+            print(f"\n  tearsheet: {html_path}")
+            import webbrowser
+            webbrowser.open("file://" + os.path.abspath(html_path))
+        except Exception as _ts_exc:
+            logging.getLogger(__name__).debug("top-scan tearsheet skipped: %s", _ts_exc)
 
     return top
 
@@ -4209,8 +4259,10 @@ def main():
             "JPM", "BAC", "GS", "V", "MA", "AMD", "XOM", "CVX",
         ])
         _do_export = (args.export or "").lower() == "csv"
+        _ts_pick = None if getattr(args, "no_tearsheet", False) else getattr(args, "tearsheet", None)
         print(f"\nRunning top-{_top_n} scan across {len(_top_tickers)} tickers...")
-        run_top_scan(_top_tickers, top_n=_top_n, export_csv=_do_export)
+        run_top_scan(_top_tickers, top_n=_top_n, export_csv=_do_export,
+                     tearsheet_pick=_ts_pick)
         sys.exit(0)
 
     # ── Startup Banner (Phase 1) ─────────────────────────────────────────────

@@ -1849,18 +1849,32 @@ def get_market_context() -> Tuple[str, str, bool, float]:
         return "Unknown", "Unknown", False, 0.0
 
 
+def _no_frames_message(symbol: str, cause: Optional[BaseException]) -> str:
+    """Failure text that names the cause instead of the generic 'no frames'.
+
+    Keeps the substring the retry layer keys on (`_is_transient_err` matches
+    'no options data'), while surfacing the underlying 429/timeout so the user
+    and the logs see something actionable.
+    """
+    base = f"No options data for {symbol}"
+    if cause is None:
+        return base + "."
+    return f"{base}: {type(cause).__name__}: {cause}"
+
+
 def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
     # yfinance returns an Options namedtuple defined dynamically — not pickleable.
     # Cache the (calls, puts) DataFrame pair as a plain dict instead.
+    #
+    # NOTE: a failed fetch RAISES rather than returning []. A rate-limit or
+    # timeout on the chain endpoint is not the same fact as "this expiry has no
+    # options", and the caller needs the reason: swallowing it here is what
+    # reduced every failure to a bare "No options data frames fetched".
     def _do_fetch():
         _yf_throttle()
         oc_local = tkr.option_chain(exp)
         return {"calls": oc_local.calls, "puts": oc_local.puts}
-    try:
-        oc_dict = _yf_cached(symbol, f"chain:{exp}", _do_fetch, ttl_s=600)
-    except Exception as e:
-        logger.debug("Could not fetch options for %s on %s: %s", symbol, exp, e)
-        return []
+    oc_dict = _yf_cached(symbol, f"chain:{exp}", _do_fetch, ttl_s=600)
 
     sub_frames = []
     for opt_type, df in [("call", oc_dict.get("calls")), ("put", oc_dict.get("puts"))]:
@@ -2170,14 +2184,16 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     # Was ThreadPoolExecutor(max_workers=4) — combined with outer workers=3 that gave 12-way
     # concurrency per symbol and triggered 429 storms.
     frames = []
+    _last_chain_err = None
     for _exp in expirations_to_scan:
         try:
             frames.extend(_process_option_chain(tkr, symbol, _exp))
-        except Exception:
+        except Exception as _ce:
+            _last_chain_err = _ce
             continue
 
     if not frames:
-        raise RuntimeError(f"No options data frames fetched for {symbol}.")
+        raise RuntimeError(_no_frames_message(symbol, _last_chain_err))
 
     df = pd.concat(frames, ignore_index=True)
 
