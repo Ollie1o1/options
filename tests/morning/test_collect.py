@@ -142,5 +142,30 @@ class TestMacroEventsPanel(unittest.TestCase):
         self.assertEqual(out["headlines"], [])
 
 
+class TestSignalsPanel(unittest.TestCase):
+    def test_panel_signals_shapes(self):
+        rows = [{"ticker": "ETF" + str(i), "composite": 1.0 - 0.1 * i,
+                 "direction": "LONG"} for i in range(8)]
+        out = collect._panel_signals(
+            _uoa_fn=lambda: {"date": "2026-07-10", "days_available": 3,
+                             "rows": [{"symbol": "NVDA", "score": 2.1,
+                                       "net_call_share": 0.8, "unusual": [1, 2]}]},
+            _insider_fn=lambda: [{"sym": "AAPL", "summary": "CLUSTER BUY (score 0.9)"}],
+            _outlook_fn=lambda: {"rows": rows, "as_of": "2026-07-10"})
+        self.assertEqual(out["uoa"][0]["symbol"], "NVDA")
+        self.assertEqual(out["uoa"][0]["n_unusual"], 2)
+        self.assertEqual(len(out["outlook"]["top"]), 3)
+        self.assertEqual(len(out["outlook"]["bottom"]), 3)
+        self.assertEqual(out["outlook"]["top"][0]["ticker"], "ETF0")
+
+    def test_panel_signals_all_dead_is_empty_not_fatal(self):
+        def boom():
+            raise RuntimeError("dead")
+        out = collect._panel_signals(_uoa_fn=boom, _insider_fn=boom, _outlook_fn=boom)
+        self.assertEqual(out["uoa"], [])
+        self.assertEqual(out["insider"], [])
+        self.assertEqual(out["outlook"], {"top": [], "bottom": [], "as_of": None})
+
+
 if __name__ == "__main__":
     unittest.main()

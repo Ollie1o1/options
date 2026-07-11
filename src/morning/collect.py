@@ -216,6 +216,69 @@ def _fetch_watchlist_earnings(limit=10, horizon_days=7):
     return out
 
 
+def _fetch_uoa():
+    from src.uoa import uoa_report
+    return uoa_report()
+
+
+def _fetch_insider(limit=6):
+    from src.pick_context import insider_summary
+    from src.watchlist import load_watchlist
+    out = []
+    for sym in load_watchlist()[:limit]:
+        try:
+            s = insider_summary(sym, fetch=True)
+        except Exception:
+            continue
+        if not s:
+            continue
+        if isinstance(s, dict):
+            label = s.get("label") or "?"
+            if label in ("NONE", "?"):
+                continue
+            text = f"{label} (score {s.get('score', 0):.1f})"
+        else:
+            text = str(s)
+        out.append({"sym": sym, "summary": text})
+    return out
+
+
+def _fetch_outlook():
+    from src.outlook.display import load_outlook_cache, compute_outlook_cache
+    cache = load_outlook_cache()
+    if not cache:
+        compute_outlook_cache()
+        cache = load_outlook_cache()
+    return cache
+
+
+def _panel_signals(_uoa_fn=None, _insider_fn=None, _outlook_fn=None) -> dict:
+    out = {"uoa": [], "insider": [],
+           "outlook": {"top": [], "bottom": [], "as_of": None}}
+    try:
+        rep = (_uoa_fn or _fetch_uoa)() or {}
+        for r in list(rep.get("rows") or [])[:8]:
+            out["uoa"].append({"symbol": r.get("symbol"),
+                               "score": r.get("score"),
+                               "net_call_share": r.get("net_call_share"),
+                               "n_unusual": len(r.get("unusual") or [])})
+    except Exception:
+        pass
+    try:
+        out["insider"] = (_insider_fn or _fetch_insider)()
+    except Exception:
+        pass
+    try:
+        cache = (_outlook_fn or _fetch_outlook)() or {}
+        rows = list(cache.get("rows") or [])
+        out["outlook"] = {"top": rows[:3],
+                          "bottom": rows[-3:] if len(rows) > 3 else [],
+                          "as_of": cache.get("as_of")}
+    except Exception:
+        pass
+    return out
+
+
 def _panel_macro_events(_calendar_fn=None, _pulse_fn=None, _earnings_fn=None) -> dict:
     out = {"calendar": [], "pulse": None, "headlines": [], "earnings": []}
     try:
@@ -238,7 +301,7 @@ def _default_fetchers():
     # Each entry is (panel_id, zero-arg callable); grown panel by panel.
     return [("health", _panel_health), ("market", _panel_market),
             ("vol", _panel_vol), ("macro_events", _panel_macro_events),
-            ("gate", _panel_gate)]
+            ("signals", _panel_signals), ("gate", _panel_gate)]
 
 
 def build(now=None, slow=True, budget_s=20.0, _fetchers=None) -> dict:
