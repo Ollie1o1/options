@@ -2808,6 +2808,19 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     return default if (not val and default is not None) else val
 
 
+def _open_briefing_file(path: str) -> None:
+    """Open a written briefing in the default browser. Never raises."""
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["open", path], check=False)
+        else:
+            import webbrowser
+            webbrowser.open("file://" + os.path.abspath(path))
+    except Exception:
+        pass
+
+
 def _run_intel_menu() -> None:
     """Intel Briefing sub-menu: (a) market overview, (b) single-ticker briefing.
 
@@ -2827,7 +2840,8 @@ def _run_intel_menu() -> None:
     while True:
         try:
             choice = prompt_input(
-                "Intel: [a] market overview  [b] ticker briefing  [c] macro pulse  [x] back",
+                "Intel: [a] market overview  [b] ticker briefing  [c] macro pulse  "
+                "[d] morning briefing  [x] back",
                 "a").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
@@ -2855,8 +2869,18 @@ def _run_intel_menu() -> None:
                     _brief.print_briefing(sym)
                 except Exception as exc:
                     print(f"  Could not build briefing for {sym}: {exc}")
+        elif choice in ("d", "morning", "briefing", "4"):
+            try:
+                import src.morning as _morning
+                from src import ui as _ui
+                with _ui.spinner("Building morning briefing (up to ~30s)"):
+                    html_path, _ = _morning.build_and_write()
+                print(f"  Briefing written: {html_path}")
+                _open_briefing_file(html_path)
+            except Exception as exc:
+                print(f"  Could not build morning briefing: {exc}")
         else:
-            print("  Unrecognized choice. Type a / b / c, or x to go back.")
+            print("  Unrecognized choice. Type a / b / c / d, or x to go back.")
 
         if not _interactive:
             return
