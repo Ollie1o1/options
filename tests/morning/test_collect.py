@@ -57,5 +57,37 @@ class TestBuildSkeleton(unittest.TestCase):
         self.assertTrue(any("vol" in n for n in data["panels"]["notes"]))
 
 
+class TestMarketPanel(unittest.TestCase):
+    def test_panel_market_shapes_injected(self):
+        regime = {"vix": 14.2, "posture": "RISK_ON", "vix_term_structure": "CONTANGO"}
+        dirs = {"SPY": {"last": 620.0, "chg_1d_pct": 0.4, "chg_5d_pct": 1.2,
+                        "closes": [610.0, 612.0, 615.0, 618.0, 620.0],
+                        "verdict": "BULLISH"}}
+        out = collect._panel_market(_regime_fn=lambda: regime,
+                                    _dirs_fn=lambda: dirs,
+                                    _rates_fn=lambda: {"t10y": 4.2, "t3m": 4.4})
+        self.assertEqual(out["regime"]["vix"], 14.2)
+        self.assertEqual(out["indexes"][0]["sym"], "SPY")
+        self.assertAlmostEqual(out["rates"]["slope"], -0.2, places=6)
+
+    def test_panel_market_rates_failure_is_partial_not_fatal(self):
+        def boom():
+            raise RuntimeError("fred down")
+        out = collect._panel_market(_regime_fn=lambda: {"vix": 15.0},
+                                    _dirs_fn=lambda: {}, _rates_fn=boom)
+        self.assertEqual(out["rates"], {"t10y": None, "t3m": None, "slope": None})
+        self.assertEqual(out["regime"]["vix"], 15.0)
+
+    def test_index_rows_from_closes(self):
+        closes = [100.0 + i for i in range(30)]
+        rows = collect._index_rows_from_closes({"SPY": closes})
+        self.assertEqual(rows["SPY"]["last"], 129.0)
+        self.assertAlmostEqual(rows["SPY"]["chg_1d_pct"],
+                               (129.0 / 128.0 - 1) * 100, places=6)
+        self.assertAlmostEqual(rows["SPY"]["chg_5d_pct"],
+                               (129.0 / 124.0 - 1) * 100, places=6)
+        self.assertEqual(len(rows["SPY"]["closes"]), 30)
+
+
 if __name__ == "__main__":
     unittest.main()

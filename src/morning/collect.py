@@ -58,9 +58,80 @@ def _desk_notes(panels, failures):
     return notes
 
 
+_TAPE_SYMBOLS = ("SPY", "QQQ", "IWM")
+
+
+def _index_rows_from_closes(closes_by_sym) -> dict:
+    """{sym: {last, chg_1d_pct, chg_5d_pct, closes}} from raw close series."""
+    out = {}
+    for sym, closes in closes_by_sym.items():
+        vals = [float(c) for c in (closes or []) if c is not None]
+        if len(vals) < 2:
+            continue
+        last = vals[-1]
+        row = {"sym": sym, "last": last,
+               "chg_1d_pct": (last / vals[-2] - 1.0) * 100.0,
+               "chg_5d_pct": (last / vals[-6] - 1.0) * 100.0 if len(vals) >= 6 else None,
+               "closes": vals[-30:]}
+        out[sym] = row
+    return out
+
+
+def _fetch_index_rows():
+    # fetch_index_directions only returns {price, verdict, ...}; sparklines and
+    # day changes need the raw closes, so reuse the same guarded fetcher.
+    from src.regime_dashboard import _safe_hist
+    closes_by_sym = {}
+    for sym in _TAPE_SYMBOLS:
+        series = _safe_hist(sym, "2mo")
+        if series is not None and len(series) >= 2:
+            closes_by_sym[sym] = series.tolist()
+    return _index_rows_from_closes(closes_by_sym)
+
+
+def _fetch_rates():
+    from src.macro_rates import fetch_rates_snapshot
+    snap = fetch_rates_snapshot()
+    return {"t10y": getattr(snap, "dgs10", None),
+            "t3m": getattr(snap, "dgs3mo", None)}
+
+
+def _panel_market(_regime_fn=None, _dirs_fn=None, _rates_fn=None) -> dict:
+    from src.regime_dashboard import fetch_market_regime
+    regime = (_regime_fn or fetch_market_regime)()
+
+    indexes = []
+    try:
+        dirs = (_dirs_fn or _fetch_index_rows)() or {}
+        for sym in _TAPE_SYMBOLS:
+            info = dirs.get(sym)
+            if not isinstance(info, dict):
+                continue
+            indexes.append({
+                "sym": sym,
+                "last": info.get("last"),
+                "chg_1d_pct": info.get("chg_1d_pct"),
+                "chg_5d_pct": info.get("chg_5d_pct"),
+                "closes": list(info.get("closes") or [])[-30:],
+            })
+    except Exception:
+        indexes = []
+
+    rates = {"t10y": None, "t3m": None, "slope": None}
+    try:
+        raw = (_rates_fn or _fetch_rates)()
+        rates["t10y"], rates["t3m"] = raw.get("t10y"), raw.get("t3m")
+        if rates["t10y"] is not None and rates["t3m"] is not None:
+            rates["slope"] = rates["t10y"] - rates["t3m"]
+    except Exception:
+        pass
+
+    return {"regime": regime, "indexes": indexes, "rates": rates}
+
+
 def _default_fetchers():
     # Each entry is (panel_id, zero-arg callable); grown panel by panel.
-    return []
+    return [("market", _panel_market)]
 
 
 def build(now=None, slow=True, budget_s=20.0, _fetchers=None) -> dict:
