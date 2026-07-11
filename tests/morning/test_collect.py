@@ -167,5 +167,29 @@ class TestSignalsPanel(unittest.TestCase):
         self.assertEqual(out["outlook"], {"top": [], "bottom": [], "as_of": None})
 
 
+class TestPortfolioPanel(unittest.TestCase):
+    def test_panel_portfolio_serializes_and_flags_exits(self):
+        rows = [{"ticker": "NVDA", "strategy": "Long Call", "dte": 18.0,
+                 "pnl_pct": 12.5, "delta": 0.42}]
+        out = collect._panel_portfolio(
+            _positions_fn=lambda: rows,
+            _greeks_fn=lambda: {"portfolio_delta": 0.42, "portfolio_vega": 10.0,
+                                "n_positions": 1},
+            _guard_fn=lambda: ["concentrated: 1 underlying"])
+        self.assertEqual(out["n_open"], 1)
+        self.assertEqual(out["positions"][0]["ticker"], "NVDA")
+        self.assertEqual(out["net_greeks"]["portfolio_vega"], 10.0)
+        self.assertEqual(len(out["exits_due"]), 1)  # dte 18 <= 21
+        self.assertIn("NVDA", out["exits_due"][0])
+        self.assertIn("concentrated: 1 underlying", out["guard"])
+
+    def test_panel_portfolio_empty_book(self):
+        out = collect._panel_portfolio(_positions_fn=lambda: [],
+                                       _greeks_fn=lambda: {},
+                                       _guard_fn=lambda: [])
+        self.assertEqual(out["n_open"], 0)
+        self.assertEqual(out["exits_due"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

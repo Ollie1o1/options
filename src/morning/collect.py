@@ -216,6 +216,77 @@ def _fetch_watchlist_earnings(limit=10, horizon_days=7):
     return out
 
 
+_TIME_EXIT_DTE = 21  # mirror of the 21-DTE time-exit rule in exit enforcement
+
+# Columns worth carrying into the sidecar when present (the paper DB is
+# SELECT *, so be defensive about which exist).
+_POSITION_COLS = ("ticker", "strategy", "type", "strike", "expiration", "dte",
+                  "entry_price", "current_price", "pnl_usd", "pnl_pct",
+                  "pnl_percent", "delta", "vega")
+
+
+def _fetch_positions():
+    from src.portfolio_risk import RiskAggregator
+    df = RiskAggregator().get_open_positions_with_greeks()
+    if df is None or getattr(df, "empty", True):
+        return []
+    df = df.copy()
+    if "dte" not in df.columns and "T_years" in df.columns:
+        df["dte"] = df["T_years"] * 365.0
+    keep = [c for c in _POSITION_COLS if c in df.columns]
+    rows = df[keep].head(20).to_dict("records")
+    # sqlite/numpy scalars -> plain python so the sidecar stays JSON-clean
+    out = []
+    for r in rows:
+        clean = {}
+        for k, v in r.items():
+            try:
+                clean[k] = v.item()  # numpy scalar
+            except AttributeError:
+                clean[k] = v
+        out.append(clean)
+    return out
+
+
+def _fetch_net_greeks():
+    from src.portfolio_risk import RiskAggregator
+    g = RiskAggregator().get_portfolio_greeks() or {}
+    g.pop("positions_df", None)  # DataFrame is not sidecar material
+    return {k: (float(v) if isinstance(v, (int, float)) else v)
+            for k, v in g.items() if isinstance(v, (int, float, str))}
+
+
+def _fetch_guard_lines():
+    from src.formatting import _strip_ansi
+    from src.portfolio_guard import format_guard_lines
+    return [_strip_ansi(l) for l in format_guard_lines(_fetch_positions(),
+                                                       "Portfolio")]
+
+
+def _panel_portfolio(_positions_fn=None, _greeks_fn=None, _guard_fn=None) -> dict:
+    positions = (_positions_fn or _fetch_positions)()
+    exits_due = []
+    for p in positions:
+        try:
+            dte = float(p.get("dte"))
+        except (TypeError, ValueError):
+            continue
+        if dte <= _TIME_EXIT_DTE:
+            exits_due.append(f"{p.get('ticker', '?')}: {dte:.0f} DTE <= "
+                             f"{_TIME_EXIT_DTE} — time-exit window")
+    greeks, guard = {}, []
+    try:
+        greeks = (_greeks_fn or _fetch_net_greeks)()
+    except Exception:
+        pass
+    try:
+        guard = list((_guard_fn or _fetch_guard_lines)())
+    except Exception:
+        pass
+    return {"positions": positions, "net_greeks": greeks, "guard": guard,
+            "exits_due": exits_due, "n_open": len(positions)}
+
+
 def _fetch_uoa():
     from src.uoa import uoa_report
     return uoa_report()
@@ -301,7 +372,8 @@ def _default_fetchers():
     # Each entry is (panel_id, zero-arg callable); grown panel by panel.
     return [("health", _panel_health), ("market", _panel_market),
             ("vol", _panel_vol), ("macro_events", _panel_macro_events),
-            ("signals", _panel_signals), ("gate", _panel_gate)]
+            ("signals", _panel_signals), ("portfolio", _panel_portfolio),
+            ("gate", _panel_gate)]
 
 
 def build(now=None, slow=True, budget_s=20.0, _fetchers=None) -> dict:
