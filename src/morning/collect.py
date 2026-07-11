@@ -97,8 +97,10 @@ def _fetch_rates():
 
 
 def _panel_market(_regime_fn=None, _dirs_fn=None, _rates_fn=None) -> dict:
-    from src.regime_dashboard import fetch_market_regime
-    regime = (_regime_fn or fetch_market_regime)()
+    if _regime_fn is None:
+        from src.regime_dashboard import fetch_market_regime
+        _regime_fn = fetch_market_regime
+    regime = _regime_fn()
 
     indexes = []
     try:
