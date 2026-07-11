@@ -317,7 +317,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 13
+_SCHEMA_VERSION = 14
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -416,6 +416,13 @@ _MIGRATIONS = {
         # user asked for: before vs after the data work.
         "ALTER TABLE trades ADD COLUMN era TEXT DEFAULT 'pre_data'",
         "CREATE INDEX IF NOT EXISTS idx_era ON trades(era)",
+    ],
+    14: [
+        # lottery_edge marks whether a Lottery-sleeve ticket cleared the evidence
+        # bar (cheap IV + reachable strike + catalyst/momentum) at entry. Lets the
+        # sleeve report edge-flagged vs unflagged hit-rate — the core validation of
+        # whether selection beats a blind far-OTM basket. NULL on every non-lottery row.
+        "ALTER TABLE trades ADD COLUMN lottery_edge INTEGER",
     ],
 }
 
@@ -606,7 +613,7 @@ class PaperManager:
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
-            paper_only, era
+            paper_only, era, lottery_edge
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -614,7 +621,7 @@ class PaperManager:
             ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?
+            ?, ?, ?
         )
         """
 
@@ -690,6 +697,7 @@ class PaperManager:
             int(trade_dict["paper_only"]) if trade_dict.get("paper_only") is not None else 0,
             # New trades belong to the post-overhaul 'finalized' era unless told otherwise.
             trade_dict.get("era", "finalized"),
+            (int(bool(trade_dict["lottery_edge"])) if trade_dict.get("lottery_edge") is not None else None),
         )
 
         with self._get_connection() as conn:

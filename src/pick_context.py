@@ -264,9 +264,42 @@ def context_lines(row: Dict[str, Any], today: Optional[str] = None,
                 out.append(ll)
         except Exception:
             pass
+
+        # Lottery lens: reuse the lottery engine's play/edge/crush read on ANY pick,
+        # so the crash/bounce/catalyst + IV-crush insight travels to normal picks too.
+        try:
+            lens = lottery_lens_line(row)
+            if lens:
+                out.append(lens)
+        except Exception:
+            pass
     except Exception:
         pass
     return out
+
+
+def lottery_lens_line(row: Dict[str, Any]) -> Optional[str]:
+    """A one-line lottery-engine read for any pick (display-only). Stays silent on
+    ordinary contracts — it only speaks when there's something actionable: a crush
+    trap (rich IV into an event), a cheap-IV edge setup, or a rich-IV warning on a
+    recognisable play. Never raises."""
+    try:
+        from src.lottery.metrics import contract_read
+        from src.lottery.plays import classify_play, LONGSHOT
+        play = classify_play(row)
+        read = contract_read(row, play_type=play)
+        crush = read.get("crush_trap")
+        if crush:
+            return f"Lottery lens: ⚠ CRUSH TRAP — {crush}; a long here overpays for the event."
+        hp = read.get("hit_prob")
+        hp_str = f"; hit≥3x ~{hp*100:.0f}%" if isinstance(hp, (int, float)) else ""
+        if read.get("edge") and play != LONGSHOT:
+            return f"Lottery lens: ✦ {play} setup on cheap IV — long-gamma favorable{hp_str}."
+        if play != LONGSHOT and read.get("iv_state") == "rich":
+            return f"Lottery lens: {play} setup but IV rich — favors selling premium / defined-risk over a long."
+        return None
+    except Exception:
+        return None
 
 
 def quant_read_line(row: Dict[str, Any]) -> Optional[str]:

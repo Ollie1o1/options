@@ -1124,6 +1124,13 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
 
         _print_portfolio_greeks(open_trades, width)
 
+        # Lottery sleeve scorecard (silent when the sleeve is empty)
+        try:
+            from src.lottery.sleeve import print_lottery_sleeve
+            print_lottery_sleeve(db_path=DB_PATH, width=width)
+        except Exception:
+            pass
+
         # Stress test — only meaningful with 3+ positions
         if HAS_STRESS and len(open_trades) >= 3:
             try:

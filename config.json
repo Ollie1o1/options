@@ -408,6 +408,17 @@
     "min_dte": 7,
     "max_dte": 60
   },
+  "lottery_sleeve": {
+    "hit_multiple": 3.0,
+    "auto_log_top_n": 5,
+    "max_sleeve_exposure": 500.0,
+    "max_iv_rank_cheap": 0.4,
+    "rich_iv_rank": 0.7,
+    "max_edge_iv_rank": 0.6,
+    "max_strike_sigma": 2.5,
+    "catalyst_dte": 45,
+    "max_spread_pct": 0.7
+  },
   "crypto": {
     "auto_log_enabled": true,
     "min_auto_log_score": 0.5

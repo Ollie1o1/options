@@ -773,9 +773,54 @@ def _zone_context(data) -> str:
             "no demonstrated edge</h5><table>{}</table></div>").format(rows)
 
 
+def _zone_lottery(data) -> str:
+    """Lottery-mode panel: play archetype, edge/crush verdict, honest metrics."""
+    lot = data.get("lottery")
+    if not lot:
+        return ""
+    play = lot.get("play") or "LONGSHOT"
+    if lot.get("crush_trap"):
+        badge = _badge("⚠ CRUSH TRAP", "bad")
+        note = _esc(lot["crush_trap"]) + " &mdash; a long here overpays for the event."
+    elif lot.get("edge"):
+        badge = _badge("✦ EDGE", "ok")
+        note = "cheap IV + reachable strike + a real catalyst / aligned momentum."
+    else:
+        badge = _badge("speculative", "warn")
+        note = "no clean edge &mdash; treat as a tiny, uncapped-tail bet."
+
+    def _pct(v):
+        return _num(v, "{:.0%}")
+    def _x(v):
+        return _num(v, "{:.1f}x")
+
+    reach = "n/a"
+    if lot.get("breakeven_move_pct") is not None and lot.get("expected_move_pct") is not None:
+        reach = "needs {} vs EM {}".format(_pct(lot["breakeven_move_pct"]), _pct(lot["expected_move_pct"]))
+        if lot.get("breakeven_vs_em") is not None:
+            reach += " ({}x EM)".format(_num(lot["breakeven_vs_em"], "{:.1f}"))
+
+    table = "<table>" + _rows((
+        ("Play", play),
+        ("IV state", lot.get("iv_state") or "n/a"),
+        ("Hit ≥3× (to expiry)", _pct(lot.get("hit_prob"))),
+        ("Tail @1EM", _x(lot.get("tail_x_1em"))),
+        ("Tail @2EM", _x(lot.get("tail_x_2em"))),
+        ("Reachability", reach),
+    )) + "</table>"
+    return (
+        '<div class="thin"></div><h5>Lottery read &middot; {play}</h5>'
+        '<div style="margin-bottom:6px">{badge}</div>'
+        '<div class="eye" style="margin-bottom:6px">{note}</div>{table}'
+        '<div class="eye" style="margin-top:6px">Base reality: naked far-OTM is '
+        'negative-EV on average &mdash; tiny size, the edge (if any) is breadth + an '
+        'uncapped tail.</div>'
+    ).format(play=_esc(play), badge=badge, note=note, table=table)
+
+
 def render(data: dict) -> str:
     """The complete HTML document. Pure."""
-    body = [_masthead(data.get("meta", {})), _verdict_block(data)]
+    body = [_masthead(data.get("meta", {})), _verdict_block(data), _zone_lottery(data)]
     for zone in _ZONES:
         if zone in _ALWAYS_RENDERED:
             body.append(_BUILDERS[zone](data))     # degrades internally

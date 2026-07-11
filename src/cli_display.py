@@ -2208,86 +2208,136 @@ def print_lottery_ticket_report(df: "pd.DataFrame", underlying_price: float, mar
         return
 
     import pandas as _pd
-    import numpy as _np
 
     WIDTH = get_display_width()
     top = df.head(10)
 
+    def _optf(v):
+        """float(v) or None, tolerating NaN/None/strings."""
+        try:
+            if v is None or (isinstance(v, float) and v != v) or _pd.isna(v):
+                return None
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _pct(v, nd=0):
+        f = _optf(v)
+        return f"{f*100:.{nd}f}%" if f is not None else "  ?"
+
+    def _mult(v):
+        f = _optf(v)
+        return f"{f:.1f}x" if f is not None else "  ?"
+
+    def _play_badge(play):
+        colors = {"BOUNCE": fmt.Colors.GREEN, "BREAKOUT": fmt.Colors.BRIGHT_GREEN,
+                  "CRASH": fmt.Colors.RED, "SQUEEZE": fmt.Colors.MAGENTA,
+                  "CATALYST": fmt.Colors.BRIGHT_CYAN, "LONGSHOT": fmt.Colors.DIM}
+        play = play or "LONGSHOT"
+        return fmt.colorize(f"{play:<8}", colors.get(play, fmt.Colors.DIM)) if HAS_ENHANCED_CLI else f"{play:<8}"
+
+    # ── Catalyst radar: what kinds of plays are live, and how many clear the bar ──
+    from collections import Counter
+    plays_present = [str(r.get("lottery_play", "LONGSHOT") or "LONGSHOT") for _, r in top.iterrows()]
+    play_counts = Counter(plays_present)
+    n_edge = sum(1 for _, r in top.iterrows() if bool(r.get("lottery_edge", False)))
+    n_trap = sum(1 for _, r in top.iterrows() if str(r.get("lottery_crush", "") or ""))
+    radar = "  ".join(f"{v}x {k}" for k, v in play_counts.most_common())
+
     print()
     if HAS_ENHANCED_CLI:
-        print(ui.banner("LOTTERY TICKET REPORT — HIGH-LEVERAGE FAR-OTM OPTIONS", [], WIDTH))
-        trend_color = fmt.Colors.GREEN if market_trend == "Bullish" else (fmt.Colors.RED if market_trend == "Bearish" else fmt.Colors.YELLOW)
-        vix_color = fmt.Colors.GREEN if volatility_regime == "Low" else (fmt.Colors.RED if volatility_regime == "High" else fmt.Colors.YELLOW)
+        print(ui.banner("LOTTERY BOARD — HIGH-LEVERAGE FAR-OTM LONG-SHOTS", [], WIDTH))
         print(fmt.colorize(f"  Market: {market_trend}  |  Vol Regime: {volatility_regime}", fmt.Colors.DIM))
-        print(fmt.colorize(
-            "  These are low-probability, high-payoff options — treat each as a small, defined-risk bet.",
-            fmt.Colors.DIM,
-        ))
+        print(f"  Catalyst radar: {fmt.colorize(radar, fmt.Colors.BRIGHT_CYAN)}")
+        print(f"  {fmt.colorize(f'✦ {n_edge} clear the edge bar', fmt.Colors.BRIGHT_GREEN)}"
+              f"   {fmt.colorize(f'⚠ {n_trap} crush-trap (shown, not picked)', fmt.Colors.YELLOW)}")
     else:
         print("=" * WIDTH)
-        print("  LOTTERY TICKET REPORT (HIGH-LEVERAGE FAR-OTM OPTIONS)")
+        print("  LOTTERY BOARD (HIGH-LEVERAGE FAR-OTM LONG-SHOTS)")
         print(f"  Market: {market_trend}  |  Vol Regime: {volatility_regime}")
+        print(f"  Catalyst radar: {radar}")
+        print(f"  * {n_edge} clear the edge bar   ! {n_trap} crush-trap (shown, not picked)")
         print("=" * WIDTH)
-        print("  These are low-probability, high-payoff options — treat each as a small, defined-risk bet.")
 
     print()
 
-    # Detail cards for top picks
+    # ── Detail cards ───────────────────────────────────────────────────────────
     for rank, (_, row) in enumerate(top.iterrows(), 1):
         sym    = str(row.get("symbol", "?"))
         opt_type = str(row.get("type", "?")).upper()
         strike = float(row.get("strike", 0))
         exp    = str(row.get("expiration", "?"))
         prem   = float(row.get("premium", 0))
-        score  = float(row.get("lottery_ticket_score", 0))
-        delta  = float(row.get("abs_delta", 0))
-        iv     = float(row.get("impliedVolatility", 0))
-        vol    = int(row.get("volume", 0))
-        oi     = int(row.get("openInterest", 0))
-        em_mult = row.get("em_multiple")
-        em_mult_str = f"{float(em_mult):.1f}x" if em_mult is not None and not _pd.isna(em_mult) else "?"
+        score  = float(row.get("lottery_ticket_score", 0) or 0)
+        delta  = float(row.get("abs_delta", 0) or 0)
+        iv     = float(row.get("impliedVolatility", 0) or 0)
+        vol    = int(row.get("volume", 0) or 0)
+        oi     = int(row.get("openInterest", 0) or 0)
+        play   = str(row.get("lottery_play", "LONGSHOT") or "LONGSHOT")
+        edge   = bool(row.get("lottery_edge", False))
+        crush  = str(row.get("lottery_crush", "") or "")
+        hit_p  = row.get("lottery_hit_prob")
+        tail1  = row.get("lottery_tail1")
+        tail2  = row.get("lottery_tail2")
+        be_mv  = row.get("lottery_be_move")
+        em_mv  = row.get("lottery_em_move")
+        be_vs  = row.get("lottery_be_vs_em")
 
-        # Catalyst flags
-        catalyst_flags = []
-        if str(row.get("Earnings Play", "")).upper() == "YES":
-            catalyst_flags.append("EARNINGS PLAY")
-        if str(row.get("event_flag", "")) == "EARNINGS_NEARBY":
-            catalyst_flags.append("EARNINGS NEARBY")
-        if row.get("Unusual_Whale"):
-            catalyst_flags.append("WHALE FLOW")
-        if _pd.to_numeric(row.get("short_interest", 0), errors="coerce") > 0.20:
-            catalyst_flags.append(f"HIGH SI {float(row['short_interest']):.0%}")
-        if row.get("unusual_options_activity"):
-            catalyst_flags.append("UNUSUAL ACTIVITY")
-        catalyst_str = "  ".join(catalyst_flags) if catalyst_flags else "speculative"
+        # Verdict badge: crush trap wins (never picked), else edge / speculative.
+        if crush:
+            badge = fmt.colorize("⚠ CRUSH TRAP", fmt.Colors.YELLOW, bold=True) if HAS_ENHANCED_CLI else "! CRUSH TRAP"
+            badge_note = crush
+        elif edge:
+            badge = fmt.colorize("✦ EDGE", fmt.Colors.BRIGHT_GREEN, bold=True) if HAS_ENHANCED_CLI else "* EDGE"
+            badge_note = "cheap IV + reachable strike + catalyst/momentum"
+        else:
+            badge = fmt.colorize("· speculative", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "speculative"
+            badge_note = ""
+
+        reach = ""
+        if _optf(be_mv) is not None and _optf(em_mv) is not None:
+            reach = f"needs {_pct(be_mv,0)} vs EM {_pct(em_mv,0)}"
+            if _optf(be_vs) is not None:
+                reach += f" ({_optf(be_vs):.1f}× EM)"
 
         if HAS_ENHANCED_CLI:
             type_color = fmt.Colors.GREEN if opt_type == "CALL" else fmt.Colors.RED
-            score_bar = "█" * int(score * 10) + "░" * (10 - int(score * 10))
             print(fmt.draw_separator(WIDTH))
             sym_str   = fmt.colorize(f"#{rank} {sym}", fmt.Colors.BRIGHT_WHITE, bold=True)
             type_str  = fmt.colorize(f"{opt_type}", type_color, bold=True)
             score_str = fmt.colorize(f"{score:.2f}", fmt.Colors.BRIGHT_YELLOW, bold=True)
-            print(f"  {sym_str}  {type_str}  ${strike:.0f}  exp {exp}  |  Score: {score_str}  {score_bar}")
-            print(fmt.colorize(f"  Premium: ${prem:.2f}/contract (${prem*100:.0f})  |  Δ {delta:.3f}  |  IV {iv:.0%}  |  Vol {vol:,}  OI {oi:,}", fmt.Colors.DIM))
-            mult_color = fmt.Colors.GREEN if em_mult is not None and not _pd.isna(em_mult) and float(em_mult) >= 3 else fmt.Colors.YELLOW
-            print(f"  EM multiple: {fmt.colorize(em_mult_str, mult_color)}  |  Catalysts: {fmt.colorize(catalyst_str, fmt.Colors.BRIGHT_CYAN)}")
+            print(f"  {sym_str}  {_play_badge(play)}  {type_str}  ${strike:.0f}  exp {exp}  |  {badge}  Score {score_str}")
+            print(fmt.colorize(f"  Premium ${prem:.2f} (${prem*100:.0f})  |  Δ {delta:.3f}  IV {iv:.0%}  Vol {vol:,}  OI {oi:,}", fmt.Colors.DIM))
+            metrics_line = (f"  Hit≥3x ~ {fmt.colorize(_pct(hit_p,0), fmt.Colors.BRIGHT_WHITE)}"
+                            f"  |  Tail @1EM {_mult(tail1)}  @2EM {_mult(tail2)}")
+            if reach:
+                metrics_line += f"  |  {reach}"
+            print(metrics_line)
+            if badge_note:
+                print(fmt.colorize(f"    {badge_note}", fmt.Colors.DIM))
         else:
             print("-" * WIDTH)
-            print(f"  #{rank} {sym}  {opt_type}  ${strike:.0f}  exp {exp}  |  Score: {score:.2f}")
-            print(f"     Premium: ${prem:.2f}/contract (${prem*100:.0f})  |  delta {delta:.3f}  |  IV {iv:.0%}  |  Vol {vol:,}  OI {oi:,}")
-            print(f"     EM multiple: {em_mult_str}  |  Catalysts: {catalyst_str}")
+            print(f"  #{rank} {sym}  {play}  {opt_type}  ${strike:.0f}  exp {exp}  |  {badge}  Score {score:.2f}")
+            print(f"     Premium ${prem:.2f} (${prem*100:.0f})  |  delta {delta:.3f}  IV {iv:.0%}  Vol {vol:,}  OI {oi:,}")
+            line = f"     Hit>=3x ~ {_pct(hit_p,0)}  |  Tail @1EM {_mult(tail1)}  @2EM {_mult(tail2)}"
+            if reach:
+                line += f"  |  {reach}"
+            print(line)
+            if badge_note:
+                print(f"       {badge_note}")
 
+    # ── Board table ──────────────────────────────────────────────────────────────
     print()
     if HAS_ENHANCED_CLI:
         print(fmt.draw_separator(WIDTH))
-        print(fmt.colorize("  COMPARISON TABLE", fmt.Colors.BOLD))
+        print(fmt.colorize("  BOARD", fmt.Colors.BOLD))
         print("  " + fmt.draw_separator(WIDTH - 2))
     else:
-        print("  COMPARISON TABLE")
+        print("  BOARD")
         print("  " + "-" * (WIDTH - 2))
 
-    hdr = f"  {'Sym':<6} {'T':<5} {'Strike':>8} {'Exp':<12} {'Prem':>7} {'Delta':>7} {'IV':>6} {'EM x':>6} {'Score':>6}  Catalysts"
+    hdr = (f"  {'Sym':<6} {'Play':<9} {'T':<2} {'Strike':>7} {'Prem':>6} "
+           f"{'IV':>5} {'Hit':>5} {'T@1':>5} {'T@2':>5} {'Score':>6}  Flag")
     print(fmt.colorize(hdr, fmt.Colors.BOLD) if HAS_ENHANCED_CLI else hdr)
     print(("  " + fmt.draw_separator(WIDTH - 2)) if HAS_ENHANCED_CLI else ("  " + "-" * (WIDTH - 2)))
 
@@ -2295,21 +2345,16 @@ def print_lottery_ticket_report(df: "pd.DataFrame", underlying_price: float, mar
         sym    = str(row.get("symbol", "?"))[:6]
         opt_type = str(row.get("type", "?"))[:1].upper()
         strike = float(row.get("strike", 0))
-        exp    = str(row.get("expiration", "?"))
         prem   = float(row.get("premium", 0))
-        score  = float(row.get("lottery_ticket_score", 0))
-        delta  = float(row.get("abs_delta", 0))
-        iv     = float(row.get("impliedVolatility", 0))
-        em_mult = row.get("em_multiple")
-        em_s = f"{float(em_mult):.1f}x" if em_mult is not None and not _pd.isna(em_mult) else "  ?"
-        flags = []
-        if str(row.get("Earnings Play", "")).upper() == "YES":
-            flags.append("earn")
-        if row.get("Unusual_Whale"):
-            flags.append("whale")
-        if _pd.to_numeric(row.get("short_interest", 0), errors="coerce") > 0.20:
-            flags.append("squeeze")
-        flag_str = ",".join(flags) if flags else "-"
+        score  = float(row.get("lottery_ticket_score", 0) or 0)
+        iv     = float(row.get("impliedVolatility", 0) or 0)
+        play   = str(row.get("lottery_play", "LONGSHOT") or "LONGSHOT")
+        flag = "⚠trap" if str(row.get("lottery_crush", "") or "") else ("✦edge" if bool(row.get("lottery_edge", False)) else "-")
+        if not HAS_ENHANCED_CLI:
+            flag = flag.replace("⚠", "!").replace("✦", "*")
+        hit_s  = _pct(row.get("lottery_hit_prob"), 0)
+        t1_s   = _mult(row.get("lottery_tail1"))
+        t2_s   = _mult(row.get("lottery_tail2"))
 
         if HAS_ENHANCED_CLI:
             type_color = fmt.Colors.GREEN if opt_type == "C" else fmt.Colors.RED
@@ -2319,15 +2364,18 @@ def print_lottery_ticket_report(df: "pd.DataFrame", underlying_price: float, mar
             t_str = opt_type
             score_str = f"{score:.2f}"
 
-        print(f"  {sym:<6} {t_str:<5} {strike:>8.2f} {exp:<12} ${prem:>5.2f} {delta:>7.3f} {iv:>5.0%} {em_s:>6} {score_str:>6}  {flag_str}")
+        print(f"  {sym:<6} {play:<9} {t_str:<2} {strike:>7.2f} ${prem:>4.2f} "
+              f"{iv:>5.0%} {hit_s:>5} {t1_s:>5} {t2_s:>5} {score_str:>6}  {flag}")
 
+    # ── Honest footer ────────────────────────────────────────────────────────────
     print()
-    if HAS_ENHANCED_CLI:
-        print(fmt.draw_separator(WIDTH))
-        print(fmt.colorize("  Key: EM multiple = estimated option value / premium if stock moves 1 expected move.", fmt.Colors.DIM))
-        print(fmt.colorize("  Risk: each contract costs premium × 100. Max loss = full premium. Size accordingly.", fmt.Colors.DIM))
-        print(fmt.colorize("  These are low-probability trades. Expect most to expire worthless.", fmt.Colors.DIM))
-    else:
-        print("  Key: EM multiple = estimated value / premium if stock moves 1 expected move.")
-        print("  Risk: max loss = full premium paid per contract. Size positions very small.")
-        print("  These are low-probability trades. Expect most to expire worthless.")
+    key_lines = [
+        "Hit≥3x = modeled P[ticket returns ≥3× debit] held to expiry (realized vol when available).",
+        "Tail @NEM = BS-repriced multiple if the stock travels N expected-moves mid-life.",
+        "✦ edge = cheap IV + reachable strike (≤2.5σ) + a real catalyst/aligned momentum + exitable.",
+        "⚠ crush-trap = rich IV into an event: overpaying, IV-crush eats the move. Shown, never picked.",
+        "Base reality: naked far-OTM is negative-EV on average. Tiny size; the sleeve exists to",
+        "measure whether the ✦-edge subset actually beats that. Most tickets expire worthless.",
+    ]
+    for ln in key_lines:
+        print(fmt.colorize("  " + ln, fmt.Colors.DIM) if HAS_ENHANCED_CLI else "  " + ln.replace("≥", ">=").replace("✦", "*").replace("⚠", "!").replace("×", "x").replace("≤", "<=").replace("σ", "sd"))

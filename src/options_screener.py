@@ -1966,6 +1966,46 @@ def calculate_scores(
             df["em_multiple"] = pd.NA
 
         df["quality_score"] = df["lottery_ticket_score"]
+
+        # ── Honest lottery read: play archetype + BS-repriced metrics + edge/trap ──
+        # Additive, defensive: any failure leaves the plain score untouched. Crush
+        # traps (rich IV into an event) are demoted so they surface but never top
+        # the board or get auto-logged. See src/lottery/{plays,metrics}.py.
+        try:
+            from src.lottery.plays import classify_play
+            from src.lottery.metrics import contract_read, DEFAULT_EDGE_CFG
+            _edge_cfg = dict(DEFAULT_EDGE_CFG)
+            _edge_cfg.update(config.get("lottery_sleeve", {}) if isinstance(config, dict) else {})
+            _plays, _edges, _crush, _hp = [], [], [], []
+            _t1, _t2, _bem, _emm, _bve = [], [], [], [], []
+            for _i in range(len(df)):
+                _r = df.iloc[_i]
+                _pt = classify_play(_r, _edge_cfg.get("catalyst_dte", 45),
+                                    _edge_cfg.get("max_iv_rank_cheap", 0.40))
+                _rd = contract_read(_r, _edge_cfg, play_type=_pt)
+                _plays.append(_pt)
+                _edges.append(bool(_rd["edge"]))
+                _crush.append(_rd["crush_trap"] or "")
+                _hp.append(_rd["hit_prob"])
+                _t1.append(_rd["tail_x_1em"])
+                _t2.append(_rd["tail_x_2em"])
+                _bem.append(_rd["breakeven_move_pct"])
+                _emm.append(_rd["expected_move_pct"])
+                _bve.append(_rd["breakeven_vs_em"])
+            df["lottery_play"] = _plays
+            df["lottery_edge"] = _edges
+            df["lottery_crush"] = _crush
+            df["lottery_hit_prob"] = _hp
+            df["lottery_tail1"] = _t1
+            df["lottery_tail2"] = _t2
+            df["lottery_be_move"] = _bem
+            df["lottery_em_move"] = _emm
+            df["lottery_be_vs_em"] = _bve
+            # Demote crush traps: shown, never picked (0.55x keeps them below clean picks).
+            _crush_mask = df["lottery_crush"].astype(bool)
+            df.loc[_crush_mask, "quality_score"] = df.loc[_crush_mask, "quality_score"] * 0.55
+        except Exception as _lt_exc:  # never let the read break the scan
+            logging.getLogger(__name__).debug("lottery read skipped: %s", _lt_exc)
     else:
         df["lottery_ticket_score"] = pd.NA
 
@@ -4077,7 +4117,7 @@ def main():
     parser.add_argument("--viz", action="store_true", help="Launch interactive 3D visualizer in browser after scan")
     parser.add_argument("--auto", action="store_true", help="Skip interactive prompts, use config defaults")
     parser.add_argument("--compact", action="store_true", help="Compact per-pick output (3 lines per pick)")
-    parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist"], help="Scan mode (skip mode menu)")
+    parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist", "lottery"], help="Scan mode (skip mode menu)")
     parser.add_argument("--ticker", type=str, default=None, metavar="SYM", help="Ticker symbol (implies --mode ticker)")
     parser.add_argument("--weights", type=str, default=None, metavar="NAME", help="Weight profile name (in configs/weights/) or path to a JSON file; tags logged trades with the profile id")
     parser.add_argument("--auto-log", action="store_true", help="Skip the save-menu prompt and automatically log top-N picks to paper_trades.db")
@@ -4668,8 +4708,31 @@ def main():
                     except Exception as _viz_exc:
                         logger.warning("Visualizer failed: %s", _viz_exc)
 
+                # ── Lottery sleeve auto-log (dedicated path; never touches the ──────
+                # shared allowlist, so no other mode's logging behaviour changes) ──
+                if _has_results and getattr(args, "auto_log", False) and mode == "Lottery Ticket":
+                    try:
+                        from src.lottery.sleeve import autolog_lottery_sleeve
+                        from src.paper_manager import PaperManager as _LotPM
+                        _lot_pm = _LotPM(db_path="paper_trades.db", config_path="config.json")
+                        _lot_logged = autolog_lottery_sleeve(
+                            picks, _lot_pm, config_path="config.json",
+                            top_n=int(getattr(args, "log_top", 5) or 5),
+                        )
+                        if _lot_logged:
+                            print()
+                            _hdr = f"  Logged {len(_lot_logged)} to the lottery sleeve:"
+                            print(fmt.colorize(_hdr, fmt.Colors.BRIGHT_GREEN) if HAS_ENHANCED_CLI else _hdr)
+                            for _line in _lot_logged:
+                                print(f"    {_line}")
+                            print(fmt.colorize("    Track it: python3 -m src.check_pnl", fmt.Colors.DIM) if HAS_ENHANCED_CLI else "    Track it: python3 -m src.check_pnl")
+                        else:
+                            print("  Lottery sleeve: nothing logged (traps skipped or exposure cap reached).")
+                    except Exception as _lot_exc:
+                        logger.warning("lottery sleeve auto-log failed: %s", _lot_exc)
+
                 # ── Auto-log mode: bypass interactive save menu ──────────────────
-                if _has_results and getattr(args, "auto_log", False):
+                if _has_results and getattr(args, "auto_log", False) and mode != "Lottery Ticket":
                     # Pick exactly one result source — prefer single-leg picks, otherwise
                     # the first non-empty spread/condor DF that the scan produced.
                     _log_src = picks if not picks.empty else (

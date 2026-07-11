@@ -230,6 +230,31 @@ def _ticket(row, config):
         "guidance": _jsonable(guidance)}
 
 
+def _lottery_block(row, spot=None):
+    """Play archetype + honest lottery metrics, recomputed from the raw row."""
+    from src.lottery.metrics import contract_read
+    from src.lottery.plays import classify_play
+    # In the tearsheet the spot lives in ctx, not always on the row; inject it so
+    # the metrics (which read 'underlying') compute rather than degrade to None.
+    if spot and not (row.get("underlying") if hasattr(row, "get") else None):
+        row = dict(row)
+        row["underlying"] = spot
+    play = classify_play(row)
+    rd = contract_read(row, play_type=play)
+    return {
+        "play": play,
+        "edge": bool(rd.get("edge")),
+        "crush_trap": rd.get("crush_trap") or "",
+        "iv_state": rd.get("iv_state"),
+        "hit_prob": _jsonable(rd.get("hit_prob")),
+        "tail_x_1em": _jsonable(rd.get("tail_x_1em")),
+        "tail_x_2em": _jsonable(rd.get("tail_x_2em")),
+        "breakeven_move_pct": _jsonable(rd.get("breakeven_move_pct")),
+        "expected_move_pct": _jsonable(rd.get("expected_move_pct")),
+        "breakeven_vs_em": _jsonable(rd.get("breakeven_vs_em")),
+    }
+
+
 def _term_from_siblings(row, ctx):
     """(dte, median IV) per expiry across the scan's other picks on this name.
 
@@ -472,6 +497,12 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
     quote = _safe("quote", lambda: _quote(row), panels, {})
     ticket = _safe("ticket", lambda: _ticket(row, ctx.get("config")), panels, {})
 
+    # Lottery block: only for Lottery Ticket picks. Recomputed from raw row fields
+    # via the lottery engine, so the sidecar stays reproducible offline.
+    lottery = None
+    if str(ctx.get("mode") or "") == "Lottery Ticket":
+        lottery = _safe("lottery", lambda: _lottery_block(row, spot), panels, None)
+
     base = "{}_{:g}{}_{}".format(sym, float(row["strike"]),
                                  str(row.get("type", "c"))[0].upper(),
                                  str(row["expiration"]).replace("-", ""))
@@ -499,5 +530,5 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
         "stress": stress, "vol": vol, "name": name, "narrative": narrative,
         "evidence": evidence, "context": _context(row), "panels": panels,
         "greeks_full": greeks_full, "quote": quote, "ticket": ticket,
-        "events": events,
+        "events": events, "lottery": lottery,
     }
