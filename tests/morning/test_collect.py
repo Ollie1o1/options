@@ -89,5 +89,25 @@ class TestMarketPanel(unittest.TestCase):
         self.assertEqual(len(rows["SPY"]["closes"]), 30)
 
 
+class TestHealthGatePanels(unittest.TestCase):
+    def test_panel_health_serializes_report(self):
+        class J:
+            name, cadence, last_run = "auto-log", "business-daily", "2026-07-09"
+            business_days_stale, severity = 1, "OK"
+        class R:
+            jobs, worst = [J()], "OK"
+        out = collect._panel_health(_report_fn=lambda: R())
+        self.assertEqual(out["worst"], "OK")
+        self.assertEqual(out["jobs"][0]["name"], "auto-log")
+        self.assertEqual(out["jobs"][0]["stale_days"], 1)
+
+    def test_panel_gate_carries_target(self):
+        ev = {"pooled_ic": 0.1, "p_value": 0.4, "n_oos": 30,
+              "cohort_n": 2, "gate_decision": "GATHERING", "as_of": "2026-07-01"}
+        out = collect._panel_gate(_evidence_fn=lambda: dict(ev))
+        self.assertEqual(out["cohort_n"], 2)
+        self.assertGreaterEqual(out["target_n"], 50)
+
+
 if __name__ == "__main__":
     unittest.main()

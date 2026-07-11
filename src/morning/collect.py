@@ -58,6 +58,29 @@ def _desk_notes(panels, failures):
     return notes
 
 
+def _fetch_health_report():
+    from src.maintenance import load_state, DEFAULT_STATE_PATH
+    from src.maintenance_health import compute_health
+    return compute_health(load_state(DEFAULT_STATE_PATH), datetime.now())
+
+
+def _panel_health(_report_fn=None) -> dict:
+    report = (_report_fn or _fetch_health_report)()
+    return {
+        "worst": report.worst,
+        "jobs": [{"name": j.name, "cadence": j.cadence, "last_run": j.last_run,
+                  "stale_days": j.business_days_stale, "severity": j.severity}
+                 for j in report.jobs],
+    }
+
+
+def _panel_gate(_evidence_fn=None) -> dict:
+    from src.evidence import load_model_evidence, GATE_TARGET_N
+    ev = dict((_evidence_fn or load_model_evidence)())
+    ev["target_n"] = GATE_TARGET_N
+    return ev
+
+
 _TAPE_SYMBOLS = ("SPY", "QQQ", "IWM")
 
 
@@ -133,7 +156,8 @@ def _panel_market(_regime_fn=None, _dirs_fn=None, _rates_fn=None) -> dict:
 
 def _default_fetchers():
     # Each entry is (panel_id, zero-arg callable); grown panel by panel.
-    return [("market", _panel_market)]
+    return [("health", _panel_health), ("market", _panel_market),
+            ("gate", _panel_gate)]
 
 
 def build(now=None, slow=True, budget_s=20.0, _fetchers=None) -> dict:
