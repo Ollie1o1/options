@@ -121,5 +121,26 @@ class TestVolPanel(unittest.TestCase):
         self.assertIn("carry", out["crypto_note"].lower())
 
 
+class TestMacroEventsPanel(unittest.TestCase):
+    def test_panel_macro_events_shapes(self):
+        cal = [{"date": "2026-07-15", "name": "CPI"}]
+        out = collect._panel_macro_events(
+            _calendar_fn=lambda: cal,
+            _pulse_fn=lambda: ("risk tone neutral", ["Headline A", "Headline B"]),
+            _earnings_fn=lambda: [{"sym": "NVDA", "date": "2026-08-26"}])
+        self.assertEqual(out["calendar"][0]["name"], "CPI")
+        self.assertEqual(out["pulse"], "risk tone neutral")
+        self.assertEqual(out["earnings"][0]["sym"], "NVDA")
+
+    def test_panel_macro_events_pulse_failure_partial(self):
+        def boom():
+            raise RuntimeError("rss down")
+        out = collect._panel_macro_events(_calendar_fn=lambda: [],
+                                          _pulse_fn=boom,
+                                          _earnings_fn=lambda: [])
+        self.assertIsNone(out["pulse"])
+        self.assertEqual(out["headlines"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

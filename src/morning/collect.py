@@ -174,10 +174,71 @@ def _panel_market(_regime_fn=None, _dirs_fn=None, _rates_fn=None) -> dict:
     return {"regime": regime, "indexes": indexes, "rates": rates}
 
 
+def _fetch_calendar():
+    from src.worldnews.panel import next_events
+    return [{"date": e.get("date"), "name": e.get("name") or "?"}
+            for e in next_events(limit=6)]
+
+
+def _fetch_pulse():
+    from src.worldnews import panel, scoring, sources
+    items = sources.fetch_all()
+    if not items:
+        return None, []
+    agg = scoring.aggregate(items)
+    headlines = [i.get("title", "") for i in items[:5] if i.get("title")]
+    return panel.pulse_line(agg), headlines
+
+
+def _fetch_watchlist_earnings(limit=10, horizon_days=7):
+    import json as _json
+    from datetime import timedelta
+    from src.watchlist import load_watchlist
+    from src.earnings_provider import next_earnings_date, resolve_api_key
+    try:
+        with open("config.json") as f:
+            cfg = _json.load(f)
+    except Exception:
+        cfg = None
+    key = resolve_api_key(cfg)
+    today = _now_eastern().date()
+    out = []
+    for sym in load_watchlist()[:limit]:
+        try:
+            dt = next_earnings_date(sym, api_key=key)
+        except Exception:
+            continue
+        if dt is None:
+            continue
+        d = dt.date()
+        if today <= d <= today + timedelta(days=horizon_days):
+            out.append({"sym": sym, "date": d.strftime("%Y-%m-%d")})
+    return out
+
+
+def _panel_macro_events(_calendar_fn=None, _pulse_fn=None, _earnings_fn=None) -> dict:
+    out = {"calendar": [], "pulse": None, "headlines": [], "earnings": []}
+    try:
+        out["calendar"] = (_calendar_fn or _fetch_calendar)()
+    except Exception:
+        pass
+    try:
+        pulse, headlines = (_pulse_fn or _fetch_pulse)()
+        out["pulse"], out["headlines"] = pulse, headlines
+    except Exception:
+        pass
+    try:
+        out["earnings"] = (_earnings_fn or _fetch_watchlist_earnings)()
+    except Exception:
+        pass
+    return out
+
+
 def _default_fetchers():
     # Each entry is (panel_id, zero-arg callable); grown panel by panel.
     return [("health", _panel_health), ("market", _panel_market),
-            ("vol", _panel_vol), ("gate", _panel_gate)]
+            ("vol", _panel_vol), ("macro_events", _panel_macro_events),
+            ("gate", _panel_gate)]
 
 
 def build(now=None, slow=True, budget_s=20.0, _fetchers=None) -> dict:
