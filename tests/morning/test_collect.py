@@ -109,5 +109,17 @@ class TestHealthGatePanels(unittest.TestCase):
         self.assertGreaterEqual(out["target_n"], 50)
 
 
+class TestVolPanel(unittest.TestCase):
+    def test_panel_vol_caps_sorts_and_passthrough(self):
+        movers = [{"symbol": f"S{i}", "iv": 0.3, "d_iv": 0.001 * i} for i in range(20)]
+        vrp = [{"symbol": "SPY", "iv": 0.15, "rv": 0.12, "vrp": 3.1, "label": "RICH"}]
+        out = collect._panel_vol(_rows_fn=lambda: (movers, vrp))
+        self.assertEqual(len(out["movers"]), 8)
+        self.assertEqual(out["movers"][0]["symbol"], "S19")  # biggest |d_iv| first
+        self.assertEqual(out["vrp"][0]["symbol"], "SPY")
+        self.assertEqual(out["n_cov"], 1)
+        self.assertIn("carry", out["crypto_note"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

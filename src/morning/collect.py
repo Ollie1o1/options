@@ -81,6 +81,26 @@ def _panel_gate(_evidence_fn=None) -> dict:
     return ev
 
 
+# One honest line on the crypto vol sleeve; static because the briefing must
+# not fetch Deribit every morning just to restate a validated finding.
+_CRYPTO_NOTE = ("Crypto: BTC short-vol carry is the one net-validated edge "
+                "(carry, not timing); equity VRP is currently the opposite sign.")
+
+
+def _fetch_vol_rows():
+    from src.vol_intel.engine import build_rows
+    return build_rows()
+
+
+def _panel_vol(_rows_fn=None) -> dict:
+    movers, vrp_rows = (_rows_fn or _fetch_vol_rows)()
+    ranked = sorted((m for m in movers if m.get("d_iv") is not None),
+                    key=lambda m: abs(m["d_iv"]), reverse=True)
+    n_cov = len({r["symbol"] for r in vrp_rows})
+    return {"movers": ranked[:8], "vrp": list(vrp_rows)[:8],
+            "n_cov": n_cov, "crypto_note": _CRYPTO_NOTE}
+
+
 _TAPE_SYMBOLS = ("SPY", "QQQ", "IWM")
 
 
@@ -157,7 +177,7 @@ def _panel_market(_regime_fn=None, _dirs_fn=None, _rates_fn=None) -> dict:
 def _default_fetchers():
     # Each entry is (panel_id, zero-arg callable); grown panel by panel.
     return [("health", _panel_health), ("market", _panel_market),
-            ("gate", _panel_gate)]
+            ("vol", _panel_vol), ("gate", _panel_gate)]
 
 
 def build(now=None, slow=True, budget_s=20.0, _fetchers=None) -> dict:
