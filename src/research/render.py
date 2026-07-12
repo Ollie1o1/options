@@ -197,9 +197,144 @@ def _tab_market(data):
     return "".join(parts + grid)
 
 
+# ── Volatility tab ───────────────────────────────────────────────────────────
+
+def _vrp_chip(label):
+    cls = {"RICH": "k-ok", "CHEAP": "k-bad"}.get(str(label).upper(), "k-warn")
+    return '<span class="badge {c}">{l}</span>'.format(c=cls, l=_esc(label))
+
+
+def _tab_vol(data):
+    vol = _panel(data, "vol")
+    grid = ['<div class="grid">']
+    if not vol:
+        grid.append(_card("Volatility intelligence",
+                          _ph(data, "vol", "Vol archive"), span=12))
+    else:
+        movers = [(m.get("symbol"), (m.get("d_iv") or 0) * 100.0)
+                  for m in vol.get("movers") or []
+                  if m.get("d_iv") is not None]
+        grid.append(_card("IV movers — day-over-day",
+                          CH.hbar_diverging(movers, unit="vp") or
+                          '<div class="ph">no movers today</div>', span=6))
+        vrp_rows = vol.get("vrp") or []
+        bars = CH.hbar_diverging([(r.get("symbol"), r.get("vrp"))
+                                  for r in vrp_rows], unit="vp")
+        table = ["<table><tr><th></th><th>IV</th><th>RV</th><th>VRP</th>"
+                 "<th></th></tr>"]
+        for r in vrp_rows:
+            table.append(
+                '<tr><td class="m">{s}</td><td class="n">{iv}</td>'
+                '<td class="n">{rv}</td><td class="n {t}">{v}</td>'
+                "<td>{chip}</td></tr>".format(
+                    s=_esc(r.get("symbol")), iv=_num(r.get("iv"), "{:.0%}"),
+                    rv=_num(r.get("rv"), "{:.0%}"),
+                    t="g" if (r.get("vrp") or 0) >= 0 else "b",
+                    v=_num(r.get("vrp"), "{:+.1f}vp"),
+                    chip=_vrp_chip(r.get("label"))))
+        table.append("</table>")
+        grid.append(_card("Variance risk premium — implied vs realized",
+                          bars + "".join(table), span=6))
+        note = ('<div class="evt">{}</div><div class="evt mut">coverage: {} '
+                "symbols in the chain archive</div>").format(
+                    _esc(vol.get("crypto_note", "")), _esc(vol.get("n_cov", 0)))
+        grid.append(_card("Notes", note, span=6))
+    tape = _panel(data, "tape")
+    if tape and tape.get("vix"):
+        vix = tape["vix"]
+        grid.append(_card("VIX — 6 months",
+                          CH.area_chart(vix.get("closes"), vix.get("dates"),
+                                        "vix2", fmt="{:.1f}"), span=6))
+    grid.append("</div>")
+    return "".join(grid)
+
+
+# ── Macro & News tab ─────────────────────────────────────────────────────────
+
+def _theme_rows(themes):
+    out = []
+    for t in themes or []:
+        score = t.get("score")
+        out.append(
+            '<div class="evt"><span class="m {tone}">{sc}</span> '
+            "<strong>{th}</strong> · {read} "
+            '<span class="mut">({n} stories)</span></div>'.format(
+                tone="g" if (score or 0) >= 0 else "b",
+                sc=_num(score, "{:+.2f}"), th=_esc(t.get("theme")),
+                read=_esc(t.get("read", "")), n=_esc(t.get("n", 0))))
+    return "".join(out)
+
+
+def _tab_macro(data):
+    grid = ['<div class="grid">']
+    pulse = _panel(data, "pulse")
+    if pulse:
+        head = ('<div class="chead"><span class="big m">{lean}</span>'
+                '<span class="mut">confidence {conf} · {n} stories / '
+                "{src} sources</span></div>"
+                '<div class="lede">{hl}</div>'
+                '<div class="flipbox"><strong>What would flip it:</strong> '
+                "{flip}</div>").format(
+                    lean=_esc(pulse.get("lean", "?")),
+                    conf=_esc(pulse.get("confidence")),
+                    n=_esc(pulse.get("n_items")),
+                    src=_esc(pulse.get("n_sources")),
+                    hl=_esc(pulse.get("headline", "")),
+                    flip=_esc(pulse.get("what_would_flip", "")))
+        grid.append(_card("Macro pulse (deterministic — no AI)",
+                          head + _theme_rows(pulse.get("themes")), span=7))
+    else:
+        grid.append(_card("Macro pulse", _ph(data, "pulse", "Macro pulse"),
+                          span=7))
+    news = _panel(data, "news")
+    if news:
+        items = "".join(
+            '<div class="evt"><a href="{u}" target="_blank" rel="noopener">{t}'
+            '</a> <span class="mut">· {s}</span></div>'.format(
+                u=_esc(i.get("url", "")), t=_esc(i.get("title", "")),
+                s=_esc(i.get("source", ""))) for i in news.get("items") or [])
+        line = ('<div class="mut" style="font-size:11px;margin-bottom:6px">{}'
+                "</div>").format(_esc(news.get("line", "")))
+        grid.append(_card("World headlines", line + items, span=5))
+    else:
+        grid.append(_card("World headlines", _ph(data, "news", "Headlines"),
+                          span=5))
+    sig = _panel(data, "signals") or {}
+    uoa_rows = sig.get("uoa") or []
+    if uoa_rows:
+        t = ["<table><tr><th></th><th>score</th><th>call share</th>"
+             "<th>n</th></tr>"]
+        for r in uoa_rows:
+            t.append('<tr><td class="m">{s}</td><td class="n">{sc}</td>'
+                     '<td class="n">{cs}</td><td class="n">{n}</td></tr>'.format(
+                         s=_esc(r.get("symbol")),
+                         sc=_num(r.get("score"), "{:.1f}"),
+                         cs=_num(r.get("net_call_share"), "{:.0%}"),
+                         n=_esc(r.get("n_unusual"))))
+        t.append("</table>")
+        grid.append(_card("Unusual options activity", "".join(t), span=4))
+    ins = sig.get("insider") or []
+    if ins:
+        body = "".join('<div class="evt"><span class="m">{s}</span> {t}</div>'
+                       .format(s=_esc(r.get("sym")), t=_esc(r.get("summary")))
+                       for r in ins)
+        grid.append(_card("Insider clusters (EDGAR)", body, span=4))
+    ol = sig.get("outlook") or {}
+    if ol.get("top") or ol.get("bottom"):
+        body = "".join(
+            '<div class="evt"><span class="m {c}">{d}</span> {t}</div>'.format(
+                c="g" if r.get("direction") == "LONG" else "b",
+                d=_esc(r.get("direction")), t=_esc(r.get("ticker")))
+            for r in (ol.get("top") or []) + (ol.get("bottom") or []))
+        grid.append(_card("Sector outlook (1-3mo relative)", body, span=4))
+    grid.append("</div>")
+    return "".join(grid)
+
+
 # ── Assembly ────────────────────────────────────────────────────────────────
 
-_TAB_BUILDERS = {"market": _tab_market}
+_TAB_BUILDERS = {"market": _tab_market, "volatility": _tab_vol,
+                 "macro": _tab_macro}
 
 
 def _footer(data):

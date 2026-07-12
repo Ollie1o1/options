@@ -59,5 +59,40 @@ class TestRenderSkeleton(unittest.TestCase):
         self.assertNotIn("None", html.replace("none", ""))
 
 
+class TestVolTab(unittest.TestCase):
+    def test_movers_vrp_and_note(self):
+        from src.research.render import render
+        html = render(_fixture())
+        self.assertIn("IV movers", html)
+        self.assertIn("+3.0vp", html)      # NVDA d_iv 0.03 -> +3.0vp signed label
+        self.assertIn("RICH", html)        # VRP label chip
+        self.assertIn("BTC carry note", html)
+
+    def test_dead_vol_panel_placeholder(self):
+        from src.research.render import render
+        data = _fixture()
+        data["panels"]["vol"] = None
+        data["failures"] = ["vol: RuntimeError: chain archive stale"]
+        html = render(data)
+        self.assertIn("chain archive stale", html)
+
+
+class TestMacroTab(unittest.TestCase):
+    def test_pulse_news_signals(self):
+        from src.research.render import render
+        html = render(_fixture())
+        self.assertIn("risk-on", html)
+        self.assertIn("What would flip it", html)
+        self.assertIn("https://example.com/1", html)
+        self.assertIn("CLUSTER BUY", html)
+        self.assertIn("XLK", html)          # outlook top
+
+    def test_news_titles_are_escaped(self):
+        from src.research.render import render
+        html = render(_fixture())
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+
 if __name__ == "__main__":
     unittest.main()
