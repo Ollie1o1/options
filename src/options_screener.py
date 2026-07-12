@@ -2808,6 +2808,37 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     return default if (not val and default is not None) else val
 
 
+_WORDMARK = "◤ OPTIONS DESK ◢"
+
+
+def _menu_prompt_with_motion(prompt_text: str, default: str,
+                             interactive: bool) -> str:
+    """Mode-menu prompt with the ambient 2-line header band above it.
+    Static everywhere motion isn't allowed; motion always stops before return."""
+    from src import ui_motion
+    if not (interactive and ui_motion.motion_allowed(interactive)):
+        return prompt_input(prompt_text, default)
+
+    def _frames(width):
+        offset = int(time.monotonic() * 10)
+        mark = _WORDMARK.center(width)
+        tape = "  " + ui_motion.tape_frame(offset, max(20, width - 4))
+        if HAS_ENHANCED_CLI:
+            mark = fmt.style(mark, 'accent')
+            tape = fmt.style(tape, 'muted')
+        return [mark, tape]
+
+    # Print the band once so the painter has real lines to repaint.
+    for line in _frames(min(get_display_width(), 100)):
+        print(line)
+    motion = ui_motion.HeaderMotion(2, _frames)
+    motion.start()
+    try:
+        return prompt_input(prompt_text, default)
+    finally:
+        motion.stop()
+
+
 def _open_briefing_file(path: str) -> None:
     """Open a written briefing in the default browser. Never raises."""
     try:
@@ -4484,8 +4515,9 @@ def main():
             symbol_input = _mode_map_cli.get(args.mode.lower(), "DISCOVER")
         else:
             try:
-                symbol_input = prompt_input(
-                    "Enter number, ticker, command, or Q to quit (default: 3)", "3").upper()
+                symbol_input = _menu_prompt_with_motion(
+                    "Enter number, ticker, command, or Q to quit (default: 3)",
+                    "3", _interactive).upper()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break

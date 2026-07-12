@@ -503,6 +503,27 @@ def print_market_direction(width: int = 100) -> None:
         print("-" * width)
 
 
+def _seed_motion_tape(regime) -> None:
+    """Feed the menu ticker tape from data already fetched. Never raises."""
+    try:
+        from src import ui_motion
+        r = regime or {}
+        segs = []
+        if r.get("vix") is not None:
+            segs.append(f"VIX {r['vix']:.1f}")
+        if r.get("vix_term_structure") not in (None, "UNKNOWN"):
+            segs.append(f"term {r['vix_term_structure']}")
+        if r.get("options_pcr") is not None:
+            segs.append(f"PCR {r['options_pcr']:.2f}")
+        if r.get("spy_ret_5d") is not None:
+            segs.append(f"SPY 5d {r['spy_ret_5d']:+.1f}%")
+        if r.get("posture"):
+            segs.append(str(r["posture"]))
+        ui_motion.set_tape(segs)
+    except Exception:
+        pass
+
+
 def print_regime_dashboard(width: int = 90) -> None:
     """
     Print a compact one-box market regime dashboard.
@@ -524,6 +545,7 @@ def print_regime_dashboard(width: int = 90) -> None:
         return
 
     posture = data.get("posture", "NEUTRAL")
+    _seed_motion_tape(data)
 
     # Choose box/border color based on posture
     if HAS_FMT and fmt:
