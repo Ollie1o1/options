@@ -331,10 +331,117 @@ def _tab_macro(data):
     return "".join(grid)
 
 
+# ── Ticker deep-dive tab ─────────────────────────────────────────────────────
+
+_VERDICT_CLS = {"BUY": "v-buy", "WAIT": "v-wait", "AVOID": "v-avoid",
+                "NEUTRAL": "v-neutral"}
+
+
+def _sig_row(s):
+    v = s.get("value") or 0.0
+    bar_w = min(50.0, abs(v) * 50.0)
+    colour = "var(--good)" if v >= 0 else "var(--bad)"
+    lab = "{:+.2f}".format(v) if s.get("directional", True) else "info"
+    return ('<div class="sig"><div class="sighead"><span class="m">{n}</span>'
+            '<span class="m" style="color:{c}">{lab}</span></div>'
+            '<div class="sigbar"><span style="width:{w:.0f}%;background:{c};'
+            '{side}"></span></div><div class="sigdet">{lb} · {d}</div></div>'
+            .format(n=_esc(s.get("name")), c=colour, lab=lab, w=bar_w,
+                    side=("margin-left:50%" if v >= 0 else
+                          "margin-left:{:.0f}%".format(50 - bar_w)),
+                    lb=_esc(s.get("label")), d=_esc(s.get("detail"))))
+
+
+def _ticker_stats(t):
+    st = t.get("state") or {}
+    cells = [
+        ("Price", _num(st.get("price"), "${:,.2f}"), ""),
+        ("5d", _num((st.get("ret_5d") or 0) * 100 if st.get("ret_5d") is not None
+                    else None, "{:+.1f}%"), _chg_tone(st.get("ret_5d"))),
+        ("RSI", _num(st.get("rsi"), "{:.0f}"), ""),
+        ("IV rank", _num(st.get("iv_rank"), "{:.0%}"), ""),
+        ("Term", ("backwardated" if (t.get("term_spread") or 0) < 0
+                  else "contango")
+         if t.get("term_spread") is not None else "—",
+         "bad" if (t.get("term_spread") or 0) < 0 else ""),
+        ("Earnings", ("in {}d".format(st.get("days_to_earnings"))
+                      if st.get("days_to_earnings") is not None else "—"),
+         "warn" if (st.get("days_to_earnings") is not None
+                    and 0 <= st["days_to_earnings"] <= 10) else ""),
+        ("Bounce", ("{:.0%} (n={})".format(t["bounce"]["bounce_rate"],
+                                           t["bounce"].get("n", 0))
+                    if (t.get("bounce") or {}).get("bounce_rate") is not None
+                    else "—"), ""),
+    ]
+    return ('<div class="strip">' + "".join(
+        '<div><div class="eye">{l}</div><div class="sv{t}">{v}</div></div>'.format(
+            l=_esc(l), t=_TONES.get(tone, ""), v=v)
+        for l, v, tone in cells) + "</div>")
+
+
+def _tab_ticker(data):
+    t = _panel(data, "ticker")
+    if not t:
+        return _ph(data, "ticker", "Ticker briefing")
+    v = t.get("verdict") or {}
+    call = str(v.get("call", "NEUTRAL")).upper()
+    banner = (
+        '<div class="vrow"><span class="verdict {cls}">{call}</span>'
+        '<span class="mut">confidence {conf} · composite {comp}</span>'
+        "{note}{drivers}</div>").format(
+            cls=_VERDICT_CLS.get(call, "v-neutral"), call=_esc(call),
+            conf=_esc(v.get("confidence", "?")),
+            comp=_num(v.get("composite"), "{:+.2f}"),
+            note=('<span class="w">! {}</span>'.format(_esc(v["note"]))
+                  if v.get("note") else ""),
+            drivers="".join(
+                '<span class="badge {k}">{g} {t} [{tag}]</span>'.format(
+                    k="k-ok" if d.get("glyph") == "+" else
+                      ("k-bad" if d.get("glyph") == "-" else "k-warn"),
+                    g=_esc(d.get("glyph")), t=_esc(d.get("text")),
+                    tag=_esc(d.get("tag"))) for d in v.get("drivers") or []))
+    action = ('<div class="flipbox"><strong>What to do:</strong> {p}{s}</div>'
+              .format(p=_esc(t.get("primary_action", "")),
+                      s=(" <span class='mut'>Also: {}</span>".format(
+                          _esc(t.get("secondary_action")))
+                         if t.get("secondary_action") else "")))
+    grid = ['<div class="grid">',
+            '<div class="c12">' + banner + action + _ticker_stats(t) + "</div>"]
+    chart = t.get("chart") or {}
+    if chart.get("closes"):
+        price = CH.price_chart(chart["closes"], chart.get("ma50"),
+                               chart.get("ma200"), t.get("support"),
+                               t.get("resist"), chart.get("dates"), "px")
+        rsi = CH.rsi_strip(chart.get("rsi") or [])
+        grid.append(_card("{} — 1 year, close / 50d / 200d".format(
+            _esc(t.get("symbol"))), price + rsi, span=8))
+    else:
+        grid.append(_card("Price", '<div class="ph">price history unavailable'
+                          "</div>", span=8))
+    sigs = "".join(_sig_row(s) for s in t.get("signals") or [])
+    grid.append(_card("Signals (reliability-weighted)",
+                      sigs or '<div class="ph">no signals</div>', span=4))
+    cone = CH.cone_chart(t.get("cone"))
+    grid.append(_card("Realized-vol cone vs current",
+                      cone or '<div class="ph">vol cone unavailable</div>',
+                      span=6))
+    term = CH.term_chart(t.get("term"))
+    grid.append(_card("ATM IV term structure",
+                      term or '<div class="ph">term structure unavailable</div>',
+                      span=6))
+    heads = t.get("headlines") or []
+    if heads:
+        grid.append(_card("Recent headlines", "".join(
+            '<div class="evt">{}</div>'.format(_esc(h)) for h in heads),
+            span=12))
+    grid.append("</div>")
+    return "".join(grid)
+
+
 # ── Assembly ────────────────────────────────────────────────────────────────
 
 _TAB_BUILDERS = {"market": _tab_market, "volatility": _tab_vol,
-                 "macro": _tab_macro}
+                 "macro": _tab_macro, "ticker": _tab_ticker}
 
 
 def _footer(data):
@@ -447,6 +554,29 @@ td.n { text-align:right; font-family:ui-monospace,Menlo,monospace;
 .k-bad{border-color:var(--chip-bad-bd);color:var(--bad);background:var(--chip-bad-bg)}
 .k-ok{border-color:var(--chip-ok-bd);color:var(--good);background:var(--chip-ok-bg)}
 .k-warn{border-color:var(--chip-wn-bd);color:var(--warn);background:var(--chip-wn-bg)}
+.vrow { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+  margin-top:16px; }
+.verdict { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif;
+  font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+  font-size:12px; color:var(--paper); padding:5px 12px; border-radius:3px; }
+.v-buy{background:var(--good)} .v-avoid{background:var(--bad)}
+.v-wait{background:var(--warn)} .v-neutral{background:var(--muted)}
+.strip { display:grid; grid-template-columns:repeat(7,minmax(0,1fr));
+  border-top:1px solid var(--rule-hard); border-bottom:1px solid var(--rule);
+  margin-top:12px; }
+.strip>div { padding:9px 11px; border-right:1px solid var(--rule); }
+.strip>div:last-child{border-right:none}
+@media (max-width:900px){ .strip{grid-template-columns:repeat(3,minmax(0,1fr))} }
+.sv { font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
+  font-size:15px; margin-top:3px; color:var(--ink-strong); }
+.sv.g{color:var(--good)} .sv.b{color:var(--bad)} .sv.w{color:var(--warn)}
+.sig { padding:7px 0; border-top:1px solid var(--grid); }
+.sig:first-child{border-top:none}
+.sighead { display:flex; justify-content:space-between; font-size:11px; }
+.sigbar { height:6px; background:var(--grid); border-radius:3px; margin:4px 0;
+  overflow:hidden; }
+.sigbar span { display:block; height:100%; border-radius:3px; }
+.sigdet { font-size:11px; color:var(--muted); }
 .ph { border:1px dashed var(--rule); border-radius:3px; padding:8px 10px;
   color:var(--muted); font-family:ui-sans-serif,system-ui,sans-serif;
   font-size:11px; }

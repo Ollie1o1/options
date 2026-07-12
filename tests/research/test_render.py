@@ -94,5 +94,36 @@ class TestMacroTab(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html)
 
 
+class TestTickerTab(unittest.TestCase):
+    def test_verdict_actions_signals_charts(self):
+        from src.research.render import render
+        html = render(_fixture())
+        self.assertIn("BUY", html)
+        self.assertIn("v-buy", html)                 # verdict banner class
+        self.assertIn("Buy the 50d-MA retest", html) # primary action
+        self.assertIn("above 200d (+21.5%)", html)   # signal detail
+        self.assertIn("50d MA", html)                # support band label
+        self.assertIn("What to do", html)
+        self.assertIn("NVDA headline one", html)
+
+    def test_no_ticker_hides_tab(self):
+        from src.research.render import render
+        data = _fixture()
+        data["panels"]["ticker"] = None
+        data["meta"]["symbol"] = None
+        html = render(data)
+        self.assertNotIn('data-tab="ticker"', html)
+        self.assertNotIn('id="pane-ticker"', html)
+
+    def test_missing_chart_degrades(self):
+        from src.research.render import render
+        data = _fixture()
+        data["panels"]["ticker"]["chart"] = None
+        data["panels"]["ticker"]["cone"] = []
+        data["panels"]["ticker"]["term"] = []
+        html = render(data)
+        self.assertIn("price history unavailable", html)
+
+
 if __name__ == "__main__":
     unittest.main()
