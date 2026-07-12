@@ -1,45 +1,80 @@
-"""Ambient menu-header motion: a scrolling ticker tape repainted in place
-while the mode menu waits for input.
+"""Ambient ASCII-art masthead for the mode menu — and only the mode menu.
 
-Safety model: the painter thread only ever rewrites the N lines directly
-ABOVE the cursor (ANSI save/restore), so the prompt line and its echo are
-untouched; it breaks its loop the moment stdin has a completed line; and it
-paints inside try/except so a closed stream can never crash the app. Callers
-must gate on motion_allowed() — non-TTY, plain mode, and dumb terminals get
-the static header.
+The wordmark is printed as part of the menu; while the menu waits for input a
+painter thread re-styles those same rows in place with a moving shimmer band.
+No information lives in the animation (no ticker bar): it is pure art, so
+killing it never costs data.
+
+Safety model: the painter only rewrites the wordmark rows, which sit `offset`
+rows above the prompt (the mode list is printed between them), so the prompt
+line and its echo are untouched; it breaks its loop the moment stdin has a
+completed line; and it paints inside try/except so a closed stream can never
+crash the app. Callers must gate on motion_allowed() — non-TTY, plain mode,
+and dumb terminals get the static wordmark.
 """
 import os
 import select
 import sys
 import threading
+import time
 
-_TAGLINE = ("options desk — quotes 15+ min delayed · display-only until "
-            "the gate fires")
-_SEP = " · "
+# ANSI-shadow block font, per-letter so the wordmark is assembled
+# programmatically (hand-aligned multiline art rots the first time it's edited).
+_FONT = {
+    "O": [" ██████╗ ", "██╔═══██╗", "██║   ██║", "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
+    "P": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔═══╝ ", "██║     ", "╚═╝     "],
+    "T": ["████████╗", "╚══██╔══╝", "   ██║   ", "   ██║   ", "   ██║   ", "   ╚═╝   "],
+    "I": ["██╗", "██║", "██║", "██║", "██║", "╚═╝"],
+    "N": ["███╗   ██╗", "████╗  ██║", "██╔██╗ ██║", "██║╚██╗██║", "██║ ╚████║", "╚═╝  ╚═══╝"],
+    "S": ["███████╗", "██╔════╝", "███████╗", "╚════██║", "███████║", "╚══════╝"],
+    "D": ["██████╗ ", "██╔══██╗", "██║  ██║", "██║  ██║", "██████╔╝", "╚═════╝ "],
+    "E": ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"],
+    "K": ["██╗  ██╗", "██║ ██╔╝", "█████╔╝ ", "██╔═██╗ ", "██║  ██╗", "╚═╝  ╚═╝"],
+    " ": ["   ", "   ", "   ", "   ", "   ", "   "],
+}
 
-_tape_segments: list = []
-_tape_lock = threading.Lock()
+WORDMARK = "OPTIONS DESK"
+FALLBACK = "◤ OPTIONS DESK ◢"
+_SHIMMER_W = 10
 
 
-def set_tape(segments) -> None:
-    with _tape_lock:
-        _tape_segments[:] = [s for s in (segments or []) if s]
+def _assemble(text: str) -> list:
+    rows = ["".join(_FONT[ch][i] for ch in text if ch in _FONT)
+            for i in range(6)]
+    return rows
 
 
-def tape_text() -> str:
-    with _tape_lock:
-        segs = list(_tape_segments)
-    return _SEP.join(segs) if segs else _TAGLINE
+_ART = _assemble(WORDMARK)
+_ART_W = max(len(r) for r in _ART)
 
 
-def tape_frame(offset: int, width: int) -> str:
-    """A `width`-char window into the looped tape, shifted by `offset`."""
-    text = tape_text() + _SEP
-    if not text.strip():
-        text = _TAGLINE + _SEP
-    doubled = text * (2 + width // max(1, len(text)))
-    start = offset % len(text)
-    return doubled[start:start + width]
+def art_lines(width: int) -> list:
+    """Static wordmark fitted to `width`: full block art, or a one-liner."""
+    if width >= _ART_W:
+        pad = " " * ((width - _ART_W) // 2)
+        return [pad + r for r in _ART]
+    return [FALLBACK.center(max(len(FALLBACK), width))[:width]]
+
+
+def art_frame(width: int, tick: int = None) -> list:
+    """One shimmer frame: the wordmark in muted ink with a bright band that
+    sweeps left→right. Plain text comes back unstyled when color is off."""
+    lines = art_lines(width)
+    from src import formatting as fmt
+    if not fmt.supports_color():
+        return lines
+    if tick is None:
+        tick = int(time.monotonic() * 14)
+    span = max(len(l) for l in lines) + _SHIMMER_W * 2
+    a = tick % span - _SHIMMER_W
+    b = a + _SHIMMER_W
+    out = []
+    for l in lines:
+        lo, hi = max(0, a), max(0, min(len(l), b))
+        out.append(fmt.style(l[:lo], 'muted')
+                   + fmt.style(l[lo:hi], 'accent', bold=True)
+                   + fmt.style(l[hi:], 'muted'))
+    return out
 
 
 def motion_allowed(interactive: bool) -> bool:
@@ -57,15 +92,14 @@ def motion_allowed(interactive: bool) -> bool:
 
 
 class HeaderMotion:
-    """Repaints `n_lines` above the cursor with frames from `frame_fn(width)`.
+    """Repaints `n_lines` rows with frames from `frame_fn(width)`. The band's
+    bottom row sits `offset` rows above the cursor row (offset=0 means the
+    band is directly above the prompt)."""
 
-    frame_fn returns a list of exactly n_lines strings (pre-styled OK); each
-    is clipped to the terminal width by the painter.
-    """
-
-    def __init__(self, n_lines: int, frame_fn, fps: int = 8):
+    def __init__(self, n_lines: int, frame_fn, fps: int = 12, offset: int = 0):
         self.n_lines = n_lines
         self.frame_fn = frame_fn
+        self.offset = offset
         self.tick = 1.0 / max(1, fps)
         self._stop = threading.Event()
         self._thread = None
@@ -79,7 +113,7 @@ class HeaderMotion:
     def _paint(self, lines) -> None:
         out = ["\0337"]  # save cursor
         for i, line in enumerate(lines[: self.n_lines]):
-            up = self.n_lines - i
+            up = self.offset + self.n_lines - i
             out.append(f"\033[{up}A\r\033[2K{line}\0338\0337")
         out.append("\0338")  # restore cursor
         sys.stdout.write("".join(out))
@@ -96,8 +130,7 @@ class HeaderMotion:
             except Exception:
                 return
             try:
-                width = self._width()
-                self._paint([l[:width] for l in self.frame_fn(width)])
+                self._paint(self.frame_fn(self._width()))
             except Exception:
                 return
 

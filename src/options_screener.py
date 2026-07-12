@@ -2808,30 +2808,22 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     return default if (not val and default is not None) else val
 
 
-_WORDMARK = "◤ OPTIONS DESK ◢"
-
-
 def _menu_prompt_with_motion(prompt_text: str, default: str,
-                             interactive: bool) -> str:
-    """Mode-menu prompt with the ambient 2-line header band above it.
-    Static everywhere motion isn't allowed; motion always stops before return."""
+                             interactive: bool, art_rows: int = 0,
+                             art_offset: int = 0) -> str:
+    """Mode-menu prompt that animates the wordmark art printed `art_offset`
+    rows above the prompt (the mode list sits between them). Static wordmark
+    everywhere motion isn't allowed; motion always stops before return."""
     from src import ui_motion
-    if not (interactive and ui_motion.motion_allowed(interactive)):
+    if not (art_rows and interactive and ui_motion.motion_allowed(interactive)):
         return prompt_input(prompt_text, default)
 
-    def _frames(width):
-        offset = int(time.monotonic() * 10)
-        mark = _WORDMARK.center(width)
-        tape = "  " + ui_motion.tape_frame(offset, max(20, width - 4))
-        if HAS_ENHANCED_CLI:
-            mark = fmt.style(mark, 'accent')
-            tape = fmt.style(tape, 'muted')
-        return [mark, tape]
-
-    # Print the band once so the painter has real lines to repaint.
-    for line in _frames(min(get_display_width(), 100)):
-        print(line)
-    motion = ui_motion.HeaderMotion(2, _frames)
+    # Same width the menu printed the art with, so the centering pad (and
+    # therefore every painted row) lines up with what is already on screen.
+    art_w = min(get_display_width(), 100)
+    motion = ui_motion.HeaderMotion(art_rows,
+                                    lambda _w: ui_motion.art_frame(art_w),
+                                    offset=art_offset)
     motion.start()
     try:
         return prompt_input(prompt_text, default)
@@ -4467,6 +4459,18 @@ def main():
         # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
         _wl = load_watchlist()
         _wl_desc = f"Scan your {len(_wl)} saved ticker(s)" if _wl else "(empty \u2014 type ADD AAPL to begin)"
+        # ── Wordmark masthead: art lives in THIS menu and nowhere else. The
+        # prompt helper below re-styles exactly these rows with a shimmer, so
+        # anything printed between the art and the prompt must be counted in
+        # _menu_art_offset (rule + mode lines + rule + trailing blank).
+        _menu_art_rows = 0
+        _menu_art_offset = 0
+        if _interactive and sys.stdout.isatty() and HAS_ENHANCED_CLI:
+            from src import ui_motion as _menu_motion
+            print()
+            for _art_line in _menu_motion.art_lines(min(WIDTH, 100)):
+                print(fmt.style(_art_line, 'muted'))
+                _menu_art_rows += 1
         if HAS_ENHANCED_CLI:
             from . import ui as _menu_ui
             print()
@@ -4490,6 +4494,10 @@ def main():
                 d = fmt.style(f"\u2014 {desc}", 'muted')
                 print(f"  {n} {c} {d}")
             print(_menu_ui.rule(WIDTH))
+            if _menu_art_rows:
+                # blank + MODES rule above the list, closing rule + trailing
+                # blank below it \u2014 the rows between the art and the prompt.
+                _menu_art_offset = len(modes) + 4
         else:
             print("\nModes:")
             print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")
@@ -4520,7 +4528,8 @@ def main():
             try:
                 symbol_input = _menu_prompt_with_motion(
                     "Enter number, ticker, command, or Q to quit (default: 3)",
-                    "3", _interactive).upper()
+                    "3", _interactive, art_rows=_menu_art_rows,
+                    art_offset=_menu_art_offset).upper()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break

@@ -9,21 +9,42 @@ from src import formatting as fmt
 from src import ui_motion
 
 
-class TestTape(unittest.TestCase):
-    def test_tape_frame_scrolls_and_wraps(self):
-        ui_motion.set_tape(["SPY +0.4%", "VIX 14.2"])
-        f0 = ui_motion.tape_frame(0, 12)
-        f3 = ui_motion.tape_frame(3, 12)
-        self.assertEqual(len(f0), 12)
-        self.assertEqual(len(f3), 12)
-        self.assertNotEqual(f0, f3)
-        big = ui_motion.tape_frame(10_000, 12)   # offset far past text length wraps
-        self.assertEqual(len(big), 12)
+class TestArt(unittest.TestCase):
+    def test_wide_terminal_gets_block_art(self):
+        lines = ui_motion.art_lines(120)
+        self.assertEqual(len(lines), 6)
+        self.assertTrue(any("█" in l for l in lines))
+        # centered: consistent leading pad on the widest row
+        self.assertTrue(lines[0].startswith(" "))
 
-    def test_empty_tape_gives_tagline(self):
-        ui_motion.set_tape([])
-        f = ui_motion.tape_frame(0, 20)
-        self.assertEqual(len(f), 20)
+    def test_narrow_terminal_gets_one_line_fallback(self):
+        lines = ui_motion.art_lines(40)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("OPTIONS DESK", lines[0])
+
+    def test_art_rows_align(self):
+        widths = {len(l) for l in ui_motion._ART}
+        self.assertEqual(len(widths), 1)  # every row same width or art breaks
+
+    def test_art_frame_plain_mode_is_static_unstyled(self):
+        saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+        try:
+            frames = ui_motion.art_frame(120, tick=5)
+            self.assertEqual(frames, ui_motion.art_lines(120))
+        finally:
+            fmt._COLOR_ENABLED = saved
+
+    def test_art_frame_shimmer_moves(self):
+        saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = True
+        try:
+            f1 = ui_motion.art_frame(120, tick=10)
+            f2 = ui_motion.art_frame(120, tick=30)
+            self.assertNotEqual(f1, f2)
+            self.assertIn("\x1b[", f1[0])
+        finally:
+            fmt._COLOR_ENABLED = saved
 
 
 class TestMotionAllowed(unittest.TestCase):
@@ -70,6 +91,16 @@ class TestHeaderMotion(unittest.TestCase):
         m.start()
         m.stop()
         self.assertFalse(m._thread and m._thread.is_alive())
+
+    def test_offset_positions_paint_above_menu(self):
+        m = ui_motion.HeaderMotion(2, lambda w: ["aa", "bb"], offset=15)
+        writes = []
+        with mock.patch.object(sys, "stdout") as out:
+            out.write = writes.append
+            m._paint(["aa", "bb"])
+        joined = "".join(writes)
+        self.assertIn("\033[17A", joined)  # offset 15 + 2 rows -> top row
+        self.assertIn("\033[16A", joined)  # second row
 
 
 if __name__ == "__main__":
