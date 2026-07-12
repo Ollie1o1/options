@@ -2842,7 +2842,7 @@ def _run_intel_menu() -> None:
         try:
             choice = prompt_input(
                 "Intel: [a] market overview  [b] ticker briefing  [c] macro pulse  "
-                "[d] morning briefing  [x] back",
+                "[d] morning briefing  [e] research desk  [x] back",
                 "a").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
@@ -2880,8 +2880,23 @@ def _run_intel_menu() -> None:
                 _open_briefing_file(html_path)
             except Exception as exc:
                 print(_uikit.error_line(f"Could not build morning briefing: {exc}"))
+        elif choice in ("e", "desk", "research", "5"):
+            sym = prompt_input(
+                "Ticker for the deep-dive tab (blank = market only)",
+                "").strip().upper()
+            if sym and (not sym.isalnum() or len(sym) > 6):
+                print(_uikit.error_line("Invalid ticker — building market-only desk."))
+                sym = ""
+            try:
+                from src import research as _research
+                with _uikit.spinner("Building research desk (up to ~30s)"):
+                    html_path, _ = _research.build_and_write(symbol=sym or None)
+                print(f"  Research desk written: {html_path}")
+                _open_briefing_file(html_path)
+            except Exception as exc:
+                print(_uikit.error_line(f"Could not build research desk: {exc}"))
         else:
-            print("  Unrecognized choice. Type a / b / c / d, or x to go back.")
+            print("  Unrecognized choice. Type a / b / c / d / e, or x to go back.")
 
         if not _interactive:
             return
