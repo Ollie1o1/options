@@ -52,26 +52,68 @@ def _loading(msg: str) -> None:
     print(fmt.style(line, "muted") if HAS_UI else line, flush=True)
 
 
+def _art_width() -> int:
+    import os
+    try:
+        return min(os.get_terminal_size().columns, 100)
+    except OSError:
+        return WIDTH
+
+
 def _show_menu() -> str:
-    if HAS_UI:
+    # ── Wordmark masthead: the animated art lives HERE, at the very top of
+    # the launcher, and nowhere else. The painter below re-styles exactly
+    # these rows, so everything printed after the art is counted into
+    # `offset` (rows between the art's bottom line and the prompt row).
+    art_rows, art_w = 0, _art_width()
+    interactive = False
+    try:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        pass
+    if HAS_UI and interactive:
+        from src import ui_motion
         print()
-        print(ui.banner("OPTIONS SCREENER  ·  QUANT DESK", width=WIDTH))
+        for line in ui_motion.art_lines(art_w):
+            print(fmt.style(line, "muted"))
+            art_rows += 1
+
+    after = []
+    if HAS_UI:
+        after.append("")
+        after.extend(ui.banner("OPTIONS SCREENER  ·  QUANT DESK",
+                               width=WIDTH).splitlines())
     else:
-        print("\n" + "=" * WIDTH + "\n  OPTIONS SCREENER  ·  QUANT DESK\n" + "=" * WIDTH)
-    print()
-    print(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
-    print(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
-    print(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
-    print(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
-               tag="read-only"))
-    print(_row("Q", "QUIT", "", muted_key=True))
-    print()
-    print(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
+        after.extend(("", "=" * WIDTH, "  OPTIONS SCREENER  ·  QUANT DESK",
+                      "=" * WIDTH))
+    after.append("")
+    after.append(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
+    after.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
+    after.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
+    after.append(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
+                      tag="read-only"))
+    after.append(_row("Q", "QUIT", "", muted_key=True))
+    after.append("")
+    after.append(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
+    for line in after:
+        print(line)
+
+    motion = None
+    if art_rows:
+        from src import ui_motion
+        if ui_motion.motion_allowed(True):
+            motion = ui_motion.HeaderMotion(
+                art_rows, lambda _w: ui_motion.art_frame(art_w),
+                offset=len(after))
+            motion.start()
     try:
         choice = input("  Choice [1]: ").strip() or "1"
     except (EOFError, KeyboardInterrupt):
         print()
         return "Q"
+    finally:
+        if motion is not None:
+            motion.stop()
     return choice.upper()
 
 
