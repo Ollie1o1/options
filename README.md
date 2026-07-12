@@ -182,6 +182,9 @@ python -m src.check_pnl
 
 # Walk-forward backtest
 python -m src.backtester AAPL SPY NVDA
+
+# Morning briefing — market-wide quant morning note (self-contained HTML)
+python -m src.morning --open
 ```
 
 > Commands in this section assume the venv is activated. If not, either activate it (`source venv/bin/activate`) or use the auto-venv launchers above.
@@ -204,6 +207,22 @@ Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (
 | `IRON` | Iron Condors | Delta-neutral range-bound strategies — same detail-card pipeline as singles + spreads |
 | `PORTFOLIO` | Portfolio | View P/L on all open paper trades |
 | `MY LIST` | Watchlist | Scan your personal watchlist (type `ADD AAPL` to build it) |
+| `INTEL` | Intel Briefing | Market overview, single-ticker briefing, macro pulse, and the morning briefing |
+
+### Morning Briefing
+
+A market-wide quant morning note — regime, vol intelligence, macro calendar,
+signals, portfolio state, and gate status — as a self-contained HTML page
+(light/dark, reproducible offline from its JSON sidecar).
+
+```bash
+python -m src.morning --open                                     # build and open
+python -m src.morning --from reports/briefings/2026-07-10.json   # offline re-render
+```
+
+Also available in the screener via `INTEL` → `[d] morning briefing`. The
+maintenance heartbeat writes a fresh pair once per business day to
+`reports/briefings/YYYY-MM-DD.{html,json}` when the headless LaunchAgent runs.
 
 ### CLI Reference
 

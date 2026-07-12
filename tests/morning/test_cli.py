@@ -40,6 +40,27 @@ class TestCli(unittest.TestCase):
         rc = main(["--from", "/nonexistent/x.json"])
         self.assertNotEqual(rc, 0)
 
+    def test_from_rerender_does_not_touch_maintenance_state(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            side = _tiny_sidecar(tmp)
+            with mock.patch("src.morning.__main__._mark_maintenance_state") as mm:
+                rc = main(["--from", side, "--out-dir", tmp])
+            self.assertEqual(rc, 0)
+            mm.assert_not_called()
+
+    def test_fresh_build_marks_maintenance_state(self):
+        import json as _json
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(_tiny_sidecar(tmp)) as f:
+                data = _json.load(f)
+            with mock.patch("src.morning.__main__._mark_maintenance_state") as mm, \
+                 mock.patch("src.morning.collect.build", return_value=data):
+                rc = main(["--out-dir", tmp])
+            self.assertEqual(rc, 0)
+            mm.assert_called_once_with("2026-07-10")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,19 @@ def _open_file(path: str) -> None:
         webbrowser.open("file://" + os.path.abspath(path))
 
 
+def _mark_maintenance_state(date_s: str) -> None:
+    """A fresh build satisfies the daily job regardless of who triggered it
+    (heartbeat, INTEL menu, CLI) — record it so the health banner stays quiet.
+    Offline --from re-renders don't count. Never raises."""
+    try:
+        from src.maintenance import DEFAULT_STATE_PATH, load_state, save_state
+        state = load_state(DEFAULT_STATE_PATH)
+        state["last_morning_briefing"] = date_s
+        save_state(DEFAULT_STATE_PATH, state)
+    except Exception:
+        pass
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m src.morning")
     ap.add_argument("--open", action="store_true", help="open the page when written")
@@ -42,6 +55,8 @@ def main(argv=None) -> int:
         data = build(slow=True, budget_s=args.budget)
 
     html_path, json_path = write_briefing(data, out_dir=args.out_dir)
+    if not args.src:
+        _mark_maintenance_state(data["meta"]["date"])
     print(html_path)
     print(json_path)
     if args.open:
