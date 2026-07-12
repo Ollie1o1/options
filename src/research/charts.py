@@ -320,7 +320,9 @@ def term_chart(term, w=560, h=200):
     lo, hi = min(ivs), max(ivs)
     span = (hi - lo) or 1.0
     pad, axis_w = 14, 56
-    x0, x1, y0, y1 = axis_w, w - pad, pad, h - 30
+    # wider right margin: the last point's centered "NNd NN%" label would
+    # otherwise clip at the canvas edge
+    x0, x1, y0, y1 = axis_w, w - 30, pad, h - 30
     step = (x1 - x0) / (len(pts_in) - 1)
     xy = [(x0 + i * step, y1 - (v - lo) / span * (y1 - y0))
           for i, (_, v) in enumerate(pts_in)]

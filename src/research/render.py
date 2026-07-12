@@ -112,12 +112,23 @@ def _tabbar(data):
 
 # ── Market tab ───────────────────────────────────────────────────────────────
 
+def _vix_regime_label(reg):
+    """Prefer the collected label; else derive with the repo's 15/25 cuts
+    (mirrors data_fetching.determine_vix_regime defaults)."""
+    if reg.get("vix_regime"):
+        return str(reg["vix_regime"])
+    vix = reg.get("vix")
+    if not isinstance(vix, (int, float)):
+        return "?"
+    return "low" if vix < 15 else ("high" if vix > 25 else "normal")
+
+
 def _market_kpis(data):
     mkt = _panel(data, "market") or {}
     reg = mkt.get("regime") or {}
     rates = mkt.get("rates") or {}
     vix = reg.get("vix")
-    vix_sub = "{} · {}".format(_esc(reg.get("vix_regime", "?")),
+    vix_sub = "{} · {}".format(_esc(_vix_regime_label(reg)),
                                _esc(reg.get("vix_term_structure", "?")))
     posture = _esc(str(reg.get("posture", "—")).replace("_", " "))
     slope = rates.get("slope")
@@ -176,9 +187,11 @@ def _tab_market(data):
                           spy_head + CH.area_chart(spy.get("closes"),
                                                    spy.get("dates"), "spy"),
                           span=8))
+        # w=380: this card spans 4 of 12 columns, so a narrower viewBox keeps
+        # axis text readable instead of scaling a 760-wide chart down by half.
         grid.append(_card("VIX — 6 months",
                           CH.area_chart(vix.get("closes"), vix.get("dates"),
-                                        "vix", fmt="{:.1f}"), span=4))
+                                        "vix", w=380, fmt="{:.1f}"), span=4))
     else:
         grid.append(_card("Index tape", _ph(data, "tape", "Index history"),
                           span=12))
@@ -244,7 +257,7 @@ def _tab_vol(data):
         vix = tape["vix"]
         grid.append(_card("VIX — 6 months",
                           CH.area_chart(vix.get("closes"), vix.get("dates"),
-                                        "vix2", fmt="{:.1f}"), span=6))
+                                        "vix2", w=560, fmt="{:.1f}"), span=6))
     grid.append("</div>")
     return "".join(grid)
 
@@ -321,9 +334,16 @@ def _tab_macro(data):
         grid.append(_card("Insider clusters (EDGAR)", body, span=4))
     ol = sig.get("outlook") or {}
     if ol.get("top") or ol.get("bottom"):
+        def _dir_tone(d):
+            d = str(d or "").upper()
+            if d in ("LONG", "BULLISH"):
+                return "g"
+            if d in ("SHORT", "BEARISH"):
+                return "b"
+            return "mut"
         body = "".join(
             '<div class="evt"><span class="m {c}">{d}</span> {t}</div>'.format(
-                c="g" if r.get("direction") == "LONG" else "b",
+                c=_dir_tone(r.get("direction")),
                 d=_esc(r.get("direction")), t=_esc(r.get("ticker")))
             for r in (ol.get("top") or []) + (ol.get("bottom") or []))
         grid.append(_card("Sector outlook (1-3mo relative)", body, span=4))
@@ -517,11 +537,12 @@ h5 { font-family:ui-sans-serif,system-ui,sans-serif; font-size:9.5px;
   font-size:12.5px; }
 .grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr));
   gap:16px; margin-top:16px; }
-.c3{grid-column:span 3} .c4{grid-column:span 4} .c6{grid-column:span 6}
-.c8{grid-column:span 8} .c12{grid-column:span 12}
+.c3{grid-column:span 3} .c4{grid-column:span 4} .c5{grid-column:span 5}
+.c6{grid-column:span 6} .c7{grid-column:span 7} .c8{grid-column:span 8}
+.c12{grid-column:span 12}
 @media (max-width:1100px){ .c3{grid-column:span 6} .c4{grid-column:span 6}
-  .c8{grid-column:span 12} }
-@media (max-width:760px){ .c3,.c4,.c6,.c8{grid-column:span 12} }
+  .c5,.c7,.c8{grid-column:span 12} }
+@media (max-width:760px){ .c3,.c4,.c5,.c6,.c7,.c8{grid-column:span 12} }
 .card { background:var(--panel); border:1px solid var(--rule); border-radius:6px;
   padding:14px 16px; min-width:0; }
 .kpi .kv { font-family:ui-monospace,Menlo,monospace;
@@ -542,6 +563,8 @@ td.n { text-align:right; font-family:ui-monospace,Menlo,monospace;
 .evt { font-size:12.5px; padding:4px 0; border-top:1px solid var(--grid); }
 .evt:first-child { border-top:none; }
 .evt .m { color:var(--accent); margin-right:8px; }
+.evt .m.g { color:var(--good); } .evt .m.b { color:var(--bad); }
+.evt .m.mut { color:var(--muted); }
 .evt a { color:var(--ink-strong); text-decoration:none;
   border-bottom:1px solid var(--rule-hard); }
 .evt a:hover { color:var(--accent); border-color:var(--accent); }
