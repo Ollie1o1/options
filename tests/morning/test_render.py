@@ -75,6 +75,30 @@ class TestRender(unittest.TestCase):
     def test_no_ansi_escapes(self):
         self.assertNotIn("\x1b[", R.render(_fixture()))
 
+    def test_kpi_strip_present(self):
+        html = R.render(_fixture())
+        self.assertIn("class='kpis'", html)
+        for label in ("VIX", "SPY 1D", "POSTURE", "10Y–3M", "GATE"):
+            self.assertIn(label, html)
+
+    def test_callout_takeaways_bolded(self):
+        html = R.render(_fixture())
+        self.assertIn("What matters this morning", html)
+        self.assertIn("<b>Exit due:</b>", html)
+        self.assertIn("<b>Biggest IV move:</b>", html)
+        self.assertIn("<b>Widest VRP:</b>", html)
+
+    def test_portfolio_collapsed_in_details(self):
+        html = R.render(_fixture())
+        start = html.index("<h2>Portfolio</h2>")
+        chunk = html[start:start + 400]
+        self.assertIn("<details>", chunk)
+        self.assertIn("1 open position", chunk)
+
+    def test_vol_charts_are_svg(self):
+        html = R.render(_fixture())
+        self.assertIn("class='bars'", html)   # signed ΔIV bars + IV/RV pairs
+
 
 if __name__ == "__main__":
     unittest.main()
