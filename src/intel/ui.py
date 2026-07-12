@@ -23,8 +23,22 @@ def _vlen(s: str) -> int:
     return len(_fmt._strip_ansi(s)) if _HAS else len(s)
 
 
+# Legacy ANSI constants → semantic theme tokens, so intel panels pick up the
+# quant-desk palette (truecolor when available) instead of raw 16-color codes.
+_SEMANTIC = {}
+if _HAS:
+    _SEMANTIC = {_C.GREEN: 'good', _C.RED: 'bad', _C.YELLOW: 'warn',
+                 _C.CYAN: 'accent', _C.BRIGHT_CYAN: 'heading',
+                 _C.DIM: 'muted', _C.BRIGHT_WHITE: 'emph'}
+
+
 def color(s: str, c: str, bold: bool = False) -> str:
-    return _fmt.colorize(s, c, bold=bold) if _HAS else s
+    if not _HAS:
+        return s
+    token = _SEMANTIC.get(c)
+    if token:
+        return _fmt.style(s, token, bold=bold)
+    return _fmt.colorize(s, c, bold=bold)
 
 
 def _sparkline(values: Sequence[float]) -> str:

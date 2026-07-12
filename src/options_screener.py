@@ -2858,10 +2858,11 @@ def _run_intel_menu() -> None:
     Robust to bad input: re-prompts on an unrecognized choice, validates the
     ticker is non-empty alphanumeric, and never raises out to the caller.
     """
+    from src import ui as _uikit
     try:
         from .intel import briefing as _brief, market as _market
     except Exception as exc:  # pragma: no cover
-        print(f"  Intel module unavailable: {exc}")
+        print(_uikit.error_line(f"Intel module unavailable: {exc}"))
         return
 
     # Loop so several briefings can be run in one sitting; [x] returns to the
@@ -2885,21 +2886,21 @@ def _run_intel_menu() -> None:
                 from src.macro_pulse import run as _macro_run
                 print(_macro_run())
             except Exception as exc:
-                print(f"  Could not build macro pulse: {exc}")
+                print(_uikit.error_line(f"Could not build macro pulse: {exc}"))
         elif choice in ("a", "market", "1", "m"):
             try:
                 _market.print_market_overview(get_display_width())
             except Exception as exc:
-                print(f"  Could not render market overview: {exc}")
+                print(_uikit.error_line(f"Could not render market overview: {exc}"))
         elif choice in ("b", "ticker", "2", "t"):
             sym = prompt_input("Enter ticker symbol (e.g. NVDA)", "").strip().upper()
             if not sym or not sym.isalnum() or len(sym) > 6:
-                print("  No valid ticker entered.")
+                print(_uikit.error_line("No valid ticker entered."))
             else:
                 try:
                     _brief.print_briefing(sym)
                 except Exception as exc:
-                    print(f"  Could not build briefing for {sym}: {exc}")
+                    print(_uikit.error_line(f"Could not build briefing for {sym}: {exc}"))
         elif choice in ("d", "morning", "briefing", "4"):
             try:
                 import src.morning as _morning
@@ -2909,7 +2910,7 @@ def _run_intel_menu() -> None:
                 print(f"  Briefing written: {html_path}")
                 _open_briefing_file(html_path)
             except Exception as exc:
-                print(f"  Could not build morning briefing: {exc}")
+                print(_uikit.error_line(f"Could not build morning briefing: {exc}"))
         else:
             print("  Unrecognized choice. Type a / b / c / d, or x to go back.")
 
@@ -4467,7 +4468,9 @@ def main():
         _wl = load_watchlist()
         _wl_desc = f"Scan your {len(_wl)} saved ticker(s)" if _wl else "(empty \u2014 type ADD AAPL to begin)"
         if HAS_ENHANCED_CLI:
-            print("\n" + fmt.draw_separator(WIDTH))
+            from . import ui as _menu_ui
+            print()
+            print(_menu_ui.rule(WIDTH, "MODES"))
             modes = [
                 ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
                 ("2", "ALL",       "Budget-based multi-stock scan"),
@@ -4482,11 +4485,11 @@ def main():
                 ("Q", "QUIT",      "Exit the screener"),
             ]
             for num, cmd, desc in modes:
-                n = fmt.colorize(f"[{num}]", fmt.Colors.BRIGHT_YELLOW)
-                c = fmt.colorize(f"{cmd:<10}", fmt.Colors.BRIGHT_WHITE, bold=True)
-                d = fmt.colorize(f"\u2014 {desc}", fmt.Colors.DIM)
+                n = fmt.style(f"[{num:>2}]", 'accent')
+                c = fmt.style(f"{cmd:<10}", 'emph', bold=True)
+                d = fmt.style(f"\u2014 {desc}", 'muted')
                 print(f"  {n} {c} {d}")
-            print(fmt.draw_separator(WIDTH))
+            print(_menu_ui.rule(WIDTH))
         else:
             print("\nModes:")
             print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")

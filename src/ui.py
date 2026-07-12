@@ -424,3 +424,8 @@ class Spinner:
 def spinner(label: str = '', **kw) -> Spinner:
     """Convenience constructor for `Spinner` used as a context manager."""
     return Spinner(label, **kw)
+
+
+def error_line(msg: str) -> str:
+    """One consistent error treatment for interactive flows."""
+    return fmt.style(f'  ✖ {msg}', 'bad')
