@@ -106,6 +106,13 @@ def due_autolog(state: dict, window_key: str, today: str) -> bool:
     return (not last) or last != today
 
 
+def due_morning_briefing(state: dict, today: str, weekday: int) -> bool:
+    """Once per business day: write the morning-briefing HTML/JSON pair."""
+    if weekday > 5:
+        return False
+    return (state or {}).get("last_morning_briefing") != today
+
+
 # ── State persistence (failure-safe) ────────────────────────────────────────
 
 def load_state(path: str) -> dict:
@@ -253,6 +260,9 @@ def _cohort_min_dte(config_path: str = "config.json", default: int = 30) -> int:
         return default
 
 
+_MORNING_CMD = [VENV_PY, "-m", "src.morning"]
+
+
 def _run_chain_archive() -> int:
     """Snapshot today's option chains (free CBOE) per config → data_archive."""
     import json as _json
@@ -284,7 +294,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             spawn_fn: Optional[Callable] = None,
                             checkpoint_fn: Optional[Callable] = None,
                             track_record_fn: Optional[Callable] = None,
-                            chain_archive_fn: Optional[Callable] = None) -> dict:
+                            chain_archive_fn: Optional[Callable] = None,
+                            morning_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -365,6 +376,20 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
+    # 5. Morning briefing (business days, once/day) — HTML/JSON pair under
+    #    reports/briefings/ so a fresh page is waiting every morning. Headless
+    #    heartbeat only: interactive startup (background=True) must never block
+    #    on ~30s of fetches — the INTEL menu covers on-demand builds there.
+    #    Goes through `runner` so stubbed-runner tests never spawn a real build.
+    try:
+        if not background and due_morning_briefing(state, today, now.isoweekday()):
+            rc = morning_fn() if morning_fn else runner(_MORNING_CMD)
+            if rc == 0:
+                state["last_morning_briefing"] = today
+                ran.append("morning-briefing")
+    except Exception:
+        pass
+
     try:
         save_state(state_path, state)
     except Exception:
@@ -388,7 +413,8 @@ def run_headless(db_path: str = "paper_trades.db",
                  enforce_exits_fn: Optional[Callable] = None,
                  checkpoint_fn: Optional[Callable] = None,
                  track_record_fn: Optional[Callable] = None,
-                 chain_archive_fn: Optional[Callable] = None) -> dict:
+                 chain_archive_fn: Optional[Callable] = None,
+                 morning_fn: Optional[Callable] = None) -> dict:
     """Run startup maintenance without the interactive screener.
 
     The LaunchAgent entry: reads phase1_start from config.json itself,
@@ -421,7 +447,8 @@ def run_headless(db_path: str = "paper_trades.db",
         return run_startup_maintenance(
             db_path=db_path, phase1_start=phase1_start, state_path=state_path,
             now=now, runner=runner, checkpoint_fn=checkpoint_fn,
-            track_record_fn=track_record_fn, chain_archive_fn=chain_archive_fn)
+            track_record_fn=track_record_fn, chain_archive_fn=chain_archive_fn,
+            morning_fn=morning_fn)
     except Exception:
         return {"cohort": "", "ran": []}
 

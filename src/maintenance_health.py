@@ -52,7 +52,8 @@ _NEVER = 99  # sentinel business-day age when a job has no recorded run
 # cosmetic public publish at WARN, so a stale archive never shouts as loudly as a
 # starving cohort.
 _MAX_SEV = {"auto-log": "CRITICAL", "checkpoint": "STALE",
-            "track-record": "WARN", "chain-archive": "STALE"}
+            "track-record": "WARN", "chain-archive": "STALE",
+            "morning-briefing": "STALE"}
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,7 @@ def compute_health(state: dict, now) -> HealthReport:
         _job("checkpoint", "weekly", (state or {}).get("last_checkpoint"), today),
         _job("track-record", "weekly", (state or {}).get("last_track_record"), today),
         _job("chain-archive", "daily", (state or {}).get("last_chain_archive"), today),
+        _job("morning-briefing", "daily", (state or {}).get("last_morning_briefing"), today),
     ]
     worst = "OK"
     for j in jobs:

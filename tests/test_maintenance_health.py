@@ -12,7 +12,7 @@ from datetime import date
 from src import maintenance_health as H
 
 
-def _state(autolog=None, checkpoint=None, track=None, archive=None):
+def _state(autolog=None, checkpoint=None, track=None, archive=None, morning=None):
     st = {}
     if autolog is not None:
         st["last_autolog"] = autolog
@@ -22,6 +22,8 @@ def _state(autolog=None, checkpoint=None, track=None, archive=None):
         st["last_track_record"] = track
     if archive is not None:
         st["last_chain_archive"] = archive
+    if morning is not None:
+        st["last_morning_briefing"] = morning
     return st
 
 
@@ -46,7 +48,8 @@ class ComputeHealthTest(unittest.TestCase):
     def test_all_fresh_is_ok_and_silent(self):
         now = date(2026, 7, 7)
         rep = H.compute_health(_state(autolog=ALL_WINDOWS, checkpoint="2026-07-06",
-                                      track="2026-07-06", archive="2026-07-07"), now)
+                                      track="2026-07-06", archive="2026-07-07",
+                                      morning="2026-07-07"), now)
         self.assertEqual(rep.worst, "OK")
         self.assertEqual(H.health_banner(rep), "")
 
