@@ -297,6 +297,7 @@ def _payoff_section(data) -> str:
             "at expiry (solid) &middot; model P&amp;L today (dashed)"
             "</div>") if svg else shell.ph(
                 "payoff unavailable — no entry premium on this sidecar")
+    left += _exit_block(data)
     wf = charts.waterfall(data.get("cost_waterfall"))
     right = (wf or shell.ph("no cost breakdown")) + (
         '<div class="eye" style="margin-top:4px">Gross model edge minus the '
@@ -313,6 +314,48 @@ def _payoff_section(data) -> str:
 def _heat_grid(stress) -> str:
     """Spot x IV grid. Each cell carries BOTH inks; CSS picks one."""
     return charts.heat_grid(stress, theme.heat_inks)
+
+
+def _exit_block(data) -> str:
+    """The exit-aware read: hold-to-expiry is a fiction, so show what the
+    book's OWN rules do to this contract — which exit fires first, the
+    expected P&L under those rules, and the peak-multiple ladder if held.
+    Degrades to a labelled placeholder, never silently absent."""
+    ex = data.get("exits")
+    if not ex:
+        if "exits" in (data.get("panels") or {}):
+            return ('<div style="margin-top:10px"></div>'
+                    + _placeholder(data, "exits"))
+        return ""   # pre-exits sidecar (schema ≤2): say nothing, claim nothing
+    peak = ex.get("peak") or {}
+    pg = peak.get("p_ge") or {}
+    cells = (
+        ("Rule EV", _num(ex.get("ev_exit_per_contract"), "${:+,.0f}"),
+         _sv_tone(ex.get("ev_exit_per_contract"))),
+        ("P TP first", _num(ex.get("p_tp"), "{:.0%}"), ""),
+        ("P time-exit", _num(ex.get("p_time"), "{:.0%}"), ""),
+        ("P stop", _num(ex.get("p_sl"), "{:.0%}"), ""),
+        ("Med peak", _num(peak.get("med_mult"), "{:.2f}×"), ""),
+        ("P ≥2×", _num(pg.get("2"), "{:.0%}"), ""),
+        ("P ≥3×", _num(pg.get("3"), "{:.0%}"), ""),
+    )
+    rules = ex.get("rules") or {}
+    if rules.get("tiered_tp"):
+        tps = rules["tiered_tp"]
+        rule_txt = "TP {:.0%}/{:.0%}/{:.0%} by DTE".format(*tps)
+    else:
+        rule_txt = "TP +{:.0%} or Δ≥{:.2f} · SL {:+.0%}".format(
+            rules.get("tp") or 0, rules.get("tp_delta") or 0,
+            rules.get("sl") or 0)
+    note = ("Your exit rules simulated ({rt} · {te}d time-exit · {n:,} paths): "
+            "peak ladder is if-held-to-expiry, not rule-truncated. {a}.").format(
+        rt=rule_txt, te=rules.get("time_exit_dte"),
+        n=int(ex.get("n_paths") or 0), a=_esc(ex.get("assumptions") or ""))
+    return ('<div class="eye" style="margin:12px 0 0">Exit odds — the P&amp;L '
+            "process you actually run</div>"
+            + shell.strip(cells)
+            + '<div class="eye" style="margin-top:5px;line-height:1.5">{}</div>'
+            .format(note))
 
 
 def _risk_section(data) -> str:

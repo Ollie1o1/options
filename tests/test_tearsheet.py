@@ -537,6 +537,28 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(len(po["prices"]), len(po["today_pnl"]))
         self.assertGreater(len(po["prices"]), 10)
 
+    def test_exits_panel_is_pure_math_and_offline(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        ex = data.get("exits")
+        self.assertIsNotNone(ex)
+        self.assertAlmostEqual(ex["p_tp"] + ex["p_time"] + ex["p_sl"]
+                               + ex["p_expiry"], 1.0, places=3)
+        # deterministic seed → reproducible sidecar
+        again = collect.build(_row(), _ctx(), slow=False)["exits"]
+        self.assertEqual(ex, again)
+
+    def test_exit_block_renders_and_labels_the_model(self):
+        out = R.render(collect.build(_row(), _ctx(), slow=False))
+        self.assertIn("Exit odds", out)
+        self.assertIn("P TP first", out)
+        self.assertIn("≥2×", out)
+        self.assertIn("sticky entry IV", out)   # assumptions stay on the page
+
+    def test_old_sidecar_without_exits_says_nothing(self):
+        d = _fixture()   # has no exits key and no exits panel
+        out = R.render(d)
+        self.assertNotIn("Exit odds", out)
+
     def test_build_produces_json_serialisable_data(self):
         data = collect.build(_row(), _ctx(), slow=False)
         json.dumps(data)   # must not raise

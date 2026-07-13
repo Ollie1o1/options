@@ -500,7 +500,8 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
     #     book overlap, flow/insider overlays (display only; failure-safe) ---
     try:
         from src.pick_context import context_lines as _ctx_lines
-        for _cl in _ctx_lines(dict(row)):
+        from src.pick_context import exit_lines as _exit_lines
+        for _cl in _ctx_lines(dict(row)) + _exit_lines(dict(row)):
             if HAS_ENHANCED_CLI and ":" in _cl:
                 _lab, _rest = _cl.split(":", 1)
                 lines.append(ui.kv_line(_lab.strip(), _rest.strip()))
@@ -1176,6 +1177,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     col_hdr += (
         f" {'PoP':>5}"
         f" {'R/R':>5} {'IV%':>5} {_delta_hdr:>5} {_vega_hdr:>5} {'EV':>7} {'Sprd':>5}"
+        f" {'P2x':>5}"
     )
     if "iv_surface_residual" in rows.columns:
         col_hdr += f" {'SVI':>6}"
@@ -1228,11 +1230,22 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         sym = str(r.get("symbol", ""))[:6]
         strike_str = f"${strike:.0f}{opt_type}"
 
+        # P(premium ever ≥ 2× entry before expiry) — the exit-aware read;
+        # cached in pick_context so detail lines + this cell cost one sim.
+        try:
+            from src.pick_context import exit_stats as _exit_stats
+            _xs = _exit_stats(r.to_dict() if hasattr(r, "to_dict") else dict(r))
+            p2x = float(((_xs or {}).get("peak") or {}).get("p_ge", {}).get("2"))
+            p2x_str = f"{p2x*100:>4.0f}%"
+        except Exception:
+            p2x_str = "  n/a"
+
         line = (
             f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8} {score_str}"
             f"{conf_badge}"
             f" {pop_str:>5}"
             f" {rr_str:>5} {iv_pct:>4.0f}% {delta_str} {vega_str} {ev_cell} {spread:>4.1f}%"
+            f" {p2x_str:>5}"
         )
         if "iv_surface_residual" in rows.columns:
             resid = r.get("iv_surface_residual", 0) or 0

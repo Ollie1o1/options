@@ -207,3 +207,25 @@ class NetEvTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExitLinesTest(unittest.TestCase):
+    ROW = {"underlying": 182.4, "strike": 190.0, "type": "call",
+           "premium": 4.2, "T_years": 36 / 365.0, "hv_ewma": 0.38,
+           "impliedVolatility": 0.42, "spread_pct": 0.021,
+           "strategy_name": "long_call", "delta": 0.45,
+           "symbol": "NVDA", "expiration": "2026-07-17"}
+
+    def test_two_lines_with_rule_and_peak_reads(self):
+        from src.pick_context import exit_lines
+        lines = exit_lines(dict(self.ROW))
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("Exit plan:"))
+        self.assertIn("time-exit", lines[0])
+        self.assertTrue(lines[1].startswith("Peak odds:"))
+        self.assertIn("P≥2×", lines[1])
+
+    def test_never_raises_on_garbage(self):
+        from src.pick_context import exit_lines
+        self.assertEqual(exit_lines({}), [])
+        self.assertEqual(exit_lines({"premium": "x"}), [])

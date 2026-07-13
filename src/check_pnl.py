@@ -1152,7 +1152,7 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
         hdr = (
             f"  {'Ticker':<7} {'Type':<5} {'Strike':>8} {'Expiry':<12}"
             f" {'Opened':<11} {'Closed':<11} {'Entry $':>8} {'Exit $':>8}"
-            f" {'P/L $':>10} {'P/L %':>7} {'Result'}"
+            f" {'P/L $':>10} {'P/L %':>7} {'Peak':>6} {'Result'}"
         )
         sep = "  " + "\u2500" * (width - 2)
 
@@ -1165,6 +1165,8 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
 
         closed_pnl_usd = 0.0
         wins = 0
+        missed_2x = 0     # peaked ≥2× entry while tracked but exited below 2×
+        peaks_seen = 0
 
         for r in closed_trades:
             ticker      = r["ticker"]
@@ -1210,6 +1212,25 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
                 raw_pct = f"-{abs(pnl_pct):.1f}%"
             result  = "WIN " if won else "LOSS"
 
+            # High-water mark: highest premium sampled while the position was
+            # tracked (schema v15; NULL on rows closed before it existed).
+            try:
+                peak_seen = r["max_price_seen"] if "max_price_seen" in r.keys() else None
+            except Exception:
+                peak_seen = None
+            if peak_seen is not None and entry_price > 0:
+                peak_mult = float(peak_seen) / entry_price
+                raw_peak = f"{peak_mult:.1f}x"
+                peaks_seen += 1
+                # a missed multiple is a LONG concept: the premium ran ≥2× while
+                # held but the exit banked less (for shorts a spike is a stop)
+                if (peak_mult >= 2.0 and exit_price < 2.0 * entry_price
+                        and not _is_short(str(r["strategy_name"] or "")
+                                          if "strategy_name" in r.keys() else "")):
+                    missed_2x += 1
+            else:
+                raw_peak = "—"
+
             if HAS_FMT and fmt:
                 tc = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
                 type_str   = fmt.colorize(f"{opt_type:<5}", tc)
@@ -1223,10 +1244,19 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
                 pct_str    = f"{raw_pct:>7}"
                 result_str = result
 
+            if HAS_FMT and fmt:
+                # peak ≥2× is the "look what you let go" signal — warn ink
+                peak_str = (fmt.style(f"{raw_peak:>6}", 'warn')
+                            if raw_peak not in ("—",) and peak_seen is not None
+                            and float(peak_seen) >= 2.0 * entry_price
+                            else fmt.style(f"{raw_peak:>6}", 'muted'))
+            else:
+                peak_str = f"{raw_peak:>6}"
+
             print(
                 f"  {ticker:<7} {type_str} {strike:>8.2f} {expiry:<12}"
                 f" {opened:<11} {closed_date:<11} ${entry_price:>6.2f} ${exit_price:>6.2f}"
-                f" {usd_str} {pct_str}  {result_str}"
+                f" {usd_str} {pct_str} {peak_str}  {result_str}"
             )
 
         if HAS_FMT and fmt:
@@ -1241,6 +1271,11 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
             f"  Realized P/L: {sign}${abs(closed_pnl_usd):.2f}"
             f"   Win Rate: {win_rate_pct:.0f}% ({wins}/{n} trades)"
         )
+        if peaks_seen:
+            closed_summary += (
+                f"   Peaks tracked: {peaks_seen}"
+                f" (missed ≥2×: {missed_2x})"
+            )
         if HAS_FMT and fmt:
             pc = fmt.Colors.GREEN if closed_pnl_usd >= 0 else fmt.Colors.RED
             print(fmt.colorize(closed_summary, pc, bold=True))

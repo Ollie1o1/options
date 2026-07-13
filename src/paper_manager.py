@@ -317,7 +317,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 14
+_SCHEMA_VERSION = 15
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -423,6 +423,14 @@ _MIGRATIONS = {
         # sleeve report edge-flagged vs unflagged hit-rate — the core validation of
         # whether selection beats a blind far-OTM basket. NULL on every non-lottery row.
         "ALTER TABLE trades ADD COLUMN lottery_edge INTEGER",
+    ],
+    15: [
+        # High-water mark: the highest premium observed while the position was
+        # tracked (sampled at each update_positions/check_pnl run — daily-ish
+        # granularity, NOT a tick high). Answers "how high did it actually go
+        # after I exited at +100%?" so missed 3x/5x multipliers become data.
+        "ALTER TABLE trades ADD COLUMN max_price_seen REAL",
+        "ALTER TABLE trades ADD COLUMN max_price_date TEXT",
     ],
 }
 
@@ -1308,6 +1316,22 @@ class PaperManager:
             current_price = option_price_cache.get(single_key)
 
             if current_price is not None:
+                # High-water mark: sample the premium every run so "how high
+                # did it go while I held it" is recorded data, not memory.
+                # One statement; RHS reads the OLD row, so date and level stay
+                # consistent. Never blocks exit handling.
+                try:
+                    with self._get_connection() as conn:
+                        conn.execute(
+                            "UPDATE trades SET "
+                            "max_price_date = CASE WHEN ? > COALESCE(max_price_seen, entry_price) "
+                            "THEN ? ELSE max_price_date END, "
+                            "max_price_seen = MAX(COALESCE(max_price_seen, entry_price), ?) "
+                            "WHERE entry_id=?",
+                            (current_price, now, current_price, entry_id),
+                        )
+                except Exception:
+                    pass
                 is_short = _is_short_position(row["strategy_name"] or "")
                 spot = spot_cache.get(ticker)
                 try:
