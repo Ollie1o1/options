@@ -3612,10 +3612,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         underlying_price = picks.iloc[0]["underlying"]
 
     # --- Portfolio GEX Gate ---
+    # First scan of a session cold-prices the whole open book here (an IV
+    # chain fetch per leg, ~20s on a 50-position book) before anything else
+    # prints — without a spinner it reads as a hang.
     try:
         from .portfolio_risk import RiskAggregator, risk_off_filters_picks
         _risk = RiskAggregator(config=config)
-        _risk_off, _risk_reason = _risk.is_risk_off_required(config)
+        with _spinner("Pricing open book for the portfolio risk gate…"):
+            _risk_off, _risk_reason = _risk.is_risk_off_required(config)
         _filters_picks = risk_off_filters_picks(config)
         if _risk_off and verbose:
             _warn_msg = f"RISK-OFF MODE: {_risk_reason}"
