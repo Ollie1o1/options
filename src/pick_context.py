@@ -347,8 +347,81 @@ def quant_read_line(row: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+# ── Exit-aware read: what YOUR exit rules do to this pick ────────────────────
+
+_exit_stats_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+_exit_config_cache: Optional[Dict[str, Any]] = None
+
+
+def _exit_config() -> Dict[str, Any]:
+    """config.json, loaded once — the same exit_rules enforcement reads."""
+    global _exit_config_cache
+    if _exit_config_cache is None:
+        try:
+            with open("config.json") as f:
+                _exit_config_cache = json.load(f)
+        except Exception:
+            _exit_config_cache = {}
+    return _exit_config_cache
+
+
+def exit_stats(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Monte-Carlo exit read for one pick, cached per contract. Never raises."""
+    key = "|".join(str(row.get(k)) for k in
+                   ("symbol", "strike", "expiration", "type", "strategy_name"))
+    if key in _exit_stats_cache:
+        return _exit_stats_cache[key]
+    try:
+        from src.exit_model import simulate_for_row
+        cfg = _exit_config()
+        out = simulate_for_row(dict(row), config=cfg,
+                               rfr=float(cfg.get("risk_free_rate", 0.04)))
+    except Exception:
+        out = None
+    if len(_exit_stats_cache) > 512:
+        _exit_stats_cache.clear()
+    _exit_stats_cache[key] = out
+    return out
+
+
+def exit_lines(row: Dict[str, Any]) -> List[str]:
+    """Two plain-text lines for the per-pick detail. Never raises.
+
+    Line 1 — the P&L process you actually run: which exit rule fires first
+    (probabilities partition to 1) and the expected P&L under those rules.
+    Line 2 — how high the premium goes if never exited: the peak-multiple
+    ladder, so a missed 3× is a number, not a feeling.
+    """
+    try:
+        st = exit_stats(row)
+        if not st:
+            return []
+        peak = st.get("peak") or {}
+        pg = peak.get("p_ge") or {}
+        rules = st.get("rules") or {}
+        if rules.get("tiered_tp"):
+            tps = rules["tiered_tp"]
+            rule_txt = (f"TP {tps[0]:.0%}/{tps[1]:.0%}/{tps[2]:.0%} by DTE, "
+                        f"{rules['time_exit_dte']}d time-exit")
+        else:
+            rule_txt = (f"TP +{rules.get('tp', 0):.0%} or Δ≥{rules.get('tp_delta', 0):.2f}, "
+                        f"SL {rules.get('sl', 0):+.0%}, {rules.get('time_exit_dte')}d time-exit")
+        l1 = (f"Exit plan: first hit — TP {st['p_tp']:.0%} · time-exit {st['p_time']:.0%}"
+              f" · stop {st['p_sl']:.0%} | rule-EV {st['ev_exit_per_contract']:+,.0f}/ct"
+              f" · ~{st['med_days_to_exit']:.0f}d held ({rule_txt})")
+        l2 = (f"Peak odds: if never exited — median peak {peak.get('med_mult', 0):.2f}×"
+              f" · P≥2× {float(pg.get('2', 0)):.0%} · P≥3× {float(pg.get('3', 0)):.0%}"
+              f" · P≥5× {float(pg.get('5', 0)):.0%}"
+              + ("  ⚠ HV missing, IV stood in" if st.get("hv_fallback") else ""))
+        return [l1, l2]
+    except Exception:
+        return []
+
+
 def reset_caches() -> None:
     """Test hook."""
-    global _closed_trades_cache, _open_book_cache
+    global _closed_trades_cache, _open_book_cache, _exit_config_cache
     _closed_trades_cache = None
     _open_book_cache = None
+    _exit_config_cache = None
+    _exit_stats_cache.clear()

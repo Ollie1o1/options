@@ -15,7 +15,9 @@ _SLOW_IDS = ("earnings", "insider", "news")
 # src.tearsheet --from <old sidecar>` warns rather than raising a bare KeyError.
 # v2: adds the optional `payoff` panel (model P&L-today curve); the renderer
 # degrades to an expiry-only payoff on v1 sidecars.
-SCHEMA = 2
+# v3: adds the optional `exits` panel (Monte-Carlo of the book's exit rules);
+# older sidecars simply render without the exit-odds block.
+SCHEMA = 3
 
 # How wrong a stored implied vol plausibly is, in IV points, by the confidence
 # data_fetching assigns it. "Low" means an HV proxy stood in for a real IV.
@@ -165,6 +167,20 @@ def _payoff(row, spot, rfr):
     today = [round((float(bs_price(opt, p, k, T, r, iv)) - prem) * 100.0, 2)
              for p in prices]
     return {"prices": prices, "today_pnl": today}
+
+
+def _exit_stats(row, ctx, spot):
+    """Monte-Carlo read of the book's own exit rules on this contract (pure
+    math over the row — deterministic seed, so the sidecar stays
+    byte-reproducible)."""
+    from src.exit_model import simulate_for_row
+    row2 = dict(row)
+    row2.setdefault("underlying", spot)
+    out = simulate_for_row(row2, config=ctx.get("config") or {},
+                           rfr=float(ctx.get("rfr") or 0.0))
+    if out is None:
+        raise ValueError("missing premium/vol/T for exit simulation")
+    return out
 
 
 def _vol_cone(ticker):
@@ -494,6 +510,7 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
                    {"moves": [], "rows": [], "worst": "n/a"})
     payoff = _safe("payoff", lambda: _payoff(row, spot, ctx.get("rfr")),
                    panels, None)
+    exits = _safe("exits", lambda: _exit_stats(row, ctx, spot), panels, None)
 
     iv, hv = _f(row, "impliedVolatility"), _f(row, "hv_30d")
     vol = _safe("vol", lambda: {
@@ -559,8 +576,8 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
         "liquidity": {"spread_pct": _f(row, "spread_pct"), "oi": _f(row, "openInterest"),
                       "volume": _f(row, "volume"),
                       "quote_freshness": row.get("quote_freshness", "unknown")},
-        "stress": stress, "payoff": payoff, "vol": vol, "name": name,
-        "narrative": narrative,
+        "stress": stress, "payoff": payoff, "exits": exits, "vol": vol,
+        "name": name, "narrative": narrative,
         "evidence": evidence, "context": _context(row), "panels": panels,
         "greeks_full": greeks_full, "quote": quote, "ticket": ticket,
         "events": events, "lottery": lottery,
