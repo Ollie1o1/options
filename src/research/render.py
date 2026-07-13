@@ -1,9 +1,10 @@
-"""Pure HTML render over the research-desk sidecar. Zero network, zero
-data-fetching imports: render(json.load(sidecar)) must reproduce the page."""
+"""Pure HTML render over the research-desk sidecar, composed on the desk kit.
+Zero network, zero data-fetching imports: render(json.load(sidecar)) must
+reproduce the page."""
 import html as _html
 
-from src.research import charts as CH
-from src.research import theme
+from src.desk_kit import charts as CH
+from src.desk_kit import shell
 
 
 def _esc(v):
@@ -37,19 +38,12 @@ def _ph(data, pid, label):
             .format(l=_esc(label), r=_esc(_fail_reason(data, pid))))
 
 
-def _card(title, body, span=6, extra_cls=""):
-    return ('<section class="card c{s}{x}"><h5>{t}</h5>{b}</section>'
-            .format(s=span, x=(" " + extra_cls if extra_cls else ""),
-                    t=_esc(title), b=body))
-
-
+_card = shell.card
 _TONES = {"good": " g", "bad": " b", "warn": " w", "": ""}
 
 
 def _kpi(label, value, sub="", tone=""):
-    return ('<div class="card kpi c3"><div class="eye">{l}</div>'
-            '<div class="kv{t}">{v}</div><div class="ks">{s}</div></div>'
-            .format(l=_esc(label), t=_TONES.get(tone, ""), v=value, s=sub))
+    return shell.kpi(label, value, sub=sub, tone=tone, span=3)
 
 
 def _chg_tone(v):
@@ -76,20 +70,6 @@ def _stale_banner(data):
             "be older than it looks.</div>".format(items))
 
 
-def _masthead(data):
-    m = data.get("meta", {})
-    sym = m.get("symbol")
-    chip = ('<span class="chip">{}</span>'.format(_esc(sym))) if sym else ""
-    return (
-        '<header class="mast"><div class="mastrow">'
-        '<div><span class="wordmark">RESEARCH DESK</span>{chip}</div>'
-        '<div class="mastmeta"><span class="eye m">Generated {gen}</span>'
-        '<button class="toggle" onclick="flipTheme()">'
-        '<span id="tglabel">◑ Light</span></button></div></div>'
-        '<nav class="tabbar">{tabs}</nav></header>'
-    ).format(chip=chip, gen=_esc(m.get("generated_at")), tabs=_tabbar(data))
-
-
 _TAB_ORDER = (("market", "Market"), ("volatility", "Volatility"),
               ("macro", "Macro &amp; News"), ("ticker", "Ticker"))
 
@@ -103,11 +83,17 @@ def _tabs_present(data):
     return out
 
 
-def _tabbar(data):
-    return "".join(
+def _masthead(data):
+    m = data.get("meta", {})
+    sym = m.get("symbol")
+    chip = ('<span class="chip">{}</span>'.format(_esc(sym))) if sym else ""
+    meta = shell.chipline([("generated", _esc(m.get("generated_at")))])
+    nav = '<nav class="tabbar" data-tabgroup>' + "".join(
         '<button class="tabbtn" data-tab="{t}">{n}&nbsp;{l}</button>'.format(
             t=tid, n=i + 1, l=label)
-        for i, (tid, label) in enumerate(_tabs_present(data)))
+        for i, (tid, label) in enumerate(_tabs_present(data))) + "</nav>"
+    return shell.masthead("RESEARCH", chip, meta_html=meta, nav_html=nav,
+                          where="research")
 
 
 # ── Market tab ───────────────────────────────────────────────────────────────
@@ -393,10 +379,18 @@ def _ticker_stats(t):
                     if (t.get("bounce") or {}).get("bounce_rate") is not None
                     else "—"), ""),
     ]
-    return ('<div class="strip">' + "".join(
-        '<div><div class="eye">{l}</div><div class="sv{t}">{v}</div></div>'.format(
-            l=_esc(l), t=_TONES.get(tone, ""), v=v)
-        for l, v, tone in cells) + "</div>")
+    return shell.strip(cells)
+
+
+def _related_tearsheets(t):
+    rel = t.get("related_tearsheets") or []
+    if not rel:
+        return ""
+    body = "".join(
+        '<div class="evt"><a href="../tearsheets/{f}">{f}</a></div>'.format(
+            f=_esc(f)) for f in rel)
+    return _card("Tearsheets on file — {}".format(_esc(t.get("symbol"))),
+                 body, span=12)
 
 
 def _tab_ticker(data):
@@ -454,6 +448,9 @@ def _tab_ticker(data):
         grid.append(_card("Recent headlines", "".join(
             '<div class="evt">{}</div>'.format(_esc(h)) for h in heads),
             span=12))
+    rel = _related_tearsheets(t)
+    if rel:
+        grid.append(rel)
     grid.append("</div>")
     return "".join(grid)
 
@@ -474,6 +471,12 @@ def _footer(data):
         lines, "<div>{}</div>".format(_esc(regen)))
 
 
+_CSS = """
+.vrow { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+  margin-top:14px; }
+"""
+
+
 def render(data: dict) -> str:
     meta = data.get("meta", {})
     panes = []
@@ -482,218 +485,6 @@ def render(data: dict) -> str:
         body = builder(data) if builder else ""
         panes.append('<div class="pane" id="pane-{t}">{b}</div>'.format(
             t=tid, b=body))
-    return (
-        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        "<title>{title}</title><style>{tokens}{css}</style></head><body>"
-        '{mast}<main class="desk">{stale}{panes}{foot}</main>'
-        '<div class="tip" id="tip"></div>'
-        "<script>{js}</script></body></html>"
-    ).format(title=_esc(meta.get("title", "Research Desk")),
-             tokens=theme.css_tokens(), css=_CSS, mast=_masthead(data),
-             stale=_stale_banner(data), panes="".join(panes),
-             foot=_footer(data), js=_JS)
-
-
-_CSS = """
-*, *::before, *::after { box-sizing:border-box; }
-body { margin:0; background:var(--paper); color:var(--ink);
-  font-family:"Iowan Old Style","Charter",Palatino,Georgia,serif;
-  transition:background .18s ease,color .18s ease; }
-.desk { max-width:1760px; margin:0 auto; padding:18px 28px 44px; }
-.m { font-family:ui-monospace,"SF Mono",Menlo,monospace;
-  font-variant-numeric:tabular-nums; }
-.eye { font-family:ui-sans-serif,system-ui,sans-serif; font-size:9px;
-  letter-spacing:.2em; text-transform:uppercase; color:var(--muted); }
-h5 { font-family:ui-sans-serif,system-ui,sans-serif; font-size:9.5px;
-  letter-spacing:.18em; text-transform:uppercase; margin:0 0 10px;
-  font-weight:700; color:var(--muted); }
-.g{color:var(--good)} .b{color:var(--bad)} .w{color:var(--warn)} .mut{color:var(--muted)}
-.mast { position:sticky; top:0; z-index:20; background:var(--paper);
-  border-bottom:1px solid var(--rule-hard); padding:12px 28px 0; }
-.mastrow { display:flex; justify-content:space-between; align-items:center;
-  max-width:1760px; margin:0 auto; }
-.wordmark { font-family:ui-sans-serif,system-ui,sans-serif; font-weight:800;
-  letter-spacing:.34em; font-size:13px; color:var(--ink-strong); }
-.chip { font-family:ui-monospace,Menlo,monospace; font-size:12px; margin-left:14px;
-  border:1px solid var(--accent); color:var(--accent); border-radius:3px;
-  padding:2px 8px; letter-spacing:.08em; }
-.mastmeta { display:flex; gap:14px; align-items:center; }
-.toggle { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif;
-  font-size:10px; letter-spacing:.1em; text-transform:uppercase;
-  color:var(--muted); border:1px solid var(--rule); padding:4px 9px;
-  border-radius:20px; background:transparent; }
-.tabbar { display:flex; gap:2px; max-width:1760px; margin:10px auto 0; }
-.tabbtn { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif;
-  font-size:10px; letter-spacing:.14em; text-transform:uppercase; font-weight:600;
-  color:var(--muted); background:transparent; padding:9px 16px;
-  border:1px solid transparent; border-bottom:none;
-  border-radius:4px 4px 0 0; }
-.tabbtn:hover { color:var(--ink); }
-.tabbtn.on { color:var(--ink-strong); border-color:var(--rule);
-  background:var(--panel); }
-.stale { margin:16px 0 0; border-left:3px solid var(--warn);
-  background:var(--chip-wn-bg); border-radius:0 3px 3px 0; padding:10px 14px;
-  font-size:12.5px; }
-.grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr));
-  gap:16px; margin-top:16px; }
-.c3{grid-column:span 3} .c4{grid-column:span 4} .c5{grid-column:span 5}
-.c6{grid-column:span 6} .c7{grid-column:span 7} .c8{grid-column:span 8}
-.c12{grid-column:span 12}
-@media (max-width:1100px){ .c3{grid-column:span 6} .c4{grid-column:span 6}
-  .c5,.c7,.c8{grid-column:span 12} }
-@media (max-width:760px){ .c3,.c4,.c5,.c6,.c7,.c8{grid-column:span 12} }
-.card { background:var(--panel); border:1px solid var(--rule); border-radius:6px;
-  padding:14px 16px; min-width:0; }
-.kpi .kv { font-family:ui-monospace,Menlo,monospace;
-  font-variant-numeric:tabular-nums; font-size:26px; margin-top:6px;
-  color:var(--ink-strong); }
-.kpi .kv.g{color:var(--good)} .kpi .kv.b{color:var(--bad)} .kpi .kv.w{color:var(--warn)}
-.kpi .ks { font-size:11px; color:var(--muted); margin-top:2px; }
-.chead { display:flex; gap:12px; align-items:baseline; margin-bottom:6px; }
-.big { font-size:20px; color:var(--ink-strong); }
-table { width:100%; border-collapse:collapse; font-size:12px; }
-th { text-align:right; font-family:ui-sans-serif,system-ui,sans-serif;
-  font-size:8.5px; letter-spacing:.14em; text-transform:uppercase;
-  color:var(--muted); font-weight:600; padding-bottom:5px; }
-th:first-child { text-align:left; }
-td { padding:3px 0; border-top:1px solid var(--grid); }
-td.n { text-align:right; font-family:ui-monospace,Menlo,monospace;
-  font-variant-numeric:tabular-nums; }
-.evt { font-size:12.5px; padding:4px 0; border-top:1px solid var(--grid); }
-.evt:first-child { border-top:none; }
-.evt .m { color:var(--accent); margin-right:8px; }
-.evt .m.g { color:var(--good); } .evt .m.b { color:var(--bad); }
-.evt .m.mut { color:var(--muted); }
-.evt a { color:var(--ink-strong); text-decoration:none;
-  border-bottom:1px solid var(--rule-hard); }
-.evt a:hover { color:var(--accent); border-color:var(--accent); }
-.lede { font-size:14px; line-height:1.5; margin:8px 0; max-width:70ch; }
-.flipbox { margin:10px 0; font-size:12.5px; line-height:1.55;
-  border-left:3px solid var(--accent); background:var(--paper);
-  padding:8px 12px; border-radius:0 3px 3px 0; }
-.badge { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif;
-  font-size:8px; padding:1px 6px; border-radius:8px; border:1px solid; }
-.k-bad{border-color:var(--chip-bad-bd);color:var(--bad);background:var(--chip-bad-bg)}
-.k-ok{border-color:var(--chip-ok-bd);color:var(--good);background:var(--chip-ok-bg)}
-.k-warn{border-color:var(--chip-wn-bd);color:var(--warn);background:var(--chip-wn-bg)}
-.vrow { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
-  margin-top:16px; }
-.verdict { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif;
-  font-weight:700; letter-spacing:.16em; text-transform:uppercase;
-  font-size:12px; color:var(--paper); padding:5px 12px; border-radius:3px; }
-.v-buy{background:var(--good)} .v-avoid{background:var(--bad)}
-.v-wait{background:var(--warn)} .v-neutral{background:var(--muted)}
-.strip { display:grid; grid-template-columns:repeat(7,minmax(0,1fr));
-  border-top:1px solid var(--rule-hard); border-bottom:1px solid var(--rule);
-  margin-top:12px; }
-.strip>div { padding:9px 11px; border-right:1px solid var(--rule); }
-.strip>div:last-child{border-right:none}
-@media (max-width:900px){ .strip{grid-template-columns:repeat(3,minmax(0,1fr))} }
-.sv { font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
-  font-size:15px; margin-top:3px; color:var(--ink-strong); }
-.sv.g{color:var(--good)} .sv.b{color:var(--bad)} .sv.w{color:var(--warn)}
-.sig { padding:7px 0; border-top:1px solid var(--grid); }
-.sig:first-child{border-top:none}
-.sighead { display:flex; justify-content:space-between; font-size:11px; }
-.sigbar { height:6px; background:var(--grid); border-radius:3px; margin:4px 0;
-  overflow:hidden; }
-.sigbar span { display:block; height:100%; border-radius:3px; }
-.sigdet { font-size:11px; color:var(--muted); }
-.ph { border:1px dashed var(--rule); border-radius:3px; padding:8px 10px;
-  color:var(--muted); font-family:ui-sans-serif,system-ui,sans-serif;
-  font-size:11px; }
-.foot { font-family:ui-monospace,Menlo,monospace; font-size:9.5px;
-  color:var(--muted); margin-top:26px; border-top:1px solid var(--rule);
-  padding-top:10px; line-height:1.7; }
-.tip { position:fixed; display:none; z-index:50; pointer-events:none;
-  background:var(--panel); border:1px solid var(--rule-hard); color:var(--ink-strong);
-  font-family:ui-monospace,Menlo,monospace; font-size:11px; padding:5px 9px;
-  border-radius:4px; box-shadow:0 4px 14px rgba(0,0,0,.25); }
-.pane { animation:fadein .12s ease; }
-@keyframes fadein { from{opacity:.4} to{opacity:1} }
-@media print {
-  .mast{position:static} .tabbar,.toggle{display:none}
-  .pane{display:block !important; page-break-inside:avoid; margin-bottom:18px}
-}
-"""
-
-_JS = """
-(function () {
-  var root = document.documentElement;
-  function applyTheme(t) {
-    root.setAttribute('data-theme', t);
-    var el = document.getElementById('tglabel');
-    if (el) el.textContent = t === 'dark' ? '\\u25d1 Light' : '\\u25d0 Dark';
-  }
-  var saved = null;
-  try { saved = localStorage.getItem('desk-theme'); } catch (e) {}
-  applyTheme(saved || 'dark');
-  window.flipTheme = function () {
-    var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-    applyTheme(next);
-    try { localStorage.setItem('desk-theme', next); } catch (e) {}
-  };
-
-  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tabbtn'));
-  function show(id) {
-    tabs.forEach(function (b) { b.classList.toggle('on', b.dataset.tab === id); });
-    Array.prototype.forEach.call(document.querySelectorAll('.pane'), function (p) {
-      p.style.display = (p.id === 'pane-' + id) ? '' : 'none';
-    });
-    if (history.replaceState) history.replaceState(null, '', '#' + id);
-  }
-  tabs.forEach(function (b) {
-    b.addEventListener('click', function () { show(b.dataset.tab); });
-  });
-  document.addEventListener('keydown', function (e) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    var tag = (document.activeElement && document.activeElement.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-    var i = parseInt(e.key, 10);
-    if (i >= 1 && i <= tabs.length) show(tabs[i - 1].dataset.tab);
-  });
-  var want = (location.hash || '').slice(1);
-  var ok = tabs.some(function (b) { return b.dataset.tab === want; });
-  if (tabs.length) show(ok ? want : tabs[0].dataset.tab);
-
-  var tip = document.getElementById('tip');
-  Array.prototype.forEach.call(document.querySelectorAll('svg.xh'), function (svg) {
-    var labels, ys;
-    try {
-      labels = JSON.parse(svg.dataset.labels || '[]');
-      ys = JSON.parse(svg.dataset.ys || '[]');
-    } catch (e) { return; }
-    if (!labels.length) return;
-    var x0 = parseFloat(svg.dataset.x0), step = parseFloat(svg.dataset.step);
-    var line = svg.querySelector('.ch-line'), dot = svg.querySelector('.ch-dot');
-    var vb = (svg.getAttribute('viewBox') || '0 0 760 200').split(/\\s+/);
-    var vw = parseFloat(vb[2]);
-    svg.addEventListener('mousemove', function (e) {
-      var r = svg.getBoundingClientRect();
-      var sx = (e.clientX - r.left) * (vw / r.width);
-      var i = Math.round((sx - x0) / step);
-      if (i < 0) i = 0;
-      if (i >= labels.length) i = labels.length - 1;
-      var cx = x0 + i * step;
-      if (line) { line.setAttribute('x1', cx); line.setAttribute('x2', cx);
-                  line.setAttribute('visibility', 'visible'); }
-      if (dot && ys[i] != null) { dot.setAttribute('cx', cx);
-        dot.setAttribute('cy', ys[i]); dot.setAttribute('visibility', 'visible'); }
-      if (tip) {
-        tip.textContent = labels[i];
-        tip.style.display = 'block';
-        var tx = e.clientX + 14, ty = e.clientY - 12;
-        if (tx + tip.offsetWidth > window.innerWidth - 8)
-          tx = e.clientX - tip.offsetWidth - 14;
-        tip.style.left = tx + 'px'; tip.style.top = ty + 'px';
-      }
-    });
-    svg.addEventListener('mouseleave', function () {
-      if (line) line.setAttribute('visibility', 'hidden');
-      if (dot) dot.setAttribute('visibility', 'hidden');
-      if (tip) tip.style.display = 'none';
-    });
-  });
-})();
-"""
+    body = _stale_banner(data) + "".join(panes) + _footer(data)
+    return shell.page(meta.get("title", "Research Desk"), _masthead(data),
+                      body, extra_css=_CSS)

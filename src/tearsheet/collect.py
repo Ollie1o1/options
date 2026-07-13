@@ -472,7 +472,11 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
     """
     panels = {}
     sym = row.get("symbol")
-    spot = float(ctx.get("spot") or row.get("underlying") or 0.0)
+    # The row's own underlying price wins: on a cross-ticker scan the ctx spot
+    # is whatever ticker the scan loop touched last, which silently poisons
+    # every Black-Scholes panel (a TSLA sheet once shipped with spot=59.67 —
+    # the stress grid degenerated to ±0 across the board).
+    spot = float(row.get("underlying") or ctx.get("spot") or 0.0)
     dte = int(round(float(row.get("T_years") or 0) * 365))
 
     net = _f(row, "ev_per_contract")

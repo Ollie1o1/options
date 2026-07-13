@@ -634,7 +634,10 @@ def heat_grid(stress, heat_inks_fn):
         out.append('<div class="rh">{}</div>'.format(_esc(label)))
         for pnl in r["pnls"]:
             hl, hd = heat_inks_fn(pnl, span)
+            v = float(pnl)
+            # sub-dollar cells print unsigned "0": "-0" reads as a bug
+            txt = "0" if abs(v) < 0.5 else "{:+,.0f}".format(v)
             out.append('<div class="hc" style="--hl:{hl};--hd:{hd}">'
-                       "{v:+,.0f}</div>".format(hl=hl, hd=hd, v=float(pnl)))
+                       "{v}</div>".format(hl=hl, hd=hd, v=txt))
     out.append("</div>")
     return "".join(out)
