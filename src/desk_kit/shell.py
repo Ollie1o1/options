@@ -341,7 +341,12 @@ _JS = """
   }
   var saved = null;
   try { saved = localStorage.getItem('desk-theme'); } catch (e) {}
-  applyTheme(saved || 'dark');
+  // Terminal-dark is the desk default; an explicit OS light preference wins
+  // only until the reader picks a side with the toggle.
+  var prefers = window.matchMedia
+    && window.matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light' : 'dark';
+  applyTheme(saved || prefers);
   window.flipTheme = function () {
     var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     applyTheme(next);

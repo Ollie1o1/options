@@ -1,12 +1,18 @@
-"""TearsheetData -> HTML. A pure function: no network, no DB, no clock.
+"""TearsheetData -> HTML, composed on the desk kit. A pure function: no
+network, no DB, no clock.
 
 Purity is load-bearing. It is what makes `--from <sidecar>.json` reproduce a
 page byte-for-byte months later, and what lets the tests run without mocks.
+
+Layout: verdict hero first (the lead number proves the thesis in five
+seconds), then anchored card sections — payoff, risk, vol, the name,
+narrative & evidence — with depth folded into a tab deck. Nothing that
+QUALIFIES the trade hides behind a tab.
 """
 import html as _html
 import math
 
-from . import charts, theme
+from src.desk_kit import charts, shell, theme
 
 _ZONES = ("decision", "vol", "name", "narrative", "detail", "context")
 
@@ -155,77 +161,26 @@ def _flip_line(decision, verdict, quote) -> str:
                 m=_num(_CONTRACT_MULTIPLIER / 100.0, "${:,.0f}")))
 
 
+# Tearsheet-only styling on top of the kit sheet.
 _CSS = """
-*, *::before, *::after { box-sizing: border-box; }
-body { margin:0; padding:28px; background:var(--paper); color:var(--ink);
-  font-family:"Iowan Old Style","Charter",Palatino,Georgia,serif;
-  transition:background .18s ease,color .18s ease; }
-.sheet { max-width:1040px; margin:0 auto; }
-.m,.n { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums; }
-.eye { font-family:ui-sans-serif,system-ui,sans-serif; font-size:8.5px; letter-spacing:.22em;
-  text-transform:uppercase; color:var(--muted); }
-h1 { font-size:26px; margin:3px 0 0; color:var(--ink-strong); font-weight:600; }
-h5 { font-family:ui-sans-serif,system-ui,sans-serif; font-size:9.5px; letter-spacing:.18em;
-  text-transform:uppercase; margin:0 0 8px; font-weight:700; }
-.rule { height:2px; background:var(--rule-hard); margin:14px 0 10px; }
-.thin { height:1px; background:var(--rule); margin:14px 0; }
-.g{color:var(--good)} .b{color:var(--bad)} .w{color:var(--warn)} .mut{color:var(--muted)}
-.verdict { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif; font-weight:700;
-  letter-spacing:.16em; text-transform:uppercase; font-size:12px; color:var(--paper);
-  padding:5px 12px; border-radius:3px; }
-.v-take{background:var(--good)} .v-skip{background:var(--bad)}
-.v-marg{background:var(--warn)} .v-ind{background:var(--muted)}
-.lede { font-size:14.5px; line-height:1.5; margin-top:9px; max-width:64ch; }
-.flip { margin-top:10px; max-width:64ch; font-size:12.5px; line-height:1.55;
-  border-left:3px solid var(--accent); background:var(--panel); padding:9px 13px;
-  border-radius:0 3px 3px 0; }
-.strip { display:grid; grid-template-columns:repeat(7,minmax(0,1fr));
-  border-top:1px solid var(--rule-hard); border-bottom:1px solid var(--rule); margin-top:16px; }
-.strip>div { padding:9px 11px; border-right:1px solid var(--rule); }
-.strip>div:last-child{border-right:none}
-.sv { font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
-  font-size:16px; margin-top:3px; color:var(--ink-strong); }
-.sv.g{color:var(--good)} .sv.b{color:var(--bad)}
-@media (max-width:900px){ .strip{grid-template-columns:repeat(3,minmax(0,1fr))} }
-.cols { display:grid; grid-template-columns:1.15fr 1fr; gap:26px; }
-@media (max-width:760px){ .cols,.strip{grid-template-columns:1fr} }
-table { width:100%; border-collapse:collapse; font-size:12px; }
-td { padding:3px 0; }
-td.n { text-align:right; }
-.heat { display:grid; gap:2px; font-size:10px; }
-.heat div { padding:4px 2px; text-align:center; font-family:ui-monospace,Menlo,monospace;
-  border-radius:2px; background:var(--hl); color:var(--ink); }
-[data-theme="dark"] .heat div { background:var(--hd); }
-.heat .rh { text-align:left; color:var(--muted); background:none !important; }
-.badge { display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif; font-size:8px;
-  padding:1px 5px; border-radius:8px; border:1px solid; }
-.k-bad{border-color:var(--chip-bad-bd);color:var(--bad);background:var(--chip-bad-bg)}
-.k-ok{border-color:var(--chip-ok-bd);color:var(--good);background:var(--chip-ok-bg)}
-.k-warn{border-color:var(--chip-wn-bd);color:var(--warn);background:var(--chip-wn-bg)}
-.demote { opacity:.7; background:var(--panel); padding:16px 20px 6px; border-top:1px solid var(--rule);
-  margin-top:16px; border-radius:4px; }
-.ph { border:1px dashed var(--rule); border-radius:3px; padding:8px 10px; color:var(--muted);
-  font-family:ui-sans-serif,system-ui,sans-serif; font-size:11px; }
-.foot { font-family:ui-monospace,Menlo,monospace; font-size:9.5px; color:var(--muted);
-  margin-top:18px; border-top:1px solid var(--rule); padding-top:8px; line-height:1.6; }
-.wf { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
-.wf > div { margin:2px 0; }
-.wfl { display:inline-block; width:96px; }
-.wfbar { display:inline-block; height:9px; vertical-align:middle; border-radius:1px; margin-right:6px; }
-.wftot { border-top:1px solid var(--rule); margin-top:4px; padding-top:4px; }
-.toggle { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif; font-size:10px;
-  letter-spacing:.1em; text-transform:uppercase; color:var(--muted); border:1px solid var(--rule);
-  padding:4px 9px; border-radius:20px; background:transparent; }
-.cols3 { display:grid; grid-template-columns:repeat(3,1fr); gap:22px; }
-@media (max-width:760px){ .cols3{grid-template-columns:1fr} }
+h1 { font-size:23px; margin:2px 0 0; color:var(--ink-strong); font-weight:650;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace; letter-spacing:.01em; }
+.hero { padding-top:12px; }
+.demote { opacity:.75; background:var(--panel); border:1px solid var(--rule);
+  border-radius:5px; padding:12px 14px; margin-top:12px; }
+.cols2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; min-width:0; }
+@media (max-width:760px){ .cols2{grid-template-columns:1fr} }
 
-/* Tabbed detail deck: radio + :checked, no JavaScript. */
+/* Detail deck: radio + :checked, no JavaScript — the depth tabs keep working
+   in viewers that strip scripts, and print expands every pane. */
 .deck { margin-top:4px; }
 .tabin { position:absolute; opacity:0; pointer-events:none; }
-.tabbar { display:flex; gap:2px; border-bottom:1px solid var(--rule); margin-bottom:12px; }
-.tablab { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif; font-size:9.5px;
-  letter-spacing:.14em; text-transform:uppercase; font-weight:600; color:var(--muted);
-  padding:7px 12px; border:1px solid transparent; border-bottom:none; border-radius:3px 3px 0 0; }
+.deck .tabbar { border-bottom:1px solid var(--rule); margin:0 0 12px; }
+.tablab { cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif;
+  font-size:9.5px; letter-spacing:.14em; text-transform:uppercase;
+  font-weight:600; color:var(--muted); padding:7px 12px;
+  border:1px solid transparent; border-bottom:none;
+  border-radius:3px 3px 0 0; }
 .tablab:hover { color:var(--ink); }
 .tabpane { display:none; }
 #tab-greeks:checked ~ .tabbar label[for="tab-greeks"],
@@ -233,65 +188,43 @@ td.n { text-align:right; }
 #tab-chain:checked ~ .tabbar label[for="tab-chain"],
 #tab-events:checked ~ .tabbar label[for="tab-events"],
 #tab-raw:checked ~ .tabbar label[for="tab-raw"] {
-  color:var(--ink-strong); border-color:var(--rule); background:var(--panel); }
+  color:var(--ink-strong); border-color:var(--rule); background:var(--paper); }
 #tab-greeks:checked ~ .tp-greeks,
 #tab-execution:checked ~ .tp-execution,
 #tab-chain:checked ~ .tp-chain,
 #tab-events:checked ~ .tp-events,
 #tab-raw:checked ~ .tp-raw { display:block; }
-.raw { font-family:ui-monospace,Menlo,monospace; font-size:10px; line-height:1.45;
-  background:var(--panel); border:1px solid var(--rule); border-radius:4px; padding:10px;
-  max-height:420px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
 
 /* Paper never hides anything: printing expands every tab. */
 @media print {
-  .tabbar, .toggle { display:none; }
-  .tabpane { display:block !important; page-break-inside:avoid; margin-bottom:14px; }
-  .raw { max-height:none; }
+  .deck .tabbar { display:none; }
+  .tabpane { display:block !important; page-break-inside:avoid;
+    margin-bottom:14px; }
 }
 """
 
-_JS = """
-(function () {
-  var root = document.documentElement;
-  function apply(t) {
-    root.setAttribute('data-theme', t);
-    var el = document.getElementById('tglabel');
-    if (el) el.textContent = t === 'dark' ? '\\u25d1 Light' : '\\u25d0 Dark';
-  }
-  var saved = null;
-  try { saved = localStorage.getItem('tearsheet-theme'); } catch (e) {}
-  var prefers = window.matchMedia
-    && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  apply(saved || prefers);
-  window.flipTheme = function () {
-    var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-    apply(next);
-    try { localStorage.setItem('tearsheet-theme', next); } catch (e) {}
-  };
-})();
-"""
+
+def _masthead(data):
+    m = data.get("meta", {})
+    title = '<span class="chip">{tkr} {strike:g}{tl} · {exp}</span>'.format(
+        tkr=_esc(m.get("ticker")), strike=float(m.get("strike") or 0),
+        tl=_esc((m.get("opt_type") or "c")[0].upper()), exp=_esc(m.get("expiration")))
+    meta = shell.chipline([
+        ("spot", _num(m.get("spot"))), ("rfr", _num(m.get("rfr"), "{:.2%}")),
+        ("VIX", "{} ({})".format(_num(m.get("vix"), "{:.1f}"),
+                                 _esc(m.get("vix_regime")))),
+        ("gen", _esc(m.get("generated_at"))),
+    ])
+    nav = shell.anchor_nav([("verdict", "Verdict"), ("payoff", "Payoff"),
+                            ("risk", "Risk"), ("vol", "Vol"),
+                            ("name", "The name"), ("evidence", "Evidence"),
+                            ("detail", "Detail")])
+    return shell.masthead("TEARSHEET", title, meta_html=meta, nav_html=nav,
+                          where="tearsheets")
 
 
-def _masthead(m):
-    return (
-        '<div style="display:flex;justify-content:space-between;align-items:flex-start">'
-        '<div><div class="eye">{mode} &middot; pick {rank} of {n} &middot; {typ} &middot; {dte} DTE</div>'
-        '<h1>{tkr} {strike:g}{tl} &mdash; {exp}</h1></div>'
-        '<div style="text-align:right">'
-        '<button class="toggle" onclick="flipTheme()"><span id="tglabel">◐ Dark</span></button>'
-        '<div class="eye" style="margin-top:6px">Generated {gen}</div>'
-        '<div class="eye m">spot {spot} &middot; rfr {rfr} &middot; VIX {vix} ({reg})</div>'
-        "</div></div>"
-    ).format(mode=_esc(m.get("mode")), rank=_esc(m.get("rank")), n=_esc(m.get("n_picks")),
-             typ=_esc(m.get("opt_type")), dte=_esc(m.get("dte")), tkr=_esc(m.get("ticker")),
-             strike=float(m.get("strike") or 0), tl=_esc((m.get("opt_type") or "c")[0].upper()),
-             exp=_esc(m.get("expiration")), gen=_esc(m.get("generated_at")),
-             spot=_num(m.get("spot")), rfr=_num(m.get("rfr"), "{:.2%}"),
-             vix=_num(m.get("vix"), "{:.1f}"), reg=_esc(m.get("vix_regime")))
-
-
-_VERDICT_CLASS = {"TAKE": "v-take", "SKIP": "v-skip", "MARGINAL": "v-marg"}
+_VERDICT_CLASS = {"TAKE": "v-take", "SKIP": "v-skip", "MARGINAL": "v-marg",
+                  "INDETERMINATE": "v-ind"}
 
 
 def _sv_tone(v, invert=False):
@@ -300,15 +233,15 @@ def _sv_tone(v, invert=False):
     if f is None or f == 0:
         return ""
     good = (f < 0) if invert else (f > 0)
-    return " g" if good else " b"
+    return "good" if good else "bad"
 
 
-def _verdict_block(data):
+def _hero(data) -> str:
+    m = data.get("meta", {})
     v = data["verdict"]
     decision, reason = decide_verdict(v.get("net_ev"), v.get("gross_ev"),
                                       v.get("cost"), data.get("cost_waterfall"),
                                       noise=v.get("noise"))
-    cls = _VERDICT_CLASS.get(decision, "v-ind")
     s = data.get("stats", {})
     cells = (("Net EV", _num(v.get("net_ev"), "${:+,.0f}"), _sv_tone(v.get("net_ev"))),
              ("Noise band", _num(v.get("noise"), "±${:,.0f}"), ""),
@@ -317,38 +250,23 @@ def _verdict_block(data):
              ("POP", _num(s.get("pop"), "{:.0%}"), ""),
              ("Max loss", _num(s.get("max_loss"), "${:,.0f}"), ""),
              ("Breakeven", _num(s.get("breakeven"), "{:,.2f}"), ""))
-    strip = "".join('<div><div class="eye">{k}</div><div class="sv{t}">{val}</div></div>'
-                    .format(k=_esc(k), val=_esc(val), t=tone) for k, val, tone in cells)
-    return ('<div class="rule"></div>'
-            '<span class="verdict {c}">{d}</span>'
-            '<p class="lede">{r}</p>{flip}'
-            '<div class="strip">{s}</div>').format(
-                c=cls, d=_esc(decision), r=_esc(reason), s=strip,
-                flip=_flip_line(decision, v, data.get("quote") or {}))
-
-
-def _heat_grid(stress) -> str:
-    """Spot x IV grid. Each cell carries BOTH inks; CSS picks one."""
-    moves = stress.get("moves") or []
-    rows = stress.get("rows") or []
-    if not moves or not rows:
-        return ""
-    span = max((abs(p) for r in rows for p in r["pnls"]), default=1.0) or 1.0
-    cols = "64px " + " ".join(["1fr"] * len(moves))
-    out = ['<div class="heat" style="grid-template-columns:{}">'.format(cols)]
-    out.append('<div class="rh"></div>')
-    for m in moves:
-        out.append('<div class="rh eye">{:+.0%}</div>'.format(float(m)))
-    for r in rows:
-        iv = float(r["iv"])
-        label = "IV flat" if iv == 0 else "IV {:+.0f}pp".format(iv * 100)
-        out.append('<div class="rh">{}</div>'.format(_esc(label)))
-        for pnl in r["pnls"]:
-            hl, hd = theme.heat_inks(pnl, span)
-            out.append('<div class="hc" style="--hl:{hl};--hd:{hd}">{v}</div>'.format(
-                hl=hl, hd=hd, v=_num(pnl, "{:+,.0f}")))
-    out.append("</div>")
-    return "".join(out)
+    eye = ("{mode} &middot; pick {rank} of {n} &middot; {typ} &middot; "
+           "{dte} DTE").format(
+        mode=_esc(m.get("mode")), rank=_esc(m.get("rank")),
+        n=_esc(m.get("n_picks")), typ=_esc(m.get("opt_type")),
+        dte=_esc(m.get("dte")))
+    return (
+        '<section class="hero" id="verdict">'
+        '<div class="eye">{eye}</div>'
+        "<h1>{tkr} {strike:g}{tl} &mdash; {exp}</h1>"
+        '<div style="margin-top:10px"><span class="verdict {c}">{d}</span></div>'
+        '<p class="lede">{r}</p>{flip}{s}</section>'
+    ).format(eye=eye, tkr=_esc(m.get("ticker")), strike=float(m.get("strike") or 0),
+             tl=_esc((m.get("opt_type") or "c")[0].upper()),
+             exp=_esc(m.get("expiration")),
+             c=_VERDICT_CLASS.get(decision, "v-ind"), d=_esc(decision),
+             r=_esc(reason), flip=_flip_line(decision, v, data.get("quote") or {}),
+             s=shell.strip(cells))
 
 
 def _rows(pairs) -> str:
@@ -356,30 +274,78 @@ def _rows(pairs) -> str:
                    for k, v in pairs)
 
 
-def _zone_decision(data) -> str:
-    g, l = data["greeks"], data["liquidity"]
-    left = (
-        '<div class="eye" style="margin-bottom:5px">Cost wall &mdash; where the edge goes</div>'
-        + charts.waterfall_bars(data.get("cost_waterfall"))
-        + '<div class="eye" style="margin:12px 0 4px">Greeks (per contract)</div><table>'
-        + _rows((("Delta", _num(g.get("delta"))), ("Gamma", _num(g.get("gamma"), "{:.3f}")),
-                 ("Vega", _num(g.get("vega"))), ("Theta", _num(g.get("theta")) + " /day")))
-        + '</table><div class="eye" style="margin:12px 0 4px">Liquidity</div><table>'
-        + _rows((("Spread", _num(l.get("spread_pct"), "{:.1%}")),
+def _payoff_section(data) -> str:
+    """Payoff card + cost-waterfall card. The payoff line is arithmetic over
+    the contract itself; the dashed today curve appears only when the sidecar
+    (schema ≥ 2) carries model repricing points."""
+    m = data.get("meta", {})
+    q = data.get("quote") or {}
+    v = data.get("verdict") or {}
+    prem = _finite_or_none(q.get("premium"))
+    if prem is None:
+        prem = _finite_or_none((data.get("ticket") or {}).get("entry_price"))
+    if prem is None:
+        prem = _finite_or_none(v.get("assumed_fill"))
+    po = data.get("payoff") or {}
+    svg = ""
+    if prem is not None:
+        svg = charts.payoff_chart(
+            m.get("spot"), m.get("strike"), m.get("opt_type"), prem,
+            breakeven=(data.get("stats") or {}).get("breakeven"),
+            today_prices=po.get("prices"), today_pnl=po.get("today_pnl"))
+    left = (svg + '<div class="eye" style="margin-top:4px">P&amp;L per contract '
+            "at expiry (solid) &middot; model P&amp;L today (dashed)"
+            "</div>") if svg else shell.ph(
+                "payoff unavailable — no entry premium on this sidecar")
+    wf = charts.waterfall(data.get("cost_waterfall"))
+    right = (wf or shell.ph("no cost breakdown")) + (
+        '<div class="eye" style="margin-top:4px">Gross model edge minus the '
+        "round-trip cost of actually trading it</div>")
+    return shell.grid([
+        shell.card("Payoff — {} {:g}{} @ {}".format(
+            _esc(m.get("ticker")), float(m.get("strike") or 0),
+            _esc((m.get("opt_type") or "c")[0].upper()),
+            _num(prem, "${:,.2f}")), left, span=7, anchor="payoff"),
+        shell.card("Cost wall — where the edge goes", right, span=5),
+    ])
+
+
+def _heat_grid(stress) -> str:
+    """Spot x IV grid. Each cell carries BOTH inks; CSS picks one."""
+    return charts.heat_grid(stress, theme.heat_inks)
+
+
+def _risk_section(data) -> str:
+    g, l = data.get("greeks") or {}, data.get("liquidity") or {}
+    heat = _heat_grid(data.get("stress", {}))
+    left = ((heat or shell.ph("stress grid unavailable"))
+            + '<div class="eye" style="margin-top:5px">worst {}</div>'.format(
+                _esc(data.get("stress", {}).get("worst", "n/a"))))
+    right = ('<div class="cols2"><div>'
+             '<div class="eye" style="margin-bottom:4px">Greeks (per contract)</div>'
+             "<table>" + _rows((
+                 ("Delta", _num(g.get("delta"))),
+                 ("Gamma", _num(g.get("gamma"), "{:.3f}")),
+                 ("Vega", _num(g.get("vega"))),
+                 ("Theta", _num(g.get("theta")) + " /day"))) + "</table></div>"
+             '<div><div class="eye" style="margin-bottom:4px">Liquidity</div>'
+             "<table>" + _rows((
+                 ("Spread", _num(l.get("spread_pct"), "{:.1%}")),
                  ("Open interest", _num(l.get("oi"), "{:,.0f}")),
                  ("Volume", _num(l.get("volume"), "{:,.0f}")),
-                 ("Quote", _esc(l.get("quote_freshness")))))
-        + "</table>")
-    right = (
-        '<div class="eye" style="margin-bottom:5px">Stress &mdash; P&amp;L across spot &times; IV</div>'
-        + _heat_grid(data.get("stress", {}))
-        + '<div class="eye" style="margin-top:5px">worst {}</div>'.format(
-            _esc(data.get("stress", {}).get("worst", "n/a"))))
-    return ('<div class="thin"></div><h5>I &middot; Decision-grade</h5>'
-            '<div class="cols"><div>{}</div><div>{}</div></div>').format(left, right)
+                 ("Quote", _esc(l.get("quote_freshness"))))) + "</table></div></div>")
+    return shell.grid([
+        shell.card("Stress — P&amp;L across spot × IV", left, span=7,
+                   anchor="risk"),
+        shell.card("Greeks &amp; liquidity", right, span=5),
+    ])
 
 
-def _zone_vol(data) -> str:
+def _vol_section(data) -> str:
+    if not _panel_ok(data, "vol"):
+        return ('<div class="grid">'
+                + shell.card("Vol", _placeholder(data, "vol"), span=12,
+                             anchor="vol") + "</div>")
     v = data["vol"]
     resid = v.get("svi_residual")
     if resid is None:
@@ -388,8 +354,8 @@ def _zone_vol(data) -> str:
         rich = "RICH +{:.2f}σ vs surface".format(float(resid))
     else:
         rich = "CHEAP {:.2f}σ vs surface".format(float(resid))
-    left = ('<div class="eye" style="margin-bottom:4px">Vol cone</div>'
-            + charts.vol_cone(v.get("cone"), v.get("iv"))
+    cone = charts.cone_chart(v.get("cone"))
+    left = ((cone or shell.ph("vol cone unavailable"))
             + "<table>" + _rows((
                 ("IV / HV30", "{} / {}".format(_num(v.get("iv"), "{:.1%}"),
                                                _num(v.get("hv"), "{:.1%}"))),
@@ -398,20 +364,20 @@ def _zone_vol(data) -> str:
                 ("vs SVI", rich))) + "</table>")
     term = v.get("term") or []
     if len(term) >= 2:
-        term_html = charts.term_curve(term)
+        term_html = charts.term_chart(term)
     else:
         # A heading over a blank chart reads as "no term structure". Say why.
-        term_html = ('<div class="ph">no term curve — this scan surfaced only '
-                     'one expiry for this name (need ≥2)</div>')
-    right = ('<div class="eye" style="margin-bottom:4px">Term structure &amp; skew</div>'
-             + term_html
-             + "<table>" + _rows((
-                 ("Skew 25Δ", "{}vp".format(_num(v.get("skew_vp"), "{:+.1f}"))),
-                 ("Skew rank", _num(v.get("skew_rank"), "{:.0%}")),
-                 ("Expected move", _num(v.get("expected_move"))),
-                 ("Required move", _num(v.get("required_move"))))) + "</table>")
-    return ('<div class="thin"></div><h5>II &middot; Vol complex</h5>'
-            '<div class="cols"><div>{}</div><div>{}</div></div>').format(left, right)
+        term_html = shell.ph("no term curve — this scan surfaced only "
+                             "one expiry for this name (need ≥2)")
+    right = (term_html + "<table>" + _rows((
+        ("Skew 25Δ", "{}vp".format(_num(v.get("skew_vp"), "{:+.1f}"))),
+        ("Skew rank", _num(v.get("skew_rank"), "{:.0%}")),
+        ("Expected move", _num(v.get("expected_move"))),
+        ("Required move", _num(v.get("required_move"))))) + "</table>")
+    return shell.grid([
+        shell.card("Vol complex — cone vs current", left, span=6, anchor="vol"),
+        shell.card("Term structure &amp; skew", right, span=6),
+    ])
 
 
 _IC_EDGE_THRESHOLD = 0.05
@@ -419,7 +385,7 @@ _P_VALUE_THRESHOLD = 0.05
 
 
 def _badge(text, kind) -> str:
-    return '<span class="badge k-{k}">{t}</span>'.format(k=_esc(kind), t=_esc(text))
+    return shell.badge(text, kind)
 
 
 def _finite_or_none(v):
@@ -500,31 +466,43 @@ def _fmt_history(h) -> str:
     return " · ".join(parts) if parts else "no prior trades"
 
 
-def _zone_name(data) -> str:
+def _name_section(data) -> str:
+    if not _panel_ok(data, "name"):
+        return ('<div class="grid">'
+                + shell.card("The name", _placeholder(data, "name"), span=12,
+                             anchor="name") + "</div>")
     n = data["name"]
-    left = charts.price_with_bands(n.get("closes"), n.get("supports"), n.get("resistances"))
     sup = (n.get("supports") or [{}])
     res = (n.get("resistances") or [{}])
-    left += "<table>" + _rows((
-        ("RSI(14)", _num(n.get("rsi"), "{:.0f}")),
-        ("5d return", _num(n.get("ret_5d"), "{:+.1%}")),
-        ("Support", _num(sup[0].get("level"))),
-        ("Resistance", _num(res[0].get("level"))))) + "</table>"
-    right = ('<div class="eye" style="margin-bottom:4px">Flow &amp; positioning</div><table>'
-             + _rows((("Put/call ratio", _num(n.get("pcr"))),
-                      ("OI change (1d)", _num(n.get("oi_change"), "{:+,.0f}")),
-                      ("Unusual activity", _fmt_uoa(n.get("uoa"))),
-                      ("Max pain", _num(n.get("max_pain"))))) + "</table>")
-    return ('<div class="thin"></div><h5>III &middot; The name &mdash; {t}</h5>'
-            '<div class="cols"><div>{l}</div><div>{r}</div></div>').format(
-                t=_esc(data.get("meta", {}).get("ticker")), l=left, r=right)
+    price = charts.price_chart(
+        n.get("closes"), None, None,
+        sup[0] if sup and sup[0].get("level") is not None else None,
+        res[0] if res and res[0].get("level") is not None else None,
+        None, "px", h=220)
+    left = ((price or shell.ph("price history unavailable"))
+            + "<table>" + _rows((
+                ("RSI(14)", _num(n.get("rsi"), "{:.0f}")),
+                ("5d return", _num(n.get("ret_5d"), "{:+.1%}")),
+                ("Support", _num(sup[0].get("level"))),
+                ("Resistance", _num(res[0].get("level"))))) + "</table>")
+    right = ("<table>" + _rows((
+        ("Put/call ratio", _num(n.get("pcr"))),
+        ("OI change (1d)", _num(n.get("oi_change"), "{:+,.0f}")),
+        ("Unusual activity", _fmt_uoa(n.get("uoa"))),
+        ("Max pain", _num(n.get("max_pain"))))) + "</table>")
+    return shell.grid([
+        shell.card("The name — {}".format(_esc(data.get("meta", {}).get("ticker"))),
+                   left, span=7, anchor="name"),
+        shell.card("Flow &amp; positioning", right, span=5),
+    ])
 
 
-def _zone_evidence(data) -> str:
+def _evidence_body(data) -> str:
     e = data.get("evidence", {})
     ic_txt, ic_badge = _ic_badge(e.get("pooled_ic"), e.get("p_value"))
     gate = _esc(e.get("gate_decision") or "UNKNOWN")
     p_txt = _num(e.get("p_value"), "{:.3f}")
+    cohort_n = _finite_or_none(e.get("cohort_n")) or 0
     rows = (
         '<tr><td>Scorer OOS IC</td><td class="n m">{}</td><td class="n">{}</td></tr>'.format(
             ic_txt, ic_badge),
@@ -548,17 +526,15 @@ def _zone_evidence(data) -> str:
                    "out-of-sample skill. The cost and Greeks arithmetic above does.")
     return ('<div class="eye" style="margin-bottom:4px">Model evidence</div>'
             "<table>{}</table>"
-            '<div class="eye" style="margin-top:6px;line-height:1.5">{}</div>').format(
-                "".join(rows), _esc(caption))
+            + charts.meter(cohort_n, 50)
+            + '<div class="eye" style="margin-top:6px;line-height:1.5">{}</div>'
+            ).format("".join(rows), _esc(caption))
 
 
-def _zone_narrative(data) -> str:
-    """Zone IV. ALWAYS rendered, even when the narrative panel failed.
-
-    The evidence panel lives in this zone's right column. If a narrative failure
-    could take zone IV down with it, the page would silently drop the very panel
-    that qualifies everything above it. Only the left column degrades.
-    """
+def _narrative_section(data) -> str:
+    """Narrative card + evidence card. ALWAYS rendered, even when the
+    narrative panel failed: the evidence card qualifies everything above it
+    and must never vanish with a bad thesis fetch."""
     if _panel_ok(data, "narrative"):
         nar = data.get("narrative", {})
         fit = nar.get("portfolio_fit") or []
@@ -582,9 +558,10 @@ def _zone_narrative(data) -> str:
         left += "</table>"
     else:
         left = _placeholder(data, "narrative")
-    return ('<div class="thin"></div><h5>IV &middot; Narrative &amp; provenance</h5>'
-            '<div class="cols"><div>{l}</div><div>{r}</div></div>').format(
-                l=left, r=_zone_evidence(data))
+    return shell.grid([
+        shell.card("Narrative &amp; provenance", left, span=6, anchor="evidence"),
+        shell.card("Evidence", _evidence_body(data), span=6),
+    ])
 
 
 def _greek_rows(data):
@@ -611,15 +588,16 @@ def _greek_rows(data):
 
 def _tab_greeks(data) -> str:
     a, b, c = _greek_rows(data)
-    return ('<div class="cols3">'
-            '<div><div class="eye">First order</div>{}</div>'
-            '<div><div class="eye">Second order</div>{}</div>'
-            '<div><div class="eye">Dollar exposure</div>{}</div></div>').format(a, b, c)
+    return ('<div class="grid" style="margin-top:0">'
+            '<div class="c4"><div class="eye">First order</div>{}</div>'
+            '<div class="c4"><div class="eye">Second order</div>{}</div>'
+            '<div class="c4"><div class="eye">Dollar exposure</div>{}</div></div>'
+            ).format(a, b, c)
 
 
 def _tab_execution(data) -> str:
     """Order ticket + exit plan. The stress grid deliberately is NOT repeated
-    here: it is decision-grade and stays in the always-visible zone I."""
+    here: it is decision-grade and stays in the always-visible risk section."""
     t = data.get("ticket") or {}
     left = ('<div class="eye" style="margin-bottom:4px">Order ticket</div><table>'
             + _rows((("Limit price", _num(t.get("entry_price"), "${:,.2f}")),
@@ -635,7 +613,7 @@ def _tab_execution(data) -> str:
     if t.get("guidance"):
         right += '<div class="eye" style="margin-top:6px;line-height:1.5">{}</div>'.format(
             _esc(t["guidance"]))
-    return '<div class="cols"><div>{}</div><div>{}</div></div>'.format(left, right)
+    return '<div class="cols2"><div>{}</div><div>{}</div></div>'.format(left, right)
 
 
 def _tab_chain(data) -> str:
@@ -671,16 +649,19 @@ def _tab_chain(data) -> str:
         ("Max-pain distance", _num(q.get("max_pain_dist_pct"), "{:+.2%}")),
         ("Gamma-pin distance", _num(q.get("gamma_pin_dist_pct"), "{:+.2%}")),
     )) + "</table>"
-    return ('<div class="cols3"><div><div class="eye">Contract</div>{}</div>'
-            '<div><div class="eye">Liquidity &amp; quote</div>{}</div>'
-            '<div><div class="eye">Derived</div>{}</div></div>').format(left, right, third)
+    return ('<div class="grid" style="margin-top:0">'
+            '<div class="c4"><div class="eye">Contract</div>{}</div>'
+            '<div class="c4"><div class="eye">Liquidity &amp; quote</div>{}</div>'
+            '<div class="c4"><div class="eye">Derived</div>{}</div></div>'
+            ).format(left, right, third)
 
 
 def _event_panel(data, pid, title, body_fn) -> str:
     if not _panel_ok(data, pid):
-        return '<div><div class="eye">{}</div>{}</div>'.format(
+        return '<div class="c4"><div class="eye">{}</div>{}</div>'.format(
             _esc(title), _placeholder(data, pid))
-    return '<div><div class="eye">{}</div>{}</div>'.format(_esc(title), body_fn())
+    return '<div class="c4"><div class="eye">{}</div>{}</div>'.format(
+        _esc(title), body_fn())
 
 
 def _tab_events(data) -> str:
@@ -704,7 +685,7 @@ def _tab_events(data) -> str:
         return "<ul style='margin:4px 0;padding-left:16px;font-size:12.5px'>" + "".join(
             "<li>{}</li>".format(_esc(i)) for i in items[:5]) + "</ul>"
 
-    return ('<div class="cols3">{}{}{}</div>').format(
+    return ('<div class="grid" style="margin-top:0">{}{}{}</div>').format(
         _event_panel(data, "earnings", "Earnings", _earn),
         _event_panel(data, "insider", "Insider (EDGAR, 90d)", _ins),
         _event_panel(data, "news", "News", _news))
@@ -739,9 +720,9 @@ _TABS = (("greeks", "Greeks", _tab_greeks),
 def _zone_detail(data) -> str:
     """Tabbed depth. Pure CSS (radio + :checked) so it works offline with no JS.
 
-    Nothing that QUALIFIES the trade lives here — the verdict, cost wall, model
-    evidence and the no-edge zone all stay in the always-visible scroll. Only
-    depth hides behind a tab. Print CSS expands every tab.
+    Nothing that QUALIFIES the trade lives here — the verdict, cost wall,
+    model evidence and the no-edge zone all stay in the always-visible scroll.
+    Only depth hides behind a tab. Print CSS expands every tab.
     """
     inputs, labels, panes = [], [], []
     for i, (key, label, fn) in enumerate(_TABS):
@@ -755,9 +736,10 @@ def _zone_detail(data) -> str:
             body = '<div class="ph">unavailable — {}: {}</div>'.format(
                 _esc(type(exc).__name__), _esc(exc))
         panes.append('<div class="tabpane tp-{k}">{b}</div>'.format(k=key, b=body))
-    return ('<div class="thin"></div><h5>VI &middot; Detail</h5>'
-            '<div class="deck">{i}<div class="tabbar">{l}</div>{p}</div>').format(
-                i="".join(inputs), l="".join(labels), p="".join(panes))
+    deck = ('<div class="deck">{i}<div class="tabbar">{l}</div>{p}</div>').format(
+        i="".join(inputs), l="".join(labels), p="".join(panes))
+    return ('<div class="grid">'
+            + shell.card("Detail", deck, span=12, anchor="detail") + "</div>")
 
 
 def _zone_context(data) -> str:
@@ -769,7 +751,7 @@ def _zone_context(data) -> str:
             l=_esc(i.get("label")), v=_esc(i.get("value")),
             b=_badge(i.get("badge", ""), i.get("badge_kind", "bad")))
         for i in items)
-    return ('<div class="demote"><h5 class="mut">V &middot; Context &mdash; '
+    return ('<div class="demote"><h5 class="mut">Context &mdash; '
             "no demonstrated edge</h5><table>{}</table></div>").format(rows)
 
 
@@ -791,6 +773,7 @@ def _zone_lottery(data) -> str:
 
     def _pct(v):
         return _num(v, "{:.0%}")
+
     def _x(v):
         return _num(v, "{:.1f}x")
 
@@ -808,50 +791,35 @@ def _zone_lottery(data) -> str:
         ("Tail @2EM", _x(lot.get("tail_x_2em"))),
         ("Reachability", reach),
     )) + "</table>"
-    return (
-        '<div class="thin"></div><h5>Lottery read &middot; {play}</h5>'
-        '<div style="margin-bottom:6px">{badge}</div>'
-        '<div class="eye" style="margin-bottom:6px">{note}</div>{table}'
-        '<div class="eye" style="margin-top:6px">Base reality: naked far-OTM is '
-        'negative-EV on average &mdash; tiny size, the edge (if any) is breadth + an '
-        'uncapped tail.</div>'
-    ).format(play=_esc(play), badge=badge, note=note, table=table)
+    body = ('<div style="margin-bottom:6px">{badge}</div>'
+            '<div class="eye" style="margin-bottom:6px">{note}</div>{table}'
+            '<div class="eye" style="margin-top:6px">Base reality: naked far-OTM is '
+            'negative-EV on average &mdash; tiny size, the edge (if any) is breadth + an '
+            "uncapped tail.</div>").format(badge=badge, note=note, table=table)
+    return ('<div class="grid">'
+            + shell.card("Lottery read · {}".format(_esc(play)), body, span=12)
+            + "</div>")
 
 
 def render(data: dict) -> str:
     """The complete HTML document. Pure."""
-    body = [_masthead(data.get("meta", {})), _verdict_block(data), _zone_lottery(data)]
-    for zone in _ZONES:
-        if zone in _ALWAYS_RENDERED:
-            body.append(_BUILDERS[zone](data))     # degrades internally
-        elif _panel_ok(data, zone) and zone in _BUILDERS:
-            body.append(_BUILDERS[zone](data))
-        elif not _panel_ok(data, zone):
-            body.append('<div class="thin"></div>' + _placeholder(data, zone))
+    body = [_hero(data), _zone_lottery(data), _payoff_section(data)]
+    if _panel_ok(data, "decision"):
+        body.append(_risk_section(data))
+    else:
+        body.append('<div class="grid">' + shell.card(
+            "Stress", _placeholder(data, "decision"), span=12, anchor="risk")
+            + "</div>")
+    body.append(_vol_section(data))
+    body.append(_name_section(data))
+    body.append(_narrative_section(data))   # always: carries the evidence card
+    body.append(_zone_detail(data))
+    body.append(_zone_context(data))        # demoted: least important, last
     meta = data.get("meta", {})
     body.append('<div class="foot">{}</div>'.format(_esc(
         "{} · config sha {} · regenerate: python -m src.tearsheet --from {}".format(
-            meta.get("sidecar", ""), meta.get("config_sha", ""), meta.get("sidecar", "")))))
-    return (
-        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        "<title>{title}</title><style>{tokens}{css}</style></head>"
-        '<body><div class="sheet">{body}</div><script>{js}</script></body></html>'
-    ).format(title=_esc("{} {} tearsheet".format(
-        meta.get("ticker", ""), meta.get("expiration", ""))),
-        tokens=theme.css_tokens(), css=_CSS, body="".join(body), js=_JS)
-
-
-_BUILDERS = {
-    "decision": _zone_decision,
-    "vol": _zone_vol,
-    "name": _zone_name,
-    "narrative": _zone_narrative,   # embeds _zone_evidence beside the thesis
-    "detail": _zone_detail,
-    "context": _zone_context,
-}
-
-# Zones that render even when their panel failed, because they carry something
-# the page must never lose. Zone IV holds the model-evidence panel; zone VI
-# degrades per-tab rather than vanishing wholesale.
-_ALWAYS_RENDERED = frozenset({"narrative", "detail"})
+            meta.get("sidecar", ""), meta.get("config_sha", ""),
+            meta.get("sidecar", "")))))
+    title = "{} {} tearsheet".format(meta.get("ticker", ""),
+                                     meta.get("expiration", ""))
+    return shell.page(title, _masthead(data), "".join(body), extra_css=_CSS)
