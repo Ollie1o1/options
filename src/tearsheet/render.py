@@ -335,9 +335,9 @@ def _risk_section(data) -> str:
                  ("Volume", _num(l.get("volume"), "{:,.0f}")),
                  ("Quote", _esc(l.get("quote_freshness"))))) + "</table></div></div>")
     return shell.grid([
-        shell.card("Stress — P&amp;L across spot × IV", left, span=7,
+        shell.card("Stress — P&L across spot × IV", left, span=7,
                    anchor="risk"),
-        shell.card("Greeks &amp; liquidity", right, span=5),
+        shell.card("Greeks & liquidity", right, span=5),
     ])
 
 
@@ -376,7 +376,7 @@ def _vol_section(data) -> str:
         ("Required move", _num(v.get("required_move"))))) + "</table>")
     return shell.grid([
         shell.card("Vol complex — cone vs current", left, span=6, anchor="vol"),
-        shell.card("Term structure &amp; skew", right, span=6),
+        shell.card("Term structure & skew", right, span=6),
     ])
 
 
@@ -493,7 +493,7 @@ def _name_section(data) -> str:
     return shell.grid([
         shell.card("The name — {}".format(_esc(data.get("meta", {}).get("ticker"))),
                    left, span=7, anchor="name"),
-        shell.card("Flow &amp; positioning", right, span=5),
+        shell.card("Flow & positioning", right, span=5),
     ])
 
 
@@ -559,7 +559,7 @@ def _narrative_section(data) -> str:
     else:
         left = _placeholder(data, "narrative")
     return shell.grid([
-        shell.card("Narrative &amp; provenance", left, span=6, anchor="evidence"),
+        shell.card("Narrative & provenance", left, span=6, anchor="evidence"),
         shell.card("Evidence", _evidence_body(data), span=6),
     ])
 
