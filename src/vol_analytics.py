@@ -442,6 +442,9 @@ def classify_vol_regime(ticker: str, current_iv: Optional[float] = None) -> dict
         cone = compute_vol_cone(ticker, windows=[30])
         if cone and 30 in cone:
             d30 = cone[30]
+            # NOTE: despite the key name, this is the percentile of current
+            # 30d REALIZED vol in its own history (from the vol cone), not an
+            # implied-vol percentile. Kept as-is for display compatibility.
             iv_pctile = d30["pctile"]
             result["iv_pctile_30d"] = iv_pctile
             hv_30 = d30["current"]  # current 30d realized vol

@@ -1,6 +1,8 @@
 """Tests for src/filters.py."""
 import sys
 import os
+import unittest
+
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,19 +42,41 @@ def _config(min_volume=50, min_oi=10, max_spread=0.40, delta_min=0.15, delta_max
     }
 
 
-def test_filter_removes_low_volume():
-    """volume=10 < min_volume=50 -> filtered out."""
-    df = pd.DataFrame([_make_option_row(volume=10)])
-    result = filter_options(df, _config(min_volume=50))
+def test_filter_removes_low_volume_and_low_oi():
+    """volume=10 AND OI=5, both below their floors -> filtered out."""
+    df = pd.DataFrame([_make_option_row(volume=10, openInterest=5)])
+    result = filter_options(df, _config(min_volume=50, min_oi=10))
     assert result.empty
 
 
 def test_filter_keeps_high_oi_low_vol():
-    """volume=10 but OI=200. filter_options uses AND, so low-vol row IS filtered out."""
+    """volume=10 but OI=200: liquidity gate is volume OR OI (same semantics
+    as the live screener path), so the row survives."""
     df = pd.DataFrame([_make_option_row(volume=10, openInterest=200)])
     result = filter_options(df, _config(min_volume=50, min_oi=10))
-    # volume=10 < min_volume=50 → filtered regardless of OI
-    assert result.empty
+    assert len(result) == 1
+
+
+class TestLiquidityGateMatchesLiveScreener(unittest.TestCase):
+    """2026-07-13 audit finding: filter_options required volume >= min AND
+    OI >= min while the live path in options_screener.enrich_and_score uses
+    volume OR OI — two sources of truth with different semantics for the same
+    config keys. The live path is canonical; filter_options must match it."""
+
+    def test_low_volume_high_oi_passes(self):
+        df = pd.DataFrame([_make_option_row(volume=10, openInterest=200)])
+        out = filter_options(df, _config(min_volume=50, min_oi=10))
+        self.assertEqual(len(out), 1)
+
+    def test_high_volume_zero_oi_passes(self):
+        df = pd.DataFrame([_make_option_row(volume=500, openInterest=0)])
+        out = filter_options(df, _config(min_volume=50, min_oi=10))
+        self.assertEqual(len(out), 1)
+
+    def test_both_below_floor_dropped(self):
+        df = pd.DataFrame([_make_option_row(volume=10, openInterest=5)])
+        out = filter_options(df, _config(min_volume=50, min_oi=10))
+        self.assertTrue(out.empty)
 
 
 def test_categorize_by_premium_budget_mode():

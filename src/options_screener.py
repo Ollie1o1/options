@@ -2012,6 +2012,29 @@ def calculate_scores(
     return df
 
 
+def _compute_quote_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive mid/premium from bid/ask, trusting only usable two-sided quotes.
+
+    A quote is usable when bid > 0, ask > 0, AND ask >= bid. Inverted (crossed)
+    quotes are broken prints: their mid is meaningless and their negative
+    spread would rank as the tightest in the chain, so they get mid = NaN and
+    fall back to lastPrice (then die at the max-spread filter, spread = inf).
+    Individually invalid bid/ask values are set to NaN so the spread math
+    can't use them.
+    """
+    valid_bid = (df["bid"].notna()) & (df["bid"] > 0)
+    valid_ask = (df["ask"].notna()) & (df["ask"] > 0)
+    valid_quotes = valid_bid & valid_ask & (df["ask"] >= df["bid"])
+
+    df["mid"] = np.where(valid_quotes, (df["bid"] + df["ask"]) / 2.0, np.nan)
+    df["premium"] = df["mid"].where(df["mid"].notna() & (df["mid"] > 0.0), df["lastPrice"])
+
+    # For spread calculation, set bid/ask to NaN if invalid (filled later)
+    df.loc[~valid_bid, "bid"] = np.nan
+    df.loc[~valid_ask, "ask"] = np.nan
+    return df
+
+
 def enrich_and_score(
     df: pd.DataFrame,
     min_dte: int,
@@ -2101,17 +2124,7 @@ def enrich_and_score(
         if "quote_source" in df.columns:
             df.loc[zero_quote_mask, "quote_source"] = "yfinance+synthetic_spread"
 
-    # Calculate mid only when both bid and ask are valid (> 0)
-    valid_bid = (df["bid"].notna()) & (df["bid"] > 0)
-    valid_ask = (df["ask"].notna()) & (df["ask"] > 0)
-    valid_quotes = valid_bid & valid_ask
-
-    df["mid"] = np.where(valid_quotes, (df["bid"] + df["ask"]) / 2.0, np.nan)
-    df["premium"] = df["mid"].where(df["mid"].notna() & (df["mid"] > 0.0), df["lastPrice"])
-
-    # For spread calculation, set bid/ask to NaN if invalid (filled later)
-    df.loc[~valid_bid, "bid"] = np.nan
-    df.loc[~valid_ask, "ask"] = np.nan
+    df = _compute_quote_columns(df)
 
     if mode == "Premium Selling":
         df = df[df['type'] == 'put'].copy()

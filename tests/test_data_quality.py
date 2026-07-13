@@ -52,6 +52,49 @@ class TestCheckMarketHours(unittest.TestCase):
         self.assertTrue(len(msg) > 0)
 
 
+class TestHolidayCalendarYearGuard(unittest.TestCase):
+    """The holiday set is maintained per year. 2026-07-13 audit finding: it was
+    a single hardcoded 2026 set with no year check, so from 2027-01-01 every
+    holiday would silently report 'market open'. An uncovered year must warn
+    LOUDLY in the message instead of silently pretending holidays don't exist."""
+
+    @staticmethod
+    def _et(year, month, day, hour=10, minute=0):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(year, month, day, hour, minute,
+                        tzinfo=ZoneInfo("America/New_York"))
+
+    def test_covered_year_holiday_is_closed(self):
+        # Juneteenth 2026 falls on a Friday.
+        is_open, msg = check_market_hours(now_et=self._et(2026, 6, 19))
+        self.assertFalse(is_open)
+        self.assertIn("holiday", msg.lower())
+
+    def test_covered_year_weekday_is_open_without_warning(self):
+        # Wed 2026-06-10, 10:00 ET.
+        is_open, msg = check_market_hours(now_et=self._et(2026, 6, 10))
+        self.assertTrue(is_open)
+        self.assertNotIn("calendar", msg.lower())
+
+    def test_uncovered_year_warns_in_message(self):
+        # Wed 2027-06-09, 10:00 ET — no 2027 calendar maintained yet.
+        is_open, msg = check_market_hours(now_et=self._et(2027, 6, 9))
+        self.assertIn("2027", msg)
+        self.assertIn("calendar", msg.lower())
+
+    def test_uncovered_year_weekend_still_closed(self):
+        # Sat 2027-06-12: weekday logic must still apply.
+        is_open, msg = check_market_hours(now_et=self._et(2027, 6, 12))
+        self.assertFalse(is_open)
+
+    def test_uncovered_year_new_years_day_warns(self):
+        # 2027-01-01 (Friday) IS a market holiday, but the calendar doesn't
+        # know it. The best we can do honestly: report the gap loudly.
+        is_open, msg = check_market_hours(now_et=self._et(2027, 1, 1))
+        self.assertIn("calendar", msg.lower())
+
+
 def _fastapi_available() -> bool:
     try:
         import fastapi  # noqa: F401

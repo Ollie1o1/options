@@ -240,7 +240,7 @@ def simulate_exits(
         "n_paths": int(n_paths),
         "assumptions": ("GBM at realized vol, drift r−q (no alpha); marks at "
                         "sticky entry IV; rules checked daily; exit pays "
-                        "half-spread + commission"),
+                        "half-spread (entry spread held constant) + commission"),
     }
 
 

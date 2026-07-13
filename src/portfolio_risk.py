@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .utils import bs_call, bs_put, bs_delta, bs_gamma, bs_vega, safe_float
+from .utils import bs_call, bs_put, bs_delta, bs_gamma, bs_vega, safe_float, is_short_position
 from .data_fetching import get_risk_free_rate
 
 logger = logging.getLogger(__name__)
@@ -204,9 +204,12 @@ class RiskAggregator:
         """
         Return a DataFrame of open positions enriched with live Greeks.
 
-        Added columns: spot, T_years, sigma, delta, gamma, vega, gex
-        GEX per contract = sign × gamma × S² × 0.01 × 100
-            sign: +1 for calls (dealers short gamma), -1 for puts
+        Added columns: spot, T_years, sigma, delta, gamma, vega, gex,
+        quantity (normalized), is_short.
+
+        Greeks are the BOOK's exposure: direction-signed (short positions
+        flip the sign) and scaled by quantity. GEX per position is the book's
+        own gamma dollars per 1% move = signed gamma × S² × 0.01 × 100.
         """
         if rfr is None:
             rfr = get_risk_free_rate()
@@ -219,7 +222,9 @@ class RiskAggregator:
         # so the two per-scan callers don't each re-price the whole portfolio.
         signature = tuple(sorted(
             (str(t.get("ticker")), str(t.get("expiration")),
-             float(safe_float(t.get("strike")) or 0.0), (t.get("type") or "call").lower())
+             float(safe_float(t.get("strike")) or 0.0), (t.get("type") or "call").lower(),
+             float(safe_float(t.get("quantity")) or 1.0),
+             is_short_position(str(t.get("strategy_name") or "")))
             for t in trades))
         cache_key = (self.db_path, round(float(rfr), 4), signature)
         cached = _POSITIONS_CACHE.get(cache_key)
@@ -260,16 +265,23 @@ class RiskAggregator:
             if not sigma or sigma <= 0:
                 sigma, iv_source = self._FALLBACK_IV, "fallback"
 
+            # The book's exposure, not the contract's: short strategies flip
+            # the sign, and multi-lot / fractional rows scale by quantity.
+            qty = safe_float(t.get("quantity")) or 1.0
+            if qty <= 0:
+                qty = 1.0
+            is_short = is_short_position(str(t.get("strategy_name") or ""))
+            dir_sign = -1.0 if is_short else 1.0
+
             try:
-                delta = float(bs_delta(opt_type, spot, strike, T, rfr, sigma))
-                gamma = float(bs_gamma(spot, strike, T, rfr, sigma))
-                vega = float(bs_vega(spot, strike, T, rfr, sigma))
+                delta = dir_sign * qty * float(bs_delta(opt_type, spot, strike, T, rfr, sigma))
+                gamma = dir_sign * qty * float(bs_gamma(spot, strike, T, rfr, sigma))
+                vega = dir_sign * qty * float(bs_vega(spot, strike, T, rfr, sigma))
             except Exception:
                 delta, gamma, vega = 0.0, 0.0, 0.0
 
-            # GEX convention: dealers short calls → +GEX; short puts → −GEX
-            gex_sign = 1.0 if opt_type == "call" else -1.0
-            gex = gex_sign * gamma * (spot ** 2) * 0.01 * 100.0
+            # Book gamma dollars per 1% move (gamma is already signed × qty)
+            gex = gamma * (spot ** 2) * 0.01 * 100.0
 
             row = dict(t)
             row.update(
@@ -277,6 +289,8 @@ class RiskAggregator:
                 T_years=T,
                 sigma=sigma,
                 iv_source=iv_source,
+                quantity=qty,
+                is_short=is_short,
                 delta=delta,
                 gamma=gamma,
                 vega=vega,
@@ -367,11 +381,24 @@ class RiskAggregator:
         jump_intensity = float(self.config.get("var_jump_intensity", 2.0))
         jump_mean = float(self.config.get("var_jump_mean", -0.02))
         jump_vol = float(self.config.get("var_jump_vol", 0.04))
+        # Cross-position correlation (one-factor model). Independent draws per
+        # position would grant a correlated long-call book full diversification
+        # credit — VaR understated exactly when it matters. Default 0.7.
+        rho = float(self.config.get("var_correlation", 0.7))
+        rho = min(max(rho, 0.0), 1.0)
+        w_idio = math.sqrt(max(0.0, 1.0 - rho * rho))
 
         rng = np.random.default_rng(random_seed)
         T_horizon = horizon_days / 365.0
         n_steps = max(horizon_days, 1)
         dt = T_horizon / n_steps
+
+        # Shared market shocks: jumps are market events (one -2% gap hits the
+        # whole book), and each position mixes the market factor with its own
+        # idiosyncratic draw below.
+        z_mkt = rng.standard_normal((n_simulations, n_steps))
+        jump_occurs = rng.random((n_simulations, n_steps)) < (jump_intensity * dt)
+        jump_sizes = rng.normal(jump_mean, jump_vol, (n_simulations, n_steps))
 
         portfolio_pnl = np.zeros(n_simulations)
 
@@ -394,10 +421,11 @@ class RiskAggregator:
             drift = (rfr - jump_corr - 0.5 * sigma ** 2) * dt
             diffusion = sigma * math.sqrt(dt)
 
-            # Simulate price paths
-            z = rng.standard_normal((n_simulations, n_steps))
-            jump_occurs = rng.random((n_simulations, n_steps)) < (jump_intensity * dt)
-            jump_sizes = rng.normal(jump_mean, jump_vol, (n_simulations, n_steps))
+            # One-factor correlated paths: shared market shock + own noise.
+            # The idio draw happens even at rho=1 so RNG consumption (and thus
+            # every position's market shock) is independent of rho.
+            z_idio = rng.standard_normal((n_simulations, n_steps))
+            z = rho * z_mkt + w_idio * z_idio
             log_steps = drift + diffusion * z + np.where(jump_occurs, jump_sizes, 0.0)
             terminal_log = np.sum(log_steps, axis=1)
             S_T = spot * np.exp(terminal_log)
@@ -417,12 +445,13 @@ class RiskAggregator:
                     else:
                         exit_prices = bs_put(S_T, strike, T_remaining, rfr, sigma)
                 exit_prices = np.asarray(exit_prices, dtype=float)
-                strategy_name = str(pos.get("strategy_name", ""))
-                is_short = any(k in strategy_name.lower() for k in ("short", "credit", "covered", "cash-secured", "cash secured", "naked", "iron condor", "sell"))
-                if is_short:
-                    pnl = (entry_price - exit_prices) * 100.0
+                # Direction and quantity come from the priced frame (single
+                # source: utils.is_short_position, normalized qty).
+                qty = float(safe_float(pos.get("quantity")) or 1.0)
+                if bool(pos.get("is_short", False)):
+                    pnl = (entry_price - exit_prices) * 100.0 * qty
                 else:
-                    pnl = (exit_prices - entry_price) * 100.0
+                    pnl = (exit_prices - entry_price) * 100.0 * qty
             except Exception:
                 continue
 

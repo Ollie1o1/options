@@ -33,17 +33,25 @@ def filter_options(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
         # Filter where spread_pct is within limits and is finite
         df = df[df["spread_pct"] <= max_spread].copy()
         
-    # 2. Liquidity Filters (Volume and OI)
+    # 2. Liquidity Filter (Volume OR OI)
     # Externalized: min_volume (default 50) and min_open_interest (default 10)
+    # Same semantics as the live path in options_screener.enrich_and_score:
+    # a contract is liquid enough when EITHER floor is cleared. Do not switch
+    # this back to AND — two different semantics for the same config keys was
+    # a 2026-07-13 audit finding.
     min_vol = f_config.get("min_volume", 50)
     min_oi = f_config.get("min_open_interest", 10)
-    
+
     if "volume" in df.columns:
         df["volume"] = df["volume"].fillna(0).astype(float)
-        df = df[df["volume"] >= min_vol].copy()
-        
     if "openInterest" in df.columns:
         df["openInterest"] = df["openInterest"].fillna(0).astype(float)
+
+    if "volume" in df.columns and "openInterest" in df.columns:
+        df = df[(df["volume"] >= min_vol) | (df["openInterest"] >= min_oi)].copy()
+    elif "volume" in df.columns:
+        df = df[df["volume"] >= min_vol].copy()
+    elif "openInterest" in df.columns:
         df = df[df["openInterest"] >= min_oi].copy()
         
     # 3. Delta Filters

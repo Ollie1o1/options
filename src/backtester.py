@@ -12,8 +12,11 @@ Methodology:
 - Groups results by score quintile to test whether higher score -> better outcome.
 
 Important limitations:
-- Uses Black-Scholes theoretical prices, not actual historical bid/ask data.
-- Does not model liquidity, slippage, or bid-ask spreads.
+- Uses Black-Scholes theoretical prices unless --price-source dolt supplies real
+  historical bid/ask marks (entry at bid, exit at ask).
+- Spread costs: real measured slippage table (P4.11, dolt_slippage) when the
+  dolt cache exists, else a flat per-side haircut. Liquidity/market impact
+  beyond the spread is not modelled.
 - Realized vol (not IV) is used as the pricing sigma — IV premium not modelled.
 - Past signal-return relationships do not guarantee future performance.
 - Results should be used for qualitative signal validation, not as a trading system.

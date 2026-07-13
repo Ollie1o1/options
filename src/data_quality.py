@@ -19,55 +19,73 @@ logger = logging.getLogger("data_quality")
 # the IV implied by the contract's own mid price.
 IV_VERIFY_TOLERANCE = 0.15
 
-# US market holidays (NYSE/CBOE) — update annually.
-_US_MARKET_HOLIDAYS_2026 = {
-    "2026-01-01",  # New Year's Day
-    "2026-01-19",  # MLK Day
-    "2026-02-16",  # Presidents Day
-    "2026-04-03",  # Good Friday
-    "2026-05-25",  # Memorial Day
-    "2026-06-19",  # Juneteenth
-    "2026-07-03",  # Independence Day (observed)
-    "2026-09-07",  # Labor Day
-    "2026-11-26",  # Thanksgiving
-    "2026-12-25",  # Christmas
+# US market holidays (NYSE/CBOE), keyed by year — add each new year's set.
+# check_market_hours warns loudly when the current year is missing, so a
+# stale calendar is visible instead of silently reporting "open" on holidays.
+_US_MARKET_HOLIDAYS_BY_YEAR = {
+    2026: {
+        "2026-01-01",  # New Year's Day
+        "2026-01-19",  # MLK Day
+        "2026-02-16",  # Presidents Day
+        "2026-04-03",  # Good Friday
+        "2026-05-25",  # Memorial Day
+        "2026-06-19",  # Juneteenth
+        "2026-07-03",  # Independence Day (observed)
+        "2026-09-07",  # Labor Day
+        "2026-11-26",  # Thanksgiving
+        "2026-12-25",  # Christmas
+    },
 }
 
 
-def check_market_hours() -> Tuple[bool, str]:
+def check_market_hours(now_et: Optional[datetime] = None) -> Tuple[bool, str]:
     """
     Returns (is_open: bool, message: str) in US Eastern time.
 
     Options are liquid 09:30-16:00 ET, Mon-Fri. Outside this window,
     yfinance data is stale and bid-ask spreads are unreliable.
+
+    ``now_et`` is injectable for tests; when omitted, the current US/Eastern
+    time is used.
     """
-    try:
-        from zoneinfo import ZoneInfo
-        et_zone = ZoneInfo("America/New_York")
-        now_et = datetime.now(et_zone)
-    except Exception:
-        # Fallback: rough UTC-4 (EDT) — acceptable for a warning-only check
-        now_et = datetime.now(timezone(timedelta(hours=-4)))
+    if now_et is None:
+        try:
+            from zoneinfo import ZoneInfo
+            et_zone = ZoneInfo("America/New_York")
+            now_et = datetime.now(et_zone)
+        except Exception:
+            # Fallback: rough UTC-4 (EDT; off by an hour under EST winter
+            # time) — acceptable for a warning-only check
+            now_et = datetime.now(timezone(timedelta(hours=-4)))
 
     weekday = now_et.weekday()  # 0=Mon … 6=Sun
     hhmm = now_et.hour * 100 + now_et.minute
     time_str = now_et.strftime("%H:%M ET")
     date_str = now_et.strftime("%Y-%m-%d")
 
-    if date_str in _US_MARKET_HOLIDAYS_2026:
+    holidays = _US_MARKET_HOLIDAYS_BY_YEAR.get(now_et.year)
+    if holidays is None:
+        holidays = set()
+        cal_warn = (f" [WARNING: holiday calendar not maintained for "
+                    f"{now_et.year} — update _US_MARKET_HOLIDAYS_BY_YEAR in "
+                    f"src/data_quality.py; holiday closures NOT detected]")
+    else:
+        cal_warn = ""
+
+    if date_str in holidays:
         return False, f"Markets closed — US market holiday ({time_str}). Data is stale."
 
     if weekday >= 5:
         day_name = "Saturday" if weekday == 5 else "Sunday"
-        return False, f"Markets closed — it's {day_name} ({time_str}). Data is stale."
+        return False, f"Markets closed — it's {day_name} ({time_str}). Data is stale.{cal_warn}"
 
     if hhmm < 930:
-        return False, f"Pre-market ({time_str}). Options open at 09:30 ET — bid/ask spreads not reliable yet."
+        return False, f"Pre-market ({time_str}). Options open at 09:30 ET — bid/ask spreads not reliable yet.{cal_warn}"
 
     if hhmm >= 1600:
-        return False, f"After-hours ({time_str}). Options closed at 16:00 ET — quotes are stale."
+        return False, f"After-hours ({time_str}). Options closed at 16:00 ET — quotes are stale.{cal_warn}"
 
-    return True, f"Market open ({time_str})"
+    return True, f"Market open ({time_str}){cal_warn}"
 
 
 def classify_quote_freshness(quote_age_min, market_open: bool) -> str:
