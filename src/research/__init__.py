@@ -17,6 +17,9 @@ def write_desk(data: dict, out_dir: str = "reports/research"):
         json.dump(data, f, indent=2, sort_keys=True, default=str)
     with open(html_path, "w") as f:
         f.write(render_html(data))
+    from src.desk_kit import hub
+    hub.refresh_latest(out_dir, html_path)
+    hub.refresh(os.path.dirname(out_dir.rstrip("/")) or "reports")
     return html_path, json_path
 
 

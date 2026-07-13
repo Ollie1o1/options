@@ -22,4 +22,6 @@ def write_tearsheet(data: dict, out_dir: str = "reports/tearsheets"):
         json.dump(data, f, indent=2, sort_keys=True)
     with open(html_path, "w") as f:
         f.write(render_html(data))
+    from src.desk_kit import hub
+    hub.refresh(os.path.dirname(out_dir.rstrip("/")) or "reports")
     return html_path, json_path

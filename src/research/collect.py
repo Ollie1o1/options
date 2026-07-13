@@ -213,7 +213,23 @@ def _panel_ticker(sym, _gather_fn=None, _cone_fn=None, _surface_fn=None,
         out["term"] = (_surface_fn or _default_term)(sym) or []
     except Exception:
         out["term"] = []
+    out["related_tearsheets"] = _related_tearsheets(sym)
     return out
+
+
+def _related_tearsheets(sym, tearsheet_dir="reports/tearsheets", limit=6):
+    """This symbol's tearsheets already on disk, newest first — filename scan
+    only, so the ticker tab can deep-link into the pick-level pages."""
+    import os
+    try:
+        files = [f for f in os.listdir(tearsheet_dir)
+                 if f.startswith(str(sym) + "_") and f.endswith(".html")
+                 and f != "latest.html"]
+        files.sort(key=lambda f: os.path.getmtime(
+            os.path.join(tearsheet_dir, f)), reverse=True)
+        return files[:limit]
+    except OSError:
+        return []
 
 
 # ── Assembly ─────────────────────────────────────────────────────────────────

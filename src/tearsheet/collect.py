@@ -13,7 +13,9 @@ _SLOW_IDS = ("earnings", "insider", "news")
 
 # Bump when a key the renderer reads is renamed or removed. `python -m
 # src.tearsheet --from <old sidecar>` warns rather than raising a bare KeyError.
-SCHEMA = 1
+# v2: adds the optional `payoff` panel (model P&L-today curve); the renderer
+# degrades to an expiry-only payoff on v1 sidecars.
+SCHEMA = 2
 
 # How wrong a stored implied vol plausibly is, in IV points, by the confidence
 # data_fetching assigns it. "Low" means an HV proxy stood in for a real IV.
@@ -139,6 +141,30 @@ def _stress(row, spot):
                     p, m, iv * 100)
         rows.append({"iv": float(iv), "pnls": pnls})
     return {"moves": [float(m) for m in moves], "rows": rows, "worst": worst_txt}
+
+
+def _payoff(row, spot, rfr):
+    """Model P&L today across a spot ladder, for the payoff chart's dashed
+    projection line. Pure arithmetic over the row — Black-Scholes at the
+    stored IV — so the sidecar stays reproducible offline."""
+    from src.utils import bs_price
+    k = float(row["strike"])
+    prem = float(row["premium"])
+    iv = float(row.get("impliedVolatility") or 0.0)
+    T = float(row.get("T_years") or 0.0)
+    opt = str(row.get("type", "call"))
+    sp = float(spot)
+    if iv <= 0 or T <= 0 or sp <= 0 or prem <= 0:
+        raise ValueError("no IV/T for model repricing")
+    # ±2 expected moves, floored at ±15%, so the kink and both tails show.
+    width = max(0.15, 2.0 * iv * math.sqrt(T))
+    lo, hi = sp * (1.0 - width), sp * (1.0 + width)
+    n = 61
+    prices = [round(lo + i * (hi - lo) / (n - 1), 4) for i in range(n)]
+    r = float(rfr or 0.0)
+    today = [round((float(bs_price(opt, p, k, T, r, iv)) - prem) * 100.0, 2)
+             for p in prices]
+    return {"prices": prices, "today_pnl": today}
 
 
 def _vol_cone(ticker):
@@ -446,7 +472,11 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
     """
     panels = {}
     sym = row.get("symbol")
-    spot = float(ctx.get("spot") or row.get("underlying") or 0.0)
+    # The row's own underlying price wins: on a cross-ticker scan the ctx spot
+    # is whatever ticker the scan loop touched last, which silently poisons
+    # every Black-Scholes panel (a TSLA sheet once shipped with spot=59.67 —
+    # the stress grid degenerated to ±0 across the board).
+    spot = float(row.get("underlying") or ctx.get("spot") or 0.0)
     dte = int(round(float(row.get("T_years") or 0) * 365))
 
     net = _f(row, "ev_per_contract")
@@ -462,6 +492,8 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
 
     stress = _safe("decision", lambda: _stress(row, spot), panels,
                    {"moves": [], "rows": [], "worst": "n/a"})
+    payoff = _safe("payoff", lambda: _payoff(row, spot, ctx.get("rfr")),
+                   panels, None)
 
     iv, hv = _f(row, "impliedVolatility"), _f(row, "hv_30d")
     vol = _safe("vol", lambda: {
@@ -527,7 +559,8 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
         "liquidity": {"spread_pct": _f(row, "spread_pct"), "oi": _f(row, "openInterest"),
                       "volume": _f(row, "volume"),
                       "quote_freshness": row.get("quote_freshness", "unknown")},
-        "stress": stress, "vol": vol, "name": name, "narrative": narrative,
+        "stress": stress, "payoff": payoff, "vol": vol, "name": name,
+        "narrative": narrative,
         "evidence": evidence, "context": _context(row), "panels": panels,
         "greeks_full": greeks_full, "quote": quote, "ticket": ticket,
         "events": events, "lottery": lottery,

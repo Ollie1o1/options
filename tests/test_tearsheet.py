@@ -517,6 +517,26 @@ def _ctx():
 
 
 class TestCollect(unittest.TestCase):
+    def test_row_underlying_beats_a_stale_ctx_spot(self):
+        # On a cross-ticker scan the ctx spot is whatever ticker the scan loop
+        # touched last. A TSLA sheet shipped with spot=59.67 and its whole
+        # stress grid degenerated to ±$0 of floating-point dust.
+        data = collect.build(_row(), dict(_ctx(), spot=59.67), slow=False)
+        self.assertAlmostEqual(data["meta"]["spot"], 182.40)
+
+    def test_ctx_spot_is_still_the_fallback(self):
+        row = dict(_row())
+        row.pop("underlying")
+        data = collect.build(row, _ctx(), slow=False)
+        self.assertAlmostEqual(data["meta"]["spot"], 182.40)
+
+    def test_payoff_panel_has_matching_ladder_and_curve(self):
+        data = collect.build(_row(), _ctx(), slow=False)
+        po = data.get("payoff")
+        self.assertIsNotNone(po)
+        self.assertEqual(len(po["prices"]), len(po["today_pnl"]))
+        self.assertGreater(len(po["prices"]), 10)
+
     def test_build_produces_json_serialisable_data(self):
         data = collect.build(_row(), _ctx(), slow=False)
         json.dumps(data)   # must not raise
