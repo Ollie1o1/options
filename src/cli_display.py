@@ -195,7 +195,7 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     header = (
         f"{'Rank':<5} {'Ticker':<7} {'Type':<5} {'Strike':>7} {'Expiry':<12} "
         f"{'DTE':>4} {'Delta':>6} {'IV%ile':>6} {'PoP%':>6} {'Prem':>7} "
-        f"{'Net EV':>7} {'Call':<5} {'Score':>6}  Drivers"
+        f"{'Net EV':>7} {'P2x':>5} {'Call':<5} {'Score':>6}  Drivers"
     )
 
     dte_bucket_order = ["Short (1-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"]
@@ -234,11 +234,19 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
             net_txt = "  n/a" if net_ev is None else f"{net_ev:+.0f}"
             net_cell = (fmt.style_sign(f"{net_txt:>7}", net_ev) if
                         (HAS_ENHANCED_CLI and net_ev is not None) else f"{net_txt:>7}")
+            # P(premium ever ≥2× entry before expiry) — exit-aware, cached
+            try:
+                from src.pick_context import exit_stats as _exit_stats
+                _xs = _exit_stats(row.to_dict())
+                _p2 = float(((_xs or {}).get("peak") or {}).get("p_ge", {}).get("2"))
+                p2x_cell = f"{_p2*100:>4.0f}%"
+            except Exception:
+                p2x_cell = "  n/a"
             line = (
                 f"{rank:<5} {str(row.get('symbol','')):<7} {str(row.get('type','')):<5} "
                 f"{row.get('strike', 0):>7.1f} {str(row.get('expiration', '')):<12} "
                 f"{dte_val:>4} {delta:>6.2f} {iv_pct*100:>5.0f}% {pop*100:>5.1f}% "
-                f"${prem:>6.2f} {net_cell} {_style_verdict(decision)} "
+                f"${prem:>6.2f} {net_cell} {p2x_cell:>5} {_style_verdict(decision)} "
                 f"{score:>6.3f}  {drivers}"
             )
             print(line)
@@ -284,6 +292,19 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     vrp = row.get("vrp_regime", None)
     if vrp:
         extras.append(f"VRP {vrp}")
+
+    # Exit-aware summary (compact mode's only sight of it; the full detail
+    # rows carry the complete Exit plan / Peak odds breakdown). Cached, so
+    # this costs one dict lookup when the detail rows already simmed it.
+    try:
+        from src.pick_context import exit_stats as _exit_stats
+        _xs = _exit_stats(row.to_dict() if hasattr(row, "to_dict") else dict(row))
+        if _xs:
+            extras.append(f"P(profit) {_xs['p_profit_touch']:.0%}")
+            _p2 = float((_xs.get("peak") or {}).get("p_ge", {}).get("2", 0))
+            extras.append(f"P2× {_p2:.0%}")
+    except Exception:
+        pass
 
     if HAS_ENHANCED_CLI:
         verdict = ui.kv_line("VERDICT", [ev_cell] + extras)
@@ -1012,9 +1033,19 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
 
         # Row per pick
         _ml = float(row.get("max_loss", 0) or 0)
-        print(ui.kv_line(f"{i}.", [fmt.style(f"{symbol} ${strike} {opt_type} @ ${premium:.2f}", 'emph'),
-                                   f"{fmt.format_pop(pop)} PoP", f"{fmt.format_rr(rr)} RR",
-                                   f"{fmt.format_ev(ev, max_loss=_ml)} EV", stars]))
+        _cells = [fmt.style(f"{symbol} ${strike} {opt_type} @ ${premium:.2f}", 'emph'),
+                  f"{fmt.format_pop(pop)} PoP", f"{fmt.format_rr(rr)} RR",
+                  f"{fmt.format_ev(ev, max_loss=_ml)} EV"]
+        try:
+            from src.pick_context import exit_stats as _exit_stats
+            _xs = _exit_stats(row.to_dict())
+            if _xs:
+                _p2 = float((_xs.get("peak") or {}).get("p_ge", {}).get("2", 0))
+                _cells.append(f"P2× {_p2:.0%}")
+        except Exception:
+            pass
+        _cells.append(stars)
+        print(ui.kv_line(f"{i}.", _cells))
 
         # Thesis
         thesis = generate_trade_thesis(row) if HAS_ENHANCED_CLI else "Standard setup"
