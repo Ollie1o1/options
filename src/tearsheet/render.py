@@ -332,6 +332,7 @@ def _exit_block(data) -> str:
     cells = (
         ("Rule EV", _num(ex.get("ev_exit_per_contract"), "${:+,.0f}"),
          _sv_tone(ex.get("ev_exit_per_contract"))),
+        ("P profitable", _num(ex.get("p_profit_touch"), "{:.0%}"), ""),
         ("P TP first", _num(ex.get("p_tp"), "{:.0%}"), ""),
         ("P time-exit", _num(ex.get("p_time"), "{:.0%}"), ""),
         ("P stop", _num(ex.get("p_sl"), "{:.0%}"), ""),

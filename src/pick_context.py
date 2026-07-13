@@ -409,7 +409,8 @@ def exit_lines(row: Dict[str, Any]) -> List[str]:
         l1 = (f"Exit plan: first hit — TP {st['p_tp']:.0%} · time-exit {st['p_time']:.0%}"
               f" · stop {st['p_sl']:.0%} | rule-EV {st['ev_exit_per_contract']:+,.0f}/ct"
               f" · ~{st['med_days_to_exit']:.0f}d held ({rule_txt})")
-        l2 = (f"Peak odds: if never exited — median peak {peak.get('med_mult', 0):.2f}×"
+        l2 = (f"Peak odds: P(ever profitable pre-expiry) {st['p_profit_touch']:.0%}"
+              f" | if never exited — median peak {peak.get('med_mult', 0):.2f}×"
               f" · P≥2× {float(pg.get('2', 0)):.0%} · P≥3× {float(pg.get('3', 0)):.0%}"
               f" · P≥5× {float(pg.get('5', 0)):.0%}"
               + ("  ⚠ HV missing, IV stood in" if st.get("hv_fallback") else ""))
