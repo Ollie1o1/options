@@ -1074,27 +1074,24 @@ def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
     Falls back to a hardcoded list if fetching fails.
     """
     BACKUP_TICKERS = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "AMZN", "GOOGL"]
-    
-    filters_dict = {
-        'Option/Short': 'Optionable',
-        'Average Volume': 'Over 500K',
-        'Country': 'USA',
-    }
-    order = 'Change'  # Default for gainers
+
+    # Optionable, avg vol >500K, USA. Tickers come from row hrefs, not cell
+    # text — Finviz's letter-icon anchor makes finvizfinance's DataFrame
+    # duplicate the first letter (ABEO → "AABEO"). See src/squeeze/universe.py.
+    f_params = "sh_opt_option,sh_avgvol_o500,geo_usa"
+    order = "-change"  # Default for gainers
     if scan_type == 'high_iv':
-        order = 'Volatility (Month)'
+        order = "-volatility4w"
 
     try:
-        _init_finviz()
-        fperformance = Performance()
-        fperformance.set_filter(filters_dict=filters_dict)
-        df = fperformance.screener_view(order=order, limit=max_tickers, verbose=0)
+        from src.squeeze.universe import finviz_tickers
+        tickers = finviz_tickers(f_params, order=order, limit=max_tickers)
 
-        if df.empty:
-            logging.warning("Finviz returned empty dataframe. Using backup tickers.")
+        if not tickers:
+            logging.warning("Finviz returned no tickers. Using backup tickers.")
             return BACKUP_TICKERS[:max_tickers]
 
-        return df['Ticker'].tolist()
+        return tickers
     except Exception as e:
         logging.warning(f"Could not fetch '{scan_type}' from Finviz: {e}. Using backup tickers.")
         return BACKUP_TICKERS[:max_tickers]

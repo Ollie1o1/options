@@ -3685,7 +3685,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         elif verbose:
             print("\nNo options found within budget.")
 
-    elif mode == "Discovery scan":
+    elif mode in ("Discovery scan", "Squeeze Hunt"):
         if not picks.empty:
             final_df = picks.sort_values("quality_score", ascending=False)
             final_df = categorize_by_premium(final_df, budget=None)
@@ -3749,6 +3749,46 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 print_regime_summary(_ticker_sym, current_iv=_current_iv, width=WIDTH)
             except Exception:
                 pass
+
+    # Squeeze read — display-only (src/squeeze): loud banner when a scanned
+    # name grades as a short-squeeze setup, plus a calls-only mini-board so the
+    # long side is visible even when ranked picks skew to puts (the NBIS
+    # 2026-07-16 case). Never touches quality_score or auto-log.
+    if verbose and not picks.empty and mode not in ("Premium Selling", "Credit Spreads", "Iron Condor"):
+        try:
+            from src.squeeze.detector import SETUP as _SQ_SETUP
+            from src.squeeze.detector import assess_squeeze_row as _sq_assess
+            from src.squeeze.board import banner as _sq_banner
+            from src.squeeze.board import call_board as _sq_call_board
+            if "symbol" in picks.columns:
+                _sq_symbols = list(dict.fromkeys(picks["symbol"].astype(str)))
+            else:
+                _sq_symbols = [str(tickers[0])] if len(tickers) == 1 else []
+            for _sq_sym in _sq_symbols:
+                _sq_rows = (picks[picks["symbol"].astype(str) == _sq_sym]
+                            if "symbol" in picks.columns else picks)
+                if _sq_rows.empty:
+                    continue
+                _sq_fields = _sq_rows.iloc[0].to_dict()
+                # ctx spot is only trustworthy on single-ticker scans (rows carry
+                # their own underlying elsewhere — see tearsheet spot bug).
+                if len(tickers) == 1 and "underlying_price" not in _sq_fields:
+                    _sq_fields.setdefault("spot", underlying_price)
+                _sq_setup = _sq_assess(_sq_fields)
+                _sq_text = _sq_banner(_sq_setup, _sq_sym, width=WIDTH)
+                if not _sq_text:
+                    continue
+                print("\n" + _sq_text)
+                if _sq_setup.grade == _SQ_SETUP:
+                    _sq_cb = _sq_call_board(_sq_rows, _sq_sym, width=WIDTH)
+                    if _sq_cb:
+                        print(_sq_cb)
+                    else:
+                        print(ui.kv_line("Note", fmt.style(
+                            "no calls passed the scan filters — the squeeze long side needs a manual chain look",
+                            "warn")))
+        except Exception as _sq_exc:
+            logging.getLogger(__name__).debug("squeeze read skipped: %s", _sq_exc)
 
     # Phase 4: Executive Summary
     if verbose and HAS_ENHANCED_CLI and not picks.empty:
@@ -4174,7 +4214,7 @@ def main():
     parser.add_argument("--viz", action="store_true", help="Launch interactive 3D visualizer in browser after scan")
     parser.add_argument("--auto", action="store_true", help="Skip interactive prompts, use config defaults")
     parser.add_argument("--compact", action="store_true", help="Compact per-pick output (3 lines per pick)")
-    parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist", "lottery"], help="Scan mode (skip mode menu)")
+    parser.add_argument("--mode", type=str, default=None, choices=["ticker", "all", "discover", "sell", "spreads", "iron", "portfolio", "mylist", "lottery", "squeeze"], help="Scan mode (skip mode menu)")
     parser.add_argument("--ticker", type=str, default=None, metavar="SYM", help="Ticker symbol (implies --mode ticker)")
     parser.add_argument("--weights", type=str, default=None, metavar="NAME", help="Weight profile name (in configs/weights/) or path to a JSON file; tags logged trades with the profile id")
     parser.add_argument("--auto-log", action="store_true", help="Skip the save-menu prompt and automatically log top-N picks to paper_trades.db")
@@ -4483,6 +4523,7 @@ def main():
                 ("8", "MY LIST",   _wl_desc),
                 ("9", "LOTTERY",   "Lottery Ticket \u2014 far-OTM plays on extreme moves"),
                 ("10", "INTEL",    "Intel Briefing \u2014 everything before you buy + what to do"),
+                ("11", "SQUEEZE",  "Short-squeeze setups \u2014 high-short-float candidates"),
                 ("Q", "QUIT",      "Exit the screener"),
             ]
             for num, cmd, desc in modes:
@@ -4503,6 +4544,7 @@ def main():
             print(f"  [8] MY LIST    \u2014 {_wl_desc}")
             print("  [9] LOTTERY    \u2014 Lottery Ticket: far-OTM plays on extreme moves")
             print("  [10] INTEL     \u2014 Intel Briefing: everything before you buy + what to do")
+            print("  [11] SQUEEZE   \u2014 Short-squeeze setups (high short interest)")
             print("  [Q] QUIT       \u2014 Exit the screener")
         print()
 
@@ -4511,7 +4553,7 @@ def main():
             "ticker": "TICKER", "all": "ALL", "discover": "DISCOVER",
             "sell": "SELL", "spreads": "SPREADS", "iron": "IRON",
             "portfolio": "PORTFOLIO", "mylist": "MY LIST",
-            "lottery": "LOTTERY", "intel": "INTEL",
+            "lottery": "LOTTERY", "intel": "INTEL", "squeeze": "SQUEEZE",
         }
         if args.ticker:
             symbol_input = args.ticker.upper()
@@ -4554,7 +4596,7 @@ def main():
         # ── Number → command mapping ──────────────────────────────────────────────
         _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
                     "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST",
-                    "9": "LOTTERY", "10": "INTEL"}
+                    "9": "LOTTERY", "10": "INTEL", "11": "SQUEEZE"}
         if symbol_input in _num_map:
             symbol_input = _num_map[symbol_input]
 
@@ -4590,6 +4632,7 @@ def main():
         is_credit_spread_mode = (symbol_input == "SPREADS")
         is_iron_condor_mode = (symbol_input == "IRON")
         is_lottery_mode = (symbol_input == "LOTTERY")
+        is_squeeze_mode = (symbol_input == "SQUEEZE")
 
         if is_my_list_mode:
             mode = "Discovery scan"
@@ -4605,6 +4648,8 @@ def main():
             mode = "Iron Condor"
         elif is_lottery_mode:
             mode = "Lottery Ticket"
+        elif is_squeeze_mode:
+            mode = "Squeeze Hunt"
         else:
             mode = "Single-stock"
 
@@ -4620,6 +4665,11 @@ def main():
         elif is_lottery_mode:
             tickers = prompt_for_tickers()
             print(f"  Scanning {len(tickers)} tickers for lottery ticket setups: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+        elif is_squeeze_mode:
+            from src.squeeze.universe import get_squeeze_universe
+            print("  Sourcing high-short-float candidates from Finviz (Float Short > 20%)...")
+            tickers = get_squeeze_universe(max_tickers=15)
+            print(f"  Scanning {len(tickers)} squeeze candidates: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
         elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
             tickers = prompt_for_tickers()
             print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
@@ -4724,6 +4774,27 @@ def main():
 
                 picks = scan_results.picks
 
+                # ── Squeeze Hunt summary board (display-only) ─────────────────
+                if mode == "Squeeze Hunt" and not picks.empty and "symbol" in picks.columns:
+                    try:
+                        from src.squeeze.board import squeeze_scan_board as _sq_scan_board
+                        from src.squeeze.detector import assess_squeeze_row as _sq_assess_row
+                        _sq_per = []
+                        for _sq_sym, _sq_grp in picks.groupby(picks["symbol"].astype(str)):
+                            _sq_s = _sq_assess_row(_sq_grp.iloc[0].to_dict())
+                            _sq_calls = _sq_grp[_sq_grp["type"] == "call"]
+                            _sq_best = None
+                            if not _sq_calls.empty and "quality_score" in _sq_calls.columns:
+                                _sq_r = _sq_calls.sort_values("quality_score", ascending=False).iloc[0]
+                                _sq_best = (f"${_sq_r.get('strike'):g}C "
+                                            f"{str(_sq_r.get('expiration', ''))[:10]}")
+                            _sq_per.append({"ticker": _sq_sym, "setup": _sq_s,
+                                            "best_call": _sq_best})
+                        if _sq_per:
+                            print("\n" + _sq_scan_board(_sq_per, width=WIDTH))
+                    except Exception as _sqb_exc:
+                        logging.getLogger(__name__).debug("squeeze board skipped: %s", _sqb_exc)
+
                 # ── AI Analysis ────────────────────────────────────────────────
                 _ai_ranked = None
                 if not picks.empty and not getattr(args, 'no_ai', False):
@@ -4792,7 +4863,7 @@ def main():
                         logger.warning("lottery sleeve auto-log failed: %s", _lot_exc)
 
                 # ── Auto-log mode: bypass interactive save menu ──────────────────
-                if _has_results and getattr(args, "auto_log", False) and mode != "Lottery Ticket":
+                if _has_results and getattr(args, "auto_log", False) and mode not in ("Lottery Ticket", "Squeeze Hunt"):
                     # Pick exactly one result source — prefer single-leg picks, otherwise
                     # the first non-empty spread/condor DF that the scan produced.
                     _log_src = picks if not picks.empty else (
