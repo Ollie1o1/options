@@ -126,6 +126,21 @@ class TestHandleCommand(unittest.TestCase):
         plan, _ = self._run("REMOVE MU", plan)
         self.assertEqual(plan.names, [])
 
+    def test_remove_rejected_when_shares_held(self):
+        plan, _ = self._run("ADD MU 750", P.Plan(5000.0, []))
+        plan, _ = self._run("FILL MU 750 2.5 748.20", plan)
+        plan2, msg = self._run("REMOVE MU", plan)
+        self.assertEqual([n.ticker for n in plan2.names], ["MU"])  # not removed
+        self.assertIn("MU", msg)
+        self.assertIn("held", msg.lower())
+        self.assertEqual(F.book(db_path=self.db)["MU"]["shares"], 2.5)  # fills untouched
+
+    def test_remove_allowed_with_zero_shares(self):
+        plan, _ = self._run("ADD MU 750", P.Plan(5000.0, []))
+        plan, msg = self._run("REMOVE MU", plan)
+        self.assertEqual(plan.names, [])
+        self.assertIn("removed", msg.lower())
+
     def test_garbage_returns_grammar_help(self):
         plan, msg = self._run("FROB MU", P.Plan(0.0, []))
         self.assertIn("ADD", msg)

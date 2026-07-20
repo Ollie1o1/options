@@ -179,6 +179,12 @@ def handle_command(line: str, plan: Plan, plan_path: str = _PLAN_PATH,
             return plan, fmt.style(f"{name.ticker} ladder replaced", "good")
         if verb == "REMOVE" and len(parts) == 2:
             ticker = parts[1].upper()
+            held = _book(db_path=db_path).get(ticker)
+            if held and held["shares"] > 0:
+                return plan, fmt.style(
+                    f"{ticker} has {held['shares']:g} shares held — can't remove from "
+                    f"the plan while holding a position; the ladder just won't alert "
+                    f"further once fully filled", "bad")
             plan.names = [n for n in plan.names if n.ticker != ticker]
             _save_plan(plan, plan_path)
             return plan, fmt.style(f"{ticker} removed (fill history kept)", "good")
