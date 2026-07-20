@@ -2,6 +2,7 @@
 
 Separate DB on purpose — zero schema-migration risk to paper_trades.db.
 A tranche is "filled" when a row here references its (ticker, level)."""
+import contextlib
 import datetime as _dt
 import os
 import sqlite3
@@ -32,13 +33,22 @@ class Fill:
     note: str
 
 
-def _conn(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
+@contextlib.contextmanager
+def _conn(db_path: str = DEFAULT_DB):
+    """Yield a sqlite3 connection; commits on success, rolls back on error, always closes."""
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute(_SCHEMA)
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def record_fill(ticker: str, level: float, shares: float, price: float,
