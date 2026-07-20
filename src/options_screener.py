@@ -104,6 +104,74 @@ def _spinner(label: str):
     return contextlib.nullcontext()
 
 
+def _print_via_spinner(label: str, fn, *args, **kwargs):
+    """Run a printing callable with a spinner over its slow gather phase.
+
+    The callable's stdout is captured into a buffer while the spinner animates
+    on the real terminal (the spinner binds sys.stdout at construction, before
+    the redirect), then emitted once the spinner clears — same pattern as the
+    startup regime render, so spinner frames and box output never interleave.
+    Partial output is still printed if the callable raises.
+    """
+    import io as _io
+    buf = _io.StringIO()
+    try:
+        with _spinner(label), contextlib.redirect_stdout(buf):
+            fn(*args, **kwargs)
+    finally:
+        out = buf.getvalue()
+        if out:
+            print(out, end="")
+
+
+# Hard wall-clock cap on the intel HTML report builders ([d] morning, [e]
+# research). Their network phase bounds itself (collect budget ~25s), but that
+# promise lives in Python-level thread joins — a wedged layer underneath (DNS,
+# a stuck disk, an import lock) has none, and on 2026-07-15 one froze the
+# intel menu indefinitely with no diagnostics. On overrun the builder thread
+# is abandoned (daemon), every thread's stack is dumped to _INTEL_HANG_LOG so
+# the next hang identifies itself, and the menu stays usable.
+_INTEL_BUILD_TIMEOUT_S = 90.0
+_INTEL_HANG_LOG = os.path.join("logs", "intel_hangs.log")
+
+
+def _build_report_bounded(label, fn, timeout_s=None, **kwargs):
+    """Run a report builder on a worker thread with a hard time cap.
+
+    Returns the builder's result, re-raises its exception, or returns None on
+    overrun (after logging all thread stacks to _INTEL_HANG_LOG)."""
+    import faulthandler
+    import queue
+    import threading as _t
+    if timeout_s is None:
+        timeout_s = _INTEL_BUILD_TIMEOUT_S
+    q = queue.Queue()
+
+    def _run():
+        try:
+            q.put(("ok", fn(**kwargs)))
+        except BaseException as exc:
+            q.put(("err", exc))
+
+    _t.Thread(target=_run, daemon=True).start()
+    try:
+        kind, val = q.get(timeout=timeout_s)
+    except queue.Empty:
+        try:
+            os.makedirs(os.path.dirname(_INTEL_HANG_LOG), exist_ok=True)
+            with open(_INTEL_HANG_LOG, "a") as f:
+                f.write("\n[{:%Y-%m-%d %H:%M:%S}] {} exceeded {:.0f}s; "
+                        "thread stacks:\n".format(datetime.now(), label,
+                                                  timeout_s))
+                faulthandler.dump_traceback(file=f)
+        except Exception:
+            pass
+        return None
+    if kind == "err":
+        raise val
+    return val
+
+
 # How long startup will WAIT for background exit-enforcement before showing the
 # menu. Exit enforcement (auto-closing positions past their stops) runs in a
 # daemon thread and is idempotent, so overrunning it is safe to leave running in
@@ -2822,16 +2890,26 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
 
 
 def _open_briefing_file(path: str) -> None:
-    """Open a written briefing in the default browser. Never raises."""
+    """Open a written briefing in the default browser. Never raises or hangs.
+
+    macOS `open` blocks on LaunchServices; when that (or the browser) is
+    wedged it can sit forever, and check=False used to swallow refusals — the
+    report existed but nothing appeared on screen. Bound it and always leave
+    the user a path they can open by hand."""
     try:
         if sys.platform == "darwin":
             import subprocess
-            subprocess.run(["open", path], check=False)
+            res = subprocess.run(["open", path], check=False, timeout=10)
+            if res.returncode != 0:
+                print(f"  Could not auto-open — view it at: {os.path.abspath(path)}")
         else:
             import webbrowser
             webbrowser.open("file://" + os.path.abspath(path))
     except Exception:
-        pass
+        try:
+            print(f"  Could not auto-open — view it at: {os.path.abspath(path)}")
+        except Exception:
+            pass
 
 
 def _run_intel_menu() -> None:
@@ -2865,13 +2943,17 @@ def _run_intel_menu() -> None:
             return
         elif choice in ("c", "macro", "pulse", "3", "p"):
             try:
-                from src.macro_pulse import run as _macro_run
-                print(_macro_run())
+                from src import macro_pulse as _macro
+                with _spinner("Building macro pulse (news + calendar fetch)…"):
+                    pulse = _macro.run()
+                print(pulse)
             except Exception as exc:
                 print(_uikit.error_line(f"Could not build macro pulse: {exc}"))
         elif choice in ("a", "market", "1", "m"):
             try:
-                _market.print_market_overview(get_display_width())
+                _print_via_spinner("Gathering market overview (regime + movers)…",
+                                   _market.print_market_overview,
+                                   get_display_width())
             except Exception as exc:
                 print(_uikit.error_line(f"Could not render market overview: {exc}"))
         elif choice in ("b", "ticker", "2", "t"):
@@ -2880,17 +2962,24 @@ def _run_intel_menu() -> None:
                 print(_uikit.error_line("No valid ticker entered."))
             else:
                 try:
-                    _brief.print_briefing(sym)
+                    _print_via_spinner(f"Building {sym} briefing (chain + news fetch)…",
+                                       _brief.print_briefing, sym)
                 except Exception as exc:
                     print(_uikit.error_line(f"Could not build briefing for {sym}: {exc}"))
         elif choice in ("d", "morning", "briefing", "4"):
             try:
                 import src.morning as _morning
-                from src import ui as _ui
-                with _ui.spinner("Building morning briefing (up to ~30s)"):
-                    html_path, _ = _morning.build_and_write()
-                print(f"  Briefing written: {html_path}")
-                _open_briefing_file(html_path)
+                with _uikit.spinner("Building morning briefing (up to ~30s)"):
+                    result = _build_report_bounded("morning briefing",
+                                                   _morning.build_and_write)
+                if result is None:
+                    print(_uikit.error_line(
+                        f"Morning briefing stalled past {_INTEL_BUILD_TIMEOUT_S:.0f}s "
+                        f"— abandoned; thread stacks in {_INTEL_HANG_LOG}"))
+                else:
+                    html_path, _ = result
+                    print(f"  Briefing written: {html_path}")
+                    _open_briefing_file(html_path)
             except Exception as exc:
                 print(_uikit.error_line(f"Could not build morning briefing: {exc}"))
         elif choice in ("e", "desk", "research", "5"):
@@ -2903,9 +2992,17 @@ def _run_intel_menu() -> None:
             try:
                 from src import research as _research
                 with _uikit.spinner("Building research desk (up to ~30s)"):
-                    html_path, _ = _research.build_and_write(symbol=sym or None)
-                print(f"  Research desk written: {html_path}")
-                _open_briefing_file(html_path)
+                    result = _build_report_bounded("research desk",
+                                                   _research.build_and_write,
+                                                   symbol=sym or None)
+                if result is None:
+                    print(_uikit.error_line(
+                        f"Research desk stalled past {_INTEL_BUILD_TIMEOUT_S:.0f}s "
+                        f"— abandoned; thread stacks in {_INTEL_HANG_LOG}"))
+                else:
+                    html_path, _ = result
+                    print(f"  Research desk written: {html_path}")
+                    _open_briefing_file(html_path)
             except Exception as exc:
                 print(_uikit.error_line(f"Could not build research desk: {exc}"))
         else:
