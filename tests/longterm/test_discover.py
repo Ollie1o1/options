@@ -52,9 +52,20 @@ class TestUniverse(unittest.TestCase):
                          or mocked.call_args.args[2], 7)
 
     def test_empty_result_on_fetch_failure_does_not_raise(self):
-        # finviz_tickers itself never raises (degrades to [] internally) —
-        # confirm universe() doesn't add its own crash path on top.
+        # finviz_tickers can itself return [] (e.g. a genuinely empty
+        # screen) — confirm universe() passes that straight through.
         with mock.patch("src.squeeze.universe.finviz_tickers", return_value=[]):
+            result = DSC.universe("BANKS")
+        self.assertEqual(result, [])
+
+    def test_raising_finviz_fetch_degrades_to_empty_list_not_raise(self):
+        # finviz_tickers has NO try/except of its own around its network
+        # calls (unlike get_squeeze_universe, which wraps a call to it) —
+        # a live Finviz failure raises straight out of finviz_tickers.
+        # universe() must catch that itself and degrade to [], never
+        # propagate, so a live-network hiccup can't crash the launcher.
+        with mock.patch("src.squeeze.universe.finviz_tickers",
+                        side_effect=RuntimeError("connection reset")):
             result = DSC.universe("BANKS")
         self.assertEqual(result, [])
 

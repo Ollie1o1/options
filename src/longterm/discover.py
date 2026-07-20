@@ -17,11 +17,14 @@ behavior, not forecasts. Insider buying and fundamentals are descriptive
 context, not a "buy signal" — a name can show every positive sign here and
 still be a value trap.
 """
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from .plan import Tranche
 from .zones import Snapshot
+
+logger = logging.getLogger(__name__)
 
 # Mid-cap-or-larger, average volume > 200k shares/day, US-listed — screens out
 # illiquid and penny-stock noise before anything else runs. Every sector
@@ -53,8 +56,13 @@ def universe(sector_keyword: str, limit: int = 30) -> List[str]:
     Raises ValueError (with the valid keyword list) for an unrecognized
     keyword — a typo should never silently scan the wrong thing or an empty
     universe. A recognized keyword whose live Finviz fetch fails returns an
-    empty list rather than raising (finviz_tickers's own contract), so the
-    caller can distinguish "bad input" from "the network is down right now."
+    empty list rather than raising: unlike get_squeeze_universe() in
+    src/squeeze/universe.py, finviz_tickers() itself has NO try/except of
+    its own around its network calls, so this function wraps the call
+    directly and degrades to [] on any Exception, so the caller can
+    distinguish "bad input" (ValueError) from "the network is down right
+    now" ([] — a legitimate scan result caller code already treats as "no
+    candidates").
     """
     from src.squeeze.universe import finviz_tickers
 
@@ -63,7 +71,12 @@ def universe(sector_keyword: str, limit: int = 30) -> List[str]:
     if f_params is None:
         valid = ", ".join(sorted(SECTOR_FILTERS))
         raise ValueError(f"unknown sector {sector_keyword!r} — valid: {valid}")
-    return finviz_tickers(f_params, order="-averagevolume", limit=limit)
+    try:
+        return finviz_tickers(f_params, order="-averagevolume", limit=limit)
+    except Exception as exc:
+        logger.warning("Finviz fetch failed for sector %s (%s); returning empty universe",
+                       keyword, exc)
+        return []
 
 
 # Fallback ladder steps when a name has too little history for real support
