@@ -182,5 +182,86 @@ class TestSuggestLadder(unittest.TestCase):
             self.assertAlmostEqual(t.weight, 1.0 / 3, places=6)
 
 
+class TestDeepContext(unittest.TestCase):
+    def test_insider_read_returns_none_without_cik(self):
+        with mock.patch("src.insider.edgar.cik_for", return_value=None):
+            result = DSC._insider_read("ZZZZ")
+        self.assertIsNone(result)
+
+    def test_insider_read_wires_cluster_score(self):
+        fake_score = {"n_buyers": 2, "score": 0.85, "label": "CLUSTER BUY"}
+        with mock.patch("src.insider.edgar.cik_for", return_value=12345), \
+             mock.patch("src.insider.edgar.recent_form4",
+                        return_value=[{"accession": "a", "document": "d", "filed": "2026-07-01"}]), \
+             mock.patch("src.insider.edgar.fetch_form4_xml", return_value="<xml/>"), \
+             mock.patch("src.insider.parse.parse_form4", return_value=[{"code": "P"}]), \
+             mock.patch("src.insider.signal.cluster_score", return_value=fake_score):
+            result = DSC._insider_read("MU")
+        self.assertEqual(result, fake_score)
+
+    def test_insider_read_degrades_on_exception(self):
+        with mock.patch("src.insider.edgar.cik_for", side_effect=RuntimeError("boom")):
+            result = DSC._insider_read("MU")
+        self.assertIsNone(result)
+
+    def test_earnings_read_none_without_key(self):
+        # resolve_api_key returns None with no FINNHUB_API_KEY/config — the
+        # real next_earnings_date already returns None in that case; confirm
+        # this wrapper doesn't crash and passes that through.
+        with mock.patch("src.earnings_provider.resolve_api_key", return_value=None), \
+             mock.patch("src.earnings_provider.next_earnings_date", return_value=None):
+            result = DSC._earnings_read("MU")
+        self.assertIsNone(result)
+
+    def test_earnings_read_converts_datetime_to_days(self):
+        import datetime as dt
+        future = dt.datetime.combine(dt.date.today() + dt.timedelta(days=12),
+                                     dt.time())
+        with mock.patch("src.earnings_provider.resolve_api_key", return_value="k"), \
+             mock.patch("src.earnings_provider.next_earnings_date", return_value=future):
+            result = DSC._earnings_read("MU")
+        self.assertEqual(result, 12)
+
+    def test_fundamentals_read_extracts_named_fields_only(self):
+        fake_info = {
+            "trailingPE": 18.2, "forwardPE": 15.1, "profitMargins": 0.22,
+            "revenueGrowth": 0.11, "earningsGrowth": 0.08, "returnOnEquity": 0.31,
+            "irrelevantField": "should not appear",
+        }
+        fake_ticker = mock.MagicMock()
+        fake_ticker.info = fake_info
+        with mock.patch("yfinance.Ticker", return_value=fake_ticker):
+            result = DSC._fundamentals_read("MU")
+        self.assertEqual(result, {
+            "trailingPE": 18.2, "forwardPE": 15.1, "profitMargins": 0.22,
+            "revenueGrowth": 0.11, "earningsGrowth": 0.08, "returnOnEquity": 0.31,
+        })
+        self.assertNotIn("irrelevantField", result)
+
+    def test_fundamentals_read_degrades_on_exception(self):
+        with mock.patch("yfinance.Ticker", side_effect=RuntimeError("timeout")):
+            result = DSC._fundamentals_read("MU")
+        self.assertIsNone(result)
+
+    def test_deep_context_combines_all_three_independently(self):
+        with mock.patch.object(DSC, "_insider_read", return_value={"score": 0.8}), \
+             mock.patch.object(DSC, "_earnings_read", return_value=5), \
+             mock.patch.object(DSC, "_fundamentals_read", return_value={"trailingPE": 20.0}):
+            result = DSC.deep_context("MU")
+        self.assertEqual(result.ticker, "MU")
+        self.assertEqual(result.insider, {"score": 0.8})
+        self.assertEqual(result.earnings_days, 5)
+        self.assertEqual(result.fundamentals, {"trailingPE": 20.0})
+
+    def test_deep_context_survives_one_source_failing(self):
+        with mock.patch.object(DSC, "_insider_read", side_effect=RuntimeError("boom")), \
+             mock.patch.object(DSC, "_earnings_read", return_value=5), \
+             mock.patch.object(DSC, "_fundamentals_read", return_value={"trailingPE": 20.0}):
+            result = DSC.deep_context("MU")
+        self.assertIsNone(result.insider)
+        self.assertEqual(result.earnings_days, 5)
+        self.assertEqual(result.fundamentals, {"trailingPE": 20.0})
+
+
 if __name__ == "__main__":
     unittest.main()
