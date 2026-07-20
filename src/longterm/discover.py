@@ -273,7 +273,7 @@ def _fundamentals_read(ticker: str) -> Optional[Dict[str, Any]]:
 
     try:
         info = yf.Ticker(ticker).info
-        return {field: info.get(field) for field in _FUNDAMENTALS_FIELDS}
+        return {name: info.get(name) for name in _FUNDAMENTALS_FIELDS}
     except Exception:
         return None
 
