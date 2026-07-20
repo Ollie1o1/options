@@ -1,11 +1,16 @@
 """Tests for the desk-kit holdings report (pure render over fixture sidecar)."""
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+from src.longterm import fills as F
+from src.longterm import plan as P
 from src.longterm import report as R
+from src.longterm.zones import Snapshot
 
 
 def sidecar():
@@ -60,6 +65,44 @@ class TestWrite(unittest.TestCase):
             self.assertTrue(os.path.exists(json_path))
             self.assertTrue(os.path.exists(os.path.join(out_dir, "latest.html")))
             self.assertTrue(os.path.exists(os.path.join(tmp, "reports", "index.html")))
+
+
+class TestBuildPartialFetchFailure(unittest.TestCase):
+    """A held ticker whose snapshot fetch fails (realistic transient
+    yfinance error — data.fetch_snapshots simply omits it from the returned
+    dict) must be excluded from BOTH sides of the P&L calc, not just the
+    market-value side. Regression for a bug where cost was summed
+    unconditionally over every held ticker while book_value only summed
+    tickers with a live snapshot, silently understating unrealized_pnl by
+    the failed ticker's full cost basis."""
+
+    def test_cost_excludes_positions_with_failed_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_path = os.path.join(tmp, "plan.json")
+            db_path = os.path.join(tmp, "longterm.db")
+            plan = P.Plan(cash_pool_usd=1000.0, names=[
+                P.PlanName("A", [P.Tranche(100.0, 1.0)], thesis="a"),
+                P.PlanName("B", [P.Tranche(50.0, 1.0)], thesis="b"),
+            ])
+            P.save_plan(plan, plan_path)
+            F.record_fill("A", 100.0, 2.0, 100.0, db_path=db_path)  # cost 200
+            F.record_fill("B", 50.0, 3.0, 50.0, db_path=db_path)    # cost 150
+
+            snap_a = Snapshot(ticker="A", spot=150.0, high_52w=160.0,
+                              low_52w=90.0, ma200=120.0, daily_sigma=0.02,
+                              closes=[100.0 + i for i in range(40)])
+            # B "fails" — absent from the returned dict, exactly like
+            # data.fetch_snapshots does on a per-ticker exception.
+            with mock.patch("src.longterm.data.fetch_snapshots",
+                            return_value={"A": snap_a}):
+                data = R.build(plan_path=plan_path, db_path=db_path)
+
+            self.assertEqual(data["book_value"], 300.0)      # A only: 2 * 150
+            # A's unrealized P&L is 300 - 200 = 100. If B's $150 cost leaked
+            # into the total with no matching market value, this would be
+            # -50 instead — a phantom $150 loss on a position that simply
+            # has no price data this run.
+            self.assertEqual(data["unrealized_pnl"], 100.0)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ def build(plan_path: str = PLAN_PATH, db_path: str = DEFAULT_DB) -> dict:
     today = _dt.date.today().isoformat()
     names = []
     book_value = 0.0
+    cost = 0.0
     for n in plan.names:
         snap = snaps.get(n.ticker)
         filled = filled_levels(n.ticker, db_path=db_path)
@@ -37,8 +38,15 @@ def build(plan_path: str = PLAN_PATH, db_path: str = DEFAULT_DB) -> dict:
         ma200 = [sum(closes[max(0, i - 199):i + 1]) / min(i + 1, 200)
                  for i in range(len(closes))] if closes else []
         slot = held.get(n.ticker)
+        # book_value and cost must move together: a snapshot-fetch failure
+        # (transient yfinance error, realistic — see feedback_fetch_failure_ux)
+        # must drop a held position from BOTH sides of the P&L calc, not just
+        # skip its market value while still counting its cost basis — that
+        # would silently understate unrealized_pnl by the full cost of the
+        # position with no signal anything was wrong.
         if slot and snap:
             book_value += slot["shares"] * snap.spot
+            cost += slot["cost"]
         names.append({
             "ticker": n.ticker, "thesis": n.thesis,
             "spot": snap.spot if snap else None,
@@ -57,7 +65,6 @@ def build(plan_path: str = PLAN_PATH, db_path: str = DEFAULT_DB) -> dict:
             # analysis, so blank labels beat a wrong date repeated 252 times.
             "labels": [""] * len(closes),
         })
-    cost = sum((s or {}).get("cost", 0.0) for s in held.values())
     return {"meta": {"sidecar": today + ".json",
                      "generated": _dt.datetime.now().isoformat(timespec="seconds")},
             "cash": {"pool": plan.cash_pool_usd, "deployed": deployed,

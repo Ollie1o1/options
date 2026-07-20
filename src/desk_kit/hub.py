@@ -17,6 +17,7 @@ _SECTIONS = (
     ("briefings", "Morning briefings", "briefing"),
     ("research", "Research desk", "research report"),
     ("tearsheets", "Tearsheets", "tearsheet"),
+    ("holdings", "Holdings", "holdings report"),
 )
 _SKIP = {"latest.html", "index.html"}
 
