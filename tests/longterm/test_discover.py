@@ -263,5 +263,112 @@ class TestDeepContext(unittest.TestCase):
         self.assertEqual(result.fundamentals, {"trailingPE": 20.0})
 
 
+from src.longterm.discover import CandidateRead, DeepRead
+
+
+def _candidate(ticker="MU", drawdown=-32.4, spot=760.0):
+    return CandidateRead(
+        ticker=ticker, spot=spot, drawdown_pct=drawdown,
+        ma200_distance_pct=-8.5, momentum_12_1=-0.18,
+        supports=[{"label": "200d MA", "level": 700.0, "pct": -0.079}],
+        bounce={"trailing_return": -0.15, "lookback_days": 5,
+               "by_horizon": {20: {"n": 41, "bounce_rate": 0.65,
+                                   "median": 0.04, "p25": -0.02, "p75": 0.09}}},
+        suggested_ladder=[],
+    )
+
+
+class TestInsightLine(unittest.TestCase):
+    def test_includes_ticker_and_drawdown(self):
+        line = DSC.insight_line(_candidate(), None)
+        self.assertIn("MU", line)
+        self.assertIn("32", line)  # drawdown magnitude appears
+
+    def test_includes_nearest_support_label(self):
+        line = DSC.insight_line(_candidate(), None)
+        self.assertIn("200d MA", line)
+
+    def test_includes_bounce_odds_with_sample_size(self):
+        line = DSC.insight_line(_candidate(), None)
+        self.assertIn("41", line)  # n= is present, not hidden
+
+    def test_none_deep_read_omits_deep_clauses_without_crashing(self):
+        line = DSC.insight_line(_candidate(), None)
+        self.assertIsInstance(line, str)
+        self.assertNotIn("None", line)  # no raw None leaking into the sentence
+
+    def test_partial_deep_read_omits_only_missing_fields(self):
+        deep = DeepRead(ticker="MU", insider={"n_buyers": 2, "buy_value": 340_000.0,
+                                              "label": "CLUSTER BUY"},
+                        earnings_days=None, fundamentals=None)
+        line = DSC.insight_line(_candidate(), deep)
+        self.assertIn("insider", line.lower())
+        self.assertNotIn("None", line)
+
+    def test_full_deep_read_includes_all_clauses(self):
+        deep = DeepRead(
+            ticker="MU",
+            insider={"n_buyers": 2, "buy_value": 340_000.0, "label": "CLUSTER BUY"},
+            earnings_days=12,
+            fundamentals={"trailingPE": 18.0, "forwardPE": 15.0,
+                         "profitMargins": 0.22, "revenueGrowth": 0.11,
+                         "earningsGrowth": 0.08, "returnOnEquity": 0.31},
+        )
+        line = DSC.insight_line(_candidate(), deep)
+        self.assertIn("12", line)     # earnings days
+        self.assertIn("18", line)     # P/E
+        self.assertIn("340", line)    # insider buy value (in thousands or raw)
+
+
+class TestScan(unittest.TestCase):
+    def test_ranks_by_drawdown_most_negative_first(self):
+        from src.longterm.zones import Snapshot
+
+        def snap(ticker, spot, high):
+            return Snapshot(ticker=ticker, spot=spot, high_52w=high, low_52w=spot * 0.9,
+                            ma200=spot, daily_sigma=0.02, closes=[spot] * 60)
+
+        snaps = {
+            "AAA": snap("AAA", 90.0, 100.0),   # -10%
+            "BBB": snap("BBB", 60.0, 100.0),   # -40%
+            "CCC": snap("CCC", 80.0, 100.0),   # -20%
+        }
+        with mock.patch.object(DSC, "universe", return_value=list(snaps)), \
+             mock.patch("src.longterm.data.fetch_snapshots", return_value=snaps), \
+             mock.patch.object(DSC, "deep_context",
+                               side_effect=lambda t: DeepRead(ticker=t)):
+            results = DSC.scan("TECH", universe_limit=10, board_limit=10, deep_limit=2)
+        tickers_in_order = [c.ticker for c, _ in results]
+        self.assertEqual(tickers_in_order, ["BBB", "CCC", "AAA"])
+
+    def test_deep_read_only_for_deep_limit_candidates(self):
+        from src.longterm.zones import Snapshot
+
+        def snap(ticker, spot):
+            return Snapshot(ticker=ticker, spot=spot, high_52w=100.0, low_52w=spot * 0.9,
+                            ma200=spot, daily_sigma=0.02, closes=[spot] * 60)
+
+        snaps = {t: snap(t, 100.0 - i) for i, t in enumerate(["A", "B", "C", "D"])}
+        with mock.patch.object(DSC, "universe", return_value=list(snaps)), \
+             mock.patch("src.longterm.data.fetch_snapshots", return_value=snaps), \
+             mock.patch.object(DSC, "deep_context",
+                               side_effect=lambda t: DeepRead(ticker=t)) as mocked_deep:
+            results = DSC.scan("TECH", universe_limit=10, board_limit=10, deep_limit=2)
+        deep_present = [deep is not None for _, deep in results]
+        self.assertEqual(deep_present, [True, True, False, False])
+        self.assertEqual(mocked_deep.call_count, 2)
+
+    def test_missing_snapshot_for_a_universe_ticker_is_skipped_not_crashed(self):
+        from src.longterm.zones import Snapshot
+        snaps = {"A": Snapshot(ticker="A", spot=90.0, high_52w=100.0, low_52w=80.0,
+                               ma200=90.0, daily_sigma=0.02, closes=[90.0] * 60)}
+        with mock.patch.object(DSC, "universe", return_value=["A", "MISSING"]), \
+             mock.patch("src.longterm.data.fetch_snapshots", return_value=snaps), \
+             mock.patch.object(DSC, "deep_context",
+                               side_effect=lambda t: DeepRead(ticker=t)):
+            results = DSC.scan("TECH")
+        self.assertEqual([c.ticker for c, _ in results], ["A"])
+
+
 if __name__ == "__main__":
     unittest.main()

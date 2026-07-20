@@ -18,7 +18,7 @@ context, not a "buy signal" — a name can show every positive sign here and
 still be a value trap.
 """
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .plan import Tranche
 from .zones import Snapshot
@@ -308,3 +308,129 @@ def deep_context(ticker: str) -> DeepRead:
         earnings_days=earnings_days,
         fundamentals=fundamentals,
     )
+
+
+def _fmt_pct(value: Optional[float], from_fraction: bool = False) -> str:
+    """Consistent %-sign formatting for the narrative; 'n/a' for None.
+
+    Args:
+      value: a percent already (e.g. -8.5) unless from_fraction is True, in
+        which case it's a fraction (e.g. 0.22 == 22%) as yfinance reports
+        margins/growth/ROE.
+    """
+    if value is None:
+        return "n/a"
+    pct = value * 100.0 if from_fraction else value
+    return f"{pct:+.0f}%"
+
+
+# Default cluster_score() window (see src/insider/signal.py and
+# _insider_read's own call above); used only as a fallback label if an
+# insider dict predates the "window_days" key, so the sentence never claims
+# a window it didn't actually measure.
+_DEFAULT_INSIDER_WINDOW_DAYS = 90
+
+
+def insight_line(candidate: CandidateRead, deep: Optional[DeepRead]) -> str:
+    """One synthesized sentence per candidate. Every clause traces to a
+    concrete field on `candidate`/`deep` — no clause is invented, and a
+    missing deep-tier field simply drops its clause rather than printing a
+    placeholder ('None' must never appear in the returned string).
+
+    Never claims predictive edge: bounce odds are labeled as a historical
+    base rate with its sample size (n=), never a forecast; insider activity
+    and fundamentals are descriptive context, never framed as a
+    recommendation or a "buy signal".
+
+    Args:
+      candidate: this ticker's free-tier context (always present).
+      deep: this ticker's bounded-cost context, or None if it wasn't in the
+        deep-tier count for this scan (see scan()).
+
+    Returns:
+      A single "; "-joined sentence ending in ".". Clause count varies from
+      1 (drawdown only, no supports/bounce data, no deep tier) up to 5 (all
+      fast-tier clauses present plus all three deep-tier clauses).
+    """
+    clauses = [f"{candidate.ticker}: {candidate.drawdown_pct:+.0f}% off ATH"]
+
+    if candidate.supports:
+        nearest = candidate.supports[0]  # nearest-first, see CandidateRead docstring
+        clauses.append(f"${candidate.spot:,.0f} ≈ {nearest['label']} support")
+
+    horizons = (candidate.bounce or {}).get("by_horizon") or {}
+    twenty_day = horizons.get(20)
+    if twenty_day and twenty_day.get("n"):
+        rate = twenty_day["bounce_rate"]
+        n = twenty_day["n"]
+        clauses.append(
+            f"historically finished higher {rate * 100:.0f}% of the time "
+            f"20 trading days after a drop this size (n={n})"
+        )
+
+    if deep and deep.insider and deep.insider.get("label") not in (None, "NONE"):
+        buyers = deep.insider.get("n_buyers", 0)
+        value = deep.insider.get("buy_value", 0.0)
+        window = deep.insider.get("window_days", _DEFAULT_INSIDER_WINDOW_DAYS)
+        clauses.append(
+            f"insiders bought ${value:,.0f} across {buyers} buyer"
+            f"{'s' if buyers != 1 else ''} in the last {window}d"
+        )
+
+    if deep and deep.earnings_days is not None:
+        clauses.append(f"earnings in {deep.earnings_days} days")
+
+    if deep and deep.fundamentals:
+        pe = deep.fundamentals.get("trailingPE")
+        margin = deep.fundamentals.get("profitMargins")
+        if pe is not None:
+            margin_txt = (f", margins {_fmt_pct(margin, from_fraction=True)}"
+                          if margin is not None else "")
+            clauses.append(f"P/E {pe:.0f}{margin_txt}")
+
+    return "; ".join(clauses) + "."
+
+
+def scan(sector_keyword: str, universe_limit: int = 30, board_limit: int = 15,
+         deep_limit: int = 6) -> List[Tuple[CandidateRead, Optional[DeepRead]]]:
+    """Full discovery scan: universe -> one batched price fetch -> free
+    context for every candidate -> rank by drawdown -> bounded-cost deep
+    context for the top `deep_limit` ranked candidates.
+
+    Args:
+      sector_keyword: key into SECTOR_FILTERS (case-insensitive); see
+        universe()'s own contract for the ValueError on an unknown keyword.
+      universe_limit: how many tickers to pull from the sector screen before
+        any price data is fetched.
+      board_limit: how many ranked candidates to return in total (after the
+        drawdown sort); the "board" the caller renders.
+      deep_limit: how many of those ranked candidates (from the top,
+        i.e. most beaten-down first) get the extra, per-ticker deep_context()
+        network round-trips. deep_limit <= board_limit in normal use; a
+        larger deep_limit has no effect since only board_limit candidates
+        ever exist to deepen.
+
+    Returns:
+      A list of (CandidateRead, Optional[DeepRead]) pairs, length
+      <= board_limit, ordered most-beaten-down-first (ascending
+      drawdown_pct, i.e. most negative — the biggest drop — sorts first).
+      DeepRead is non-None only for the first `deep_limit` entries in that
+      order; every entry after that carries None rather than a stale or
+      empty DeepRead. A ticker returned by universe() with no snapshot (a
+      single failed fetch inside the one batched call) is silently skipped,
+      not raised — the scan degrades to "fewer candidates," never a crash,
+      matching the rest of this module's failure philosophy.
+    """
+    from .data import fetch_snapshots
+
+    tickers = universe(sector_keyword, limit=universe_limit)
+    snapshots = fetch_snapshots(tickers)
+    candidates = [fast_context(snapshots[t]) for t in tickers if t in snapshots]
+    candidates.sort(key=lambda c: c.drawdown_pct)
+    ranked = candidates[:board_limit]
+
+    results: List[Tuple[CandidateRead, Optional[DeepRead]]] = []
+    for i, candidate in enumerate(ranked):
+        deep = deep_context(candidate.ticker) if i < deep_limit else None
+        results.append((candidate, deep))
+    return results
