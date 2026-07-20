@@ -216,5 +216,37 @@ class TestResolveAddTarget(unittest.TestCase):
         self.assertEqual(resolved, "ADD MU 760/700")
 
 
+class TestDiscoverMenuWiring(unittest.TestCase):
+    """menu()'s D/DISCOVER branch and its ADD-by-index handoff to
+    handle_command are exercised together here since menu() itself is an
+    interactive input() loop (not unit-tested directly elsewhere in this
+    file either) — this proves the two pieces actually compose, which
+    neither test_discover.py nor the rest of test_board.py can prove alone.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_discover_then_add_by_index_lands_in_plan(self):
+        # Simulates the two-step flow menu() performs: run a scan, then
+        # resolve "ADD 1" against its results before handing off to the
+        # existing, already-tested handle_command.
+        candidate = _disc_candidate("MU")
+        last_results = [(candidate, None)]
+
+        resolved = B.resolve_add_target("ADD 1", last_results)
+        plan, msg = B.handle_command(resolved, P.Plan(5000.0, []),
+                                     plan_path=self.plan_path, db_path=self.db)
+
+        self.assertEqual(plan.names[0].ticker, "MU")
+        self.assertEqual([t.level for t in plan.names[0].tranches], [760.0, 700.0])
+        self.assertIn("MU", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

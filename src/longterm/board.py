@@ -338,6 +338,7 @@ def menu(width: int = 100) -> None:
     print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
     if not interactive:
         return
+    last_discovery: Optional[List[Tuple[CandidateRead, Optional[DeepRead]]]] = None
     while True:
         try:
             raw = input("\n  holdings> ").strip()
@@ -352,7 +353,29 @@ def menu(width: int = 100) -> None:
                 html_path, _ = write_report()
             print("  " + fmt.style(f"report written: {html_path}", "good"))
             continue
-        plan, msg = handle_command(raw, plan)
+        # Token-based verb match (mirrors handle_command's own parts[0].upper()
+        # idiom) rather than raw.upper().startswith("DISCOVER") — a prefix
+        # check would also fire on a mistyped/concatenated word like
+        # "DISCOVERSEMI" (verb "DISCOVERSEMI" != "DISCOVER", so it correctly
+        # falls through to the grammar-help message below instead).
+        parts = raw.split(None, 1)
+        verb = parts[0].upper() if parts else ""
+        if verb in ("D", "DISCOVER"):
+            arg = parts[1] if len(parts) > 1 else ""
+            if not arg:
+                print("  " + fmt.style(
+                    "usage: D <SECTOR>  e.g. D SEMICONDUCTORS", "label"))
+                continue
+            from .discover import scan
+            try:
+                with ui.spinner(f"scanning {arg.upper()}…"):
+                    last_discovery = scan(arg)
+                print(render_discover_board(last_discovery, arg, width=width))
+            except ValueError as exc:
+                print("  " + fmt.style(str(exc), "bad"))
+            continue
+        resolved = resolve_add_target(raw, last_discovery)
+        plan, msg = handle_command(resolved, plan)
         print("  " + msg)
         reads, held, remaining = _gather_cached(plan, snaps)
         print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
