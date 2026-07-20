@@ -9,6 +9,7 @@ from src import ui
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
+from .wizard import open_tranche_levels
 from .zones import FILLED, IN_ZONE, NEAR, WATCHING, ZoneRead
 
 _STATE_STYLE = {IN_ZONE: "good", NEAR: "warn", WATCHING: "muted", FILLED: "label"}
@@ -92,11 +93,8 @@ def render_board(plan: Plan, reads: List[ZoneRead], book: Dict[str, dict],
         lines.append("  " + f"  {fmt.style(fmt.GLYPHS['dot'], 'muted')}  ".join(head))
         if name.thesis:
             lines.append("    " + fmt.style(name.thesis, "muted"))
-        filled_here = set()
-        if r and r.next_level is not None:
-            filled_here = {t.level for t in name.tranches if t.level > r.next_level}
-        elif r and r.state == FILLED:
-            filled_here = {t.level for t in name.tranches}
+        open_levels = set(open_tranche_levels(name, r))
+        filled_here = {t.level for t in name.tranches} - open_levels
         for i, t in enumerate(name.tranches):
             joint = "└─" if i == len(name.tranches) - 1 else "├─"
             size = suggested_size(plan, name, t, remaining_usd)

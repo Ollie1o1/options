@@ -6,7 +6,10 @@ handle_command() already accepts. Keeping this pure (no I/O) means every
 piece of the guided menu's logic is unit-testable without mocking input().
 """
 import re
-from typing import List
+from typing import List, Optional
+
+from .plan import PlanName
+from .zones import FILLED, ZoneRead
 
 _LEVEL_SPLIT = re.compile(r"[,/\s]+")
 
@@ -51,3 +54,16 @@ def build_cash_command(amount: float) -> str:
 
 def build_fill_command(ticker: str, level: float, shares: float, price: float) -> str:
     return f"FILL {ticker.upper()} {_fmt_num(level)} {_fmt_num(shares)} {_fmt_num(price)}"
+
+
+def open_tranche_levels(name: PlanName, read: Optional[ZoneRead]) -> List[float]:
+    """Which of `name`'s tranche levels are still unfilled. Mirrors the
+    logic render_board() uses to mark tranches "filled": every level above
+    the current next-unfilled level is treated as already filled. This
+    assumes ladders fill top-down — an out-of-order manual FILL isn't
+    represented here, matching how render_board already renders it."""
+    if read is None:
+        return [t.level for t in name.tranches]
+    if read.state == FILLED or read.next_level is None:
+        return []
+    return [t.level for t in name.tranches if t.level <= read.next_level]

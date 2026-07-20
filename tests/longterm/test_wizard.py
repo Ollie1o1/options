@@ -6,6 +6,8 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.longterm import wizard as W
+from src.longterm import zones as Z
+from src.longterm.plan import PlanName, Tranche
 
 
 class TestParseLevels(unittest.TestCase):
@@ -56,6 +58,22 @@ class TestBuildCommands(unittest.TestCase):
     def test_fill_preserves_precision_with_existing_case(self):
         self.assertEqual(W.build_fill_command("mu", 750.0, 2.5, 748.20),
                          "FILL MU 750 2.5 748.2")
+
+
+class TestOpenTrancheLevels(unittest.TestCase):
+    def _name(self):
+        return PlanName("MU", [Tranche(750, 0.4), Tranche(650, 0.3), Tranche(550, 0.3)])
+
+    def test_no_read_means_everything_open(self):
+        self.assertEqual(W.open_tranche_levels(self._name(), None), [750.0, 650.0, 550.0])
+
+    def test_filled_state_means_nothing_open(self):
+        read = Z.ZoneRead("MU", Z.FILLED, 500.0, None, None, None, -30.0, True)
+        self.assertEqual(W.open_tranche_levels(self._name(), read), [])
+
+    def test_next_level_excludes_higher_filled_tranches(self):
+        read = Z.ZoneRead("MU", Z.NEAR, 660.0, 650.0, 1.5, 1.0, -12.0, True)
+        self.assertEqual(W.open_tranche_levels(self._name(), read), [650.0, 550.0])
 
 
 if __name__ == "__main__":
