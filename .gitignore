@@ -96,3 +96,7 @@ backups/
 
 # Superpowers brainstorming session artifacts
 .superpowers/
+
+# long-term holdings desk (personal)
+longterm_plan.json
+data/longterm.db
