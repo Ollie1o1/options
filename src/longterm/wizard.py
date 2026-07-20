@@ -23,3 +23,25 @@ def parse_levels(text: str) -> List[float]:
     except ValueError:
         raise ValueError(f"'{text}' isn't a list of prices — try e.g. 750, 650, 550")
     return sorted(levels, reverse=True)
+
+
+def build_add_command(ticker: str, levels: List[float]) -> str:
+    ladder = "/".join(f"{lvl:g}" for lvl in levels)
+    return f"ADD {ticker.upper()} {ladder}"
+
+
+def build_edit_command(ticker: str, levels: List[float]) -> str:
+    ladder = "/".join(f"{lvl:g}" for lvl in levels)
+    return f"EDIT {ticker.upper()} {ladder}"
+
+
+def build_remove_command(ticker: str) -> str:
+    return f"REMOVE {ticker.upper()}"
+
+
+def build_cash_command(amount: float) -> str:
+    return f"CASH {amount:g}"
+
+
+def build_fill_command(ticker: str, level: float, shares: float, price: float) -> str:
+    return f"FILL {ticker.upper()} {level:g} {shares:g} {price:g}"

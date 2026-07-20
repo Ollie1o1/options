@@ -33,5 +33,23 @@ class TestParseLevels(unittest.TestCase):
             W.parse_levels("cheap, cheaper")
 
 
+class TestBuildCommands(unittest.TestCase):
+    def test_add(self):
+        self.assertEqual(W.build_add_command("mu", [750.0, 650.0]), "ADD MU 750/650")
+
+    def test_edit(self):
+        self.assertEqual(W.build_edit_command("mu", [800.0, 700.0]), "EDIT MU 800/700")
+
+    def test_remove(self):
+        self.assertEqual(W.build_remove_command("mu"), "REMOVE MU")
+
+    def test_cash(self):
+        self.assertEqual(W.build_cash_command(6000), "CASH 6000")
+
+    def test_fill(self):
+        self.assertEqual(W.build_fill_command("mu", 750.0, 2.5, 748.20),
+                         "FILL MU 750 2.5 748.2")
+
+
 if __name__ == "__main__":
     unittest.main()
