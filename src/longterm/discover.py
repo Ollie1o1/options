@@ -132,10 +132,20 @@ class CandidateRead:
 
 def suggest_ladder(spot: float, supports: List[Any]) -> List[Tranche]:
     """A 3-tranche equal-weight ladder: spot, then up to 2 real support
-    levels strictly below spot (nearest first). Falls back to spot / -10% /
-    -20% when fewer than 2 valid supports are available (either because the
-    name lacks history, or because the caller passed levels that aren't
-    genuinely below spot).
+    levels strictly below spot (nearest first), preferring real levels over
+    synthetic percentage steps wherever at least one real level exists.
+
+    Exact behavior by how many valid supports (entries with "level" < spot)
+    are available:
+      0 supports -> full synthetic fallback: spot, spot*0.90, spot*0.80
+        (i.e. spot / -10% / -20%).
+      1 support  -> spot, that one real support, then a single synthetic
+        step below it: spot*0.80 (spot / -20%) — the real level is never
+        discarded; only the third tranche is synthetic, since there's no
+        second real level to use.
+      2+ supports -> spot plus the 2 nearest real supports below spot,
+        nearest first (the 3rd-nearest and beyond are ignored — this
+        function only ever returns 3 tranches).
 
     This is a starting point, never a prediction — every level here is
     editable before ADD.
@@ -151,8 +161,11 @@ def suggest_ladder(spot: float, supports: List[Any]) -> List[Tranche]:
     """
     below = sorted((s for s in supports if s["level"] < spot),
                    key=lambda s: -s["level"])[:_MAX_LADDER_SUPPORTS]
-    if len(below) < _MAX_LADDER_SUPPORTS:
+    if len(below) == 0:
         levels = [spot] + [spot * (1.0 + step) for step in _FALLBACK_STEPS[1:]]
+    elif len(below) == 1:
+        real_level = below[0]["level"]
+        levels = [spot, real_level, spot * (1.0 + _FALLBACK_STEPS[2])]
     else:
         levels = [spot] + [s["level"] for s in below]
     weight = 1.0 / len(levels)

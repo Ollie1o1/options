@@ -173,6 +173,17 @@ class TestSuggestLadder(unittest.TestCase):
         self.assertEqual(len(ladder), 3)
         self.assertEqual([t.level for t in ladder], [100.0, 95.0, 90.0])
 
+    def test_uses_single_real_support_when_only_one_available(self):
+        # Exactly one support below spot must be used, not discarded — it
+        # becomes the second tranche; the third falls back to one
+        # synthetic step (-20% from spot) since there's no second real
+        # level to use.
+        supports = [{"label": "50d MA", "level": 95.0, "pct": -0.05}]
+        ladder = DSC.suggest_ladder(100.0, supports)
+        levels = [t.level for t in ladder]
+        self.assertEqual(levels, [100.0, 95.0, 80.0])
+        self.assertIn(95.0, levels, "the one real support must not be discarded")
+
     def test_falls_back_to_percentage_steps_with_no_supports(self):
         ladder = DSC.suggest_ladder(100.0, [])
         levels = [t.level for t in ladder]
