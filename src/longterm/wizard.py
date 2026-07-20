@@ -11,6 +11,12 @@ from typing import List
 _LEVEL_SPLIT = re.compile(r"[,/\s]+")
 
 
+def _fmt_num(x: float) -> str:
+    """Format a number preserving full precision without scientific notation."""
+    s = f"{x:.10f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
 def parse_levels(text: str) -> List[float]:
     """Turns "750, 650, 550" / "750/650/550" / "750 650 550" into
     [750.0, 650.0, 550.0] — sorted highest first regardless of typed order.
@@ -26,12 +32,12 @@ def parse_levels(text: str) -> List[float]:
 
 
 def build_add_command(ticker: str, levels: List[float]) -> str:
-    ladder = "/".join(f"{lvl:g}" for lvl in levels)
+    ladder = "/".join(_fmt_num(lvl) for lvl in levels)
     return f"ADD {ticker.upper()} {ladder}"
 
 
 def build_edit_command(ticker: str, levels: List[float]) -> str:
-    ladder = "/".join(f"{lvl:g}" for lvl in levels)
+    ladder = "/".join(_fmt_num(lvl) for lvl in levels)
     return f"EDIT {ticker.upper()} {ladder}"
 
 
@@ -40,8 +46,8 @@ def build_remove_command(ticker: str) -> str:
 
 
 def build_cash_command(amount: float) -> str:
-    return f"CASH {amount:g}"
+    return f"CASH {_fmt_num(amount)}"
 
 
 def build_fill_command(ticker: str, level: float, shares: float, price: float) -> str:
-    return f"FILL {ticker.upper()} {level:g} {shares:g} {price:g}"
+    return f"FILL {ticker.upper()} {_fmt_num(level)} {_fmt_num(shares)} {_fmt_num(price)}"

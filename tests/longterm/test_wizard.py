@@ -50,6 +50,13 @@ class TestBuildCommands(unittest.TestCase):
         self.assertEqual(W.build_fill_command("mu", 750.0, 2.5, 748.20),
                          "FILL MU 750 2.5 748.2")
 
+    def test_cash_large_number_no_scientific_notation(self):
+        self.assertEqual(W.build_cash_command(1234567), "CASH 1234567")
+
+    def test_fill_preserves_precision_with_existing_case(self):
+        self.assertEqual(W.build_fill_command("mu", 750.0, 2.5, 748.20),
+                         "FILL MU 750 2.5 748.2")
+
 
 if __name__ == "__main__":
     unittest.main()
