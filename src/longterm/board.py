@@ -2,10 +2,11 @@
 
 House style: everything through src/ui.py + fmt.style semantic names —
 never raw Colors. Plain mode must stay readable."""
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import src.formatting as fmt
 from src import ui
+from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
 from .zones import FILLED, IN_ZONE, NEAR, WATCHING, ZoneRead
@@ -119,6 +120,94 @@ def render_board(plan: Plan, reads: List[ZoneRead], book: Dict[str, dict],
         f"cash pool ${plan.cash_pool_usd:,.0f}  {fmt.GLYPHS['dot']}  "
         f"remaining ${remaining_usd:,.0f}", "label"))
     return "\n".join(lines)
+
+
+def render_discover_board(results: List[Tuple[CandidateRead, Optional[DeepRead]]],
+                          sector_keyword: str, width: int = 100) -> str:
+    """Discovery scan results: a numbered table for every candidate, plus
+    the narrative insight line for whichever entries carry a DeepRead
+    (the top-ranked handful — see discover.scan's deep_limit).
+
+    `results` is discover.scan()'s return shape, ranked most-beaten-down
+    first (most negative drawdown_pct sorts first) — a ranking by historical
+    drawdown, never a prediction or a "top picks" claim.
+
+    Args:
+      results: (CandidateRead, Optional[DeepRead]) pairs in scan() order.
+      sector_keyword: the sector this scan covered, shown in the header.
+      width: rule width, matching the other board renderers in this file.
+
+    Returns:
+      The full board as one string (rule header, one row per candidate,
+      then a "deeper read" section for entries with a DeepRead). An empty
+      `results` renders just the header plus a "no candidates" message.
+    """
+    lines = [ui.rule(width, f"DISCOVER — {sector_keyword.upper()}")]
+    if not results:
+        lines.append("  " + fmt.style(
+            "no candidates found — check the sector keyword or try again", "label"))
+        return "\n".join(lines)
+
+    for i, (candidate, _deep) in enumerate(results, start=1):
+        support_label = candidate.supports[0]["label"] if candidate.supports else "—"
+        momentum_txt = (f"{candidate.momentum_12_1 * 100:+.0f}%"
+                        if candidate.momentum_12_1 is not None else "n/a")
+        ma_txt = (f"{candidate.ma200_distance_pct:+.0f}%"
+                  if candidate.ma200_distance_pct is not None else "n/a")
+        segs = [
+            fmt.style(f"{i:>2}", "muted"),
+            fmt.style(candidate.ticker, "emph"),
+            fmt.style(f"{candidate.spot:,.2f}", "value"),
+            fmt.style(f"{candidate.drawdown_pct:+.0f}% ATH", "bad"),
+            fmt.style(f"{ma_txt} vs 200dma", "label"),
+            fmt.style(f"mom {momentum_txt}", "muted"),
+            fmt.style(f"near {support_label}", "label"),
+        ]
+        lines.append("  " + f"  {fmt.style(fmt.GLYPHS['dot'], 'muted')}  ".join(segs))
+
+    deep_entries = [(i, c, d) for i, (c, d) in enumerate(results, start=1) if d]
+    if deep_entries:
+        lines.append("")
+        lines.append("  " + fmt.style("deeper read:", "heading"))
+        for i, candidate, deep in deep_entries:
+            lines.append(f"    {i}. " + fmt.style(insight_line(candidate, deep), "value"))
+    return "\n".join(lines)
+
+
+def resolve_add_target(arg_line: str,
+                       last_results: Optional[List[Tuple[CandidateRead, Optional[DeepRead]]]]
+                       ) -> str:
+    """Translate `ADD <n>` (a 1-based index into the last discovery scan)
+    into the canonical `ADD <TICKER> <level>/<level>/...` command, built
+    from that candidate's suggested_ladder. Pure function: no I/O, never
+    mutates `last_results` or anything else.
+
+    Anything else — a ticker-first ADD, an out-of-range index, a
+    non-numeric second token, no prior scan, or a non-ADD command — passes
+    through unchanged, so today's `ADD MU 750/650/550` grammar keeps
+    working exactly as it does without this function in the loop.
+
+    Args:
+      arg_line: the raw command line as typed (case-insensitive verb).
+      last_results: the most recent discover.scan() output, or None if no
+        discovery scan has run yet this session.
+
+    Returns:
+      The canonical ADD command string if `arg_line` was a valid `ADD <n>`
+      referring to an in-range candidate; otherwise `arg_line` unchanged.
+    """
+    parts = arg_line.split()
+    if len(parts) != 2 or parts[0].upper() != "ADD" or not last_results:
+        return arg_line
+    try:
+        index = int(parts[1])
+    except ValueError:
+        return arg_line
+    if not (1 <= index <= len(last_results)):
+        return arg_line
+    candidate, _deep = last_results[index - 1]
+    ladder = "/".join(f"{t.level:g}" for t in candidate.suggested_ladder)
+    return f"ADD {candidate.ticker} {ladder}"
 
 
 # ── Commands + interactive menu ──────────────────────────────────────────────

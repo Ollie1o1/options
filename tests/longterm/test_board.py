@@ -11,6 +11,7 @@ from src.longterm import board as B
 from src.longterm import fills as F
 from src.longterm import plan as P
 from src.longterm import zones as Z
+from src.longterm.discover import CandidateRead, DeepRead
 
 fmt._COLOR_ENABLED = False  # pin: never env vars (supports_color memoizes)
 
@@ -145,6 +146,74 @@ class TestHandleCommand(unittest.TestCase):
         plan, msg = self._run("FROB MU", P.Plan(0.0, []))
         self.assertIn("ADD", msg)
         self.assertIn("FILL", msg)
+
+
+def _disc_candidate(ticker="MU", drawdown=-32.4, spot=760.0):
+    return CandidateRead(
+        ticker=ticker, spot=spot, drawdown_pct=drawdown,
+        ma200_distance_pct=-8.5, momentum_12_1=-0.18,
+        supports=[{"label": "200d MA", "level": 700.0, "pct": -0.079}],
+        bounce={"by_horizon": {20: {"n": 41, "bounce_rate": 0.65}}},
+        suggested_ladder=[P.Tranche(760.0, 0.5), P.Tranche(700.0, 0.5)],
+    )
+
+
+class TestRenderDiscoverBoard(unittest.TestCase):
+    def test_shows_every_candidate_numbered(self):
+        results = [(_disc_candidate("MU"), None), (_disc_candidate("AMD", -18.0), None)]
+        out = B.render_discover_board(results, "SEMICONDUCTORS")
+        self.assertIn("1", out)
+        self.assertIn("2", out)
+        self.assertIn("MU", out)
+        self.assertIn("AMD", out)
+
+    def test_deep_tier_narrative_appears_for_entries_with_deep_read(self):
+        deep = DeepRead(ticker="MU", insider={"n_buyers": 2, "buy_value": 340_000.0,
+                                              "label": "CLUSTER BUY"},
+                        earnings_days=12, fundamentals=None)
+        results = [(_disc_candidate("MU"), deep)]
+        out = B.render_discover_board(results, "SEMICONDUCTORS")
+        self.assertIn("insider", out.lower())
+
+    def test_no_deep_read_omits_narrative_for_that_candidate(self):
+        results = [(_disc_candidate("MU"), None)]
+        out = B.render_discover_board(results, "SEMICONDUCTORS")
+        self.assertIn("MU", out)  # still in the table
+
+    def test_empty_results_shows_no_candidates_message(self):
+        out = B.render_discover_board([], "SEMICONDUCTORS")
+        self.assertIn("no candidates", out.lower())
+
+
+class TestResolveAddTarget(unittest.TestCase):
+    def test_numeric_add_resolves_to_canonical_command(self):
+        results = [(_disc_candidate("MU"), None)]
+        resolved = B.resolve_add_target("ADD 1", results)
+        self.assertEqual(resolved, "ADD MU 760/700")
+
+    def test_out_of_range_index_passes_through_unchanged(self):
+        results = [(_disc_candidate("MU"), None)]
+        resolved = B.resolve_add_target("ADD 5", results)
+        self.assertEqual(resolved, "ADD 5")
+
+    def test_no_prior_scan_passes_through_unchanged(self):
+        resolved = B.resolve_add_target("ADD 1", None)
+        self.assertEqual(resolved, "ADD 1")
+
+    def test_ticker_add_passes_through_unchanged(self):
+        results = [(_disc_candidate("MU"), None)]
+        resolved = B.resolve_add_target("ADD MU 750/650/550", results)
+        self.assertEqual(resolved, "ADD MU 750/650/550")
+
+    def test_non_add_command_passes_through_unchanged(self):
+        results = [(_disc_candidate("MU"), None)]
+        resolved = B.resolve_add_target("REMOVE MU", results)
+        self.assertEqual(resolved, "REMOVE MU")
+
+    def test_case_insensitive_add_keyword(self):
+        results = [(_disc_candidate("MU"), None)]
+        resolved = B.resolve_add_target("add 1", results)
+        self.assertEqual(resolved, "ADD MU 760/700")
 
 
 if __name__ == "__main__":
