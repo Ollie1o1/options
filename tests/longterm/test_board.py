@@ -1,12 +1,14 @@
 """Tests for banner + board rendering (plain-mode, color pinned off)."""
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import src.formatting as fmt
 from src.longterm import board as B
+from src.longterm import fills as F
 from src.longterm import plan as P
 from src.longterm import zones as Z
 
@@ -65,6 +67,69 @@ class TestBoard(unittest.TestCase):
         n, t = plan.names[0], plan.names[0].tranches[0]
         self.assertEqual(B.suggested_size(plan, n, t, 10000.0), 2000.0)
         self.assertEqual(B.suggested_size(plan, n, t, 500.0), 500.0)
+
+
+class TestHandleCommand(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, line, plan):
+        return B.handle_command(line, plan, plan_path=self.plan_path, db_path=self.db)
+
+    def test_add(self):
+        plan, msg = self._run("ADD MU 750/650/550", P.Plan(5000.0, []))
+        self.assertEqual(plan.names[0].ticker, "MU")
+        self.assertEqual([t.level for t in plan.names[0].tranches], [750.0, 650.0, 550.0])
+        self.assertAlmostEqual(plan.names[0].tranches[0].weight, 1 / 3)
+        self.assertEqual(P.load_plan(self.plan_path).names[0].ticker, "MU")  # persisted
+        self.assertIn("MU", msg)
+
+    def test_add_duplicate_rejected(self):
+        plan, _ = self._run("ADD MU 750", P.Plan(5000.0, []))
+        plan2, msg = self._run("ADD MU 700", plan)
+        self.assertEqual(len(plan2.names), 1)
+        self.assertIn("already", msg.lower())
+
+    def test_fill_records_and_matches_level(self):
+        plan, _ = self._run("ADD MU 750/650", P.Plan(5000.0, []))
+        plan, msg = self._run("FILL MU 750 2.5 748.20", plan)
+        self.assertEqual(F.filled_levels("MU", db_path=self.db), {750.0})
+        self.assertIn("748.20", msg)
+
+    def test_fill_unknown_level_rejected(self):
+        plan, _ = self._run("ADD MU 750/650", P.Plan(5000.0, []))
+        plan, msg = self._run("FILL MU 700 1 700", plan)
+        self.assertEqual(F.fills_for(db_path=self.db), [])
+        self.assertIn("no tranche", msg.lower())
+
+    def test_fill_already_filled_rejected(self):
+        plan, _ = self._run("ADD MU 750", P.Plan(5000.0, []))
+        plan, _ = self._run("FILL MU 750 1 749", plan)
+        plan, msg = self._run("FILL MU 750 1 748", plan)
+        self.assertEqual(len(F.fills_for(db_path=self.db)), 1)
+        self.assertIn("filled", msg.lower())
+
+    def test_edit_replaces_ladder(self):
+        plan, _ = self._run("ADD MU 750/650", P.Plan(5000.0, []))
+        plan, _ = self._run("EDIT MU 800/700/600", plan)
+        self.assertEqual([t.level for t in plan.names[0].tranches], [800.0, 700.0, 600.0])
+
+    def test_remove_and_cash(self):
+        plan, _ = self._run("ADD MU 750", P.Plan(5000.0, []))
+        plan, _ = self._run("CASH 6000", plan)
+        self.assertEqual(plan.cash_pool_usd, 6000.0)
+        plan, _ = self._run("REMOVE MU", plan)
+        self.assertEqual(plan.names, [])
+
+    def test_garbage_returns_grammar_help(self):
+        plan, msg = self._run("FROB MU", P.Plan(0.0, []))
+        self.assertIn("ADD", msg)
+        self.assertIn("FILL", msg)
 
 
 if __name__ == "__main__":

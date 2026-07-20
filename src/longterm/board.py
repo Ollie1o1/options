@@ -119,3 +119,145 @@ def render_board(plan: Plan, reads: List[ZoneRead], book: Dict[str, dict],
         f"cash pool ${plan.cash_pool_usd:,.0f}  {fmt.GLYPHS['dot']}  "
         f"remaining ${remaining_usd:,.0f}", "label"))
     return "\n".join(lines)
+
+
+# ── Commands + interactive menu ──────────────────────────────────────────────
+import datetime as _dt
+import sys as _sys
+
+from .fills import book as _book
+from .fills import deployed_usd as _deployed
+from .fills import filled_levels as _filled_levels
+from .fills import record_fill as _record_fill
+from .plan import DEFAULT_PATH as _PLAN_PATH
+from .plan import save_plan as _save_plan
+
+_GRAMMAR = ("commands: ADD MU 750/650/550  |  FILL MU 750 2.5 748.20  |  "
+            "EDIT MU 800/700/600  |  REMOVE MU  |  CASH 6000  |  "
+            "R report  |  B back")
+
+
+def _parse_ladder(spec: str):
+    levels = [float(x) for x in spec.split("/") if x.strip()]
+    if not levels:
+        raise ValueError("empty ladder")
+    w = 1.0 / len(levels)
+    return [Tranche(lvl, w) for lvl in levels]
+
+
+def handle_command(line: str, plan: Plan, plan_path: str = _PLAN_PATH,
+                   db_path: str = DEFAULT_DB):
+    parts = line.split()
+    verb = parts[0].upper() if parts else ""
+    try:
+        if verb == "ADD" and len(parts) == 3:
+            ticker = parts[1].upper()
+            if _name_for(plan, ticker):
+                return plan, fmt.style(f"{ticker} already on the plan — use EDIT", "warn")
+            plan.names.append(PlanName(ticker, _parse_ladder(parts[2])))
+            _save_plan(plan, plan_path)
+            return plan, fmt.style(f"{ticker} added with {len(plan.names[-1].tranches)}"
+                                   f"-tranche ladder", "good")
+        if verb == "FILL" and len(parts) == 5:
+            ticker, level, shares, price = (parts[1].upper(), float(parts[2]),
+                                            float(parts[3]), float(parts[4]))
+            name = _name_for(plan, ticker)
+            if not name or not _tranche_at(name, level):
+                return plan, fmt.style(f"no tranche @ {level:g} on {ticker}", "bad")
+            if any(abs(level - f) < _LEVEL_TOL
+                   for f in _filled_levels(ticker, db_path=db_path)):
+                return plan, fmt.style(f"{ticker} @ {level:g} is already filled", "warn")
+            _record_fill(ticker, level, shares, price, db_path=db_path)
+            return plan, fmt.style(
+                f"filled {ticker} tranche @ {level:g}: {shares:g} sh @ {price:,.2f}", "good")
+        if verb == "EDIT" and len(parts) == 3:
+            name = _name_for(plan, parts[1].upper())
+            if not name:
+                return plan, fmt.style(f"{parts[1].upper()} not on the plan", "bad")
+            name.tranches = _parse_ladder(parts[2])
+            _save_plan(plan, plan_path)
+            return plan, fmt.style(f"{name.ticker} ladder replaced", "good")
+        if verb == "REMOVE" and len(parts) == 2:
+            ticker = parts[1].upper()
+            plan.names = [n for n in plan.names if n.ticker != ticker]
+            _save_plan(plan, plan_path)
+            return plan, fmt.style(f"{ticker} removed (fill history kept)", "good")
+        if verb == "CASH" and len(parts) == 2:
+            plan.cash_pool_usd = float(parts[1])
+            _save_plan(plan, plan_path)
+            return plan, fmt.style(f"cash pool set to ${plan.cash_pool_usd:,.0f}", "good")
+    except ValueError as exc:
+        return plan, fmt.style(f"bad input ({exc}) — {_GRAMMAR}", "bad")
+    return plan, fmt.style(_GRAMMAR, "label")
+
+
+def _earnings_flags(tickers):
+    out = {}
+    for t in tickers:
+        try:
+            import json as _json
+
+            from src.earnings_provider import next_earnings_date, resolve_api_key
+            try:
+                with open("config.json") as f:
+                    cfg = _json.load(f)
+            except Exception:
+                cfg = None
+            when = next_earnings_date(t, api_key=resolve_api_key(cfg))
+            if when and 0 <= (when.date() - _dt.date.today()).days <= 7:
+                out[t] = when.strftime("%m-%d")
+        except Exception:
+            pass
+    return out
+
+
+def _gather(plan: Plan, db_path: str = DEFAULT_DB):
+    """Snapshots → reads/book/remaining. One batched fetch."""
+    from .data import fetch_snapshots
+    from .zones import assess
+    snaps = fetch_snapshots([n.ticker for n in plan.names])
+    reads = [assess(n, snaps[n.ticker], _filled_levels(n.ticker, db_path=db_path))
+             for n in plan.names if n.ticker in snaps]
+    remaining = max(0.0, plan.cash_pool_usd - _deployed(db_path=db_path))
+    return snaps, reads, _book(db_path=db_path), remaining
+
+
+def _gather_cached(plan: Plan, snaps, db_path: str = DEFAULT_DB):
+    """Re-derive reads/book/remaining from already-fetched snapshots
+    (commands change fills/plan, not prices)."""
+    from .zones import assess
+    reads = [assess(n, snaps[n.ticker], _filled_levels(n.ticker, db_path=db_path))
+             for n in plan.names if n.ticker in snaps]
+    remaining = max(0.0, plan.cash_pool_usd - _deployed(db_path=db_path))
+    return reads, _book(db_path=db_path), remaining
+
+
+def menu(width: int = 100) -> None:
+    from .plan import load_plan
+    plan = load_plan()
+    interactive = _sys.stdin.isatty()
+    with ui.spinner("pricing holdings…"):
+        snaps, reads, held, remaining = _gather(plan)
+        flags = _earnings_flags([r.ticker for r in reads
+                                 if r.state in (IN_ZONE, NEAR)])
+    print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
+    if not interactive:
+        return
+    while True:
+        try:
+            raw = input("\n  holdings> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+        up = raw.upper()
+        if up in ("B", "BACK", "Q", "QUIT", "X", ""):
+            return
+        if up in ("R", "REPORT"):
+            from .report import write_report
+            with ui.spinner("rendering report…"):
+                html_path, _ = write_report()
+            print("  " + fmt.style(f"report written: {html_path}", "good"))
+            continue
+        plan, msg = handle_command(raw, plan)
+        print("  " + msg)
+        reads, held, remaining = _gather_cached(plan, snaps)
+        print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
