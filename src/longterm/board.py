@@ -325,6 +325,29 @@ def _gather_cached(plan: Plan, snaps, db_path: str = DEFAULT_DB):
     return reads, _book(db_path=db_path), remaining
 
 
+_ACTIONS = [
+    ("1", "Add a stock", "track a new ticker with a buy ladder"),
+    ("2", "Record a buy", "log a fill against an open tranche"),
+    ("3", "Edit buy levels", "replace a ticker's ladder"),
+    ("4", "Remove a stock", "drop a ticker from the plan"),
+    ("5", "Set cash budget", "change the pool tranche sizes are drawn from"),
+    ("6", "Find candidates", "scan a sector for new buy-the-dip ideas"),
+    ("7", "Write & open report", "render the HTML holdings report"),
+]
+
+
+def render_actions_menu(width: int = 100) -> str:
+    lines = [ui.rule(width, "ACTIONS")]
+    for num, name, desc in _ACTIONS:
+        n = fmt.style(f"[{num}]", "accent")
+        t = fmt.style(ui.pad(name, 20), "emph", bold=True)
+        d = fmt.style(f"— {desc}", "muted")
+        lines.append(f"  {n} {t} {d}")
+    lines.append(f"  {fmt.style('[B]', 'muted')} {fmt.style('Back', 'muted')}")
+    lines.append(ui.rule(width))
+    return "\n".join(lines)
+
+
 def menu(width: int = 100) -> None:
     from .plan import load_plan
     plan = load_plan()

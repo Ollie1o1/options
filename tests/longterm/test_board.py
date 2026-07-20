@@ -248,5 +248,15 @@ class TestDiscoverMenuWiring(unittest.TestCase):
         self.assertIn("MU", msg)
 
 
+class TestActionsMenu(unittest.TestCase):
+    def test_lists_all_seven_actions_and_back(self):
+        out = B.render_actions_menu(60)
+        for n in "1234567":
+            self.assertIn(f"[{n}]", out)
+        self.assertIn("[B]", out)
+        self.assertIn("Add a stock", out)
+        self.assertIn("Write & open report", out)
+
+
 if __name__ == "__main__":
     unittest.main()
