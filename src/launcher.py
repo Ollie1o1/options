@@ -92,6 +92,7 @@ def _show_menu() -> str:
     after.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
     after.append(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
                       tag="read-only"))
+    after.append(_row("5", "HOLDINGS", "long-term stock accumulation — buy zones · tranches · TFSA book"))
     after.append(_row("Q", "QUIT", "", muted_key=True))
     after.append("")
     after.append(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
@@ -183,10 +184,15 @@ def main() -> None:
         if choice in ("4", "RESEARCH", "R"):
             _research_menu()
             continue
+        if choice in ("5", "HOLDINGS", "H"):
+            _loading("Loading holdings desk…")
+            from src.longterm.board import menu as _holdings_menu
+            _holdings_menu()
+            continue
         if choice in ("Q", "QUIT", "EXIT", ""):
             print("  Goodbye.")
             return
-        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, or Q")
+        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, or Q")
 
 
 if __name__ == "__main__":
