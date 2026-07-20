@@ -113,7 +113,7 @@ class CandidateRead:
     ma200_distance_pct: Optional[float]
     momentum_12_1: Optional[float]
     supports: List[Any] = field(default_factory=list)
-    bounce: Any = field(default_factory=dict)
+    bounce: Dict[str, Any] = field(default_factory=dict)
     suggested_ladder: List[Tranche] = field(default_factory=list)
 
 
