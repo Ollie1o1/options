@@ -35,16 +35,18 @@ def fetch_snapshots(tickers: List[str]) -> Dict[str, Snapshot]:
     if not tickers:
         return {}
     import yfinance as yf
+    import pandas as pd
     try:
         frame = yf.download(tickers, period="1y", auto_adjust=True,
                             progress=False, group_by="ticker", threads=True)
     except Exception as exc:
-        log.debug("longterm fetch failed: %s", exc)
+        log.warning("longterm fetch failed: %s", exc)
         return {}
     out: Dict[str, Snapshot] = {}
     for t in tickers:
         try:
-            closes = (frame[t]["Close"] if len(tickers) > 1 else frame["Close"]).dropna()
+            closes = (frame[t]["Close"] if isinstance(frame.columns, pd.MultiIndex)
+                      else frame["Close"]).dropna()
             snap = snapshot_from_closes(t, list(closes))
             if snap:
                 out[t] = snap
