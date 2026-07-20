@@ -37,8 +37,13 @@ def fetch_snapshots(tickers: List[str]) -> Dict[str, Snapshot]:
     import yfinance as yf
     import pandas as pd
     try:
+        # timeout matches the codebase convention for yfinance calls, e.g. the
+        # shared curl_cffi session in src/data_fetching.py (20s default) and the
+        # YQTicker(..., timeout=15) quote calls — this banner path must never
+        # hang indefinitely on a stalled connection.
         frame = yf.download(tickers, period="1y", auto_adjust=True,
-                            progress=False, group_by="ticker", threads=True)
+                            progress=False, group_by="ticker", threads=True,
+                            timeout=15)
     except Exception as exc:
         log.warning("longterm fetch failed: %s", exc)
         return {}

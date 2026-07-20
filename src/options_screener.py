@@ -4474,27 +4474,34 @@ def main():
     # One quiet line per name near/in its accumulation zone. The desk itself
     # is launcher [5]; the banner lives here because this is the surface used
     # daily. Silent when the plan is empty or nothing is triggered.
-    try:
-        from .longterm.plan import DEFAULT_PATH as _LT_PLAN_PATH
-        from .longterm.plan import load_plan as _lt_load_plan
-        if os.path.exists(_LT_PLAN_PATH):
-            _lt_plan = _lt_load_plan(_LT_PLAN_PATH)
-            if _lt_plan.names:
-                from .longterm.board import _earnings_flags as _lt_flags
-                from .longterm.board import _gather as _lt_gather
-                from .longterm.board import banner as _lt_banner
-                from .longterm.zones import IN_ZONE as _LT_IN
-                from .longterm.zones import NEAR as _LT_NEAR
-                with ui.spinner("checking buy zones…"):
-                    _snaps, _lt_reads, _lt_book, _lt_remaining = _lt_gather(_lt_plan)
-                    _lt_earn = _lt_flags([r.ticker for r in _lt_reads
-                                          if r.state in (_LT_IN, _LT_NEAR)])
-                _lt_text = _lt_banner(_lt_reads, _lt_plan, _lt_remaining,
-                                      earnings=_lt_earn, width=WIDTH)
-                if _lt_text:
-                    print("\n" + _lt_text)
-    except Exception as _lt_exc:
-        logging.getLogger(__name__).debug("longterm banner skipped: %s", _lt_exc)
+    # Automation (cron via --auto/--mode/--auto-log) must never run this —
+    # it does a real, untimed yf.download() fetch per name. Gate on the same
+    # flags the later `_interactive` check uses so cron never blocks here.
+    # See project_automation_staleness_guard / project_portfolio_spot_cache
+    # for this exact failure class (silent blocking fetch on the cron path).
+    _lt_automated = bool(args.auto or args.mode or getattr(args, "auto_log", False))
+    if not _lt_automated:
+        try:
+            from .longterm.plan import DEFAULT_PATH as _LT_PLAN_PATH
+            from .longterm.plan import load_plan as _lt_load_plan
+            if os.path.exists(_LT_PLAN_PATH):
+                _lt_plan = _lt_load_plan(_LT_PLAN_PATH)
+                if _lt_plan.names:
+                    from .longterm.board import _earnings_flags as _lt_flags
+                    from .longterm.board import _gather as _lt_gather
+                    from .longterm.board import banner as _lt_banner
+                    from .longterm.zones import IN_ZONE as _LT_IN
+                    from .longterm.zones import NEAR as _LT_NEAR
+                    with ui.spinner("checking buy zones…"):
+                        _snaps, _lt_reads, _lt_book, _lt_remaining = _lt_gather(_lt_plan)
+                        _lt_earn = _lt_flags([r.ticker for r in _lt_reads
+                                              if r.state in (_LT_IN, _LT_NEAR)])
+                    _lt_text = _lt_banner(_lt_reads, _lt_plan, _lt_remaining,
+                                          earnings=_lt_earn, width=WIDTH)
+                    if _lt_text:
+                        print("\n" + _lt_text)
+        except Exception as _lt_exc:
+            logging.getLogger(__name__).debug("longterm banner skipped: %s", _lt_exc)
 
     # ── Regime Dashboard + Portfolio Update (overlapped, race-free) ────────
     # update_positions() does no printing → it runs in the daemon thread, while
