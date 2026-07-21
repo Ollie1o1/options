@@ -9,8 +9,9 @@ from src import ui
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
-from .wizard import (build_add_command, build_edit_command, build_fill_command,
-                     build_remove_command, open_tranche_levels, parse_levels)
+from .wizard import (build_add_command, build_cash_command, build_edit_command,
+                     build_fill_command, build_remove_command, open_tranche_levels,
+                     parse_levels)
 from .zones import FILLED, IN_ZONE, NEAR, WATCHING, ZoneRead
 
 _STATE_STYLE = {IN_ZONE: "good", NEAR: "warn", WATCHING: "muted", FILLED: "label"}
@@ -464,6 +465,14 @@ def _guided_remove(plan: Plan, plan_path: str = _PLAN_PATH, db_path: str = DEFAU
     return plan
 
 
+def _guided_cash(plan: Plan, plan_path: str = _PLAN_PATH, db_path: str = DEFAULT_DB) -> Plan:
+    amount = _ask_float("cash budget", default=f"{plan.cash_pool_usd:g}")
+    plan, msg = handle_command(build_cash_command(amount),
+                               plan, plan_path=plan_path, db_path=db_path)
+    print("  " + msg)
+    return plan
+
+
 def menu(width: int = 100) -> None:
     from .plan import load_plan
     plan = load_plan()
@@ -515,6 +524,15 @@ def menu(width: int = 100) -> None:
         if up == "4":
             try:
                 plan = _guided_remove(plan)
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            reads, held, remaining = _gather_cached(plan, snaps)
+            print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
+            continue
+        if up == "5":
+            try:
+                plan = _guided_cash(plan)
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue

@@ -392,5 +392,33 @@ class TestGuidedRemove(unittest.TestCase):
         self.assertIs(result, empty)
 
 
+class TestGuidedCash(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_sets_new_budget(self):
+        plan = mu_plan()
+        self._feed("7500")
+        plan = B._guided_cash(plan, plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(plan.cash_pool_usd, 7500.0)
+
+    def test_default_is_current_budget(self):
+        plan = mu_plan()  # cash_pool_usd=5000.0 per the module helper
+        self._feed("")  # accept the shown default
+        plan = B._guided_cash(plan, plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(plan.cash_pool_usd, 5000.0)
+
+
 if __name__ == "__main__":
     unittest.main()
