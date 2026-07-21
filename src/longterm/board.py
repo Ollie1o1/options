@@ -252,14 +252,16 @@ def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100
     lines.append("")
     lines.append("  " + fmt.style("STATISTICAL EDGE — bounce odds after a drop this size", "heading"))
     horizons = (candidate.bounce or {}).get("by_horizon") or {}
-    if horizons:
-        for h in sorted(horizons):
-            row = horizons[h]
-            if not row.get("n"):
-                continue
-            lines.append(f"    {h:>3}d  " + fmt.style(
-                f"{row['bounce_rate'] * 100:.0f}% higher  (n={row['n']}, "
-                f"median {row['median'] * 100:+.1f}%)", "value"))
+    horizon_lines = []
+    for h in sorted(horizons):
+        row = horizons[h]
+        if not row.get("n"):
+            continue
+        horizon_lines.append(f"    {h:>3}d  " + fmt.style(
+            f"{row['bounce_rate'] * 100:.0f}% higher  (n={row['n']}, "
+            f"median {row['median'] * 100:+.1f}%)", "value"))
+    if horizon_lines:
+        lines.extend(horizon_lines)
     else:
         lines.append("    " + fmt.style("bounce odds: n/a", "muted"))
 

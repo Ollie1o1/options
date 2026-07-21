@@ -292,6 +292,14 @@ class TestRenderDetail(unittest.TestCase):
         self.assertIn("55", out)
         self.assertIn("65", out)
 
+    def test_bounce_all_zero_sample_shows_na_not_empty_section(self):
+        c = _disc_candidate("MU")
+        c.bounce = {"by_horizon": {
+            20: {"n": 0, "bounce_rate": None, "median": None, "p25": None, "p75": None},
+        }}
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("n/a", out.lower())
+
     def test_fundamentals_table_shows_all_six_fields(self):
         c = _disc_candidate("MU")
         out = B.render_detail(c, _full_detail("MU"))
