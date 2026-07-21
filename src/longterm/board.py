@@ -212,6 +212,7 @@ def resolve_add_target(arg_line: str,
 
 # ── Commands + interactive menu ──────────────────────────────────────────────
 import datetime as _dt
+import os
 import sys as _sys
 
 from .fills import book as _book
@@ -486,6 +487,35 @@ def _guided_discover(width: int):
     return results
 
 
+def _open_report_file(path: str) -> None:
+    """Open a written report in the default browser. Never raises or hangs
+    — mirrors options_screener._open_briefing_file, added there after a
+    wedged macOS `open` call made a finished report look like it never
+    rendered; always leaves a path to open by hand as a fallback."""
+    try:
+        if _sys.platform == "darwin":
+            import subprocess
+            res = subprocess.run(["open", path], check=False, timeout=10)
+            if res.returncode != 0:
+                print(f"  Could not auto-open — view it at: {os.path.abspath(path)}")
+        else:
+            import webbrowser
+            webbrowser.open("file://" + os.path.abspath(path))
+    except Exception:
+        try:
+            print(f"  Could not auto-open — view it at: {os.path.abspath(path)}")
+        except Exception:
+            pass
+
+
+def _guided_report() -> None:
+    from .report import write_report
+    with ui.spinner("rendering report…"):
+        html_path, _ = write_report()
+    print("  " + fmt.style(f"report written: {html_path}", "good"))
+    _open_report_file(html_path)
+
+
 def menu(width: int = 100) -> None:
     from .plan import load_plan
     plan = load_plan()
@@ -561,11 +591,14 @@ def menu(width: int = 100) -> None:
             if result is not None:
                 last_discovery = result
             continue
+        if up == "7":
+            try:
+                _guided_report()
+            except (EOFError, KeyboardInterrupt):
+                print()
+            continue
         if up in ("R", "REPORT"):
-            from .report import write_report
-            with ui.spinner("rendering report…"):
-                html_path, _ = write_report()
-            print("  " + fmt.style(f"report written: {html_path}", "good"))
+            _guided_report()
             continue
         # Token-based verb match (mirrors handle_command's own parts[0].upper()
         # idiom) rather than raw.upper().startswith("DISCOVER") — a prefix

@@ -448,5 +448,24 @@ class TestGuidedDiscover(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestGuidedReport(unittest.TestCase):
+    def test_opens_the_written_report(self):
+        with mock.patch("src.longterm.report.write_report",
+                        return_value=("reports/holdings/x.html", "reports/holdings/x.json")), \
+             mock.patch.object(B, "_open_report_file") as m_open:
+            B._guided_report()
+        m_open.assert_called_once_with("reports/holdings/x.html")
+
+
+class TestOpenReportFile(unittest.TestCase):
+    def test_falls_back_to_printing_path_when_open_fails(self):
+        buf = io.StringIO()
+        with mock.patch.object(B._sys, "platform", "darwin"), \
+             mock.patch("subprocess.run", side_effect=OSError("boom")), \
+             contextlib.redirect_stdout(buf):
+            B._open_report_file("/tmp/x.html")
+        self.assertIn("Could not auto-open", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
