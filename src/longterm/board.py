@@ -9,7 +9,7 @@ from src import ui
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
-from .wizard import build_add_command, open_tranche_levels, parse_levels
+from .wizard import build_add_command, build_fill_command, open_tranche_levels, parse_levels
 from .zones import FILLED, IN_ZONE, NEAR, WATCHING, ZoneRead
 
 _STATE_STYLE = {IN_ZONE: "good", NEAR: "warn", WATCHING: "muted", FILLED: "label"}
@@ -402,6 +402,37 @@ def _guided_add(plan: Plan, last_discovery,
     return plan, last_discovery
 
 
+def _guided_fill(plan: Plan, reads: List[ZoneRead],
+                 plan_path: str = _PLAN_PATH, db_path: str = DEFAULT_DB) -> Plan:
+    if not plan.names:
+        print(ui.error_line("nothing on your plan yet — add a stock first"))
+        return plan
+    by_ticker = {r.ticker: r for r in reads}
+    tickers_with_opens = []
+    for name in plan.names:
+        r = by_ticker.get(name.ticker)
+        levels = open_tranche_levels(name, r)
+        if levels:
+            tickers_with_opens.append(name.ticker)
+    if not tickers_with_opens:
+        return plan
+    idx = _choose(tickers_with_opens, "which ticker did you buy?")
+    ticker = tickers_with_opens[idx]
+    name = _name_for(plan, ticker)
+    r = by_ticker.get(ticker)
+    levels = open_tranche_levels(name, r)
+    lidx = _choose([f"{lvl:g}" for lvl in levels],
+                   f"which tranche did you fill on {ticker}?")
+    level = levels[lidx]
+    shares = _ask_float("how many shares")
+    default_price = f"{r.spot:g}" if r else None
+    price = _ask_float("price paid", default=default_price)
+    plan, msg = handle_command(build_fill_command(ticker, level, shares, price),
+                               plan, plan_path=plan_path, db_path=db_path)
+    print("  " + msg)
+    return plan
+
+
 def menu(width: int = 100) -> None:
     from .plan import load_plan
     plan = load_plan()
@@ -426,6 +457,15 @@ def menu(width: int = 100) -> None:
         if up == "1":
             try:
                 plan, last_discovery = _guided_add(plan, last_discovery)
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            reads, held, remaining = _gather_cached(plan, snaps)
+            print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
+            continue
+        if up == "2":
+            try:
+                plan = _guided_fill(plan, reads)
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue

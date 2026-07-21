@@ -299,5 +299,39 @@ class TestGuidedAdd(unittest.TestCase):
         self.assertEqual([t.level for t in plan.names[0].tranches], [750.0, 650.0])
 
 
+class TestGuidedFill(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_records_fill_against_chosen_tranche(self):
+        plan = mu_plan()
+        r = read(Z.NEAR, spot=752.0, level=750.0)
+        self._feed("1", "1", "2.5", "748.20")
+        B._guided_fill(plan, [r], plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(F.filled_levels("MU", db_path=self.db), {750.0})
+
+    def test_no_open_tranches_returns_unchanged_without_prompting(self):
+        plan = mu_plan()
+        r = Z.ZoneRead("MU", Z.FILLED, 500.0, None, None, None, -30.0, True)
+        result = B._guided_fill(plan, [r], plan_path=self.plan_path, db_path=self.db)
+        self.assertIs(result, plan)
+
+    def test_empty_plan_returns_unchanged_without_prompting(self):
+        empty = P.Plan(5000.0, [])
+        result = B._guided_fill(empty, [], plan_path=self.plan_path, db_path=self.db)
+        self.assertIs(result, empty)
+
+
 if __name__ == "__main__":
     unittest.main()
