@@ -16,6 +16,9 @@ from src.longterm import fills as F
 from src.longterm import plan as P
 from src.longterm import zones as Z
 from src.longterm.discover import CandidateRead, DeepRead
+from src.longterm.detail import DetailRead
+from src.news_fetcher import AnalystChange, NewsData, NewsItem
+from src.short_interest import ShortInterest
 
 fmt._COLOR_ENABLED = False  # pin: never env vars (supports_color memoizes)
 
@@ -157,7 +160,7 @@ def _disc_candidate(ticker="MU", drawdown=-32.4, spot=760.0):
         ticker=ticker, spot=spot, drawdown_pct=drawdown,
         ma200_distance_pct=-8.5, momentum_12_1=-0.18,
         supports=[{"label": "200d MA", "level": 700.0, "pct": -0.079}],
-        bounce={"by_horizon": {20: {"n": 41, "bounce_rate": 0.65}}},
+        bounce={"by_horizon": {20: {"n": 41, "bounce_rate": 0.65, "median": 0.04, "p25": -0.02, "p75": 0.09}}},
         suggested_ladder=[P.Tranche(760.0, 0.5), P.Tranche(700.0, 0.5)],
     )
 
@@ -218,6 +221,138 @@ class TestResolveAddTarget(unittest.TestCase):
         results = [(_disc_candidate("MU"), None)]
         resolved = B.resolve_add_target("add 1", results)
         self.assertEqual(resolved, "ADD MU 760/700")
+
+
+def _full_detail(ticker="MU"):
+    import datetime as dt
+    return DetailRead(
+        ticker=ticker,
+        deep=DeepRead(
+            ticker=ticker,
+            insider={"n_buyers": 2, "buy_value": 340_000.0, "label": "CLUSTER BUY",
+                     "window_days": 90},
+            earnings_days=5,
+            fundamentals={"trailingPE": 18.0, "forwardPE": 15.0, "profitMargins": 0.22,
+                         "revenueGrowth": 0.11, "earningsGrowth": 0.08, "returnOnEquity": 0.31},
+        ),
+        short_interest=ShortInterest(pct_float=0.08, days_to_cover=3.4,
+                                     pct_float_prior=0.06, shares_short=1_000_000,
+                                     trend="rising"),
+        news=NewsData(
+            symbol=ticker,
+            items=[NewsItem(headline="MU beats estimates", source="Yahoo Finance",
+                            published=dt.datetime(2026, 7, 18), sentiment=0.6, url="")],
+            analyst_changes=[AnalystChange(firm="Morgan Stanley", action="upgrade",
+                                           from_grade="Hold", to_grade="Buy",
+                                           date=dt.datetime(2026, 7, 15), price_target=900.0)],
+            aggregate_sentiment=0.5,
+            top_headlines=["MU beats estimates"],
+            has_negative_catalyst=False,
+            has_positive_catalyst=True,
+        ),
+    )
+
+
+def _empty_detail(ticker="MU"):
+    return DetailRead(ticker=ticker, deep=DeepRead(ticker=ticker),
+                      short_interest=None, news=None)
+
+
+class TestRenderDetail(unittest.TestCase):
+    def test_header_vitals_always_present(self):
+        c = _disc_candidate("MU")
+        c.rsi = 28.0
+        c.ann_vol_pct = 45.2
+        out = B.render_detail(c, _full_detail("MU"))
+        self.assertIn("MU", out)
+        self.assertIn("28", out)   # RSI value
+        self.assertIn("oversold", out.lower())
+
+    def test_rsi_none_shows_na_not_missing_section(self):
+        c = _disc_candidate("MU")
+        c.rsi = None
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("n/a", out.lower())
+
+    def test_full_support_resistance_ladder_shown(self):
+        c = _disc_candidate("MU")
+        c.supports = [{"label": "50d MA", "level": 720.0, "pct": -0.05},
+                     {"label": "200d MA", "level": 700.0, "pct": -0.079}]
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("50d MA", out)
+        self.assertIn("200d MA", out)
+
+    def test_bounce_odds_table_shows_multiple_horizons(self):
+        c = _disc_candidate("MU")
+        c.bounce = {"by_horizon": {
+            5: {"n": 30, "bounce_rate": 0.55, "median": 0.02, "p25": -0.01, "p75": 0.05},
+            20: {"n": 41, "bounce_rate": 0.65, "median": 0.04, "p25": -0.02, "p75": 0.09},
+        }}
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("55", out)
+        self.assertIn("65", out)
+
+    def test_fundamentals_table_shows_all_six_fields(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _full_detail("MU"))
+        self.assertIn("18", out)   # trailing PE
+        self.assertIn("15", out)   # forward PE
+        self.assertIn("22", out)   # profit margin %
+        self.assertIn("11", out)   # revenue growth %
+        self.assertIn("8", out)    # earnings growth %
+        self.assertIn("31", out)   # ROE %
+
+    def test_fundamentals_missing_shows_na_section(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("fundamentals", out.lower())
+        self.assertIn("n/a", out.lower())
+
+    def test_short_interest_shown_with_trend(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _full_detail("MU"))
+        self.assertIn("8", out)     # 8% of float
+        self.assertIn("3.4", out)   # days to cover
+
+    def test_short_interest_missing_shows_na(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("short interest", out.lower())
+
+    def test_news_headlines_shown(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _full_detail("MU"))
+        self.assertIn("MU beats estimates", out)
+
+    def test_analyst_change_shown(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _full_detail("MU"))
+        self.assertIn("Morgan Stanley", out)
+        self.assertIn("upgrade", out.lower())
+
+    def test_catalyst_flag_line_present_when_positive(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _full_detail("MU"))
+        self.assertIn("catalyst", out.lower())
+
+    def test_news_missing_shows_na_not_missing_section(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("news", out.lower())
+        self.assertIn("n/a", out.lower())
+
+    def test_insight_line_synthesis_included(self):
+        c = _disc_candidate("MU")
+        out = B.render_detail(c, _empty_detail("MU"))
+        # insight_line always starts with "{ticker}: {drawdown}% off ATH"
+        self.assertIn("off ATH", out)
+
+    def test_earnings_within_window_uses_warn_glyph(self):
+        c = _disc_candidate("MU")
+        detail = _full_detail("MU")
+        detail.deep.earnings_days = 5
+        out = B.render_detail(c, detail)
+        self.assertIn(fmt.GLYPHS["warn"], out)
 
 
 class TestDiscoverMenuWiring(unittest.TestCase):

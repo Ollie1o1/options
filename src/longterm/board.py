@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import src.formatting as fmt
 from src import ui
+from .detail import DetailRead
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
@@ -171,6 +172,174 @@ def render_discover_board(results: List[Tuple[CandidateRead, Optional[DeepRead]]
         lines.append("  " + fmt.style("deeper read:", "heading"))
         for i, candidate, deep in deep_entries:
             lines.append(f"    {i}. " + fmt.style(insight_line(candidate, deep), "value"))
+    return "\n".join(lines)
+
+
+_RSI_OVERSOLD = 30.0
+_RSI_OVERBOUGHT = 70.0
+_EARNINGS_WARN_DAYS = 14
+_MAX_NEWS_LINES = 5
+_MAX_ANALYST_LINES = 5
+_SENTIMENT_POS = 0.15
+_SENTIMENT_NEG = -0.15
+
+
+def _rsi_zone(value: Optional[float]) -> Tuple[str, str]:
+    """(label, style_name) for an RSI reading — same zone convention as
+    src/levels.py:print_levels, applied here for the holdings desk."""
+    if value is None:
+        return "n/a", "muted"
+    if value < _RSI_OVERSOLD:
+        return "oversold", "good"
+    if value > _RSI_OVERBOUGHT:
+        return "overbought", "warn"
+    return "neutral", "muted"
+
+
+def _sentiment_style(score: float) -> str:
+    if score >= _SENTIMENT_POS:
+        return "good"
+    if score <= _SENTIMENT_NEG:
+        return "bad"
+    return "muted"
+
+
+def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100) -> str:
+    """Full drill-down for one DISCOVER candidate: vitals, synthesis, price
+    structure, statistical edge, catalysts, quality, positioning — in that
+    order (why-now, before is-it-good). Every section header always
+    prints, even when its data is None ("n/a"), so nothing decision-
+    relevant silently disappears. Descriptive context only, same
+    non-predictive philosophy as the rest of this package — see
+    discover.py's module docstring.
+    """
+    lines = [ui.rule(width, f"{candidate.ticker} — DETAIL")]
+
+    zone_label, zone_style = _rsi_zone(candidate.rsi)
+    rsi_txt = f"RSI {candidate.rsi:.0f} ({zone_label})" if candidate.rsi is not None else "RSI n/a"
+    ma_txt = (f"{candidate.ma200_distance_pct:+.0f}% vs 200dma"
+             if candidate.ma200_distance_pct is not None else "200dma n/a")
+    mom_txt = (f"mom {candidate.momentum_12_1 * 100:+.0f}%"
+              if candidate.momentum_12_1 is not None else "mom n/a")
+    vol_txt = (f"vol {candidate.ann_vol_pct:.0f}%/yr"
+              if candidate.ann_vol_pct is not None else "vol n/a")
+    vitals = [
+        fmt.style(candidate.ticker, "heading"),
+        fmt.style(f"{candidate.spot:,.2f}", "emph"),
+        fmt.style(f"{candidate.drawdown_pct:+.0f}% ATH", "bad"),
+        fmt.style(rsi_txt, zone_style),
+        fmt.style(ma_txt, "label"),
+        fmt.style(mom_txt, "muted"),
+        fmt.style(vol_txt, "muted"),
+    ]
+    lines.append("  " + f"  {fmt.style(fmt.GLYPHS['dot'], 'muted')}  ".join(vitals))
+    lines.append("  " + fmt.style(insight_line(candidate, detail.deep), "value"))
+
+    # PRICE STRUCTURE
+    lines.append("")
+    lines.append("  " + fmt.style("PRICE STRUCTURE", "heading"))
+    if candidate.supports:
+        for s in candidate.supports:
+            lines.append(f"    support  {fmt.style(s['label'], 'label')}  "
+                         + fmt.style(f"{s['level']:,.2f}  ({s['pct'] * 100:+.1f}%)", "value"))
+    else:
+        lines.append("    " + fmt.style("supports: n/a", "muted"))
+    if candidate.suggested_ladder:
+        ladder_txt = " / ".join(f"{t.level:g}" for t in candidate.suggested_ladder)
+        lines.append("    " + fmt.style(f"suggested ladder: {ladder_txt}", "accent"))
+
+    # STATISTICAL EDGE
+    lines.append("")
+    lines.append("  " + fmt.style("STATISTICAL EDGE — bounce odds after a drop this size", "heading"))
+    horizons = (candidate.bounce or {}).get("by_horizon") or {}
+    if horizons:
+        for h in sorted(horizons):
+            row = horizons[h]
+            if not row.get("n"):
+                continue
+            lines.append(f"    {h:>3}d  " + fmt.style(
+                f"{row['bounce_rate'] * 100:.0f}% higher  (n={row['n']}, "
+                f"median {row['median'] * 100:+.1f}%)", "value"))
+    else:
+        lines.append("    " + fmt.style("bounce odds: n/a", "muted"))
+
+    # CATALYSTS
+    lines.append("")
+    lines.append("  " + fmt.style("CATALYSTS", "heading"))
+    if detail.deep.earnings_days is not None:
+        style_name = "warn" if detail.deep.earnings_days <= _EARNINGS_WARN_DAYS else "muted"
+        glyph = f"{fmt.GLYPHS['warn']} " if style_name == "warn" else ""
+        lines.append("    " + fmt.style(f"{glyph}earnings in {detail.deep.earnings_days} days", style_name))
+    else:
+        lines.append("    " + fmt.style("earnings: n/a", "muted"))
+    news = detail.news
+    if news:
+        if news.has_positive_catalyst or news.has_negative_catalyst:
+            flag_style = "bad" if news.has_negative_catalyst else "good"
+            flag_txt = "negative" if news.has_negative_catalyst else "positive"
+            if news.has_positive_catalyst and news.has_negative_catalyst:
+                flag_txt, flag_style = "mixed", "warn"
+            lines.append("    " + fmt.style(f"catalyst flag: {flag_txt}", flag_style))
+        else:
+            lines.append("    " + fmt.style("catalyst flag: none", "muted"))
+        if news.items:
+            for item in news.items[:_MAX_NEWS_LINES]:
+                lines.append("    " + fmt.style(item.headline, _sentiment_style(item.sentiment))
+                             + "  " + fmt.style(f"({item.source})", "label"))
+        else:
+            lines.append("    " + fmt.style("headlines: n/a", "muted"))
+        if news.analyst_changes:
+            for ch in news.analyst_changes[:_MAX_ANALYST_LINES]:
+                act_style = "good" if ch.action == "upgrade" else ("bad" if ch.action == "downgrade" else "muted")
+                lines.append("    " + fmt.style(
+                    f"{ch.firm}: {ch.action} {ch.from_grade} -> {ch.to_grade}", act_style))
+    else:
+        lines.append("    " + fmt.style("news: n/a", "muted"))
+
+    # QUALITY
+    lines.append("")
+    lines.append("  " + fmt.style("QUALITY — fundamentals", "heading"))
+    fnd = detail.deep.fundamentals
+    if fnd:
+        pe = fnd.get("trailingPE")
+        fpe = fnd.get("forwardPE")
+        margin = fnd.get("profitMargins")
+        rev_g = fnd.get("revenueGrowth")
+        earn_g = fnd.get("earningsGrowth")
+        roe = fnd.get("returnOnEquity")
+        lines.append("    " + fmt.style(
+            f"P/E {pe:.0f} trailing / {fpe:.0f} forward  ·  margin {margin * 100:+.0f}%  ·  "
+            f"rev growth {rev_g * 100:+.0f}%  ·  earnings growth {earn_g * 100:+.0f}%  ·  "
+            f"ROE {roe * 100:+.0f}%" if all(v is not None for v in (pe, fpe, margin, rev_g, earn_g, roe))
+            else "fundamentals: partial data", "value"))
+    else:
+        lines.append("    " + fmt.style("fundamentals: n/a", "muted"))
+
+    # POSITIONING
+    lines.append("")
+    lines.append("  " + fmt.style("POSITIONING", "heading"))
+    ins = detail.deep.insider
+    if ins and ins.get("label") not in (None, "NONE"):
+        lines.append("    " + fmt.style(
+            f"insider: {ins.get('label')}  ·  {ins.get('n_buyers', 0)} buyer(s)  ·  "
+            f"${ins.get('buy_value', 0.0):,.0f}  ·  {ins.get('window_days', 90)}d window", "value"))
+    else:
+        lines.append("    " + fmt.style("insider activity: n/a", "muted"))
+    si = detail.short_interest
+    if si and (si.pct_float is not None or si.days_to_cover is not None):
+        arrow_style = "warn" if si.trend == "rising" else "muted"
+        parts = []
+        if si.pct_float is not None:
+            parts.append(f"{si.pct_float * 100:.1f}% of float")
+        if si.days_to_cover is not None:
+            parts.append(f"{si.days_to_cover:.1f}d to cover")
+        if si.trend:
+            arrow = {"rising": "↑", "falling": "↓", "flat": "→"}.get(si.trend, "")
+            parts.append(f"{arrow} {si.trend} MoM")
+        lines.append("    " + fmt.style("short interest: " + "  ·  ".join(parts), arrow_style))
+    else:
+        lines.append("    " + fmt.style("short interest: n/a", "muted"))
+
     return "\n".join(lines)
 
 
