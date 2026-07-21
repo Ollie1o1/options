@@ -338,5 +338,32 @@ class TestGuidedFill(unittest.TestCase):
         self.assertIs(result, empty)
 
 
+class TestGuidedEdit(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_replaces_ladder(self):
+        plan = mu_plan()
+        self._feed("1", "800, 700, 600")
+        plan = B._guided_edit(plan, plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual([t.level for t in plan.names[0].tranches], [800.0, 700.0, 600.0])
+
+    def test_empty_plan_returns_unchanged_without_prompting(self):
+        empty = P.Plan(5000.0, [])
+        result = B._guided_edit(empty, plan_path=self.plan_path, db_path=self.db)
+        self.assertIs(result, empty)
+
+
 if __name__ == "__main__":
     unittest.main()
