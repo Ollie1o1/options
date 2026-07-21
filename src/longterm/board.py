@@ -415,6 +415,7 @@ def _guided_fill(plan: Plan, reads: List[ZoneRead],
         if levels:
             tickers_with_opens.append(name.ticker)
     if not tickers_with_opens:
+        print(ui.error_line("nothing to fill — no open tranches on any ticker"))
         return plan
     idx = _choose(tickers_with_opens, "which ticker did you buy?")
     ticker = tickers_with_opens[idx]

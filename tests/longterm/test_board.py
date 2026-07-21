@@ -1,5 +1,7 @@
 """Tests for banner + board rendering (plain-mode, color pinned off)."""
 import builtins
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -321,11 +323,14 @@ class TestGuidedFill(unittest.TestCase):
         B._guided_fill(plan, [r], plan_path=self.plan_path, db_path=self.db)
         self.assertEqual(F.filled_levels("MU", db_path=self.db), {750.0})
 
-    def test_no_open_tranches_returns_unchanged_without_prompting(self):
+    def test_no_open_tranches_prints_error_and_returns_unchanged(self):
         plan = mu_plan()
         r = Z.ZoneRead("MU", Z.FILLED, 500.0, None, None, None, -30.0, True)
-        result = B._guided_fill(plan, [r], plan_path=self.plan_path, db_path=self.db)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = B._guided_fill(plan, [r], plan_path=self.plan_path, db_path=self.db)
         self.assertIs(result, plan)
+        self.assertIn("nothing to fill", buf.getvalue())
 
     def test_empty_plan_returns_unchanged_without_prompting(self):
         empty = P.Plan(5000.0, [])
