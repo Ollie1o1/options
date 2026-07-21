@@ -641,19 +641,87 @@ class TestGuidedDiscover(unittest.TestCase):
         builtins.input = lambda *_a, **_k: next(it)
 
     def test_returns_scan_results_on_success(self):
-        self._feed("semiconductors")
+        self._feed("semiconductors", "b")  # scan, then back out of the detail loop
         fake_results = [(_disc_candidate("MU"), None)]
+        plan_in = P.Plan(5000.0, [])
         with mock.patch("src.longterm.discover.scan", return_value=fake_results) as m:
-            result = B._guided_discover(60)
+            plan_out, result = B._guided_discover(plan_in, 60)
         m.assert_called_once_with("semiconductors")
         self.assertEqual(result, fake_results)
+        self.assertIs(plan_out, plan_in)
 
     def test_returns_none_on_bad_sector(self):
         self._feed("nonsense")
         with mock.patch("src.longterm.discover.scan",
                         side_effect=ValueError("no matching sector")):
-            result = B._guided_discover(60)
+            plan_out, result = B._guided_discover(P.Plan(5000.0, []), 60)
         self.assertIsNone(result)
+
+
+class TestDiscoverDetailLoop(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+        self.orig_input = builtins.input
+        B._PLAN_PATH_OVERRIDE = None  # not used; kept for clarity of setUp intent
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def _results(self):
+        return [(_disc_candidate("MU"), DeepRead(ticker="MU"))]
+
+    def test_back_at_results_prompt_returns_plan_unchanged(self):
+        self._feed("b")
+        plan_in = P.Plan(5000.0, [])
+        with mock.patch.object(B, "_PLAN_PATH", self.plan_path), \
+             mock.patch.object(B, "DEFAULT_DB", self.db):
+            plan_out = B._discover_detail_loop(plan_in, self._results(), 60)
+        self.assertIs(plan_out, plan_in)
+
+    def test_empty_input_returns_to_menu(self):
+        self._feed("")
+        plan_in = P.Plan(5000.0, [])
+        plan_out = B._discover_detail_loop(plan_in, self._results(), 60)
+        self.assertIs(plan_out, plan_in)
+
+    def test_invalid_number_reprompts(self):
+        self._feed("99", "1", "b", "b")
+        with mock.patch("src.longterm.detail.fetch_detail",
+                        return_value=DetailRead(ticker="MU", deep=DeepRead(ticker="MU"))):
+            plan_out = B._discover_detail_loop(P.Plan(5000.0, []), self._results(), 60)
+        self.assertIsInstance(plan_out, P.Plan)
+
+    def test_drilling_in_then_back_returns_to_results_prompt(self):
+        # "1" opens detail, "b" backs to results, "b" exits to ACTIONS
+        self._feed("1", "b", "b")
+        with mock.patch("src.longterm.detail.fetch_detail",
+                        return_value=DetailRead(ticker="MU", deep=DeepRead(ticker="MU"))):
+            plan_out = B._discover_detail_loop(P.Plan(5000.0, []), self._results(), 60)
+        self.assertEqual(plan_out.names, [])
+
+    def test_logging_from_detail_view_adds_to_plan(self):
+        # "1" opens detail, "l" logs, "" accepts suggested ladder, "b" exits
+        self._feed("1", "l", "", "b")
+        with mock.patch("src.longterm.detail.fetch_detail",
+                        return_value=DetailRead(ticker="MU", deep=DeepRead(ticker="MU"))):
+            plan_out = B._discover_detail_loop(P.Plan(5000.0, []), self._results(), 60,
+                                               plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(plan_out.names[0].ticker, "MU")
+        self.assertEqual([t.level for t in plan_out.names[0].tranches], [760.0, 700.0])
+
+    def test_fetch_detail_reuses_deep_read_from_scan_results(self):
+        self._feed("1", "b", "b")
+        with mock.patch("src.longterm.detail.fetch_detail",
+                        return_value=DetailRead(ticker="MU", deep=DeepRead(ticker="MU"))) as m_fetch:
+            B._discover_detail_loop(P.Plan(5000.0, []), self._results(), 60)
+        m_fetch.assert_called_once_with("MU", DeepRead(ticker="MU"))
 
 
 class TestGuidedReport(unittest.TestCase):

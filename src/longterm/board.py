@@ -658,7 +658,46 @@ def _guided_log(plan: Plan, candidate: CandidateRead,
     return plan
 
 
-def _guided_discover(width: int):
+def _discover_detail_loop(plan: Plan, results: List[Tuple[CandidateRead, Optional[DeepRead]]],
+                          width: int, plan_path: str = _PLAN_PATH,
+                          db_path: str = DEFAULT_DB) -> Plan:
+    """Nested navigation under a completed DISCOVER scan: pick any
+    candidate number (not just the deep-tier top few) to drill into its
+    full detail, then L to log it or B to browse another. B/empty at this
+    top level exits back to the ACTIONS menu. Invalid input at either
+    prompt re-asks that same prompt, matching _choose()'s existing
+    retry-in-place convention elsewhere in this file."""
+    from .detail import fetch_detail
+
+    while True:
+        raw = _ask("number to inspect, or B for the menu")
+        up = raw.strip().upper()
+        if up in ("", "B", "BACK", "Q", "QUIT"):
+            return plan
+        try:
+            idx = int(raw)
+        except ValueError:
+            print(ui.error_line(f"'{raw}' isn't a number — try again"))
+            continue
+        if not (1 <= idx <= len(results)):
+            print(ui.error_line(f"pick a number between 1 and {len(results)}"))
+            continue
+        candidate, deep = results[idx - 1]
+        with ui.spinner(f"pulling detail on {candidate.ticker}…"):
+            detail = fetch_detail(candidate.ticker, deep)
+        print(render_detail(candidate, detail, width=width))
+        while True:
+            action = _ask("L to log this pick, or B for the results")
+            a_up = action.strip().upper()
+            if a_up in ("", "B", "BACK"):
+                break
+            if a_up in ("L", "LOG"):
+                plan = _guided_log(plan, candidate, plan_path=plan_path, db_path=db_path)
+                break
+            print(ui.error_line(f"'{action}' isn't L or B — try again"))
+
+
+def _guided_discover(plan: Plan, width: int):
     sector = _ask("sector or keyword, e.g. semiconductors")
     from .discover import scan
     try:
@@ -666,9 +705,11 @@ def _guided_discover(width: int):
             results = scan(sector)
     except ValueError as exc:
         print(ui.error_line(str(exc)))
-        return None
+        return plan, None
     print(render_discover_board(results, sector, width=width))
-    return results
+    if results:
+        plan = _discover_detail_loop(plan, results, width)
+    return plan, results
 
 
 def _open_report_file(path: str) -> None:
@@ -768,12 +809,14 @@ def menu(width: int = 100) -> None:
             continue
         if up == "6":
             try:
-                result = _guided_discover(width)
+                plan, result = _guided_discover(plan, width)
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue
             if result is not None:
                 last_discovery = result
+            reads, held, remaining = _gather_cached(plan, snaps)
+            print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
             continue
         if up == "7":
             try:
