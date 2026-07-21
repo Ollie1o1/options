@@ -564,6 +564,44 @@ class TestGuidedCash(unittest.TestCase):
         self.assertEqual(plan.cash_pool_usd, 5000.0)
 
 
+class TestGuidedLog(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_enter_accepts_suggested_ladder(self):
+        candidate = _disc_candidate("MU")  # suggested_ladder=[760.0/0.5, 700.0/0.5]
+        self._feed("")
+        plan = B._guided_log(P.Plan(5000.0, []), candidate,
+                             plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(plan.names[0].ticker, "MU")
+        self.assertEqual([t.level for t in plan.names[0].tranches], [760.0, 700.0])
+
+    def test_typed_levels_override_suggestion(self):
+        candidate = _disc_candidate("MU")
+        self._feed("800, 700, 600")
+        plan = B._guided_log(P.Plan(5000.0, []), candidate,
+                             plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual([t.level for t in plan.names[0].tranches], [800.0, 700.0, 600.0])
+
+    def test_reprompts_on_unparseable_input(self):
+        candidate = _disc_candidate("MU")
+        self._feed("cheap", "750, 650")
+        plan = B._guided_log(P.Plan(5000.0, []), candidate,
+                             plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual([t.level for t in plan.names[0].tranches], [750.0, 650.0])
+
+
 class TestAskLevelsDefault(unittest.TestCase):
     def setUp(self):
         self.orig_input = builtins.input

@@ -645,6 +645,19 @@ def _guided_cash(plan: Plan, plan_path: str = _PLAN_PATH, db_path: str = DEFAULT
     return plan
 
 
+def _guided_log(plan: Plan, candidate: CandidateRead,
+                plan_path: str = _PLAN_PATH, db_path: str = DEFAULT_DB) -> Plan:
+    """Log a DISCOVER candidate into the plan — same ADD path action [1]
+    uses, pre-filled with the candidate's already-computed suggested
+    ladder so accepting it is a single Enter."""
+    default_ladder = "/".join(f"{t.level:g}" for t in candidate.suggested_ladder)
+    levels = _ask_levels(f"buy levels for {candidate.ticker}", default=default_ladder)
+    plan, msg = handle_command(build_add_command(candidate.ticker, levels),
+                               plan, plan_path=plan_path, db_path=db_path)
+    print("  " + msg)
+    return plan
+
+
 def _guided_discover(width: int):
     sector = _ask("sector or keyword, e.g. semiconductors")
     from .discover import scan
