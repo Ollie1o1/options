@@ -10,7 +10,7 @@ from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
 from .wizard import (build_add_command, build_edit_command, build_fill_command,
-                     open_tranche_levels, parse_levels)
+                     build_remove_command, open_tranche_levels, parse_levels)
 from .zones import FILLED, IN_ZONE, NEAR, WATCHING, ZoneRead
 
 _STATE_STYLE = {IN_ZONE: "good", NEAR: "warn", WATCHING: "muted", FILLED: "label"}
@@ -451,6 +451,19 @@ def _guided_edit(plan: Plan, plan_path: str = _PLAN_PATH, db_path: str = DEFAULT
     return plan
 
 
+def _guided_remove(plan: Plan, plan_path: str = _PLAN_PATH, db_path: str = DEFAULT_DB) -> Plan:
+    if not plan.names:
+        print(ui.error_line("nothing on your plan yet — add a stock first"))
+        return plan
+    tickers = [n.ticker for n in plan.names]
+    idx = _choose(tickers, "which ticker to remove?")
+    ticker = tickers[idx]
+    plan, msg = handle_command(build_remove_command(ticker),
+                               plan, plan_path=plan_path, db_path=db_path)
+    print("  " + msg)
+    return plan
+
+
 def menu(width: int = 100) -> None:
     from .plan import load_plan
     plan = load_plan()
@@ -493,6 +506,15 @@ def menu(width: int = 100) -> None:
         if up == "3":
             try:
                 plan = _guided_edit(plan)
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            reads, held, remaining = _gather_cached(plan, snaps)
+            print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
+            continue
+        if up == "4":
+            try:
+                plan = _guided_remove(plan)
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue

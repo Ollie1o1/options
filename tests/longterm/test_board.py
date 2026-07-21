@@ -365,5 +365,32 @@ class TestGuidedEdit(unittest.TestCase):
         self.assertIs(result, empty)
 
 
+class TestGuidedRemove(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_removes_chosen_ticker(self):
+        plan = mu_plan()
+        self._feed("1")
+        plan = B._guided_remove(plan, plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(plan.names, [])
+
+    def test_empty_plan_returns_unchanged_without_prompting(self):
+        empty = P.Plan(5000.0, [])
+        result = B._guided_remove(empty, plan_path=self.plan_path, db_path=self.db)
+        self.assertIs(result, empty)
+
+
 if __name__ == "__main__":
     unittest.main()
