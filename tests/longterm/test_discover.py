@@ -154,6 +154,28 @@ class TestFastContext(unittest.TestCase):
         total_weight = sum(t.weight for t in c.suggested_ladder)
         self.assertAlmostEqual(total_weight, 1.0, places=6)
 
+    def test_rsi_present_with_enough_history(self):
+        snap = _drawdown_snapshot()
+        c = DSC.fast_context(snap)
+        self.assertIsNotNone(c.rsi)
+        self.assertGreaterEqual(c.rsi, 0.0)
+        self.assertLessEqual(c.rsi, 100.0)
+
+    def test_rsi_none_with_short_history(self):
+        closes = _rising_closes(n=10)  # levels.rsi needs > period=14 closes
+        snap = Snapshot(ticker="TST", spot=closes[-1], high_52w=max(closes),
+                        low_52w=min(closes), ma200=None, daily_sigma=0.02,
+                        closes=closes)
+        c = DSC.fast_context(snap)
+        self.assertIsNone(c.rsi)
+
+    def test_ann_vol_pct_matches_daily_sigma_annualized(self):
+        import math
+        snap = _drawdown_snapshot()  # daily_sigma=0.02
+        c = DSC.fast_context(snap)
+        expected = 0.02 * math.sqrt(252) * 100.0
+        self.assertAlmostEqual(c.ann_vol_pct, expected, places=4)
+
 
 class TestSuggestLadder(unittest.TestCase):
     def test_uses_real_supports_when_available(self):

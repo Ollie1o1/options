@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import src.formatting as fmt
 from src import ui
+from .detail import DetailRead
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
@@ -171,6 +172,176 @@ def render_discover_board(results: List[Tuple[CandidateRead, Optional[DeepRead]]
         lines.append("  " + fmt.style("deeper read:", "heading"))
         for i, candidate, deep in deep_entries:
             lines.append(f"    {i}. " + fmt.style(insight_line(candidate, deep), "value"))
+    return "\n".join(lines)
+
+
+_RSI_OVERSOLD = 30.0
+_RSI_OVERBOUGHT = 70.0
+_EARNINGS_WARN_DAYS = 14
+_MAX_NEWS_LINES = 5
+_MAX_ANALYST_LINES = 5
+_SENTIMENT_POS = 0.15
+_SENTIMENT_NEG = -0.15
+
+
+def _rsi_zone(value: Optional[float]) -> Tuple[str, str]:
+    """(label, style_name) for an RSI reading — same zone convention as
+    src/levels.py:print_levels, applied here for the holdings desk."""
+    if value is None:
+        return "n/a", "muted"
+    if value < _RSI_OVERSOLD:
+        return "oversold", "good"
+    if value > _RSI_OVERBOUGHT:
+        return "overbought", "warn"
+    return "neutral", "muted"
+
+
+def _sentiment_style(score: float) -> str:
+    if score >= _SENTIMENT_POS:
+        return "good"
+    if score <= _SENTIMENT_NEG:
+        return "bad"
+    return "muted"
+
+
+def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100) -> str:
+    """Full drill-down for one DISCOVER candidate: vitals, synthesis, price
+    structure, statistical edge, catalysts, quality, positioning — in that
+    order (why-now, before is-it-good). Every section header always
+    prints, even when its data is None ("n/a"), so nothing decision-
+    relevant silently disappears. Descriptive context only, same
+    non-predictive philosophy as the rest of this package — see
+    discover.py's module docstring.
+    """
+    lines = [ui.rule(width, f"{candidate.ticker} — DETAIL")]
+
+    zone_label, zone_style = _rsi_zone(candidate.rsi)
+    rsi_txt = f"RSI {candidate.rsi:.0f} ({zone_label})" if candidate.rsi is not None else "RSI n/a"
+    ma_txt = (f"{candidate.ma200_distance_pct:+.0f}% vs 200dma"
+             if candidate.ma200_distance_pct is not None else "200dma n/a")
+    mom_txt = (f"mom {candidate.momentum_12_1 * 100:+.0f}%"
+              if candidate.momentum_12_1 is not None else "mom n/a")
+    vol_txt = (f"vol {candidate.ann_vol_pct:.0f}%/yr"
+              if candidate.ann_vol_pct is not None else "vol n/a")
+    vitals = [
+        fmt.style(candidate.ticker, "heading"),
+        fmt.style(f"{candidate.spot:,.2f}", "emph"),
+        fmt.style(f"{candidate.drawdown_pct:+.0f}% ATH", "bad"),
+        fmt.style(rsi_txt, zone_style),
+        fmt.style(ma_txt, "label"),
+        fmt.style(mom_txt, "muted"),
+        fmt.style(vol_txt, "muted"),
+    ]
+    lines.append("  " + f"  {fmt.style(fmt.GLYPHS['dot'], 'muted')}  ".join(vitals))
+    lines.append("  " + fmt.style(insight_line(candidate, detail.deep), "value"))
+
+    # PRICE STRUCTURE
+    lines.append("")
+    lines.append("  " + fmt.style("PRICE STRUCTURE", "heading"))
+    if candidate.supports:
+        for s in candidate.supports:
+            lines.append(f"    support  {fmt.style(s['label'], 'label')}  "
+                         + fmt.style(f"{s['level']:,.2f}  ({s['pct'] * 100:+.1f}%)", "value"))
+    else:
+        lines.append("    " + fmt.style("supports: n/a", "muted"))
+    if candidate.suggested_ladder:
+        ladder_txt = " / ".join(f"{t.level:g}" for t in candidate.suggested_ladder)
+        lines.append("    " + fmt.style(f"suggested ladder: {ladder_txt}", "accent"))
+
+    # STATISTICAL EDGE
+    lines.append("")
+    lines.append("  " + fmt.style("STATISTICAL EDGE — bounce odds after a drop this size", "heading"))
+    horizons = (candidate.bounce or {}).get("by_horizon") or {}
+    horizon_lines = []
+    for h in sorted(horizons):
+        row = horizons[h]
+        if not row.get("n"):
+            continue
+        horizon_lines.append(f"    {h:>3}d  " + fmt.style(
+            f"{row['bounce_rate'] * 100:.0f}% higher  (n={row['n']}, "
+            f"median {row['median'] * 100:+.1f}%)", "value"))
+    if horizon_lines:
+        lines.extend(horizon_lines)
+    else:
+        lines.append("    " + fmt.style("bounce odds: n/a", "muted"))
+
+    # CATALYSTS
+    lines.append("")
+    lines.append("  " + fmt.style("CATALYSTS", "heading"))
+    if detail.deep.earnings_days is not None:
+        style_name = "warn" if detail.deep.earnings_days <= _EARNINGS_WARN_DAYS else "muted"
+        glyph = f"{fmt.GLYPHS['warn']} " if style_name == "warn" else ""
+        lines.append("    " + fmt.style(f"{glyph}earnings in {detail.deep.earnings_days} days", style_name))
+    else:
+        lines.append("    " + fmt.style("earnings: n/a", "muted"))
+    news = detail.news
+    if news:
+        if news.has_positive_catalyst or news.has_negative_catalyst:
+            flag_style = "bad" if news.has_negative_catalyst else "good"
+            flag_txt = "negative" if news.has_negative_catalyst else "positive"
+            if news.has_positive_catalyst and news.has_negative_catalyst:
+                flag_txt, flag_style = "mixed", "warn"
+            lines.append("    " + fmt.style(f"catalyst flag: {flag_txt}", flag_style))
+        else:
+            lines.append("    " + fmt.style("catalyst flag: none", "muted"))
+        if news.items:
+            for item in news.items[:_MAX_NEWS_LINES]:
+                lines.append("    " + fmt.style(item.headline, _sentiment_style(item.sentiment))
+                             + "  " + fmt.style(f"({item.source})", "label"))
+        else:
+            lines.append("    " + fmt.style("headlines: n/a", "muted"))
+        if news.analyst_changes:
+            for ch in news.analyst_changes[:_MAX_ANALYST_LINES]:
+                act_style = "good" if ch.action == "upgrade" else ("bad" if ch.action == "downgrade" else "muted")
+                lines.append("    " + fmt.style(
+                    f"{ch.firm}: {ch.action} {ch.from_grade} -> {ch.to_grade}", act_style))
+    else:
+        lines.append("    " + fmt.style("news: n/a", "muted"))
+
+    # QUALITY
+    lines.append("")
+    lines.append("  " + fmt.style("QUALITY — fundamentals", "heading"))
+    fnd = detail.deep.fundamentals
+    if fnd:
+        pe = fnd.get("trailingPE")
+        fpe = fnd.get("forwardPE")
+        margin = fnd.get("profitMargins")
+        rev_g = fnd.get("revenueGrowth")
+        earn_g = fnd.get("earningsGrowth")
+        roe = fnd.get("returnOnEquity")
+        lines.append("    " + fmt.style(
+            f"P/E {pe:.0f} trailing / {fpe:.0f} forward  ·  margin {margin * 100:+.0f}%  ·  "
+            f"rev growth {rev_g * 100:+.0f}%  ·  earnings growth {earn_g * 100:+.0f}%  ·  "
+            f"ROE {roe * 100:+.0f}%" if all(v is not None for v in (pe, fpe, margin, rev_g, earn_g, roe))
+            else "fundamentals: partial data", "value"))
+    else:
+        lines.append("    " + fmt.style("fundamentals: n/a", "muted"))
+
+    # POSITIONING
+    lines.append("")
+    lines.append("  " + fmt.style("POSITIONING", "heading"))
+    ins = detail.deep.insider
+    if ins and ins.get("label") not in (None, "NONE"):
+        lines.append("    " + fmt.style(
+            f"insider: {ins.get('label')}  ·  {ins.get('n_buyers', 0)} buyer(s)  ·  "
+            f"${ins.get('buy_value', 0.0):,.0f}  ·  {ins.get('window_days', 90)}d window", "value"))
+    else:
+        lines.append("    " + fmt.style("insider activity: n/a", "muted"))
+    si = detail.short_interest
+    if si and (si.pct_float is not None or si.days_to_cover is not None):
+        arrow_style = "warn" if si.trend == "rising" else "muted"
+        parts = []
+        if si.pct_float is not None:
+            parts.append(f"{si.pct_float * 100:.1f}% of float")
+        if si.days_to_cover is not None:
+            parts.append(f"{si.days_to_cover:.1f}d to cover")
+        if si.trend:
+            arrow = {"rising": "↑", "falling": "↓", "flat": "→"}.get(si.trend, "")
+            parts.append(f"{arrow} {si.trend} MoM")
+        lines.append("    " + fmt.style("short interest: " + "  ·  ".join(parts), arrow_style))
+    else:
+        lines.append("    " + fmt.style("short interest: n/a", "muted"))
+
     return "\n".join(lines)
 
 
@@ -366,9 +537,9 @@ def _ask_float(prompt: str, default: Optional[str] = None) -> float:
             print(ui.error_line(f"'{raw}' isn't a number — try again"))
 
 
-def _ask_levels(prompt: str) -> List[float]:
+def _ask_levels(prompt: str, default: Optional[str] = None) -> List[float]:
     while True:
-        raw = _ask(prompt)
+        raw = _ask(prompt, default)
         try:
             return parse_levels(raw)
         except ValueError as exc:
@@ -474,7 +645,59 @@ def _guided_cash(plan: Plan, plan_path: str = _PLAN_PATH, db_path: str = DEFAULT
     return plan
 
 
-def _guided_discover(width: int):
+def _guided_log(plan: Plan, candidate: CandidateRead,
+                plan_path: str = _PLAN_PATH, db_path: str = DEFAULT_DB) -> Plan:
+    """Log a DISCOVER candidate into the plan — same ADD path action [1]
+    uses, pre-filled with the candidate's already-computed suggested
+    ladder so accepting it is a single Enter."""
+    default_ladder = "/".join(f"{t.level:g}" for t in candidate.suggested_ladder)
+    levels = _ask_levels(f"buy levels for {candidate.ticker}", default=default_ladder)
+    plan, msg = handle_command(build_add_command(candidate.ticker, levels),
+                               plan, plan_path=plan_path, db_path=db_path)
+    print("  " + msg)
+    return plan
+
+
+def _discover_detail_loop(plan: Plan, results: List[Tuple[CandidateRead, Optional[DeepRead]]],
+                          width: int, plan_path: str = _PLAN_PATH,
+                          db_path: str = DEFAULT_DB) -> Plan:
+    """Nested navigation under a completed DISCOVER scan: pick any
+    candidate number (not just the deep-tier top few) to drill into its
+    full detail, then L to log it or B to browse another. B/empty at this
+    top level exits back to the ACTIONS menu. Invalid input at either
+    prompt re-asks that same prompt, matching _choose()'s existing
+    retry-in-place convention elsewhere in this file."""
+    from .detail import fetch_detail
+
+    while True:
+        raw = _ask("number to inspect, or B for the menu")
+        up = raw.strip().upper()
+        if up in ("", "B", "BACK", "Q", "QUIT"):
+            return plan
+        try:
+            idx = int(raw)
+        except ValueError:
+            print(ui.error_line(f"'{raw}' isn't a number — try again"))
+            continue
+        if not (1 <= idx <= len(results)):
+            print(ui.error_line(f"pick a number between 1 and {len(results)}"))
+            continue
+        candidate, deep = results[idx - 1]
+        with ui.spinner(f"pulling detail on {candidate.ticker}…"):
+            detail = fetch_detail(candidate.ticker, deep)
+        print(render_detail(candidate, detail, width=width))
+        while True:
+            action = _ask("L to log this pick, or B for the results")
+            a_up = action.strip().upper()
+            if a_up in ("", "B", "BACK"):
+                break
+            if a_up in ("L", "LOG"):
+                plan = _guided_log(plan, candidate, plan_path=plan_path, db_path=db_path)
+                break
+            print(ui.error_line(f"'{action}' isn't L or B — try again"))
+
+
+def _guided_discover(plan: Plan, width: int):
     sector = _ask("sector or keyword, e.g. semiconductors")
     from .discover import scan
     try:
@@ -482,9 +705,11 @@ def _guided_discover(width: int):
             results = scan(sector)
     except ValueError as exc:
         print(ui.error_line(str(exc)))
-        return None
+        return plan, None
     print(render_discover_board(results, sector, width=width))
-    return results
+    if results:
+        plan = _discover_detail_loop(plan, results, width)
+    return plan, results
 
 
 def _open_report_file(path: str) -> None:
@@ -584,12 +809,14 @@ def menu(width: int = 100) -> None:
             continue
         if up == "6":
             try:
-                result = _guided_discover(width)
+                plan, result = _guided_discover(plan, width)
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue
             if result is not None:
                 last_discovery = result
+            reads, held, remaining = _gather_cached(plan, snaps)
+            print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
             continue
         if up == "7":
             try:
