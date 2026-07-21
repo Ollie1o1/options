@@ -9,7 +9,7 @@ from src import ui
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
-from .wizard import open_tranche_levels
+from .wizard import build_add_command, open_tranche_levels, parse_levels
 from .zones import FILLED, IN_ZONE, NEAR, WATCHING, ZoneRead
 
 _STATE_STYLE = {IN_ZONE: "good", NEAR: "warn", WATCHING: "muted", FILLED: "label"}
@@ -348,6 +348,60 @@ def render_actions_menu(width: int = 100) -> str:
     return "\n".join(lines)
 
 
+def _ask(prompt: str, default: Optional[str] = None) -> str:
+    suffix = f" [{default}]" if default is not None else ""
+    val = input(f"  {prompt}{suffix}: ").strip()
+    return default if (not val and default is not None) else val
+
+
+def _ask_float(prompt: str, default: Optional[str] = None) -> float:
+    while True:
+        raw = _ask(prompt, default)
+        try:
+            return float(raw)
+        except ValueError:
+            print(ui.error_line(f"'{raw}' isn't a number — try again"))
+
+
+def _ask_levels(prompt: str) -> List[float]:
+    while True:
+        raw = _ask(prompt)
+        try:
+            return parse_levels(raw)
+        except ValueError as exc:
+            print(ui.error_line(str(exc)))
+
+
+def _choose(items: List[str], prompt: str) -> int:
+    for i, item in enumerate(items, start=1):
+        print(f"    {fmt.style(f'[{i}]', 'accent')} {item}")
+    while True:
+        raw = _ask(prompt)
+        try:
+            idx = int(raw)
+        except ValueError:
+            print(ui.error_line(f"'{raw}' isn't a number — try again"))
+            continue
+        if 1 <= idx <= len(items):
+            return idx - 1
+        print(ui.error_line(f"pick a number between 1 and {len(items)}"))
+
+
+def _guided_add(plan: Plan, last_discovery,
+                plan_path: str = _PLAN_PATH, db_path: str = DEFAULT_DB):
+    if last_discovery:
+        target = _ask("ticker to add, or a number from your last scan")
+    else:
+        target = _ask("ticker to add")
+    resolved = resolve_add_target(f"ADD {target.upper()}", last_discovery)
+    if resolved == f"ADD {target.upper()}":
+        levels = _ask_levels("buy levels, e.g. 750, 650, 550")
+        resolved = build_add_command(target, levels)
+    plan, msg = handle_command(resolved, plan, plan_path=plan_path, db_path=db_path)
+    print("  " + msg)
+    return plan, last_discovery
+
+
 def menu(width: int = 100) -> None:
     from .plan import load_plan
     plan = load_plan()
@@ -361,6 +415,7 @@ def menu(width: int = 100) -> None:
         return
     last_discovery: Optional[List[Tuple[CandidateRead, Optional[DeepRead]]]] = None
     while True:
+        print(render_actions_menu(width))
         try:
             raw = input("\n  holdings> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -368,6 +423,15 @@ def menu(width: int = 100) -> None:
         up = raw.upper()
         if up in ("B", "BACK", "Q", "QUIT", "X", ""):
             return
+        if up == "1":
+            try:
+                plan, last_discovery = _guided_add(plan, last_discovery)
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            reads, held, remaining = _gather_cached(plan, snaps)
+            print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
+            continue
         if up in ("R", "REPORT"):
             from .report import write_report
             with ui.spinner("rendering report…"):

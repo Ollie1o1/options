@@ -1,4 +1,5 @@
 """Tests for banner + board rendering (plain-mode, color pinned off)."""
+import builtins
 import os
 import sys
 import tempfile
@@ -256,6 +257,46 @@ class TestActionsMenu(unittest.TestCase):
         self.assertIn("[B]", out)
         self.assertIn("Add a stock", out)
         self.assertIn("Write & open report", out)
+
+
+class TestGuidedAdd(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plan_path = os.path.join(self.tmp.name, "plan.json")
+        self.db = os.path.join(self.tmp.name, "longterm.db")
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_typed_ticker_and_levels(self):
+        self._feed("mu", "750, 650, 550")
+        plan, last_discovery = B._guided_add(P.Plan(5000.0, []), None,
+                                             plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(plan.names[0].ticker, "MU")
+        self.assertEqual([t.level for t in plan.names[0].tranches], [750.0, 650.0, 550.0])
+        self.assertIsNone(last_discovery)
+
+    def test_add_by_index_from_last_scan_skips_levels_question(self):
+        candidate = _disc_candidate("MU")
+        last_discovery = [(candidate, None)]
+        self._feed("1")  # only one answer needed — no levels prompt
+        plan, returned_discovery = B._guided_add(P.Plan(5000.0, []), last_discovery,
+                                                  plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual(plan.names[0].ticker, "MU")
+        self.assertEqual([t.level for t in plan.names[0].tranches], [760.0, 700.0])
+        self.assertIs(returned_discovery, last_discovery)
+
+    def test_reprompts_on_unparseable_levels(self):
+        self._feed("mu", "cheap", "750, 650")
+        plan, _ = B._guided_add(P.Plan(5000.0, []), None,
+                                plan_path=self.plan_path, db_path=self.db)
+        self.assertEqual([t.level for t in plan.names[0].tranches], [750.0, 650.0])
 
 
 if __name__ == "__main__":
