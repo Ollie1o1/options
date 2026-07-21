@@ -119,6 +119,14 @@ class CandidateRead:
                               A backward-looking base rate, not a forecast.
       suggested_ladder    -- starting-point 3-tranche buy ladder from
                               suggest_ladder(); every level is editable before ADD.
+      rsi                 -- Wilder RSI(14) on `snapshot.closes` (src/levels.py:rsi).
+                              None if fewer than 15 closes. Textbook zones only
+                              (<30 oversold, >70 overbought) — descriptive, not
+                              a signal.
+      ann_vol_pct         -- annualized realized volatility, i.e.
+                              snapshot.daily_sigma * sqrt(252) * 100, from the
+                              same 63-day window data.snapshot_from_closes()
+                              already computes. Zero extra network cost.
     """
     ticker: str
     spot: float
@@ -128,6 +136,8 @@ class CandidateRead:
     supports: List[Any] = field(default_factory=list)
     bounce: Dict[str, Any] = field(default_factory=dict)
     suggested_ladder: List[Tranche] = field(default_factory=list)
+    rsi: Optional[float] = None
+    ann_vol_pct: Optional[float] = None
 
 
 def suggest_ladder(spot: float, supports: List[Any]) -> List[Tranche]:
@@ -181,8 +191,9 @@ def fast_context(snapshot: Snapshot) -> CandidateRead:
     Pure function: no I/O, no network, deterministic given the snapshot.
     See CandidateRead's field docs for exact units/sign conventions.
     """
-    from src.levels import bounce_stats, support_resistance_levels
+    from src.levels import bounce_stats, rsi, support_resistance_levels
     from src.outlook.factors import mom_12_1
+    import math
 
     drawdown_pct = (snapshot.spot / snapshot.high_52w - 1.0) * 100.0
     ma200_distance_pct = (
@@ -193,6 +204,7 @@ def fast_context(snapshot: Snapshot) -> CandidateRead:
     levels = support_resistance_levels(snapshot.closes, snapshot.spot)
     bounce = bounce_stats(snapshot.closes)
     ladder = suggest_ladder(snapshot.spot, levels["supports"])
+    ann_vol_pct = snapshot.daily_sigma * math.sqrt(252) * 100.0 if snapshot.daily_sigma else None
     return CandidateRead(
         ticker=snapshot.ticker,
         spot=snapshot.spot,
@@ -202,6 +214,8 @@ def fast_context(snapshot: Snapshot) -> CandidateRead:
         supports=levels["supports"],
         bounce=bounce,
         suggested_ladder=ladder,
+        rsi=rsi(snapshot.closes),
+        ann_vol_pct=ann_vol_pct,
     )
 
 
