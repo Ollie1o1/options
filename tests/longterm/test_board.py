@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -418,6 +419,33 @@ class TestGuidedCash(unittest.TestCase):
         self._feed("")  # accept the shown default
         plan = B._guided_cash(plan, plan_path=self.plan_path, db_path=self.db)
         self.assertEqual(plan.cash_pool_usd, 5000.0)
+
+
+class TestGuidedDiscover(unittest.TestCase):
+    def setUp(self):
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_returns_scan_results_on_success(self):
+        self._feed("semiconductors")
+        fake_results = [(_disc_candidate("MU"), None)]
+        with mock.patch("src.longterm.discover.scan", return_value=fake_results) as m:
+            result = B._guided_discover(60)
+        m.assert_called_once_with("semiconductors")
+        self.assertEqual(result, fake_results)
+
+    def test_returns_none_on_bad_sector(self):
+        self._feed("nonsense")
+        with mock.patch("src.longterm.discover.scan",
+                        side_effect=ValueError("no matching sector")):
+            result = B._guided_discover(60)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

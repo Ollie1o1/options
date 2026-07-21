@@ -473,6 +473,19 @@ def _guided_cash(plan: Plan, plan_path: str = _PLAN_PATH, db_path: str = DEFAULT
     return plan
 
 
+def _guided_discover(width: int):
+    sector = _ask("sector or keyword, e.g. semiconductors")
+    from .discover import scan
+    try:
+        with ui.spinner(f"scanning {sector.upper()}…"):
+            results = scan(sector)
+    except ValueError as exc:
+        print(ui.error_line(str(exc)))
+        return None
+    print(render_discover_board(results, sector, width=width))
+    return results
+
+
 def menu(width: int = 100) -> None:
     from .plan import load_plan
     plan = load_plan()
@@ -538,6 +551,15 @@ def menu(width: int = 100) -> None:
                 continue
             reads, held, remaining = _gather_cached(plan, snaps)
             print(render_board(plan, reads, held, remaining, earnings=flags, width=width))
+            continue
+        if up == "6":
+            try:
+                result = _guided_discover(width)
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            if result is not None:
+                last_discovery = result
             continue
         if up in ("R", "REPORT"):
             from .report import write_report
