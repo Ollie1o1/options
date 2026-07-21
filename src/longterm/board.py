@@ -366,9 +366,9 @@ def _ask_float(prompt: str, default: Optional[str] = None) -> float:
             print(ui.error_line(f"'{raw}' isn't a number — try again"))
 
 
-def _ask_levels(prompt: str) -> List[float]:
+def _ask_levels(prompt: str, default: Optional[str] = None) -> List[float]:
     while True:
-        raw = _ask(prompt)
+        raw = _ask(prompt, default)
         try:
             return parse_levels(raw)
         except ValueError as exc:

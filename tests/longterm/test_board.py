@@ -421,6 +421,33 @@ class TestGuidedCash(unittest.TestCase):
         self.assertEqual(plan.cash_pool_usd, 5000.0)
 
 
+class TestAskLevelsDefault(unittest.TestCase):
+    def setUp(self):
+        self.orig_input = builtins.input
+
+    def tearDown(self):
+        builtins.input = self.orig_input
+
+    def _feed(self, *answers):
+        it = iter(answers)
+        builtins.input = lambda *_a, **_k: next(it)
+
+    def test_empty_input_returns_default(self):
+        self._feed("")
+        result = B._ask_levels("levels", default="760/700")
+        self.assertEqual(result, [760.0, 700.0])
+
+    def test_typed_input_overrides_default(self):
+        self._feed("800, 700, 600")
+        result = B._ask_levels("levels", default="760/700")
+        self.assertEqual(result, [800.0, 700.0, 600.0])
+
+    def test_no_default_still_reprompts_on_bad_input(self):
+        self._feed("cheap", "750, 650")
+        result = B._ask_levels("levels")
+        self.assertEqual(result, [750.0, 650.0])
+
+
 class TestGuidedDiscover(unittest.TestCase):
     def setUp(self):
         self.orig_input = builtins.input
