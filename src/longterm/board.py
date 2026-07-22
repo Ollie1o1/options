@@ -2,7 +2,7 @@
 
 House style: everything through src/ui.py + fmt.style semantic names —
 never raw Colors. Plain mode must stay readable."""
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import src.formatting as fmt
 from src import ui
@@ -210,6 +210,80 @@ def _sentiment_style(score: float) -> str:
     return "muted"
 
 
+def _quality_lines(fnd: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Grouped QUALITY sub-lines from a fundamentals dict. Each group
+    appears only if it has at least one non-None value; returns [] if
+    nothing across all groups is present (caller falls back to the
+    existing "fundamentals: n/a" line). Order is fixed: profitability and
+    growth and valuation (unchanged since before this expansion), then
+    balance sheet and dividend appended last.
+
+    UNIT NOTE (see _FUNDAMENTALS_FIELDS for the full rationale):
+    dividendYield/fiveYearAvgDividendYield are already percents from
+    yfinance; payoutRatio is a fraction; debtToEquity is 100x the true
+    ratio.
+    """
+    groups: List[Tuple[str, str]] = []
+
+    margin = fnd.get("profitMargins")
+    roe = fnd.get("returnOnEquity")
+    if margin is not None or roe is not None:
+        parts = []
+        if margin is not None:
+            parts.append(f"margin {margin * 100:+.0f}%")
+        if roe is not None:
+            parts.append(f"ROE {roe * 100:+.0f}%")
+        groups.append(("profitability", "  ·  ".join(parts)))
+
+    rev_g = fnd.get("revenueGrowth")
+    earn_g = fnd.get("earningsGrowth")
+    if rev_g is not None or earn_g is not None:
+        parts = []
+        if rev_g is not None:
+            parts.append(f"rev {rev_g * 100:+.0f}%")
+        if earn_g is not None:
+            parts.append(f"earnings {earn_g * 100:+.0f}%")
+        groups.append(("growth", "  ·  ".join(parts)))
+
+    pe = fnd.get("trailingPE")
+    fpe = fnd.get("forwardPE")
+    if pe is not None and fpe is not None:
+        groups.append(("valuation", f"P/E {pe:.0f} trailing / {fpe:.0f} forward"))
+    elif pe is not None:
+        groups.append(("valuation", f"P/E {pe:.0f} trailing"))
+    elif fpe is not None:
+        groups.append(("valuation", f"P/E {fpe:.0f} forward"))
+
+    de = fnd.get("debtToEquity")
+    fcf = fnd.get("freeCashflow")
+    rev = fnd.get("totalRevenue")
+    fcf_margin = (fcf / rev) if (fcf is not None and rev not in (None, 0)) else None
+    if de is not None or fcf_margin is not None:
+        parts = []
+        if de is not None:
+            parts.append(f"D/E {de / 100:.2f}x")
+        if fcf_margin is not None:
+            parts.append(f"FCF margin {fcf_margin * 100:+.0f}%")
+        groups.append(("balance sheet", "  ·  ".join(parts)))
+
+    div_y = fnd.get("dividendYield")
+    div_5y = fnd.get("fiveYearAvgDividendYield")
+    payout = fnd.get("payoutRatio")
+    if div_y is not None or div_5y is not None or payout is not None:
+        parts = []
+        if div_y is not None and div_5y is not None:
+            parts.append(f"yield {div_y:.1f}%  (5yr avg {div_5y:.1f}%)")
+        elif div_y is not None:
+            parts.append(f"yield {div_y:.1f}%")
+        elif div_5y is not None:
+            parts.append(f"5yr avg yield {div_5y:.1f}%")
+        if payout is not None:
+            parts.append(f"payout {payout * 100:.0f}%")
+        groups.append(("dividend", "  ·  ".join(parts)))
+
+    return groups
+
+
 def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100) -> str:
     """Full drill-down for one DISCOVER candidate: vitals, synthesis, price
     structure, statistical edge, catalysts, quality, positioning — in that
@@ -310,18 +384,10 @@ def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100
     lines.append("")
     lines.append("  " + fmt.style("QUALITY — fundamentals", "heading"))
     fnd = detail.deep.fundamentals
-    if fnd:
-        pe = fnd.get("trailingPE")
-        fpe = fnd.get("forwardPE")
-        margin = fnd.get("profitMargins")
-        rev_g = fnd.get("revenueGrowth")
-        earn_g = fnd.get("earningsGrowth")
-        roe = fnd.get("returnOnEquity")
-        lines.append("    " + fmt.style(
-            f"P/E {pe:.0f} trailing / {fpe:.0f} forward  ·  margin {margin * 100:+.0f}%  ·  "
-            f"rev growth {rev_g * 100:+.0f}%  ·  earnings growth {earn_g * 100:+.0f}%  ·  "
-            f"ROE {roe * 100:+.0f}%" if all(v is not None for v in (pe, fpe, margin, rev_g, earn_g, roe))
-            else "fundamentals: partial data", "value"))
+    quality_groups = _quality_lines(fnd) if fnd else []
+    if quality_groups:
+        for label, text in quality_groups:
+            lines.append(f"    {label.ljust(13)} " + fmt.style(text, "value"))
     else:
         lines.append("    " + fmt.style("fundamentals: n/a", "muted"))
 

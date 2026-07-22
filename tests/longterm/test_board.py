@@ -350,6 +350,37 @@ class TestRenderDetail(unittest.TestCase):
         self.assertIn("fundamentals", out.lower())
         self.assertIn("n/a", out.lower())
 
+    def test_quality_expanded_fields_shown(self):
+        c = _disc_candidate("MU")
+        detail = _full_detail("MU")
+        detail.deep.fundamentals.update({
+            "dividendYield": 2.59, "fiveYearAvgDividendYield": 2.88,
+            "payoutRatio": 0.6478, "debtToEquity": 124.9,
+            "freeCashflow": 3_124_250_112, "totalRevenue": 49_284_001_792,
+        })
+        out = B.render_detail(c, detail)
+        self.assertIn("2.6%", out)          # dividendYield, NOT multiplied by 100
+        self.assertIn("2.9%", out)          # fiveYearAvgDividendYield
+        self.assertIn("65%", out)           # payoutRatio * 100
+        self.assertIn("1.25x", out)         # debtToEquity / 100
+        self.assertIn("6%", out)            # FCF margin ~6.34%, rounds to 6
+
+    def test_quality_groups_degrade_independently(self):
+        c = _disc_candidate("MU")
+        detail = _empty_detail("MU")
+        detail.deep.fundamentals = {"profitMargins": 0.22, "dividendYield": 1.5}
+        out = B.render_detail(c, detail)
+        self.assertIn("22%", out)
+        self.assertIn("1.5%", out)
+        self.assertNotIn("fundamentals: n/a", out)
+
+    def test_quality_all_fields_none_falls_back_to_na(self):
+        c = _disc_candidate("MU")
+        detail = _empty_detail("MU")
+        detail.deep.fundamentals = {"trailingPE": None, "profitMargins": None}
+        out = B.render_detail(c, detail)
+        self.assertIn("fundamentals: n/a", out)
+
     def test_short_interest_shown_with_trend(self):
         c = _disc_candidate("MU")
         out = B.render_detail(c, _full_detail("MU"))
