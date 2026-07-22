@@ -225,6 +225,7 @@ def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100
               if candidate.momentum_12_1 is not None else "mom n/a")
     vol_txt = (f"vol {candidate.ann_vol_pct:.0f}%/yr"
               if candidate.ann_vol_pct is not None else "vol n/a")
+    cdr_txt = f"CDR: {candidate.cdr_ticker}" if candidate.cdr_ticker else "CDR: n/a"
     vitals = [
         fmt.style(candidate.ticker, "heading"),
         fmt.style(f"{candidate.spot:,.2f}", "emph"),
@@ -233,6 +234,7 @@ def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100
         fmt.style(ma_txt, "label"),
         fmt.style(mom_txt, "muted"),
         fmt.style(vol_txt, "muted"),
+        fmt.style(cdr_txt, "good" if candidate.cdr_ticker else "muted"),
     ]
     lines.append("  " + f"  {fmt.style(fmt.GLYPHS['dot'], 'muted')}  ".join(vitals))
     lines.append("  " + fmt.style(insight_line(candidate, detail.deep), "value"))

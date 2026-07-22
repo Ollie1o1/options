@@ -280,6 +280,18 @@ class TestRenderDetail(unittest.TestCase):
         self.assertIn("28", out)   # RSI value
         self.assertIn("oversold", out.lower())
 
+    def test_cdr_shown_when_present(self):
+        c = _disc_candidate("MU")
+        c.cdr_ticker = "MU"
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("CDR: MU", out)
+
+    def test_cdr_shows_na_when_absent(self):
+        c = _disc_candidate("MU")
+        c.cdr_ticker = None
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("CDR: n/a", out)
+
     def test_rsi_none_shows_na_not_missing_section(self):
         c = _disc_candidate("MU")
         c.rsi = None
