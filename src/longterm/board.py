@@ -164,6 +164,8 @@ def render_discover_board(results: List[Tuple[CandidateRead, Optional[DeepRead]]
             fmt.style(f"mom {momentum_txt}", "muted"),
             fmt.style(f"near {support_label}", "label"),
         ]
+        if candidate.cdr_ticker:
+            segs.append(fmt.style(f"CDR {candidate.cdr_ticker}", "good"))
         lines.append("  " + f"  {fmt.style(fmt.GLYPHS['dot'], 'muted')}  ".join(segs))
 
     deep_entries = [(i, c, d) for i, (c, d) in enumerate(results, start=1) if d]

@@ -187,6 +187,18 @@ class TestRenderDiscoverBoard(unittest.TestCase):
         out = B.render_discover_board(results, "SEMICONDUCTORS")
         self.assertIn("MU", out)  # still in the table
 
+    def test_cdr_marker_shown_when_present(self):
+        c = _disc_candidate("KO")
+        c.cdr_ticker = "COLA"
+        out = B.render_discover_board([(c, None)], "CONSUMER")
+        self.assertIn("COLA", out)
+
+    def test_cdr_marker_omitted_when_absent(self):
+        c = _disc_candidate("MU")
+        c.cdr_ticker = None
+        out = B.render_discover_board([(c, None)], "SEMICONDUCTORS")
+        self.assertNotIn("CDR", out)
+
     def test_empty_results_shows_no_candidates_message(self):
         out = B.render_discover_board([], "SEMICONDUCTORS")
         self.assertIn("no candidates", out.lower())
