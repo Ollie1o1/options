@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from .cdr import cdr_for
 from .plan import Tranche
 from .zones import Snapshot
 
@@ -127,6 +128,10 @@ class CandidateRead:
                               snapshot.daily_sigma * sqrt(252) * 100, from the
                               same 63-day window data.snapshot_from_closes()
                               already computes. Zero extra network cost.
+      cdr_ticker          -- the Canadian Depositary Receipt ticker for this
+                              name, if one exists in cdr_map.json (see
+                              src/longterm/cdr.py), else None. Annotation
+                              only — not a recommendation.
     """
     ticker: str
     spot: float
@@ -138,6 +143,7 @@ class CandidateRead:
     suggested_ladder: List[Tranche] = field(default_factory=list)
     rsi: Optional[float] = None
     ann_vol_pct: Optional[float] = None
+    cdr_ticker: Optional[str] = None
 
 
 def suggest_ladder(spot: float, supports: List[Any]) -> List[Tranche]:
@@ -216,6 +222,7 @@ def fast_context(snapshot: Snapshot) -> CandidateRead:
         suggested_ladder=ladder,
         rsi=rsi(snapshot.closes),
         ann_vol_pct=ann_vol_pct,
+        cdr_ticker=cdr_for(snapshot.ticker),
     )
 
 

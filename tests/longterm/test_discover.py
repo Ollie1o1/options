@@ -176,6 +176,19 @@ class TestFastContext(unittest.TestCase):
         expected = 0.02 * math.sqrt(252) * 100.0
         self.assertAlmostEqual(c.ann_vol_pct, expected, places=4)
 
+    def test_cdr_ticker_populated_when_known(self):
+        snap = _drawdown_snapshot()  # ticker="TST"
+        with mock.patch.object(DSC, "cdr_for", return_value="COLA") as m:
+            c = DSC.fast_context(snap)
+        m.assert_called_once_with("TST")
+        self.assertEqual(c.cdr_ticker, "COLA")
+
+    def test_cdr_ticker_none_when_unknown(self):
+        snap = _drawdown_snapshot()
+        with mock.patch.object(DSC, "cdr_for", return_value=None):
+            c = DSC.fast_context(snap)
+        self.assertIsNone(c.cdr_ticker)
+
 
 class TestSuggestLadder(unittest.TestCase):
     def test_uses_real_supports_when_available(self):
