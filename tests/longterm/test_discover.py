@@ -432,6 +432,76 @@ class TestScan(unittest.TestCase):
             results = DSC.scan("TECH")
         self.assertEqual([c.ticker for c, _ in results], ["A"])
 
+    def test_reorders_buy_now_ahead_of_wait_even_when_less_beaten_down(self):
+        from src.longterm.plan import Tranche
+        from src.longterm.zones import Snapshot
+
+        def snap(ticker, spot):
+            return Snapshot(ticker=ticker, spot=spot, high_52w=100.0, low_52w=spot * 0.9,
+                            ma200=spot, daily_sigma=0.02, closes=[spot] * 60)
+
+        def candidate(ticker, drawdown, ladder_target):
+            return CandidateRead(
+                ticker=ticker, spot=100.0, drawdown_pct=drawdown,
+                ma200_distance_pct=-5.0, momentum_12_1=-0.05,
+                supports=[{"label": "50d MA", "level": ladder_target, "pct": -0.01}],
+                bounce={}, ann_vol_pct=15.8745,
+                suggested_ladder=[Tranche(100.0, 0.5), Tranche(ladder_target, 0.5)],
+            )
+
+        snaps = {"AAA": snap("AAA", 100.0), "BBB": snap("BBB", 60.0)}
+        fast_reads = {
+            "AAA": candidate("AAA", -10.0, 99.0),   # 1.0% from support -> BUY NOW
+            "BBB": candidate("BBB", -40.0, 51.0),   # 17.6% from support -> WAIT
+        }
+        with mock.patch.object(DSC, "universe", return_value=list(snaps)), \
+             mock.patch("src.longterm.data.fetch_snapshots", return_value=snaps), \
+             mock.patch.object(DSC, "fast_context", side_effect=lambda s: fast_reads[s.ticker]), \
+             mock.patch.object(DSC, "deep_context",
+                               side_effect=lambda t: DeepRead(ticker=t)):
+            results = DSC.scan("TECH", universe_limit=10, board_limit=10, deep_limit=2)
+        tickers_in_order = [c.ticker for c, _ in results]
+        # BBB is more beaten-down (-40% vs -10%) but BUY NOW (AAA) still
+        # sorts first — verdict tier beats raw drawdown.
+        self.assertEqual(tickers_in_order, ["AAA", "BBB"])
+
+    def test_earnings_caution_sorts_after_clean_buy_now_within_deep_tier(self):
+        from src.longterm.plan import Tranche
+        from src.longterm.zones import Snapshot
+
+        def snap(ticker, spot):
+            return Snapshot(ticker=ticker, spot=spot, high_52w=100.0, low_52w=spot * 0.9,
+                            ma200=spot, daily_sigma=0.02, closes=[spot] * 60)
+
+        def buy_now_candidate(ticker, drawdown):
+            return CandidateRead(
+                ticker=ticker, spot=100.0, drawdown_pct=drawdown,
+                ma200_distance_pct=-5.0, momentum_12_1=-0.05,
+                supports=[{"label": "50d MA", "level": 99.0, "pct": -0.01}],
+                bounce={}, ann_vol_pct=15.8745,
+                suggested_ladder=[Tranche(100.0, 0.5), Tranche(99.0, 0.5)],
+            )
+
+        # AAA is MORE beaten-down (would sort first on drawdown alone) but
+        # has earnings in 3 days; BBB is less beaten-down but earnings-clear.
+        snaps = {"AAA": snap("AAA", 100.0), "BBB": snap("BBB", 100.0)}
+        fast_reads = {"AAA": buy_now_candidate("AAA", -20.0),
+                      "BBB": buy_now_candidate("BBB", -10.0)}
+        deep_reads = {"AAA": DeepRead(ticker="AAA", earnings_days=3),
+                      "BBB": DeepRead(ticker="BBB", earnings_days=None)}
+        with mock.patch.object(DSC, "universe", return_value=list(snaps)), \
+             mock.patch("src.longterm.data.fetch_snapshots", return_value=snaps), \
+             mock.patch.object(DSC, "fast_context", side_effect=lambda s: fast_reads[s.ticker]), \
+             mock.patch.object(DSC, "deep_context", side_effect=lambda t: deep_reads[t]):
+            results = DSC.scan("TECH", universe_limit=10, board_limit=10, deep_limit=2)
+        tickers_in_order = [c.ticker for c, _ in results]
+        self.assertEqual(tickers_in_order, ["BBB", "AAA"])
+
+    def test_deep_limit_default_is_ten(self):
+        import inspect
+        sig = inspect.signature(DSC.scan)
+        self.assertEqual(sig.parameters["deep_limit"].default, 10)
+
 
 if __name__ == "__main__":
     unittest.main()
