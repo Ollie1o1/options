@@ -283,6 +283,9 @@ class TestDeepContext(unittest.TestCase):
         fake_info = {
             "trailingPE": 18.2, "forwardPE": 15.1, "profitMargins": 0.22,
             "revenueGrowth": 0.11, "earningsGrowth": 0.08, "returnOnEquity": 0.31,
+            "dividendYield": 2.59, "fiveYearAvgDividendYield": 2.88,
+            "payoutRatio": 0.6478, "debtToEquity": 124.9,
+            "freeCashflow": 3_124_250_112, "totalRevenue": 49_284_001_792,
             "irrelevantField": "should not appear",
         }
         fake_ticker = mock.MagicMock()
@@ -292,6 +295,9 @@ class TestDeepContext(unittest.TestCase):
         self.assertEqual(result, {
             "trailingPE": 18.2, "forwardPE": 15.1, "profitMargins": 0.22,
             "revenueGrowth": 0.11, "earningsGrowth": 0.08, "returnOnEquity": 0.31,
+            "dividendYield": 2.59, "fiveYearAvgDividendYield": 2.88,
+            "payoutRatio": 0.6478, "debtToEquity": 124.9,
+            "freeCashflow": 3_124_250_112, "totalRevenue": 49_284_001_792,
         })
         self.assertNotIn("irrelevantField", result)
 

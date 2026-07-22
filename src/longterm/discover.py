@@ -232,6 +232,16 @@ def fast_context(snapshot: Snapshot) -> CandidateRead:
 _FUNDAMENTALS_FIELDS = (
     "trailingPE", "forwardPE", "profitMargins",
     "revenueGrowth", "earningsGrowth", "returnOnEquity",
+    # Added 2026-07-22: dividend/balance-sheet/cash-flow context, zero
+    # extra network cost — same yf.Ticker(ticker).info call as above.
+    # UNIT NOTE: dividendYield and fiveYearAvgDividendYield come back
+    # from yfinance already as a percent (e.g. 2.59 == 2.59%, NOT a
+    # fraction) — verified live against KO/AAPL/MU during design; do not
+    # multiply by 100 when formatting these two. payoutRatio is a normal
+    # fraction (multiply by 100). debtToEquity is reported at 100x the
+    # true ratio (divide by 100 to get an "x" multiple).
+    "dividendYield", "fiveYearAvgDividendYield", "payoutRatio",
+    "debtToEquity", "freeCashflow", "totalRevenue",
 )
 
 
