@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import src.formatting as fmt
 from src import ui
+from .cdr import cdr_for
 from .detail import DetailRead
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
@@ -92,6 +93,9 @@ def render_board(plan: Plan, reads: List[ZoneRead], book: Dict[str, dict],
         if name.ticker in earnings:
             head.append(fmt.style(
                 f"{fmt.GLYPHS['warn']} earnings {earnings[name.ticker]}", "warn"))
+        cdr_ticker = cdr_for(name.ticker)
+        if cdr_ticker:
+            head.append(fmt.style(f"CDR {cdr_ticker}", "good"))
         lines.append("")
         lines.append("  " + f"  {fmt.style(fmt.GLYPHS['dot'], 'muted')}  ".join(head))
         if name.thesis:

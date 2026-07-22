@@ -66,6 +66,16 @@ class TestBoard(unittest.TestCase):
         self.assertIn("2.0", out)            # held shares visible
         self.assertIn("3,500", out)          # remaining cash
 
+    def test_cdr_marker_shown_for_tracked_name(self):
+        with mock.patch.object(B, "cdr_for", return_value="COLA"):
+            out = B.render_board(mu_plan(), [read(Z.NEAR)], {}, 5000.0)
+        self.assertIn("COLA", out)
+
+    def test_cdr_marker_omitted_when_no_cdr(self):
+        with mock.patch.object(B, "cdr_for", return_value=None):
+            out = B.render_board(mu_plan(), [read(Z.NEAR)], {}, 5000.0)
+        self.assertNotIn("CDR", out)
+
     def test_board_empty_plan(self):
         out = B.render_board(P.Plan(), [], {}, 0.0)
         self.assertIn("empty", out.lower())  # points user at ADD
