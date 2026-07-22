@@ -1,0 +1,17 @@
+{
+  "_source": "Seeded 2026-07-22 from CIBC press releases + secondary compilations. NOT exhaustive — CIBC states 130+ CDRs exist across six countries; this covers ~50 US-listed underlyings. Add more as you spot them on Wealthsimple.",
+  "AAPL": "AAPL", "MSFT": "MSFT", "GOOG": "GOOG", "AMZN": "AMZN",
+  "NVDA": "NVDA", "META": "META", "TSLA": "TSLA", "AMD": "AMD",
+  "COST": "COST", "LLY": "LLY", "XOM": "XOM", "ASML": "ASML",
+  "LULU": "LULU", "PLTR": "PLTR", "GEV": "GEV", "CRWV": "CRWV",
+  "DHI": "DHI", "INTU": "INTU", "KLAC": "KLAC", "LRCX": "LRCX",
+  "NOC": "NOC", "SNDK": "SNDK", "SYK": "SYK", "TMUS": "TMUS",
+  "VRT": "VRT", "WDC": "WDC", "ABBV": "ABBV", "CSCO": "CSCO",
+  "GS": "GS", "HD": "HD", "HON": "HON", "IBM": "IBM", "JPM": "JPM",
+  "MA": "MA", "NFLX": "NFLX", "NKE": "NKE", "PYPL": "PYPL",
+  "PFE": "PFE", "PG": "PG", "CRM": "CRM", "SBUX": "SBUX",
+  "UNH": "UNH", "UPS": "UPS", "VZ": "VZ", "WMT": "WMT", "DIS": "DIS",
+  "CVS": "CVS", "JNJ": "JNJ", "MU": "MU",
+  "KO": "COLA", "MCD": "MCDS", "BAC": "BOFA", "V": "VISA",
+  "MRVL": "MRV", "PWR": "PWRS", "FCX": "FCXS", "CAT": "CATR"
+}
