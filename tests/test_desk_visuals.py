@@ -250,12 +250,13 @@ class TestEquityCurve(ColorMixin, unittest.TestCase):
                 check_pnl._print_equity_curve(rows, width=100)
             return buf.getvalue()
 
-    def test_renders_curve_and_underwater(self):
+    def test_renders_curve_and_drawdown(self):
         self.force_color_on()
         out = self._render(self._rows(30), rich=True)
         self.assertIn("EQUITY", out.upper())
         self.assertTrue(any(0x2800 <= ord(c) <= 0x28FF for c in out))
-        self.assertIn("Underwater", out)
+        self.assertIn("Drawdown", out)
+        self.assertIn("Max DD", out)
 
     def test_plain_branch_has_no_braille(self):
         out = self._render(self._rows(30), rich=False)
@@ -263,20 +264,47 @@ class TestEquityCurve(ColorMixin, unittest.TestCase):
         self.assertIn("max DD", out)
         self.assertFalse(any(0x2800 <= ord(c) <= 0x28FF for c in out))
 
-    def test_underwater_strip_encodes_depth_not_height(self):
-        """Deepest drawdown must be the TALLEST bar, since red = bad."""
+    def test_drawdown_strip_is_width_capped(self):
+        """The old sparkline rendered one character per trade with no cap,
+        overflowing the terminal on accounts with many closed trades. The
+        braille replacement must stay within the requested chart width no
+        matter how many trades are fed in."""
         self.force_color_on()
-        # Rises, then one big loss at the end → deepest drawdown is last.
+        out = self._render(self._rows(300), rich=True)
+        lines = out.splitlines()
+        braille_lines = [ln for ln in lines
+                          if any(0x2800 <= ord(c) <= 0x28FF for c in ln)]
+        self.assertTrue(braille_lines)
+        for ln in braille_lines:
+            visible = ui.visible_len(ln)
+            self.assertLessEqual(visible, 80)  # "  " indent + chart_width (<=72)
+
+    def test_drawdown_chart_receives_negated_depth(self):
+        """braille_chart must be fed *negative* depth so the deepest drawdown
+        is the most-negative value and plots lowest on the canvas — a shape
+        that droops below the peak, not a bar-height-means-badness sparkline."""
+        self.force_color_on()
+        # Rises to a peak, then one big loss at the end → deepest drawdown is last.
         rows = [{"pnl_pct": 0.1, "entry_price": 5.0, "ticker": "AAPL",
                  "exit_date": f"2026-06-{i + 1:02d}", "date": None}
                 for i in range(11)]
         rows.append({"pnl_pct": -0.9, "entry_price": 5.0, "ticker": "AAPL",
                      "exit_date": "2026-06-28", "date": None})
-        out = self._render(rows, rich=True)
-        strip = [ln for ln in out.splitlines() if "Underwater" in ln][0]
-        bars = [c for c in strip if c in "▁▂▃▄▅▆▇█"]
-        self.assertEqual(bars[-1], "█")   # deepest drawdown = full bar
-        self.assertEqual(bars[0], "▁")    # at the peak = empty bar
+        from src import check_pnl
+        calls = []
+        orig = ui.braille_chart
+
+        def _spy(series, **kw):
+            calls.append((list(series), kw.get("style_name")))
+            return orig(series, **kw)
+
+        with unittest.mock.patch.object(check_pnl.ui, "braille_chart", side_effect=_spy):
+            self._render(rows, rich=True)
+
+        dd_series, dd_style = next((s, st) for s, st in calls if st == 'bad')
+        self.assertEqual(dd_series[0], 0.0)               # starts at the peak
+        self.assertEqual(dd_series[-1], min(dd_series))   # final point is deepest
+        self.assertLess(dd_series[-1], 0.0)                # negated: drawdown is negative
 
     def test_too_few_trades_prints_nothing(self):
         self.assertEqual(self._render(self._rows(4), rich=True), "")

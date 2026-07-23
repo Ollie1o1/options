@@ -406,24 +406,32 @@ def _print_equity_curve(closed_trades: list, width: int, min_trades: int = 10):
         cum += pnl_u
         peak = max(peak, cum)
         equity.append(cum)
-        # Depth below the running peak, as a positive magnitude: a sparkline
-        # cannot draw below its baseline, so height encodes how far underwater
-        # we are. Taller red bar = deeper drawdown.
+        # Depth below the running peak, as a positive magnitude.
         depth.append(peak - cum)
     max_dd = max(depth) if depth else 0.0
 
     print()
     title = f"EQUITY CURVE — cumulative realized P&L ({len(chrono)} trades)"
     if HAS_FMT and fmt and _HAS_UI_CP:
+        chart_width = min(72, width - 6)
         print(ui.rule(width, title=title))
-        for ln in ui.braille_chart(equity, width=min(72, width - 6), height=5,
+        for ln in ui.braille_chart(equity, width=chart_width, height=5,
                                    style_name=('good' if cum >= 0 else 'bad')):
             print("  " + ln)
         end_style = 'good' if cum >= 0 else 'bad'
         print(ui.kv_line("Final", fmt.style(f"${cum:+,.0f}", end_style)
                          + fmt.style(f"   peak ${peak:+,.0f}", 'muted')))
-        uw = ui.sparkline(depth, style_name='bad')
-        print(ui.kv_line("Underwater", uw + fmt.style(f"   max DD -${max_dd:,.0f}", 'muted')))
+        # Drawdown drawn as its own mini equity curve, negated so it droops
+        # below a flat "at peak" surface instead of a bar-height-means-badness
+        # sparkline — same visual language as the curve above, and correctly
+        # width-capped (braille_chart downsamples; a bare sparkline doesn't
+        # and would overflow the terminal one character per trade).
+        print()
+        print(ui.kv_line("Drawdown", fmt.style("below peak equity", 'muted')))
+        for ln in ui.braille_chart([-d for d in depth], width=chart_width, height=2,
+                                   style_name='bad'):
+            print("  " + ln)
+        print(ui.kv_line("Max DD", fmt.style(f"-${max_dd:,.0f}", 'bad')))
     else:
         print(f"  {title}")
         print(f"  Final: ${cum:+,.0f}   peak ${peak:+,.0f}   max DD -${max_dd:,.0f}")
