@@ -569,31 +569,139 @@ def rgb_fg(r: int, g: int, b: int) -> str:
 # Call sites use meaning-names, never raw colors. Truecolor palette on capable
 # terminals, 16-color ANSI fallback otherwise, plain text when color is off.
 
-_THEME_RGB = {
-    'heading': (130, 170, 210),   # steel blue
-    'accent':  (130, 170, 210),
-    'label':   (130, 137, 145),   # gray for row labels
-    'value':   None,              # terminal default fg
-    'good':    (94, 201, 141),
-    'warn':    (214, 164, 82),
-    'bad':     (224, 108, 117),
-    'muted':   (98, 104, 112),    # structure, provenance
-    'emph':    (240, 240, 240),   # headline values
+_THEME_DEFS = {
+    'quant_desk': {
+        'label': 'Quant Desk',
+        'rgb': {
+            'heading': (130, 170, 210),   # steel blue
+            'accent':  (130, 170, 210),
+            'label':   (130, 137, 145),   # gray for row labels
+            'value':   None,              # terminal default fg
+            'good':    (94, 201, 141),
+            'warn':    (214, 164, 82),
+            'bad':     (224, 108, 117),
+            'muted':   (98, 104, 112),    # structure, provenance
+            'emph':    (240, 240, 240),   # headline values
+        },
+        'ansi': {
+            'heading': Colors.BRIGHT_CYAN,
+            'accent':  Colors.CYAN,
+            'label':   Colors.DIM,
+            'value':   '',
+            'good':    Colors.GREEN,
+            'warn':    Colors.YELLOW,
+            'bad':     Colors.RED,
+            'muted':   Colors.BRIGHT_BLACK,
+            'emph':    Colors.BRIGHT_WHITE,
+        },
+    },
+    'cyberpunk_neon': {
+        'label': 'Cyberpunk Neon',
+        'rgb': {
+            'heading': (80, 230, 255),    # electric cyan
+            'accent':  (255, 60, 220),    # neon magenta
+            'label':   (150, 120, 180),   # dim orchid
+            'value':   None,
+            'good':    (94, 201, 141),
+            'warn':    (214, 164, 82),
+            'bad':     (224, 108, 117),
+            'muted':   (95, 65, 120),     # dark purple
+            'emph':    (255, 240, 250),   # bright white-pink
+        },
+        'ansi': {
+            'heading': Colors.BRIGHT_MAGENTA,
+            'accent':  Colors.BRIGHT_CYAN,
+            'label':   Colors.MAGENTA,
+            'value':   '',
+            'good':    Colors.GREEN,
+            'warn':    Colors.YELLOW,
+            'bad':     Colors.RED,
+            'muted':   Colors.BRIGHT_BLACK,
+            'emph':    Colors.BRIGHT_WHITE,
+        },
+    },
+    'matrix_terminal': {
+        'label': 'Matrix Terminal',
+        'rgb': {
+            'heading': (80, 255, 120),    # phosphor green
+            'accent':  (60, 220, 90),
+            'label':   (70, 150, 85),
+            'value':   None,
+            'good':    (94, 201, 141),
+            'warn':    (214, 164, 82),
+            'bad':     (224, 108, 117),
+            'muted':   (40, 95, 50),      # dark green
+            'emph':    (210, 255, 220),   # bright near-white green
+        },
+        'ansi': {
+            'heading': Colors.BRIGHT_GREEN,
+            'accent':  Colors.GREEN,
+            'label':   Colors.GREEN,
+            'value':   '',
+            'good':    Colors.GREEN,
+            'warn':    Colors.YELLOW,
+            'bad':     Colors.RED,
+            'muted':   Colors.BRIGHT_BLACK,
+            'emph':    Colors.BRIGHT_GREEN,
+        },
+    },
+    'amber_crt': {
+        'label': 'Amber CRT',
+        'rgb': {
+            'heading': (255, 176, 59),    # bright amber
+            'accent':  (230, 150, 40),
+            'label':   (150, 110, 60),
+            'value':   None,
+            'good':    (94, 201, 141),
+            'warn':    (214, 164, 82),
+            'bad':     (224, 108, 117),
+            'muted':   (95, 68, 35),      # dark amber-brown
+            'emph':    (255, 220, 170),   # warm cream
+        },
+        'ansi': {
+            'heading': Colors.BRIGHT_YELLOW,
+            'accent':  Colors.YELLOW,
+            'label':   Colors.YELLOW,
+            'value':   '',
+            'good':    Colors.GREEN,
+            'warn':    Colors.YELLOW,
+            'bad':     Colors.RED,
+            'muted':   Colors.BRIGHT_BLACK,
+            'emph':    Colors.BRIGHT_WHITE,
+        },
+    },
 }
 
-_THEME_ANSI = {
-    'heading': Colors.BRIGHT_CYAN,
-    'accent':  Colors.CYAN,
-    'label':   Colors.DIM,
-    'value':   '',
-    'good':    Colors.GREEN,
-    'warn':    Colors.YELLOW,
-    'bad':     Colors.RED,
-    'muted':   Colors.BRIGHT_BLACK,
-    'emph':    Colors.BRIGHT_WHITE,
-}
+THEMES = _THEME_DEFS
+_THEME_ORDER = ['quant_desk', 'cyberpunk_neon', 'matrix_terminal', 'amber_crt']
+_DEFAULT_THEME = 'quant_desk'
+_CURRENT_THEME = _DEFAULT_THEME
 
+_THEME_RGB = dict(_THEME_DEFS[_DEFAULT_THEME]['rgb'])
+_THEME_ANSI = dict(_THEME_DEFS[_DEFAULT_THEME]['ansi'])
 _THEME_BOLD = {'heading', 'emph'}
+
+
+def set_theme(name: str) -> bool:
+    """Switch the active chrome theme. Returns False (no-op) for an unknown
+    name so a caller can't silently corrupt the active palette."""
+    global _CURRENT_THEME, _THEME_RGB, _THEME_ANSI
+    if name not in _THEME_DEFS:
+        return False
+    _CURRENT_THEME = name
+    _THEME_RGB = dict(_THEME_DEFS[name]['rgb'])
+    _THEME_ANSI = dict(_THEME_DEFS[name]['ansi'])
+    return True
+
+
+def get_theme() -> str:
+    """Key of the currently active theme."""
+    return _CURRENT_THEME
+
+
+def list_themes():
+    """[(key, display_label), ...] in a fixed, stable display order."""
+    return [(k, _THEME_DEFS[k]['label']) for k in _THEME_ORDER]
 
 GLYPHS = {
     'anchor':  '▸',  # actionable lines (thesis/plan/exec)
@@ -668,5 +776,9 @@ __all__ = [
     'rgb_fg',
     'style',
     'style_sign',
+    'THEMES',
+    'set_theme',
+    'get_theme',
+    'list_themes',
     'GLYPHS',
 ]
