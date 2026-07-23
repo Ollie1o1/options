@@ -27,6 +27,17 @@ import re
 import sys
 import subprocess
 
+# CPython only line-buffers stdout/stderr when it detects a tty at interpreter
+# startup; some terminal/pty setups (observed: iTerm2 launching this script
+# with an already-activated venv, so no subprocess re-launch below occurs)
+# don't trip that detection, leaving output fully block-buffered. The
+# interactive screener then looks completely hung — it's actually running
+# fine, just invisible until an ~8KB buffer fills or the process exits.
+# Force line buffering unconditionally so prompts and progress always show
+# immediately, regardless of how this process ends up connected to a tty.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 _project_root = os.path.dirname(os.path.abspath(__file__))
 
 # ── Logging-help doc (shown by --logging-help / -lh) ──────────────────────
@@ -314,10 +325,13 @@ if _project_venv_status != "ok":
 # src.launcher which shows the [1] STOCKS [2] CRYPTO menu.
 _target_module = "src.launcher" if not _argv else "src.options_screener"
 
-# If not already inside the venv, re-launch with the venv interpreter
+# If not already inside the venv, re-launch with the venv interpreter.
+# -u: the child is a fresh interpreter that makes its own tty-buffering
+# decision at startup — this process's own reconfigure() above doesn't
+# carry over a fork/exec boundary, so it needs the same forcing directly.
 if sys.prefix == sys.base_prefix:
     sys.exit(subprocess.call(
-        [_venv_python, "-m", _target_module] + _argv,
+        [_venv_python, "-u", "-m", _target_module] + _argv,
         cwd=_project_root,
     ))
 
