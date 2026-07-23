@@ -11,6 +11,7 @@ from .detail import DetailRead
 from .discover import CandidateRead, DeepRead, insight_line
 from .fills import DEFAULT_DB
 from .plan import Plan, PlanName, Tranche, tranche_size_usd
+from .verdict import BUY_NOW, WAIT, apply_caution, verdict_for
 from .wizard import (build_add_command, build_cash_command, build_edit_command,
                      build_fill_command, build_remove_command, open_tranche_levels,
                      parse_levels)
@@ -127,6 +128,16 @@ def render_board(plan: Plan, reads: List[ZoneRead], book: Dict[str, dict],
     return "\n".join(lines)
 
 
+def _verdict_badge(v) -> Tuple[str, str]:
+    """(text, style_name) for a Verdict — shared by the board and the
+    detail view so the two can never disagree."""
+    if v.state == BUY_NOW:
+        if v.caution:
+            return f"BUY NOW — {v.caution}", "warn"
+        return "BUY NOW", "good"
+    return f"WAIT for ${v.target:,.2f}", "label"
+
+
 def render_discover_board(results: List[Tuple[CandidateRead, Optional[DeepRead]]],
                           sector_keyword: str, width: int = 100) -> str:
     """Discovery scan results: a numbered table for every candidate, plus
@@ -153,16 +164,28 @@ def render_discover_board(results: List[Tuple[CandidateRead, Optional[DeepRead]]
             "no candidates found — check the sector keyword or try again", "label"))
         return "\n".join(lines)
 
-    for i, (candidate, _deep) in enumerate(results, start=1):
+    verdicts = [apply_caution(verdict_for(candidate), deep) for candidate, deep in results]
+    buy_now_clean = sum(1 for v in verdicts if v.state == BUY_NOW and not v.caution)
+    buy_now_caution = sum(1 for v in verdicts if v.state == BUY_NOW and v.caution)
+    wait_count = sum(1 for v in verdicts if v.state == WAIT)
+    digest = f"{buy_now_clean + buy_now_caution} BUY NOW"
+    if buy_now_caution:
+        digest += f" ({buy_now_caution} with earnings caution)"
+    digest += f" · {wait_count} WAIT"
+    lines.append("  " + fmt.style(digest, "heading"))
+
+    for i, ((candidate, _deep), v) in enumerate(zip(results, verdicts), start=1):
         support_label = candidate.supports[0]["label"] if candidate.supports else "—"
         momentum_txt = (f"{candidate.momentum_12_1 * 100:+.0f}%"
                         if candidate.momentum_12_1 is not None else "n/a")
         ma_txt = (f"{candidate.ma200_distance_pct:+.0f}%"
                   if candidate.ma200_distance_pct is not None else "n/a")
+        badge_txt, badge_style = _verdict_badge(v)
         segs = [
             fmt.style(f"{i:>2}", "muted"),
             fmt.style(candidate.ticker, "emph"),
             fmt.style(f"{candidate.spot:,.2f}", "value"),
+            fmt.style(badge_txt, badge_style),
             fmt.style(f"{candidate.drawdown_pct:+.0f}% ATH", "bad"),
             fmt.style(f"{ma_txt} vs 200dma", "label"),
             fmt.style(f"mom {momentum_txt}", "muted"),
@@ -304,9 +327,12 @@ def render_detail(candidate: CandidateRead, detail: DetailRead, width: int = 100
     vol_txt = (f"vol {candidate.ann_vol_pct:.0f}%/yr"
               if candidate.ann_vol_pct is not None else "vol n/a")
     cdr_txt = f"CDR: {candidate.cdr_ticker}" if candidate.cdr_ticker else "CDR: n/a"
+    v = apply_caution(verdict_for(candidate), detail.deep)
+    badge_txt, badge_style = _verdict_badge(v)
     vitals = [
         fmt.style(candidate.ticker, "heading"),
         fmt.style(f"{candidate.spot:,.2f}", "emph"),
+        fmt.style(badge_txt, badge_style),
         fmt.style(f"{candidate.drawdown_pct:+.0f}% ATH", "bad"),
         fmt.style(rsi_txt, zone_style),
         fmt.style(ma_txt, "label"),

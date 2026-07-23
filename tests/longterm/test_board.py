@@ -214,6 +214,64 @@ class TestRenderDiscoverBoard(unittest.TestCase):
         self.assertIn("no candidates", out.lower())
 
 
+class TestVerdictBadge(unittest.TestCase):
+    def test_buy_now_badge_shown(self):
+        c = _disc_candidate("MU")
+        c.supports = [{"label": "50d MA", "level": 755.0, "pct": -0.0066}]
+        c.suggested_ladder = [P.Tranche(760.0, 0.5), P.Tranche(755.0, 0.5)]
+        c.ann_vol_pct = 15.8745
+        out = B.render_discover_board([(c, None)], "SEMICONDUCTORS")
+        self.assertIn("BUY NOW", out)
+
+    def test_wait_badge_shows_target_price(self):
+        c = _disc_candidate("MU")  # default ladder 760.0/700.0 -> 8.57% away, WAIT
+        out = B.render_discover_board([(c, None)], "SEMICONDUCTORS")
+        self.assertIn("WAIT for $700.00", out)
+
+    def test_earnings_caution_appended_to_buy_now(self):
+        c = _disc_candidate("MU")
+        c.supports = [{"label": "50d MA", "level": 755.0, "pct": -0.0066}]
+        c.suggested_ladder = [P.Tranche(760.0, 0.5), P.Tranche(755.0, 0.5)]
+        c.ann_vol_pct = 15.8745
+        deep = DeepRead(ticker="MU", earnings_days=5)
+        out = B.render_discover_board([(c, deep)], "SEMICONDUCTORS")
+        self.assertIn("earnings in 5 days", out)
+
+    def test_digest_line_tallies_verdicts(self):
+        buy_now = _disc_candidate("MU")
+        buy_now.supports = [{"label": "50d MA", "level": 755.0, "pct": -0.0066}]
+        buy_now.suggested_ladder = [P.Tranche(760.0, 0.5), P.Tranche(755.0, 0.5)]
+        buy_now.ann_vol_pct = 15.8745
+        waiting = _disc_candidate("AMD", drawdown=-18.0)  # default ladder -> WAIT
+        out = B.render_discover_board([(buy_now, None), (waiting, None)], "SEMICONDUCTORS")
+        self.assertIn("1 BUY NOW", out)
+        self.assertIn("1 WAIT", out)
+
+
+class TestRenderDetailVerdict(unittest.TestCase):
+    def test_verdict_shown_in_vitals(self):
+        c = _disc_candidate("MU")  # default ladder -> WAIT for $700.00
+        out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("WAIT for $700.00", out)
+
+    def test_buy_now_with_caution_shown_in_vitals(self):
+        c = _disc_candidate("MU")
+        c.supports = [{"label": "50d MA", "level": 755.0, "pct": -0.0066}]
+        c.suggested_ladder = [P.Tranche(760.0, 0.5), P.Tranche(755.0, 0.5)]
+        c.ann_vol_pct = 15.8745
+        detail = _full_detail("MU")  # deep.earnings_days=5
+        out = B.render_detail(c, detail)
+        self.assertIn("BUY NOW", out)
+        self.assertIn("earnings in 5 days", out)
+
+    def test_board_and_detail_agree_on_verdict(self):
+        c = _disc_candidate("MU")
+        board_out = B.render_discover_board([(c, None)], "SEMICONDUCTORS")
+        detail_out = B.render_detail(c, _empty_detail("MU"))
+        self.assertIn("WAIT for $700.00", board_out)
+        self.assertIn("WAIT for $700.00", detail_out)
+
+
 class TestResolveAddTarget(unittest.TestCase):
     def test_numeric_add_resolves_to_canonical_command(self):
         results = [(_disc_candidate("MU"), None)]
