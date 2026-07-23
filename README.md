@@ -12,27 +12,31 @@ A Python-based options screening tool that identifies high-probability trading o
 2. [Module Maturity](#module-maturity)
 3. [What You Can Trust Today](#what-you-can-trust-today)
 4. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [The Technical Screener](#the-technical-screener)
+5. [Quick Start](#quick-start)
+6. [The Quant Desk Launcher](#the-quant-desk-launcher)
+7. [The Technical Screener](#the-technical-screener)
    - [Scan Modes](#scan-modes)
    - [CLI Reference](#cli-reference)
    - [Terminal Output](#terminal-output)
-5. [The AI Ranking Layer](#the-ai-ranking-layer)
+8. [The AI Ranking Layer](#the-ai-ranking-layer)
    - [Choosing a Model](#choosing-a-model)
    - [Setup](#setup)
    - [Usage](#usage)
    - [CLI Reference (ai_rank.py)](#cli-reference-ai_rankpy)
    - [How It Works](#how-it-works)
    - [Output Columns Explained](#output-columns-explained)
-6. [Analytics Engine](#analytics-engine)
-7. [Paper Trading](#paper-trading)
-8. [Weight-Profile Auto-Logging](#weight-profile-auto-logging)
-   - [Calibration tracking](#calibration-tracking)
-9. [Crypto Strategist (BTC / ETH options)](#crypto-strategist-btc--eth-options)
-10. [Configuration](#configuration)
-11. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
-12. [Project Structure](#project-structure)
-13. [Roadmap](#roadmap)
+9. [Analytics Engine](#analytics-engine)
+10. [Paper Trading](#paper-trading)
+11. [Weight-Profile Auto-Logging](#weight-profile-auto-logging)
+    - [Calibration tracking](#calibration-tracking)
+12. [Crypto Strategist (BTC / ETH options)](#crypto-strategist-btc--eth-options)
+13. [Long-Term Holdings Desk](#long-term-holdings-desk)
+14. [Leverage Module (BTC/ETH perp futures)](#leverage-module-btceth-perp-futures)
+15. [Research Tools](#research-tools)
+16. [Configuration](#configuration)
+17. [API + Discord & Telegram Bots](#api--discord--telegram-bots)
+18. [Project Structure](#project-structure)
+19. [Roadmap](#roadmap)
 
 ---
 
@@ -56,6 +60,7 @@ Not every part of this repo is equally proven. These tiers are honest about wher
 | Tier | Modules | Why |
 |------|---------|-----|
 | **Stable** | Equity screener core (`src/options_screener.py`, scoring/filters, Greeks & pricing in `utils.py`, paper ledger in `paper_manager.py`) | Exercised daily; covered by the bulk of the test suite. Market data is now provenance-stamped and IV is cross-validated against each contract's mid price (see [What You Can Trust Today](#what-you-can-trust-today)). |
+| **Stable (non-predictive)** | Long-term holdings desk (`src/longterm`) | Buy-zone/tranche accumulation bookkeeping and a support-resistance-based DISCOVER scan — deterministic, rule-based math, not a scored prediction. See [Long-Term Holdings Desk](#long-term-holdings-desk). |
 | **Beta** | AI ranking layer (`ai_rank.py`, `src/ranking.py`), intel briefings (`src/intel`), sector/asset outlook engine (`src/outlook`), FastAPI server (`src/api.py`), Discord/Telegram bots (`src/bots`) | Functional but lighter test coverage; depends on external LLM/API availability. Predictive edge is still under out-of-sample evaluation. The outlook engine's backtested edge is **relative** ranking only (IC +0.05–0.08 at 2–3 months); its absolute bearish calls are unreliable (~30% hit rate) and regime-gated — see [docs/OUTLOOK_FINDINGS.md](docs/OUTLOOK_FINDINGS.md). |
 | **Experimental** | Crypto strategist (`src/crypto`), leverage module (`src/leverage`), lottery sleeve (`src/lottery`) | Explicitly pre-validation. The leverage module's own banner reads **"PRE-VALIDATION — NO EDGE YET"** and shows no edge in walk-forward testing — do not trade it with real money. The lottery engine starts from a **documented negative result** — with real-IV calibration, blind far-OTM single-pick selection is negative-EV across every configuration tested (see [docs/LOTTERY_BACKTEST_FINDINGS.md](docs/LOTTERY_BACKTEST_FINDINGS.md)). The live **Lottery Ticket mode** (menu `[9]`, `--mode lottery`) is built around that honesty: it ranks a board of the wildest long-shot plays (bounce/crash/breakout/catalyst/squeeze) with **BS-repriced hit-probability and tail multiples**, flags the `✦` subset that clears an evidence bar (cheap IV + reachable strike + a real catalyst/aligned momentum) and the `⚠` crush-traps it will never pick, and auto-logs top picks into a **tracked paper sleeve** (`python3 -m src.check_pnl`) that measures hit-rate and — the whole point — whether the `✦`-edge subset actually beats the blind base rate. Still pre-validation; tiny size only. |
 
@@ -191,6 +196,29 @@ python -m src.morning --open
 
 ---
 
+## The Quant Desk Launcher
+
+Running `python3 run.py` or `python3 -m src` **with no arguments** doesn't drop you straight into the equity screener — it opens a top-level menu (`src/launcher.py`) covering everything in this repo:
+
+```
+[1]  STOCKS     equity options — discover / spreads / iron / sell
+[2]  CRYPTO     BTC/ETH options on Deribit + perp funding/basis
+[3]  LEVERAGE   BTC/ETH perp futures strategy              [no edge yet]
+[4]  RESEARCH   breakout · vol-intelligence · equity-VRP    [read-only]
+[5]  HOLDINGS   long-term stock accumulation — buy zones · tranches · TFSA book
+[Q]  QUIT
+```
+
+- **`[1] STOCKS`** is the technical screener documented below — everything from [Scan Modes](#scan-modes) through [Weight-Profile Auto-Logging](#weight-profile-auto-logging).
+- **`[2] CRYPTO`** is the [Crypto Strategist](#crypto-strategist-btc--eth-options).
+- **`[3] LEVERAGE`** is the [Leverage Module](#leverage-module-btceth-perp-futures) — explicitly pre-validation, tagged `no edge yet` in the menu itself.
+- **`[4] RESEARCH`** opens the [Research Tools](#research-tools) submenu (breakout / vol-intelligence / equity-VRP), all read-only, no scores or trades.
+- **`[5] HOLDINGS`** is the [Long-Term Holdings Desk](#long-term-holdings-desk).
+
+**If you pass any CLI flag** (`--ticker AAPL`, `--mode discover`, `--default-scoring`, `--enforce-exits`, etc.), the launcher is bypassed entirely and the flag is forwarded straight to the equity screener — this is what keeps cron jobs and every historical command in this README working unchanged. The menu is purely an opt-in front door for interactive sessions; the `python -m src.options_screener [OPTIONS]` and `python3 run.py [OPTIONS]` forms shown throughout this doc always go directly to the equity screener, with or without the launcher.
+
+---
+
 ## The Technical Screener
 
 ### Scan Modes
@@ -207,7 +235,9 @@ Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (
 | `IRON` | Iron Condors | Delta-neutral range-bound strategies — same detail-card pipeline as singles + spreads |
 | `PORTFOLIO` | Portfolio | View P/L on all open paper trades |
 | `MY LIST` | Watchlist | Scan your personal watchlist (type `ADD AAPL` to build it) |
+| `LOTTERY` | Lottery Ticket | Far-OTM long-shot board (bounce/crash/breakout/catalyst/squeeze) — **experimental, negative-EV base rate**, see [Module Maturity](#module-maturity) |
 | `INTEL` | Intel Briefing | Market overview, single-ticker briefing, macro pulse, and the morning briefing |
+| `SQUEEZE` | Short Squeeze | Short-squeeze setups ranked by short interest + unusual call activity — display-only, not scored into ranking |
 
 ### Morning Briefing
 
@@ -237,7 +267,8 @@ Options:
   --close-trades         Update the trade log with closing prices and realised P/L
   --enforce-exits        Run exit-rule enforcement on paper_trades.db and exit (for cron)
   --ui                   Launch the Streamlit web dashboard
-  --mode MODE            Skip mode menu: ticker | all | discover | sell | spreads | iron | portfolio | mylist
+  --mode MODE            Skip mode menu: ticker | all | discover | sell | spreads | iron |
+                          portfolio | mylist | lottery | squeeze
   --ticker SYM           Ticker symbol (implies --mode ticker)
   --watchlist NAME       Use named watchlist (liquid_large_cap, sector_etfs, high_iv, income)
   --top N                Cross-ticker top-N scan (default 10), grouped by DTE bucket
@@ -245,6 +276,8 @@ Options:
   --auto                 Skip interactive prompts, use config defaults
   --compact              Compact per-pick output (3 lines per pick)
   --no-cache             Disable all caching (requests, AI scores, IV history)
+  --tearsheet N          Write a self-contained HTML tearsheet for pick #N after the scan
+  --no-tearsheet         Suppress the post-scan tearsheet prompt
   --weights NAME         Weight profile name (in configs/weights/) or path to JSON; tags logged trades
   --auto-log             Auto-log top-N picks after scan (skips save-menu prompt)
   --log-top N            With --auto-log: how many top picks to log (default 5)
@@ -785,13 +818,13 @@ Unknown keys log a warning; non-numeric values error out. If `--weights` is omit
 
 ### Calibration tracking
 
-Once the paper-trade ledger has accumulated enough closed trades, the per-component IC analysis tells you which scoring weights are actually predictive. Full plan and current state in **`LOGGING_PLAN.md`**.
+Once the paper-trade ledger has accumulated enough closed trades, the per-component IC analysis tells you which scoring weights are actually predictive. Full plan and current state in **[`docs/LOGGING_PLAN.md`](docs/LOGGING_PLAN.md)**.
 
 | Tool | What it does |
 |---|---|
 | `scripts/calibration_status.sh` | One-page dashboard: closed-trade counts, per-strategy progress, apply-gate checklist, top-5 IC components, data integrity. Run anytime, no side effects. |
 | `python3 -m src.backtester --calibrate` | Read-only IC report against `paper_trades.db`. Run anytime to preview recommended weight changes. |
-| `python3 -m src.backtester --calibrate --apply` | Writes recommended weights into `config.json` (only run once you've crossed the gates in `LOGGING_PLAN.md`). Auto-backs up to `config.bak.<timestamp>.json`. |
+| `python3 -m src.backtester --calibrate --apply` | Writes recommended weights into `config.json` (only run once you've crossed the gates in `docs/LOGGING_PLAN.md`). Auto-backs up to `config.bak.<timestamp>.json`. |
 | `docs/CALIBRATION_JOURNAL.md` | Append-only changelog of every `--calibrate --apply` event: IC snapshot, weight Δs, interpretation, revert procedure, known issues at time of apply. |
 | `scripts/enforce_exits.sh` | Wrapper around `--enforce-exits`. Install in cron for automatic daily TP/stop/time-exit closes. |
 | `scripts/calibrate_snapshot.sh` | Weekly snapshot — runs `--calibrate`, appends per-component IC drift to `logs/calibration_history.tsv`, integrity-checks the DB for out-of-bounds PnL or NULL `pnl_usd`. |
@@ -856,6 +889,47 @@ Automation (cron — installed alongside equity automation):
 ```
 
 Crypto trades land in `paper_trades_crypto.db` (separate ledger from equity). The two books share schema layout but never mix — calibration runs independently per book.
+
+---
+
+## Long-Term Holdings Desk
+
+A separate book from the options screener above: buy-zone / tranche-ladder tracking for **long-term stock accumulation**, not options trading. `[5] HOLDINGS` in the [launcher menu](#the-quant-desk-launcher), or directly:
+
+```bash
+python -m src.longterm            # interactive holdings desk
+python -m src.longterm --report   # write & open the HTML holdings report, then exit
+```
+
+**What it does — all descriptive, none of it predictive** (see [Module Maturity](#module-maturity)):
+
+- **Buy-zone tracking.** For each tracked ticker you define a ladder of price levels (`Tranche`s) and a cash pool to draw from. Each name is classified `IN ZONE` (spot at/below the next unfilled level), `NEAR` (within 1 daily σ or 2%, whichever is wider), `WATCHING`, or `FILLED` — pure zone-state math (`src/longterm/zones.py`), not a signal.
+- **`[6] Find candidates` (DISCOVER)** scans a sector (`SEMICONDUCTORS`, `TECH`, `BANKS`, `HEALTHCARE`, `ENERGY`, `CONSUMER`, `INDUSTRIALS`, `UTILITIES`, `REALESTATE`, `MATERIALS`, `COMMUNICATIONS`) for beaten-down, liquid, US-listed names and gives each an explicit **`BUY NOW`** or **`WAIT for $X`** entry verdict — reusing the same distance/sigma widening rule as the zone tracker against the candidate's own suggested buy ladder, never a new weighted score. `BUY NOW` picks inside a 14-day earnings window carry a caution rather than a silent upgrade. Drill into any candidate for its full read: support/resistance ladder, bounce-odds after similar historical drops, insider cluster buys (SEC EDGAR Form 4), days to earnings, and lightweight fundamentals — then log it straight into your plan with the suggested ladder pre-filled.
+- **CDR markers.** Tracked/discovered US names also show their CIBC CDR ticker (Canadian Depositary Receipt, e.g. `KO → COLA`) where one exists — annotation only, no price is fetched for the CDR itself (`src/longterm/cdr.py`).
+- **Guided ACTIONS menu** — no command grammar to memorize: add a stock, record a buy against an open tranche, edit a ladder, remove a stock, set the cash budget, find candidates, or write & open the HTML report.
+- **HTML report** (`--report` or `[7]` from the menu) — self-contained, same house design system as the rest of this repo's reports (`src/desk_kit`).
+
+The plan lives in `longterm_plan.json` (git-ignored, same as `watchlist.json`); actual fills live in `data/longterm.db`.
+
+---
+
+## Leverage Module (BTC/ETH perp futures)
+
+`[3] LEVERAGE` in the launcher, or `python -m src.leverage {signal,backtest,paper,status}`. **Explicitly pre-validation** — the module's own banner reads `PRE-VALIDATION — NO EDGE YET` and every command is paper/dry-run unless `--live`, which is an inert stub until the validation gate passes. See [Module Maturity](#module-maturity). Do not trade this with real money.
+
+---
+
+## Research Tools
+
+`[4] RESEARCH` in the launcher opens a read-only submenu — no scores, no trades, no real money, ever:
+
+| Tool | Command | Finding |
+|------|---------|---------|
+| Breakout/breakdown probabilities | `python -m src.breakout` | Honest no-edge result vs. implied vol |
+| Vol-intelligence (IV movers + VRP) | `python -m src.vol_intel` | Monitor-only; equity VRP currently negative |
+| Equity-VRP backtest (delta-hedged short straddle) | `python -m src.equity_vol` | No single-name edge; SPY/index level is positive |
+
+These are kept in the repo — and in the menu — precisely because they're honest negative/no-edge results, in the same spirit as the Lottery sleeve and the leverage module's backtests.
 
 ---
 
@@ -1099,18 +1173,33 @@ options/
     │   ├── __init__.py
     │   ├── discord_bot.py    # Discord slash commands (/market, /top, /scan, /watchlist)
     │   └── telegram_bot.py   # Telegram command handlers (same 4 commands)
-    └── crypto/               # BTC/ETH options module (Deribit) — separate book from equity
-        ├── screener.py       # Main crypto CLI: scans, funding-basis dashboard, portfolio, calibration, backtest
-        ├── data_fetching.py  # Deribit chain + Binance/Bybit/OKX/dYdX funding + stablecoin flow
-        ├── scoring.py        # Crypto-specific composite (IV rank, VRP, term, skew, funding/basis, OI, stableflow)
-        ├── strategy.py       # Strategy builders: long single-leg, debit/credit spreads, calendars
-        ├── exit_enforcer.py  # TP / stop / time-exit enforcement (per-leg Deribit marks)
-        ├── auto_logger.py    # Auto-log driver (cron, every 4h, gated by regime + chain availability)
-        ├── backtester.py     # Walk-forward backtest over accumulated chain snapshots
-        ├── chain_snapshot.py # Daily chain snapshotting for backtest data accumulation
-        ├── regime.py         # Crypto regime classifier (BEAR / NEUTRAL / BULL based on rvol30d + spot vs 200dMA)
-        ├── cache.py          # Disk-backed cache for Deribit responses
-        └── check_pnl.py      # Standalone portfolio viewer (entry / live mark / P&L / reason)
+    ├── crypto/               # BTC/ETH options module (Deribit) — separate book from equity
+    │   ├── screener.py       # Main crypto CLI: scans, funding-basis dashboard, portfolio, calibration, backtest
+    │   ├── data_fetching.py  # Deribit chain + Binance/Bybit/OKX/dYdX funding + stablecoin flow
+    │   ├── scoring.py        # Crypto-specific composite (IV rank, VRP, term, skew, funding/basis, OI, stableflow)
+    │   ├── strategy.py       # Strategy builders: long single-leg, debit/credit spreads, calendars
+    │   ├── exit_enforcer.py  # TP / stop / time-exit enforcement (per-leg Deribit marks)
+    │   ├── auto_logger.py    # Auto-log driver (cron, every 4h, gated by regime + chain availability)
+    │   ├── backtester.py     # Walk-forward backtest over accumulated chain snapshots
+    │   ├── chain_snapshot.py # Daily chain snapshotting for backtest data accumulation
+    │   ├── regime.py         # Crypto regime classifier (BEAR / NEUTRAL / BULL based on rvol30d + spot vs 200dMA)
+    │   ├── cache.py          # Disk-backed cache for Deribit responses
+    │   └── check_pnl.py      # Standalone portfolio viewer (entry / live mark / P&L / reason)
+    ├── launcher.py           # Top-level [1-5] menu: STOCKS / CRYPTO / LEVERAGE / RESEARCH / HOLDINGS
+    ├── longterm/             # Long-term holdings desk — buy zones, tranches, DISCOVER entry verdict (see § Long-Term Holdings Desk)
+    ├── leverage/              # BTC/ETH perp futures strategy — pre-validation, no edge yet
+    ├── breakout/, vol_intel/, equity_vol/  # Research tools (read-only) — see § Research Tools
+    ├── research.py / research/     # Research desk — multi-tab HTML report (market + optional ticker deep-dive)
+    ├── morning/               # Morning briefing — self-contained HTML quant note (regime, vol, macro, portfolio, gate)
+    ├── tearsheet/             # Self-contained HTML tearsheet per scanned pick (--tearsheet N)
+    ├── squeeze/               # Short-squeeze grader — powers SQUEEZE mode, display-only
+    ├── lottery/               # Lottery Ticket board — powers LOTTERY mode; documented negative-EV base rate
+    ├── outlook/               # Sector/asset outlook engine — relative-ranking edge only (see Module Maturity)
+    ├── intel/                 # Intel Briefing engine — powers INTEL mode
+    ├── worldnews.py, insider.py, uoa.py  # Signal overlays — see § What You Can Trust Today
+    ├── cross_check.py, av_options.py, dolt_*.py  # Second-source data + DoltHub backtest/validation tooling
+    ├── core/, execution/, desk_kit/  # Shared internals: position sizing/costs/journal, exit/preflight pipeline, HTML design system
+    └── maintenance.py, maintenance_health.py  # Headless cron/LaunchAgent heartbeat + staleness escalation
 
 scripts/
 ├── auto_log_equity.sh         # Equity auto-log driver (M-F 10:30 / 12:30 / 14:15 ET) — modes by clock window
@@ -1125,10 +1214,14 @@ scripts/
 └── reclassify_legacy_trades.py  # One-shot migration for legacy single-leg rows
 
 docs/
+├── LOGGING_PLAN.md            # Calibration logging plan — what/when to log, current gate progress
 ├── CALIBRATION_JOURNAL.md     # Append-only changelog of every --calibrate --apply event
 ├── QUANT_RESEARCH_MANUAL.md   # Strategy/architecture reference manual
 ├── DECISION_MATRIX_AND_TROUBLESHOOTING.md  # Tactical command reference + VIX-regime decision matrix
-└── CRYPTO_BUILD_PLAN.md       # Crypto module build plan + progress
+├── CRYPTO_BUILD_PLAN.md       # Crypto module build plan + progress
+├── VALIDATION_POWER.md        # Power analysis behind the forward-cohort gate
+├── OUTLOOK_FINDINGS.md        # Sector/asset outlook engine backtest findings
+└── LOTTERY_BACKTEST_FINDINGS.md  # Lottery sleeve negative-EV backtest findings
 ```
 
 ---
@@ -1179,9 +1272,18 @@ docs/
 - [x] Stand-alone SVG equity curve generator (`scripts/make_pnl_chart.py`) — pure stdlib, no matplotlib dependency, supports `--cohort pre|post|all` and crypto book
 - [x] Calibration journal (`docs/CALIBRATION_JOURNAL.md`) — append-only changelog of every `--calibrate --apply` event with IC tables, weight Δs, interpretation, and revert procedure
 - [x] First IC-driven calibration applied 2026-05-11 — `composite_weights` shrunk POP from 0.13 → 0.03, boosted vrp / term_structure / vega_risk to 0.14 / 0.13 / 0.11 (Calibration #1; backup `config.bak.20260511-111722.json`)
-- [ ] Spread-bucket calibration (`recommend_weights_for_structure('spread')` — gated by Bear Call ≥ 30; ETA ~2-3 weeks)
-- [ ] Iron-condor-bucket calibration (gated by IC ≥ 30; ETA late June 2026 as the May-opened ICs mature)
-- [ ] Fix 6 variance-zero scorers (`gamma_pin`, `max_pain`, `oi_change`, `option_rvol`, `pcr`, `sentiment`) — currently returning constants, dropping free signal
+- [x] Fixed 6 variance-zero scorers (`gamma_pin`, `max_pain`, `oi_change`, `option_rvol`, `pcr`, `sentiment`) — removed self-reinforcing weight-gate short-circuits that pinned them to constants (2026-05-20); whether they carry real signal is still an open calibration question now that they store real values
+- [x] Crypto vol-risk-premium backtest (`src/crypto/volbacktest`) — delta-hedged short-straddle harness on real Deribit DVOL marks; BTC VRP harvestable (Sharpe ~2.8–3.2, survives >5× quoted cost), ETH is not
+- [x] Sector/asset outlook engine (`src/outlook`) — relative-ranking edge (IC +0.05–0.08 at 2–3 months); absolute directional calls are unreliable, see [docs/OUTLOOK_FINDINGS.md](docs/OUTLOOK_FINDINGS.md)
+- [x] Research desk (`python -m src.research`) and morning briefing (`python -m src.morning`) — self-contained HTML quant reports through a shared design system (`src/desk_kit`)
+- [x] Ticker tearsheet (`--tearsheet N`) — self-contained HTML per scanned pick, re-renderable offline from its JSON sidecar
+- [x] Short-squeeze detector (`[11] SQUEEZE` mode) — display-only grader on short interest + unusual call activity
+- [x] Lottery Ticket board (`[9] LOTTERY` mode) — far-OTM long-shot ranking with BS-repriced hit-probability; built around a documented negative-EV base rate, see [docs/LOTTERY_BACKTEST_FINDINGS.md](docs/LOTTERY_BACKTEST_FINDINGS.md)
+- [x] Leverage module (`src/leverage`, BTC/ETH perp futures) — pre-validation signal/backtest/paper harness, explicitly no edge yet
+- [x] Long-term holdings desk (`src/longterm`) — buy-zone/tranche accumulation tracking, DISCOVER sector scan with BUY NOW / WAIT entry verdict, CDR ticker markers, guided ACTIONS menu, HTML report
+- [x] Quant-desk launcher (`python3 run.py` / `python3 -m src` with no args) — top-level `[1-5]` menu across STOCKS / CRYPTO / LEVERAGE / RESEARCH / HOLDINGS
+- [ ] Spread-bucket calibration (`recommend_weights_for_structure('spread')` — gated by Bear Call ≥ 30)
+- [ ] Iron-condor-bucket calibration (gated by IC ≥ 30)
 - [ ] Fix crypto auto-log / exit-enforcer same-cycle time-exit race (puts opened and time-exited within the same 5-minute interval)
 - [ ] Real-time alerts (email / SMS)
 - [ ] Backtesting UI improvements

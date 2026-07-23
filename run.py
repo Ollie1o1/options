@@ -31,7 +31,7 @@ _project_root = os.path.dirname(os.path.abspath(__file__))
 
 # ── Logging-help doc (shown by --logging-help / -lh) ──────────────────────
 _LOGGING_HELP = """\
-Calibration logging guide                      (see LOGGING_PLAN.md for full plan)
+Calibration logging guide                 (see docs/LOGGING_PLAN.md for full plan)
 =========================
 
 Goal: build a diverse paper-trade ledger so the weight optimizer and IC
@@ -112,7 +112,7 @@ Quick reference
   Healthy book, calibrating?     rotate modes, top 5-10 default
   Stress >> book?                 -sps or -ics only; never -ss
   IC looks flat/inverted?         sample deeper (--20), check warnings
-  Where am I in the plan?         see LOGGING_PLAN.md
+  Where am I in the plan?         see docs/LOGGING_PLAN.md
   Want the full screener help?    python3 run.py --help
 """
 

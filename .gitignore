@@ -103,3 +103,6 @@ backups/
 # long-term holdings desk (personal)
 longterm_plan.json
 data/longterm.db
+
+# personal ticker watchlist (auto-created by ADD command)
+watchlist.json
