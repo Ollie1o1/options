@@ -1,32 +1,32 @@
 # Paper Trading Track Record
 
-_Generated 2026-07-15 12:52 • 558 closed trades_
+_Generated 2026-07-22 12:00 • 631 closed trades_
 
 > **Methodology & caveats.** These are **paper trades**, not live fills. Entries and exits use **delayed retail data** (Yahoo Finance) and a **modeled friction** assumption (spread/slippage), so realized results would differ. The descriptive stats below are real; the **predictive edge of the ranking model is still under out-of-sample evaluation** and is *not* established — see [docs/VALIDATION_POWER.md](../docs/VALIDATION_POWER.md).
 
-_Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=30/50)_
+_Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=43/50)_
 
 ## Summary
 
-- Closed trades: **558**
-- Win rate: **49.1%** (274/558 with a recorded return)
-- Average return: **+3.8%** per trade (paper, pre-tax, modeled friction)
+- Closed trades: **631**
+- Win rate: **49.1%** (310/631 with a recorded return)
+- Average return: **+2.6%** per trade (paper, pre-tax, modeled friction)
 
 ## By strategy
 
 | Strategy | Closed | Win rate | Avg return |
 |----------|-------:|---------:|-----------:|
-| Bear Call | 94 | 59.6% | -2.7% |
-| Bull Put | 107 | 63.6% | +13.1% |
-| Iron Condor | 74 | 48.6% | -0.6% |
-| Long Call | 164 | 40.2% | +4.6% |
-| Long Put | 70 | 31.4% | -5.2% |
-| Short Put | 49 | 53.1% | +12.6% |
+| Bear Call | 109 | 61.5% | -3.7% |
+| Bull Put | 114 | 63.2% | +12.2% |
+| Iron Condor | 77 | 49.4% | -1.5% |
+| Long Call | 182 | 39.6% | +3.4% |
+| Long Put | 75 | 32.0% | -5.0% |
+| Short Put | 74 | 50.0% | +7.2% |
 
 ## Forward-cohort gate
 
 - Gate decision: **GATHERING**
-- Cohort size: **30** (closed cohort trades accumulated since the gate window opened)
+- Cohort size: **43** (closed cohort trades accumulated since the gate window opened)
 
 ## Closed trades
 
@@ -489,6 +489,7 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-06-23 | AMD | Long Call | $31.10 | $15.00 | -55.0% | Stop Loss (-50%) |
 | 2026-06-23 | UPS | Long Call | $2.30 | $2.45 | -0.0% | Time Exit (21d to expiry) |
 | 2026-06-23 | AVGO | Long Call | $13.30 | $4.50 | -72.3% | Time Exit (21d to expiry) |
+| 2026-06-24 | TLT | Iron Condor | $0.96 | $2.02 | -157.5% | Stop Loss (100% of credit) |
 | 2026-06-24 | SPY | Bear Call | $0.49 | $1.81 | -104.1% | Stop Loss (100% of credit) |
 | 2026-06-24 | QQQ | Bear Call | $0.55 | $1.13 | -81.8% | Stop Loss (100% of credit) |
 | 2026-06-24 | IWM | Bear Call | $0.56 | $1.13 | -80.2% | Stop Loss (100% of credit) |
@@ -526,6 +527,8 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-06-26 | IWM | Short Put | $4.75 | $2.65 | +37.9% | Take Profit (35% @ 10d) |
 | 2026-06-26 | SCHW | Short Put | $1.99 | $0.05 | +90.8% | Take Profit (35% @ 10d) |
 | 2026-06-26 | DIA | Short Put | $3.75 | $0.14 | +89.9% | Take Profit (25% @ 3d) |
+| 2026-06-26 | IWM | Iron Condor | $8.91 | $4.44 | +45.1% | Take Profit (50% of credit) |
+| 2026-06-26 | GLD | Iron Condor | $5.57 | $2.73 | +42.9% | Take Profit (50% of credit) |
 | 2026-07-07 | ABBV | Long Call | $8.30 | $3.75 | -61.0% | Stop Loss (-50%) |
 | 2026-07-07 | BA | Long Call | $8.80 | $4.10 | -59.6% | Stop Loss (-50%) |
 | 2026-07-07 | META | Long Call | $29.75 | $71.02 | +135.3% | Take Profit (100%) |
@@ -541,6 +544,7 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-07-07 | TSLA | Short Put | $7.75 | $5.94 | +17.2% | Time Exit (14d to expiry) |
 | 2026-07-07 | SLV | Short Put | $0.90 | $2.13 | -149.2% | Stop Loss (2.0× premium) |
 | 2026-07-08 | ABBV | Long Call | $8.30 | $3.75 | -61.0% | Stop Loss (-50%) |
+| 2026-07-08 | AAPL | Long Call | $7.65 | $16.50 | +109.5% | Take Profit (100%) |
 | 2026-07-08 | SPY | Bull Put | $0.50 | $0.00 | +67.1% | Take Profit (50% of credit) |
 | 2026-07-08 | QQQ | Bull Put | $0.50 | $0.03 | +48.3% | Take Profit (50% of credit) |
 | 2026-07-08 | XOM | Bear Call | $0.42 | $0.19 | +1.0% | Take Profit (50% of credit) |
@@ -551,6 +555,8 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-07-08 | CHTR | Short Put | $8.60 | $9.00 | -10.8% | Stop Loss (strike breached) |
 | 2026-07-08 | NFLX | Short Put | $2.65 | $3.75 | -48.0% | Stop Loss (strike breached) |
 | 2026-07-08 | WMT | Short Put | $1.23 | $0.75 | +29.8% | Take Profit (35% @ 20d) |
+| 2026-07-09 | EEM | Long Call | $2.35 | $1.15 | -57.6% | Stop Loss (-50%) |
+| 2026-07-09 | XLI | Long Call | $4.45 | $1.97 | -62.0% | Stop Loss (-50%) |
 | 2026-07-09 | QQQ | Bear Call | $0.46 | $0.47 | -51.3% | Time Exit (5d to expiry) |
 | 2026-07-09 | SPY | Bear Call | $0.46 | $0.55 | -68.7% | Time Exit (5d to expiry) |
 | 2026-07-09 | IWM | Bear Call | $0.41 | $0.20 | -2.7% | Take Profit (50% of credit) |
@@ -561,9 +567,13 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-07-09 | NVDA | Short Put | $3.65 | $2.06 | +37.2% | Take Profit (35% @ 14d) |
 | 2026-07-09 | BAC | Short Put | $0.85 | $0.58 | +18.5% | Time Exit (12d to expiry) |
 | 2026-07-09 | ABBV | Short Put | $5.95 | $7.45 | -31.4% | Time Exit (19d to expiry) |
+| 2026-07-09 | QCOM | Long Put | $15.30 | $26.05 | +64.2% | Time Exit (21d to expiry) |
 | 2026-07-09 | WMT | Long Put | $2.12 | $1.03 | -58.0% | Stop Loss (-50%) |
 | 2026-07-09 | IWM | Long Put | $2.67 | $2.83 | -0.5% | Time Exit (8d to expiry) |
 | 2026-07-09 | CRM | Long Put | $5.75 | $5.19 | -16.0% | Time Exit (19d to expiry) |
+| 2026-07-10 | AAPL | Long Call | $8.70 | $18.45 | +105.9% | Take Profit (100%) |
+| 2026-07-10 | AVGO | Long Call | $19.65 | $9.15 | -58.6% | Stop Loss (-50%) |
+| 2026-07-10 | TSLA | Long Call | $19.90 | $9.65 | -56.6% | Stop Loss (-50%) |
 | 2026-07-10 | SPY | Bear Call | $0.86 | $0.69 | -5.9% | Time Exit (11d to expiry) |
 | 2026-07-10 | INTC | Bull Put | $0.90 | $1.00 | -36.2% | Time Exit (11d to expiry) |
 | 2026-07-10 | RIVN | Bull Put | $0.24 | $0.10 | -38.7% | Take Profit (50% of credit) |
@@ -584,9 +594,72 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (
 | 2026-07-10 | TSLA | Short Put | $12.65 | $16.81 | -39.0% | Time Exit (11d to expiry) |
 | 2026-07-10 | SPY | Short Put | $4.08 | $4.87 | -25.7% | Time Exit (11d to expiry) |
 | 2026-07-10 | LCID | Short Put | $0.33 | $0.30 | -25.2% | Time Exit (11d to expiry) |
+| 2026-07-13 | AAPL | Long Call | $8.10 | $16.30 | +95.1% | Take Profit (100%) |
 | 2026-07-13 | SPY | Bear Call | $0.53 | $0.01 | +55.0% | Take Profit (50% of credit) |
 | 2026-07-13 | QQQ | Bear Call | $1.53 | $0.34 | +63.1% | Take Profit (50% of credit) |
 | 2026-07-13 | MU | Bull Put | $3.00 | $0.00 | +100.0% | Take Profit (50% of credit) |
 | 2026-07-13 | GOOGL | Bull Put | $1.15 | $0.06 | +75.1% | Take Profit (50% of credit) |
 | 2026-07-13 | INTC | Bull Put | $0.47 | $0.00 | +52.4% | Take Profit (50% of credit) |
+| 2026-07-13 | UNH | Short Put | $12.30 | $4.08 | +60.7% | Take Profit (35% @ 15d) |
+| 2026-07-13 | PYPL | Short Put | $1.60 | $0.15 | +83.6% | Take Profit (50% @ 23d) |
+| 2026-07-13 | TSLA | Short Put | $9.80 | $10.37 | -11.9% | Time Exit (8d to expiry) |
+| 2026-07-13 | AAPL | Short Put | $5.45 | $2.70 | +44.2% | Take Profit (35% @ 16d) |
+| 2026-07-13 | WMT | Short Put | $1.88 | $1.50 | +13.5% | Time Exit (15d to expiry) |
+| 2026-07-13 | WMT | Long Put | $1.98 | $1.98 | -6.7% | Time Exit (21d to expiry) |
+| 2026-07-13 | JPM | Long Call | $7.50 | $10.10 | +28.5% | Time Exit (21d to expiry) |
+| 2026-07-13 | BAC | Long Call | $1.44 | $2.39 | +58.1% | Time Exit (21d to expiry) |
+| 2026-07-13 | TSLA | Long Put | $18.40 | $21.72 | +12.5% | Time Exit (21d to expiry) |
+| 2026-07-13 | WMT | Long Put | $1.64 | $0.86 | -54.5% | Time Exit (21d to expiry) |
+| 2026-07-13 | DIA | Long Put | $5.20 | $4.45 | -20.7% | Time Exit (21d to expiry) |
+| 2026-07-14 | GS | Long Call | $40.05 | $19.55 | -53.7% | Stop Loss (-50%) |
+| 2026-07-14 | QQQ | Bear Call | $0.47 | $0.19 | +11.5% | Take Profit (50% of credit) |
+| 2026-07-14 | SPY | Bear Call | $0.46 | $0.22 | +2.0% | Take Profit (50% of credit) |
+| 2026-07-14 | IWM | Bear Call | $0.21 | $0.45 | -132.6% | Stop Loss (100% of credit) |
+| 2026-07-14 | WMT | Bull Put | $0.45 | $0.14 | +19.6% | Take Profit (50% of credit) |
+| 2026-07-14 | UBER | Bull Put | $0.45 | $0.20 | +5.3% | Take Profit (50% of credit) |
+| 2026-07-14 | AAPL | Short Put | $5.90 | $2.70 | +48.0% | Take Profit (35% @ 16d) |
+| 2026-07-14 | UBER | Short Put | $1.18 | $0.67 | +33.6% | Take Profit (35% @ 16d) |
 | 2026-07-14 | LCID | Short Put | $2.89 | $2.75 | -1.7% | Stop Loss (strike breached) |
+| 2026-07-14 | NVDA | Short Put | $4.30 | $6.03 | -46.5% | Time Exit (14d to expiry) |
+| 2026-07-14 | AMZN | Short Put | $3.75 | $2.13 | +36.9% | Take Profit (35% @ 16d) |
+| 2026-07-14 | AMZN | Short Put | $5.30 | $2.89 | +39.2% | Take Profit (35% @ 16d) |
+| 2026-07-15 | VLO | Long Call | $11.90 | $25.89 | +111.5% | Take Profit (100%) |
+| 2026-07-15 | AVGO | Long Call | $12.80 | $7.10 | -50.6% | Time Exit (11d to expiry) |
+| 2026-07-15 | WFC | Long Call | $1.61 | $1.00 | -44.9% | Time Exit (11d to expiry) |
+| 2026-07-15 | AAPL | Long Call | $6.90 | $6.30 | -14.9% | Time Exit (18d to expiry) |
+| 2026-07-15 | UNH | Long Call | $12.70 | $5.10 | -65.9% | Time Exit (11d to expiry) |
+| 2026-07-15 | WMT | Long Call | $2.32 | $1.32 | -49.7% | Time Exit (18d to expiry) |
+| 2026-07-15 | QQQ | Bear Call | $1.01 | $0.44 | +34.1% | Take Profit (50% of credit) |
+| 2026-07-15 | SPY | Bear Call | $0.46 | $0.09 | +32.0% | Take Profit (50% of credit) |
+| 2026-07-15 | ORCL | Bull Put | $0.95 | $2.16 | -110.5% | Stop Loss (100% of credit) |
+| 2026-07-15 | DIA | Bear Call | $0.45 | $0.90 | -122.2% | Stop Loss (100% of credit) |
+| 2026-07-15 | GLD | Bear Call | $0.40 | $2.45 | -150.0% | Stop Loss (100% of credit) |
+| 2026-07-15 | AAPL | Short Put | $3.95 | $4.00 | -7.6% | Time Exit (11d to expiry) |
+| 2026-07-15 | AMZN | Short Put | $7.80 | $10.37 | -39.1% | Stop Loss (strike breached) |
+| 2026-07-15 | SPY | Short Put | $5.74 | $7.57 | -38.1% | Stop Loss (strike breached) |
+| 2026-07-15 | TSLA | Short Put | $12.00 | $20.85 | -79.9% | Time Exit (11d to expiry) |
+| 2026-07-15 | META | Short Put | $26.20 | $39.50 | -54.6% | Stop Loss (strike breached) |
+| 2026-07-16 | UNH | Long Call | $12.15 | $4.90 | -65.8% | Stop Loss (-50%) |
+| 2026-07-16 | GS | Long Call | $33.65 | $11.81 | -67.9% | Stop Loss (-50%) |
+| 2026-07-16 | QQQ | Bear Call | $0.47 | $0.15 | +20.0% | Take Profit (50% of credit) |
+| 2026-07-16 | SPY | Bear Call | $0.43 | $0.20 | +0.9% | Take Profit (50% of credit) |
+| 2026-07-16 | TSLA | Bull Put | $1.35 | $1.70 | -42.7% | Time Exit (4d to expiry) |
+| 2026-07-16 | MU | Bull Put | $2.45 | $1.01 | +49.6% | Take Profit (50% of credit) |
+| 2026-07-16 | C | Bear Call | $0.46 | $0.16 | +15.2% | Take Profit (50% of credit) |
+| 2026-07-16 | AMZN | Short Put | $7.75 | $10.37 | -40.0% | Stop Loss (strike breached) |
+| 2026-07-16 | PYPL | Short Put | $1.57 | $1.22 | +15.1% | Time Exit (11d to expiry) |
+| 2026-07-16 | AAPL | Short Put | $4.80 | $5.52 | -21.3% | Time Exit (11d to expiry) |
+| 2026-07-16 | IWM | Short Put | $2.43 | $3.34 | -44.0% | Stop Loss (strike breached) |
+| 2026-07-16 | META | Short Put | $26.50 | $39.50 | -52.9% | Stop Loss (strike breached) |
+| 2026-07-17 | SPY | Bear Call | $0.50 | $0.10 | +34.1% | Take Profit (50% of credit) |
+| 2026-07-17 | IWM | Bear Call | $0.43 | $0.32 | -27.0% | Time Exit (9d to expiry) |
+| 2026-07-17 | QQQ | Bear Call | $0.46 | $0.22 | +3.0% | Take Profit (50% of credit) |
+| 2026-07-17 | DIA | Bear Call | $0.46 | $0.00 | +100.0% | Take Profit (50% of credit) |
+| 2026-07-17 | NVDA | Bull Put | $0.98 | $1.05 | -30.9% | Time Exit (11d to expiry) |
+| 2026-07-17 | PYPL | Short Put | $1.35 | $1.22 | +1.3% | Time Exit (11d to expiry) |
+| 2026-07-17 | AAPL | Short Put | $4.90 | $5.52 | -18.9% | Time Exit (11d to expiry) |
+| 2026-07-17 | COIN | Short Put | $9.05 | $7.40 | +12.1% | Time Exit (11d to expiry) |
+| 2026-07-17 | LRCX | Short Put | $20.70 | $22.95 | -15.8% | Time Exit (11d to expiry) |
+| 2026-07-17 | NVDA | Short Put | $4.35 | $4.25 | -4.0% | Time Exit (11d to expiry) |
+| 2026-07-21 | QQQ | Bear Call | $0.44 | $0.07 | +32.7% | Take Profit (50% of credit) |
+| 2026-07-21 | MU | Bull Put | $3.07 | $0.00 | +100.0% | Take Profit (50% of credit) |
