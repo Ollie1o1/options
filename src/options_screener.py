@@ -77,6 +77,7 @@ from .paper_manager import PaperManager
 try:
     from . import formatting as fmt
     from . import ui
+    from . import settings
     from .trade_analysis import (
         generate_trade_thesis,
         calculate_entry_exit_levels,
@@ -4337,6 +4338,9 @@ def main():
 
     if args.no_color and HAS_ENHANCED_CLI:
         fmt.set_color_enabled(False)
+
+    if HAS_ENHANCED_CLI:
+        settings.apply_saved_theme()
 
     if args.version:
         print("Options Screener v1.0.0")
