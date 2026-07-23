@@ -106,3 +106,6 @@ data/longterm.db
 
 # personal ticker watchlist (auto-created by ADD command)
 watchlist.json
+
+# personal preferences (theme, etc. — auto-created by SETTINGS menu)
+settings.json
