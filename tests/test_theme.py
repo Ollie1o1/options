@@ -136,5 +136,69 @@ class ThemeSwitchingTestCase(unittest.TestCase):
             fmt.set_theme("quant_desk")
 
 
+class ChromeThemingTestCase(unittest.TestCase):
+    def setUp(self):
+        fmt.set_color_enabled(True)
+        self._colorterm = os.environ.get("COLORTERM")
+        os.environ["COLORTERM"] = ""
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = None
+        fmt.set_theme("quant_desk")
+        if self._colorterm is None:
+            os.environ.pop("COLORTERM", None)
+        else:
+            os.environ["COLORTERM"] = self._colorterm
+
+    def test_draw_box_uses_heading_color(self):
+        fmt.set_theme("matrix_terminal")
+        out = fmt.draw_box("TITLE", width=20)
+        self.assertIn(fmt.Colors.BRIGHT_GREEN, out)  # matrix_terminal's heading ansi
+
+    def test_draw_separator_uses_muted_color(self):
+        fmt.set_theme("amber_crt")
+        out = fmt.draw_separator(10)
+        self.assertIn(fmt.Colors.BRIGHT_BLACK, out)  # muted ansi is theme-invariant
+
+    def test_format_header_uses_heading_color(self):
+        fmt.set_theme("cyberpunk_neon")
+        out = fmt.format_header("Section")
+        self.assertIn(fmt.Colors.BRIGHT_MAGENTA, out)
+
+    def test_format_info_uses_accent_color(self):
+        fmt.set_theme("cyberpunk_neon")
+        out = fmt.format_info("note")
+        self.assertIn(fmt.Colors.BRIGHT_CYAN, out)
+
+    def test_format_warning_still_yellow_bold_every_theme(self):
+        for name, _label in fmt.list_themes():
+            fmt.set_theme(name)
+            out = fmt.format_warning("careful")
+            self.assertIn(fmt.Colors.YELLOW, out)
+            self.assertIn(fmt.Colors.BOLD, out)
+
+    def test_format_error_still_red_bold_every_theme(self):
+        for name, _label in fmt.list_themes():
+            fmt.set_theme(name)
+            out = fmt.format_error("broke")
+            self.assertIn(fmt.Colors.RED, out)
+            self.assertIn(fmt.Colors.BOLD, out)
+
+    def test_format_success_still_green_bold_every_theme(self):
+        for name, _label in fmt.list_themes():
+            fmt.set_theme(name)
+            out = fmt.format_success("done")
+            self.assertIn(fmt.Colors.GREEN, out)
+            self.assertIn(fmt.Colors.BOLD, out)
+
+    def test_chrome_plain_when_color_disabled(self):
+        fmt.set_color_enabled(False)
+        self.assertEqual(fmt.draw_box("T", width=10), fmt.draw_box("T", width=10))
+        self.assertNotIn("\033", fmt.draw_box("T", width=10))
+        self.assertNotIn("\033", fmt.draw_separator(5))
+        self.assertNotIn("\033", fmt.format_header("h"))
+        self.assertNotIn("\033", fmt.format_info("i"))
+
+
 if __name__ == "__main__":
     unittest.main()

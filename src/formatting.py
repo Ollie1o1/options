@@ -318,11 +318,7 @@ def draw_box(title: str, width: int = 80, double: bool = False) -> str:
     padding_right = width - title_len - 2 - padding_left
 
     top_line = tl + h * padding_left + title_with_space + h * padding_right + tr
-
-    if supports_color():
-        return colorize(top_line, Colors.BRIGHT_BLUE, bold=True)
-
-    return top_line
+    return style(top_line, 'heading')
 
 
 def draw_separator(width: int = 80, char: str = None) -> str:
@@ -338,11 +334,7 @@ def draw_separator(width: int = 80, char: str = None) -> str:
     """
     char = char or BoxChars.HORIZONTAL
     line = char * width
-
-    if supports_color():
-        return colorize(line, Colors.BRIGHT_BLACK)
-
-    return line
+    return style(line, 'muted')
 
 
 def format_header(text: str, emoji: str = "") -> str:
@@ -357,39 +349,27 @@ def format_header(text: str, emoji: str = "") -> str:
         Formatted header string
     """
     header_text = f"{emoji} {text}" if emoji else text
-
-    if supports_color():
-        return colorize(header_text, Colors.BRIGHT_CYAN, bold=True)
-
-    return header_text
+    return style(header_text, 'heading')
 
 
 def format_warning(text: str) -> str:
     """Format a warning message."""
-    if supports_color():
-        return colorize(f"⚠ {text}", Colors.YELLOW, bold=True)
-    return f"⚠ {text}"
+    return style(f"⚠ {text}", 'warn', bold=True)
 
 
 def format_error(text: str) -> str:
     """Format an error message."""
-    if supports_color():
-        return colorize(f"✗ {text}", Colors.RED, bold=True)
-    return f"✗ {text}"
+    return style(f"✗ {text}", 'bad', bold=True)
 
 
 def format_success(text: str) -> str:
     """Format a success message."""
-    if supports_color():
-        return colorize(f"✓ {text}", Colors.GREEN, bold=True)
-    return f"✓ {text}"
+    return style(f"✓ {text}", 'good', bold=True)
 
 
 def format_info(text: str) -> str:
     """Format an info message."""
-    if supports_color():
-        return colorize(f"· {text}", Colors.BRIGHT_BLUE)
-    return f"· {text}"
+    return style(f"· {text}", 'accent')
 
 
 def truncate(text: str, max_len: int, suffix: str = "...") -> str:
