@@ -7,7 +7,7 @@ Two-tier design (see docs/superpowers/specs/2026-07-20-longterm-discover-design.
   the 200-day moving average, 12-1 month momentum, real support/resistance
   levels, and this name's own empirical bounce-odds after drops this size.
 
-  DEEP tier (bounded to the top ~6 ranked candidates, each a separate network
+  DEEP tier (bounded to the top ~10 ranked candidates, each a separate network
   round-trip): insider cluster-buy activity (EDGAR Form 4), days to next
   earnings, and lightweight fundamentals (P/E, margins, growth).
 
@@ -449,45 +449,68 @@ def insight_line(candidate: CandidateRead, deep: Optional[DeepRead]) -> str:
 
 
 def scan(sector_keyword: str, universe_limit: int = 30, board_limit: int = 15,
-         deep_limit: int = 6) -> List[Tuple[CandidateRead, Optional[DeepRead]]]:
+         deep_limit: int = 10) -> List[Tuple[CandidateRead, Optional[DeepRead]]]:
     """Full discovery scan: universe -> one batched price fetch -> free
-    context for every candidate -> rank by drawdown -> bounded-cost deep
-    context for the top `deep_limit` ranked candidates.
+    context for every candidate -> verdict-tier reorder -> bounded-cost
+    deep context for the top `deep_limit` ranked candidates -> a second,
+    narrower reorder within that deep-fetched slice for any
+    earnings-proximity caution.
 
     Args:
       sector_keyword: key into SECTOR_FILTERS (case-insensitive); see
         universe()'s own contract for the ValueError on an unknown keyword.
       universe_limit: how many tickers to pull from the sector screen before
         any price data is fetched.
-      board_limit: how many ranked candidates to return in total (after the
-        drawdown sort); the "board" the caller renders.
-      deep_limit: how many of those ranked candidates (from the top,
-        i.e. most beaten-down first) get the extra, per-ticker deep_context()
-        network round-trips. deep_limit <= board_limit in normal use; a
-        larger deep_limit has no effect since only board_limit candidates
-        ever exist to deepen.
+      board_limit: how many ranked candidates to return in total.
+      deep_limit: how many of those ranked candidates get the extra,
+        per-ticker deep_context() network round-trips. deep_limit <=
+        board_limit in normal use; a larger deep_limit has no effect since
+        only board_limit candidates ever exist to deepen.
 
     Returns:
       A list of (CandidateRead, Optional[DeepRead]) pairs, length
-      <= board_limit, ordered most-beaten-down-first (ascending
-      drawdown_pct, i.e. most negative — the biggest drop — sorts first).
-      DeepRead is non-None only for the first `deep_limit` entries in that
-      order; every entry after that carries None rather than a stale or
-      empty DeepRead. A ticker returned by universe() with no snapshot (a
-      single failed fetch inside the one batched call) is silently skipped,
-      not raised — the scan degrades to "fewer candidates," never a crash,
-      matching the rest of this module's failure philosophy.
+      <= board_limit. Ordering: every BUY NOW verdict (see
+      verdict.verdict_for) sorts ahead of every WAIT verdict; within the
+      first `deep_limit` entries, a BUY NOW downgraded by an
+      earnings-proximity caution (see verdict.apply_caution) sorts after
+      the clean BUY NOW entries but still ahead of any WAIT entries.
+      Drawdown (most negative first) is the tiebreaker within each tier —
+      the same tiebreaker the board used as its only sort key before this
+      verdict tier existed. DeepRead is non-None only for the first
+      `deep_limit` entries in the *pre-caution-reorder* ranking; entries
+      after that carry None. A ticker returned by universe() with no
+      snapshot is silently skipped, not raised.
     """
     from .data import fetch_snapshots
+    from .verdict import BUY_NOW, apply_caution, verdict_for
 
     tickers = universe(sector_keyword, limit=universe_limit)
     snapshots = fetch_snapshots(tickers)
     candidates = [fast_context(snapshots[t]) for t in tickers if t in snapshots]
-    candidates.sort(key=lambda c: c.drawdown_pct)
+
+    # Pass 1: group BUY NOW ahead of WAIT using only fast-tier signals (zero
+    # extra network cost), drawdown as the tiebreaker within each group.
+    candidates.sort(key=lambda c: (0 if verdict_for(c).state == BUY_NOW else 1,
+                                   c.drawdown_pct))
     ranked = candidates[:board_limit]
 
-    results: List[Tuple[CandidateRead, Optional[DeepRead]]] = []
-    for i, candidate in enumerate(ranked):
-        deep = deep_context(candidate.ticker) if i < deep_limit else None
-        results.append((candidate, deep))
-    return results
+    head = ranked[:deep_limit]
+    tail = ranked[deep_limit:]
+    head_deep = [deep_context(c.ticker) for c in head]
+    tail_deep: List[Optional[DeepRead]] = [None] * len(tail)
+
+    # Pass 2: within the deep-fetched head only, an earnings-proximity
+    # caution re-sorts a downgraded BUY NOW after the clean ones — tail
+    # candidates were never deep-fetched, so their pass-1 order is untouched.
+    def _final_key(pair: Tuple[CandidateRead, Optional[DeepRead]]) -> Tuple[int, float]:
+        candidate, deep = pair
+        v = apply_caution(verdict_for(candidate), deep)
+        if v.state == BUY_NOW:
+            tier = 0 if v.caution is None else 1
+        else:
+            tier = 2
+        return (tier, candidate.drawdown_pct)
+
+    head_pairs = sorted(zip(head, head_deep), key=_final_key)
+    tail_pairs = list(zip(tail, tail_deep))
+    return head_pairs + tail_pairs
