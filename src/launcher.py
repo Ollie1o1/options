@@ -217,7 +217,7 @@ def _settings_menu() -> None:
         print(_row("B", "BACK", "", muted_key=True))
         print(ui.rule(WIDTH))
         try:
-            choice = (input("  Choice [1]: ").strip() or "1").upper()
+            choice = (input("  Choice [B]: ").strip() or "B").upper()
         except (EOFError, KeyboardInterrupt):
             print()
             return

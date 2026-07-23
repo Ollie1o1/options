@@ -155,6 +155,14 @@ class TestSettingsMenu(unittest.TestCase):
         out = self._route_to_settings(["9", "Q"])
         self.assertIn("6", out)
 
+    def test_empty_choice_at_settings_menu_goes_back_not_into_theme(self):
+        # Regression: the settings menu's blank-Enter default must be BACK,
+        # not THEME — otherwise Enter re-opens the theme picker every time,
+        # trapping the user in a loop between SETTINGS and THEME with no way
+        # back to the main menu via a bare Enter.
+        out = self._route_to_settings(["6", "", "Q"])
+        self.assertNotIn("Cyberpunk Neon", out)  # only the theme picker prints theme labels
+
 
 if __name__ == "__main__":
     unittest.main()
