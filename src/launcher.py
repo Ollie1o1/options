@@ -93,6 +93,7 @@ def _show_menu() -> str:
     after.append(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
                       tag="read-only"))
     after.append(_row("5", "HOLDINGS", "long-term stock accumulation — buy zones · tranches · TFSA book"))
+    after.append(_row("6", "SETTINGS", "theme · preferences"))
     after.append(_row("Q", "QUIT", "", muted_key=True))
     after.append("")
     after.append(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
@@ -155,6 +156,79 @@ def _research_menu() -> None:
             print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, or B")
 
 
+def _theme_picker() -> None:
+    """List all themes with a live-colored preview swatch; pick one to apply
+    and persist. Browsing never mutates the active theme until a pick is
+    confirmed."""
+    from src import settings as _settings
+    themes = fmt.list_themes()
+    while True:
+        current = fmt.get_theme()
+        print()
+        print(ui.rule(WIDTH, "THEME"))
+        for i, (key, label) in enumerate(themes, start=1):
+            palette = fmt.THEMES[key]["rgb"]
+            swatch = ""
+            if fmt.supports_truecolor():
+                swatch = "".join(
+                    fmt.rgb_fg(*palette[part]) + "██" + fmt.Colors.RESET
+                    for part in ("heading", "accent", "muted", "emph")
+                    if palette[part] is not None
+                )
+            marker = "  (current)" if key == current else ""
+            k = fmt.style(f"[{i}]", "accent", bold=True)
+            name = fmt.style(ui.pad(label, 18), "heading")
+            print(f"  {k}  {name} {swatch}{marker}")
+        print(_row("B", "BACK", "", muted_key=True))
+        print(ui.rule(WIDTH))
+        try:
+            choice = (input("  Choice [B]: ").strip() or "B").upper()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("B", "BACK", "Q", "QUIT", ""):
+            return
+        picked = None
+        if choice.isdigit() and 1 <= int(choice) <= len(themes):
+            picked = themes[int(choice) - 1][0]
+        else:
+            for key, label in themes:
+                if choice in (key.upper(), label.upper()):
+                    picked = key
+                    break
+        if picked is None:
+            print(f"  Unknown choice: {choice!r}")
+            continue
+        _settings.set_theme(picked)
+        print(fmt.style(f"  Theme set to {fmt.THEMES[picked]['label']}.", "good"))
+
+
+def _settings_menu() -> None:
+    """User preferences. THEME today; more settings land here later — add a
+    default in src/settings.py plus one row + handler here."""
+    if not HAS_UI:
+        print("  Settings unavailable (UI module failed to load).")
+        return
+    while True:
+        print()
+        print(ui.rule(WIDTH, "SETTINGS"))
+        current_label = fmt.THEMES[fmt.get_theme()]["label"]
+        print(_row("1", "THEME", f"currently: {current_label}"))
+        print(_row("B", "BACK", "", muted_key=True))
+        print(ui.rule(WIDTH))
+        try:
+            choice = (input("  Choice [1]: ").strip() or "1").upper()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("B", "BACK", "Q", "QUIT", ""):
+            return
+        if choice in ("1", "THEME"):
+            _theme_picker()
+        else:
+            print(f"  Unknown choice: {choice!r} — pick 1 or B")
+
+
 def main() -> None:
     # If any CLI arg was provided, skip the menu and dispatch straight to the
     # equity screener. This keeps cron, --default-scoring shortcuts, and every
@@ -163,6 +237,10 @@ def main() -> None:
         from src.options_screener import main as _stocks_main
         _stocks_main()
         return
+
+    if HAS_UI:
+        from src import settings as _settings
+        _settings.apply_saved_theme()
 
     while True:
         choice = _show_menu()
@@ -189,10 +267,13 @@ def main() -> None:
             from src.longterm.board import menu as _holdings_menu
             _holdings_menu()
             continue
+        if choice in ("6", "SETTINGS"):
+            _settings_menu()
+            continue
         if choice in ("Q", "QUIT", "EXIT", ""):
             print("  Goodbye.")
             return
-        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, or Q")
+        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, 6, or Q")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,16 @@
 import builtins
 import contextlib
 import io
+import os
 import sys
+import tempfile
 import types
 import unittest
 
+import src.formatting as fmt
 import src.launcher as launcher
 import src.leverage.__main__ as leverage_main
+import src.settings as settings_mod
 
 
 class TestLauncherRouting(unittest.TestCase):
@@ -97,6 +101,59 @@ class TestLauncherLoadingFeedback(unittest.TestCase):
             else:
                 sys.modules.pop("src.options_screener", None)
         self.assertEqual(len(runs), 2)
+
+
+class TestSettingsMenu(unittest.TestCase):
+    """[6] must route to the settings menu, and picking a theme there must
+    persist it via src.settings, not just mutate in-memory state."""
+
+    def setUp(self):
+        self._orig_path = settings_mod._SETTINGS_PATH
+        fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.remove(tmp_path)
+        settings_mod._SETTINGS_PATH = tmp_path
+        self._tmp_path = tmp_path
+
+    def tearDown(self):
+        settings_mod._SETTINGS_PATH = self._orig_path
+        if os.path.exists(self._tmp_path):
+            os.remove(self._tmp_path)
+        fmt.set_theme("quant_desk")
+
+    def _route_to_settings(self, inputs):
+        orig_input = builtins.input
+        orig_argv = sys.argv
+        _inputs = iter(inputs)
+        builtins.input = lambda *_a, **_k: next(_inputs, "Q")
+        sys.argv = ["prog"]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                launcher.main()
+        finally:
+            builtins.input = orig_input
+            sys.argv = orig_argv
+        return buf.getvalue()
+
+    def test_choice_6_opens_settings_menu(self):
+        out = self._route_to_settings(["6", "B", "Q"])
+        self.assertIn("SETTINGS", out)
+
+    def test_theme_picker_lists_all_four_themes(self):
+        out = self._route_to_settings(["6", "1", "B", "B", "Q"])
+        self.assertIn("Quant Desk", out)
+        self.assertIn("Cyberpunk Neon", out)
+        self.assertIn("Matrix Terminal", out)
+        self.assertIn("Amber CRT", out)
+
+    def test_picking_a_theme_persists_it(self):
+        self._route_to_settings(["6", "1", "3", "B", "B", "Q"])  # 3 = matrix_terminal
+        self.assertEqual(settings_mod.get_theme(), "matrix_terminal")
+
+    def test_unknown_top_level_choice_mentions_6(self):
+        out = self._route_to_settings(["9", "Q"])
+        self.assertIn("6", out)
 
 
 if __name__ == "__main__":
