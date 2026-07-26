@@ -2913,6 +2913,60 @@ def _open_briefing_file(path: str) -> None:
             pass
 
 
+def _run_probability_lab_menu() -> None:
+    """Probability Lab: extract the market's risk-neutral density, tilt it into
+    the user's view (drift + vol multiplier), and rank listed structures by EV.
+
+    Robust to bad input: re-prompts, validates, and never raises to the caller.
+    Non-interactive callers run one pass and return.
+    """
+    from src import ui as _uikit
+    try:
+        from .probability_lab.cli import (build_context, parse_drift,
+                                          render_report)
+    except Exception as exc:  # pragma: no cover
+        print(_uikit.error_line(f"Probability Lab unavailable: {exc}"))
+        return
+
+    _interactive = sys.stdin.isatty()
+    while True:
+        try:
+            ticker = prompt_input("Probability Lab — ticker (or [x] back)",
+                                  "").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if ticker in ("X", "BACK", "Q", "QUIT", ""):
+            return
+        if not ticker.isalnum():
+            print("  Enter a single ticker symbol, e.g. AAPL.")
+            if _interactive:
+                continue
+            return
+        try:
+            drift = parse_drift(prompt_input(
+                "  Your directional view over the horizon (e.g. +3%, -2%)", "0"))
+        except ValueError:
+            drift = 0.0
+        try:
+            vol_mult = float(prompt_input(
+                "  Your vol vs the market's (1.0 = same, 0.9 = calmer)", "1.0"))
+        except ValueError:
+            vol_mult = 1.0
+
+        print("  Building density…")
+        try:
+            ctx = build_context(ticker, None, drift, vol_mult)
+        except Exception as exc:
+            print(_uikit.error_line(f"{ticker}: {exc}"))
+            if _interactive:
+                continue
+            return
+        print("\n".join(render_report(ctx)))
+        if not _interactive:
+            return
+
+
 def _run_intel_menu() -> None:
     """Intel Briefing sub-menu: (a) market overview, (b) single-ticker briefing.
 
@@ -4658,6 +4712,7 @@ def main():
                 ("9", "LOTTERY",   "Lottery Ticket \u2014 far-OTM plays on extreme moves"),
                 ("10", "INTEL",    "Intel Briefing \u2014 everything before you buy + what to do"),
                 ("11", "SQUEEZE",  "Short-squeeze setups \u2014 high-short-float candidates"),
+                ("12", "PROB LAB", "Risk-neutral density + your-view structure ranking"),
                 ("Q", "QUIT",      "Exit the screener"),
             ]
             for num, cmd, desc in modes:
@@ -4679,6 +4734,7 @@ def main():
             print("  [9] LOTTERY    \u2014 Lottery Ticket: far-OTM plays on extreme moves")
             print("  [10] INTEL     \u2014 Intel Briefing: everything before you buy + what to do")
             print("  [11] SQUEEZE   \u2014 Short-squeeze setups (high short interest)")
+            print("  [12] PROB LAB  \u2014 Risk-neutral density + your-view structure ranking")
             print("  [Q] QUIT       \u2014 Exit the screener")
         print()
 
@@ -4730,9 +4786,18 @@ def main():
         # ── Number → command mapping ──────────────────────────────────────────────
         _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
                     "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST",
-                    "9": "LOTTERY", "10": "INTEL", "11": "SQUEEZE"}
+                    "9": "LOTTERY", "10": "INTEL", "11": "SQUEEZE", "12": "PROBLAB"}
         if symbol_input in _num_map:
             symbol_input = _num_map[symbol_input]
+        elif symbol_input in ("PROB LAB", "PROB", "PROBABILITY LAB", "RND"):
+            symbol_input = "PROBLAB"
+
+        # ── PROBLAB mode: risk-neutral density + view-based structure ranking ──────
+        if symbol_input == "PROBLAB":
+            _run_probability_lab_menu()
+            if _interactive:
+                continue
+            return
 
         # ── INTEL mode: pre-trade briefing (market overview or single-ticker) ──────
         if symbol_input == "INTEL":
