@@ -8,11 +8,29 @@ Computes iv_surface_residual: (market_IV - fitted_IV) / fitted_IV.
 Positive = expensive vs fair surface, negative = cheap.
 """
 
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
+
+
+@dataclass(frozen=True)
+class SVIParams:
+    """Fitted SVI parameters for a single expiry slice."""
+    a: float
+    b: float
+    rho: float
+    sigma: float
+    m: float
+    T: float
+    fit_quality: float
+
+    def iv(self, k: np.ndarray) -> np.ndarray:
+        """Implied vol at log-moneyness k = ln(K/S)."""
+        return _svi_iv(np.asarray(k, dtype=float), self.T,
+                       self.a, self.b, self.rho, self.m, self.sigma)
 
 
 def _svi_total_variance(k: np.ndarray, a: float, b: float, rho: float,
@@ -96,6 +114,34 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
         return None, 0.0
 
 
+def fit_svi_slice(strikes, market_iv, T: float, S: float) -> Optional[SVIParams]:
+    """Fit SVI to a single expiry slice.
+
+    Parameters
+    ----------
+    strikes, market_iv : 1-D arrays (raw strikes, not log-moneyness).
+    T : years to expiry.  S : underlying spot.
+
+    Returns SVIParams or None when the slice is too thin / the fit fails.
+    Reuses the same ``_fit_single_expiry`` optimizer that drives the surface
+    residual signal, so both paths stay consistent.
+    """
+    strikes = np.asarray(strikes, dtype=float)
+    market_iv = np.asarray(market_iv, dtype=float)
+    if S <= 0 or T <= 0:
+        return None
+    valid = (market_iv > 0) & np.isfinite(market_iv) & (strikes > 0)
+    if valid.sum() < 5:
+        return None
+    k = np.log(strikes[valid] / S)
+    params, quality = _fit_single_expiry(k, market_iv[valid], T)
+    if params is None:
+        return None
+    a, b, rho, sigma, m = params
+    return SVIParams(a=float(a), b=float(b), rho=float(rho), sigma=float(sigma),
+                     m=float(m), T=float(T), fit_quality=float(quality))
+
+
 def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fit SVI surface across all expirations and compute residuals.
@@ -176,4 +222,4 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-__all__ = ["fit_svi_surface"]
+__all__ = ["fit_svi_surface", "fit_svi_slice", "SVIParams"]
