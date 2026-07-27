@@ -65,10 +65,13 @@ def render(view: View, expressions: List[Expression],
     else:
         # Distinguish "the filters rejected everything" from "no contracts were
         # supplied to filter" - conflating them would misreport a plumbing gap
-        # as an edge verdict.
-        eligible = [r for r in rejections
-                    if "no candidate contract" not in r.reason]
-        if rejections and not eligible:
+        # as an edge verdict. Wrong-direction rejections do not count as the
+        # filters having done real work: those structures were never in scope
+        # for this view.
+        judged = [r for r in rejections
+                  if "no candidate contract" not in r.reason
+                  and "wrong direction" not in r.reason]
+        if rejections and not judged:
             lines.append("  no candidate contracts supplied - run a scan and "
                          "pass its picks in to see expressions.")
         else:

@@ -13,7 +13,8 @@ from . import ideas as _ideas
 
 SCHEMA_VERSION = 1
 PANEL_IDS = ("health", "market", "tape", "movers", "vol", "calendar",
-             "pulse", "news", "signals", "ticker", "ideas", "notes")
+             "pulse", "news", "signals", "ticker", "ideas", "structure",
+             "notes")
 
 _STANDING_NOTES = [
     "Display-only research. Nothing here feeds scoring or execution.",
@@ -22,6 +23,24 @@ _STANDING_NOTES = [
 ]
 
 _CHART_SESSIONS = 180
+
+
+def _structure_panel():
+    """Structure league table — local sqlite read, so no network and no
+    timeout budget. Returns None when there is no evidence yet, which hides
+    the tab rather than showing an empty one."""
+    from src.structure.margins import (DEFAULT_HISTORY, apply_states,
+                                       compute_league_table, load_history)
+    today = datetime.now().strftime("%Y-%m-%d")
+    table = apply_states(compute_league_table(),
+                         load_history(DEFAULT_HISTORY), today)
+    if not table:
+        return None
+    return {"rows": [{"strategy": m.strategy, "breakeven_hit": m.breakeven_hit,
+                      "realized_hit": m.realized_hit, "margin": m.margin,
+                      "state": m.state, "n": m.n,
+                      "ci_includes_zero": m.ci_includes_zero}
+                     for m in table.values()]}
 
 
 def _safe(panel_id, fn, panels, failures):
@@ -282,6 +301,7 @@ def build(symbol=None, now=None, slow=True, budget_s=25.0, _fetchers=None) -> di
     # Local file read — no network, no thread, no timeout budget. Loaded after
     # the fetchers so a slow desk never delays the one panel that cannot fail.
     _safe("ideas", _ideas.load, panels, failures)
+    _safe("structure", _structure_panel, panels, failures)
 
     panels["notes"] = _desk_notes(failures)
     return {"meta": meta, "panels": panels, "failures": failures}

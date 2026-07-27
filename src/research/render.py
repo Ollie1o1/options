@@ -72,15 +72,17 @@ def _stale_banner(data):
 
 _TAB_ORDER = (("market", "Market"), ("volatility", "Volatility"),
               ("macro", "Macro &amp; News"), ("ticker", "Ticker"),
-              ("ideas", "Ideas"))
+              ("structure", "Structure"), ("ideas", "Ideas"))
+
+# Tabs that render nothing useful without their panel — hide rather than show
+# an empty pane. Same contract as the long-standing ticker tab.
+_OPTIONAL_TABS = ("ticker", "structure", "ideas")
 
 
 def _tabs_present(data):
     out = []
     for tid, label in _TAB_ORDER:
-        if tid == "ticker" and not _panel(data, "ticker"):
-            continue
-        if tid == "ideas" and not _panel(data, "ideas"):
+        if tid in _OPTIONAL_TABS and not _panel(data, tid):
             continue
         out.append((tid, label))
     return out
@@ -525,11 +527,48 @@ def _tab_ideas(data):
     return "".join(grid)
 
 
+# ── Structure tab ───────────────────────────────────────────────────────────
+
+_STATE_CLS = {"ACTIVE": "k-ok", "UNPROVEN": "k-warn", "BENCHED": "k-bad"}
+
+
+def _tab_structure(data):
+    panel = _panel(data, "structure")
+    if not panel:
+        return _ph(data, "structure", "Structure league table")
+    rows = sorted(panel.get("rows") or [],
+                  key=lambda r: -(r.get("margin") or 0))
+    table = ["<table><tr><th></th><th>B/E</th><th>realized</th>"
+             "<th>margin</th><th>n</th><th></th></tr>"]
+    for r in rows:
+        mark = " ~" if r.get("ci_includes_zero") else ""
+        table.append(
+            '<tr><td class="m">{s}</td><td class="n">{be:.1f}%</td>'
+            '<td class="n">{rl:.1f}%</td><td class="n {t}">{mg:+.1f}</td>'
+            '<td class="n">{n}</td><td><span class="badge {c}">{st}{mk}</span>'
+            "</td></tr>".format(
+                s=_esc(r.get("strategy")),
+                be=(r.get("breakeven_hit") or 0) * 100,
+                rl=(r.get("realized_hit") or 0) * 100,
+                t="g" if (r.get("margin") or 0) >= 0 else "b",
+                mg=(r.get("margin") or 0) * 100, n=_esc(r.get("n", 0)),
+                c=_STATE_CLS.get(r.get("state"), "k-warn"),
+                st=_esc(r.get("state")), mk=_esc(mark)))
+    table.append("</table>")
+    note = ('<div class="evt mut">Hit rate each structure needs to break even, '
+            "from its own realized payoffs, versus what it actually achieved. "
+            "Rolling 90 days. <strong>~</strong> marks a margin whose 95% CI "
+            "includes zero — present, not trusted.</div>")
+    return ('<div class="grid">' + _card(
+        "Structure league table — breakeven vs realized",
+        "".join(table) + note, span=12) + "</div>")
+
+
 # ── Assembly ────────────────────────────────────────────────────────────────
 
 _TAB_BUILDERS = {"market": _tab_market, "volatility": _tab_vol,
                  "macro": _tab_macro, "ticker": _tab_ticker,
-                 "ideas": _tab_ideas}
+                 "structure": _tab_structure, "ideas": _tab_ideas}
 
 
 def _footer(data):

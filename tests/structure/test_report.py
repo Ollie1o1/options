@@ -61,3 +61,17 @@ class TestReport(unittest.TestCase):
         out = R.render(view, [], rej, table, 511.0)
         self.assertIn("no candidate contracts supplied", out)
         self.assertNotIn("nothing clears its own breakeven", out)
+
+    def test_wrong_direction_rejections_do_not_mask_missing_candidates(self):
+        # All direction-appropriate structures died on "no candidate"; the
+        # wrong-direction ones must not make it look like the filters judged
+        # anything on its merits.
+        view = View("SPY", "NEUTRAL", 0.0, [])
+        table = {"Bull Put": StructureMargin(
+            "Bull Put", 107, 68, 39, 116.0, 70.0, 0.376, 0.636, 0.259,
+            "ACTIVE", 0.10, 0.40)}
+        rej = [Rejection("Bull Put", "no candidate contract found"),
+               Rejection("Long Put", "wrong direction for a NEUTRAL view")]
+        out = R.render(view, [], rej, table, 511.0)
+        self.assertIn("no candidate contracts supplied", out)
+        self.assertNotIn("nothing clears its own breakeven", out)
