@@ -2913,6 +2913,45 @@ def _open_briefing_file(path: str) -> None:
             pass
 
 
+def _run_structure_menu() -> None:
+    """[13] STRUCTURE — route a directional view into the structure whose
+    measured breakeven that view can clear, filtered to what the account can
+    actually afford. Display-only; never logs or trades."""
+    from datetime import datetime as _dt
+
+    from src.structure.chain import fetch_candidates
+    from src.structure.express import express, load_costs
+    from src.structure.margins import (DEFAULT_HISTORY, apply_states,
+                                       compute_league_table, load_history)
+    from src.structure.report import render
+    from src.structure.view import build_view
+
+    symbol = prompt_input("Ticker", "SPY").upper().strip()
+    raw_view = prompt_input(
+        "Your view — [b]ullish / bea[r]ish / [n]eutral", "n").lower().strip()
+    composite = {"b": 0.8, "bullish": 0.8,
+                 "r": -0.8, "bearish": -0.8}.get(raw_view, 0.0)
+    try:
+        capital = float(prompt_input("Capital in USD", "511"))
+    except (TypeError, ValueError):
+        capital = 511.0
+
+    today = _dt.now().strftime("%Y-%m-%d")
+    table = apply_states(compute_league_table(),
+                         load_history(DEFAULT_HISTORY), today)
+
+    print(f"\n  Fetching {symbol} chain (30-60 DTE)...")
+    cands, err = fetch_candidates(symbol, capital_usd=capital)
+    if err:
+        print(f"  note: {err}")
+
+    view = build_view(symbol, composite=composite)
+    commission, slippage = load_costs()
+    exprs, rej = express(view, table, capital, cands,
+                         commission=commission, slippage=slippage)
+    print(render(view, exprs, rej, table, capital))
+
+
 def _run_probability_lab_menu() -> None:
     """Probability Lab: extract the market's risk-neutral density, tilt it into
     the user's view (drift + vol multiplier), and rank listed structures by EV.
@@ -3068,9 +3107,16 @@ def _run_intel_menu() -> None:
 
 
 def close_trades():
-    """Update trade log with closing prices and realized P/L."""
+    """Update trade log with closing prices and realized P/L.
+
+    Legacy CSV log only (trades_log/entries.csv). The live book lives in
+    paper_trades.db and is closed by src/maintenance.py -> update_positions;
+    this path exists to settle the historical single-leg CSV entries.
+    """
+    import yfinance as yf
+
     log_file = "trades_log/entries.csv"
-    
+
     if not os.path.exists(log_file):
         print("No trade log found. Run the screener first and log some trades.")
         sys.exit(1)
@@ -3092,16 +3138,36 @@ def close_trades():
     print(f"\nFound {len(open_trades)} open trades.")
     print("\nFetching current prices and calculating P/L...\n")
     
+    # Header drift: rows written before the current schema carry 'entry_premium',
+    # newer appends land in the same column but DictWriter never rewrites the
+    # header, so accept either name rather than KeyError on the whole run.
+    premium_col = next((c for c in ('entry_premium', 'entry_price')
+                        if c in df_trades.columns), None)
+    if premium_col is None:
+        print("\n⚠️  No entry premium column found in log — nothing to settle.")
+        sys.exit(1)
+
     updated_count = 0
+    skipped_multileg = 0
     for idx, trade in open_trades.iterrows():
         symbol = trade['symbol']
         exp_date = pd.to_datetime(trade['expiration']).date()
-        
+
         # Check if expired
         if exp_date > datetime.now().date():
             continue  # Skip unexpired trades
-        
-        print(f"Processing {symbol} {trade['type']} ${trade['strike']} exp {exp_date}...")
+
+        # Single-leg intrinsic math below cannot price a spread/condor. Those
+        # rows carry a strategy name in 'type' and a blank strike; settling them
+        # here would write a NaN P/L and mark them CLOSED. Leave them OPEN.
+        raw_type = trade['type']
+        option_type = str(raw_type).strip().lower() if pd.notna(raw_type) else ''
+        strike_val = safe_float(trade['strike'])  # None for blank/NaN strikes
+        if option_type not in ('call', 'put') or strike_val is None:
+            skipped_multileg += 1
+            continue
+
+        print(f"Processing {symbol} {option_type} ${strike_val} exp {exp_date}...")
         
         try:
             ticker = yf.Ticker(symbol)
@@ -3124,16 +3190,16 @@ def close_trades():
                 continue
             exit_price = float(filtered['Close'].iloc[0])
             
-            # Calculate intrinsic value at expiration
-            strike = float(trade['strike'])
-            option_type = trade['type'].lower()
-            
+            # Calculate intrinsic value at expiration (strike/type validated above)
             if option_type == 'call':
-                intrinsic_value = max(0, exit_price - strike)
+                intrinsic_value = max(0.0, exit_price - strike_val)
             else:  # put
-                intrinsic_value = max(0, strike - exit_price)
-            
-            entry_price = float(trade['entry_price'])
+                intrinsic_value = max(0.0, strike_val - exit_price)
+
+            entry_price = safe_float(trade[premium_col])
+            if entry_price is None:
+                print("  ⚠️  No entry premium recorded — skipped")
+                continue
             exit_premium = intrinsic_value
             
             # P/L per share
@@ -3159,6 +3225,10 @@ def close_trades():
         print(f"\n✓ Updated {updated_count} trades in {log_file}")
     else:
         print("\nNo trades were updated.")
+
+    if skipped_multileg:
+        print(f"  ({skipped_multileg} multi-leg/spread rows left OPEN — "
+              f"single-leg intrinsic settlement does not apply to them)")
     
     print("\n" + "=" * 80)
     print("  Done!")
@@ -4713,6 +4783,7 @@ def main():
                 ("10", "INTEL",    "Intel Briefing \u2014 everything before you buy + what to do"),
                 ("11", "SQUEEZE",  "Short-squeeze setups \u2014 high-short-float candidates"),
                 ("12", "PROB LAB", "Risk-neutral density + your-view structure ranking"),
+                ("13", "STRUCTURE", "View → structure expression sized to your account"),
                 ("Q", "QUIT",      "Exit the screener"),
             ]
             for num, cmd, desc in modes:
@@ -4735,6 +4806,7 @@ def main():
             print("  [10] INTEL     \u2014 Intel Briefing: everything before you buy + what to do")
             print("  [11] SQUEEZE   \u2014 Short-squeeze setups (high short interest)")
             print("  [12] PROB LAB  \u2014 Risk-neutral density + your-view structure ranking")
+            print("  [13] STRUCTURE \u2014 View \u2192 structure expression sized to your account")
             print("  [Q] QUIT       \u2014 Exit the screener")
         print()
 
@@ -4744,6 +4816,7 @@ def main():
             "sell": "SELL", "spreads": "SPREADS", "iron": "IRON",
             "portfolio": "PORTFOLIO", "mylist": "MY LIST",
             "lottery": "LOTTERY", "intel": "INTEL", "squeeze": "SQUEEZE",
+            "structure": "STRUCTURE",
         }
         if args.ticker:
             symbol_input = args.ticker.upper()
@@ -4786,11 +4859,19 @@ def main():
         # ── Number → command mapping ──────────────────────────────────────────────
         _num_map = {"1": "TICKER", "2": "ALL", "3": "DISCOVER", "4": "SELL",
                     "5": "SPREADS", "6": "IRON", "7": "PORTFOLIO", "8": "MY LIST",
-                    "9": "LOTTERY", "10": "INTEL", "11": "SQUEEZE", "12": "PROBLAB"}
+                    "9": "LOTTERY", "10": "INTEL", "11": "SQUEEZE", "12": "PROBLAB",
+                    "13": "STRUCTURE"}
         if symbol_input in _num_map:
             symbol_input = _num_map[symbol_input]
         elif symbol_input in ("PROB LAB", "PROB", "PROBABILITY LAB", "RND"):
             symbol_input = "PROBLAB"
+
+        # ── STRUCTURE mode: view → structure expression, sized to the account ─────
+        if symbol_input == "STRUCTURE":
+            _run_structure_menu()
+            if _interactive:
+                continue
+            return
 
         # ── PROBLAB mode: risk-neutral density + view-based structure ranking ──────
         if symbol_input == "PROBLAB":
