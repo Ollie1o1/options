@@ -1,0 +1,193 @@
+{
+  "updated": "2026-07-27",
+  "note": "Idea backlog for the research desk Ideas tab. Statuses: proposed, testing, validated, shipped, dead. cost_wall records whether the idea's edge survives slippage+commissions - the recurring killer in this repo. Dead ideas are kept deliberately so they are not re-litigated.",
+  "ideas": [
+    {
+      "id": "stop-lc-autolog-bleed",
+      "title": "Stop auto-logging Long Calls into the cohort",
+      "area": "options",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "fails",
+      "thesis": "Long Call is -$17,620 over 98 closed trades at a 33% win rate, with a scorer IC of -0.020 (p=0.85). It is the only strategy the Phase-1 gate measures and the worst line in the book.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; ds feeder logs 5 LC/day.",
+      "next_step": "Decide whether the ds auto-log window keeps running. Continuing costs money to gather data on a signal that reads as zero."
+    },
+    {
+      "id": "repoint-gate-credit",
+      "title": "Re-point Phase 1 at credit structures",
+      "area": "options",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "unknown",
+      "thesis": "Bear Call has the best scorer IC (+0.152) and Bull Put the best P&L (+$3,630 at 66% win). Both are short premium, consistent with every prior repo result. The gate ignores both.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 2.",
+      "next_step": "Write a gate-redesign spec. DECISIONS.md 2026-06-07 forbids silent gate changes - propose, do not edit thresholds."
+    },
+    {
+      "id": "fix-gate-power-math",
+      "title": "Fix the gate's incoherent power math",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "READY needs IC>=0.08 AND p<0.05, but proving IC=0.08 at p<0.05 requires n~601. At the n>=50 trigger, p<0.05 demands observed IC~0.286 - 3.6x the stated bar. The gate cannot fire on its own terms.",
+      "evidence": "Fisher-z: n = (1.96/atanh(IC))^2 + 3. docs/PROFITABILITY_FINDINGS.md section 1.",
+      "next_step": "Pick one: size n to the effect, switch to a one-sided test, or gate on net-EV instead of IC."
+    },
+    {
+      "id": "merge-btc-vrp-carry",
+      "title": "Merge and paper-trade the BTC short-vol carry",
+      "area": "crypto",
+      "status": "validated",
+      "conviction": "high",
+      "cost_wall": "clears",
+      "thesis": "BTC short-vol carry is the only strategy in this repo that has cleared the cost wall on its own numbers: NET +4 to +5.5 vol points, 68-74% hit rate.",
+      "evidence": "src/crypto/volbacktest; branch NOT merged. ETH did not validate - BTC only.",
+      "next_step": "Merge the branch and run it on the paper ledger before anything touches real money."
+    },
+    {
+      "id": "index-put-spread-capacity",
+      "title": "Re-examine the OOS-validated index put spread",
+      "area": "options",
+      "status": "validated",
+      "conviction": "medium",
+      "cost_wall": "clears",
+      "thesis": "Index put spreads validated out-of-sample on 7yr DoltHub EOD chains, but were shelved as capacity-walled. At retail size the capacity wall may not bind.",
+      "evidence": "docs/DOLT_OPTIONS.md; project memory dolthub_real_options.",
+      "next_step": "Quantify the capacity ceiling in dollars. If it exceeds intended size, the wall is irrelevant."
+    },
+    {
+      "id": "day-level-vs-trade-level",
+      "title": "Test whether the scorer ranks days better than contracts",
+      "area": "research",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "unknown",
+      "thesis": "Collapsing the cohort to day-means lifts IC from +0.076 (n=57) to +0.249 (n=18). If it holds as n grows, the edge is in timing entries, not selecting contracts.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 3. p=0.32 - suggestive only.",
+      "next_step": "Re-measure at n>=40 entry days before drawing any conclusion."
+    },
+    {
+      "id": "tp-threshold-vs-costs",
+      "title": "Make take-profit thresholds cost-aware by spread width",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "fails",
+      "thesis": "A NFLX $1-wide spread hit its 50%-of-credit take-profit at +56% gross and settled at -1.5% net. Fixed percentage exits ignore that costs are a fixed dollar amount per contract.",
+      "evidence": "Auto-close log 2026-07-27.",
+      "next_step": "Require modelled net P&L > 0 before a take-profit fires. Note: changes live exit behaviour across the open book and the gate cohort - deliberate decision, not a cleanup."
+    },
+    {
+      "id": "effective-n-in-gate",
+      "title": "Count effective n, not nominal n, in the gate",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "thesis": "Batch auto-logging clusters entries: 57 trades on 18 days, ICC +0.108, design effect 1.23, effective n ~46. The n>=50 trigger counts nominal trades and is therefore slightly overconfident.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 3.",
+      "next_step": "Only matters if IC ever approaches the READY bar. Bundle with the gate-power redesign."
+    },
+    {
+      "id": "launchd-health-check",
+      "title": "Surface a dead scheduler in maintenance_health",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "thesis": "All three LaunchAgents exited 78 (EX_CONFIG) since ~2026-06-15. maintenance_health reads the state file, which the interactive path also stamps, so it showed mild staleness rather than 'scheduler dead'.",
+      "evidence": "launchctl list; logs/launchagent.log stops 2026-06-15 while maintenance.log continues.",
+      "next_step": "Have maintenance_health shell out to launchctl and check last exit status. Underlying fix is user-only: System Settings > Login Items > Allow in the Background."
+    },
+    {
+      "id": "hold-to-expiry-small-account",
+      "title": "Hold credit spreads to expiry instead of closing at 50% take-profit",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "clears",
+      "thesis": "Round-trip cost on a 2-leg vertical is a fixed $22.60. Letting an OTM spread expire worthless pays only the opening legs, halving the toll: Bear Call 48% of max profit -> 24%, Bull Put 18% -> 9%. At 700 CAD this is the single cheapest improvement available and needs no new signal.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 7. Mechanism behind the NFLX +56% gross / -1.5% net exit.",
+      "next_step": "Costs assignment risk against cost saving for ITM-at-expiry cases; the current take-profit rule exists partly to avoid that. Quantify before changing exit rules."
+    },
+    {
+      "id": "prefer-bull-put-at-small-size",
+      "title": "Prefer Bull Put over Bear Call purely on cost ratio at small size",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "clears",
+      "thesis": "Median Bull Put credit is $122.50 vs Bear Call $47.50. The same fixed $22.60 round-trip is 18% vs 48% of max profit. Nothing to do with edge - it is credit-per-trade against a fixed toll.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 7, n=159 credit spreads.",
+      "next_step": "Confirm the credit gap is structural and not an artifact of which strikes the scanner happened to pick."
+    },
+    {
+      "id": "dead-pop-score-as-ranker",
+      "title": "Use pop_score instead of quality_score as the ranker",
+      "area": "research",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "pop_score is the only metric of 35 to survive FDR correction (IC +0.176, p=0.0005) - but it is a decoy. Its mean is rank-ordered by structure family, so aggregate POP merely re-discovers 'credit beats debit'. Within strategy it predicts nothing, and in Short Put it is significantly backwards (-0.305, p=0.007).",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 6.",
+      "next_step": "None. Any future metric claim must be tested WITHIN strategy before it is believed."
+    },
+    {
+      "id": "dead-cherry-pick-high-score",
+      "title": "Cherry-pick only the highest quality_score trades for real money",
+      "area": "options",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "fails",
+      "thesis": "Intuitive plan: skip the volume, trade only the best-scoring setup. Tested over 32 entry days / 393 closed trades - selectivity degrades results monotonically. Top-1 per day: 43.8% win, -$126/trade. All logged: 50.4% win, -$27/trade. The 0.85+ score bucket is the worst in the book (33% win, -$165/trade); long premium at 0.85+ is 23% win, -$270/trade.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 5. Caveat: all CIs straddle zero, n=32 days - the monotone ordering across all/long/short panels is the real evidence, not any single cell.",
+      "next_step": "None. Do not select on quality_score. If a selection rule is ever revisited it must be validated on held-out data first, not on this cohort."
+    },
+    {
+      "id": "dead-lottery-sleeve",
+      "title": "Lottery sleeve",
+      "area": "options",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "fails",
+      "thesis": "Negative-EV in backtest. Shelved as research, wired nowhere.",
+      "evidence": "docs/LOTTERY_BACKTEST_FINDINGS.md.",
+      "next_step": "None. Do not revive without a materially different structure."
+    },
+    {
+      "id": "dead-breakout-engine",
+      "title": "Breakout / tail-move probability engine",
+      "area": "research",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "fails",
+      "thesis": "Honest no-edge result. The engine predicts tail moves no better than the chain already prices them.",
+      "evidence": "src/breakout.",
+      "next_step": "None. Kept as a descriptive layer only."
+    },
+    {
+      "id": "dead-crypto-perp-signals",
+      "title": "Crypto perp directional signals",
+      "area": "crypto",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "fails",
+      "thesis": "Four candidate signals, all dead net-of-cost. Reversion is gone entirely; daily trend-breakout has only modest gross edge that funding and fees consume.",
+      "evidence": "src/crypto signals harness; leverage signal research (cost 22x short vs edge).",
+      "next_step": "None. Carry is the surviving crypto path, not direction."
+    },
+    {
+      "id": "dead-single-name-equity-vrp",
+      "title": "Single-name equity short-vol",
+      "area": "options",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "fails",
+      "thesis": "No edge on single names. Index/SPY VRP is positive - the distinction is the whole result.",
+      "evidence": "Equity VRP backtest.",
+      "next_step": "None for single names. The index leg is live in idea index-put-spread-capacity."
+    }
+  ]
+}

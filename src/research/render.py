@@ -71,13 +71,16 @@ def _stale_banner(data):
 
 
 _TAB_ORDER = (("market", "Market"), ("volatility", "Volatility"),
-              ("macro", "Macro &amp; News"), ("ticker", "Ticker"))
+              ("macro", "Macro &amp; News"), ("ticker", "Ticker"),
+              ("ideas", "Ideas"))
 
 
 def _tabs_present(data):
     out = []
     for tid, label in _TAB_ORDER:
         if tid == "ticker" and not _panel(data, "ticker"):
+            continue
+        if tid == "ideas" and not _panel(data, "ideas"):
             continue
         out.append((tid, label))
     return out
@@ -455,10 +458,78 @@ def _tab_ticker(data):
     return "".join(grid)
 
 
+# ── Ideas tab ───────────────────────────────────────────────────────────────
+
+_STATUS_CLS = {"validated": "k-ok", "shipped": "k-ok", "testing": "k-warn",
+               "proposed": "k-warn", "dead": "k-bad"}
+# The cost wall is the recurring killer in this repo, so it gets its own column
+# rather than being buried in the thesis text.
+_WALL_CLS = {"clears": "g", "fails": "b", "unknown": "w"}
+
+
+def _idea_row(i):
+    status = str(i.get("status", "")).lower()
+    wall = str(i.get("cost_wall", "")).lower()
+    wall_chip = ("" if wall in ("", "n/a") else
+                 '<span class="m {c}">cost wall: {w}</span> '.format(
+                     c=_WALL_CLS.get(wall, "w"), w=_esc(wall)))
+    conv = str(i.get("conviction", "")).lower()
+    return (
+        '<div class="evt"><span class="badge {sc}">{st}</span> '
+        "<strong>{title}</strong> "
+        '<span class="mut">· {area}{conv}</span>'
+        "<div>{thesis}</div>"
+        '<div class="mut">{wall}<strong>next:</strong> {next}</div>'
+        '<div class="mut">evidence: {ev}</div></div>').format(
+            sc=_STATUS_CLS.get(status, "k-warn"), st=_esc(status or "?"),
+            title=_esc(i.get("title", "(untitled)")),
+            area=_esc(i.get("area", "")),
+            conv=(" · {} conviction".format(_esc(conv)) if conv else ""),
+            thesis=_esc(i.get("thesis", "")),
+            wall=wall_chip, next=_esc(i.get("next_step", "")),
+            ev=_esc(i.get("evidence", "")))
+
+
+def _tab_ideas(data):
+    idea_panel = _panel(data, "ideas")
+    if not idea_panel:
+        return _ph(data, "ideas", "Idea backlog")
+    ideas = idea_panel.get("ideas") or []
+    counts = idea_panel.get("counts") or {}
+
+    kpis = "".join(
+        shell.kpi(label, counts.get(label, 0), span=2,
+                  tone={"validated": "good", "dead": "bad"}.get(label, ""))
+        for label in ("validated", "testing", "proposed", "shipped", "dead")
+        if counts.get(label))
+
+    live = [i for i in ideas if str(i.get("status", "")).lower() != "dead"]
+    dead = [i for i in ideas if str(i.get("status", "")).lower() == "dead"]
+
+    grid = ['<div class="grid">', '<div class="c12">' + kpis + "</div>"]
+    grid.append(_card(
+        "Live backlog",
+        "".join(_idea_row(i) for i in live) or
+        '<div class="ph">nothing open</div>', span=12))
+    if dead:
+        grid.append(_card(
+            "Graveyard — settled, do not re-litigate",
+            "".join(_idea_row(i) for i in dead), span=12))
+    note = idea_panel.get("note")
+    if note:
+        grid.append(_card("How to use this", '<div class="evt mut">{}</div>'
+                          "<div class='evt mut'>edit <strong>ideas.json</strong>"
+                          " at the repo root; this tab renders it.</div>".format(
+                              _esc(note)), span=12))
+    grid.append("</div>")
+    return "".join(grid)
+
+
 # ── Assembly ────────────────────────────────────────────────────────────────
 
 _TAB_BUILDERS = {"market": _tab_market, "volatility": _tab_vol,
-                 "macro": _tab_macro, "ticker": _tab_ticker}
+                 "macro": _tab_macro, "ticker": _tab_ticker,
+                 "ideas": _tab_ideas}
 
 
 def _footer(data):

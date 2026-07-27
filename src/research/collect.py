@@ -9,9 +9,11 @@ import threading
 import time
 from datetime import datetime
 
+from . import ideas as _ideas
+
 SCHEMA_VERSION = 1
 PANEL_IDS = ("health", "market", "tape", "movers", "vol", "calendar",
-             "pulse", "news", "signals", "ticker", "notes")
+             "pulse", "news", "signals", "ticker", "ideas", "notes")
 
 _STANDING_NOTES = [
     "Display-only research. Nothing here feeds scoring or execution.",
@@ -276,6 +278,10 @@ def build(symbol=None, now=None, slow=True, budget_s=25.0, _fetchers=None) -> di
     else:
         for pid, fn in fetchers:
             _safe(pid, fn, panels, failures)
+
+    # Local file read — no network, no thread, no timeout budget. Loaded after
+    # the fetchers so a slow desk never delays the one panel that cannot fail.
+    _safe("ideas", _ideas.load, panels, failures)
 
     panels["notes"] = _desk_notes(failures)
     return {"meta": meta, "panels": panels, "failures": failures}
