@@ -59,6 +59,12 @@ class Expression:
     capital_required: float
     cost_drag_pct: float
     legs: int
+    # Set when a debit structure passes the forward-looking confidence gate
+    # despite a negative backward-looking margin. The view is overriding the
+    # structure's own track record, and the user must see that explicitly -
+    # "my view is better than history" is exactly the unfalsifiable optimism
+    # this engine exists to prevent.
+    warning: str = ""
 
 
 @dataclass

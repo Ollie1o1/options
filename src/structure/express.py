@@ -109,11 +109,18 @@ def express(view: View, table: Dict, capital_usd: float,
                     drag, max_cost_drag_pct)))
             continue
 
+        warning = ""
+        if name in DEBIT_STRUCTURES and margin.margin < 0:
+            warning = ("your view is OVERRIDING this structure's record: it "
+                       "has cleared its breakeven only {:.1f}% vs the {:.1f}% "
+                       "it needs".format(margin.realized_hit * 100,
+                                         margin.breakeven_hit * 100))
+
         out.append(Expression(
             strategy=name, margin=margin.margin,
             breakeven_hit=margin.breakeven_hit,
             realized_hit=margin.realized_hit, capital_required=cap_req,
-            cost_drag_pct=drag, legs=legs))
+            cost_drag_pct=drag, legs=legs, warning=warning))
 
     out.sort(key=lambda e: (-e.margin, e.cost_drag_pct))
     return out, rejections

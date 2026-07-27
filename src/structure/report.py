@@ -62,6 +62,8 @@ def render(view: View, expressions: List[Expression],
                              e.margin * 100))
             lines.append("       cost drag {:.1f}% of max profit".format(
                 e.cost_drag_pct))
+            if e.warning:
+                lines.append("       ! {}".format(e.warning))
     else:
         # Distinguish "the filters rejected everything" from "no contracts were
         # supplied to filter" - conflating them would misreport a plumbing gap

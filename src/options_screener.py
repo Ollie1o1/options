@@ -2919,6 +2919,7 @@ def _run_structure_menu() -> None:
     actually afford. Display-only; never logs or trades."""
     from datetime import datetime as _dt
 
+    from src.structure.chain import fetch_candidates
     from src.structure.express import express, load_costs
     from src.structure.margins import (DEFAULT_HISTORY, apply_states,
                                        compute_league_table, load_history)
@@ -2938,9 +2939,15 @@ def _run_structure_menu() -> None:
     today = _dt.now().strftime("%Y-%m-%d")
     table = apply_states(compute_league_table(),
                          load_history(DEFAULT_HISTORY), today)
+
+    print(f"\n  Fetching {symbol} chain (30-60 DTE)...")
+    cands, err = fetch_candidates(symbol, capital_usd=capital)
+    if err:
+        print(f"  note: {err}")
+
     view = build_view(symbol, composite=composite)
     commission, slippage = load_costs()
-    exprs, rej = express(view, table, capital, {},
+    exprs, rej = express(view, table, capital, cands,
                          commission=commission, slippage=slippage)
     print(render(view, exprs, rej, table, capital))
 

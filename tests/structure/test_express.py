@@ -139,3 +139,25 @@ class TestExpress(unittest.TestCase):
         comm, slip = E.load_costs("/nonexistent/config.json")
         self.assertAlmostEqual(comm, 0.65)
         self.assertAlmostEqual(slip, 0.05)
+
+
+class TestNegativeMarginOverride(unittest.TestCase):
+    def test_debit_with_negative_margin_carries_a_warning(self):
+        # Long Call B/E 0.374 vs realized 0.356 -> margin negative. A strong
+        # bullish view still clears the forward-looking gate, but the user must
+        # be told they are overriding the structure's own record.
+        table = {"Long Call": _m("Long Call", 0.374, 0.356)}
+        cands = {"Long Call": {"capital_required": 300.0,
+                               "max_profit": 300.0}}
+        view = View("SPY", "BULLISH", 0.8, [])
+        exprs, _ = E.express(view, table, 511.0, cands)
+        self.assertEqual(len(exprs), 1)
+        self.assertIn("OVERRIDING", exprs[0].warning)
+
+    def test_positive_margin_debit_has_no_warning(self):
+        table = {"Long Put": _m("Long Put", 0.229, 0.351)}
+        cands = {"Long Put": {"capital_required": 300.0,
+                              "max_profit": 900.0}}
+        view = View("NVDA", "BEARISH", 0.4, [])
+        exprs, _ = E.express(view, table, 511.0, cands)
+        self.assertEqual(exprs[0].warning, "")
