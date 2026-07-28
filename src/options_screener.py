@@ -4202,9 +4202,9 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
 
     # Ensure at least one OpenRouter / Anthropic key is set before trying any network call
     _key_env_vars = [
-        "OPENROUTER_API_KEY", "OPENROUTER_ARCEE_KEY",
-        "OPENROUTER_STEPFUN_KEY", "OPENROUTER_NVIDIA_KEY",
-        "OPENROUTER_HUNTER_KEY", "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY", "OPENROUTER_LING_KEY",
+        "OPENROUTER_NVIDIA_KEY", "OPENROUTER_POOLSIDE_KEY",
+        "ANTHROPIC_API_KEY",
     ]
     if not any(os.environ.get(k) for k in _key_env_vars):
         msg = "AI scoring skipped — no API key set. Add OPENROUTER_API_KEY (or similar) to .env"
@@ -4594,8 +4594,8 @@ def main():
                                 os.environ.setdefault(_k, _v)
         _has_any_key = any(
             os.environ.get(k) for k in [
-                "OPENROUTER_API_KEY", "OPENROUTER_ARCEE_KEY",
-                "OPENROUTER_STEPFUN_KEY", "OPENROUTER_NVIDIA_KEY",
+                "OPENROUTER_API_KEY", "OPENROUTER_LING_KEY",
+                "OPENROUTER_NVIDIA_KEY", "OPENROUTER_POOLSIDE_KEY",
                 "ANTHROPIC_API_KEY",
             ]
         )

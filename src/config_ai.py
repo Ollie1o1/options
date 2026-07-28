@@ -5,29 +5,25 @@ import logging
 AI_CONFIG: dict = {
     # ── API Provider ──────────────────────────────────────────────────────────
     "provider": "openrouter",
-    # Key chain (2026-04-24): gpt-oss-120b primary (proven fast), z-ai demoted to spare.
-    # Observed: z-ai/glm-4.5-air consistently hangs at the streaming layer (>17s wall-clock
-    # even on HTTP 200), wasting ~17s per attempt. Session-level circuit breaker in
-    # AIScorer will also blacklist any model after 2 consecutive hard-timeouts.
-    "model": "openai/gpt-oss-120b:free",                                   # attempt 1 (PRIMARY)
-    "fallback_model": "openrouter/elephant-alpha",                         # attempt 2
-    "second_fallback_model": "meta-llama/llama-3.3-70b-instruct:free",     # attempt 3
-    "third_fallback_model": "z-ai/glm-4.5-air:free",                       # attempt 4 (spare)
+    # Key chain (2026-07-27): three current keys — Ling 3.0 primary, Nemotron 3 Ultra
+    # first fallback, Laguna S 2.1 second. All previous keys (z-ai, gpt-oss, elephant,
+    # arcee, stepfun, hunter) were retired and their env vars removed from .env.
+    # Only three models in the chain, so the 4th attempt re-tries the last one.
+    # Session-level circuit breaker in AIScorer still blacklists any model after
+    # 2 consecutive hard-timeouts.
+    "model": "inclusionai/ling-3.0-flash:free",                            # attempt 1 (PRIMARY)
+    "fallback_model": "nvidia/nemotron-3-ultra-550b-a55b:free",            # attempt 2
+    "second_fallback_model": "poolside/laguna-s-2.1:free",                 # attempt 3
+    "third_fallback_model": None,                                          # unused — no 4th key
     "api_key_env": "OPENROUTER_API_KEY",
 
     # ── Per-model API key overrides ───────────────────────────────────────────
     # Maps model id → env var name for models that use a different key.
     # Models NOT listed here fall back to "api_key_env".
     "model_key_map": {
-        "z-ai/glm-4.5-air:free":                  "OPENROUTER_ZAI_KEY",
-        "openai/gpt-oss-120b:free":               "OPENROUTER_GPTOSS_KEY",
-        "openrouter/elephant-alpha":              "OPENROUTER_ELEPHANT_KEY",
-        "arcee-ai/trinity-large-preview:free":    "OPENROUTER_ARCEE_KEY",
-        "stepfun/step-3.5-flash:free":            "OPENROUTER_STEPFUN_KEY",
-        "nvidia/nemotron-3-super-120b-a12b:free": "OPENROUTER_NVIDIA_KEY",
-        "openrouter/hunter-alpha":                "OPENROUTER_HUNTER_KEY",
-        "meta-llama/llama-3.3-70b-instruct:free": "OPENROUTER_API_KEY",
-        "mistralai/mistral-7b-instruct:free":     "OPENROUTER_API_KEY",
+        "inclusionai/ling-3.0-flash:free":         "OPENROUTER_LING_KEY",
+        "nvidia/nemotron-3-ultra-550b-a55b:free":  "OPENROUTER_NVIDIA_KEY",
+        "poolside/laguna-s-2.1:free":              "OPENROUTER_POOLSIDE_KEY",
     },
 
     # ── Scoring Weights ───────────────────────────────────────────────────────
@@ -63,7 +59,10 @@ AI_CONFIG: dict = {
     "batch_size": 3,     # smaller batches = shorter responses = less truncation risk
     "max_tokens": 2048,  # enough room for 3 candidates at ~600 tokens each with margin
     "temperature": 0.1,
-    "timeout": 12,       # lowered from 25 — free-tier models that take >12s are usually hung
+    "timeout": 30,       # raised from 12 (2026-07-27): measured nemotron-3-ultra at ~20s
+                         # on a real scoring prompt, so a 12s cap killed the 1st fallback on
+                         # every call and blacklisted it after 2 attempts. Primary (ling-3.0-flash)
+                         # answers in ~2s, so this only affects the slow fallbacks.
 
     # ── Narrative thresholds for context enrichment ───────────────────────────
     "narrative_thresholds": {
@@ -114,20 +113,17 @@ def resolve_api_key_env(model_id: str, config: dict) -> str:
 
     Priority:
     1. Explicit ``model_key_map`` entry in *config*.
-    2. Prefix-based lookup (arcee-ai/, openrouter/, anthropic/).
+    2. Prefix-based lookup (inclusionai/, nvidia/, poolside/, anthropic/).
     3. Fallback to ``config["api_key_env"]``.
     """
     explicit = config.get("model_key_map", {})
     if model_id in explicit:
         return explicit[model_id]
     prefix_map = {
-        "z-ai/":       "OPENROUTER_ZAI_KEY",
-        "openai/":     "OPENROUTER_GPTOSS_KEY",
-        "arcee-ai/":   "OPENROUTER_ARCEE_KEY",
-        "stepfun/":    "OPENROUTER_STEPFUN_KEY",
-        "nvidia/":     "OPENROUTER_NVIDIA_KEY",
-        "openrouter/": "OPENROUTER_HUNTER_KEY",
-        "anthropic/":  "ANTHROPIC_API_KEY",
+        "inclusionai/": "OPENROUTER_LING_KEY",
+        "nvidia/":      "OPENROUTER_NVIDIA_KEY",
+        "poolside/":    "OPENROUTER_POOLSIDE_KEY",
+        "anthropic/":   "ANTHROPIC_API_KEY",
     }
     for prefix, env_var in prefix_map.items():
         if model_id.startswith(prefix):

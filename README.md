@@ -242,7 +242,7 @@ Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (
 | `MY LIST` | Watchlist | Scan your personal watchlist (type `ADD AAPL` to build it) |
 | `LOTTERY` | Lottery Ticket | Far-OTM long-shot board (bounce/crash/breakout/catalyst/squeeze) — **experimental, negative-EV base rate**, see [Module Maturity](#module-maturity) |
 | `INTEL` | Intel Briefing | Market overview, single-ticker briefing, macro pulse, and the morning briefing |
-| `SQUEEZE` | Short Squeeze | Short-squeeze setups ranked by short interest + unusual call activity — display-only, not scored into ranking |
+| `SQUEEZE` | Short Squeeze | Short-squeeze setups ranked by short interest + unusual call activity — display-only, not scored into ranking. Backtested 2018–2026 on point-in-time FINRA data: the signal is real and out-of-sample robust, but it lives in the **short-interest level**, not the multi-factor score — see [docs/SQUEEZE_BACKTEST.md](docs/SQUEEZE_BACKTEST.md) |
 
 ### Morning Briefing
 
@@ -409,10 +409,9 @@ These models are free with an OpenRouter account and no credit card required:
 
 | Model | ID for config_ai.py | Role | Notes |
 |-------|---------------------|------|-------|
-| **Arcee Trinity** (primary) | `arcee-ai/trinity-large-preview:free` | Primary model | Good reasoning, free |
-| **StepFun 3.5 Flash** | `stepfun/step-3.5-flash:free` | 1st fallback | Fast reasoning model |
-| **Nemotron 120B** | `nvidia/nemotron-3-super-120b-a12b:free` | 2nd fallback | Large model, strong analysis |
-| Llama 3.3 70B | `meta-llama/llama-3.3-70b-instruct:free` | 3rd fallback | Solid general-purpose |
+| **Ling 3.0 Flash** (primary) | `inclusionai/ling-3.0-flash:free` | Primary model | Fast, good reasoning |
+| **Nemotron 3 Ultra** | `nvidia/nemotron-3-ultra-550b-a55b:free` | 1st fallback | Large model, strong analysis |
+| **Laguna S 2.1** | `poolside/laguna-s-2.1:free` | 2nd fallback | Strong structured output |
 
 > The free tier is rate-limited. If you hit 429 errors, the screener retries automatically with exponential backoff and switches to the fallback model. For production use, add a small OpenRouter credit balance to lift rate limits.
 
@@ -452,9 +451,9 @@ To change model at any time, edit the `model` field in `src/config_ai.py`. The `
    OPENROUTER_API_KEY=sk-or-v1-your-key-here
 
    # Optional: per-model keys for specialised models
-   # OPENROUTER_ARCEE_KEY=sk-or-v1-...
-   # OPENROUTER_STEPFUN_KEY=sk-or-v1-...
+   # OPENROUTER_LING_KEY=sk-or-v1-...
    # OPENROUTER_NVIDIA_KEY=sk-or-v1-...
+   # OPENROUTER_POOLSIDE_KEY=sk-or-v1-...
 
    # Optional: Polygon.io for higher-quality news, VWAP, unusual flow
    # POLYGON_API_KEY=your_polygon_key_here
@@ -570,7 +569,7 @@ Tickers
    │    edge, PoP strength, RR quality, theta burn, score drivers, warnings)
    │  - Ticker summary from Pass 1 prepended to each contract prompt
    │  - Batches candidates (default 3 per API call)
-   │  - Model fallback chain: arcee → stepfun → nvidia → llama
+   │  - Model fallback chain: ling → nemotron-ultra → laguna-s
    │  - Returns: ai_score (0-100), ai_confidence (0-10), reasoning, flags,
    │             catalyst_risk, iv_justified
    │  - Results cached in .ai_score_cache.db for the trading day
@@ -999,17 +998,17 @@ These are kept in the repo — and in the menu — precisely because they're hon
 AI_CONFIG = {
     # API provider: "openrouter" (default) or "anthropic"
     "provider":              "openrouter",
-    "model":                 "arcee-ai/trinity-large-preview:free",
-    "fallback_model":        "stepfun/step-3.5-flash:free",
-    "second_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free",
-    "third_fallback_model":  "meta-llama/llama-3.3-70b-instruct:free",
-    "api_key_env":           "OPENROUTER_ARCEE_KEY",
+    "model":                 "inclusionai/ling-3.0-flash:free",
+    "fallback_model":        "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "second_fallback_model": "poolside/laguna-s-2.1:free",
+    "third_fallback_model":  None,
+    "api_key_env":           "OPENROUTER_API_KEY",
 
     # Per-model API key overrides
     "model_key_map": {
-        "arcee-ai/trinity-large-preview:free":    "OPENROUTER_ARCEE_KEY",
-        "stepfun/step-3.5-flash:free":            "OPENROUTER_STEPFUN_KEY",
-        "nvidia/nemotron-3-super-120b-a12b:free": "OPENROUTER_NVIDIA_KEY",
+        "inclusionai/ling-3.0-flash:free":        "OPENROUTER_LING_KEY",
+        "nvidia/nemotron-3-ultra-550b-a55b:free": "OPENROUTER_NVIDIA_KEY",
+        "poolside/laguna-s-2.1:free":             "OPENROUTER_POOLSIDE_KEY",
     },
 
     # Scoring weights
@@ -1198,6 +1197,7 @@ options/
     ├── morning/               # Morning briefing — self-contained HTML quant note (regime, vol, macro, portfolio, gate)
     ├── tearsheet/             # Self-contained HTML tearsheet per scanned pick (--tearsheet N)
     ├── squeeze/               # Short-squeeze grader — powers SQUEEZE mode, display-only
+    │   └── backtest/          # Point-in-time validation harness (FINRA + EDGAR + DoltHub)
     ├── lottery/               # Lottery Ticket board — powers LOTTERY mode; documented negative-EV base rate
     ├── outlook/               # Sector/asset outlook engine — relative-ranking edge only (see Module Maturity)
     ├── intel/                 # Intel Briefing engine — powers INTEL mode
@@ -1283,6 +1283,7 @@ docs/
 - [x] Research desk (`python -m src.research`) and morning briefing (`python -m src.morning`) — self-contained HTML quant reports through a shared design system (`src/desk_kit`)
 - [x] Ticker tearsheet (`--tearsheet N`) — self-contained HTML per scanned pick, re-renderable offline from its JSON sidecar
 - [x] Short-squeeze detector (`[11] SQUEEZE` mode) — display-only grader on short interest + unusual call activity
+- [x] Squeeze grader validation (`src/squeeze/backtest`) — survivorship-free point-in-time study, 205 FINRA settlement dates × 480k graded observations. Signal confirmed (tail asymmetry +2.6pp, holds out-of-sample) but attributable to the short-interest **level**; the scoring adds nothing and two of its rules are backwards — see [docs/SQUEEZE_BACKTEST.md](docs/SQUEEZE_BACKTEST.md)
 - [x] Lottery Ticket board (`[9] LOTTERY` mode) — far-OTM long-shot ranking with BS-repriced hit-probability; built around a documented negative-EV base rate, see [docs/LOTTERY_BACKTEST_FINDINGS.md](docs/LOTTERY_BACKTEST_FINDINGS.md)
 - [x] Leverage module (`src/leverage`, BTC/ETH perp futures) — pre-validation signal/backtest/paper harness, explicitly no edge yet
 - [x] Long-term holdings desk (`src/longterm`) — buy-zone/tranche accumulation tracking, DISCOVER sector scan with BUY NOW / WAIT entry verdict, CDR ticker markers, guided ACTIONS menu, HTML report
