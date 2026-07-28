@@ -185,12 +185,21 @@ class GradeTest(unittest.TestCase):
         return {"si_ratio": 0.30, "dtc": 6.0, "trend": "rising",
                 "ret_5d": ret_5d, "rvol": 2.0, "spot": 10.0}
 
-    def test_ret5d_rule_is_dead_as_written(self):
-        # The live pipeline stores ret_5d as a fraction while the rule compares
-        # it to -10.0, so a -15% week cannot score the "late shorts" point.
-        row = panel.grade([self._row(-0.15)], ret5d_scale="as_written")[0]
-        as_intended = panel.grade([self._row(-0.15)], ret5d_scale="as_intended")[0]
-        self.assertEqual(as_intended["points"], row["points"] + 1)
+    def test_ret5d_scale_now_controls_the_momentum_rule(self):
+        # The fraction/percent mismatch that killed the old "late shorts" rule
+        # applies to the momentum rule too: +12% arrives as 0.12 and cannot
+        # clear a >= 10.0 threshold. as_written reproduces that dead behaviour;
+        # as_intended reproduces the fixed adapter (detector._ret_5d_as_percent).
+        dead = panel.grade([self._row(0.12)], ret5d_scale="as_written")[0]
+        live = panel.grade([self._row(0.12)], ret5d_scale="as_intended")[0]
+        self.assertEqual(live["points"], dead["points"] + 2)
+
+    def test_negative_week_scores_nothing_either_way(self):
+        # The "late shorts pressing" bonus is retired: a -15% week is shown as
+        # evidence but never scored, whichever scale is used.
+        dead = panel.grade([self._row(-0.15)], ret5d_scale="as_written")[0]
+        live = panel.grade([self._row(-0.15)], ret5d_scale="as_intended")[0]
+        self.assertEqual(live["points"], dead["points"])
 
     def test_si_scale_widens_the_gate(self):
         low = panel.grade([{"si_ratio": 0.12, "dtc": 6.0, "trend": "rising",

@@ -171,3 +171,47 @@ week arrives as `-0.15`, never `-15.0`, so the "late shorts pressing" point can
 never fire in the live grader — it would need a -1000% week. The study reports
 both `--ret5d as_written` (reproducing live behaviour) and `--ret5d as_intended`,
 which quantifies what the mismatch costs.
+
+## Applied to the grader (2026-07-28)
+
+The findings above were acted on. Scoring now carries only the factors whose
+bootstrapped CI clears zero; everything else is shown as evidence but not
+scored.
+
+| factor | was | now | measured effect |
+|---|---|---|---|
+| short interest level | +2 / +1 | unchanged | the real signal (monotone deciles) |
+| days-to-cover ≥ 5 | **+2** | **not scored** | −2.38pp [−4.82, −0.75] |
+| 5d return ≥ +10% | not scored | **+2** | +3.31pp [+1.31, +5.77] |
+| 5d return ≤ −10% | +1 | not scored | −1.96pp [−8.53, +2.30] |
+| RVOL > 1.5 | +1 | not scored | −1.39pp [−5.46, +1.77] |
+| SI rising MoM | +1 | unchanged | +1.30pp [−0.01, +2.70] |
+
+`SETUP_MIN_POINTS` moved 4 → 3. This is a rescaling, not a tuned parameter:
+dropping three bonuses cut the maximum from 8 points to 6 (and from 7 to 5
+inside the backtest, which has no options history and so never awards the
+call-skew leg). Holding the threshold at 4 left **18 SETUP observations in
+480,744**; 4/7 of the old budget maps to ~3 of the new.
+
+**A units bug was found and fixed in the process.** `data_fetching` returns
+`ret_5d` as a fraction (`close[-1]/close[-6] - 1.0`), while the detector's
+thresholds are percent — the reason the old "late shorts" rule was measured
+dead. The new momentum rule would have inherited the same defect and shipped
+inert. `detector._ret_5d_as_percent` now converts in the row adapter, and the
+harness default moved to `--ret5d as_intended` because that is what production
+does. `as_written` is retained only to reproduce pre-fix behaviour.
+
+### Result (21d asymmetry, SETUP − NONE)
+
+| scoring | full sample | 2023-2026 holdout |
+|---|---|---|
+| old | +2.90pp | — |
+| new, momentum inert (units bug) | +4.13pp | +3.69pp |
+| **new, momentum live** | **+4.73pp** [+3.25, +6.41] | **+4.43pp** [+2.98, +5.78] |
+
+The holdout alone beats the old full-sample result, and SETUP population is
+4,430 rather than 18. Reproduce with:
+
+```bash
+python -m src.squeeze.backtest --run --rebuild
+```

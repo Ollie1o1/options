@@ -22,9 +22,16 @@ SI_HEAVY = 0.20
 DTC_STRONG = 5.0
 DTC_MODERATE = 2.5
 SKEW_CALL_BID = -0.02      # put−call IV ≤ −2vp → upside is bid
-LATE_SHORT_RET5D = -10.0   # % 5-day return
+LATE_SHORT_RET5D = -10.0   # % 5-day return — shown, not scored (measured -1.96pp)
+MOMENTUM_RET5D = 10.0      # % 5-day return — scored +2 (measured +3.31pp)
 RVOL_HOT = 1.5
-SETUP_MIN_POINTS = 4
+# Rescaled with the point budget, not tuned to the metric. Dropping the three
+# disproven bonuses (dtc, late-shorts, RVOL) cut the maximum scored points from
+# 8 to 6 — and from 7 to 5 inside the backtest, which has no historical options
+# chain and so never awards the call-skew leg. Holding SETUP at 4 made the grade
+# demand SI>=20% AND +10% momentum together: 18 observations in 480,744.
+# 4/7 of the old budget maps to ~3 of the new.
+SETUP_MIN_POINTS = 3
 WATCH_MIN_POINTS = 2
 
 
@@ -86,12 +93,13 @@ def assess_squeeze(fields: dict) -> SqueezeSetup:
         points += 1
         ev.append(f"{si * 100.0:.1f}% of float short (elevated)")
 
+    # Days-to-cover: shown, NOT scored. It was the grader's largest bonus (+2)
+    # and the backtest measured it at -2.38pp asymmetry [-4.82, -0.75] — a CI
+    # clear of zero, so this is a measured harm, not noise.
     if dtc is not None and dtc >= DTC_STRONG:
-        points += 2
-        ev.append(f"{dtc:.1f} days to cover (crowded exit)")
+        ev.append(f"{dtc:.1f} days to cover (crowded exit — not scored, see backtest)")
     elif dtc is not None and dtc >= DTC_MODERATE:
-        points += 1
-        ev.append(f"{dtc:.1f} days to cover")
+        ev.append(f"{dtc:.1f} days to cover (not scored)")
 
     if trend == "rising":
         points += 1
@@ -101,13 +109,19 @@ def assess_squeeze(fields: dict) -> SqueezeSetup:
         points += 1
         ev.append(f"25Δ skew {skew * 100.0:+.1f}vp call-skewed (upside is bid)")
 
-    if ret_5d is not None and ret_5d <= LATE_SHORT_RET5D:
-        points += 1
-        ev.append(f"5d return {ret_5d:+.1f}% with heavy SI (late shorts pressing)")
+    # Upward momentum: the single strongest measured factor (+3.31pp
+    # [+1.31, +5.77]) and previously unscored. Squeezes follow strength.
+    if ret_5d is not None and ret_5d >= MOMENTUM_RET5D:
+        points += 2
+        ev.append(f"5d return {ret_5d:+.1f}% with heavy SI (squeeze underway)")
+    elif ret_5d is not None and ret_5d <= LATE_SHORT_RET5D:
+        # Kept visible because it reads as a squeeze setup and is not: the
+        # "late shorts pressing" rule measured -1.96pp. Shown, never scored.
+        ev.append(f"5d return {ret_5d:+.1f}% (weakness — not scored, see backtest)")
 
+    # RVOL: shown, not scored (-1.39pp, CI spans zero — no evidence it helps).
     if rvol is not None and rvol > RVOL_HOT:
-        points += 1
-        ev.append(f"RVOL {rvol:.1f}x (volume confirming)")
+        ev.append(f"RVOL {rvol:.1f}x (volume active — not scored)")
 
     # Dealer-gamma context: reported, not scored (v1).
     if gex_flip is not None and spot is not None and spot > 0:
@@ -125,6 +139,19 @@ def assess_squeeze(fields: dict) -> SqueezeSetup:
     return setup
 
 
+def _ret_5d_as_percent(value) -> Optional[float]:
+    """Pipeline ret_5d is a FRACTION; assess_squeeze thresholds are PERCENT.
+
+    ``data_fetching.calculate_momentum_indicators`` returns
+    ``close[-1]/close[-6] - 1.0``, so a +12% week arrives as 0.12. Comparing
+    that against ±10.0 can never be true — which is precisely why the old
+    "late shorts" rule was measured dead in the backtest. Converting here keeps
+    assess_squeeze's percent contract intact for direct callers and tests.
+    """
+    f = _num(value)
+    return None if f is None else f * 100.0
+
+
 def assess_squeeze_row(row) -> SqueezeSetup:
     """Adapter: grade from a scan DataFrame row (or any mapping-like)."""
     get = row.get if hasattr(row, "get") else lambda k, d=None: d
@@ -133,7 +160,7 @@ def assess_squeeze_row(row) -> SqueezeSetup:
         "short_interest_dtc": get("short_interest_dtc"),
         "short_interest_trend": get("short_interest_trend"),
         "iv_skew": get("iv_skew"),
-        "ret_5d": get("ret_5d"),
+        "ret_5d": _ret_5d_as_percent(get("ret_5d")),
         "rvol": get("rvol"),
         "gex_flip_price": get("gex_flip_price"),
         "spot": get("spot", get("underlying_price")),

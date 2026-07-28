@@ -165,7 +165,10 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--run", action="store_true")
     p.add_argument("--rebuild", action="store_true", help="rebuild the cached panel")
     p.add_argument("--si-scale", type=float, default=1.0)
-    p.add_argument("--ret5d", choices=("as_written", "as_intended"), default="as_written")
+    # Default flipped 2026-07-28: the live adapter now converts ret_5d from the
+    # pipeline's fraction to percent, so "as_intended" is what production does.
+    # "as_written" is kept only to reproduce the pre-fix (dead-rule) behaviour.
+    p.add_argument("--ret5d", choices=("as_written", "as_intended"), default="as_intended")
     p.add_argument("--k", type=float, default=2.0)
     p.add_argument("--boot", type=int, default=2000)
     p.add_argument("--db", default=DEFAULT_DB)

@@ -23,12 +23,85 @@ def nbis_fields():
     }
 
 
+class TestEvidenceBasedScoring(unittest.TestCase):
+    """Scoring follows docs/SQUEEZE_BACKTEST.md (480,744 graded observations).
+
+    Only effects whose bootstrapped 95% CI excludes zero are scored:
+      days-to-cover >= 5   -2.38pp [-4.82, -0.75]  -> NOT scored (was +2)
+      5d return >= +10%    +3.31pp [+1.31, +5.77]  -> scored +2 (was absent)
+      5d return <= -10%    -1.96pp [-8.53, +2.30]  -> NOT scored (was +1)
+      RVOL > 1.5           -1.39pp [-5.46, +1.77]  -> NOT scored (was +1)
+      SI rising MoM        +1.30pp [-0.01, +2.70]  -> kept at +1 (borderline)
+    Unscored factors remain visible as evidence lines.
+    """
+
+    def test_days_to_cover_is_not_scored(self):
+        # dtc was the grader's largest bonus and measured significantly harmful.
+        high = D.assess_squeeze({"short_interest": 0.22, "short_interest_dtc": 12.0})
+        none = D.assess_squeeze({"short_interest": 0.22})
+        self.assertEqual(high.points, none.points)
+
+    def test_days_to_cover_still_shown_as_evidence(self):
+        setup = D.assess_squeeze({"short_interest": 0.22, "short_interest_dtc": 12.0})
+        self.assertTrue(any("days to cover" in e for e in setup.evidence))
+
+    def test_upward_momentum_is_scored(self):
+        hot = D.assess_squeeze({"short_interest": 0.22, "ret_5d": 12.0})
+        flat = D.assess_squeeze({"short_interest": 0.22, "ret_5d": 1.0})
+        self.assertEqual(hot.points - flat.points, 2)
+
+    def test_sharp_drop_is_not_scored(self):
+        # "late shorts pressing" pointed the wrong way: squeezes follow strength.
+        dropped = D.assess_squeeze({"short_interest": 0.22, "ret_5d": -18.2})
+        flat = D.assess_squeeze({"short_interest": 0.22, "ret_5d": 1.0})
+        self.assertEqual(dropped.points, flat.points)
+
+    def test_rvol_is_not_scored(self):
+        hot = D.assess_squeeze({"short_interest": 0.22, "rvol": 3.0})
+        cold = D.assess_squeeze({"short_interest": 0.22, "rvol": 0.5})
+        self.assertEqual(hot.points, cold.points)
+
+    def test_short_interest_still_drives_the_score(self):
+        heavy = D.assess_squeeze({"short_interest": 0.30})
+        light = D.assess_squeeze({"short_interest": 0.16})
+        self.assertGreater(heavy.points, light.points)
+
+
+class TestRet5dUnits(unittest.TestCase):
+    """The scan pipeline stores ret_5d as a FRACTION.
+
+    data_fetching.calculate_momentum_indicators returns
+    ``close[-1]/close[-6] - 1.0`` (so +12% arrives as 0.12), but assess_squeeze
+    compares against percent thresholds. That mismatch is why the old
+    "late shorts" rule (<= -10.0) could never fire in production, documented in
+    docs/SQUEEZE_BACKTEST.md as "the ret_5d rule is dead". The momentum rule
+    would inherit exactly the same defect, so the adapter converts.
+    """
+
+    def test_row_adapter_converts_fraction_to_percent(self):
+        scored = D.assess_squeeze_row({"short_interest": 0.22, "ret_5d": 0.12})
+        flat = D.assess_squeeze_row({"short_interest": 0.22, "ret_5d": 0.01})
+        self.assertEqual(scored.points - flat.points, 2)
+
+    def test_row_adapter_handles_missing_ret_5d(self):
+        setup = D.assess_squeeze_row({"short_interest": 0.22})
+        self.assertIsNotNone(setup.grade)
+
+    def test_direct_percent_call_is_unchanged(self):
+        # assess_squeeze itself keeps its percent contract.
+        setup = D.assess_squeeze({"short_interest": 0.22, "ret_5d": 12.0})
+        flat = D.assess_squeeze({"short_interest": 0.22, "ret_5d": 1.0})
+        self.assertEqual(setup.points - flat.points, 2)
+
+
 class TestAssessSqueeze(unittest.TestCase):
-    def test_nbis_replay_is_setup(self):
+    def test_nbis_replay_still_grades_setup(self):
+        # NBIS motivated the feature. It scored 6 under the old rules, two of
+        # which (dtc, -18.2% 5d return) are now known to be backwards. It keeps
+        # SETUP on SI 2 + rising 1 + call-skew 1 = 4.
         setup = D.assess_squeeze(nbis_fields())
         self.assertEqual(setup.grade, D.SETUP)
-        # SI 2 + dtc 1 + rising 1 + call-skew 1 + late-shorts 1 = 6
-        self.assertEqual(setup.points, 6)
+        self.assertEqual(setup.points, 4)
         self.assertTrue(setup.evidence)
 
     def test_low_si_is_none_even_with_flow(self):
@@ -58,10 +131,11 @@ class TestAssessSqueeze(unittest.TestCase):
         self.assertEqual(setup.points, 2)
 
     def test_setup_threshold_edge(self):
-        # exactly 20% SI, dtc 5, no more: 2 + 2 = 4 points → SETUP
+        # exactly 20% SI + 5d momentum: 2 + 2 = 4 points → SETUP. Momentum
+        # replaces days-to-cover as the second scored leg (dtc measured -2.38pp).
         setup = D.assess_squeeze({
             "short_interest": 0.20,
-            "short_interest_dtc": 5.0,
+            "ret_5d": 11.0,
         })
         self.assertEqual(setup.grade, D.SETUP)
 
