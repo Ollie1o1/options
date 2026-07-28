@@ -14,6 +14,7 @@ Design:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -21,10 +22,16 @@ import subprocess
 from datetime import datetime
 from typing import Callable, Optional
 
+try:                      # POSIX only; Windows falls back to no locking
+    import fcntl
+except ImportError:       # pragma: no cover - not exercised on macOS/Linux
+    fcntl = None
+
 from src import phase1_checkpoint
 
 VENV_PY = os.path.expanduser("~/.venvs/options/bin/python")
 DEFAULT_STATE_PATH = os.path.join("logs", ".maintenance_state.json")
+DEFAULT_LOCK_PATH = os.path.join("logs", ".catchup.lock")
 
 # The auto-log job spawns `run.py <mode>` — which boots the screener, which
 # calls run_startup_maintenance again. The parent records the window as done
@@ -151,12 +158,18 @@ def cohort_progress_line(db_path: str, phase1_start: str, today: Optional[str] =
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
 def _default_runner(cmd) -> int:
-    """Run a subprocess, capturing output to logs/maintenance.log."""
+    """Run a subprocess, capturing output to logs/maintenance.log.
+
+    stdin is DEVNULL, never inherited: these children run unattended while the
+    user may be typing into the same terminal, and an inherited tty makes them
+    race the interactive screener for keystrokes (see the stdin-isolation test).
+    """
     os.makedirs("logs", exist_ok=True)
     with open(os.path.join("logs", "maintenance.log"), "a") as logf:
         logf.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] $ {' '.join(cmd)}\n")
         logf.flush()
-        return subprocess.call(cmd, stdout=logf, stderr=logf, env=_child_env())
+        return subprocess.call(cmd, stdin=subprocess.DEVNULL,
+                               stdout=logf, stderr=logf, env=_child_env())
 
 
 def _autolog_cmd(win) -> list:
@@ -174,20 +187,58 @@ def _spawn_catchup_detached() -> None:
     finishes; start_new_session keeps it alive after the screener exits."""
     subprocess.Popen(
         [VENV_PY, "-m", "src.maintenance", "--catchup"],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env=_child_env(), start_new_session=True,
     )
 
 
+@contextlib.contextmanager
+def _catchup_lock(lock_path: str):
+    """Exclusive, non-blocking, whole-run lock. Yields True to the single
+    holder and False to anyone who finds it taken.
+
+    The marker env var cannot serve here: the legitimate detached catch-up is
+    itself spawned with the marker set, so guarding on it would disable the
+    normal path. flock is released by the OS if a holder is killed, so a crash
+    can't leave the catch-up wedged shut."""
+    if fcntl is None:
+        yield True
+        return
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    with open(lock_path, "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def run_catchup(db_path: str = "paper_trades.db",
                 state_path: str = DEFAULT_STATE_PATH,
                 now: Optional[datetime] = None,
-                runner: Optional[Callable] = None) -> dict:
+                runner: Optional[Callable] = None,
+                lock_path: str = DEFAULT_LOCK_PATH) -> dict:
     """Run every due working auto-log window for today, blocking, marking state
     after each success so a crash mid-way keeps the windows already done.
     Invoked detached by interactive startup (``-m src.maintenance --catchup``)
     and inline by the headless path. Idempotent per window/day; safe to run
-    twice (the auto-log itself dedups at the DB layer)."""
+    twice (the auto-log itself dedups at the DB layer).
+
+    Single-instance: a concurrent catch-up returns immediately having run
+    nothing. Overlapping runs re-scan the same window and log the same contract
+    at a slightly different price, which defeats the DB-layer dedup."""
+    with _catchup_lock(lock_path) as acquired:
+        if not acquired:
+            return {"ran": [], "skipped": "already-running"}
+        return _run_catchup_locked(db_path, state_path, now, runner)
+
+
+def _run_catchup_locked(db_path, state_path, now, runner) -> dict:
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
     runner = runner or _default_runner
@@ -468,7 +519,12 @@ def main() -> None:
         # Detached multi-window auto-log fired by an interactive launch.
         summary = run_catchup()
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ran = ", ".join(summary.get("ran") or []) or "nothing due"
+        # Distinguish "refused, another catch-up holds the lock" from "nothing
+        # due" — both leave ran empty, and reading a refusal as a completed
+        # no-op is how a silently-empty cohort goes unnoticed.
+        ran = ", ".join(summary.get("ran") or []) or (
+            "skipped — another catch-up is already running"
+            if summary.get("skipped") else "nothing due")
         print(f"[{stamp}] catch-up auto-log: {ran}")
         return
     summary = run_headless()

@@ -1,9 +1,11 @@
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from datetime import datetime
+from unittest import mock
 
 from src import maintenance as m
 
@@ -148,9 +150,12 @@ class TestOrchestrator(unittest.TestCase):
         calls = []
         with tempfile.TemporaryDirectory() as d:
             sp = os.path.join(d, "state.json")
+            # Isolated lock path: the default is shared with any catch-up
+            # actually running on this machine, which would refuse this one.
             summary = m.run_catchup(
                 state_path=sp, now=datetime(2026, 6, 4, 14, 30),
-                runner=lambda cmd: (calls.append(cmd), 0)[1])
+                runner=lambda cmd: (calls.append(cmd), 0)[1],
+                lock_path=os.path.join(d, "catchup.lock"))
             self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
             self.assertEqual(set(m.load_state(sp)["last_autolog"]),
                              {"ds", "sps", "ss", "ics"})
@@ -272,6 +277,54 @@ class TestChildGuard(unittest.TestCase):
         env = m._child_env()
         self.assertEqual(env.get(m.CHILD_ENV_MARKER), "1")
 
+    def test_child_does_not_inherit_parent_stdin(self):
+        """Catch-up children must see EOF on stdin, never the parent's terminal.
+
+        Observed 2026-07-28: the detached catch-up inherited the tty the user
+        was typing into, so `-ds`/`-sps` raced the interactive screener for
+        keystrokes, ate a stray 'b' at the ticker-source prompt and died with
+        `invalid literal for int() with base 10: 'b'`. prompt_input only falls
+        back to its default when stdin is not a tty, so isolation has to happen
+        here, at the spawn."""
+        script = "import sys; sys.stdout.write('GOT:' + repr(sys.stdin.read()))"
+        with tempfile.TemporaryDirectory() as d:
+            feed = os.path.join(d, "feed.txt")
+            with open(feed, "w") as f:
+                f.write("b\n")
+            old_cwd = os.getcwd()
+            saved_stdin = os.dup(0)
+            try:
+                os.chdir(d)
+                with open(feed) as f:
+                    os.dup2(f.fileno(), 0)
+                rc = m._default_runner([sys.executable, "-c", script])
+            finally:
+                os.dup2(saved_stdin, 0)
+                os.close(saved_stdin)
+                os.chdir(old_cwd)
+            with open(os.path.join(d, "logs", "maintenance.log")) as f:
+                log = f.read()
+        self.assertEqual(rc, 0)
+        self.assertIn("GOT:''", log)
+
+    def test_detached_catchup_does_not_inherit_parent_stdin(self):
+        """The detached catch-up must be isolated at its own spawn too.
+
+        Isolating only _default_runner covers the grandchildren; the catch-up
+        process itself is spawned by _spawn_catchup_detached, and without
+        stdin=DEVNULL it keeps the user's tty on fd 0 for its whole (minutes
+        long) life — confirmed with lsof on 2026-07-28. Anything it later reads
+        comes straight out of what the user is typing into the screener."""
+        seen = {}
+
+        def fake_popen(cmd, **kwargs):
+            seen.update(kwargs)
+            return None
+
+        with mock.patch.object(m.subprocess, "Popen", fake_popen):
+            m._spawn_catchup_detached()
+        self.assertEqual(seen.get("stdin"), m.subprocess.DEVNULL)
+
     def test_child_process_skips_all_maintenance(self):
         calls = []
         with tempfile.TemporaryDirectory() as d:
@@ -296,6 +349,48 @@ class TestChildGuard(unittest.TestCase):
                     os.environ[m.CHILD_ENV_MARKER] = old
             self.assertEqual(calls, [])           # no recursive spawn
             self.assertEqual(summary["ran"], [])  # no jobs run in the child
+
+
+class TestCatchupSingleInstance(unittest.TestCase):
+    """Only one catch-up may run at a time.
+
+    Observed 2026-07-28: a stalled window left state unmarked, so every new
+    screener launch spawned another detached catch-up. Six piled up and five
+    ran `-ics` concurrently; the overlapping `-sps` runs logged INTC 85p twice
+    (entry_ids 825/829) because each re-fetch shifted the price enough to slip
+    past the DB-layer dedup. Concurrency has to be refused at the source."""
+
+    def test_second_catchup_skips_windows_while_one_is_running(self):
+        import fcntl
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            lock_path = os.path.join(d, "catchup.lock")
+            held = open(lock_path, "w")
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                res = m.run_catchup(
+                    state_path=os.path.join(d, "state.json"),
+                    now=datetime(2026, 6, 4, 14, 30),  # Thursday, in RTH band
+                    runner=lambda cmd: (calls.append(cmd), 0)[1],
+                    lock_path=lock_path)
+            finally:
+                fcntl.flock(held, fcntl.LOCK_UN)
+                held.close()
+        self.assertEqual(calls, [])      # ran no scans
+        self.assertEqual(res["ran"], [])
+
+    def test_catchup_runs_windows_when_lock_is_free(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            res = m.run_catchup(
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: (calls.append(cmd), 0)[1],
+                lock_path=os.path.join(d, "catchup.lock"))
+        flags = {f for c in calls for f in c if f in ("-ds", "-sps", "-ss", "-ics")}
+        self.assertEqual(flags, {"-ds", "-sps", "-ss", "-ics"})
+        self.assertEqual(set(res["ran"]) & {"ds", "sps", "ss", "ics"},
+                         {"ds", "sps", "ss", "ics"})
 
 
 class TestChainArchiveJob(unittest.TestCase):
