@@ -78,6 +78,26 @@ class NarrativeHonestyTests(unittest.TestCase):
         self.assertIn("-13.0%", text)
         self.assertIn("excludes the last month", text)
 
+    def test_flagged_leader_drops_the_false_present_tense_claim(self):
+        # Appending the caveat is not enough: leaving "have been doing well"
+        # in place makes the narrative contradict itself in consecutive
+        # sentences. The claim itself must go.
+        text = " ".join(narrative(self._rows(True), DEFAULT_OUTLOOK_CONFIG))
+        self.assertNotIn("doing well", text)
+        self.assertNotIn("has outperformed", text)
+
+    def test_single_flagged_leader_also_drops_the_claim(self):
+        rows = [
+            {"ticker": "SMH", "score": 1.2, "direction": "BULLISH", "conviction": 99,
+             "drivers": "12m momentum +, trend +", "lagging": True,
+             "ret_21d": -0.130, "excess_21d": -14.8},
+            {"ticker": "GLD", "score": -0.9, "direction": "NEUTRAL", "conviction": 12,
+             "drivers": "trend −", "lagging": False},
+        ]
+        text = " ".join(narrative(rows, DEFAULT_OUTLOOK_CONFIG))
+        self.assertNotIn("has outperformed", text)
+        self.assertIn("excludes the last month", text)
+
     def test_unflagged_leader_keeps_the_plain_reading(self):
         text = " ".join(narrative(self._rows(False), DEFAULT_OUTLOOK_CONFIG))
         self.assertIn("doing well", text)

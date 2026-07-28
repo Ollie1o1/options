@@ -60,20 +60,25 @@ def narrative(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> List[str]:
 
     lines: List[str] = []
     if leaders:
+        head = leaders[0]
+        # "has been doing well" is a present-tense claim, but the factors behind
+        # it stop a month back. When the tape since then disagrees, the clause is
+        # replaced rather than merely annotated — appending a caveat to a false
+        # sentence leaves the narrative contradicting itself.
+        flagged = bool(head.get("lagging"))
         if len(leaders) == 1:
-            r = leaders[0]
-            lines.append(f"Leading: {_name(r['ticker'])} ({r['ticker']}) — "
-                         f"{_phrase(r['drivers'])}; has outperformed and the trend "
-                         f"favors more.")
+            tail = ("the 1-3mo factors still rank it first."
+                    if flagged else "has outperformed and the trend favors more.")
+            lines.append(f"Leading: {_name(head['ticker'])} ({head['ticker']}) — "
+                         f"{_phrase(head['drivers'])}; {tail}")
         else:
-            head = leaders[0]
             others = ", ".join(_name(r["ticker"]) for r in leaders[1:])
+            tail = ("the 1-3mo factors still rank these first."
+                    if flagged else
+                    "these have been doing well and momentum/trend favor continuation.")
             lines.append(f"Leading: {_name(head['ticker'])} ({head['ticker']}) "
-                         f"with {others} — {_phrase(head['drivers'])}; these have "
-                         f"been doing well and momentum/trend favor continuation.")
-    # The leader's headline claim is about a window that ended a month ago. If
-    # the tape since then disagrees, say so — otherwise the sentence reads as a
-    # statement about the present, which is the bug this fixes.
+                         f"with {others} — {_phrase(head['drivers'])}; {tail}")
+    # Having removed the false claim above, state what actually happened.
     if leaders:
         head = leaders[0]
         if head.get("lagging") and head.get("ret_21d") is not None \
