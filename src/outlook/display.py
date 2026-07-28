@@ -60,17 +60,35 @@ def narrative(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> List[str]:
 
     lines: List[str] = []
     if leaders:
+        head = leaders[0]
+        # "has been doing well" is a present-tense claim, but the factors behind
+        # it stop a month back. When the tape since then disagrees, the clause is
+        # replaced rather than merely annotated — appending a caveat to a false
+        # sentence leaves the narrative contradicting itself.
+        flagged = bool(head.get("lagging"))
         if len(leaders) == 1:
-            r = leaders[0]
-            lines.append(f"Leading: {_name(r['ticker'])} ({r['ticker']}) — "
-                         f"{_phrase(r['drivers'])}; has outperformed and the trend "
-                         f"favors more.")
+            tail = ("the 1-3mo factors still rank it first."
+                    if flagged else "has outperformed and the trend favors more.")
+            lines.append(f"Leading: {_name(head['ticker'])} ({head['ticker']}) — "
+                         f"{_phrase(head['drivers'])}; {tail}")
         else:
-            head = leaders[0]
             others = ", ".join(_name(r["ticker"]) for r in leaders[1:])
+            tail = ("the 1-3mo factors still rank these first."
+                    if flagged else
+                    "these have been doing well and momentum/trend favor continuation.")
             lines.append(f"Leading: {_name(head['ticker'])} ({head['ticker']}) "
-                         f"with {others} — {_phrase(head['drivers'])}; these have "
-                         f"been doing well and momentum/trend favor continuation.")
+                         f"with {others} — {_phrase(head['drivers'])}; {tail}")
+    # Having removed the false claim above, state what actually happened.
+    if leaders:
+        head = leaders[0]
+        if head.get("lagging") and head.get("ret_21d") is not None \
+                and head.get("excess_21d") is not None:
+            lines.append(
+                f"Note: {head['ticker']} is {head['ret_21d']:+.1%} over the past "
+                f"month ({head['excess_21d']:+.1f}pp vs SPY); the 1-3mo score "
+                f"excludes the last month by design, so this ranking is not a "
+                f"claim about the last few weeks.")
+
     lag_names = ", ".join(f"{_name(r['ticker'])} ({r['ticker']})" for r in laggards)
     lines.append(f"Lagging: {lag_names} — weak momentum/trend; relatively soft, "
                  f"lean underweight (not a high-confidence short).")
@@ -165,6 +183,16 @@ def print_outlook_box(width: int = 90, refresh_if_stale_hours: float = 20.0,
         a = arrow.get(r["direction"], "▬")
         line = f"{a} {label[r['direction']]:<7} {r['ticker']:<5} {nm:<16} {r.get('conviction',50):>3}   {r.get('drivers','')}"
         print(_c(f"│  {line[:inner].ljust(inner)}│", colors.get(r["direction"], "")))
+        # A flagged row states what just happened. The score deliberately
+        # excludes the last month, so without this the panel reads as a claim
+        # about the present that it is not making.
+        if r.get("lagging") and r.get("ret_21d") is not None \
+                and r.get("excess_21d") is not None:
+            note = (f"          ↳ {r['ret_21d']:+.1%} past month "
+                    f"({r['excess_21d']:+.1f}pp vs SPY) — "
+                    f"score excludes the last month")
+            print(_c(f"│  {note[:inner].ljust(inner)}│",
+                     fmt.Colors.DIM if _HAS_FMT else ""))
     print(_c(bot, fmt.Colors.CYAN if _HAS_FMT else "", bold=True))
     for ln in lines:
         # wrap to width

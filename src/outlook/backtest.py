@@ -191,7 +191,16 @@ def live_outlook(cfg: Dict[str, Any], universe: Optional[List[str]] = None,
     t = len(bench) - 1
     names = [tk for tk in universe if tk in cols]
     feats = {tk: _features(cols[tk], bench, t) for tk in names}
-    return rank_universe(feats, cfg)
+    rows = rank_universe(feats, cfg)
+    # Descriptive context attached AFTER ranking: the score is already final, so
+    # this cannot influence it. Never fold these into cfg["weights"] — the
+    # composite's validated IC depends on the factor set staying as backtested.
+    from src.outlook.recent import recent_context, DEFAULT_LAG_THRESHOLD_PP
+    thr = float(cfg.get("recent_lag_threshold_pp", DEFAULT_LAG_THRESHOLD_PP))
+    for r in rows:
+        if r["ticker"] in cols:
+            r.update(recent_context(cols[r["ticker"]], bench, t, thr))
+    return rows
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
