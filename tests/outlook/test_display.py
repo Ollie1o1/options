@@ -54,5 +54,46 @@ class CacheTests(unittest.TestCase):
         self.assertIsNone(load_outlook_cache(path="/nonexistent/x.json"))
 
 
+class LaggingNoteTests(unittest.TestCase):
+    """A flagged row gets a second line stating what just happened. Rows from a
+    pre-upgrade cache have no such fields and must render exactly as before."""
+
+    def _cache(self, extra):
+        row = {"ticker": "SMH", "score": 1.2, "direction": "BULLISH",
+               "conviction": 99, "drivers": "12m momentum +, trend +"}
+        row.update(extra)
+        return {"as_of": "2026-07-28 12:00 UTC", "rows": [row], "narrative": []}
+
+    def _render(self, cache):
+        import contextlib
+        import io
+        import json
+        from src.outlook.display import print_outlook_box
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "cache.json")
+            with open(p, "w") as fh:
+                json.dump(cache, fh)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                print_outlook_box(cache_path=p, refresh_if_stale_hours=1e9)
+            return buf.getvalue()
+
+    def test_flagged_row_reports_the_recent_move(self):
+        out = self._render(self._cache(
+            {"lagging": True, "ret_21d": -0.130, "excess_21d": -14.8}))
+        self.assertIn("-13.0%", out.replace("−", "-"))
+        self.assertIn("14.8pp", out.replace("−", "-"))
+
+    def test_unflagged_row_gets_no_note(self):
+        out = self._render(self._cache(
+            {"lagging": False, "ret_21d": 0.012, "excess_21d": 1.1}))
+        self.assertNotIn("pp vs", out)
+
+    def test_pre_upgrade_cache_renders_without_error(self):
+        out = self._render(self._cache({}))   # no recent fields at all
+        self.assertIn("SMH", out)
+        self.assertNotIn("pp vs", out)
+
+
 if __name__ == "__main__":
     unittest.main()

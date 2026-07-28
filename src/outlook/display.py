@@ -165,6 +165,16 @@ def print_outlook_box(width: int = 90, refresh_if_stale_hours: float = 20.0,
         a = arrow.get(r["direction"], "▬")
         line = f"{a} {label[r['direction']]:<7} {r['ticker']:<5} {nm:<16} {r.get('conviction',50):>3}   {r.get('drivers','')}"
         print(_c(f"│  {line[:inner].ljust(inner)}│", colors.get(r["direction"], "")))
+        # A flagged row states what just happened. The score deliberately
+        # excludes the last month, so without this the panel reads as a claim
+        # about the present that it is not making.
+        if r.get("lagging") and r.get("ret_21d") is not None \
+                and r.get("excess_21d") is not None:
+            note = (f"          ↳ {r['ret_21d']:+.1%} past month "
+                    f"({r['excess_21d']:+.1f}pp vs SPY) — "
+                    f"score excludes the last month")
+            print(_c(f"│  {note[:inner].ljust(inner)}│",
+                     fmt.Colors.DIM if _HAS_FMT else ""))
     print(_c(bot, fmt.Colors.CYAN if _HAS_FMT else "", bold=True))
     for ln in lines:
         # wrap to width
