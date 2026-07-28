@@ -2122,7 +2122,18 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     news_data = None
     if _HAS_NEWS_FETCHER:
         try:
-            news_data = fetch_news_and_events(symbol, ticker_obj=tkr, max_age_hours=72, max_headlines=5)
+            # Company name lets the relevance matcher recognise headlines that
+            # print the name rather than the symbol ("Microsoft earnings beat"
+            # for MSFT). _get_info_cached is session- and 24h disk-cached, so
+            # this costs no extra network call.
+            _nm = None
+            try:
+                _inf = _get_info_cached(symbol, tkr) or {}
+                _nm = _inf.get("shortName") or _inf.get("longName")
+            except Exception:
+                pass
+            news_data = fetch_news_and_events(symbol, ticker_obj=tkr, max_age_hours=72,
+                                              max_headlines=5, company_name=_nm)
             if news_data and news_data.top_headlines:
                 news_headlines = news_data.top_headlines
         except Exception:

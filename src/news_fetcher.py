@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -131,10 +132,56 @@ def _score_headline_sentiment(headline: str) -> float:
     return max(-1.0, min(1.0, tb_score + kw_boost))
 
 
-def _boost_relevance(headline: str, symbol: str) -> float:
-    """Return 1.0 if the ticker appears in the headline, else 0.6."""
-    if symbol.lower() in headline.lower():
+# Corporate suffixes and articles carry no identifying information — a headline
+# about some other "Inc" must not count as a match.
+_NAME_STOPWORDS = {
+    "the", "inc", "inc.", "corp", "corp.", "corporation", "co", "co.",
+    "company", "ltd", "ltd.", "limited", "plc", "holdings", "holding",
+    "group", "sa", "nv", "ag", "se", "llc", "lp", "trust", "and",
+    "class", "common", "stock", "shares", "adr", "etf", "fund", "index",
+}
+
+
+def _name_tokens(name: Optional[str]) -> List[str]:
+    """Distinctive lowercase tokens of a company name, suffixes removed."""
+    if not name:
+        return []
+    cleaned = re.sub(r"[^A-Za-z0-9 ]+", " ", name)
+    out = []
+    for tok in cleaned.split():
+        low = tok.lower()
+        if low in _NAME_STOPWORDS or len(low) < 3:
+            continue
+        out.append(low)
+    return out
+
+
+def _boost_relevance(headline: str, symbol: str,
+                     company_name: Optional[str] = None) -> float:
+    """1.0 when the headline is genuinely about *symbol*, else 0.6.
+
+    Substring matching used to be the test, which made every one-letter ticker
+    match nearly any headline ("F" in "Fed cuts rates") while demoting real
+    coverage of mega-caps, because headlines print the company name rather than
+    the symbol. Relevance drives both the display sort and the
+    relevance-weighted aggregate sentiment, so a false 1.0 corrupts the panel.
+
+    Two independent ways to qualify:
+      * the symbol appears as a standalone UPPERCASE token — case-sensitive, so
+        the ordinary word "it" cannot stand in for ticker IT
+      * a distinctive token of the company name appears (case-insensitive)
+    """
+    if not headline:
+        return 0.6
+
+    if symbol and re.search(rf"\b{re.escape(symbol.upper())}\b", headline):
         return 1.0
+
+    low = headline.lower()
+    for tok in _name_tokens(company_name):
+        if re.search(rf"\b{re.escape(tok)}\b", low):
+            return 1.0
+
     return 0.6
 
 
@@ -144,7 +191,8 @@ _YF_RSS_URL = "https://finance.yahoo.com/rss/headline?s={symbol}"
 _RSS_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
-def _fetch_yf_rss(symbol: str, max_age_hours: int = 72) -> List[NewsItem]:
+def _fetch_yf_rss(symbol: str, max_age_hours: int = 72,
+                  company_name: Optional[str] = None) -> List[NewsItem]:
     """Fetch and parse Yahoo Finance per-ticker RSS feed."""
     items: List[NewsItem] = []
     try:
@@ -184,7 +232,7 @@ def _fetch_yf_rss(symbol: str, max_age_hours: int = 72) -> List[NewsItem]:
                 continue
 
             sentiment = _score_headline_sentiment(headline)
-            relevance = _boost_relevance(headline, symbol)
+            relevance = _boost_relevance(headline, symbol, company_name)
             items.append(NewsItem(
                 headline=headline,
                 source=source_name,
@@ -201,7 +249,8 @@ def _fetch_yf_rss(symbol: str, max_age_hours: int = 72) -> List[NewsItem]:
 
 # ── Source 2: Finviz ticker news ───────────────────────────────────────────────
 
-def _fetch_finviz_news(symbol: str, max_age_hours: int = 72) -> List[NewsItem]:
+def _fetch_finviz_news(symbol: str, max_age_hours: int = 72,
+                       company_name: Optional[str] = None) -> List[NewsItem]:
     """Fetch news from Finviz via finvizfinance library."""
     items: List[NewsItem] = []
     if not _HAS_FINVIZ:
@@ -237,7 +286,7 @@ def _fetch_finviz_news(symbol: str, max_age_hours: int = 72) -> List[NewsItem]:
                 continue
 
             sentiment = _score_headline_sentiment(headline)
-            relevance = _boost_relevance(headline, symbol)
+            relevance = _boost_relevance(headline, symbol, company_name)
             items.append(NewsItem(
                 headline=headline,
                 source=source,
@@ -448,6 +497,7 @@ def fetch_news_and_events(
     ticker_obj=None,
     max_age_hours: int = 72,
     max_headlines: int = 5,
+    company_name: Optional[str] = None,
 ) -> NewsData:
     """
     Aggregate news and analyst events for *symbol* from all configured sources.
@@ -479,8 +529,10 @@ def fetch_news_and_events(
 
     # Build concurrent fetch list
     fetch_fns = [
-        ("yf_rss", lambda: _fetch_yf_rss(symbol, max_age_hours=max_age_hours)),
-        ("finviz", lambda: _fetch_finviz_news(symbol, max_age_hours=max_age_hours)),
+        ("yf_rss", lambda: _fetch_yf_rss(symbol, max_age_hours=max_age_hours,
+                                         company_name=company_name)),
+        ("finviz", lambda: _fetch_finviz_news(symbol, max_age_hours=max_age_hours,
+                                              company_name=company_name)),
     ]
     av_key = os.environ.get("ALPHAVANTAGE_API_KEY", "")
     if av_key:
