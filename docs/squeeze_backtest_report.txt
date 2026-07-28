@@ -1,0 +1,79 @@
+
+SQUEEZE GRADER — POINT-IN-TIME BACKTEST
+──────────────────────────────────────────────────────────────────────────────
+  settlement dates : 205  (2018-01-12 → 2026-07-15)
+  panel rows       : 810,266
+  symbols          : 9,120
+  float assumption : shares_out × 1.25
+  ret_5d rule      : as_written
+  iv_skew          : unavailable (no option history for these names)
+
+  grade distribution (gradeable rows only)
+    SETUP    16,397  ( 3.4%)
+    WATCH    23,700  ( 4.9%)
+    NONE    443,682  (91.7%)
+
+  coverage check — rows dropped for missing EDGAR shares-outstanding
+    gradeable       480,744  (59.8% of priced rows)
+    ungradeable     323,248
+    P(+2σ) kept   6.0% vs dropped   5.5%   gap +0.44pp
+    P(-2σ) kept   4.6% vs dropped   5.5%
+    (a small gap means the join is ~random w.r.t. outcome)
+
+──────────────────────────────────────────────────────────────────────────────
+  OUTCOME PROFILE BY GRADE   (tail = path max ≥ k·σ, σ = trailing 60d vol)
+──────────────────────────────────────────────────────────────────────────────
+    H grade         n  P(+2σ)  P(+3σ)  P(-2σ)    asym  med max  med end  P(+20%)
+   10 SETUP    16,397   6.5%   2.4%   4.2%   2.3%   5.1%  -0.3%  12.0%
+   10 WATCH    23,700   5.6%   2.0%   3.6%   2.0%   4.9%  -0.3%  11.7%
+   10 NONE    443,682   4.8%   1.4%   4.5%   0.3%   3.4%   0.2%   4.6%
+
+   21 SETUP    16,211   7.9%   3.2%   4.2%   3.7%   8.6%  -0.8%  24.2%
+   21 WATCH    23,472   7.3%   2.7%   3.7%   3.6%   8.4%  -0.5%  23.1%
+   21 NONE    441,061   5.8%   1.6%   4.6%   1.2%   5.6%   0.4%  11.0%
+
+   42 SETUP    15,915  10.0%   4.0%   4.1%   5.9%  13.5%  -1.5%  38.0%
+   42 WATCH    22,967   9.1%   3.5%   3.4%   5.7%  13.3%  -1.1%  36.7%
+   42 NONE    435,779   6.9%   2.0%   4.6%   2.3%   8.7%   0.6%  21.2%
+
+──────────────────────────────────────────────────────────────────────────────
+  LIFT: SETUP − NONE   (moving-block bootstrap over settlement dates, 2,000 draws)
+──────────────────────────────────────────────────────────────────────────────
+  'up' = upside tail rate.  'asym' = upside minus downside tail rate — the
+  control for junk names simply having fat tails in both directions.
+
+  upside tail
+      H   SETUP    NONE      lift             95% CI  p(lift≤0)
+     10   6.5%   4.8%   +1.69pp     [+1.01, +2.36]      0.000
+     21   7.9%   5.8%   +2.12pp     [+1.03, +3.00]      0.000
+     42  10.0%   6.9%   +3.16pp     [+1.89, +4.37]      0.000
+
+  asymmetry
+      H   SETUP    NONE      lift             95% CI  p(lift≤0)
+     10   2.3%   0.3%   +1.97pp     [+1.16, +2.76]      0.000
+     21   3.7%   1.2%   +2.57pp     [+1.33, +3.54]      0.000
+     42   5.9%   2.3%   +3.57pp     [+2.13, +4.91]      0.000
+
+
+──────────────────────────────────────────────────────────────────────────────
+  DOSE-RESPONSE: tail rate by evidence points (21d)
+──────────────────────────────────────────────────────────────────────────────
+    pts        n  P(+2σ)  P(-2σ)
+      0  440,315   5.8%   4.6%  ████████████
+      1      746   6.8%   0.8%  ██████████████
+      2    3,658   7.0%   1.4%  ██████████████
+      3   14,642   7.2%   3.5%  ██████████████
+      4   15,962   7.5%   4.3%  ███████████████
+      5    4,996   8.9%   5.0%  ██████████████████
+      6      425   7.8%   6.6%  ████████████████
+
+    Spearman(points, σ-normalised max move) = +0.0013  95% CI [-0.0466, +0.0393]   n=480,744
+
+──────────────────────────────────────────────────────────────────────────────
+  ROBUSTNESS — same lift under cuts that expose a one-episode result (21d)
+──────────────────────────────────────────────────────────────────────────────
+    full sample            lift  +2.12pp  CI     [+1.03, +2.92]  n_setup=16,211
+    ex 2021 meme window    lift  +2.15pp  CI     [+1.14, +3.04]  n_setup=15,999
+    2018-2022 (train)      lift  +1.88pp  CI     [+0.47, +3.11]  n_setup= 8,418
+    2023-2026 (holdout)    lift  +2.36pp  CI     [+0.93, +3.44]  n_setup= 7,793
+
