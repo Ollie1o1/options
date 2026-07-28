@@ -39,6 +39,11 @@ DEFAULT_OUTLOOK_CONFIG: Dict[str, Any] = {
     "bull_threshold": 0.4,   # composite above this → BULLISH
     "bear_threshold": -0.4,  # below this → BEARISH
     "conviction_gain": 0.9,  # tanh gain mapping composite → 0-100
+    # Recent-action context (display only — NEVER a scored factor). Flags an
+    # instrument whose 21d excess return vs the benchmark falls below this, in
+    # percentage points. Measured as the p10 of that distribution across the
+    # universe. See src/outlook/recent.py.
+    "recent_lag_threshold_pp": -5.2,
     # human labels for drivers
     "factor_labels": {
         "mom_12_1": "12m momentum",
