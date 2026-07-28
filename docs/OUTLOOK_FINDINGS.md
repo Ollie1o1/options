@@ -51,3 +51,33 @@ gate opens and genuine bearish calls can appear.
 - ~8y aligned history (XLC/XLRE start 2018) is mostly a bull regime, so the
   bearish side is under-tested by construction — another reason to treat shorts
   with skepticism.
+
+## reversal_1m weight — tested 2026-07-28, no change warranted
+
+The 1-month reversal factor is negated by construction, so a sharp selloff
+contributes *positively* to a bullish score. On 2026-07-28 that meant SMH read
++0.130 on the factor while down 13% over the month, which prompted the question
+of whether the 0.15 weight is miscalibrated.
+
+Four weight settings were compared on identical aligned price columns (one
+fetch, so the comparison is like-for-like), with a paired bootstrap over
+per-rebalance ICs — 5,000 resamples of the per-date IC difference.
+
+| horizon | variant | ΔIC vs current | 95% CI | verdict |
+|---|---|---:|---|---|
+| 42d | removed (renormalised) | +0.0088 | [−0.0100, +0.0276] | indistinguishable |
+| 42d | sign flipped (= 1m momentum) | +0.0166 | [−0.0142, +0.0487] | indistinguishable |
+| 42d | half weight | +0.0029 | [−0.0081, +0.0139] | indistinguishable |
+| 63d | removed (renormalised) | −0.0034 | [−0.0222, +0.0163] | indistinguishable |
+| 63d | sign flipped | −0.0061 | [−0.0367, +0.0242] | indistinguishable |
+| 63d | half weight | −0.0012 | [−0.0126, +0.0101] | indistinguishable |
+
+Every interval spans zero, and the two horizons disagree on sign — the 42d
+point estimates favour removing or flipping it, the 63d estimates favour
+keeping it. With n≈83 rebalances the study cannot resolve IC differences of
+~0.01, which is the size of every effect here.
+
+**Verdict: leave the weight at 0.15.** There is no evidence it is wrong, and
+changing it on these numbers would be fitting noise. The factor's odd live
+reading is a property of short-horizon reversal, not a demonstrated defect.
+Revisit only with materially more rebalances, not with a different opinion.
