@@ -71,6 +71,19 @@ def narrative(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> List[str]:
             lines.append(f"Leading: {_name(head['ticker'])} ({head['ticker']}) "
                          f"with {others} — {_phrase(head['drivers'])}; these have "
                          f"been doing well and momentum/trend favor continuation.")
+    # The leader's headline claim is about a window that ended a month ago. If
+    # the tape since then disagrees, say so — otherwise the sentence reads as a
+    # statement about the present, which is the bug this fixes.
+    if leaders:
+        head = leaders[0]
+        if head.get("lagging") and head.get("ret_21d") is not None \
+                and head.get("excess_21d") is not None:
+            lines.append(
+                f"Note: {head['ticker']} is {head['ret_21d']:+.1%} over the past "
+                f"month ({head['excess_21d']:+.1f}pp vs SPY); the 1-3mo score "
+                f"excludes the last month by design, so this ranking is not a "
+                f"claim about the last few weeks.")
+
     lag_names = ", ".join(f"{_name(r['ticker'])} ({r['ticker']})" for r in laggards)
     lines.append(f"Lagging: {lag_names} — weak momentum/trend; relatively soft, "
                  f"lean underweight (not a high-confidence short).")
