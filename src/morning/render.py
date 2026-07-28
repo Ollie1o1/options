@@ -380,6 +380,17 @@ def _zone_signals(p) -> str:
                 names = ", ".join(_esc(r.get("ticker") or r.get("symbol")) for r in rows)
                 parts.append(f"<p class='note'>{label}: "
                              f"<span class='{cls}'>{names}</span></p>")
+                # The 1-3mo score excludes the last month by construction, so a
+                # top-ranked name can be falling right now. Say so.
+                for r in rows:
+                    if r.get("lagging") and r.get("ret_21d") is not None \
+                            and r.get("excess_21d") is not None:
+                        parts.append(
+                            "<p class='muted'>• {t}: {m:+.1%} past month "
+                            "({e:+.1f}pp vs SPY) — the 1–3mo score excludes the "
+                            "last month</p>".format(
+                                t=_esc(r.get("ticker") or r.get("symbol")),
+                                m=r["ret_21d"], e=r["excess_21d"]))
         if ol.get("as_of"):
             parts.append(f"<p class='muted'>as of {_esc(ol['as_of'])}</p>")
     return "".join(parts) or "<p class='muted'>No active signals this morning.</p>"

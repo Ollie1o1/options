@@ -332,10 +332,20 @@ def _tab_macro(data):
             if d in ("SHORT", "BEARISH"):
                 return "b"
             return "mut"
+        def _lag_note(r):
+            # The 1-3mo score excludes the last month by construction, so a
+            # top-ranked name can be falling right now. Say so.
+            if not r.get("lagging") or r.get("excess_21d") is None \
+                    or r.get("ret_21d") is None:
+                return ""
+            return (' <span class="mut">({m:+.1%} past month, {e:+.1f}pp vs SPY)</span>'
+                    .format(m=r["ret_21d"], e=r["excess_21d"]))
+
         body = "".join(
-            '<div class="evt"><span class="m {c}">{d}</span> {t}</div>'.format(
+            '<div class="evt"><span class="m {c}">{d}</span> {t}{n}</div>'.format(
                 c=_dir_tone(r.get("direction")),
-                d=_esc(r.get("direction")), t=_esc(r.get("ticker")))
+                d=_esc(r.get("direction")), t=_esc(r.get("ticker")),
+                n=_lag_note(r))
             for r in (ol.get("top") or []) + (ol.get("bottom") or []))
         grid.append(_card("Sector outlook (1-3mo relative)", body, span=4))
     grid.append("</div>")
