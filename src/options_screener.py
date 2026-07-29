@@ -2889,6 +2889,19 @@ def is_auto_mode() -> bool:
     return _AUTO_MODE
 
 
+def suppress_prompts_for(args) -> bool:
+    """Whether this invocation asked not to be prompted.
+
+    Only --auto does. --mode/--ticker/--auto-log choose *what* gets scanned; the
+    operator still has a tty and still wants the save menu when it finishes.
+    Keying off the session-loop's `_interactive` flag instead swept those in and
+    silently ate the Save/Export prompt on a hand-run `--ticker AAPL`. Every
+    run.py shortcut that is genuinely unattended already carries --auto in its
+    expansion (see run.py's _SCORING_BASE), so --auto alone is sufficient.
+    """
+    return bool(getattr(args, "auto", False))
+
+
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     # --auto, or a non-TTY (pipes/CI/cron): take the default rather than block.
     if _AUTO_MODE:
@@ -4785,7 +4798,8 @@ def main():
                     and not args.ticker and not getattr(args, "auto_log", False))
     # Let prompt_input resolve to defaults too, so a hand-run `run.py -ds` does
     # not stall on the ticker-source prompt with --auto already in its expansion.
-    set_auto_mode(bool(args.auto) or not _interactive)
+    # Deliberately narrower than _interactive — see suppress_prompts_for.
+    set_auto_mode(suppress_prompts_for(args))
     while True:
         # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
         _wl = load_watchlist()

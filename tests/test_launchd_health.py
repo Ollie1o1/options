@@ -85,36 +85,38 @@ class TestMessage(unittest.TestCase):
         self.assertNotIn("Login Items", launchd_failure_message(jobs))
 
 
+def _fresh_report():
+    """A report where every job is current — nothing to warn about on its own."""
+    from datetime import date
+
+    from src.maintenance_health import WORKING_WINDOWS, compute_health
+
+    today = date(2026, 7, 29).isoformat()
+    state = {
+        "last_autolog": {w: today for w in WORKING_WINDOWS},
+        "last_checkpoint": today,
+        "last_track_record": today,
+        "last_chain_archive": today,
+        "last_morning_briefing": today,
+    }
+    return compute_health(state, date(2026, 7, 29))
+
+
 class TestBannerSurfacing(unittest.TestCase):
     """A dead scheduler must show even when the state file looks fresh — that
     combination is the whole bug, since opening the screener by hand stamps the
     state file and hides six weeks of nothing running."""
 
-    def _fresh_report(self):
-        from datetime import date
-
-        from src.maintenance_health import WORKING_WINDOWS, compute_health
-
-        today = date(2026, 7, 29).isoformat()
-        state = {
-            "last_autolog": {w: today for w in WORKING_WINDOWS},
-            "last_checkpoint": today,
-            "last_track_record": today,
-            "last_chain_archive": today,
-            "last_morning_briefing": today,
-        }
-        return compute_health(state, date(2026, 7, 29))
-
     def test_a_fresh_report_alone_produces_no_banner(self):
         from src.maintenance_health import health_banner
 
-        self.assertEqual(health_banner(self._fresh_report()), "")
+        self.assertEqual(health_banner(_fresh_report()), "")
 
     def test_a_dead_scheduler_forces_a_banner_despite_fresh_state(self):
         from src.maintenance_health import health_banner
 
         jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
-        banner = health_banner(self._fresh_report(), launchd_jobs=jobs)
+        banner = health_banner(_fresh_report(), launchd_jobs=jobs)
         self.assertNotEqual(banner, "")
         self.assertIn("Login Items", banner)
 
@@ -122,7 +124,63 @@ class TestBannerSurfacing(unittest.TestCase):
         from src.maintenance_health import health_banner
 
         jobs = parse_launchctl_list(_HEALTHY, "com.ollie.options")
-        self.assertEqual(health_banner(self._fresh_report(), launchd_jobs=jobs), "")
+        self.assertEqual(health_banner(_fresh_report(), launchd_jobs=jobs), "")
+
+
+class TestBannerFitsItsBox(unittest.TestCase):
+    """The launchd line is the longest string the banner can emit — three job
+    names plus the exit-78 remedy runs ~280 chars. ui.card pads but never wraps,
+    so an unwrapped line pushes the right border off screen on every startup."""
+
+    def setUp(self):
+        from src import formatting as fmt
+
+        self._saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False  # plain text, so len() is the visible width
+
+    def tearDown(self):
+        from src import formatting as fmt
+
+        fmt._COLOR_ENABLED = self._saved
+
+    def _widths(self, banner):
+        return {len(ln) for ln in banner.splitlines()}
+
+    def test_every_line_of_a_dead_scheduler_banner_is_one_width(self):
+        from src.maintenance_health import health_banner
+
+        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        banner = health_banner(_fresh_report(), width=100, launchd_jobs=jobs)
+        self.assertEqual(self._widths(banner), {100})
+
+    def test_it_holds_when_stale_jobs_and_a_dead_scheduler_stack(self):
+        # Both branches of health_banner emit launchd_msg; this is the other one.
+        from datetime import date
+
+        from src.maintenance_health import WORKING_WINDOWS, compute_health, health_banner
+
+        stale = "2026-06-01"
+        state = {
+            "last_autolog": {w: stale for w in WORKING_WINDOWS},
+            "last_checkpoint": stale,
+            "last_track_record": stale,
+            "last_chain_archive": stale,
+            "last_morning_briefing": stale,
+        }
+        report = compute_health(state, date(2026, 7, 29))
+        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        banner = health_banner(report, width=100, launchd_jobs=jobs)
+        self.assertEqual(self._widths(banner), {100})
+
+    def test_the_remedy_survives_wrapping(self):
+        from src.maintenance_health import health_banner
+
+        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        banner = health_banner(_fresh_report(), width=100, launchd_jobs=jobs)
+        # Wrapping must not shred the one instruction that fixes it.
+        flat = " ".join(ln.strip("│ ") for ln in banner.splitlines())
+        self.assertIn("Login Items", flat)
+        self.assertIn("Allow in the Background", flat)
 
 
 if __name__ == "__main__":

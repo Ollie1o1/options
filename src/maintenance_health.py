@@ -235,6 +235,28 @@ def _glyph(name: str, fallback: str = "") -> str:
 _SEV_STYLE = {"WARN": "warn", "STALE": "warn", "CRITICAL": "bad"}
 
 
+def _wrap_body(lines: List[str], width: int) -> List[str]:
+    """Wrap body lines to the card's inner width.
+
+    ``ui.card`` pads to a fixed width but never wraps, so any line longer than
+    the box pushes the right border off screen. The launchd message is the one
+    that gets there — three job names plus the exit-78 remedy is ~280 chars —
+    and it renders on every startup while the agents are down.
+
+    Body lines are plain text at this point (only the title carries ANSI), so a
+    plain textwrap is safe. Long tokens are left intact so paths and the
+    `python -m src.maintenance --health` command stay copy-pasteable.
+    """
+    import textwrap
+
+    inner = max(20, width - 4)  # "│ " + body + " │"
+    out: List[str] = []
+    for line in lines:
+        out.extend(textwrap.wrap(line, inner, break_long_words=False,
+                                 break_on_hyphens=False) or [""])
+    return out
+
+
 def health_banner(report: HealthReport, width: int = 100,
                   launchd_jobs: Optional[List["LaunchdJob"]] = None) -> str:
     """A loud, escalating banner — empty string when everything is fresh.
@@ -254,8 +276,10 @@ def health_banner(report: HealthReport, width: int = 100,
         warn = _glyph("warn", "!")
         title = _style(f"{warn} SCHEDULER DEAD — nothing is running on a timer",
                        "err", bold=True)
-        body = [launchd_msg,
-                "State files look current because interactive runs stamp them too."]
+        body = _wrap_body(
+            [launchd_msg,
+             "State files look current because interactive runs stamp them too."],
+            width)
         if _ui is not None:
             return _ui.card(title, body, width, boxed=True)
         rule = _style("─" * width, "err")
@@ -289,6 +313,7 @@ def health_banner(report: HealthReport, width: int = 100,
     body.append("Launch during market hours to catch up, or run "
                 "`python -m src.maintenance --health` for detail.")
 
+    body = _wrap_body(body, width)
     styled_title = _style(title, sev, bold=True)
     if _ui is not None:
         # ui.card pads on visible width, so a pre-styled (ANSI) title aligns.

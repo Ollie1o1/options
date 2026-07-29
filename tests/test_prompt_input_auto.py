@@ -52,5 +52,44 @@ class TestPromptInputAutoMode(unittest.TestCase):
         self.assertFalse(S.is_auto_mode())
 
 
+class _Args:
+    """Stand-in for the parsed argparse namespace main() builds."""
+
+    def __init__(self, **kw):
+        self.auto = False
+        self.mode = None
+        self.ticker = None
+        self.auto_log = False
+        self.__dict__.update(kw)
+
+
+class TestSuppressPromptsFor(unittest.TestCase):
+    """Which invocations may skip prompts.
+
+    The first version of this keyed off the session-loop's `_interactive` flag,
+    which is already false for --mode/--ticker/--auto-log. That silently ate the
+    Save/Export menu on a hand-run `--ticker AAPL`: prompt_input returned the
+    "" default, so the menu broke out before the operator could log the pick.
+    """
+
+    def test_auto_suppresses(self):
+        self.assertTrue(S.suppress_prompts_for(_Args(auto=True)))
+
+    def test_plain_run_does_not_suppress(self):
+        self.assertFalse(S.suppress_prompts_for(_Args()))
+
+    def test_scan_selectors_alone_do_not_suppress(self):
+        # These say *what* to scan, not that the operator stopped wanting the
+        # save menu. run.py's unattended shortcuts all carry --auto as well.
+        for kw in ({"ticker": "AAPL"}, {"mode": "discover"}, {"auto_log": True}):
+            with self.subTest(**kw):
+                self.assertFalse(S.suppress_prompts_for(_Args(**kw)))
+
+    def test_selectors_combined_with_auto_still_suppress(self):
+        # `run.py -ds` → --mode discover --auto-log --log-top 5 --auto
+        args = _Args(auto=True, mode="discover", auto_log=True)
+        self.assertTrue(S.suppress_prompts_for(args))
+
+
 if __name__ == "__main__":
     unittest.main()
