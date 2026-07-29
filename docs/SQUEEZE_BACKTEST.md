@@ -98,6 +98,45 @@ move is +0.001 (CI [−0.047, +0.039]) — indistinguishable from zero. Short
 interest deciles, by contrast, are monotone: P(+20%) climbs 9.0% → 23.1% from
 D1 to D10.
 
+### Re-measured 2026-07-29, after the rescoring — and the claim above was over-read
+
+The baseline had been computed ad hoc and never committed, so it could not be
+re-run when the grader was rescored on 2026-07-28. It is now
+`study.si_only_comparison` and prints as a section of `--run`. Same panel, float
+at 80% of shares outstanding, paired moving-block bootstrap over settlement
+dates:
+
+| horizon | grader | SI-only | difference | 95% CI | overlap |
+|---:|---:|---:|---:|---|---:|
+| 10d | 3.46pp | 3.34pp | −0.12pp | [−0.90, +0.59] | 44% |
+| 21d | 5.38pp | 5.31pp | −0.06pp | [−0.93, +0.70] | 44% |
+| 42d | 7.79pp | 7.46pp | −0.33pp | [−1.48, +0.79] | 44% |
+
+Two things follow, and the second matters more.
+
+**The rescoring closed the gap.** SI-only no longer leads; the two are level at
+every horizon, and the grader is nominally ahead at all three.
+
+**The original claim was never resolvable by this design.** The headline above
+rests on a +0.62pp gap (4.36 − 3.74). The interval on that difference is roughly
+±0.9pp — wider than the effect it was asserting. So "the scoring adds nothing"
+was a point estimate read as a result. The honest statement then and now is that
+this study cannot distinguish the grader from a pure short-interest ranking in
+either direction. Note also that a difference whose interval spans zero is not
+evidence the scoring adds value; it is evidence the question is open.
+
+What *is* resolvable and unchanged: the short-interest level carries the signal
+(monotone deciles, +2.57pp SETUP-vs-NONE asymmetry lift surviving every cut),
+while evidence points correlate with outcome at +0.001. Overlap falling from
+77% to 44% says the rescored grader now selects a substantially different cohort
+than pure SI ranking and arrives at the same place — it moves names around
+without improving them.
+
+**Reproduce:** `python -m src.squeeze.backtest --run`, "BASELINE" section. The
+grader figures here (5.38pp at 21d) do not match the 4.73pp quoted for the
+rescoring on 2026-07-28; that number was measured before this section existed
+and its exact parameters were not recorded. Trust the reproducible one.
+
 **Two scored factors are backwards.** Within the top 5% by short interest,
 bootstrapped effect on asymmetry:
 

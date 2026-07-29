@@ -154,7 +154,7 @@
       "cost_wall": "clears",
       "thesis": "Letting an OTM spread expire worthless avoids the closing leg entirely. STRENGTHENED 2026-07-29 by the real broker schedule: on Wealthsimple, assignment is US$0 and auto-exercise is US$0, so expiry costs nothing at all — the objection this idea was hedging against (assignment risk on ITM-at-expiry) carries no fee, only the position risk. The '$22.60 fixed round trip' framing is retired: commission is US$0, so the round trip is spread plus 1.5% currency conversion each way, both of which are avoided entirely by not trading out.",
       "evidence": "docs/PROFITABILITY_FINDINGS.md section 7; Wealthsimple fee schedule verified 2026-07-29 (options commission US$0, contract fee US$0, assignment US$0, auto-exercise US$0). Mechanism behind the NFLX +56% gross / -1.5% net exit.",
-      "next_step": "One real cost remains and it is large: EARLY exercise is US$45, as is a do-not-exercise instruction. Against a $122 median credit a single early assignment wipes out a third of a year's edge on that line. So the rule should be 'hold to expiry, but never be forced to act early' — quantify how often the short leg goes deep ITM before expiry before changing the exit rule."
+      "next_step": "The hazard is not the fee, and the fee is not assignment. Being assigned costs $0; so does auto-exercise. The US$45 is charged only for INSTRUCTIONS the operator issues — an early exercise, or a do-not-exercise to block an automatic one. The scenario that matters is a spread that finishes PARTIALLY in the money: short leg assigned (free), long leg expired worthless, leaving an unhedged 100-share position worth multiples of the account. The $45 is then the cost of escaping it, which is trivial next to the position itself. So the rule is 'hold to expiry, but never sit in the partial-ITM zone into the close'. Quantify how often the short strike is breached while the long strike is not, in the final days, before changing any exit rule."
     },
     {
       "id": "prefer-bull-put-at-small-size",
@@ -292,12 +292,12 @@
       "id": "squeeze-si-only-baseline-recheck",
       "title": "Re-run the SI-level-only baseline against the rescored grader",
       "area": "options",
-      "status": "proposed",
+      "status": "shipped",
       "conviction": "high",
       "cost_wall": "n/a",
-      "thesis": "The original study's sharpest finding was that ranking by short-interest level ALONE beat the full grader: +4.36pp asymmetry vs +3.74pp, with 77% cohort overlap and Spearman +0.001 between evidence points and outcome. The 2026-07-28 rescoring lifted the grader to +4.73pp, but the SI-only baseline was never re-measured under the same conditions. If SI-only still wins, the multi-factor scoring is decoration and should be deleted rather than tuned.",
-      "evidence": "docs/SQUEEZE_BACKTEST.md 'The scoring adds nothing over its own gate'; rescoring measured 2026-07-28 but only against the old grader, not against SI-only.",
-      "next_step": "Re-run SI-level-only ranking on the current panel, same horizons and bootstrap, and compare to +4.73pp. Deleting scoring that does not beat a one-line baseline is a win, not a loss."
+      "thesis": "The original study's sharpest finding was that ranking by short-interest level ALONE beat the full grader: +4.36pp asymmetry vs +3.74pp. RE-MEASURED 2026-07-29 against the rescored grader on the same panel: the two are level at every horizon — 21d grader +5.38pp vs SI-only +5.31pp, difference -0.06pp with a 95% CI of [-0.93, +0.70]. The rescoring closed the gap. But the more useful result is that the ORIGINAL claim was never resolvable: it rested on a +0.62pp gap while the interval on that difference is about +/-0.9pp, wider than the effect being asserted. 'The scoring adds nothing' was a point estimate read as a result.",
+      "evidence": "Shipped as src/squeeze/backtest/study.si_only_comparison, printed by `--run`; docs/SQUEEZE_BACKTEST.md re-measurement section. Cohort overlap fell 77% -> 44%, so the rescored grader picks a substantially different cohort and lands in the same place.",
+      "next_step": "Do not delete the scoring on this evidence, and do not defend it either — an interval spanning zero is not proof of value. The decision now rests on parsimony rather than measurement, and that is a judgement call to make deliberately. What IS resolvable and unchanged: short-interest level carries the signal (monotone deciles) while evidence points correlate at +0.001. If the scoring is kept, it should be justified as a display aid, not as a ranker."
     },
     {
       "id": "dead-retune-reversal-1m",

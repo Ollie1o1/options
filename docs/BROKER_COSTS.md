@@ -65,10 +65,14 @@ it came to $1,098.
 
 These are unmodelled, deliberately, and each will flatter results until fixed:
 
-1. **Early exercise (US$45).** Assignment and auto-exercise are free, so holding
-   to expiry costs nothing — but being forced to act early costs $45 against a
-   median credit of $122. Not modelled because the ledger has no early-exercise
-   events to calibrate against.
+1. **Early exercise (US$45).** The $45 is charged only for *instructions you
+   issue* — exercising early, or a do-not-exercise to block an automatic one.
+   Assignment and auto-exercise are both free, so a spread held to expiry costs
+   nothing however it settles. The real hazard is a **partially in-the-money**
+   finish: the short leg is assigned (free) while the long leg expires
+   worthless, leaving an unhedged 100-share position worth several times the
+   account. The $45 is merely the cost of escaping that. Not modelled, because
+   the ledger contains no such events to calibrate against.
 2. **Index option contract fees.** `commission_per_contract` is a single number
    and cannot express per-symbol pricing. Harmless today (the ledger trades SPY,
    QQQ and IWM, which are ETFs and genuinely free) but wrong the moment any SPX

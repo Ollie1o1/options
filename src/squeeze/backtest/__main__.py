@@ -128,6 +128,28 @@ def report(rows: List[dict], horizons=(10, 21, 42), k: float = 2.0,
 
     print()
     print(_RULE)
+    print("  BASELINE: short-interest ranking alone vs the full grader")
+    print(_RULE)
+    print("  The null the scoring has to beat. Same number of names per settlement")
+    print("  date, chosen on short interest and nothing else. Paired block bootstrap.")
+    print()
+    print(f"    {'H':>3} {'grader':>9} {'SI-only':>9} {'diff':>9} {'95% CI':>20} {'overlap':>8}")
+    for h in horizons:
+        sb = _study.si_only_comparison(rows, h, k, n_boot=n_boot)
+        if not sb.get("n_dates"):
+            continue
+        print(f"    {h:>3} {100 * sb['grader_asymmetry']:>8.2f}pp "
+              f"{100 * sb['si_only_asymmetry']:>8.2f}pp "
+              f"{100 * sb['difference']:>+8.2f}pp "
+              f"[{100 * sb['ci_lo']:>+6.2f}, {100 * sb['ci_hi']:>+6.2f}]pp "
+              f"{100 * sb['overlap']:>7.0f}%")
+    print()
+    print("  A difference whose interval spans zero does not mean the scoring adds")
+    print("  value — it means this design cannot tell. Read the interval width against")
+    print("  the size of the claim being made before concluding anything either way.")
+
+    print()
+    print(_RULE)
     print("  DOSE-RESPONSE: tail rate by evidence points (21d)")
     print(_RULE)
     mono = _study.monotonicity(rows, 21, k)

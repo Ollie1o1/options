@@ -24,6 +24,130 @@ GRADES = ("SETUP", "WATCH", "NONE")
 MEME_WINDOW = ("2021-01-01", "2021-03-31")
 
 
+def select_top_by_si(panel: Sequence[dict], n_by_date: Dict[str, int]) -> List[dict]:
+    """The n highest short-interest names on each date, n taken per date.
+
+    This is the null the grader has to beat: no scoring, no factors, just rank
+    by short interest and take the same number of names the grader took. Sizing
+    per date rather than globally matters because inference bootstraps over
+    dates — a baseline drawing its names from a different set of dates would not
+    be comparable however well the totals matched.
+
+    Rows without a short-interest ratio are ungradeable and therefore absent
+    from the grader's cohort, so they are not selectable here either. Ties break
+    on symbol so the cohort does not depend on panel ordering.
+    """
+    by_date: Dict[str, List[dict]] = {}
+    for row in panel:
+        date = row.get("date")
+        if date is None or date not in n_by_date or row.get("si_ratio") is None:
+            continue
+        by_date.setdefault(date, []).append(row)
+
+    picked: List[dict] = []
+    for date, rows in by_date.items():
+        rows.sort(key=lambda r: (-float(r["si_ratio"]), str(r.get("symbol") or "")))
+        picked.extend(rows[: n_by_date[date]])
+    return picked
+
+
+def cohort_overlap(a: Sequence[dict], b: Sequence[dict]) -> float:
+    """Share of cohort ``a`` also present in ``b``, keyed on (date, symbol).
+
+    A high overlap means the comparison is close to a paired one: the two
+    selections are largely the same names, and any difference in outcome comes
+    from the minority they disagree about.
+    """
+    def keys(rows):
+        return {(r.get("date"), r.get("symbol")) for r in rows}
+
+    ka = keys(a)
+    if not ka:
+        return 0.0
+    return len(ka & keys(b)) / len(ka)
+
+
+def _cohort_date_counts(rows: Sequence[dict], horizon: int, k: float
+                        ) -> Dict[str, Tuple[int, int, int]]:
+    """Per-date (n, up-crossings, down-crossings) for one cohort."""
+    zk, zdk = f"z_{horizon}", f"zdn_{horizon}"
+    acc: Dict[str, List[int]] = {}
+    for r in rows:
+        z, zd = r.get(zk), r.get(zdk)
+        if z is None or zd is None:
+            continue
+        cell = acc.setdefault(r["date"], [0, 0, 0])
+        cell[0] += 1
+        cell[1] += 1 if z >= k else 0
+        cell[2] += 1 if zd <= -k else 0
+    return {d: (c[0], c[1], c[2]) for d, c in acc.items()}
+
+
+def si_only_comparison(panel: Sequence[dict], horizon: int, k: float = 2.0,
+                       n_boot: int = 2000, seed: int = 7, block: int = 4) -> dict:
+    """Does ranking on short interest alone beat the multi-factor grader?
+
+    Takes the grader's SETUP count on each date, selects that many names by
+    short interest alone, and compares the two cohorts' asymmetry
+    (P(+kσ) − P(−kσ)) with a moving-block bootstrap over settlement dates.
+
+    The bootstrap is **paired**: each draw takes a block of dates and computes
+    both cohorts on those same dates. Resampling them independently would carry
+    the between-date variance twice and could hide a real difference behind an
+    interval built mostly out of market conditions common to both.
+
+    A baseline that wins here is not a tuning opportunity. It means the scoring
+    is decoration over its own gate and should be deleted rather than adjusted.
+    """
+    setup_by_date: Dict[str, int] = {}
+    for r in panel:
+        if r.get("grade") == "SETUP":
+            setup_by_date[r["date"]] = setup_by_date.get(r["date"], 0) + 1
+
+    grader_rows = [r for r in panel if r.get("grade") == "SETUP"]
+    si_rows = select_top_by_si(panel, setup_by_date)
+
+    g_counts = _cohort_date_counts(grader_rows, horizon, k)
+    s_counts = _cohort_date_counts(si_rows, horizon, k)
+    dates = sorted(set(g_counts) & set(s_counts))
+    if not dates:
+        return {"n_dates": 0, "grader_n": 0, "si_only_n": 0}
+
+    arr = np.array([[*g_counts[d], *s_counts[d]] for d in dates], dtype=float)
+
+    def _asym(block_sums: np.ndarray) -> Tuple[float, float]:
+        gn, gu, gd, sn, su, sd = block_sums
+        g = (gu / gn - gd / gn) if gn else float("nan")
+        s = (su / sn - sd / sn) if sn else float("nan")
+        return g, s
+
+    grader_asym, si_asym = _asym(arr.sum(axis=0))
+
+    rng = np.random.default_rng(seed)
+    n_dates = len(dates)
+    n_blocks = max(1, math.ceil(n_dates / block))
+    diffs = []
+    for _ in range(n_boot):
+        starts = rng.integers(0, max(1, n_dates - block + 1), size=n_blocks)
+        idx = np.concatenate([np.arange(s, min(s + block, n_dates)) for s in starts])
+        g, s = _asym(arr[idx].sum(axis=0))
+        if not (math.isnan(g) or math.isnan(s)):
+            diffs.append(s - g)
+
+    diffs_arr = np.array(diffs) if diffs else np.array([0.0])
+    return {
+        "n_dates": n_dates,
+        "grader_n": int(arr[:, 0].sum()),
+        "si_only_n": int(arr[:, 3].sum()),
+        "grader_asymmetry": float(grader_asym),
+        "si_only_asymmetry": float(si_asym),
+        "difference": float(si_asym - grader_asym),
+        "ci_lo": float(np.percentile(diffs_arr, 2.5)),
+        "ci_hi": float(np.percentile(diffs_arr, 97.5)),
+        "overlap": cohort_overlap(si_rows, grader_rows),
+    }
+
+
 def _mask(panel: List[dict], grade: Optional[str] = None,
           date_lo: Optional[str] = None, date_hi: Optional[str] = None,
           exclude_lo: Optional[str] = None, exclude_hi: Optional[str] = None) -> List[dict]:
