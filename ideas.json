@@ -119,8 +119,8 @@
       "status": "proposed",
       "conviction": "medium",
       "cost_wall": "fails",
-      "thesis": "A NFLX $1-wide spread hit its 50%-of-credit take-profit at +56% gross and settled at -1.5% net. Fixed percentage exits ignore that costs are a fixed dollar amount per contract.",
-      "evidence": "Auto-close log 2026-07-27.",
+      "thesis": "A NFLX $1-wide spread hit its 50%-of-credit take-profit at +56% gross and settled at -1.5% net. Fixed percentage exits ignore what the round trip costs. REFRAMED 2026-07-29: costs are NOT a fixed dollar amount per contract on this broker — commission is US$0. What remains is the bid-ask (measured per structure: $0.163/share Bull Put, $0.025 Bear Call) plus 1.5% currency conversion each way, both proportional to what is traded. So the rule should compare modelled net against the spread being crossed, not against a fixed toll.",
+      "evidence": "Auto-close log 2026-07-27; cost measurement in multileg-slippage-is-a-flat-floor; Wealthsimple fee schedule verified 2026-07-29.",
       "next_step": "Require modelled net P&L > 0 before a take-profit fires. Note: changes live exit behaviour across the open book and the gate cohort - deliberate decision, not a cleanup."
     },
     {
@@ -152,9 +152,9 @@
       "status": "proposed",
       "conviction": "high",
       "cost_wall": "clears",
-      "thesis": "Round-trip cost on a 2-leg vertical is a fixed $22.60. Letting an OTM spread expire worthless pays only the opening legs, halving the toll: Bear Call 48% of max profit -> 24%, Bull Put 18% -> 9%. At 700 CAD this is the single cheapest improvement available and needs no new signal.",
-      "evidence": "docs/PROFITABILITY_FINDINGS.md section 7. Mechanism behind the NFLX +56% gross / -1.5% net exit.",
-      "next_step": "Costs assignment risk against cost saving for ITM-at-expiry cases; the current take-profit rule exists partly to avoid that. Quantify before changing exit rules."
+      "thesis": "Letting an OTM spread expire worthless avoids the closing leg entirely. STRENGTHENED 2026-07-29 by the real broker schedule: on Wealthsimple, assignment is US$0 and auto-exercise is US$0, so expiry costs nothing at all — the objection this idea was hedging against (assignment risk on ITM-at-expiry) carries no fee, only the position risk. The '$22.60 fixed round trip' framing is retired: commission is US$0, so the round trip is spread plus 1.5% currency conversion each way, both of which are avoided entirely by not trading out.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 7; Wealthsimple fee schedule verified 2026-07-29 (options commission US$0, contract fee US$0, assignment US$0, auto-exercise US$0). Mechanism behind the NFLX +56% gross / -1.5% net exit.",
+      "next_step": "One real cost remains and it is large: EARLY exercise is US$45, as is a do-not-exercise instruction. Against a $122 median credit a single early assignment wipes out a third of a year's edge on that line. So the rule should be 'hold to expiry, but never be forced to act early' — quantify how often the short leg goes deep ITM before expiry before changing the exit rule."
     },
     {
       "id": "prefer-bull-put-at-small-size",
@@ -375,6 +375,28 @@
       "thesis": "There is no Makefile, justfile or scripts/test entry point, and the options venv deliberately has no pytest, so every local run is an ad-hoc loader. Globbing tests/test_*.py collects 962 tests; globbing tests/**/test_*.py recursively collects 1,885. The narrow form silently skips entire packages \u2014 tests/outlook, tests/squeeze \u2014 while still reporting a confident green.",
       "evidence": "Observed 2026-07-28: 962 vs 1,885 from the two glob forms; both reported 0 failures. `unittest discover` cannot start at all — tests/ is not an importable package.",
       "next_step": "Shipped 2026-07-29: scripts/test.sh -> scripts/run_tests.py loads every test module by path and prints what it collected AND what it could not (1,953 tests from 217 modules; 8 pytest-only modules named, not hidden). A module that fails to import only because pytest is absent is reported, not counted as red — an always-red exit code would be ignored, which is the failure mode this was meant to prevent. Remaining: reference it in CLAUDE.md."
+    },
+    {
+      "id": "usd-account-vs-conversion-spread",
+      "title": "A USD account may pay for itself against the 1.5% conversion spread",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "thesis": "Trading US-listed options from a CAD account converts currency both ways at Wealthsimple's 1.5% spread (below US$10k of conversions; 1.0% to $25k, 0.5% to $100k, 0% above). Nothing in this repo modelled that until now, and it is the largest remaining cost in the book once commissions are correctly set to zero: $1,098 of conversion across 187 closed credit trades in the cohort window alone. A USD account removes it for $10/month.",
+      "evidence": "Wealthsimple fee schedule verified 2026-07-29; scripts/cost_model_report.py prints the conversion total. Note the cost scales with money moved, not contract count, so it cannot be traded around by using fewer legs.",
+      "next_step": "Check actual annual conversion volume rather than this window's, then decide. Two things to confirm first, because both change the answer: whether the tiered rate is assessed on cumulative annual conversions or per transaction, and whether holding USD in the account leaves idle cash uninvested in a way that costs more than the spread saves."
+    },
+    {
+      "id": "index-options-are-not-free",
+      "title": "Index options carry a per-contract fee the model treats as zero",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "unknown",
+      "thesis": "Wealthsimple's US$0 contract fee covers equity and ETF options only. Index options are charged: SPX and SPXW US$1.00 per contract, VIX US$1.00, RUT/RUTW US$0.50, XSP US$0.25. config.paper_trading.commission_per_contract is a single number and now reads 0.0, so any index-option result the system produces understates its cost. Today this is latent rather than live — the ledger trades SPY, QQQ and IWM, which are ETFs and genuinely free — but index-put-spread-capacity is an active idea and SPX is the natural venue for it.",
+      "evidence": "Wealthsimple fee schedule verified 2026-07-29.",
+      "next_step": "Before any SPX work, make the commission lookup per-symbol rather than a single constant. A $1/contract fee on a 2-leg vertical is $4 round trip, which is small against SPX-sized credits but is not zero and must not be assumed away by a config field that cannot express it."
     },
     {
       "id": "cleanup-dead-files-and-flags",

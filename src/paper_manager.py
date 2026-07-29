@@ -521,17 +521,31 @@ class PaperManager:
             _pt = _cfg.get("paper_trading", {})
             self._commission_per_contract = float(_pt.get("commission_per_contract", COMMISSION_PER_CONTRACT))
             self._slippage_per_share = float(_pt.get("slippage_per_share", SLIPPAGE_PER_SHARE))
+            self._fx_conversion_rate = float(_pt.get("fx_conversion_rate", 0.0) or 0.0)
             _cap = (_cfg.get("auto_log") or {}).get("max_capital_at_risk")
             self._max_capital_at_risk = float(_cap) if _cap not in (None, "", 0) else None
         except Exception:
             self._commission_per_contract = COMMISSION_PER_CONTRACT
             self._slippage_per_share = SLIPPAGE_PER_SHARE
+            self._fx_conversion_rate = 0.0
             self._max_capital_at_risk = None
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
         # Count of trades refused for exceeding the budget this session. Callers
         # print it so a feeder that has gone quiet is visibly gated, not broken.
         self.unaffordable_rejected = 0
         self._init_db()
+
+    def _fx_per_share(self, premium: float) -> float:
+        """Currency conversion cost per share on a round trip of this premium.
+
+        A CAD account converts to USD to open and back to CAD to close, paying
+        the spread each way. Unlike commission this scales with the money moved,
+        so it is the dominant remaining cost on large positions and is invisible
+        on a per-contract fee schedule. Zero with a USD account.
+        """
+        if not self._fx_conversion_rate:
+            return 0.0
+        return abs(float(premium or 0)) * self._fx_conversion_rate * 2
 
     @contextmanager
     def _get_connection(self):
@@ -1299,6 +1313,10 @@ class PaperManager:
                     # Friction: 2 commissions × number of legs (round trip), 2 slippage × legs
                     n_legs = len(legs)
                     friction = (2 * self._slippage_per_share * n_legs) + (2 * self._commission_per_contract * n_legs / 100.0)
+                    # Currency conversion is charged on the credit moved, not per
+                    # leg — a CAD account converts both ways regardless of how
+                    # many legs the structure has.
+                    friction += self._fx_per_share(entry_credit)
                     friction_fraction = friction / entry_credit if entry_credit > 0 else 0.0
                     # Compute the structural max-loss floor (loss in pct-of-credit units).
                     # For a credit spread: floor = -(width / credit - 1).
@@ -1407,6 +1425,7 @@ class PaperManager:
                     # Realistic P&L: proportional slippage (30% of bid-ask) + commissions
                     _slip = self._get_spread_slippage(ticker, expiration, strike, option_type, entry_price)
                     _friction = (2 * _slip) + (2 * self._commission_per_contract / 100.0)
+                    _friction += self._fx_per_share(entry_price)
                     friction_fraction = _friction / entry_price if entry_price > 0 else 0.0
                     # No floor for short legs — loss can exceed entry premium (e.g. short call bought back at 2x)
                     pnl_realistic = pnl_raw - friction_fraction

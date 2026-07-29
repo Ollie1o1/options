@@ -13,6 +13,7 @@ live quoted spread, so the flat constant was never applied to them.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from collections import defaultdict
@@ -20,7 +21,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.execution_costs import CostModel, load_measured_model, reprice_pnl_pct  # noqa: E402
+from src.execution_costs import (  # noqa: E402
+    CostModel,
+    fx_cost,
+    load_measured_model,
+    reprice_pnl_pct,
+)
 
 _MULTI_LEG = {"Bull Put", "Bear Call", "Iron Condor"}
 
@@ -33,12 +39,25 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default="paper_trades.db")
     ap.add_argument("--archive", default="data/chain_archive.db")
+    ap.add_argument("--config", default="config.json")
     ap.add_argument("--since", default="2026-05-27", help="cohort start date")
     args = ap.parse_args()
 
-    measured = load_measured_model(args.archive, args.db)
+    with open(args.config) as fh:
+        pt = json.load(fh).get("paper_trading", {})
+    commission = float(pt.get("commission_per_contract", 0.0) or 0.0)
+    fx_rate = float(pt.get("fx_conversion_rate", 0.0) or 0.0)
+
+    measured = load_measured_model(args.archive, args.db,
+                                   commission_per_contract=commission,
+                                   fx_rate=fx_rate)
+    # What the book was actually booked at: flat $0.05 spread, US-retail
+    # commission, and no currency conversion at all.
     flat = CostModel(table={}, default_half_spread=0.05,
-                     commission_per_contract=measured.commission_per_contract)
+                     commission_per_contract=0.65, fx_rate=0.0)
+    print(f"Booked under: flat $0.050 spread, $0.65/contract, no FX")
+    print(f"Re-priced at: measured spreads, ${commission:.2f}/contract, "
+          f"{fx_rate:.1%} conversion each way\n")
 
     print("Measured half-spreads (median $/share, from archived quotes of the")
     print("exact contracts logged, on their own entry dates):")
@@ -91,6 +110,17 @@ def main() -> int:
         print(f"{'TOTAL':12s} {sum(c['n'] for c in agg.values()):4d} "
               f"{tot_old:+11.0f} {tot_new:+11.0f} {tot_new - tot_old:+10.0f} "
               f"{100 * tot_old / tot_risk:+10.1f}% {100 * tot_new / tot_risk:+9.1f}%")
+
+    if fx_rate:
+        fx_total = sum(
+            fx_cost(abs(r["net_credit"] or r["entry_price"] or 0) * 100, fx_rate)
+            for r in rows
+        )
+        print(f"\nOf the re-priced cost, currency conversion alone is ${fx_total:,.0f} "
+              f"across {len(rows)} trades.")
+        print(f"A USD account removes it for $10/month ($120/yr). On this book's "
+              f"conversion volume that is {'worth it' if fx_total > 120 else 'not worth it'} "
+              f"— but check your own annual conversion total, not this window's.")
 
     print("""
 Read this as "the cost assumption was driving the comparison", not as "Bear Call

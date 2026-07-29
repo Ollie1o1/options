@@ -131,9 +131,23 @@ class TestExpress(unittest.TestCase):
         self.assertEqual(margins, sorted(margins, reverse=True))
 
     def test_costs_load_from_config_not_hardcoded(self):
-        comm, slip = E.load_costs("config.json")
-        self.assertAlmostEqual(comm, 0.65)
-        self.assertAlmostEqual(slip, 0.05)
+        # Asserts the values come from the file, using values that are nobody's
+        # default. Pinning the production numbers here made this test fail the
+        # moment the real broker's fees were configured, which tests the config
+        # rather than the code.
+        import json
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"paper_trading": {"commission_per_contract": 1.23,
+                                         "slippage_per_share": 0.42}}, fh)
+            path = fh.name
+        try:
+            comm, slip = E.load_costs(path)
+        finally:
+            os.unlink(path)
+        self.assertAlmostEqual(comm, 1.23)
+        self.assertAlmostEqual(slip, 0.42)
 
     def test_missing_config_falls_back_to_defaults(self):
         comm, slip = E.load_costs("/nonexistent/config.json")

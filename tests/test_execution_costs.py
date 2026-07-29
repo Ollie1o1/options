@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.execution_costs import (
     CostModel,
+    fx_cost,
     half_spread_for,
     measure_half_spreads,
     reprice_pnl_pct,
@@ -91,6 +92,56 @@ class TestCostModelOnATrade(unittest.TestCase):
     def test_zero_credit_does_not_divide_by_zero(self):
         model = CostModel(table={}, default_half_spread=0.05, commission_per_contract=0.65)
         self.assertEqual(model.friction_fraction("Bull Put", 0.0, 2), 0.0)
+
+
+class TestCurrencyConversion(unittest.TestCase):
+    """A CAD account trading US-listed options converts on the way in and again
+    on the way out. Wealthsimple's spread is 1.5% under $10k of conversions,
+    which is a real cost the model never carried — and unlike commission it
+    scales with the money moved, not the contract count."""
+
+    def test_premium_pays_the_spread_in_both_directions(self):
+        # $1.00/share premium, 100 shares: $1.50 in, $1.50 out.
+        self.assertAlmostEqual(fx_cost(cash_usd=100.0, rate=0.015), 3.0)
+
+    def test_one_way_conversion_for_a_position_left_to_expire(self):
+        self.assertAlmostEqual(
+            fx_cost(cash_usd=100.0, rate=0.015, round_trip=False), 1.5
+        )
+
+    def test_a_usd_account_removes_the_cost(self):
+        # $10/month buys a USD account and a 0% conversion rate.
+        self.assertEqual(fx_cost(cash_usd=100.0, rate=0.0), 0.0)
+
+    def test_cost_scales_with_size_not_with_legs(self):
+        self.assertAlmostEqual(
+            fx_cost(1000.0, 0.015), 10 * fx_cost(100.0, 0.015)
+        )
+
+
+class TestWealthsimpleFeeShape(unittest.TestCase):
+    """With $0 commission and $0 contract fees, friction is spread plus FX."""
+
+    def test_zero_commission_leaves_only_the_spread(self):
+        f = round_trip_friction(n_legs=2, half_spread=0.05, commission_per_contract=0.0)
+        self.assertAlmostEqual(f, 0.20)
+
+    def test_friction_fraction_includes_conversion_when_a_rate_is_set(self):
+        no_fx = CostModel(table={}, default_half_spread=0.05,
+                          commission_per_contract=0.0, fx_rate=0.0)
+        with_fx = CostModel(table={}, default_half_spread=0.05,
+                            commission_per_contract=0.0, fx_rate=0.015)
+        self.assertGreater(
+            with_fx.friction_fraction("Bull Put", 1.00, 2),
+            no_fx.friction_fraction("Bull Put", 1.00, 2),
+        )
+
+    def test_conversion_is_charged_on_the_credit_actually_moved(self):
+        # $1.00 credit x 100 = $100 converted, 1.5% each way = $3.00 = $0.03/share.
+        model = CostModel(table={}, default_half_spread=0.0,
+                          commission_per_contract=0.0, fx_rate=0.015)
+        self.assertAlmostEqual(model.friction("Bull Put", n_legs=2, entry_credit=1.00),
+                               0.03)
 
 
 class TestRepricing(unittest.TestCase):

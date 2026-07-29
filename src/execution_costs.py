@@ -90,6 +90,20 @@ def half_spread_for(strategy: str, table: Dict[str, Dict[str, Any]],
     return default
 
 
+def fx_cost(cash_usd: float, rate: float, round_trip: bool = True) -> float:
+    """Currency conversion cost on money moved, in dollars.
+
+    A CAD account buying US-listed options converts on the way in and back on
+    the way out. Wealthsimple's spread is 1.5% below US$10k of conversions,
+    stepping to 1.0% / 0.5% / 0% at $25k / $100k thresholds, or 0% outright with
+    a USD account at $10/month. Unlike a contract fee this scales with the size
+    of the position, so it hits long premium hardest and does not shrink by
+    trading fewer legs.
+    """
+    sides = 2 if round_trip else 1
+    return abs(float(cash_usd)) * float(rate) * sides
+
+
 def round_trip_friction(n_legs: int, half_spread: float,
                         commission_per_contract: float,
                         round_trip: bool = True) -> float:
@@ -115,21 +129,32 @@ class CostModel:
 
     def __init__(self, table: Optional[Dict[str, Dict[str, Any]]] = None,
                  default_half_spread: float = 0.05,
-                 commission_per_contract: float = 0.65):
+                 commission_per_contract: float = 0.65,
+                 fx_rate: float = 0.0,
+                 multiplier: float = 100.0):
         self.table = table or {}
         self.default_half_spread = float(default_half_spread)
         self.commission_per_contract = float(commission_per_contract)
+        self.fx_rate = float(fx_rate)
+        self.multiplier = float(multiplier)
 
     def half_spread(self, strategy: str) -> float:
         return half_spread_for(strategy, self.table, self.default_half_spread)
 
-    def friction(self, strategy: str, n_legs: int, round_trip: bool = True) -> float:
-        return round_trip_friction(
+    def friction(self, strategy: str, n_legs: int, entry_credit: float = 0.0,
+                 round_trip: bool = True) -> float:
+        """Friction per share: spread and commissions, plus currency conversion
+        on the premium actually moved."""
+        cost = round_trip_friction(
             n_legs=n_legs,
             half_spread=self.half_spread(strategy),
             commission_per_contract=self.commission_per_contract,
             round_trip=round_trip,
         )
+        if self.fx_rate and entry_credit:
+            cash = abs(float(entry_credit)) * self.multiplier
+            cost += fx_cost(cash, self.fx_rate, round_trip) / self.multiplier
+        return cost
 
     def friction_fraction(self, strategy: str, entry_credit: float, n_legs: int,
                           round_trip: bool = True) -> float:
@@ -139,7 +164,7 @@ class CostModel:
         credit = float(entry_credit or 0)
         if credit <= 0:
             return 0.0
-        return self.friction(strategy, n_legs, round_trip) / credit
+        return self.friction(strategy, n_legs, credit, round_trip) / credit
 
 
 def reprice_pnl_pct(pnl_pct: float, strategy: str, entry_credit: float, n_legs: int,
@@ -160,11 +185,12 @@ def reprice_pnl_pct(pnl_pct: float, strategy: str, entry_credit: float, n_legs: 
 def load_measured_model(archive_db: str = DEFAULT_ARCHIVE,
                         ledger_db: str = DEFAULT_LEDGER,
                         default_half_spread: float = 0.05,
-                        commission_per_contract: float = 0.65) -> CostModel:
+                        commission_per_contract: float = 0.0,
+                        fx_rate: float = 0.0) -> CostModel:
     """CostModel backed by the archive, falling back to the flat constant if the
     archive is absent or unreadable."""
     try:
         table = measure_half_spreads(archive_db, ledger_db)
     except sqlite3.Error:
         table = {}
-    return CostModel(table, default_half_spread, commission_per_contract)
+    return CostModel(table, default_half_spread, commission_per_contract, fx_rate)
