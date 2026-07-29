@@ -174,6 +174,18 @@ def _legs_for_row(r) -> list:
     return [(str(r.get("type", "")).lower(), strike, sign)]
 
 
+def _ror_cell(value: Optional[float]) -> str:
+    """Format return-on-capital-at-risk for the breakdown table.
+
+    NULL capital_at_risk is normal on rows logged before the column existed, so
+    this reads n/a rather than 0% — a strategy with no risk data has no return
+    on risk, not a flat one.
+    """
+    if value is None:
+        return f"{'n/a':>7}"
+    return f"{value * 100:>+6.1f}%"
+
+
 def _is(strategy_name: str) -> bool:
     return _is_short(strategy_name)
 
@@ -1375,7 +1387,8 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
                 else:
                     print(strat_db_hdr)
                     print(sep)
-                col_hdr = f"    {'Strategy':<24} {'Trades':>6}  {'Win%':>5}  {'Avg P&L':>9}  {'Total P&L':>10}"
+                col_hdr = (f"    {'Strategy':<24} {'Trades':>6}  {'Win%':>5}  "
+                           f"{'Avg P&L':>9}  {'Total P&L':>10}  {'On Risk':>7}")
                 if HAS_FMT and fmt:
                     print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
                 else:
@@ -1385,7 +1398,9 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
                     avg = row["avg_pnl"] * 100
                     tot = row["total_pnl"] * 100
                     strat_name = (row["strategy"] or "Unknown").split(":")[0].strip()[:24]
-                    line = f"    {strat_name:<24} {row['total']:>6}  {wr:>4.0f}%  {avg:>+8.1f}%  {tot:>+9.1f}%"
+                    line = (f"    {strat_name:<24} {row['total']:>6}  {wr:>4.0f}%  "
+                            f"{avg:>+8.1f}%  {tot:>+9.1f}%  "
+                            f"{_ror_cell(row.get('return_on_risk'))}")
                     if HAS_FMT and fmt:
                         lc = fmt.Colors.GREEN if row["avg_pnl"] > 0 else fmt.Colors.RED
                         print(fmt.colorize(line, lc))

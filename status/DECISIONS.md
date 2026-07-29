@@ -4,6 +4,38 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-07-29 — Auto-log refuses positions bigger than the account; gate untouched
+
+**Why:** The feeder had no size limit — the budget filter only ever applied in
+"Budget scan" mode, and DISCOVER is documented "no budget limit". The result:
+capital at risk per logged trade ranged $22 to $83,650 against a $750 budget, and
+**every dollar of the book's loss sat in trades the account could not have opened**.
+Over the cohort window, trades inside the budget are +$3,283 (+6.3% of capital
+risked, n=247); trades above it are −$19,741 (n=160). Long Call alone goes
+−$21,718 → +$183 once the unaffordable half is dropped. So the headline
+"Long Call bleeds $17.6k" was a sizing artifact, not a signal result.
+
+**Decision:** `config.auto_log.max_capital_at_risk = 750` (= `default_budget`), enforced
+in `PaperManager.log_trade` — the single chokepoint all eight log sites funnel
+through. Rejections print and increment `unaffordable_rejected` so a gated feeder
+is visibly gated, never silently starved. `allow_unaffordable=True` bypasses it for
+deliberate manual entries. Risk per structure is defined once in `src/capital_risk.py`
+and stored per row (schema v16); ad-hoc `max_loss_usd or entry_price*100` was
+costing a cash-secured put at the *credit received* rather than the collateral,
+understating a WFC 77.5 put ~50×. Set the key to `null` to disable.
+
+**Cost, accepted deliberately:** this refuses 108 of 242 historical Long Calls, 94 of
+99 Short Puts and 116 of 160 Iron Condors, so cohort accrual slows markedly. Measuring
+a population the account cannot trade faster is not worth having.
+
+**Explicitly NOT changed:** the gate. `phase1_checkpoint` now *reports* the affordable
+subset beside the nominal one (currently IC +0.086 p=0.50 n=64 nominal vs +0.119
+p=0.52 n=31 affordable — neither resolves anything at this n), but the READY/EXTEND/
+STOP rule still reads the nominal cohort. Re-pointing the gate is a human call to be
+made on its own, per the 2026-06-07 no-silent-gate-change decision.
+
+---
+
 ## 2026-06-07 — Built Phase 3 execution stack now (inert), not after READY
 
 **Why:** Building the execution layer (`src/execution/`: sizing, exits, ticket,

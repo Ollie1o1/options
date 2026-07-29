@@ -27,7 +27,13 @@ import numpy as np
 from scipy.stats import norm, pearsonr, spearmanr
 
 
-def _load_cohort(db_path: str, phase1_start: str):
+def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[float] = None):
+    """Cohort scores and returns.
+
+    With ``max_capital_at_risk`` set, restricts to trades the account could
+    actually have opened. Rows with NULL capital_at_risk are excluded from that
+    subset rather than assumed affordable — unbounded risk is not small risk.
+    """
     sql = (
         "SELECT quality_score, pnl_pct FROM trades "
         "WHERE strategy_name='Long Call' AND status='CLOSED' "
@@ -35,14 +41,26 @@ def _load_cohort(db_path: str, phase1_start: str):
         "AND date >= ? "
         "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
     )
+    params: tuple = (phase1_start,)
+    if max_capital_at_risk is not None:
+        sql += " AND capital_at_risk IS NOT NULL AND capital_at_risk <= ?"
+        params = (phase1_start, float(max_capital_at_risk))
     scores, returns = [], []
     with sqlite3.connect(db_path) as conn:
-        for q, p in conn.execute(sql, (phase1_start,)).fetchall():
+        for q, p in conn.execute(sql, params).fetchall():
             try:
                 scores.append(float(q)); returns.append(float(p))
             except (TypeError, ValueError):
                 continue
     return np.array(scores), np.array(returns)
+
+
+def _ic(scores: np.ndarray, returns: np.ndarray):
+    """Pearson IC and p-value, or (0.0, 1.0) when the sample cannot support one."""
+    if len(scores) < 3 or scores.std() < 1e-8 or returns.std() < 1e-8:
+        return 0.0, 1.0
+    ic, p = pearsonr(scores, returns)
+    return float(ic), float(p)
 
 
 def _weeks_between(start: str, end: str) -> int:
@@ -83,11 +101,28 @@ def posterior_ic_above(ic: float, n: int, threshold: float = 0.08) -> Optional[f
     return float(1 - norm.cdf((z_thr - z_obs) / se))
 
 
-def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = None) -> dict:
+def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = None,
+                       max_capital_at_risk: Optional[float] = None) -> dict:
+    """Cohort IC and the gate decision.
+
+    ``max_capital_at_risk`` adds a parallel read of the subset the account could
+    actually have traded — roughly half the cohort ties up more than the whole
+    budget. It is reporting only: the decision below still reads the nominal
+    cohort, because changing the gate is a decision to be made deliberately
+    (DECISIONS.md 2026-06-07), not a side effect of adding a column.
+    """
     today = today or datetime.now().strftime("%Y-%m-%d")
     scores, returns = _load_cohort(db_path, phase1_start)
     n = len(scores)
     weeks = _weeks_between(phase1_start, today)
+
+    n_affordable: Optional[int] = None
+    ic_affordable: Optional[float] = None
+    p_affordable: Optional[float] = None
+    if max_capital_at_risk is not None:
+        aff_scores, aff_returns = _load_cohort(db_path, phase1_start, max_capital_at_risk)
+        n_affordable = len(aff_scores)
+        ic_affordable, p_affordable = _ic(aff_scores, aff_returns)
 
     if n < 3 or scores.std() < 1e-8 or returns.std() < 1e-8:
         ic_p, p_p, ic_s, p_s = 0.0, 1.0, 0.0, 1.0
@@ -114,6 +149,10 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
         "ic_spearman": ic_s, "p_spearman": p_s, "ic_95_ci": [ci_lo, ci_hi],
         "decision": decision,
         "posterior_ic_ge_008": posterior_ic_above(ic_p, n, threshold=0.08),
+        "max_capital_at_risk": max_capital_at_risk,
+        "n_affordable": n_affordable,
+        "ic_pearson_affordable": ic_affordable,
+        "p_pearson_affordable": p_affordable,
     }
 
 
@@ -127,10 +166,35 @@ def _format_markdown(r: dict) -> str:
         f"- Pearson IC: **{r['ic_pearson']:+.3f}**  (p={r['p_pearson']:.3f})",
         f"- Spearman IC: {r['ic_spearman']:+.3f}  (p={r['p_spearman']:.3f})",
         f"- 95% bootstrap CI: [{r['ic_95_ci'][0]:+.3f}, {r['ic_95_ci'][1]:+.3f}]",
-        _posterior_line(r.get("posterior_ic_ge_008")), "",
+        _posterior_line(r.get("posterior_ic_ge_008")),
+        *_affordable_lines(r),
+        "",
         f"## Gate decision: **{r['decision']}**", "",
         _decision_explainer(r["decision"]), "",
     ]) + "\n"
+
+
+def _affordable_lines(r: dict) -> list:
+    """The same IC over trades that fit the budget — reporting only.
+
+    Half the cohort has historically tied up more than the whole account, so
+    the nominal IC describes positions that could not have been opened. Both
+    numbers are shown; the gate still reads the nominal one.
+    """
+    n_aff = r.get("n_affordable")
+    if n_aff is None:
+        return []
+    cap = r.get("max_capital_at_risk") or 0
+    ic = r.get("ic_pearson_affordable")
+    p = r.get("p_pearson_affordable")
+    return [
+        "",
+        f"### Affordable subset (capital at risk <= ${cap:,.0f})",
+        f"- Cohort size: **{n_aff} of {r['n_trades']}**",
+        f"- Pearson IC: **{ic:+.3f}**  (p={p:.3f})" if ic is not None else
+        "- Pearson IC: n/a",
+        "- Reporting only — the gate decision above reads the nominal cohort.",
+    ]
 
 
 def _posterior_line(p: Optional[float]) -> str:
@@ -185,7 +249,9 @@ def main() -> None:
     if not phase1_start:
         raise SystemExit("config.json missing auto_log.phase1_start_date")
 
-    result = compute_checkpoint(db_path=args.db, phase1_start=phase1_start)
+    cap = (cfg.get("auto_log") or {}).get("max_capital_at_risk")
+    result = compute_checkpoint(db_path=args.db, phase1_start=phase1_start,
+                                max_capital_at_risk=float(cap) if cap else None)
     print(json.dumps(result, indent=2))
     if not args.dry_run:
         paths = write_checkpoint(result, output_dir=args.output)

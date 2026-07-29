@@ -33,6 +33,7 @@ def _get_yf_and_session():
 
 from .utils import is_short_position as _is_short_position
 from .utils import bs_delta as _bs_delta
+from .capital_risk import capital_at_risk, within_budget
 
 
 def _normalize_exit_rules(config: dict) -> dict:
@@ -317,7 +318,7 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
-_SCHEMA_VERSION = 15
+_SCHEMA_VERSION = 16
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -432,6 +433,16 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN max_price_seen REAL",
         "ALTER TABLE trades ADD COLUMN max_price_date TEXT",
     ],
+    16: [
+        # Dollars the position ties up until it closes, resolved per structure by
+        # src/capital_risk.py. Stored rather than re-derived because every call
+        # site was rolling its own `max_loss_usd or entry_price * 100`, which
+        # costs a cash-secured put at the credit received instead of the
+        # collateral — understating a 77.5-strike short put by ~50x. Strategy
+        # comparisons and the auto-log budget gate both read this column.
+        # NULL means risk could not be bounded from the stored fields.
+        "ALTER TABLE trades ADD COLUMN capital_at_risk REAL",
+    ],
 }
 
 
@@ -510,10 +521,16 @@ class PaperManager:
             _pt = _cfg.get("paper_trading", {})
             self._commission_per_contract = float(_pt.get("commission_per_contract", COMMISSION_PER_CONTRACT))
             self._slippage_per_share = float(_pt.get("slippage_per_share", SLIPPAGE_PER_SHARE))
+            _cap = (_cfg.get("auto_log") or {}).get("max_capital_at_risk")
+            self._max_capital_at_risk = float(_cap) if _cap not in (None, "", 0) else None
         except Exception:
             self._commission_per_contract = COMMISSION_PER_CONTRACT
             self._slippage_per_share = SLIPPAGE_PER_SHARE
+            self._max_capital_at_risk = None
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
+        # Count of trades refused for exceeding the budget this session. Callers
+        # print it so a feeder that has gone quiet is visibly gated, not broken.
+        self.unaffordable_rejected = 0
         self._init_db()
 
     @contextmanager
@@ -598,11 +615,39 @@ class PaperManager:
             catalyst_score, em_realism_score, gamma_theta_score, gex_score, gamma_magnitude_score,
             gamma_pin_score, iv_velocity_score, max_pain_score, oi_change_score, option_rvol_score,
             pcr_score, sentiment_score_norm, spread_score, trader_pref_score
+
+        Returns True if the row was inserted, False if it was refused for
+        exceeding ``auto_log.max_capital_at_risk``. Pass
+        ``allow_unaffordable=True`` to log a deliberate over-budget entry.
         """
         if not trade_dict.get("strategy_name"):
             raise ValueError("strategy_name is required; must include 'short'/'long' to set P&L direction")
         if float(trade_dict.get("entry_price", 0)) <= 0:
             raise ValueError(f"Cannot log trade: entry_price must be > 0, got {trade_dict.get('entry_price')}")
+
+        # Budget gate. The feeder had no size limit, so 160 of 407 closed cohort
+        # trades tied up more than the whole account and carried every dollar of
+        # the book's loss. Refuse them at the door rather than measuring a
+        # population the account could never trade.
+        risk = capital_at_risk(
+            strategy_name=trade_dict["strategy_name"],
+            entry_price=trade_dict.get("entry_price"),
+            strike=trade_dict.get("strike"),
+            max_loss_usd=trade_dict.get("max_loss_usd"),
+            quantity=trade_dict.get("quantity", 1.0),
+            ticker=trade_dict.get("ticker"),
+        )
+        if not trade_dict.get("allow_unaffordable") and not within_budget(
+            risk, self._max_capital_at_risk
+        ):
+            self.unaffordable_rejected += 1
+            shown = f"${risk:,.0f}" if risk is not None else "unbounded"
+            print(
+                f"Skipped {trade_dict['strategy_name']} on {trade_dict.get('ticker')}: "
+                f"capital at risk {shown} exceeds the "
+                f"${self._max_capital_at_risk:,.0f} budget"
+            )
+            return False
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -621,7 +666,7 @@ class PaperManager:
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
-            paper_only, era, lottery_edge
+            paper_only, era, lottery_edge, capital_at_risk
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -629,7 +674,7 @@ class PaperManager:
             ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?
+            ?, ?, ?, ?
         )
         """
 
@@ -706,12 +751,14 @@ class PaperManager:
             # New trades belong to the post-overhaul 'finalized' era unless told otherwise.
             trade_dict.get("era", "finalized"),
             (int(bool(trade_dict["lottery_edge"])) if trade_dict.get("lottery_edge") is not None else None),
+            risk,
         )
 
         with self._get_connection() as conn:
             conn.execute(query, params)
 
         print(f"Logged {trade_dict['strategy_name']} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
+        return True
 
     def log_trade_if_new(self, trade_dict: Dict[str, Any]) -> bool:
         """Insert a paper trade unless an identical row already exists.
@@ -753,10 +800,10 @@ class PaperManager:
             ).fetchone()
         if row is not None:
             return False
-        self.log_trade(trade_dict)
-        return True
+        # False also when the budget gate refuses it — either way nothing was written.
+        return self.log_trade(trade_dict)
 
-    def log_spread(self, spread_dict: dict) -> None:
+    def log_spread(self, spread_dict: dict) -> bool:
         """Log a multi-leg credit spread as a single paper trade.
 
         Routes through ``log_trade`` so component scores, Greeks, and weight_profile
@@ -796,9 +843,9 @@ class PaperManager:
         # log_trade requires ticker — make sure case-normalized
         trade_dict["ticker"] = str(spread_dict.get("ticker", "")).upper()
 
-        self.log_trade(trade_dict)
+        return self.log_trade(trade_dict)
 
-    def log_iron_condor(self, condor_dict: dict) -> None:
+    def log_iron_condor(self, condor_dict: dict) -> bool:
         """Log an iron condor (4-leg) as a single paper trade.
 
         Required keys: ``ticker, expiration, short_put_strike, long_put_strike,
@@ -841,7 +888,7 @@ class PaperManager:
         trade_dict.setdefault("quality_score", 0.5)
         trade_dict["ticker"] = str(condor_dict.get("ticker", "")).upper()
 
-        self.log_trade(trade_dict)
+        return self.log_trade(trade_dict)
 
     def log_spread_if_new(self, spread_dict: dict) -> bool:
         """Insert a credit spread unless an identical OPEN row already exists for
@@ -873,8 +920,8 @@ class PaperManager:
             ).fetchone()
         if row is not None:
             return False
-        self.log_spread(spread_dict)
-        return True
+        # False also when the budget gate refuses it — nothing was written.
+        return self.log_spread(spread_dict)
 
     def log_iron_condor_if_new(self, condor_dict: dict) -> bool:
         """Same dedup pattern as log_spread_if_new but for 4-leg iron condors."""
@@ -906,8 +953,8 @@ class PaperManager:
             ).fetchone()
         if row is not None:
             return False
-        self.log_iron_condor(condor_dict)
-        return True
+        # False also when the budget gate refuses it — nothing was written.
+        return self.log_iron_condor(condor_dict)
 
     def _get_option_symbol(self, ticker: str, expiration: str, strike: float, option_type: str) -> str:
         """Generates a yfinance-compatible option symbol."""
@@ -1496,14 +1543,24 @@ class PaperManager:
         return base_blended_fraction * reduction, reason
 
     def get_strategy_breakdown(self) -> List[Dict]:
-        """Return win/loss/avg P&L grouped by strategy_name."""
+        """Return win/loss/avg P&L grouped by strategy_name.
+
+        ``return_on_risk`` is total P&L over total capital at risk. Summed
+        dollars alone rank strategies partly by position size — risk per trade
+        spans two orders of magnitude — so a line can lead on dollars while
+        losing money per dollar committed. It is None until the cohort has
+        capital_at_risk populated (see scripts/backfill_capital_at_risk.py).
+        """
         query = """
             SELECT strategy_name,
                    COUNT(*) as total,
                    SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
                    SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses,
                    AVG(pnl_pct) as avg_pnl,
-                   SUM(pnl_pct) as total_pnl
+                   SUM(pnl_pct) as total_pnl,
+                   SUM(CASE WHEN capital_at_risk > 0 THEN capital_at_risk ELSE 0 END) as risk,
+                   SUM(CASE WHEN capital_at_risk > 0 AND pnl_usd IS NOT NULL
+                            THEN pnl_usd ELSE 0 END) as pnl_on_risk
             FROM trades
             WHERE status = 'CLOSED' AND pnl_pct IS NOT NULL
             GROUP BY strategy_name
@@ -1511,12 +1568,17 @@ class PaperManager:
         """
         with self._get_connection() as conn:
             rows = conn.execute(query).fetchall()
-        return [
-            {"strategy": r[0] or "Unknown", "total": r[1], "wins": r[2],
-             "losses": r[3], "win_rate": r[2] / r[1] if r[1] else 0,
-             "avg_pnl": r[4], "total_pnl": r[5]}
-            for r in rows
-        ]
+        out = []
+        for r in rows:
+            risk = r[6] or 0.0
+            out.append({
+                "strategy": r[0] or "Unknown", "total": r[1], "wins": r[2],
+                "losses": r[3], "win_rate": r[2] / r[1] if r[1] else 0,
+                "avg_pnl": r[4], "total_pnl": r[5],
+                "capital_at_risk": risk,
+                "return_on_risk": (r[7] / risk) if risk > 0 else None,
+            })
+        return out
 
     def get_all_trades(self) -> pd.DataFrame:
         """Returns all trades as a pandas DataFrame."""
