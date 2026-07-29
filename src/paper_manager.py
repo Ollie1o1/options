@@ -446,6 +446,26 @@ _MIGRATIONS = {
 }
 
 
+def cost_disclosure(slippage: float, commission: float, fx_rate: float) -> str:
+    """One line naming every cost the ledger charged, and where they come from.
+
+    Printed whenever positions auto-close — it is the only place someone who is
+    not reading config.json finds out what was deducted. Costs that are zero are
+    left out rather than printed as $0.00, so the line always describes what is
+    actually happening on this broker.
+    """
+    parts = []
+    if slippage:
+        parts.append(f"${slippage:.2f}/share spread x2")
+    if commission:
+        parts.append(f"${commission:.2f}/contract commission x2")
+    if fx_rate:
+        parts.append(f"{fx_rate:.1%} CAD/USD conversion x2")
+    if not parts:
+        return "    [costs: no trading costs configured — see docs/BROKER_COSTS.md]"
+    return f"    [costs: {' + '.join(parts)} — see docs/BROKER_COSTS.md]"
+
+
 _CREDIT_STRUCTURES = {"Bull Put", "Bear Call", "Iron Condor"}
 _SHORT_SINGLE_LEGS = {"Short Put", "Short Call"}
 
@@ -1451,7 +1471,9 @@ class PaperManager:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")
             for msg in closed_this_run:
                 print(f"    \u2713 {msg}")
-            print(f"    [costs: ${self._slippage_per_share:.2f}/share slippage ×2 + ${self._commission_per_contract:.2f}/contract commissions ×2]")
+            print(cost_disclosure(self._slippage_per_share,
+                                  self._commission_per_contract,
+                                  self._fx_conversion_rate))
             self._maybe_emit_calibration_threshold_notice()
 
     def get_correlated_open_positions(

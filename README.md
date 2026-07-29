@@ -730,7 +730,9 @@ Flat `take_profit=50% / stop_loss=-25%` doesn't work for options: it's too tight
 | Stop loss | Position worth 2× credit (i.e. raw loss = 1× credit) |
 | Time exit | DTE ≤ 21 and days-held ≥ 3 |
 
-Friction model: per-close costs are `(2 × slippage + 2 × commission/100) × n_legs`, subtracted from raw P/L before persisting `pnl_pct`. Stored `exit_price` = cost-to-close so closed multi-leg trades can be re-derived.
+Friction model: per-close costs are `(2 × slippage + 2 × commission/100) × n_legs`, plus currency conversion on the premium moved, subtracted from raw P/L before persisting `pnl_pct`. Stored `exit_price` = cost-to-close so closed multi-leg trades can be re-derived.
+
+**Every fee is documented in [docs/BROKER_COSTS.md](docs/BROKER_COSTS.md)** — what the broker charges, which costs are modelled, which are knowingly not, and how the bid-ask figures were measured rather than assumed. Configured in `config.json` → `paper_trading`; nothing is hardcoded. Run `python scripts/cost_model_report.py` to see the book re-priced on real costs.
 
 **Long single-leg**:
 
