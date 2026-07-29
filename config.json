@@ -137,8 +137,8 @@
     "phase1_start_date": "2026-05-27",
     "cohort_min_dte": 30,
     "cohort_min_runway_days": 9,
-    "_max_capital_at_risk_note": "Dollars a single position may tie up before the ledger refuses to log it. Set to default_budget: 160 of 407 closed cohort trades exceeded the whole account and carried every dollar of the book's loss. null disables the gate.",
-    "max_capital_at_risk": 750
+    "_max_capital_at_risk_note": "Dollars a single position may tie up before the ledger refuses to log it. A hard ceiling, not a target: set to the most the operator would commit to a single conviction trade. The gate exists because the feeder had no limit at all and was logging $27k and $83k positions. null disables it.",
+    "max_capital_at_risk": 4000
   },
   "dolt_options": {
     "cache_path": "data/dolt_options.db",

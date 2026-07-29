@@ -28,12 +28,12 @@
       "id": "multileg-slippage-is-a-flat-floor",
       "title": "Multi-leg exits are costed at the flat floor while single-leg exits use the real quote",
       "area": "execution",
-      "status": "proposed",
+      "status": "validated",
       "conviction": "high",
-      "cost_wall": "unknown",
-      "thesis": "paper_manager._get_spread_slippage charges 30% of the live bid-ask (floor $0.05, cap $0.50) — but only on the single-leg close path (line 1361). The multi-leg path (line 1254) charges a flat slippage_per_share x n_legs, i.e. the $0.05 floor, no matter what the structure's quote looks like. So the credit spreads that carry the book get the most optimistic cost assumption in the codebase, and every 'clears the cost wall' verdict about them rests on it. Measured against real quotes the floor is roughly half the truth: over 247,085 archived liquid rows the median half-spread is $0.125, near-the-money $0.100, and 66% of NTM quotes exceed $0.05. The p90 NTM half-spread is $0.70, above the $0.50 cap.",
-      "evidence": "src/paper_manager.py:1254 vs :1361; data/chain_archive.db chain_snapshots with bid>0.05, ask>bid, open_interest>=10. Per-symbol NTM mean half-spread spans $0.047 (IWM) to $0.889 (AMD) — a flat constant cannot span that.",
-      "next_step": "Route multi-leg closes through the same quote-proportional function, per leg, and re-price the closed cohort under both models. If Bear Call's +9.1% return-on-risk does not survive doubled friction, hold-to-expiry and prefer-bull-put-at-small-size stop being optimisations and become the only viable form of the trade. Note _get_spread_slippage fetches a live quote at close time and silently falls back to 10% of entry price when yfinance returns no bid/ask for the OCC symbol — check how often that fallback actually fires before trusting either model."
+      "cost_wall": "n/a",
+      "thesis": "paper_manager._get_spread_slippage charges 30% of the live bid-ask (floor $0.05, cap $0.50) — but only on the single-leg close path (line 1361). The multi-leg path (line 1254) charges a flat slippage_per_share x n_legs regardless of what the structure quotes. MEASURED 2026-07-29 against the archived quotes of the exact contracts logged, on their own entry dates (n=172 contract-days): the flat constant is not uniformly optimistic, it is wrong per structure and in OPPOSITE directions. Bull Put's real half-spread is $0.163 against $0.050 charged (3.2x undercharged); Bear Call's is $0.025 (2x OVERcharged); Iron Condor $0.055 (about right). Re-pricing the closed credit book on that basis flips the ranking: Bull Put +$3,952 -> +$802 (RoR +32.6% -> +6.6%), Bear Call +$571 -> +$1,491 (+9.1% -> +23.8%), book +$4,313 -> +$1,983.",
+      "evidence": "src/paper_manager.py:1254 vs :1361. Measurement and re-pricing shipped 2026-07-29 as src/execution_costs.py + scripts/cost_model_report.py. Caveats are printed with the report and are not decorative: the anchor leg's spread is applied to every leg, sample sizes are tens of contract-days from 15 symbols over 19 snapshot dates, and medians say nothing about exiting a loser in a fast market.",
+      "next_step": "Do NOT read this as 'Bear Call is better'. The defensible claim is that one flat constant cannot price both structures and the line that looked best was the one it flattered — which means prefer-bull-put-at-small-size rests on a cost assumption its own data contradicts. Before rewiring live exits (which changes the open book), widen the measurement: the archive grows ~1 snapshot/trading day, so re-run the report monthly and see whether the per-structure gap holds at larger n."
     },
     {
       "id": "stop-lc-autolog-bleed",
@@ -53,7 +53,7 @@
       "status": "proposed",
       "conviction": "high",
       "cost_wall": "unknown",
-      "thesis": "Bear Call has the best scorer IC (+0.152) and Bull Put the best P&L (+$3,630 at 66% win). Both are short premium, consistent with every prior repo result. The gate ignores both. Normalising for size sharpens rather than weakens this: Bull Put is the only line positive on both aggregate (+32.6%) and median (+31.0%) return-on-risk, and Bull Put and Bear Call are the only lines that sit entirely inside the $750 budget (70/70 and 92/92 trades). If the gate is re-pointed at one structure, the evidence says Bull Put, not the dollar-total leader Long Put.",
+      "thesis": "Bear Call has the best scorer IC (+0.152) and Bull Put the best P&L (+$3,630 at 66% win). Both are short premium, consistent with every prior repo result. The gate ignores both. Normalising for size sharpens rather than weakens this: Bull Put is the only line positive on both aggregate (+32.6%) and median (+31.0%) return-on-risk, and Bull Put and Bear Call are the only lines that sit entirely inside the budget (70/70 and 92/92 trades). AMENDED 2026-07-29: which of the two leads is not settled — re-pricing on measured spreads reverses it (Bull Put +6.6%, Bear Call +23.8%, see multileg-slippage-is-a-flat-floor). The robust claim is the family, not the name: both short-premium lines beat everything else on both cost models, and Long Put's dollar lead is one trade.",
       "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; see rank-strategies-by-return-on-risk and cohort-includes-unaffordable-trades.",
       "next_step": "Write a gate-redesign spec. DECISIONS.md 2026-06-07 forbids silent gate changes - propose, do not edit thresholds."
     },
@@ -163,9 +163,9 @@
       "status": "proposed",
       "conviction": "medium",
       "cost_wall": "clears",
-      "thesis": "Median Bull Put credit is $122.50 vs Bear Call $47.50. The same fixed $22.60 round-trip is 18% vs 48% of max profit. Nothing to do with edge - it is credit-per-trade against a fixed toll.",
-      "evidence": "docs/PROFITABILITY_FINDINGS.md section 7, n=159 credit spreads.",
-      "next_step": "Confirm the credit gap is structural and not an artifact of which strikes the scanner happened to pick."
+      "thesis": "Median Bull Put credit is $122.50 vs Bear Call $47.50. The same fixed $22.60 round-trip is 18% vs 48% of max profit. Nothing to do with edge - it is credit-per-trade against a fixed toll. CONTRADICTED 2026-07-29: the toll is not fixed. It is $0.163/share for Bull Put and $0.025 for Bear Call — measured, not assumed — so the bigger credit comes with a proportionally wider market. Re-priced on real quotes the preference reverses: Bull Put +6.6% return on risk, Bear Call +23.8%. The whole argument was an artifact of costing both structures at the same flat constant.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 7, n=159 credit spreads; superseded by scripts/cost_model_report.py and the measurement in multileg-slippage-is-a-flat-floor.",
+      "next_step": "Do not act on either direction yet — the reversal rests on 28 Bull Put and 39 Bear Call contract-days. What is already safe to conclude is that 'fixed toll vs bigger credit' is the wrong frame: cost scales with the market you are crossing, so compare structures on measured cost per structure or not at all."
     },
     {
       "id": "dead-pop-score-as-ranker",
