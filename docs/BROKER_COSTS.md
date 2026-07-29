@@ -5,7 +5,17 @@
 **Configured in:** `config.json` → `paper_trading`.
 
 If you change broker, plan tier, or open a USD account, change the numbers here
-and in `config.json` together. Nothing in the code hardcodes a fee.
+and in `config.json` together.
+
+**One caveat on that.** Every code path that reads a fee reads it from
+`config.json`, so changing the config changes the system. But the *fallback*
+defaults — used only when the config is missing or unreadable — still hardcode
+the US-retail `0.65` in six places (`paper_manager.COMMISSION_PER_CONTRACT`,
+and function defaults in `dolt_spread`, `dolt_short`, `dolt_vol`,
+`trade_analysis`, `options_screener`). They do not fire in normal operation,
+but a caller that constructs one of those helpers directly without passing a
+commission will silently price at a US broker's rates. Tracked as
+`centralise-fee-defaults` in `ideas.json`.
 
 ---
 

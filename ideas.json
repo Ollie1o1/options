@@ -399,6 +399,17 @@
       "next_step": "Before any SPX work, make the commission lookup per-symbol rather than a single constant. A $1/contract fee on a 2-leg vertical is $4 round trip, which is small against SPX-sized credits but is not zero and must not be assumed away by a config field that cannot express it."
     },
     {
+      "id": "centralise-fee-defaults",
+      "title": "Six modules still hardcode a US-retail commission as their fallback",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "low",
+      "cost_wall": "n/a",
+      "thesis": "Every path that reads a fee reads it from config.json, so the 2026-07-29 switch to Wealthsimple's US$0 took effect everywhere it matters. But the fallback defaults still carry 0.65: paper_manager.COMMISSION_PER_CONTRACT plus function defaults in dolt_spread, dolt_short, dolt_vol, trade_analysis and options_screener. A caller constructing one of those helpers directly, without threading a commission through, silently prices at a US broker's rates — and the number looks deliberate rather than stale.",
+      "evidence": "grep commission_per_contract across src/ 2026-07-29: six hardcoded 0.65 defaults, all reached only when config is absent. No falsy-zero bug — every read uses a .get default rather than `or`, so a configured 0.0 survives.",
+      "next_step": "Low priority precisely because it never fires in normal operation. If touched, put the default in one place (src/execution_costs) and have the rest import it, so there is a single number to change when the broker changes. Do not do this as a drive-by: each module's CLI has its own default and they are load-bearing for the standalone backtests."
+    },
+    {
       "id": "cleanup-dead-files-and-flags",
       "title": "Delete src/launcher.py.bak and retire the --ret5d as_written flag",
       "area": "infra",
