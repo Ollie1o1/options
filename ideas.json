@@ -94,12 +94,12 @@
       "id": "dolt-credit-line-backtest",
       "title": "Backtest the credit lines on the Dolt chains instead of waiting a year for them",
       "area": "options",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "unknown",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "fails",
       "thesis": "gate-is-time-not-data says the binding constraint is calendar, not data — but that is only true for signals nothing historical can express. Bull Put and Bear Call CAN be expressed historically: data/dolt_options.db carries 595,074 chain rows with bid, ask and full Greeks, ~740 dense dates from 2022-01 to 2026-06, with strikes spanning roughly 0.02-0.97 delta. That is enough to construct verticals with real quotes and measure the two lines that carry the book, on data already sitting on disk, without waiting for live accrual.",
-      "evidence": "Schema and coverage verified 2026-07-28: dolt_chain has bid/ask on 593,779 of 595,074 rows; SPY 2025-02-20 shows strikes 490-730 against a 601 spot across 3 expirations.",
-      "next_step": "Reuse the harness shape of src/squeeze/backtest. Two hard caveats to state up front, not discover later: the universe is 8 megacaps plus SPY, so the result is megacap-conditional and does NOT transfer to the DISCOVER universe the scanner actually trades; and 17-19 strikes per expiration means $10-20 strike spacing, so the widths tested will be wider than the $1-5 verticals the live book opens. If those two make the answer untransferable, say so and close the idea rather than shipping a number that looks like validation."
+      "evidence": "RUN 2026-07-29, docs/DOLT_CREDIT_SPREADS.md. 208 weekly entries x 8 megacaps, 2022-2025, real bid/ask crossed, ledger's own exit rules and intrinsic settlement. Bull Put n=1,528 win 66.6% mean -1.89% on max risk; Bear Call n=1,517 win 61.9% mean -2.95%. Both negative even with commissions at the configured US$0 and no FX charged. 29 full max-risk losses (1.9% of trades) carry two thirds of the damage.",
+      "next_step": "CLOSED on the pre-committed condition: the corpus cannot answer the question that was asked. Mean max risk is $1,753-$1,812 against a live median of $54 (Bear Call) and $128 (Bull Put) — 14-32x the structures actually traded — and 52% of positions were quoted on at most one day, so for half the sample the exit rules under test never ran. Reporting these as validation of the live lines would be the 'number that looks like validation' this entry warned against. The one usable negative to keep: wide megacap credit spreads under this book's exit rules lost money on capital at risk with zero commissions, which is worth knowing before anyone widens the live structures toward these sizes on the intuition that width means safety. The gate-shortening ambition fails on its own terms; see gate-is-time-not-data, which stands."
     },
     {
       "id": "day-level-vs-trade-level",

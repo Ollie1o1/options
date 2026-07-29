@@ -38,6 +38,17 @@ def _spread_width(short_strike: float, long_strike: float, side: str) -> float:
     return (long_strike - short_strike) if side == "call" else (short_strike - long_strike)
 
 
+def _marks_seen_label(marks_seen: int) -> str:
+    """Was this position ever actually manageable?
+
+    An exit rule can only fire on a day the chain quotes both legs. With one
+    mark or none, the position rode to expiry unobserved and any loss it took is
+    a statement about the data, not about the strategy — the stop was never
+    offered a chance to fire.
+    """
+    return "unobserved" if marks_seen <= 1 else "managed"
+
+
 def _expiry_close_cost(short_strike: float, long_strike: float, side: str,
                        spot: float) -> float:
     """Debit to flatten a credit spread at expiry, from spot alone.
@@ -127,6 +138,7 @@ def simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
     ei = sdates.index(ed_actual)
     last_credit = None
     last_j = ei
+    marks_seen = 0
     for j in range(ei + 1, len(sdates)):
         d = sdates[j]
         if d > _do.COVERAGE_MAX:
@@ -142,6 +154,7 @@ def simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
             continue
         credit_to_close = cs["ask"] - cl["bid"]
         last_credit = credit_to_close
+        marks_seen += 1
         should_close, reason, _ = _evaluate_multileg_exit(
             rules, entry_credit, credit_to_close, rem_dte, days_held)
         if should_close:
@@ -149,7 +162,9 @@ def simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
             return {"ret": net_pnl / max_risk, "exit_reason": _bucket(reason),
                     "reason_detail": reason, "days_held": days_held,
                     "entry_date": ed_actual, "exit_date": d,
-                    "credit": entry_credit, "max_risk": max_risk}
+                    "credit": entry_credit, "max_risk": max_risk,
+                    "marks_seen": marks_seen,
+                    "observability": _marks_seen_label(marks_seen)}
     # Carried to expiry. Settle at intrinsic on the expiration date rather than
     # at the last quote seen: this chain carries only a few expirations per
     # date, so "last quote" can be weeks early — exactly the window in which a
@@ -172,7 +187,9 @@ def simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
             "days_held": max(0, (_dt.date.fromisoformat(exit_on)
                                  - _dt.date.fromisoformat(ed_actual)).days),
             "entry_date": ed_actual, "exit_date": exit_on,
-            "credit": entry_credit, "max_risk": max_risk}
+            "credit": entry_credit, "max_risk": max_risk,
+            "marks_seen": marks_seen,
+            "observability": _marks_seen_label(marks_seen)}
 
 
 def _bucket(reason: str) -> str:

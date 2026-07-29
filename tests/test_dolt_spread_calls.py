@@ -158,5 +158,24 @@ class TestExpirySettlement(unittest.TestCase):
         )
 
 
+class TestMarksSeen(unittest.TestCase):
+    """How many days a position was actually observable.
+
+    A spread that rides to a full-width loss because the chain had no quotes on
+    the days it breached is a data artifact, not a strategy result — the exit
+    rules were never given a chance to fire. Recording the count is the only way
+    to tell that apart from a genuine gap through the stop.
+    """
+
+    def test_counts_the_days_a_mark_was_available(self):
+        self.assertEqual(sp._marks_seen_label(0), "unobserved")
+
+    def test_a_single_mark_is_still_effectively_unmanaged(self):
+        self.assertEqual(sp._marks_seen_label(1), "unobserved")
+
+    def test_several_marks_count_as_managed(self):
+        self.assertEqual(sp._marks_seen_label(10), "managed")
+
+
 if __name__ == "__main__":
     unittest.main()
