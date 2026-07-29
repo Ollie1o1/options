@@ -2871,8 +2871,28 @@ def log_picks_json(logger: logging.Logger, picks_df: pd.DataFrame, context: Dict
         print(f"Failed to write to log file: {e}")
 
 
+_AUTO_MODE = False
+
+
+def set_auto_mode(enabled: bool) -> None:
+    """Record that --auto was passed, so prompts resolve to their defaults.
+
+    Separate from the non-tty check: an operator running `run.py -ds` by hand
+    has a perfectly good tty and still asked not to be prompted. Without this,
+    --auto only worked when stdin happened to be closed as well.
+    """
+    global _AUTO_MODE
+    _AUTO_MODE = bool(enabled)
+
+
+def is_auto_mode() -> bool:
+    return _AUTO_MODE
+
+
 def prompt_input(prompt: str, default: Optional[str] = None) -> str:
-    # Non-TTY: return default immediately to avoid hanging in pipes/CI
+    # --auto, or a non-TTY (pipes/CI/cron): take the default rather than block.
+    if _AUTO_MODE:
+        return default if default is not None else ""
     if not sys.stdin.isatty() and default is not None:
         return default
     if HAS_ENHANCED_CLI:
@@ -4672,9 +4692,10 @@ def main():
         # otherwise stalls the gate invisibly.
         try:
             from .maintenance import load_state, DEFAULT_STATE_PATH
-            from .maintenance_health import compute_health, health_banner
+            from .maintenance_health import compute_health, health_banner, read_launchd_status
             _banner = health_banner(compute_health(load_state(DEFAULT_STATE_PATH),
-                                                   datetime.now()))
+                                                   datetime.now()),
+                                    launchd_jobs=read_launchd_status())
             if _banner:
                 print(_banner)
         except Exception:
@@ -4762,6 +4783,9 @@ def main():
     # --mode, --ticker, --auto-log) runs exactly one cycle and exits unchanged.
     _interactive = (sys.stdin.isatty() and not args.auto and not args.mode
                     and not args.ticker and not getattr(args, "auto_log", False))
+    # Let prompt_input resolve to defaults too, so a hand-run `run.py -ds` does
+    # not stall on the ticker-source prompt with --auto already in its expansion.
+    set_auto_mode(bool(args.auto) or not _interactive)
     while True:
         # ── Mode Menu (Phase 1) ──────────────────────────────────────────────────
         _wl = load_watchlist()

@@ -138,12 +138,12 @@
       "id": "launchd-health-check",
       "title": "Surface a dead scheduler in maintenance_health",
       "area": "infra",
-      "status": "proposed",
+      "status": "shipped",
       "conviction": "medium",
       "cost_wall": "n/a",
       "thesis": "All three LaunchAgents exited 78 (EX_CONFIG) since ~2026-06-15. maintenance_health reads the state file, which the interactive path also stamps, so it showed mild staleness rather than 'scheduler dead'.",
-      "evidence": "launchctl list; logs/launchagent.log stops 2026-06-15 while maintenance.log continues.",
-      "next_step": "Have maintenance_health shell out to launchctl and check last exit status. Underlying fix is user-only: System Settings > Login Items > Allow in the Background."
+      "evidence": "launchctl list; logs/launchagent.log stops 2026-06-15 while maintenance.log continues. Re-confirmed 2026-07-29: all three agents still report exit 78, so nothing has run on a timer for roughly six weeks.",
+      "next_step": "Shipped 2026-07-29: maintenance_health.read_launchd_status reads launchctl, and health_banner now fires on a dead scheduler INDEPENDENTLY of state freshness — the two occurring together is the whole bug, since interactive runs stamp the state file. Exit 78 prints the actual fix rather than a generic failure. THE UNDERLYING FIX IS STILL PENDING AND IS USER-ONLY: System Settings > General > Login Items & Extensions > Allow in the Background. Until that toggle is flipped, cohort filling only happens when the screener is opened by hand."
     },
     {
       "id": "hold-to-expiry-small-account",
@@ -336,12 +336,12 @@
       "id": "prompt-input-honours-auto",
       "title": "prompt_input should honour --auto, not just a non-tty stdin",
       "area": "infra",
-      "status": "proposed",
+      "status": "shipped",
       "conviction": "medium",
       "cost_wall": "n/a",
       "thesis": "prompt_input falls back to its default only when sys.stdin.isatty() is False; the --auto flag is never consulted. The 2026-07-28 fix gave spawned catch-up children stdin=DEVNULL, which covers every automated path, but an operator running `run.py -ds` by hand in a terminal still stalls at the ticker-source prompt and again at 'Re-sort?' despite --auto being in the expansion.",
       "evidence": "src/options_screener.py prompt_input; run.py _SCORING_BASE includes --auto. Commit 761302d fixed the spawned path only.",
-      "next_step": "Thread the parsed --auto (or an explicit non-interactive flag) into prompt_input so it returns defaults regardless of tty. Small change, removes a whole class of silent stall."
+      "next_step": "Shipped 2026-07-29: options_screener.set_auto_mode / is_auto_mode carry the parsed flag, and prompt_input resolves to its default when either --auto is set or the session is non-interactive. Removes the whole class of silent stall."
     },
     {
       "id": "sizing-engine-never-touches-the-ledger",

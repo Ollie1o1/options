@@ -66,6 +66,75 @@ class JobHealth:
 
 
 @dataclass(frozen=True)
+class LaunchdJob:
+    label: str
+    pid: Optional[int]
+    last_exit_status: int
+
+    @property
+    def failed(self) -> bool:
+        return self.last_exit_status != 0
+
+
+# EX_CONFIG. On macOS this is what a LaunchAgent returns when the OS refuses to
+# run it, which is a permissions decision the user has to reverse by hand — not
+# a bug in the job. Reporting it as a generic failure sends the reader hunting
+# through the script instead of into System Settings.
+_EX_CONFIG = 78
+
+
+def parse_launchctl_list(output: str, prefix: str) -> List["LaunchdJob"]:
+    """Parse `launchctl list` into our jobs. Unparseable lines are skipped.
+
+    The state file cannot answer this question: the interactive path stamps it
+    too, so a scheduler that has not fired in six weeks still looks recent
+    whenever someone opens the screener by hand.
+    """
+    jobs: List[LaunchdJob] = []
+    for line in (output or "").splitlines():
+        parts = line.split("\t") if "\t" in line else line.split()
+        if len(parts) < 3:
+            continue
+        pid_raw, status_raw, label = parts[0], parts[1], parts[-1]
+        if not label.startswith(prefix):
+            continue
+        try:
+            status = int(status_raw)
+        except ValueError:
+            continue
+        pid = int(pid_raw) if pid_raw.isdigit() else None
+        jobs.append(LaunchdJob(label=label, pid=pid, last_exit_status=status))
+    return jobs
+
+
+def launchd_failure_message(jobs: List["LaunchdJob"]) -> Optional[str]:
+    """One line naming dead schedulers, or None when they are all healthy."""
+    failed = [j for j in jobs if j.failed]
+    if not failed:
+        return None
+    names = ", ".join(j.label.rsplit(".", 1)[-1] for j in failed)
+    msg = (f"{len(failed)} scheduled job(s) are not running: {names} "
+           f"(last exit {', '.join(str(j.last_exit_status) for j in failed)})")
+    if any(j.last_exit_status == _EX_CONFIG for j in failed):
+        msg += (". Exit 78 is macOS refusing to launch them — fix in "
+                "System Settings > General > Login Items & Extensions > "
+                "Allow in the Background. Nothing scheduled runs until then")
+    return msg
+
+
+def read_launchd_status(prefix: str = "com.ollie.options") -> List["LaunchdJob"]:
+    """Live `launchctl list`. Returns [] if launchctl is unavailable — this is a
+    diagnostic, and must never be the reason a run fails."""
+    import subprocess
+    try:
+        out = subprocess.run(["launchctl", "list"], capture_output=True,
+                             text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_launchctl_list(out, prefix)
+
+
+@dataclass(frozen=True)
 class HealthReport:
     jobs: List[JobHealth]
     worst: str
@@ -166,14 +235,31 @@ def _glyph(name: str, fallback: str = "") -> str:
 _SEV_STYLE = {"WARN": "warn", "STALE": "warn", "CRITICAL": "bad"}
 
 
-def health_banner(report: HealthReport, width: int = 100) -> str:
+def health_banner(report: HealthReport, width: int = 100,
+                  launchd_jobs: Optional[List["LaunchdJob"]] = None) -> str:
     """A loud, escalating banner — empty string when everything is fresh.
 
     Rendered as a boxed `ui.card` so the banner sits on the same component kit
     as every other panel. Falls back to bare rules if `ui` is unavailable.
+
+    ``launchd_jobs`` is checked independently of state freshness. A dead
+    scheduler and a fresh state file happen together all the time — opening the
+    screener by hand stamps the file — and that combination is precisely how
+    three agents sat dead for six weeks without the banner ever firing.
     """
-    if report.worst == "OK":
+    launchd_msg = launchd_failure_message(launchd_jobs or [])
+    if report.worst == "OK" and not launchd_msg:
         return ""
+    if report.worst == "OK" and launchd_msg:
+        warn = _glyph("warn", "!")
+        title = _style(f"{warn} SCHEDULER DEAD — nothing is running on a timer",
+                       "err", bold=True)
+        body = [launchd_msg,
+                "State files look current because interactive runs stamp them too."]
+        if _ui is not None:
+            return _ui.card(title, body, width, boxed=True)
+        rule = _style("─" * width, "err")
+        return "\n".join([rule, "  " + title] + ["  " + b for b in body] + [rule])
     autolog = next(j for j in report.jobs if j.name == "auto-log")
     sev = _SEV_STYLE.get(report.worst, "warn")
     warn = _glyph("warn", "!")
@@ -198,6 +284,8 @@ def health_banner(report: HealthReport, width: int = 100) -> str:
             continue
         body.append(f"{j.name} last ran {j.last_run or 'never'} "
                     f"({j.business_days_stale} business days ago) [{j.severity}]")
+    if launchd_msg:
+        body.append(launchd_msg)
     body.append("Launch during market hours to catch up, or run "
                 "`python -m src.maintenance --health` for detail.")
 

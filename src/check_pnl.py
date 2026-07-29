@@ -774,8 +774,9 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
     # book actually gets looked at. Silent when maintenance is fresh.
     try:
         from src.maintenance import load_state, DEFAULT_STATE_PATH
-        from src.maintenance_health import compute_health, health_banner
-        _hb = health_banner(compute_health(load_state(DEFAULT_STATE_PATH), datetime.now()))
+        from src.maintenance_health import compute_health, health_banner, read_launchd_status
+        _hb = health_banner(compute_health(load_state(DEFAULT_STATE_PATH), datetime.now()),
+                            launchd_jobs=read_launchd_status())
         if _hb:
             print(_hb)
     except Exception:
