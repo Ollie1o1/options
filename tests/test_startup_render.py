@@ -6,6 +6,7 @@ synchronous in the calling thread, so sys.stdout is always restored."""
 import contextlib
 import io
 import sys
+import tempfile
 import types
 import unittest
 
@@ -22,6 +23,19 @@ def _no_spinner(*_a, **_k):
 
 
 class TestRegimeRender(unittest.TestCase):
+    def setUp(self):
+        # The dashboard is now served cache-first. Without an isolated cache dir
+        # these tests read (and write) the developer's real logs/panel_cache, so
+        # the patched renderer below is silently bypassed whenever that cache
+        # happens to be warm — the suite passes or fails depending on whether
+        # anyone ran the screener recently.
+        self.cache_dir = tempfile.mkdtemp()
+
+    def _render(self, width=90, **kw):
+        kw.setdefault("cache_dir", self.cache_dir)
+        return osc._render_regime_with_exit_enforcement(
+            _fake_pm(), width, spinner_factory=_no_spinner, **kw)
+
     def _patch_dashboard(self, fn):
         orig = rd.print_regime_dashboard
         rd.print_regime_dashboard = fn
@@ -30,8 +44,7 @@ class TestRegimeRender(unittest.TestCase):
     def test_dashboard_captured_and_stdout_restored(self):
         self._patch_dashboard(lambda width=90: print("REGIME_LINE"))
         before = sys.stdout
-        out = osc._render_regime_with_exit_enforcement(
-            _fake_pm(), 90, spinner_factory=_no_spinner)
+        out = self._render()
         self.assertIn("REGIME_LINE", out)      # captured into the return value
         self.assertIs(sys.stdout, before)      # global stdout handed back
 
@@ -41,8 +54,7 @@ class TestRegimeRender(unittest.TestCase):
             raise RuntimeError("fetch blew up")
         self._patch_dashboard(boom)
         before = sys.stdout
-        osc._render_regime_with_exit_enforcement(
-            _fake_pm(), 90, spinner_factory=_no_spinner)
+        self._render()
         self.assertIs(sys.stdout, before)      # restored despite the exception
 
     def test_text_printed_after_render_reaches_real_stdout(self):
@@ -51,8 +63,7 @@ class TestRegimeRender(unittest.TestCase):
         self._patch_dashboard(lambda width=90: print("DASH"))
         cap = io.StringIO()
         with contextlib.redirect_stdout(cap):
-            osc._render_regime_with_exit_enforcement(
-                _fake_pm(), 90, spinner_factory=_no_spinner)
+            self._render()
             print("MENU_VISIBLE")
         self.assertIn("MENU_VISIBLE", cap.getvalue())
         self.assertNotIn("DASH", cap.getvalue())

@@ -91,6 +91,13 @@ try:
         build_scenario_table,
     )
     from tqdm import tqdm
+    # tqdm's default write lock allocates a multiprocessing RLock — a kernel
+    # semaphore — the first time a bar is built, and never releases it, so every
+    # exit printed "leaked semaphore objects to clean up at shutdown". That lock
+    # only matters for bars driven from separate processes; every bar here is
+    # driven from one process (the fetch pool is a ThreadPoolExecutor), so a
+    # thread lock is the correct primitive and leaves nothing to leak.
+    tqdm.set_lock(_threading.RLock())
     HAS_ENHANCED_CLI = True
 except ImportError as e:
     HAS_ENHANCED_CLI = False
@@ -181,10 +188,24 @@ def _build_report_bounded(label, fn, timeout_s=None, **kwargs):
 # already parallelizes its fetches; a healthy run finishes in a few seconds. The
 # old 60s bound (matched to update_positions' worst-case internal yfinance
 # timeouts) turned a rate-limited data feed into a minute-long startup hang.
-_EXIT_ENFORCE_JOIN_TIMEOUT = 12.0
+#
+# Now 0.0 — startup does not wait on exit enforcement at all.
+#
+# update_positions() measures ~8.9s against the real book, so it was never going
+# to finish inside any sane bound; the join was simply a fixed toll on every
+# launch. Once the dashboard became cache-first this was the ENTIRE remaining
+# startup cost (a 2.0 bound measured as exactly 2.00s to menu).
+#
+# Safe because the work is unchanged, only unwaited: the thread still runs to
+# completion behind the menu during the session, update_positions is idempotent,
+# and the cron/automation path enforces exits via `--enforce-exits` rather than
+# through here. The one trade-off: quitting within a few seconds of launch may
+# end the process before enforcement finishes, which the next launch redoes.
+_EXIT_ENFORCE_JOIN_TIMEOUT = 0.0
 
 
-def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None):
+def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None,
+                                         cache_dir=None, ttl=None):
     """Render the market-regime dashboard to a string while paper-trade exits
     are enforced in the background. Returns the captured dashboard text
     ('' on failure).
@@ -202,7 +223,6 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None):
     mode menu printed afterwards vanished into that buffer and the UI looked
     blank/frozen. ``fetch_market_regime`` already caps itself at ~6s internally,
     so the external thread+timeout bought nothing and only created the race."""
-    import io as _io
     import threading as _t
     spinner_factory = spinner_factory or _spinner
 
@@ -223,25 +243,39 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None):
         except Exception:
             pass
 
-    buf = _io.StringIO()
+    text = ""
     try:
-        from .regime_dashboard import print_regime_dashboard
+        from . import regime_dashboard as _rd
+        from .panel_cache import DEFAULT_CACHE_DIR, DEFAULT_TTL, asof_note, render_cached
         exit_thread = _t.Thread(target=_enforce_exits, daemon=True)
         with spinner_factory("Loading market data…"):
             exit_thread.start()
-            try:
-                with contextlib.redirect_stdout(buf):
-                    print_regime_dashboard(width)
-            except Exception:
-                pass
-            # Give exits a bounded grace to complete so a fast, healthy run has
-            # them done before the menu — but never hang the menu on a slow data
-            # feed. The thread is a daemon and idempotent, so if it overruns it
-            # simply finishes in the background.
+            # Cache-first: the dashboard is 5-10s of live fetches (world pulse
+            # 3.5s, VIX/regime 1.1s) that were repeated on every launch. A stale
+            # entry is still served instantly and refreshed behind the user, so
+            # the wait happens at most once per TTL rather than every time.
+            #
+            # Resolved through the module, not a from-import, so the existing
+            # monkeypatch-the-renderer tests still intercept it.
+            text, _asof, _from_cache = render_cached(
+                "regime_dashboard", width,
+                lambda: _rd.print_regime_dashboard(width),
+                ttl=DEFAULT_TTL if ttl is None else ttl,
+                cache_dir=DEFAULT_CACHE_DIR if cache_dir is None else cache_dir,
+            )
+            # Never present aged market data as live.
+            _note = asof_note(_asof)
+            if _note and text:
+                _line = f"  market data {_note}"
+                text = text.rstrip("\n") + "\n" + (
+                    fmt.colorize(_line, fmt.Colors.DIM) if HAS_ENHANCED_CLI else _line
+                ) + "\n"
+            # Exits are NOT waited on (see _EXIT_ENFORCE_JOIN_TIMEOUT): the
+            # thread is a daemon and idempotent, so it settles behind the menu.
             exit_thread.join(timeout=_EXIT_ENFORCE_JOIN_TIMEOUT)
     except Exception:
         pass
-    return buf.getvalue()
+    return text
 
 # Scan-level warning counter (incremented in except blocks, reported at end of scan)
 _SCAN_WARNINGS = [0]
@@ -282,6 +316,13 @@ from .watchlist import (
 from .oi_snapshot import load_oi_snapshot
 from .utils import safe_float
 from .spread_scoring import enrich_credit_spreads, enrich_iron_condors
+
+
+def _progress_bar(total: int, desc: str, enabled: bool = True, stream=None):
+    """Scan-phase progress bar. Canonical implementation lives in ``ui`` so the
+    portfolio viewer and reports share one answer to "is this wait indicated?"."""
+    return ui.progress_bar(total, desc, enabled=enabled and HAS_ENHANCED_CLI,
+                           stream=stream)
 
 
 @contextlib.contextmanager
@@ -3737,23 +3778,32 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                     raw_results[_sym2] = _res2
                 _time.sleep(1.5)
 
-    # Phase 2 — Score each fetched result
-    for symbol in tickers:
-        data_result = raw_results.get(symbol)
-        if data_result is None or "error" in data_result:
-            err_msg = (data_result or {}).get("error", "fetch returned no data")
-            results_buffer[symbol] = {
-                'success': False, 'error': err_msg,
-                'context_log': [], 'picks': [],
-                'credit_spreads': [], 'iron_condors': pd.DataFrame(),
-                'history': None
-            }
-            continue
-        results_buffer[symbol] = _score_fetched_data(
-            symbol, data_result, mode, min_dte, max_dte,
-            rfr, config, vix_weights, trader_profile,
-            budget, macro_risk_active, tnx_change_pct
-        )
+    # Phase 2 — Score each fetched result.
+    # Measured at 1.90s for a single ticker, so a full scan spends minutes here.
+    # Without a bar the user watched the fetch bar hit 100% and then sat in front
+    # of a still screen with no sign anything was running.
+    _score_bar = _progress_bar(len(tickers), "Scoring", enabled=bool(verbose))
+    try:
+        for symbol in tickers:
+            data_result = raw_results.get(symbol)
+            if data_result is None or "error" in data_result:
+                err_msg = (data_result or {}).get("error", "fetch returned no data")
+                results_buffer[symbol] = {
+                    'success': False, 'error': err_msg,
+                    'context_log': [], 'picks': [],
+                    'credit_spreads': [], 'iron_condors': pd.DataFrame(),
+                    'history': None
+                }
+                _score_bar.update(1)
+                continue
+            results_buffer[symbol] = _score_fetched_data(
+                symbol, data_result, mode, min_dte, max_dte,
+                rfr, config, vix_weights, trader_profile,
+                budget, macro_risk_active, tnx_change_pct
+            )
+            _score_bar.update(1)
+    finally:
+        _score_bar.close()
 
 
     # Stale-quote advisory: yfinance periodically serves bid=0/ask=0 chains

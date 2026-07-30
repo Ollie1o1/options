@@ -429,3 +429,41 @@ def spinner(label: str = '', **kw) -> Spinner:
 def error_line(msg: str) -> str:
     """One consistent error treatment for interactive flows."""
     return fmt.style(f'  ✖ {msg}', 'bad')
+
+
+class NullProgress:
+    """No-op stand-in for a progress bar.
+
+    Automation redirects stdout to a log file, where a live bar is thousands of
+    carriage returns. Callers get the same interface either way, so no caller
+    needs an ``if bar is not None`` around every update.
+    """
+
+    n = 0
+
+    def update(self, n: int = 1) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def progress_bar(total: int, desc: str, enabled: bool = True, stream=None):
+    """A tqdm bar for a long operation, or a no-op when bars aren't wanted.
+
+    Lives here rather than in the screener so every surface — scans, the
+    portfolio viewer, reports — answers "does this wait show an indicator?" the
+    same way, without importing the screener and its dependency graph.
+    """
+    if not enabled:
+        return NullProgress()
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        return NullProgress()
+    return tqdm(
+        total=total, desc=f"  {desc}", unit="",
+        leave=False, dynamic_ncols=False,
+        bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+        file=stream if stream is not None else sys.stdout,
+    )

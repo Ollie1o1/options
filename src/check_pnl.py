@@ -45,6 +45,28 @@ except Exception:
 # `ui` is always bound above (to None on failure), so test the value, not the name.
 _HAS_UI_CP = ui is not None
 
+
+class _NoProgress:
+    """Fallback bar for the no-`ui` path, so callers never branch on None."""
+
+    def update(self, n: int = 1) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _progress(total: int, desc: str):
+    """A progress bar, degrading to a no-op when the UI layer is unavailable.
+
+    `ui` is None whenever its import failed, so calling ui.progress_bar directly
+    would turn a cosmetic missing-dependency case into an AttributeError in the
+    middle of pricing the book.
+    """
+    if not _HAS_UI_CP:
+        return _NoProgress()
+    return ui.progress_bar(total, desc)
+
 try:
     try:
         from .utils import is_short_position as _is_short
@@ -835,10 +857,18 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
         def _fetch_one(args):
             return args, _fetch_live_price(*args)
         if _live_tasks:
+            # One live quote per leg across every open position (143 open trades
+            # on the real book, up to 4 legs each). This ran silently, so the
+            # viewer looked frozen for as long as the feed took.
             _workers = min(len(_live_tasks), 8)
-            with ThreadPoolExecutor(max_workers=_workers) as _ex:
-                for key, price in _ex.map(_fetch_one, _live_tasks):
-                    _live_prices[key] = price
+            _price_bar = _progress(len(_live_tasks), "Pricing open positions")
+            try:
+                with ThreadPoolExecutor(max_workers=_workers) as _ex:
+                    for key, price in _ex.map(_fetch_one, _live_tasks):
+                        _live_prices[key] = price
+                        _price_bar.update(1)
+            finally:
+                _price_bar.close()
 
         for r in open_trades:
             ticker      = r["ticker"]

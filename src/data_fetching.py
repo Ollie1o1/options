@@ -5,6 +5,7 @@ Data fetching utilities for the options screener.
 Handles all yfinance interactions with a Single-Fetch architecture for performance.
 """
 
+import os
 import time
 import math
 import logging
@@ -157,6 +158,76 @@ def _yf_disk_init() -> None:
             _YF_DISK_INITIALIZED[0] = True
         except Exception as e:
             logger.warning("yf disk cache init failed: %s", e)
+    # Expired rows are never removed by the read/write paths, so the file only
+    # grows (measured: 55MB, 94% of it dead). Prune here — the one place that
+    # runs in every process touching the cache — off the calling thread, since
+    # VACUUM rewrites the file. prune_yf_disk_cache self-throttles to once a
+    # day, so this is a no-op on all but the first launch after midnight.
+    # Resolved via globals() so tests can substitute it.
+    try:
+        _prune = globals().get("prune_yf_disk_cache")
+        if _prune is not None:
+            threading.Thread(target=_prune, daemon=True).start()
+    except Exception:
+        pass
+
+_YF_PRUNE_INTERVAL_S = 86400  # once a day; VACUUM rewrites the whole file
+
+
+def prune_yf_disk_cache(db_path: str = None, now: int = None,
+                        min_interval_s: int = _YF_PRUNE_INTERVAL_S,
+                        force: bool = False) -> dict:
+    """Delete expired rows and reclaim the space they occupied.
+
+    Nothing ever deleted from this table, so it only grew: measured 2026-07-30
+    at 4,207 of 4,782 rows expired and 49.7MB of dead payload against 3.4MB
+    live. Every lookup paid for that.
+
+    The delete boundary mirrors ``_yf_disk_get``, which reads ``expires > now``
+    — a row at exactly ``now`` is already unreadable, so removing it cannot
+    discard live data.
+
+    VACUUM is what actually returns pages to the filesystem, but it rewrites the
+    entire database, so it runs only when rows were actually deleted and at most
+    once per ``min_interval_s``. Returns
+    ``{"deleted": n, "vacuumed": bool, "skipped": reason|None}``.
+    """
+    db_path = db_path or _YF_DISK_DB
+    now = int(time.time()) if now is None else int(now)
+    out = {"deleted": 0, "vacuumed": False, "skipped": None}
+    if not os.path.exists(db_path):
+        out["skipped"] = "no-db"
+        return out
+    try:
+        with closing(sqlite3.connect(db_path, timeout=5.0)) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS yf_cache_meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            if not force:
+                row = conn.execute(
+                    "SELECT value FROM yf_cache_meta WHERE key='last_prune'"
+                ).fetchone()
+                if row is not None and (now - int(float(row[0]))) < min_interval_s:
+                    out["skipped"] = "throttled"
+                    return out
+            cur = conn.execute("DELETE FROM yf_cache WHERE expires <= ?", (now,))
+            out["deleted"] = cur.rowcount or 0
+            conn.execute(
+                "INSERT OR REPLACE INTO yf_cache_meta (key, value) VALUES ('last_prune', ?)",
+                (str(now),),
+            )
+            conn.commit()
+        if out["deleted"]:
+            # Separate connection: VACUUM cannot run inside a transaction.
+            with closing(sqlite3.connect(db_path, timeout=30.0)) as conn:
+                conn.isolation_level = None
+                conn.execute("VACUUM")
+            out["vacuumed"] = True
+    except Exception as e:
+        logger.debug("yf disk cache prune skipped: %s", e)
+        out["skipped"] = out["skipped"] or "error"
+    return out
+
 
 def _yf_disk_get(key: str):
     if _NO_CACHE or not _YF_DISK_INITIALIZED[0]:
