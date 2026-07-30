@@ -142,3 +142,75 @@ def capital_at_risk_for_row(row) -> Optional[float]:
         quantity=get("quantity") if get("quantity") is not None else 1.0,
         ticker=get("ticker"),
     )
+
+
+def _pick_get(pick, key):
+    """Field lookup tolerant of dicts, pandas Series, and missing columns."""
+    try:
+        return pick[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _pick_premium(pick) -> Optional[float]:
+    """The per-share premium of a scan row.
+
+    A scan row carries no ``entry_price``; the auto-log loop derives it as
+    ``ask`` -> ``lastPrice`` -> ``premium``, treating a zero/absent quote as
+    missing rather than free. Sizing must use the identical ladder, or a pick
+    prices as unknown here and as a real debit two lines later.
+    """
+    for key in ("entry_price", "ask", "lastPrice", "premium"):
+        value = _finite(_pick_get(pick, key))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def capital_at_risk_for_pick(pick, strategy_name: str) -> Optional[float]:
+    """capital_at_risk for a *scanner result* row, as ranked before logging.
+
+    Scan rows are shaped differently from trades rows: the ticker lives in
+    ``symbol``, the condor worst case in ``max_risk``, and the vertical worst
+    case in ``max_loss`` — the names ``log_spread``/``log_iron_condor`` map to
+    ``max_loss_usd`` only at insert time. Sizing a candidate therefore cannot go
+    through ``capital_at_risk_for_row``, which expects the post-insert names.
+
+    ``strategy_name`` is passed in rather than read off the row because the scan
+    encodes it positionally (mode + leg type), not as a column.
+    """
+    name = (strategy_name or "").strip().lower()
+    # Only a defined-risk multi-leg structure records a TRUE worst case. Every
+    # single-leg row also carries a `max_loss`, but trade_analysis computes it as
+    # `entry_price * 100` — the long-premium debit, stamped on shorts too. Trusting
+    # it there sized a cash-secured put at $50 instead of $31,850.
+    stored = None
+    if any(key in name for key in _CREDIT_STRUCTURE_KEYS):
+        stored = _pick_get(pick, "max_risk")
+        if _finite(stored) is None or _finite(stored) <= 0:
+            stored = _pick_get(pick, "max_loss")
+
+    credit = _pick_get(pick, "net_credit")
+    if credit is None:
+        credit = _pick_get(pick, "total_credit")
+
+    return capital_at_risk(
+        strategy_name=strategy_name or "",
+        entry_price=_pick_premium(pick),
+        strike=_pick_get(pick, "strike"),
+        max_loss_usd=stored,
+        spread_width=_pick_get(pick, "spread_width"),
+        net_credit=credit,
+        quantity=_pick_get(pick, "quantity") if _pick_get(pick, "quantity") is not None else 1.0,
+        ticker=_pick_get(pick, "symbol"),
+    )
+
+
+def pick_within_budget(pick, strategy_name: str, cap: Optional[float]) -> bool:
+    """True if a scanner candidate fits the budget, so it is worth a top-N slot.
+
+    Applied to the candidate pool *before* the top-N cut. Filtering after the
+    cut lets unaffordable picks consume every slot and log nothing — observed
+    2026-07-30, when all 5 short-put slots went to $13k-$74k collateral trades.
+    """
+    return within_budget(capital_at_risk_for_pick(pick, strategy_name), cap)

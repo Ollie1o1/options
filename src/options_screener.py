@@ -72,6 +72,7 @@ from .filters import (
     pick_top_per_bucket
 )
 from .paper_manager import PaperManager
+from .capital_risk import pick_within_budget
 
 # Enhanced CLI modules
 try:
@@ -360,6 +361,26 @@ def _trade_dte(trade: dict):
         except (ValueError, TypeError):
             pass
     return None
+
+
+def auto_log_budget_cap(cfg_path: str = "config.json"):
+    """The per-position budget the auto-log feeder must respect, or None.
+
+    Reads the same ``auto_log.max_capital_at_risk`` key ``PaperManager`` enforces
+    at insert time, with the same coercion, so the scan-side pre-filter and the
+    ledger-side gate can never disagree about what is affordable.
+
+    Any config problem yields None (no constraint): a cap that fails to load
+    must not silently filter every candidate out of the scan.
+    """
+    import json
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        cap = (cfg.get("auto_log") or {}).get("max_capital_at_risk")
+        return float(cap) if cap not in (None, "", 0) else None
+    except Exception:
+        return None
 
 
 def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tuple:
@@ -5202,11 +5223,35 @@ def main():
                         if "symbol" in _spreads.columns:
                             _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
                         _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+
+                        def _spread_strategy_name(row):
+                            """Structure label for a spread-scan row: condors carry a
+                            total_credit, verticals are named by their short leg's type."""
+                            if ("total_credit" in row.index) and not pd.isna(row.get("total_credit")):
+                                return "Iron Condor"
+                            _t = str(row.get("type", "")).strip().lower()
+                            return "Bear Call" if _t == "call" else "Bull Put"
+
+                        # Budget pre-filter — see the single-leg path for why this must run
+                        # BEFORE the top-N cut rather than at the ledger door.
+                        _budget_cap = auto_log_budget_cap("config.json")
+                        _displaced = 0
+                        if _budget_cap and not _spreads.empty:
+                            _afford_mask = _spreads.apply(
+                                lambda r: pick_within_budget(
+                                    r, _spread_strategy_name(r), _budget_cap
+                                ),
+                                axis=1,
+                            )
+                            _displaced = int((~_afford_mask).head(_top_n).sum())
+                            _spreads = _spreads[_afford_mask]
                         _candidates = _spreads.head(_top_n)
                         _today_str = datetime.now().strftime("%Y-%m-%d")
                         _inserted = 0
                         _skipped = 0
                         _skipped_bear_calls = 0
+                        # Split budget refusals out of the duplicate count below.
+                        _rejected_before = getattr(pm, "unaffordable_rejected", 0)
 
                         # Component-score fields carried over from the spread enrichment
                         _spread_score_keys = (
@@ -5227,12 +5272,8 @@ def main():
                             _sym = str(row.get("symbol", "")).upper()
                             try:
                                 # Derive strategy name to feed the allowlist helper.
-                                _is_condor = ("total_credit" in row.index) and not pd.isna(row.get("total_credit"))
-                                if _is_condor:
-                                    _strat_name = "Iron Condor"
-                                else:
-                                    _spread_type = str(row.get("type", "")).strip().lower()
-                                    _strat_name = "Bear Call" if _spread_type == "call" else "Bull Put"
+                                _strat_name = _spread_strategy_name(row)
+                                _is_condor = _strat_name == "Iron Condor"
                                 _decision, _paper_only_flag = apply_auto_log_allowlist(
                                     {"strategy_name": _strat_name}, cfg_path="config.json"
                                 )
@@ -5287,10 +5328,20 @@ def main():
                                 print(f"  Error auto-logging {_sym}: {_log_exc}")
                         _tag = _weight_profile_id or "untagged"
                         _bc_suffix = f", filtered {_skipped_bear_calls} disallowed structure(s)" if _skipped_bear_calls else ""
+                        # A budget refusal is not a duplicate — see the single-leg path.
+                        _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
+                        _dupes = max(0, _skipped - _refused)
                         _summary = (
                             f"Auto-logged {_inserted} spreads/condors, "
-                            f"skipped {_skipped} duplicates{_bc_suffix} (profile: {_tag})"
+                            f"skipped {_dupes} duplicates{_bc_suffix} (profile: {_tag})"
                         )
+                        if _refused:
+                            _summary += f", refused {_refused} over budget"
+                        if _displaced:
+                            _summary += (
+                                f", {_displaced} of the top {_top_n} exceeded the "
+                                f"${_budget_cap:,.0f} budget"
+                            )
                         print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
                         _has_results = False
 
@@ -5321,11 +5372,32 @@ def main():
                                 return _dec != "drop"
                             _single_legs = _single_legs[_single_legs.apply(_allowlist_keeps, axis=1)]
                         _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                        # Budget pre-filter — same reasoning as the allowlist filter above.
+                        # An unaffordable pick IS refused by the ledger, but only after it has
+                        # already consumed a top-N slot. On 2026-07-30 the short-premium window
+                        # scored 1,109 contracts, gave all five slots to $13k-$74k cash-secured
+                        # puts, and logged nothing. Rank what the account can actually take.
+                        _budget_cap = auto_log_budget_cap("config.json")
+                        _displaced = 0
+                        if _budget_cap and not _single_legs.empty and "type" in _single_legs.columns:
+                            def _affordable(_row):
+                                return pick_within_budget(
+                                    _row,
+                                    _strategy_label_for_mode(mode, _row.get("type")),
+                                    _budget_cap,
+                                )
+                            _afford_mask = _single_legs.apply(_affordable, axis=1)
+                            # Report only how many of the WOULD-BE top-N were unaffordable; the
+                            # pool-wide count is noise (most of 1,109 were never in contention).
+                            _displaced = int((~_afford_mask).head(_top_n).sum())
+                            _single_legs = _single_legs[_afford_mask]
                         _candidates = _single_legs.head(_top_n)
 
                         _inserted = 0
                         _skipped = 0
                         _skipped_long_puts = 0
+                        # Split budget refusals out of the duplicate count below.
+                        _rejected_before = getattr(pm, "unaffordable_rejected", 0)
                         # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
                         # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
                         # and re-sorted, so positional alignment with picks is not preserved.
@@ -5428,9 +5500,21 @@ def main():
                                 print(f"  Error auto-logging {row.get('symbol')}: {_log_exc}")
 
                         _tag = _weight_profile_id or "untagged"
-                        _summary = f"Auto-logged {_inserted} new, skipped {_skipped} duplicates (profile: {_tag})"
+                        # A budget refusal is not a duplicate. Counting them together reported
+                        # "skipped 5 duplicates" for a window that logged nothing because every
+                        # pick was over budget — the one line that would have shown the problem.
+                        _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
+                        _dupes = max(0, _skipped - _refused)
+                        _summary = f"Auto-logged {_inserted} new, skipped {_dupes} duplicates (profile: {_tag})"
+                        if _refused:
+                            _summary += f", refused {_refused} over budget"
                         if _skipped_long_puts:
                             _summary += f", filtered {_skipped_long_puts} disallowed pick(s)"
+                        if _displaced:
+                            _summary += (
+                                f", {_displaced} of the top {_top_n} exceeded the "
+                                f"${_budget_cap:,.0f} budget"
+                            )
                         print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  \u2713 {_summary}")
                     # Skip the interactive save-menu loop below; continue to scan-another prompt
                     _has_results = False
