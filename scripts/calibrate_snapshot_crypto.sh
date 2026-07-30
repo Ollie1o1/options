@@ -6,8 +6,8 @@
 # Read-only — never writes to config.json (no --apply passed).
 #
 # Install via crontab (Sundays 18:30 ET — after equity's 18:13 calibrate):
-#   30 18 * * 0  /Users/ollie/Desktop/options/scripts/calibrate_snapshot_crypto.sh \
-#     >> /Users/ollie/Desktop/options/logs/calibrate_crypto.log 2>&1
+#   30 18 * * 0  /path/to/options/scripts/calibrate_snapshot_crypto.sh \
+#     >> /path/to/options/logs/calibrate_crypto.log 2>&1
 
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

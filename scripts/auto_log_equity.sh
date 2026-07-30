@@ -3,12 +3,12 @@
 # Reads off-switch + stress threshold from config.json; dormant by default.
 #
 # Install via crontab (three weekday lines, same wrapper each time):
-#   30 10 * * 1-5  /Users/ollie/Desktop/options/scripts/auto_log_equity.sh \
-#     >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
-#   30 12 * * 1-5  /Users/ollie/Desktop/options/scripts/auto_log_equity.sh \
-#     >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
-#   15 14 * * 1-5  /Users/ollie/Desktop/options/scripts/auto_log_equity.sh \
-#     >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
+#   30 10 * * 1-5  /path/to/options/scripts/auto_log_equity.sh \
+#     >> /path/to/options/logs/auto_log_equity.log 2>&1
+#   30 12 * * 1-5  /path/to/options/scripts/auto_log_equity.sh \
+#     >> /path/to/options/logs/auto_log_equity.log 2>&1
+#   15 14 * * 1-5  /path/to/options/scripts/auto_log_equity.sh \
+#     >> /path/to/options/logs/auto_log_equity.log 2>&1
 
 set -euo pipefail
 

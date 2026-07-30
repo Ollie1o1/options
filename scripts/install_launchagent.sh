@@ -2,8 +2,8 @@
 # Install the headless cohort-filling LaunchAgent.
 #
 # Usage:   bash scripts/install_launchagent.sh
-# Remove:  launchctl bootout gui/$UID/com.ollie.options.maintenance \
-#            && rm ~/Library/LaunchAgents/com.ollie.options.maintenance.plist
+# Remove:  launchctl bootout gui/$UID/com.options-screener.maintenance \
+#            && rm ~/Library/LaunchAgents/com.options-screener.maintenance.plist
 #
 # After installing you MUST approve the job once:
 #   System Settings -> General -> Login Items & Extensions -> Allow in the Background
@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="$HOME/.venvs/options/bin/python"
-LABEL="com.ollie.options.maintenance"
+LABEL="com.options-screener.maintenance"
 TEMPLATE="$REPO/scripts/$LABEL.plist"
 TARGET="$HOME/Library/LaunchAgents/$LABEL.plist"
 

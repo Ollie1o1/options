@@ -22,7 +22,7 @@ import sqlite3
 from pathlib import Path
 from collections import Counter, defaultdict
 
-REPO = Path("/Users/ollie/Desktop/options")
+REPO = Path(__file__).resolve().parent.parent
 DB = REPO / "paper_trades.db"
 CSV_LOG = REPO / "trades_log" / "entries.csv"
 

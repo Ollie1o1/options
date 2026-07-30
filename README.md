@@ -115,6 +115,8 @@ The technical screener works out of the box — no API keys needed (uses Yahoo F
 
 **Optional — Polygon.io enrichment:** Set `POLYGON_API_KEY` in your `.env` file to enable higher-quality ticker-filtered news, real-time VWAP, and unusual options flow detection. Free API keys are available at [polygon.io/dashboard/signup](https://polygon.io/dashboard/signup). The screener runs identically without this key.
 
+**Optional — SEC EDGAR contact:** the insider-buys overlay calls SEC EDGAR, which asks every client to identify itself with a contact address. Set `SEC_EDGAR_CONTACT` in your `.env` (e.g. `SEC_EDGAR_CONTACT=you@example.com`) to send yours. Unset, the request still identifies the software and the SEC may throttle or refuse it — the overlay fails soft and the screener is unaffected either way.
+
 ---
 
 ## Quick Start
@@ -888,10 +890,10 @@ Automation (cron — installed alongside equity automation):
 
 ```cron
 # Crypto auto-log driver — every 4 hours, both BTC and ETH
-0 */4 * * * /Users/ollie/Desktop/options/scripts/auto_log_crypto.sh >> /Users/ollie/Desktop/options/logs/auto_log_crypto.log 2>&1
+0 */4 * * * /path/to/options/scripts/auto_log_crypto.sh >> /path/to/options/logs/auto_log_crypto.log 2>&1
 
 # Crypto exit enforcer — hourly (Deribit prices update faster than equity yfinance)
-5 * * * * /Users/ollie/Desktop/options/scripts/enforce_exits_crypto.sh >> /Users/ollie/Desktop/options/logs/enforce_exits_crypto.log 2>&1
+5 * * * * /path/to/options/scripts/enforce_exits_crypto.sh >> /path/to/options/logs/enforce_exits_crypto.log 2>&1
 ```
 
 Crypto trades land in `paper_trades_crypto.db` (separate ledger from equity). The two books share schema layout but never mix — calibration runs independently per book.

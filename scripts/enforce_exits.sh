@@ -4,7 +4,7 @@
 # time-exit threshold per config.json's exit_rules. Safe to re-run.
 #
 # Install via crontab (runs at 14:07 ET, after market settles a bit):
-#   7 14 * * 1-5 /Users/ollie/Desktop/options/scripts/enforce_exits.sh >> /Users/ollie/Desktop/options/logs/enforce_exits.log 2>&1
+#   7 14 * * 1-5 /path/to/options/scripts/enforce_exits.sh >> /path/to/options/logs/enforce_exits.log 2>&1
 
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

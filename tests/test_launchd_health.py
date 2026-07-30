@@ -18,57 +18,57 @@ from src.maintenance_health import (
 )
 
 _HEALTHY = """PID\tStatus\tLabel
--\t0\tcom.ollie.options.maintenance
-1234\t0\tcom.ollie.options.crypto-auto-log
+-\t0\tcom.options-screener.maintenance
+1234\t0\tcom.options-screener.crypto-auto-log
 -\t0\tcom.apple.something
 """
 
 _BROKEN = """PID\tStatus\tLabel
--\t78\tcom.ollie.options.crypto-enforce-exits
--\t78\tcom.ollie.options.maintenance
--\t78\tcom.ollie.options.crypto-auto-log
+-\t78\tcom.options-screener.crypto-enforce-exits
+-\t78\tcom.options-screener.maintenance
+-\t78\tcom.options-screener.crypto-auto-log
 -\t0\tcom.apple.something
 """
 
 
 class TestParsing(unittest.TestCase):
     def test_finds_our_jobs_and_ignores_everything_else(self):
-        jobs = parse_launchctl_list(_HEALTHY, prefix="com.ollie.options")
+        jobs = parse_launchctl_list(_HEALTHY, prefix="com.options-screener")
         self.assertEqual(len(jobs), 2)
-        self.assertTrue(all(j.label.startswith("com.ollie.options") for j in jobs))
+        self.assertTrue(all(j.label.startswith("com.options-screener") for j in jobs))
 
     def test_reads_the_last_exit_status(self):
-        jobs = {j.label: j for j in parse_launchctl_list(_BROKEN, "com.ollie.options")}
-        self.assertEqual(jobs["com.ollie.options.maintenance"].last_exit_status, 78)
+        jobs = {j.label: j for j in parse_launchctl_list(_BROKEN, "com.options-screener")}
+        self.assertEqual(jobs["com.options-screener.maintenance"].last_exit_status, 78)
 
     def test_a_zero_status_is_not_a_failure(self):
-        jobs = parse_launchctl_list(_HEALTHY, "com.ollie.options")
+        jobs = parse_launchctl_list(_HEALTHY, "com.options-screener")
         self.assertEqual([j for j in jobs if j.failed], [])
 
     def test_a_nonzero_status_is_a_failure(self):
-        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
         self.assertEqual(len([j for j in jobs if j.failed]), 3)
 
     def test_header_and_blank_lines_are_skipped(self):
-        self.assertEqual(parse_launchctl_list("PID\tStatus\tLabel\n\n", "com.ollie"), [])
+        self.assertEqual(parse_launchctl_list("PID\tStatus\tLabel\n\n", "com.options-screener"), [])
 
     def test_unparseable_output_yields_nothing_rather_than_raising(self):
-        self.assertEqual(parse_launchctl_list("something unexpected", "com.ollie"), [])
+        self.assertEqual(parse_launchctl_list("something unexpected", "com.options-screener"), [])
 
     def test_a_running_job_with_a_pid_is_not_a_failure(self):
-        jobs = parse_launchctl_list("PID\tStatus\tLabel\n900\t0\tcom.ollie.options.x\n",
-                                    "com.ollie.options")
+        jobs = parse_launchctl_list("PID\tStatus\tLabel\n900\t0\tcom.options-screener.x\n",
+                                    "com.options-screener")
         self.assertFalse(jobs[0].failed)
 
 
 class TestMessage(unittest.TestCase):
     def test_no_message_when_everything_is_healthy(self):
         self.assertIsNone(
-            launchd_failure_message(parse_launchctl_list(_HEALTHY, "com.ollie.options"))
+            launchd_failure_message(parse_launchctl_list(_HEALTHY, "com.options-screener"))
         )
 
     def test_names_the_failing_jobs(self):
-        msg = launchd_failure_message(parse_launchctl_list(_BROKEN, "com.ollie.options"))
+        msg = launchd_failure_message(parse_launchctl_list(_BROKEN, "com.options-screener"))
         self.assertIn("3", msg)
         self.assertIn("maintenance", msg)
 
@@ -76,12 +76,12 @@ class TestMessage(unittest.TestCase):
         # EX_CONFIG here means macOS is refusing to run the agent, and the fix is
         # a Login Items toggle the user must click. Saying "job failed" sends the
         # reader looking for a bug in the script instead.
-        msg = launchd_failure_message(parse_launchctl_list(_BROKEN, "com.ollie.options"))
+        msg = launchd_failure_message(parse_launchctl_list(_BROKEN, "com.options-screener"))
         self.assertIn("Login Items", msg)
 
     def test_other_exit_codes_do_not_claim_it_is_a_permissions_problem(self):
-        jobs = parse_launchctl_list("PID\tStatus\tLabel\n-\t1\tcom.ollie.options.x\n",
-                                    "com.ollie.options")
+        jobs = parse_launchctl_list("PID\tStatus\tLabel\n-\t1\tcom.options-screener.x\n",
+                                    "com.options-screener")
         self.assertNotIn("Login Items", launchd_failure_message(jobs))
 
 
@@ -115,7 +115,7 @@ class TestBannerSurfacing(unittest.TestCase):
     def test_a_dead_scheduler_forces_a_banner_despite_fresh_state(self):
         from src.maintenance_health import health_banner
 
-        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
         banner = health_banner(_fresh_report(), launchd_jobs=jobs)
         self.assertNotEqual(banner, "")
         self.assertIn("Login Items", banner)
@@ -123,7 +123,7 @@ class TestBannerSurfacing(unittest.TestCase):
     def test_healthy_schedulers_do_not_add_noise(self):
         from src.maintenance_health import health_banner
 
-        jobs = parse_launchctl_list(_HEALTHY, "com.ollie.options")
+        jobs = parse_launchctl_list(_HEALTHY, "com.options-screener")
         self.assertEqual(health_banner(_fresh_report(), launchd_jobs=jobs), "")
 
 
@@ -149,7 +149,7 @@ class TestBannerFitsItsBox(unittest.TestCase):
     def test_every_line_of_a_dead_scheduler_banner_is_one_width(self):
         from src.maintenance_health import health_banner
 
-        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
         banner = health_banner(_fresh_report(), width=100, launchd_jobs=jobs)
         self.assertEqual(self._widths(banner), {100})
 
@@ -168,14 +168,14 @@ class TestBannerFitsItsBox(unittest.TestCase):
             "last_morning_briefing": stale,
         }
         report = compute_health(state, date(2026, 7, 29))
-        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
         banner = health_banner(report, width=100, launchd_jobs=jobs)
         self.assertEqual(self._widths(banner), {100})
 
     def test_the_remedy_survives_wrapping(self):
         from src.maintenance_health import health_banner
 
-        jobs = parse_launchctl_list(_BROKEN, "com.ollie.options")
+        jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
         banner = health_banner(_fresh_report(), width=100, launchd_jobs=jobs)
         # Wrapping must not shred the one instruction that fixes it.
         flat = " ".join(ln.strip("│ ") for ln in banner.splitlines())

@@ -16,7 +16,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ollie.options.maintenance</string>
+    <string>com.options-screener.maintenance</string>
     <key>WorkingDirectory</key>
     <string>__REPO__</string>
     <key>ProgramArguments</key>

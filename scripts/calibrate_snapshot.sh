@@ -4,7 +4,7 @@
 # logs/calibration_<DATE>.txt. Read-only — never writes to config.json.
 #
 # Install via crontab (runs Sunday 18:13 ET — well after the week's last close):
-#   13 18 * * 0 /Users/ollie/Desktop/options/scripts/calibrate_snapshot.sh >> /Users/ollie/Desktop/options/logs/calibrate.log 2>&1
+#   13 18 * * 0 /path/to/options/scripts/calibrate_snapshot.sh >> /path/to/options/logs/calibrate.log 2>&1
 
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

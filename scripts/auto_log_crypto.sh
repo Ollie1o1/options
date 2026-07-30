@@ -3,7 +3,7 @@
 # Reads the off-switch + safeguards from config.json; dormant by default.
 #
 # Schedule lives in:
-#   ~/Library/LaunchAgents/com.ollie.options.crypto-auto-log.plist
+#   ~/Library/LaunchAgents/com.options-screener.crypto-auto-log.plist
 # launchd is used (not cron) so that runs missed while the Mac was asleep
 # get caught up at wake. Cron silently drops them.
 

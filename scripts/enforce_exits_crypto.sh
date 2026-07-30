@@ -5,7 +5,7 @@
 # Safe to re-run.
 #
 # Schedule lives in:
-#   ~/Library/LaunchAgents/com.ollie.options.crypto-enforce-exits.plist
+#   ~/Library/LaunchAgents/com.options-screener.crypto-enforce-exits.plist
 # launchd catches up missed runs at wake; cron does not.
 
 set -euo pipefail

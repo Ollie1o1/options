@@ -16,7 +16,17 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-HEADERS = {"User-Agent": "options-screener/1.0 (oliver.raczka.shue@gmail.com)"}
+def _user_agent() -> str:
+    """SEC asks every client to identify itself with a contact address. That
+    contact is per-operator, never baked into the repo: set SEC_EDGAR_CONTACT
+    (e.g. "you@example.com") to send it. Unset, we still identify the software
+    but SEC may throttle or 403 us — which is fine, every caller below is
+    failure-safe and insider data is an overlay, never a startup dependency."""
+    contact = (os.environ.get("SEC_EDGAR_CONTACT") or "").strip()
+    return f"options-screener/1.0 ({contact})" if contact else "options-screener/1.0"
+
+
+HEADERS = {"User-Agent": _user_agent()}
 THROTTLE_S = 0.3
 TICKER_CACHE = os.path.join("data", "edgar_tickers.json")
 TICKER_CACHE_DAYS = 30

@@ -70,15 +70,15 @@ Components with zero variance (always store as constant — already weighted at 
 
 ```cron
 # Daily exit-rule enforcer (weekdays 14:07 ET)
-7 14 * * 1-5 /Users/ollie/Desktop/options/scripts/enforce_exits.sh >> /Users/ollie/Desktop/options/logs/enforce_exits.log 2>&1
+7 14 * * 1-5 /path/to/options/scripts/enforce_exits.sh >> /path/to/options/logs/enforce_exits.log 2>&1
 
 # Weekly calibration snapshot (Sundays 18:13 ET)
-13 18 * * 0 /Users/ollie/Desktop/options/scripts/calibrate_snapshot.sh >> /Users/ollie/Desktop/options/logs/calibrate.log 2>&1
+13 18 * * 0 /path/to/options/scripts/calibrate_snapshot.sh >> /path/to/options/logs/calibrate.log 2>&1
 
 # Equity auto-log driver — M-F three runs (off-switch in config.json, default dormant)
-30 10 * * 1-5 /Users/ollie/Desktop/options/scripts/auto_log_equity.sh >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
-30 12 * * 1-5 /Users/ollie/Desktop/options/scripts/auto_log_equity.sh >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
-15 14 * * 1-5 /Users/ollie/Desktop/options/scripts/auto_log_equity.sh >> /Users/ollie/Desktop/options/logs/auto_log_equity.log 2>&1
+30 10 * * 1-5 /path/to/options/scripts/auto_log_equity.sh >> /path/to/options/logs/auto_log_equity.log 2>&1
+30 12 * * 1-5 /path/to/options/scripts/auto_log_equity.sh >> /path/to/options/logs/auto_log_equity.log 2>&1
+15 14 * * 1-5 /path/to/options/scripts/auto_log_equity.sh >> /path/to/options/logs/auto_log_equity.log 2>&1
 ```
 
 ---

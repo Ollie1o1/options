@@ -122,7 +122,7 @@ def launchd_failure_message(jobs: List["LaunchdJob"]) -> Optional[str]:
     return msg
 
 
-def read_launchd_status(prefix: str = "com.ollie.options") -> List["LaunchdJob"]:
+def read_launchd_status(prefix: str = "com.options-screener") -> List["LaunchdJob"]:
     """Live `launchctl list`. Returns [] if launchctl is unavailable — this is a
     diagnostic, and must never be the reason a run fails."""
     import subprocess

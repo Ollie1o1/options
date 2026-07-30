@@ -4,7 +4,7 @@
 # Never modifies paper_trades.db or config.json.
 #
 # Install via crontab (Sunday evenings, weekly):
-#   0 18 * * 0  /Users/ollie/Desktop/options/scripts/phase1_checkpoint.sh >> /Users/ollie/Desktop/options/logs/phase1_checkpoint.log 2>&1
+#   0 18 * * 0  /path/to/options/scripts/phase1_checkpoint.sh >> /path/to/options/logs/phase1_checkpoint.log 2>&1
 
 set -euo pipefail
 
