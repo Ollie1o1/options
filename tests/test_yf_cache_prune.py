@@ -195,13 +195,45 @@ class WiredIntoCacheInit(unittest.TestCase):
         self.assertLess(elapsed, 1.0, "cache init waited on the prune")
 
     def test_a_raising_prune_cannot_break_cache_init(self):
+        import threading
+        reached = threading.Event()
+
         def _boom(*a, **k):
+            reached.set()
             raise RuntimeError("vacuum failed")
 
         self.D.prune_yf_disk_cache = _boom
         self.D._YF_DISK_INITIALIZED[0] = False
         self.D._yf_disk_init()  # must not raise
         self.assertTrue(self.D._YF_DISK_INITIALIZED[0])
+        self.assertTrue(reached.wait(timeout=5.0))
+
+    def test_a_raising_prune_does_not_print_a_traceback(self):
+        # An exception escaping a thread target dumps a traceback to stderr from
+        # a context no caller can catch — alarming noise mid-scan, and it made
+        # the test suite's own output dirty.
+        import contextlib
+        import io
+        import threading
+        reached = threading.Event()
+
+        def _boom(*a, **k):
+            reached.set()
+            raise RuntimeError("vacuum failed")
+
+        self.D.prune_yf_disk_cache = _boom
+        self.D._YF_DISK_INITIALIZED[0] = False
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.D._yf_disk_init()
+            reached.wait(timeout=5.0)
+            # Give the thread a moment to unwind past the raise.
+            for t in threading.enumerate():
+                if t is not threading.current_thread() and not t.daemon:
+                    t.join(timeout=1)
+            threading.Event().wait(0.2)
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertNotIn("vacuum failed", err.getvalue())
 
 
 if __name__ == "__main__":

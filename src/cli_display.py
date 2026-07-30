@@ -1185,6 +1185,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     if account_size > 0:
         try:
             from .trade_analysis import get_position_sizing_recommendation
+            from .trade_analysis import strategy_label_for_mode as _strategy_label_for_mode
             _has_sizing = True
         except ImportError:
             pass
@@ -1287,7 +1288,11 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
             else:
                 line += f" {'':>6}"
         if _has_sizing:
-            sizing = get_position_sizing_recommendation(r, account_size)
+            # Pass the strategy: a Premium-Selling row ties up collateral, not
+            # the premium, and this column is read right before placing a trade.
+            sizing = get_position_sizing_recommendation(
+                r, account_size,
+                strategy_name=_strategy_label_for_mode(mode, r.get("type")))
             qty = sizing.get("contracts", 0)
             line += f" {qty:>4}"
 

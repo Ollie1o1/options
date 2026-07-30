@@ -155,10 +155,45 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_catchup(
                 state_path=sp, now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
+                swing_fn=lambda: None,
                 lock_path=os.path.join(d, "catchup.lock"))
             self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
             self.assertEqual(set(m.load_state(sp)["last_autolog"]),
                              {"ds", "sps", "ss", "ics"})
+
+    def test_catchup_takes_the_swing_hook_by_injection(self):
+        """The crypto swing track calls Binance over the network.
+
+        Every other side effect in this module goes through an injectable hook
+        precisely so tests stay offline; this one was called directly, so any
+        test of run_catchup made a live HTTP request. A socket spy over the
+        suite found exactly these tests reaching fetch_klines_binance, which is
+        both a flake source (the run is only as reliable as Binance) and why the
+        suite occasionally took minutes instead of seconds.
+        """
+        seen = []
+        with tempfile.TemporaryDirectory() as d:
+            summary = m.run_catchup(
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: 0,
+                swing_fn=lambda: (seen.append(1), {"opened": 1, "closed": 0})[1],
+                lock_path=os.path.join(d, "catchup.lock"))
+            self.assertEqual(seen, [1], "swing hook was not the injected one")
+            self.assertIn("swing-paper", summary["ran"])
+
+    def test_a_failing_swing_hook_cannot_touch_the_options_windows(self):
+        # Crypto is a satellite: it must never jeopardise the options cohort.
+        def _boom():
+            raise RuntimeError("exchange down")
+
+        with tempfile.TemporaryDirectory() as d:
+            sp = os.path.join(d, "state.json")
+            summary = m.run_catchup(
+                state_path=sp, now=datetime(2026, 6, 4, 14, 30),
+                runner=lambda cmd: 0, swing_fn=_boom,
+                lock_path=os.path.join(d, "catchup.lock"))
+            self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
 
     def test_ds_window_feeds_cohort_with_dte_floor(self):
         # 10:30 Thursday = 'ds' window; the scan must carry --min-dte so its
@@ -386,6 +421,7 @@ class TestCatchupSingleInstance(unittest.TestCase):
                 state_path=os.path.join(d, "state.json"),
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
+                swing_fn=lambda: None,   # offline: the real hook calls Binance
                 lock_path=os.path.join(d, "catchup.lock"))
         flags = {f for c in calls for f in c if f in ("-ds", "-sps", "-ss", "-ics")}
         self.assertEqual(flags, {"-ds", "-sps", "-ss", "-ics"})

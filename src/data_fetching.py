@@ -167,7 +167,16 @@ def _yf_disk_init() -> None:
     try:
         _prune = globals().get("prune_yf_disk_cache")
         if _prune is not None:
-            threading.Thread(target=_prune, daemon=True).start()
+            def _prune_quietly():
+                # An exception escaping a thread target prints a traceback to
+                # stderr from a context the caller cannot catch. Cache upkeep is
+                # never worth alarming the user mid-scan.
+                try:
+                    _prune()
+                except Exception as exc:
+                    logger.debug("yf disk cache prune failed: %s", exc)
+
+            threading.Thread(target=_prune_quietly, daemon=True).start()
     except Exception:
         pass
 

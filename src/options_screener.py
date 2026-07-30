@@ -357,10 +357,8 @@ def _strategy_label_for_mode(mode: str, opt_type) -> str:
     signals and are logged as Long Put / Long Call so the P&L sign and
     Greeks signing in check_pnl read correctly.
     """
-    t = str(opt_type or "").capitalize()
-    if mode == "Premium Selling":
-        return f"Short {t}"
-    return f"Long {t}"
+    from .trade_analysis import strategy_label_for_mode
+    return strategy_label_for_mode(mode, opt_type)
 
 
 def _cohort_min_dte(cfg: dict) -> int:

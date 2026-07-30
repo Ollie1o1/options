@@ -331,15 +331,44 @@ def categorize_by_strategy(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def strategy_label_for_mode(mode: str, opt_type) -> str:
+    """Map screener mode + option type to a strategy name.
+
+    Premium-Selling picks are short premium; every other single-leg mode
+    generates buy signals. Canonical here rather than in the screener so
+    display-layer code can reach it without importing the screener.
+    """
+    t = str(opt_type or "").capitalize()
+    if mode == "Premium Selling":
+        return f"Short {t}"
+    return f"Long {t}"
+
+
 def get_position_sizing_recommendation(row: pd.Series, account_size: float,
-                                       risk_per_trade: float = 0.02) -> Dict:
+                                       risk_per_trade: float = 0.02,
+                                       strategy_name: str = None) -> Dict:
     """
     Calculate recommended position size using Kelly Criterion blended with fixed-fraction.
     Kelly fraction = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
     Blended: 50% Kelly + 50% fixed (2% risk) — "half-Kelly" for safety.
+
+    ``strategy_name`` decides what a contract actually ties up. Without it this
+    assumed every trade was long premium (``premium * 100``), which sized a
+    short put on a $318 underlying as risking $50 rather than $31,825 of
+    collateral — and this number is displayed right before the operator trades.
+    Omitted, the legacy debit behaviour is kept so older callers don't shift.
     """
-    max_loss = row.get('premium', 0) * 100  # Cost per contract
-    if max_loss <= 0:
+    if strategy_name:
+        from .capital_risk import capital_at_risk_for_pick
+        max_loss = capital_at_risk_for_pick(row, strategy_name)
+        if max_loss is None:
+            # Unbounded (naked calls): there is no denominator, and inventing a
+            # contract count would be a lie about a position that can't be sized.
+            return {'contracts': 0, 'total_cost': 0, 'percent_of_account': 0,
+                    'unbounded_risk': True}
+    else:
+        max_loss = row.get('premium', 0) * 100  # Cost per contract
+    if max_loss is None or max_loss <= 0:
         return {'contracts': 0, 'total_cost': 0, 'percent_of_account': 0}
 
     # Estimate win rate from PoP, avg_win from profit target, avg_loss from stop

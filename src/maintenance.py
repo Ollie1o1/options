@@ -222,7 +222,8 @@ def run_catchup(db_path: str = "paper_trades.db",
                 state_path: str = DEFAULT_STATE_PATH,
                 now: Optional[datetime] = None,
                 runner: Optional[Callable] = None,
-                lock_path: str = DEFAULT_LOCK_PATH) -> dict:
+                lock_path: str = DEFAULT_LOCK_PATH,
+                swing_fn: Optional[Callable] = None) -> dict:
     """Run every due working auto-log window for today, blocking, marking state
     after each success so a crash mid-way keeps the windows already done.
     Invoked detached by interactive startup (``-m src.maintenance --catchup``)
@@ -235,10 +236,10 @@ def run_catchup(db_path: str = "paper_trades.db",
     with _catchup_lock(lock_path) as acquired:
         if not acquired:
             return {"ran": [], "skipped": "already-running"}
-        return _run_catchup_locked(db_path, state_path, now, runner)
+        return _run_catchup_locked(db_path, state_path, now, runner, swing_fn)
 
 
-def _run_catchup_locked(db_path, state_path, now, runner) -> dict:
+def _run_catchup_locked(db_path, state_path, now, runner, swing_fn=None) -> dict:
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
     runner = runner or _default_runner
@@ -262,8 +263,11 @@ def _run_catchup_locked(db_path, state_path, now, runner) -> dict:
     # it runs only AFTER the options windows are marked, and any failure (crypto
     # exchange down, import error) is swallowed so it can never touch the options
     # cohort. Crypto is a satellite — it must never jeopardise the options gate.
+    # Injectable like every other side effect here: called directly, it put a
+    # live Binance request inside any test of run_catchup — a flake source and
+    # a multi-minute suite whenever the exchange was slow.
     try:
-        if _run_swing_paper() is not None:
+        if (swing_fn or _run_swing_paper)() is not None:
             ran.append("swing-paper")
     except Exception:
         pass
