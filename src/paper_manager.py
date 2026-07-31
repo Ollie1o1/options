@@ -324,6 +324,32 @@ _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 
 # deliberate manual entry is always the operator's call.
 DEFAULT_DEDUP_WINDOW_DAYS = 3
 
+# Leg columns beyond the anchor `strike` that define a structure. A single-leg
+# row has NULL in all of them and so still matches only other single legs; a
+# spread differs on long_strike, a condor on either wing.
+_DEDUP_LEG_COLUMNS = (
+    "long_strike",
+    "short_call_strike", "long_call_strike",
+    "short_put_strike", "long_put_strike",
+)
+
+
+def _leg_strike(value: Any) -> Optional[float]:
+    """A leg strike as a float, or None for an absent/unusable/zero leg.
+
+    Zero collapses to None on purpose: the auto-log payloads default a missing
+    wing to 0 (``row.get("long_strike", 0)``) while ``log_trade`` writes NULL
+    for one that was never set, and the two must not read as different legs."""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(f) or f == 0.0:
+        return None
+    return f
+
 _SCHEMA_VERSION = 16
 _MIGRATIONS = {
     1: [],
@@ -662,11 +688,20 @@ class PaperManager:
         total (see ``scripts/audit_duplicate_trades.py`` for what the ledger
         already accumulated this way).
 
-        Match key is ``(ticker, strategy_name, strike, expiration)`` — price is
-        deliberately NOT in it, because a re-log at a drifted quote is exactly
-        the case the per-day dedup misses. The window is measured in absolute
-        days from the new row's own entry date, so a backdated catch-up is
-        caught the same as a forward one.
+        Match key is ``(ticker, strategy_name, expiration, every leg strike)`` —
+        price is deliberately NOT in it, because a re-log at a drifted quote is
+        exactly the case the per-day dedup misses. The window is measured in
+        absolute days from the new row's own entry date, so a backdated catch-up
+        is caught the same as a forward one.
+
+        Every leg has to be in the key because ``strike`` alone is only the
+        *anchor* leg: ``log_spread`` puts the short strike there and
+        ``log_iron_condor`` the short put. Two condors on the same ticker and
+        expiration can share a short put and differ entirely on the call wing,
+        and two Bear Calls can share a short strike at different widths — those
+        are different structures with different risk, and matching on the anchor
+        alone would silently refuse the second one. ``IS`` rather than ``=`` so
+        the NULL leg columns of a single-leg row match each other.
 
         Fails open: a DB error here must not stop a trade being logged, so it
         returns False and lets the insert proceed.
@@ -683,21 +718,30 @@ class PaperManager:
         expiration = str(trade_dict.get("expiration") or "")
         effective_date = trade_dict.get("date") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # NULLIF on the column mirrors _leg_strike on the parameter: a stored 0
+        # and a stored NULL are the same "no such leg", and must compare equal.
+        leg_clauses = " ".join(
+            f"AND ROUND(NULLIF({col}, 0), 4) IS ROUND(?, 4)" for col in _DEDUP_LEG_COLUMNS
+        )
+        leg_values = [_leg_strike(trade_dict.get(col)) for col in _DEDUP_LEG_COLUMNS]
+
         try:
             with self._get_connection() as conn:
                 row = conn.execute(
-                    """
+                    f"""
                     SELECT entry_id, date, entry_price FROM trades
                     WHERE ticker = ?
                       AND COALESCE(strategy_name, '') = ?
                       AND ROUND(strike, 4) = ROUND(?, 4)
                       AND COALESCE(expiration, '') = ?
+                      {leg_clauses}
                       AND date(date) IS NOT NULL
                       AND ABS(julianday(date(date)) - julianday(date(?))) <= ?
                     ORDER BY date DESC, entry_id DESC
                     LIMIT 1
                     """,
-                    (ticker, strategy, strike, expiration, effective_date, window),
+                    (ticker, strategy, strike, expiration, *leg_values,
+                     effective_date, window),
                 ).fetchone()
         except sqlite3.Error as exc:
             logger.debug("Dedup check failed (%s) — allowing the insert", exc)

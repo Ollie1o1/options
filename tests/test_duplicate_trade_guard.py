@@ -211,6 +211,101 @@ class TestAutoLogDedupGuard(_LedgerCase):
         self.assertFalse(pm.log_iron_condor_if_new(
             dict(condor, date=_day(0), total_credit=1.15), auto_log=True))
 
+    def test_condors_sharing_a_short_put_but_not_a_call_wing_both_log(self):
+        """``strike`` holds only the anchor leg — the short put for a condor.
+
+        Two condors on the same ticker and expiration can share it and be
+        completely different structures on the call side. Matching on the anchor
+        alone would silently refuse the second, which is the same failure class
+        as the short-put window starvation (2026-07-30).
+        """
+        pm = self.pm()
+        condor = {
+            "date": _day(-1), "ticker": "QQQ", "expiration": "2026-07-17",
+            "short_put_strike": 700.0, "long_put_strike": 695.0,
+            "short_call_strike": 760.0, "long_call_strike": 765.0,
+            "total_credit": 1.10, "max_profit": 110.0, "max_risk": 390.0,
+            "quality_score": 0.6,
+        }
+        self.assertTrue(pm.log_iron_condor_if_new(condor, auto_log=True))
+        wider_calls = dict(condor, date=_day(0),
+                           short_call_strike=770.0, long_call_strike=775.0)
+        self.assertTrue(pm.log_iron_condor_if_new(wider_calls, auto_log=True))
+        self.assertEqual(self.n_rows(), 2)
+        self.assertEqual(pm.duplicate_rejected, 0)
+
+    def test_condors_differing_only_on_the_put_wing_both_log(self):
+        pm = self.pm()
+        condor = {
+            "date": _day(-1), "ticker": "QQQ", "expiration": "2026-07-17",
+            "short_put_strike": 700.0, "long_put_strike": 695.0,
+            "short_call_strike": 760.0, "long_call_strike": 765.0,
+            "total_credit": 1.10, "max_risk": 390.0, "quality_score": 0.6,
+        }
+        self.assertTrue(pm.log_iron_condor_if_new(condor, auto_log=True))
+        self.assertTrue(pm.log_iron_condor_if_new(
+            dict(condor, date=_day(0), long_put_strike=690.0), auto_log=True))
+        self.assertEqual(self.n_rows(), 2)
+
+    def test_spreads_at_the_same_short_strike_but_different_widths_both_log(self):
+        pm = self.pm()
+        spread = {
+            "date": _day(-1), "ticker": "SPY", "expiration": "2026-07-17",
+            "short_strike": 745.0, "long_strike": 750.0, "type": "Bear Call",
+            "net_credit": 0.49, "max_loss": 451.0, "quality_score": 0.6,
+        }
+        self.assertTrue(pm.log_spread_if_new(spread, auto_log=True))
+        self.assertTrue(pm.log_spread_if_new(
+            dict(spread, date=_day(0), long_strike=755.0), auto_log=True))
+        self.assertEqual(self.n_rows(), 2)
+        self.assertEqual(pm.duplicate_rejected, 0)
+
+    def test_an_identical_structure_is_still_refused(self):
+        """The wing check must not defeat the guard for a true re-log."""
+        pm = self.pm()
+        condor = {
+            "date": _day(-1), "ticker": "QQQ", "expiration": "2026-07-17",
+            "short_put_strike": 700.0, "long_put_strike": 695.0,
+            "short_call_strike": 760.0, "long_call_strike": 765.0,
+            "total_credit": 1.10, "max_risk": 390.0, "quality_score": 0.6,
+        }
+        self.assertTrue(pm.log_iron_condor_if_new(condor, auto_log=True))
+        self.assertFalse(pm.log_iron_condor_if_new(
+            dict(condor, date=_day(0), total_credit=1.15), auto_log=True))
+        self.assertEqual(self.n_rows(), 1)
+
+    def test_a_single_leg_does_not_collide_with_a_spread_anchor(self):
+        """A Long Call at 745 and a Bear Call anchored at 745 are not the same
+        row — the single leg's NULL wings only match other NULL wings."""
+        pm = self.pm()
+        self.assertTrue(pm.log_spread_if_new({
+            "date": _day(-1), "ticker": "SPY", "expiration": "2026-07-17",
+            "short_strike": 745.0, "long_strike": 750.0, "type": "Bear Call",
+            "net_credit": 0.49, "max_loss": 451.0, "quality_score": 0.6,
+        }, auto_log=True))
+        self.assertTrue(pm.log_trade_if_new(_long_call(
+            ticker="SPY", strike=745.0, expiration="2026-07-17",
+            strategy_name="Bear Call", entry_price=0.49), auto_log=True))
+        self.assertEqual(self.n_rows(), 2)
+
+    def test_a_zero_wing_and_a_missing_wing_are_the_same_leg(self):
+        """Auto-log payloads default an absent wing to 0 (`row.get(k, 0)`) while
+        log_trade stores NULL for one never set. Those must not read as two
+        different structures, or the guard would never fire on that path."""
+        pm = self.pm()
+        spread = {
+            "date": _day(-1), "ticker": "SPY", "expiration": "2026-07-17",
+            "short_strike": 745.0, "long_strike": 750.0, "type": "Bear Call",
+            "net_credit": 0.49, "max_loss": 451.0, "quality_score": 0.6,
+        }
+        self.assertTrue(pm.log_spread_if_new(spread, auto_log=True))
+        # Same structure, re-logged with the condor wings explicitly zeroed.
+        repeat = dict(spread, date=_day(0), net_credit=0.51,
+                      short_call_strike=0, long_call_strike=0,
+                      short_put_strike=0, long_put_strike=0)
+        self.assertFalse(pm.log_spread_if_new(repeat, auto_log=True))
+        self.assertEqual(self.n_rows(), 1)
+
     def test_manual_condor_logging_is_still_allowed(self):
         """The interactive [L] menu calls log_iron_condor_if_new without the flag."""
         pm = self.pm()
@@ -403,10 +498,20 @@ class TestCheckpointHistoryIsIdempotentPerDay(unittest.TestCase):
         self.assertEqual(len(self._data_rows()), 2)
 
     def test_the_markdown_is_still_rewritten_on_a_skipped_append(self):
-        """Only the history row is suppressed — the report itself stays current."""
-        paths = self._write()
-        self._write()
-        self.assertTrue(os.path.exists(paths["md"]))
+        """Only the history row is suppressed — the report itself stays current.
+
+        Asserted on content, not existence: the file is written before the skip
+        logic runs, so an existence check would pass even if the skip short-
+        circuited the whole function.
+        """
+        paths = self._write(ic_pearson=0.0486)
+        result = self._write(ic_pearson=0.1234)
+        self.assertFalse(result["history_appended"])
+        with open(paths["md"]) as f:
+            md = f.read()
+        self.assertIn("+0.123", md)
+        self.assertNotIn("+0.049", md)
+        self.assertEqual(len(self._data_rows()), 1)
 
 
 if __name__ == "__main__":
