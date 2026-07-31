@@ -1,10 +1,11 @@
 # Paper Trading Track Record
 
-_Generated 2026-07-31 14:47 • 807 closed trades_
+_Generated 2026-07-31 15:30 • 807 closed trades_
 
 > **Methodology & caveats.** These are **paper trades**, not live fills. Entries and exits use **delayed retail data** (Yahoo Finance) and a **modeled friction** assumption (spread/slippage), so realized results would differ. The descriptive stats below are real; the **predictive edge of the ranking model is still under out-of-sample evaluation** and is *not* established — see [docs/VALIDATION_POWER.md](../docs/VALIDATION_POWER.md).
 
-_Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: EXTEND (n=70/50) | cohort IC +0.049 pearson / rank n/a_
+_Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: EXTEND (n=70/50)
+OOS walk-forward as of 2026-05-29 (63d old, STALE >30d) | cohort IC +0.049 pearson / rank n/a_
 
 ## Headline
 
@@ -64,6 +65,22 @@ Aggregate return on risk is a dollar-weighted number: one large contract can car
 A cash-secured short posts the whole strike as collateral, so its capital_at_risk denominator is roughly fifty to a hundred times the premium at stake. Return on risk therefore reads as a near-flat line however the trade actually went — that flatness is the denominator, not the result. Return on credit collected is published as the companion figure and is the one that moves.
 
 - **Short Put**: -0.3% of capital risked vs -11.4% of $72,751 credit collected (101 closed).
+
+### Stops overshot because exits were checked by hand
+
+Exit checks run inside `update_positions`, which runs when the screener is opened — not on a timer. The scheduled LaunchAgents stopped running on **2026-06-15**, so from that date exits were checked at irregular, manual intervals. A stop rule cannot fire on a day nobody looked, so stopped-out trades in that window record the loss they had drifted to by the next check, not the loss the rule specified.
+
+Measured over 103 closed trades whose exit reason states a numeric stop level (of 137 stop exits in total; 30 more stopped on a strike breach, which has no numeric level to overshoot). Overshoot is the realized loss minus the stated stop, in percent of entry premium:
+
+| window | trades | median overshoot | p90 | worst | share past their stop |
+|---|---:|---:|---:|---:|---:|
+| Before 2026-06-15 | 32 | +8.3% | +24.3% | +66.7% | 75% |
+| After 2026-06-15 (manual cadence) | 71 | +11.6% | +48.8% | +57.5% | 94% |
+| All | 103 | +10.7% | +33.5% | +66.7% | 88% |
+
+**The recorded exits are not corrected for this and never will be.** The record stays as-traded; this note is how it is read. Losses on stopped trades in the manual-cadence window are overstated relative to the rules that were supposed to govern them, and because defined-risk credit structures state their stops as a multiple of a small credit, the overstatement falls hardest on exactly the lines the credit-vs-debit comparison depends on.
+
+This note is removed only once the scheduler has been verifiably alive for a full window — not when it is merely fixed.
 
 ## Closed trades
 

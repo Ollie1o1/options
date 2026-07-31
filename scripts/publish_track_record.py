@@ -406,9 +406,33 @@ def methodology_notes(rows: Sequence[Dict[str, Any]],
         _note_weighting_basis(book),
         _note_median_vs_aggregate(rows, strategies),
         _note_collateral_denominator(credit),
+        _note_stop_overshoot(rows),
     ]
     # Further notes append here (one `_note_*` helper each).
     return [n for n in notes if n]
+
+
+def _note_stop_overshoot(rows: Sequence[Dict[str, Any]]
+                         ) -> Optional[Tuple[str, str]]:
+    """How far stopped trades ran past their stop, and why.
+
+    Measured by scripts/overshoot_report.py, rendered here so a reader of the
+    published record cannot see the -157.5% rows without also seeing that they
+    are a check-frequency artifact rather than a market gap.
+    """
+    try:
+        from scripts.overshoot_report import (format_summary, is_stop_exit,
+                                              summarize)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    stops = [r for r in rows if is_stop_exit(r.get("exit_reason"))]
+    if not stops:
+        return None
+    summary = summarize(stops)
+    if not summary["n_levelled"]:
+        return None
+    return ("Stops overshot because exits were checked by hand",
+            format_summary(summary))
 
 
 def _note_weighting_basis(book: Dict[str, Any]) -> Optional[Tuple[str, str]]:
