@@ -522,5 +522,11 @@
   "data_providers": {
     "finnhub_api_key": "",
     "_note": "Free Finnhub key (finnhub.io/register) enables reliable earnings dates + dividend yields; falls back to yfinance when blank. Env FINNHUB_API_KEY overrides this."
+  },
+  "gate": {
+    "_note": "Phase-1 gate rule. version 2 is the signed redesign (docs/GATE_REDESIGN_SPEC.md, operator sign-off 2026-07-31): decides on the SPEARMAN rank IC via posterior bands at EFFECTIVE n, with a bounded EXTEND. version 1 is the superseded Pearson/p-value rule, kept runnable so its verdict can still be computed; both are reported on every checkpoint regardless of which governs.",
+    "version": 2,
+    "_extensions_used_note": "How many 2-week EXTENDs have been granted under v2. At 2 the gate must resolve to READY or STOP rather than extending again — this is the terminal condition v1 lacked. Increment when an EXTEND is acted on.",
+    "extensions_used": 0
   }
 }

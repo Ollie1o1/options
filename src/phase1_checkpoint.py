@@ -3,18 +3,27 @@
 Cohort = trades where strategy_name='Long Call', status='CLOSED', paper_only=0,
 and date >= phase1_start_date.
 
-Gate rules:
-  n < 50                              -> GATHERING
-  n >= 50, IC >= 0.08, p < 0.05       -> READY
-  n >= 50, 0.03 <= IC < 0.08          -> EXTEND
-  n >= 50, IC < 0.03, weeks >= 6      -> STOP
-  otherwise                           -> GATHERING
+Gate v2 (docs/GATE_REDESIGN_SPEC.md, signed off by the operator 2026-07-31) is
+the active rule, selected by ``config.gate.version``:
 
-IC in those rules means the Pearson IC and nothing else. Everything else the
-checkpoint reports — the Spearman rank IC, the affordable subset, the
-short-premium cohort — sits beside the decision and is never read by it
-(DECISIONS.md 2026-06-07 forbids silent gate changes; a redesign is specified
-in docs/GATE_REDESIGN_SPEC.md and is not active until signed off).
+  n_eff < 50                                   -> GATHERING
+  P(true RANK IC >= 0.08) >= 0.85              -> READY   (sign-guard applies)
+  P(true RANK IC >= 0.08) <= 0.15              -> STOP
+  rank IC < 0.03                               -> STOP
+  EXTEND granted twice already                 -> STOP
+  otherwise                                    -> EXTEND  (bounded, 2 x 2 weeks)
+
+Three deliberate differences from v1. The statistic is the RANK IC, because
+long-call returns are floored at -100% and driven above by a few take-profits,
+which is precisely where Pearson misleads. The sample size is EFFECTIVE n —
+batch auto-logging clusters entries by day and same-day trades share that day's
+move. And EXTEND is bounded: under v1 an IC drifting between 0.03 and 0.08
+extended forever, which made "keep gathering" a permanent answer rather than a
+decision.
+
+v1 is preserved verbatim in ``decide_v1`` and its verdict is reported beside
+v2 on every run. A superseded rule that vanishes cannot be audited, and the
+two agreeing (or not) is itself evidence.
 
 Never modifies paper_trades.db or config.json. Writes only to reports/.
 """
@@ -43,7 +52,7 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
     subset rather than assumed affordable — unbounded risk is not small risk.
     """
     sql = (
-        "SELECT quality_score, pnl_pct FROM trades "
+        "SELECT quality_score, pnl_pct, date FROM trades "
         "WHERE strategy_name='Long Call' AND status='CLOSED' "
         "AND COALESCE(paper_only, 0) = 0 "
         "AND date >= ? "
@@ -53,14 +62,126 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
     if max_capital_at_risk is not None:
         sql += " AND capital_at_risk IS NOT NULL AND capital_at_risk <= ?"
         params = (phase1_start, float(max_capital_at_risk))
-    scores, returns = [], []
+    scores, returns, dates = [], [], []
     with sqlite3.connect(db_path) as conn:
-        for q, p in conn.execute(sql, params).fetchall():
+        for q, p, d in conn.execute(sql, params).fetchall():
             try:
                 scores.append(float(q)); returns.append(float(p))
             except (TypeError, ValueError):
                 continue
-    return np.array(scores), np.array(returns)
+            dates.append(str(d)[:10] if d else "")
+    return np.array(scores), np.array(returns), dates
+
+
+def design_effect(returns: np.ndarray, dates) -> tuple:
+    """(icc, design_effect, n_eff) for returns clustered by entry date.
+
+    Batch auto-logging enters several trades on the same day, and same-day
+    trades share that day's market move — so they are not independent
+    observations and nominal n overstates the evidence. One-way ANOVA over
+    entry-day clusters gives the intraclass correlation; the design effect is
+    ``1 + (mean cluster size - 1) * ICC`` and n_eff = n / DE.
+
+    ICC is floored at 0: a negative estimate means "no positive clustering
+    detected", not "these observations are better than independent".
+    """
+    n = len(returns)
+    if n < 3 or not dates or len(dates) != n:
+        return 0.0, 1.0, float(n)
+
+    groups: dict = {}
+    for value, day in zip(returns, dates):
+        groups.setdefault(day, []).append(float(value))
+    k = len(groups)
+    if k < 2 or k == n:
+        # Every trade on its own day (or all on one day): no cluster structure
+        # to estimate, so nominal n stands.
+        return 0.0, 1.0, float(n)
+
+    grand = float(np.mean(returns))
+    ss_between = sum(len(v) * (np.mean(v) - grand) ** 2 for v in groups.values())
+    ss_within = sum(sum((x - np.mean(v)) ** 2 for x in v) for v in groups.values())
+    df_between, df_within = k - 1, n - k
+    if df_within <= 0:
+        return 0.0, 1.0, float(n)
+
+    ms_between = ss_between / df_between
+    ms_within = ss_within / df_within
+    sizes = [len(v) for v in groups.values()]
+    # Unequal cluster sizes: the standard m0 correction, not the plain mean.
+    m0 = (n - sum(s * s for s in sizes) / n) / df_between
+    if m0 <= 0 or ms_between + (m0 - 1) * ms_within == 0:
+        return 0.0, 1.0, float(n)
+
+    icc = (ms_between - ms_within) / (ms_between + (m0 - 1) * ms_within)
+    icc = max(0.0, float(icc))
+    mean_size = n / k
+    de = 1.0 + (mean_size - 1.0) * icc
+    de = max(1.0, float(de))
+    return icc, de, float(n) / de
+
+
+# Gate v2 bands (docs/GATE_REDESIGN_SPEC.md, signed 2026-07-31).
+GATE_V2_READY_POSTERIOR = 0.85
+GATE_V2_STOP_POSTERIOR = 0.15
+GATE_V2_IC_FLOOR = 0.03
+GATE_V2_MIN_N_EFF = 50
+GATE_V2_MAX_EXTENSIONS = 2
+
+
+def decide_v1(n: int, ic_p: float, p_p: float, weeks: int) -> str:
+    """The original gate. Preserved verbatim so its verdict stays reportable
+    beside v2 — a decision rule that silently disappears cannot be audited."""
+    if n < 50:
+        return "GATHERING"
+    if ic_p >= 0.08 and p_p < 0.05:
+        return "READY"
+    if 0.03 <= ic_p < 0.08:
+        return "EXTEND"
+    if ic_p < 0.03 and weeks >= 6:
+        return "STOP"
+    return "GATHERING"
+
+
+def decide_v2(n_eff: float, ic_rank: float, ic_pearson: float,
+              extensions_used: int = 0) -> tuple:
+    """The signed redesign. Returns (decision, reason).
+
+    Reads RANK IC, because long-call returns are floored at -100% and
+    outlier-driven above, which is the distribution Pearson handles worst.
+    Sample size is effective n, not nominal. EXTEND is bounded: it can be
+    granted at most twice, after which the decision must resolve.
+    """
+    if n_eff < GATE_V2_MIN_N_EFF:
+        return "GATHERING", f"effective n {n_eff:.1f} < {GATE_V2_MIN_N_EFF}"
+
+    post = posterior_ic_above(ic_rank, int(round(n_eff)), threshold=0.08)
+    if post is None:
+        return "GATHERING", "posterior not computable"
+
+    disagree = (ic_rank > 0) != (ic_pearson > 0)
+
+    if post >= GATE_V2_READY_POSTERIOR:
+        if disagree:
+            # Sign-agreement guard: never authorise on a statistic its
+            # counterpart contradicts. Documented, not silent.
+            return "EXTEND", (f"posterior {post:.0%} clears the bar but rank and "
+                              "Pearson IC disagree in sign — guard holds it back")
+        return "READY", f"P(true rank IC >= 0.08) = {post:.0%}"
+
+    if post <= GATE_V2_STOP_POSTERIOR:
+        return "STOP", f"P(true rank IC >= 0.08) = {post:.0%}, at or below the floor"
+
+    if ic_rank < GATE_V2_IC_FLOOR:
+        return "STOP", f"rank IC {ic_rank:+.3f} below the {GATE_V2_IC_FLOOR} floor"
+
+    if extensions_used >= GATE_V2_MAX_EXTENSIONS:
+        return "STOP", (f"EXTEND allowance exhausted ({extensions_used} of "
+                        f"{GATE_V2_MAX_EXTENSIONS}) and posterior {post:.0%} "
+                        "never reached the bar")
+
+    return "EXTEND", (f"posterior {post:.0%} between the bands; extension "
+                      f"{extensions_used + 1} of {GATE_V2_MAX_EXTENSIONS}")
 
 
 def _dual_ic(scores: np.ndarray, returns: np.ndarray):
@@ -195,9 +316,9 @@ def posterior_ic_above(ic: float, n: int, threshold: float = 0.08) -> Optional[f
     """P(true IC >= threshold | observed ic, n) under a flat prior on the
     Fisher-z scale: true z ~ Normal(atanh(ic), 1/(n-3)).
 
-    Reporting only — never feeds the gate decision (docs/VALIDATION_POWER.md,
-    DECISIONS.md 2026-06-07: no silent gate change). Returns None when n < 4
-    or ic is not finite.
+    Under gate v1 this was reporting only. Under v2 (docs/GATE_REDESIGN_SPEC.md,
+    signed 2026-07-31) it IS the decision statistic, applied to the rank IC at
+    effective n. Returns None when n < 4 or ic is not finite.
     """
     if n < 4 or ic is None or not math.isfinite(ic):
         return None
@@ -208,21 +329,25 @@ def posterior_ic_above(ic: float, n: int, threshold: float = 0.08) -> Optional[f
 
 
 def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = None,
-                       max_capital_at_risk: Optional[float] = None) -> dict:
+                       max_capital_at_risk: Optional[float] = None,
+                       gate_version: int = 2,
+                       extensions_used: int = 0) -> dict:
     """Cohort IC and the gate decision.
+
+    ``gate_version`` selects which rule governs. 2 is the signed redesign
+    (docs/GATE_REDESIGN_SPEC.md, 2026-07-31): rank IC, posterior bands at
+    effective n, bounded EXTEND. 1 is the original Pearson/p-value rule, kept
+    so its verdict can still be computed and shown. BOTH are always returned
+    under ``decision_v1`` / ``decision_v2`` regardless of which one governs —
+    a decision rule that quietly vanishes cannot be audited.
 
     ``max_capital_at_risk`` adds a parallel read of the subset the account could
     actually have traded — roughly half the cohort ties up more than the whole
-    budget. It is reporting only: the decision below still reads the nominal
-    cohort, because changing the gate is a decision to be made deliberately
-    (DECISIONS.md 2026-06-07), not a side effect of adding a column.
-
-    The same applies to the two other numbers this returns: the Spearman rank
-    IC and the short-premium cohort block. Both are reported beside the gate
-    and neither is read by it.
+    budget. That subset, and the short-premium cohort block, remain reporting
+    only: neither is read by the gate.
     """
     today = today or datetime.now().strftime("%Y-%m-%d")
-    scores, returns = _load_cohort(db_path, phase1_start)
+    scores, returns, dates = _load_cohort(db_path, phase1_start)
     n = len(scores)
     weeks = _weeks_between(phase1_start, today)
 
@@ -232,7 +357,7 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
     ic_s_affordable: Optional[float] = None
     p_s_affordable: Optional[float] = None
     if max_capital_at_risk is not None:
-        aff_scores, aff_returns = _load_cohort(db_path, phase1_start, max_capital_at_risk)
+        aff_scores, aff_returns, _aff_dates = _load_cohort(db_path, phase1_start, max_capital_at_risk)
         n_affordable = len(aff_scores)
         (ic_affordable, p_affordable,
          ic_s_affordable, p_s_affordable) = _dual_ic(aff_scores, aff_returns)
@@ -243,22 +368,32 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
 
     ci_lo, ci_hi = _bootstrap_ci(scores, returns)
 
-    if n < 50:
-        decision = "GATHERING"
-    elif ic_p >= 0.08 and p_p < 0.05:
-        decision = "READY"
-    elif 0.03 <= ic_p < 0.08:
-        decision = "EXTEND"
-    elif ic_p < 0.03 and weeks >= 6:
-        decision = "STOP"
-    else:
-        decision = "GATHERING"
+    icc, de, n_eff = design_effect(returns, dates)
+
+    decision_v1 = decide_v1(n, ic_p, p_p, weeks)
+    decision_v2, reason_v2 = decide_v2(n_eff, ic_s, ic_p, extensions_used)
+
+    # Which one governs. v2 is the signed redesign; v1 stays computed and
+    # reported so the change is never invisible and can always be audited.
+    decision = decision_v2 if gate_version >= 2 else decision_v1
 
     return {
         "today": today, "phase1_start": phase1_start, "weeks_elapsed": weeks,
         "n_trades": n, "ic_pearson": ic_p, "p_pearson": p_p,
         "ic_spearman": ic_s, "p_spearman": p_s, "ic_95_ci": [ci_lo, ci_hi],
         "decision": decision,
+        "gate_version": gate_version,
+        "decision_v1": decision_v1,
+        "decision_v2": decision_v2,
+        "decision_v2_reason": reason_v2,
+        "icc": icc,
+        "design_effect": de,
+        "n_effective": n_eff,
+        "extensions_used": extensions_used,
+        # v2 reads RANK IC, so its posterior is the rank one. The Pearson
+        # posterior stays below under its original key for continuity.
+        "posterior_rank_ic_ge_008": posterior_ic_above(
+            ic_s, int(round(n_eff)), threshold=0.08),
         "posterior_ic_ge_008": posterior_ic_above(ic_p, n, threshold=0.08),
         "max_capital_at_risk": max_capital_at_risk,
         "n_affordable": n_affordable,
@@ -286,8 +421,46 @@ def _format_markdown(r: dict) -> str:
         "",
         f"## Gate decision: **{r['decision']}**", "",
         _decision_explainer(r["decision"]), "",
+        *_gate_version_lines(r),
         *_short_premium_lines(r.get("short_premium")),
     ]) + "\n"
+
+
+def _gate_version_lines(r: dict) -> list:
+    """Which rule decided, why, and what the other one said.
+
+    Both verdicts appear on every run. When they agree the line is short and
+    reassuring; when they disagree that disagreement is the single most
+    important thing on the page, and it must not be discoverable only by
+    reading the source.
+    """
+    v1, v2 = r.get("decision_v1"), r.get("decision_v2")
+    if v1 is None or v2 is None:
+        return []
+    active = int(r.get("gate_version", 2))
+    n_eff = r.get("n_effective")
+    lines = ["### Rule versions", ""]
+    lines.append(f"- Active rule: **v{active}** "
+                 f"({'rank IC, posterior bands, effective n' if active >= 2 else 'Pearson IC, p-value'})")
+    lines.append(f"- v2 (signed 2026-07-31) says **{v2}** — {r.get('decision_v2_reason', '')}")
+    lines.append(f"- v1 (superseded) says **{v1}**")
+    if n_eff is not None:
+        lines.append(
+            f"- Effective n: **{n_eff:.1f}** of {r['n_trades']} nominal "
+            f"(ICC {r.get('icc', 0.0):.3f}, design effect {r.get('design_effect', 1.0):.2f}) "
+            "— same-day entries share that day's move, so they are not "
+            "independent observations")
+    post = r.get("posterior_rank_ic_ge_008")
+    if post is not None:
+        lines.append(f"- P(true rank IC >= 0.08) = **{post:.0%}** "
+                     f"(READY at >= {GATE_V2_READY_POSTERIOR:.0%}, "
+                     f"STOP at <= {GATE_V2_STOP_POSTERIOR:.0%})")
+    if v1 != v2:
+        lines.append("")
+        lines.append(f"> **The two rules disagree** (v1 {v1}, v2 {v2}). v{active} "
+                     "governs; the other is shown so the choice stays auditable.")
+    lines.append("")
+    return lines
 
 
 def _sign_disagreement_line(ic_p: Optional[float], ic_s: Optional[float]) -> str:
@@ -506,12 +679,22 @@ def write_checkpoint(result: dict, output_dir: str = "reports") -> dict:
                     f"{result['ic_spearman']:.4f}\t{result['p_spearman']:.4f}\n")
 
     if result["decision"] in ("READY", "STOP"):
+        _v = int(result.get("gate_version", 2))
+        # Which statistic decided has to be stated, not inferred. Under v2 the
+        # rank IC is the gate statistic; under v1 it was reporting only.
+        _rank_label = ("Rank IC (THE gate statistic under v2)" if _v >= 2
+                       else "Rank IC (reporting only, not the gate statistic)")
+        _neff = result.get("n_effective")
+        _neff_txt = f", n_eff={_neff:.1f}" if _neff is not None else ""
         (out / "GATE_STATUS.md").write_text(
             f"GATE: **{result['decision']}** as of {result['today']}  "
-            f"(n={result['n_trades']}, IC={result['ic_pearson']:+.3f}, "
+            f"(rule v{_v}, n={result['n_trades']}{_neff_txt}, "
+            f"IC={result['ic_pearson']:+.3f}, "
             f"p={result['p_pearson']:.3f}, weeks={result['weeks_elapsed']})\n"
-            f"Rank IC (reporting only, not the gate statistic): "
+            f"{_rank_label}: "
             f"{result['ic_spearman']:+.3f} (p={result['p_spearman']:.3f})\n"
+            f"v1 says {result.get('decision_v1')}, v2 says {result.get('decision_v2')}"
+            f" — {result.get('decision_v2_reason', '')}\n"
             f"See `{md_path.name}` for details.\n"
         )
     return {"md": str(md_path), "history": str(hist_path), "history_appended": appended}
@@ -532,8 +715,13 @@ def main() -> None:
         raise SystemExit("config.json missing auto_log.phase1_start_date")
 
     cap = (cfg.get("auto_log") or {}).get("max_capital_at_risk")
-    result = compute_checkpoint(db_path=args.db, phase1_start=phase1_start,
-                                max_capital_at_risk=float(cap) if cap else None)
+    gate_cfg = cfg.get("gate") or {}
+    result = compute_checkpoint(
+        db_path=args.db, phase1_start=phase1_start,
+        max_capital_at_risk=float(cap) if cap else None,
+        gate_version=int(gate_cfg.get("version", 2)),
+        extensions_used=int(gate_cfg.get("extensions_used", 0)),
+    )
     print(json.dumps(result, indent=2))
     if not args.dry_run:
         paths = write_checkpoint(result, output_dir=args.output)

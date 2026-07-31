@@ -1,7 +1,17 @@
 # Gate Redesign Spec — for operator sign-off
 
 Date drafted: 2026-07-31
-Status: **DRAFT — nothing in this document is active until the sign-off block at the bottom is filled in.**
+Status: **SIGNED OFF AND IMPLEMENTED 2026-07-31.** The operator approved this
+spec as proposed, with no amendments. Active as `config.gate.version = 2`; v1
+remains runnable and its verdict is reported beside v2 on every checkpoint.
+Implementation: `src/phase1_checkpoint.py` (`decide_v2`, `design_effect`),
+tests in `tests/test_gate_v2.py`.
+
+**First verdict under the new rule (2026-07-31, n=92):** STOP — the same answer
+v1 gives, reached on a sounder statistic. P(true rank IC >= 0.08) = 4%, at or
+below the 15% floor. Effective n 72.5 against 92 nominal (ICC 0.080, design
+effect 1.27). The redesign did not rescue the long call; it confirmed the
+verdict and made the reasoning legible.
 Covers ideas: `gate-statistic-wrong-for-skewed-returns`, `fix-gate-power-math`, `repoint-gate-credit` (stage 2), `effective-n-in-gate`, and the feeder ruling from `stop-lc-autolog-bleed`. These are one decision; per DECISIONS.md 2026-06-07 (no silent gate change) they are specified together and applied only on explicit approval.
 
 What is already allowed without this sign-off — and is being shipped alongside this draft — is *reporting*: both statistics rendered side-by-side everywhere the gate reports, and a short-premium cohort reported next to the LC gate. The decision path in `src/phase1_checkpoint.py` remains byte-for-byte what it was until this spec is approved.
@@ -117,10 +127,15 @@ Decided on IC, not on the sizing-artifact dollars (the −$17.6k is dead; afford
 
 Nothing above the line is active until this block is completed by the operator.
 
-- [ ] Approved decision statistic: __________ (proposed: Spearman rank IC with sign-agreement guard)
-- [ ] Approved bands: P₊ ≥ ____ READY / ≤ ____ STOP (proposed: 0.85 / 0.15); rank-IC floor ____ (proposed: 0.03)
-- [ ] Approved EXTEND allowance: ____ extensions × ____ weeks (proposed: 2 × 2)
-- [ ] Approved n threshold in effective-n terms: n_eff ≥ ____ (proposed: 50)
-- [ ] Approved short-premium gate (cohort, two arms, affordable-only): yes / no / amended: __________
-- [ ] Approved LC feeder ruling (§2.5): yes / no / amended: __________
-- [ ] Date + initials: __________
+- [x] Approved decision statistic: **Spearman rank IC with sign-agreement guard** (as proposed)
+- [x] Approved bands: P₊ ≥ **0.85** READY / ≤ **0.15** STOP; rank-IC floor **0.03** (as proposed)
+- [x] Approved EXTEND allowance: **2** extensions × **2** weeks (as proposed)
+- [x] Approved n threshold in effective-n terms: n_eff ≥ **50** (as proposed)
+- [x] Approved short-premium gate (cohort, two arms, affordable-only): **yes** — reporting half is live; the gate-status half activates when the short-premium cohort is wired to `decide_v2`, which is the next step, not this change
+- [x] Approved LC feeder ruling (§2.5): **yes** — keep the feeder running affordable-only; real-money authority moves to the short-premium gate
+- [x] Date + approval: **2026-07-31, operator ("i give you premission and signature")**
+
+Recorded verbatim because the approval was a blanket grant rather than a
+per-parameter selection: every value above is the spec's own proposal, adopted
+unamended. If any of them was not what was intended, change it in
+`config.gate` / the `GATE_V2_*` constants and note the amendment here.

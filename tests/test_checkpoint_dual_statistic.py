@@ -107,16 +107,19 @@ class _TmpDB(unittest.TestCase):
 # ── the decision must not notice the rank IC ────────────────────────────────
 
 class TestDecisionIgnoresRankIC(_TmpDB):
-    """Same Pearson, opposite rank structure, identical decision.
+    """Same Pearson, opposite rank structure, identical decision — under v1.
 
-    This is the regression that keeps the reporting change honest: the gate
-    still decides on exactly what it decided on before.
+    Written when the reporting change shipped, to prove the gate still decided
+    on exactly what it decided on before. Gate v2 (signed 2026-07-31)
+    deliberately DOES read the rank IC, so this property now belongs to v1
+    alone — and it is still worth pinning, because v1 must keep answering as it
+    always did for its verdict to remain auditable beside v2's.
     """
 
     def _decide(self, scores, returns, today="2026-07-28"):
         path = os.path.join(self.tmp.name, f"c{abs(hash(returns.tobytes())) % 10**8}.db")
         _seed_long_calls(path, scores, returns)
-        return compute_checkpoint(path, "2026-05-27", today=today)
+        return compute_checkpoint(path, "2026-05-27", today=today, gate_version=1)
 
     def _assert_twins_decide_alike(self, slope, expected):
         scores, aligned, inverted = _rank_twin_cohorts(slope)
@@ -212,13 +215,34 @@ class TestDualStatisticSurfaces(_TmpDB):
         self.assertNotIn("Statistics agree in sign.", md)
 
     def test_gate_status_file_reports_the_rank_ic(self):
-        r = self._result()
+        # Under v1 the rank IC was shown but explicitly not decisive.
+        r = self._result(gate_version=1)
         self.assertEqual(r["decision"], "STOP")
         write_checkpoint(r, output_dir=self.out)
         with open(os.path.join(self.out, "GATE_STATUS.md")) as f:
             text = f.read()
         self.assertIn("Rank IC", text)
         self.assertIn("not the gate statistic", text)
+
+    def test_gate_status_names_the_rank_ic_as_decisive_under_v2(self):
+        # Under v2 it IS the statistic, and the file must say so — a reader
+        # who cannot tell which number decided cannot audit the decision.
+        # GATE_STATUS.md is only written for terminal verdicts, so seed a
+        # cohort v2 genuinely stops on: score and return move opposite ways.
+        import numpy as _np
+        n = 60
+        scores = _np.linspace(0.30, 0.95, n)
+        returns = _np.linspace(0.90, -0.90, n)
+        _seed_long_calls(self.db, scores, returns)
+        r = compute_checkpoint(self.db, "2026-05-27", today="2026-07-28",
+                               gate_version=2)
+        self.assertEqual(r["decision"], "STOP")
+        write_checkpoint(r, output_dir=self.out)
+        with open(os.path.join(self.out, "GATE_STATUS.md")) as f:
+            text = f.read()
+        self.assertIn("THE gate statistic under v2", text)
+        self.assertIn("rule v2", text)
+        self.assertIn("v1 says", text)  # superseded verdict still visible
 
 
 # ── history TSV: new columns at the end, old rows still readable ────────────

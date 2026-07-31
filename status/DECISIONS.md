@@ -4,6 +4,44 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-07-31 — Gate v2 adopted: rank IC, posterior bands, bounded EXTEND
+
+**Why:** the v1 gate could not answer its own question. It decided on the
+Pearson IC of returns floored at -100% and driven above by a handful of
+take-profits — the distribution Pearson handles worst — and on the current
+cohort Pearson and Spearman disagreed in SIGN. Its READY arm demanded
+`IC>=0.08 AND p<0.05`, which at n=50 needs an observed IC of ~0.286, 3.6x the
+stated bar. And its EXTEND had no exit: an IC drifting between 0.03 and 0.08
+extended forever, so "keep gathering" was a permanent answer rather than a
+decision. Three states, one of them an infinite loop.
+
+**Decision:** `config.gate.version = 2`. The gate now reads the **Spearman rank
+IC**, sized in **effective n** (entry-day clustering: ICC 0.080, design effect
+1.27, so 92 nominal trades are 72.5 effective), and decides on the Bayesian
+posterior `P(true rank IC >= 0.08)` — READY at >=0.85, STOP at <=0.15, EXTEND
+between, granted **at most twice**, after which it must resolve. A
+sign-agreement guard withholds READY whenever rank and Pearson disagree in
+sign, so real money is never authorised on a statistic its counterpart
+contradicts. Spec: `docs/GATE_REDESIGN_SPEC.md`, signed by the operator
+2026-07-31.
+
+**v1 is not deleted.** `decide_v1` is preserved verbatim and both verdicts are
+printed on every checkpoint and in `GATE_STATUS.md`. A superseded rule that
+vanishes cannot be audited, and whether the two agree is itself evidence.
+
+**First verdict: STOP, from both rules.** n=92, Pearson -0.065, Spearman
+-0.132, posterior 4%. The redesign did not rescue the long call — it reached
+the same conclusion on a sounder statistic and showed its working. That is the
+outcome the phased approach was built to produce: "we proved there is no edge"
+is worth more than losing real money to find out.
+
+**What did NOT change:** `live_execution.enabled` is still the hard switch, and
+READY alone never places a trade. The affordable-subset and short-premium
+cohorts remain reporting-only; wiring the short-premium family to `decide_v2`
+is the next step and its own decision.
+
+---
+
 ## 2026-07-29 — Auto-log refuses positions bigger than the account; gate untouched
 
 **Why:** The feeder had no size limit — the budget filter only ever applied in
