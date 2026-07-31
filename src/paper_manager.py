@@ -36,6 +36,67 @@ from .utils import bs_delta as _bs_delta
 from .capital_risk import capital_at_risk, within_budget
 
 
+# ── Mark provenance ──────────────────────────────────────────────────────────
+# Every mark carries where it came from, because "what is this contract worth"
+# and "is that number trustworthy enough to write an exit into the ledger
+# forever" are two different questions. Preference order is
+# MID -> LAST -> CLOSE -> MODEL; only the first three are market observations.
+# A MODEL mark is a fabricated price (Black-Scholes at the row's entry IV) and
+# must never fire a price-based exit — see docs/MARK_TRUSTWORTHINESS_SPEC.md.
+MARK_MID = "mid"
+MARK_LAST = "last"
+MARK_CLOSE = "close"
+MARK_MODEL = "model"
+MARKET_MARK_SOURCES: Tuple[str, ...] = (MARK_MID, MARK_LAST, MARK_CLOSE)
+
+# Sigma used by the model fallback when the row has no usable stored entry IV
+# (pre-v16 rows never backfilled). Name-specific IV strictly dominates it.
+DEFAULT_MODEL_SIGMA = 0.30
+# An entry_iv above this is a data error, not a vol — fall back rather than
+# price a contract at 500%+ vol.
+_MAX_SANE_SIGMA = 5.0
+
+# Suffix stamped on an exit_reason whose exit price came from a model mark, so
+# the ledger carries the provenance of the fill it recorded.
+MODEL_MARK_SUFFIX = " (model mark)"
+
+
+def _mid_from_quote(bid: Any, ask: Any) -> Optional[float]:
+    """Bid/ask midpoint, or None when the book is unusable.
+
+    A mid is taken only from a two-sided, uncrossed book: both sides present,
+    both > 0, and ask >= bid (the crossed-quote guard from the 2026-07-13
+    audit fixes). Anything else falls through to the next mark source.
+    """
+    try:
+        b = float(bid)
+        a = float(ask)
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(b) and np.isfinite(a)):
+        return None
+    if b <= 0 or a <= 0 or a < b:
+        return None
+    mid = (a + b) / 2.0
+    return mid if mid > 0 else None
+
+
+def _model_sigma(entry_iv: Any) -> float:
+    """Sigma for the model fallback: the row's stored entry IV when usable.
+
+    Entry IV is itself an approximation — vol moves after entry — but it is
+    name-specific and strictly dominates a global 30 constant. Marking an
+    80-vol name at 0.30 is what made model marks dangerous in the first place.
+    """
+    try:
+        iv = float(entry_iv)
+    except (TypeError, ValueError):
+        return DEFAULT_MODEL_SIGMA
+    if not np.isfinite(iv) or iv <= 0 or iv > _MAX_SANE_SIGMA:
+        return DEFAULT_MODEL_SIGMA
+    return iv
+
+
 def _normalize_exit_rules(config: dict) -> dict:
     """Pull context-aware exit rules from config with legacy fallback.
 
@@ -1180,6 +1241,128 @@ class PaperManager:
         except Exception:
             return self._slippage_per_share
 
+    # ── Marking open legs ────────────────────────────────────────────────────
+    # Split into three seams (chain quotes / traded prices / model) so each
+    # rung of the fallback ladder can be exercised on its own in tests without
+    # a network hop, and so the chain is fetched ONCE per (ticker, expiration)
+    # rather than once per leg.
+
+    def _fetch_chain_quotes(
+        self, ticker: str, expiration: str
+    ) -> Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]]:
+        """Live bid/ask per (strike, option_type) for one (ticker, expiration).
+
+        One option-chain request serves every leg of every row on that pair,
+        mirroring how _get_spread_slippage reads the book. Returns {} on any
+        failure; the caller then falls through to the traded-price rungs.
+        """
+        quotes: Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]] = {}
+        try:
+            yf, session = _get_yf_and_session()
+            tkr = yf.Ticker(ticker, session=session)
+            chain = tkr.option_chain(str(expiration)[:10])
+        except Exception as exc:
+            logger.debug("Chain quote fetch failed for %s %s: %s", ticker, expiration, exc)
+            return quotes
+        for tbl, opt_t in ((getattr(chain, "calls", None), "call"),
+                           (getattr(chain, "puts", None), "put")):
+            try:
+                if tbl is None or getattr(tbl, "empty", True):
+                    continue
+                strikes = tbl["strike"].tolist()
+                bids = tbl["bid"].tolist() if "bid" in tbl else [None] * len(strikes)
+                asks = tbl["ask"].tolist() if "ask" in tbl else [None] * len(strikes)
+            except Exception as exc:
+                logger.debug("Chain quote parse failed for %s %s: %s", ticker, expiration, exc)
+                continue
+            for k, b, a in zip(strikes, bids, asks):
+                try:
+                    quotes[(round(float(k), 4), opt_t)] = (b, a)
+                except (TypeError, ValueError):
+                    continue
+        return quotes
+
+    def _fetch_traded_mark(self, symbol: str) -> Tuple[Optional[float], Optional[str]]:
+        """Last trade, then daily close, for one contract symbol.
+
+        Returns (price, MARK_LAST | MARK_CLOSE) or (None, None). Both rungs are
+        real prints, so both may fire an exit — they are merely stale, not
+        fabricated.
+        """
+        import warnings
+
+        try:
+            yf, session = _get_yf_and_session()
+            tkr = yf.Ticker(symbol, session=session)
+            price = None
+            try:
+                price = getattr(tkr.fast_info, "last_price", None)
+            except Exception:
+                price = None
+            if price is not None and not np.isnan(price) and price > 0:
+                return float(price), MARK_LAST
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                hist = tkr.history(period="1d")
+            if hist is not None and not hist.empty:
+                close = float(hist["Close"].iloc[-1])
+                if not np.isnan(close) and close > 0:
+                    return close, MARK_CLOSE
+        except Exception as exc:
+            logger.debug("Traded mark fetch failed for %s: %s", symbol, exc)
+        return None, None
+
+    def _model_mark(
+        self,
+        option_type: str,
+        spot: Optional[float],
+        strike: float,
+        expiration: str,
+        sigma: float,
+    ) -> Optional[float]:
+        """Black-Scholes/American model price at `sigma` — the last resort."""
+        if not spot or float(spot) <= 0:
+            return None
+        try:
+            from .utils import american_price
+            T = max((datetime.strptime(str(expiration)[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1 / 365)
+            rfr = _get_rfr() if _HAS_RFR else 0.045
+            price = american_price(option_type, float(spot), float(strike), T, rfr, float(sigma))
+        except Exception as exc:
+            logger.debug("Model mark failed for %s %s %s: %s", option_type, strike, expiration, exc)
+            return None
+        if price is None or np.isnan(price) or price <= 0:
+            return None
+        logger.debug(
+            "Model mark used for %s %s %s at sigma=%.4f", option_type, strike, expiration, sigma
+        )
+        return float(price)
+
+    def _mark_option_leg(
+        self,
+        key: Tuple[str, str, float, str],
+        symbol: str,
+        quotes: Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]],
+        spot: Optional[float],
+        sigma: float,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """Mark one leg: live mid -> last trade -> daily close -> model.
+
+        Returns (price, source) or (None, None) if even the model has nothing.
+        """
+        ticker, expiration, strike, option_type = key
+        bid, ask = quotes.get((round(float(strike), 4), str(option_type).lower()), (None, None))
+        mid = _mid_from_quote(bid, ask)
+        if mid is not None:
+            return mid, MARK_MID
+        price, source = self._fetch_traded_mark(symbol)
+        if price is not None:
+            return price, source
+        modelled = self._model_mark(option_type, spot, strike, expiration, sigma)
+        if modelled is not None:
+            return modelled, MARK_MODEL
+        return None, None
+
     # Trade-count thresholds at which a calibration notice should fire (once each)
     _CALIBRATION_THRESHOLDS: Tuple[int, ...] = (25, 50, 100, 200, 400, 800)
 
@@ -1321,52 +1504,65 @@ class PaperManager:
         LegKey = Tuple[str, str, float, str]
         _option_fetch_tasks: List[Tuple[LegKey, str]] = []
         _row_legs: Dict[int, List[Tuple[float, str, int]]] = {}
+        _leg_sigma: Dict[LegKey, float] = {}
         _seen_legs: set = set()
+        _chain_pairs: List[Tuple[str, str]] = []
         for row in open_trades:
             if row["ticker"] not in spot_cache:
                 continue
             legs = _legs_for_row(row)
             _row_legs[row["entry_id"]] = legs
+            try:
+                row_iv = row["entry_iv"] if "entry_iv" in row.keys() else None
+            except Exception:
+                row_iv = None
             for strike_v, opt_t, _qty in legs:
                 key: LegKey = (row["ticker"], row["expiration"], float(strike_v), opt_t)
                 if key in _seen_legs:
                     continue
                 _seen_legs.add(key)
+                # The model fallback prices this leg at the row's own entry IV
+                # (schema v16); a shared leg keeps the first row's IV, which is
+                # still name-specific and beats the global constant.
+                _leg_sigma[key] = _model_sigma(row_iv)
+                pair = (row["ticker"], row["expiration"])
+                if pair not in _chain_pairs:
+                    _chain_pairs.append(pair)
                 symbol = self._get_option_symbol(row["ticker"], row["expiration"], strike_v, opt_t)
                 if symbol:
                     _option_fetch_tasks.append((key, symbol))
 
-        option_price_cache: Dict[LegKey, float] = {}
+        # One option-chain call per (ticker, expiration) supplies the live
+        # bid/ask for every leg on that pair — no per-leg quote request.
+        _chain_quotes: Dict[Tuple[str, str], Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]]] = {}
+        if _chain_pairs:
+            _chain_workers = min(len(_chain_pairs), 8)
+            with ThreadPoolExecutor(max_workers=_chain_workers) as ex:
+                try:
+                    for pair, quotes in zip(
+                        _chain_pairs,
+                        ex.map(lambda p: self._fetch_chain_quotes(p[0], p[1]), _chain_pairs, timeout=30),
+                    ):
+                        _chain_quotes[pair] = quotes or {}
+                except TimeoutError:
+                    logger.warning("Option chain fetch timed out — falling back to traded marks")
+
+        # value = (price, source); source ∈ mid | last | close | model
+        option_price_cache: Dict[LegKey, Tuple[float, str]] = {}
 
         def _fetch_option_price(task_tuple):
             key, symbol = task_tuple
             ticker, expiration, strike, option_type = key
             try:
-                yf, session = _get_yf_and_session()
-                tkr = yf.Ticker(symbol, session=session)
-                price = None
-                try:
-                    price = getattr(tkr.fast_info, "last_price", None)
-                except Exception:
-                    pass
-                if price is None or np.isnan(price) or price <= 0:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        hist = tkr.history(period="1d")
-                    if not hist.empty:
-                        price = float(hist["Close"].iloc[-1])
-                if price is None or np.isnan(price) or price <= 0:
-                    try:
-                        from .utils import american_price
-                        S = spot_cache.get(ticker)
-                        if S:
-                            T = max((datetime.strptime(expiration[:10], "%Y-%m-%d") - datetime.now()).days / 365, 1/365)
-                            _rfr = _get_rfr() if _HAS_RFR else 0.045
-                            price = american_price(option_type, float(S), float(strike), T, _rfr, 0.30)
-                    except Exception:
-                        pass
-                if price is not None and not np.isnan(price) and price > 0:
-                    return key, float(price)
+                price, source = self._mark_option_leg(
+                    key,
+                    symbol,
+                    _chain_quotes.get((ticker, expiration), {}),
+                    spot_cache.get(ticker),
+                    _leg_sigma.get(key, DEFAULT_MODEL_SIGMA),
+                )
+                if price is not None and source is not None:
+                    return key, (float(price), source)
             except Exception as exc:
                 logger.debug("Option price fetch failed for %s: %s", symbol, exc)
             return key, None
@@ -1375,9 +1571,9 @@ class PaperManager:
             _opt_workers = min(len(_option_fetch_tasks), 8)
             with ThreadPoolExecutor(max_workers=_opt_workers) as ex:
                 try:
-                    for k, price in ex.map(_fetch_option_price, _option_fetch_tasks, timeout=30):
-                        if price is not None:
-                            option_price_cache[k] = price
+                    for k, marked in ex.map(_fetch_option_price, _option_fetch_tasks, timeout=30):
+                        if marked is not None:
+                            option_price_cache[k] = marked
                 except TimeoutError:
                     logger.warning("Option price fetch timed out — proceeding with partial data")
 
@@ -1461,13 +1657,17 @@ class PaperManager:
                 if not legs:
                     continue
                 leg_marks: List[Tuple[int, float]] = []
+                model_legs: List[str] = []
                 missing = False
                 for strike_v, opt_t, qty in legs:
                     leg_key: LegKey = (ticker, expiration, float(strike_v), opt_t)
-                    lp = option_price_cache.get(leg_key)
-                    if lp is None:
+                    marked = option_price_cache.get(leg_key)
+                    if marked is None:
                         missing = True
                         break
+                    lp, lp_source = marked
+                    if lp_source == MARK_MODEL:
+                        model_legs.append(f"{opt_t} ${float(strike_v):g}")
                     leg_marks.append((qty, lp))
                 if missing:
                     continue
@@ -1489,6 +1689,22 @@ class PaperManager:
                 should_close, reason, pnl_raw = _evaluate_multileg_exit(
                     rules, entry_credit, current_credit_to_close, dte, days_held,
                 )
+                if model_legs:
+                    # At least one leg has no market price, so the structure's
+                    # cost-to-close is partly fabricated and may not write an
+                    # exit — a structure is only as trustworthy as its worst leg.
+                    # Only the pure-DTE rule — whose trigger never reads the
+                    # mark — is still allowed, and it stamps its provenance.
+                    if 0 < dte <= rules["time_exit_dte"] and days_held >= rules["min_days_held"]:
+                        should_close = True
+                        reason = f"Time Exit ({dte}d to expiry){MODEL_MARK_SUFFIX}"
+                    else:
+                        logger.warning(
+                            "Exit checks skipped for trade #%s (%s %s): no market mark for %s "
+                            "— model price used for display only; row stays OPEN",
+                            entry_id, ticker, row["strategy_name"], ", ".join(model_legs),
+                        )
+                        should_close = False
                 if should_close:
                     # Friction: 2 commissions × number of legs (round trip), 2 slippage × legs
                     n_legs = len(legs)
@@ -1558,25 +1774,29 @@ class PaperManager:
 
             # Single-leg path
             single_key: LegKey = (ticker, expiration, float(strike), str(option_type or "").lower())
-            current_price = option_price_cache.get(single_key)
+            marked = option_price_cache.get(single_key)
+            current_price, mark_source = marked if marked is not None else (None, None)
 
             if current_price is not None:
                 # High-water mark: sample the premium every run so "how high
                 # did it go while I held it" is recorded data, not memory.
                 # One statement; RHS reads the OLD row, so date and level stay
-                # consistent. Never blocks exit handling.
-                try:
-                    with self._get_connection() as conn:
-                        conn.execute(
-                            "UPDATE trades SET "
-                            "max_price_date = CASE WHEN ? > COALESCE(max_price_seen, entry_price) "
-                            "THEN ? ELSE max_price_date END, "
-                            "max_price_seen = MAX(COALESCE(max_price_seen, entry_price), ?) "
-                            "WHERE entry_id=?",
-                            (current_price, now, current_price, entry_id),
-                        )
-                except Exception:
-                    pass
+                # consistent. Never blocks exit handling. A model mark is not
+                # an observation, so it never sets the high-water mark either —
+                # that column is ledger data, not display.
+                if mark_source in MARKET_MARK_SOURCES:
+                    try:
+                        with self._get_connection() as conn:
+                            conn.execute(
+                                "UPDATE trades SET "
+                                "max_price_date = CASE WHEN ? > COALESCE(max_price_seen, entry_price) "
+                                "THEN ? ELSE max_price_date END, "
+                                "max_price_seen = MAX(COALESCE(max_price_seen, entry_price), ?) "
+                                "WHERE entry_id=?",
+                                (current_price, now, current_price, entry_id),
+                            )
+                    except Exception:
+                        pass
                 is_short = _is_short_position(row["strategy_name"] or "")
                 spot = spot_cache.get(ticker)
                 try:
@@ -1600,6 +1820,25 @@ class PaperManager:
                         entry_price, current_price, entry_iv,
                         dte, days_held, rfr,
                     )
+
+                if mark_source == MARK_MODEL:
+                    # The mark is a model price, not a market observation. A
+                    # fabricated number must not write a permanent exit into
+                    # the ledger, so every price-based rule (TP, stop, delta,
+                    # strike breach) is skipped for this row this run — it
+                    # stays OPEN and is re-evaluated when a quote exists, with
+                    # expiry settlement as the terminal backstop. The pure-DTE
+                    # rule still fires: its trigger never reads the mark.
+                    if 0 < dte <= rules["time_exit_dte"] and days_held >= rules["min_days_held"]:
+                        should_close = True
+                        reason = f"Time Exit ({dte}d to expiry){MODEL_MARK_SUFFIX}"
+                    else:
+                        logger.warning(
+                            "Exit checks skipped for trade #%s (%s %s $%s): no market mark "
+                            "— model price used for display only; row stays OPEN",
+                            entry_id, ticker, str(option_type).upper(), f"{float(strike):g}",
+                        )
+                        should_close = False
 
                 if should_close:
                     # Realistic P&L: proportional slippage (30% of bid-ask) + commissions
