@@ -543,5 +543,66 @@ class TestHeadless(unittest.TestCase):
             self.assertIsInstance(summary, dict)
 
 
+class TestCheckpointJobUsesTheBudget(unittest.TestCase):
+    """The weekly checkpoint reports the affordable book, not the nominal one.
+
+    Uncapped, the checkpoint's reporting sections describe positions the
+    account could never have opened — the affordable subset disappears and the
+    short-premium block is dominated by five-figure positions that flip its
+    headline return negative. The scheduled job must pass the same budget the
+    CLI entry point passes.
+    """
+
+    def _config(self, d, cap=4000):
+        path = os.path.join(d, "config.json")
+        auto_log = {"phase1_start_date": "2026-05-27"}
+        if cap is not None:
+            auto_log["max_capital_at_risk"] = cap
+        with open(path, "w") as f:
+            json.dump({"auto_log": auto_log}, f)
+        return path
+
+    def test_reads_the_budget_from_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(m._max_capital_at_risk(self._config(d, 4000)), 4000.0)
+
+    def test_budget_is_none_when_unset_or_unreadable(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(m._max_capital_at_risk(self._config(d, None)))
+            self.assertIsNone(m._max_capital_at_risk(os.path.join(d, "nope.json")))
+
+    def test_checkpoint_job_passes_the_budget_through(self):
+        seen = {}
+
+        def _compute(db_path, phase1_start, **kw):
+            seen.update(db_path=db_path, phase1_start=phase1_start, **kw)
+            return {"decision": "GATHERING"}
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._config(d, 4000)
+            with mock.patch.object(m.phase1_checkpoint, "compute_checkpoint", _compute), \
+                    mock.patch.object(m.phase1_checkpoint, "write_checkpoint",
+                                      lambda *a, **k: None):
+                m._run_checkpoint(db_path=os.path.join(d, "t.db"),
+                                  phase1_start="2026-05-27", config_path=cfg)
+        self.assertEqual(seen["max_capital_at_risk"], 4000.0)
+
+    def test_checkpoint_job_passes_none_when_no_budget_is_set(self):
+        seen = {}
+
+        def _compute(db_path, phase1_start, **kw):
+            seen.update(kw)
+            return {"decision": "GATHERING"}
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._config(d, None)
+            with mock.patch.object(m.phase1_checkpoint, "compute_checkpoint", _compute), \
+                    mock.patch.object(m.phase1_checkpoint, "write_checkpoint",
+                                      lambda *a, **k: None):
+                m._run_checkpoint(db_path=os.path.join(d, "t.db"),
+                                  phase1_start="2026-05-27", config_path=cfg)
+        self.assertIsNone(seen["max_capital_at_risk"])
+
+
 if __name__ == "__main__":
     unittest.main()

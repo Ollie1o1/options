@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 import numpy as np
 
@@ -200,6 +201,16 @@ class TestDualStatisticSurfaces(_TmpDB):
         self.assertLess(r["ic_spearman"], 0)
         self.assertIn("Statistics disagree in sign", _format_markdown(r))
 
+    def test_a_degenerate_cohort_is_not_reported_as_agreement(self):
+        """Both statistics at 0.000 is an absent measurement, not a match."""
+        _seed_long_calls(self.db, [0.7, 0.8], [0.10, 0.20])
+        r = compute_checkpoint(self.db, "2026-05-27", today="2026-07-28")
+        self.assertEqual(r["ic_pearson"], 0.0)
+        self.assertEqual(r["ic_spearman"], 0.0)
+        md = _format_markdown(r)
+        self.assertIn("Statistic agreement: n/a", md)
+        self.assertNotIn("Statistics agree in sign.", md)
+
     def test_gate_status_file_reports_the_rank_ic(self):
         r = self._result()
         self.assertEqual(r["decision"], "STOP")
@@ -277,6 +288,59 @@ class TestHistoryTsvIsAppendCompatible(_TmpDB):
         self.assertEqual(ev["cohort_n"], 70)
         self.assertAlmostEqual(ev["cohort_ic_pearson"], 0.0485, places=6)
         self.assertIsNone(ev["cohort_ic_spearman"])
+
+    def test_header_rewrite_is_atomic_and_leaves_no_debris(self):
+        """The history cannot be regenerated from anything, so the rewrite must
+        never be able to leave it truncated."""
+        from src.phase1_checkpoint import _ensure_history_header
+
+        os.makedirs(self.out, exist_ok=True)
+        path = os.path.join(self.out, "checkpoint_history.tsv")
+        legacy = ("date\tweeks\tn\tic\tp\tdecision\n"
+                  "2026-07-29\t9\t70\t0.0485\t0.6902\tEXTEND\n")
+        with open(path, "w") as f:
+            f.write(legacy)
+
+        import pathlib
+        real_replace = os.replace
+        seen = {}
+
+        def _spy(src, dst):
+            seen["src"], seen["dst"] = str(src), str(dst)
+            return real_replace(src, dst)
+
+        with unittest.mock.patch("src.phase1_checkpoint.os.replace", _spy):
+            _ensure_history_header(pathlib.Path(path))
+
+        # Renamed into place from a sibling temp file, not written over.
+        self.assertEqual(seen["dst"], path)
+        self.assertNotEqual(seen["src"], path)
+        self.assertEqual(os.path.dirname(seen["src"]), self.out)
+        # No temp files survive.
+        self.assertEqual([f for f in os.listdir(self.out) if f.endswith(".tmp")], [])
+        with open(path) as f:
+            lines = f.read().splitlines()
+        self.assertIn("spearman", lines[0])
+        self.assertEqual(lines[1], "2026-07-29\t9\t70\t0.0485\t0.6902\tEXTEND")
+
+    def test_a_failed_atomic_write_removes_its_temp_file(self):
+        from src.phase1_checkpoint import _atomic_write
+
+        import pathlib
+        os.makedirs(self.out, exist_ok=True)
+        path = pathlib.Path(self.out) / "checkpoint_history.tsv"
+        path.write_text("date\tweeks\tn\tic\tp\tdecision\n")
+
+        def _boom(src, dst):
+            raise OSError("rename failed")
+
+        with unittest.mock.patch("src.phase1_checkpoint.os.replace", _boom):
+            with self.assertRaises(OSError):
+                _atomic_write(path, "clobbered\n")
+
+        # Original intact, no debris left behind.
+        self.assertEqual(path.read_text(), "date\tweeks\tn\tic\tp\tdecision\n")
+        self.assertEqual(os.listdir(self.out), ["checkpoint_history.tsv"])
 
     def test_evidence_reads_wide_rows_under_a_legacy_header(self):
         """A clone whose header predates the column still finds the rank IC."""

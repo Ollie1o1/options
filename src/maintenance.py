@@ -286,8 +286,33 @@ def _run_swing_paper() -> Optional[dict]:
     return summ if (summ["opened"] or summ["closed"]) else None
 
 
-def _run_checkpoint(db_path: str, phase1_start: str) -> None:
-    result = phase1_checkpoint.compute_checkpoint(db_path, phase1_start)
+def _max_capital_at_risk(config_path: str = "config.json") -> Optional[float]:
+    """The budget a single position may tie up (auto_log.max_capital_at_risk).
+
+    None when unset or unreadable, which disables every capped read rather than
+    silently substituting a number nobody chose.
+    """
+    try:
+        with open(config_path) as f:
+            cap = (json.load(f).get("auto_log") or {}).get("max_capital_at_risk")
+        return float(cap) if cap else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _run_checkpoint(db_path: str, phase1_start: str,
+                    config_path: str = "config.json") -> None:
+    """The weekly gate refresh, with the same budget the CLI entry point uses.
+
+    Without the cap the checkpoint's reporting sections describe positions the
+    account could never have opened: the affordable subset vanishes entirely,
+    and the short-premium block is dominated by a handful of five-figure
+    positions that flip its headline return negative. The gate decision itself
+    reads the nominal cohort either way — the cap changes what is reported
+    beside it, never what is decided.
+    """
+    result = phase1_checkpoint.compute_checkpoint(
+        db_path, phase1_start, max_capital_at_risk=_max_capital_at_risk(config_path))
     phase1_checkpoint.write_checkpoint(result, output_dir="reports")
 
 

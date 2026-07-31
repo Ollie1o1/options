@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -59,14 +61,6 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
             except (TypeError, ValueError):
                 continue
     return np.array(scores), np.array(returns)
-
-
-def _ic(scores: np.ndarray, returns: np.ndarray):
-    """Pearson IC and p-value, or (0.0, 1.0) when the sample cannot support one."""
-    if len(scores) < 3 or scores.std() < 1e-8 or returns.std() < 1e-8:
-        return 0.0, 1.0
-    ic, p = pearsonr(scores, returns)
-    return float(ic), float(p)
 
 
 def _dual_ic(scores: np.ndarray, returns: np.ndarray):
@@ -300,9 +294,15 @@ def _sign_disagreement_line(ic_p: Optional[float], ic_s: Optional[float]) -> str
     """Flag the case the two statistics tell opposite stories.
 
     Not a rule — the gate still reads Pearson. It is here so the disagreement
-    cannot be read past without noticing it (docs/GATE_REDESIGN_SPEC.md)."""
+    cannot be read past without noticing it (docs/GATE_REDESIGN_SPEC.md).
+
+    A cohort too small or too degenerate to correlate reports both statistics
+    as 0.000; that is the absence of a measurement, not agreement, and must not
+    be printed as if the two had been computed and matched."""
     if ic_p is None or ic_s is None:
         return "- Statistic agreement: n/a"
+    if abs(ic_p) <= 1e-9 and abs(ic_s) <= 1e-9:
+        return "- Statistic agreement: n/a (cohort too small or too degenerate to correlate)"
     if (ic_p > 0) != (ic_s > 0) and abs(ic_p) > 1e-9 and abs(ic_s) > 1e-9:
         return ("- **Statistics disagree in sign** — the rank IC does not confirm "
                 "the Pearson reading. Treat the gate statistic with suspicion.")
@@ -405,24 +405,48 @@ def _ensure_history_header(hist_path: Path) -> None:
     The file therefore holds rows of two widths — 6-field rows from before the
     rank IC was recorded, 8-field rows after — and every reader must tolerate
     both (``src/evidence.py`` does). Nothing is ever rewritten but the header
-    line, because the history is a record, not a derived artifact.
+    line, because the history is a record, not a derived artifact. That rewrite
+    goes through a temp file and ``os.replace`` — the history cannot be
+    regenerated from anything, so it must never be left truncated by an
+    interrupted write.
     """
     if not hist_path.exists():
-        hist_path.write_text(HISTORY_HEADER)
+        _atomic_write(hist_path, HISTORY_HEADER)
         return
     text = hist_path.read_text()
     if not text.strip():
-        hist_path.write_text(HISTORY_HEADER)
+        _atomic_write(hist_path, HISTORY_HEADER)
         return
     lines = text.splitlines(keepends=True)
     if lines[0].startswith("date\t") and "spearman" not in lines[0]:
         lines[0] = HISTORY_HEADER
         text = "".join(lines)
-        hist_path.write_text(text)
+        _atomic_write(hist_path, text)
     if not text.endswith("\n"):
         # A truncated last row would otherwise be fused with the new one.
         with hist_path.open("a") as f:
             f.write("\n")
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Replace ``path`` in one step: write a sibling temp file, fsync, rename.
+
+    A same-directory rename is atomic, so a reader or a crash sees either the
+    old file or the new one, never a half-truncated one.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def write_checkpoint(result: dict, output_dir: str = "reports") -> dict:
