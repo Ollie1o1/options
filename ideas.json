@@ -1,7 +1,261 @@
 {
-  "updated": "2026-07-28",
-  "note": "Idea backlog for the research desk Ideas tab. Statuses: proposed, testing, validated, shipped, dead. cost_wall records whether the idea's edge survives slippage+commissions - the recurring killer in this repo. Dead ideas are kept deliberately so they are not re-litigated. Where a later measurement contradicts an earlier one, the entry is AMENDED in place rather than replaced, so the reasoning that was acted on stays visible.",
+  "updated": "2026-07-31",
+  "note": "Idea backlog for the research desk Ideas tab. Statuses: proposed, testing, validated, shipped, dead. cost_wall records whether the idea's edge survives slippage+commissions - the recurring killer in this repo. Dead ideas are kept deliberately so they are not re-litigated. Where a later measurement contradicts an earlier one, the entry is AMENDED in place rather than replaced, so the reasoning that was acted on stays visible. 2026-07-30: a full beta-readiness audit added a prioritised execution plan - see beta_readiness_plan and constraints_for_executor below. Entries carrying a priority field (P0-P3) are that plan; the executor model should work them in beta_readiness_plan order and honour every constraint listed. 2026-07-31: the beta-readiness plan was executed - P0 through P2 are shipped or specced, see each entry's status and next_step. The two gate/exit decisions are deliberately NOT applied: they are specs awaiting operator sign-off (docs/GATE_REDESIGN_SPEC.md, docs/MARK_TRUSTWORTHINESS_SPEC.md). P3 (split-options-screener, retire-or-measure-ai-scorer, centralise-fee-defaults) was not started.",
+  "beta_readiness_plan": {
+    "purpose": "Hand-off plan for the executing model (e.g. Opus). The goal of beta is not more features - it is that the two load-bearing surfaces (the validation gate and the published track record) say true things, and that a stranger can run the tool without tribal knowledge. Work the phases in order. Within a phase, order is by decision-relevance.",
+    "step_0_user_only": "OPERATOR ACTION, not code: flip System Settings > General > Login Items & Extensions > Allow in the Background for the three com.ollie.options.* LaunchAgents. All three have exited 78 since ~2026-06-15 (re-confirmed 2026-07-30 via launchctl list). Until this is flipped, exits are only checked when the app is opened by hand, which corrupts exit fidelity (see track-record-exit-overshoot-artifact) and starves cohort accrual. No code change can substitute for this toggle.",
+    "P0_correctness_of_conclusions": [
+      "gate-statistic-wrong-for-skewed-returns",
+      "fix-gate-power-math",
+      "repoint-gate-credit",
+      "mark-fallback-hardcoded-vol",
+      "ledger-duplicate-rows-audit",
+      "track-record-dollar-weighted",
+      "track-record-exit-overshoot-artifact",
+      "evidence-banner-staleness"
+    ],
+    "P1_beta_user_experience": [
+      "scheduler-dead-hard-confirm",
+      "idle-launcher-wal-guard",
+      "first-run-doctor",
+      "canonical-entry-point"
+    ],
+    "P2_resilience_and_polish": [
+      "yfinance-cboe-scan-failover",
+      "guided-start-flow",
+      "repo-hygiene-beta",
+      "sizing-engine-never-touches-the-ledger",
+      "usd-account-vs-conversion-spread"
+    ],
+    "P3_structural_debt": [
+      "split-options-screener",
+      "retire-or-measure-ai-scorer",
+      "centralise-fee-defaults"
+    ],
+    "explicitly_not_in_plan": "merge-btc-vrp-carry and index-put-spread-capacity are validated research paths but expand scope; do not start them as part of beta-readiness. The dead graveyard below is settled - do not revive any of it."
+  },
+  "constraints_for_executor": [
+    "Tests: run ONLY via scripts/test.sh (wraps scripts/run_tests.py under ~/.venvs/options/bin/python). The project-local venv/ has broken pandas; the options venv has NO pytest. Globbing under-collects and unittest discover cannot start. CI (GitHub Actions, pytest) is the second check - it is green on main as of 2026-07-30; keep it green.",
+    "Environment: NEVER pip install, create venvs, or modify the Python environment from the assistant on this Mac (provenance/quarantine breaks things). If a dependency is needed, stop and ask the operator to install it themselves.",
+    "Gate changes: DECISIONS.md 2026-06-07 forbids silent gate changes. Any change to what the Phase-1 gate reads (statistic, thresholds, cohort, terminal conditions) must be written as a spec, shown to the operator, and applied only on explicit approval. Reporting new numbers ALONGSIDE the gate is always allowed; changing the decision path is not, without sign-off.",
+    "Exit rules: any change to live exit behaviour (take-profit/stop logic, marks used for exit decisions) changes the open book AND the gate cohort. Treat as a deliberate decision with its own entry and operator sign-off, never a drive-by cleanup.",
+    "Screener runs during work: pass --no-ai so LLM calls never contaminate calibration-era logs.",
+    "Never remove the OPTIONS_MAINTENANCE_CHILD env guard (maintenance recursion bug).",
+    "Display code: use fmt.style semantic theme via src/ui.py, never raw Colors. In display tests, pin fmt._COLOR_ENABLED directly; do not use env vars.",
+    "Git: commit messages carry ZERO AI attribution (no Co-Authored-By, no Generated-with). Match the existing conventional-commit style. Do not commit or push without the operator asking.",
+    "Sizing: scan-row max_loss is entry_price*100 on every single-leg row and is meaningless on shorts. All sizing goes through src/capital_risk.py definitions. auto_log.max_capital_at_risk (currently 750) is the budget gate; the operator's stated max for one conviction trade is 4000.",
+    "Data: yfinance is the primary live source; an idle launcher left open pins the yfinance tz-cache WAL and makes scans 20-50x slower (this is a known trap, see idle-launcher-wal-guard). SQ is permanently renamed XYZ on Yahoo.",
+    "ideas.json: keep dead entries; amend in place with dated AMENDED notes rather than deleting; the research desk Ideas tab reads updated/note/ideas and tolerates extra keys."
+  ],
   "ideas": [
+    {
+      "id": "gate-statistic-wrong-for-skewed-returns",
+      "title": "The gate reads Pearson IC on skewed option returns - rank IC says the edge is zero",
+      "area": "infra",
+      "status": "testing",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P0",
+      "thesis": "Long-call returns are floored at -100% and unbounded above, so Pearson IC is dominated by a handful of +100% take-profit outliers. Checkpoint 2026-07-29 (n=70): Pearson +0.048 (p=0.690) drives an EXTEND, while Spearman is -0.020 (p=0.873) - the two statistics disagree in SIGN, and the bootstrap CI is [-0.175, +0.248]. Rank IC is the industry standard for exactly this distribution shape. src/phase1_checkpoint.py already computes Spearman on line 131; the decision block (lines 135-144) reads only ic_p. Under rank IC the current state is not 'positive but below the bar', it is 'no forward information detected'. This is the single most decision-relevant number in the repo and it is currently flattering the system.",
+      "evidence": "reports/checkpoint_2026-07-29.md; reports/checkpoint_history.tsv shows the Pearson IC decaying monotonically as n grows (0.22 at n=4, 0.20 at n=23, 0.11 at n=43, 0.048 at n=70) - the classic signature of an effect that was never there.",
+      "next_step": "AMENDED 2026-07-31: the reporting half SHIPPED (commit 49edfd1/a8acd83) - checkpoint markdown, GATE_STATUS.md, checkpoint_history.tsv (new spearman/p_spearman columns, append-only) and the evidence banner now all render Pearson and Spearman side by side, with an explicit sign-disagreement line. The DECISION half is written up but NOT applied: see docs/GATE_REDESIGN_SPEC.md, which is a draft awaiting the operator's sign-off block. The decision function still reads Pearson, byte-identical, pinned by a regression test. NOTE the cohort has since grown to n=92 with Pearson -0.065, so the next real checkpoint reads STOP under the UNCHANGED rules - the redesign is now urgent rather than theoretical.\n\nPRIOR NEXT STEP: Write the gate-redesign spec (one spec covering this entry, fix-gate-power-math, and repoint-gate-credit - they are one decision). Proposal: decision reads Spearman, or requires Pearson AND Spearman to agree in sign with Spearman clearing the bar. Immediately (allowed without sign-off): render both statistics side-by-side in the checkpoint markdown, the evidence banner, and TRACK_RECORD.md so the operator sees the disagreement every week. Then apply the decision change only on operator approval per DECISIONS.md.",
+      "acceptance": "Checkpoint markdown and evidence banner show both statistics; a signed-off spec exists in docs/; the decision function's statistic matches the spec; scripts/test.sh green."
+    },
+    {
+      "id": "fix-gate-power-math",
+      "title": "Fix the gate's incoherent power math - and give EXTEND a terminal condition",
+      "area": "infra",
+      "status": "testing",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P0",
+      "thesis": "READY needs IC>=0.08 AND p<0.05, but proving IC=0.08 at p<0.05 requires n~601. At the n>=50 trigger, p<0.05 demands observed IC~0.286 - 3.6x the stated bar. The gate cannot fire on its own terms. AMENDED 2026-07-30: the mirror problem is that EXTEND has no exit. STOP requires IC<0.03 and READY requires p<0.05, so an IC drifting in the 0.03-0.08 band extends forever - at ~70 trades per 9 weeks, resolving IC~0.05 at p<0.05 needs n~1,500, i.e. years. The explainer text says 'continue gathering for 2 more weeks' but nothing enforces any deadline. The gate currently has three states and one of them is an infinite loop.",
+      "evidence": "Fisher-z: n = (1.96/atanh(IC))^2 + 3. docs/PROFITABILITY_FINDINGS.md section 1; src/phase1_checkpoint.py:135-144; checkpoint_history.tsv accrual rate.",
+      "next_step": "AMENDED 2026-07-31: specced, not applied. docs/GATE_REDESIGN_SPEC.md section 2.3 gives every gate state an entry AND an exit condition, caps EXTEND at 2 grants x 2 weeks, replaces the p-value cliff with posterior bands (READY P>=0.85, STOP P<=0.15) on the already-computed posterior_ic_above, and states all thresholds in effective-n terms (folding in effective-n-in-gate). Awaiting operator sign-off.\n\nPRIOR NEXT STEP: Fold into the gate-redesign spec with gate-statistic-wrong-for-skewed-returns. Proposal to put in front of the operator: (a) EXTEND is granted at most twice (2 weeks each), after which the decision falls to STOP unless the Bayesian posterior P(true IC>=0.08) >= 0.85 (the posterior is already computed and printed, reporting-only, by posterior_ic_above); (b) size the READY test to the effect actually claimed, or switch the claim to one the sample can support. Also fold in effective-n-in-gate (design effect ~1.23 from clustered entries).",
+      "acceptance": "The spec enumerates every gate state with an entry AND exit condition; no state is unbounded; operator sign-off recorded; implementation matches."
+    },
+    {
+      "id": "repoint-gate-credit",
+      "title": "Stand up a parallel short-premium gate cohort - stop validating only the worst strategy",
+      "area": "options",
+      "status": "testing",
+      "conviction": "high",
+      "cost_wall": "unknown",
+      "priority": "P0",
+      "thesis": "Bear Call has the best scorer IC (+0.152) and Bull Put the best P&L (66% win). Both are short premium, consistent with every prior repo result. The gate ignores both. Normalising for size sharpens rather than weakens this: Bull Put is the only line positive on both aggregate (+32.6%) and median (+31.0%) return-on-risk, and Bull Put and Bear Call sit entirely inside the budget. AMENDED 2026-07-29: which of the two leads is not settled - re-pricing on measured spreads reverses it (Bull Put +6.6%, Bear Call +23.8%, see multileg-slippage-is-a-flat-floor). The robust claim is the family, not the name. AMENDED 2026-07-30: this is now urgent rather than optional, because the LC gate's rank IC is zero (see gate-statistic-wrong-for-skewed-returns) and the strategy real money would actually trade first is short premium. Validating LC to authorise going live, then trading credit structures anyway, is a mismatch between the experiment and the decision it authorises. TRACK_RECORD 2026-07-29: Bull Put 64.2% win +14.5% avg over 120 closed; Long Call 38.4% win +1.5% and falling over 211.",
+      "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; reports/TRACK_RECORD.md 2026-07-29; see rank-strategies-by-return-on-risk and cohort-includes-unaffordable-trades.",
+      "next_step": "AMENDED 2026-07-31: Stage 1 SHIPPED (reporting only, no sign-off needed). compute_checkpoint now reports a second cohort - Bull Put + Bear Call + Short Put, closed, post-window, affordability-capped - with n, rank IC, sum and median return-on-risk, labelled REPORTING ONLY beneath the gate. First real read: n=186, +18.9% on capital risked, median +14.5%/trade, rank IC +0.108 (p=0.141). A review caught the weekly maintenance job passing no budget cap, which would have published the uncapped n=270 / -0.2% figure instead - fixed in a8acd83. Stage 2 (making it a gate) is in docs/GATE_REDESIGN_SPEC.md section 2.4, awaiting sign-off.\n\nPRIOR NEXT STEP: Two stages. Stage 1 (no sign-off needed, reporting only): extend compute_checkpoint with a second cohort query over the short-premium family (Bull Put + Bear Call + Short Put, closed, post-window, affordable), report its n / rank IC / return-on-risk alongside the LC gate in the checkpoint markdown every week. Stage 2 (needs the gate-redesign spec sign-off): make it a first-class gate with its own thresholds sized to short-premium return distributions - which are negatively skewed, the OPPOSITE tail problem from LC, so the statistic choice matters here too.",
+      "acceptance": "Weekly checkpoint prints both cohorts; the short-premium cohort uses capital_at_risk-affordable trades only; gate-status change gated on the signed spec."
+    },
+    {
+      "id": "mark-fallback-hardcoded-vol",
+      "title": "Exit decisions can fire off a Black-Scholes mark at a hardcoded 30 vol",
+      "area": "execution",
+      "status": "testing",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P0",
+      "thesis": "paper_manager.update_positions marks each leg by fast_info.last_price, falling back to daily close, falling back to american_price(..., 0.30) - a model price at sigma=0.30 regardless of the name (src/paper_manager.py:1205). Marking an 80-IV name at 30 vol misprices it severely, and that fabricated mark can TRIGGER a stop-loss or take-profit, i.e. write a permanent exit into the ledger the gate then reads. Separately, preferring last_price over bid/ask mid means marks can be hours stale on illiquid contracts - inconsistent with the repo's own quote-freshness philosophy, and the single-leg close path already knows how to read the live spread (_get_spread_slippage, line ~1361).",
+      "evidence": "src/paper_manager.py:1181-1212 (fetch chain: last_price -> 1d close -> american_price at 0.30); schema v16 stores entry IV per row.",
+      "next_step": "AMENDED 2026-07-31: specced, NOT implemented - it changes live exit behaviour, so per the exit-rules constraint it needs sign-off first. docs/MARK_TRUSTWORTHINESS_SPEC.md covers all three parts as one decision (entry-IV fallback sigma, model-fallback marks may never fire an exit, bid/ask mid preferred over stale last trade), plus the test plan and the calibration-journal requirement.\n\nPRIOR NEXT STEP: Three changes, one entry, because they all define 'what is a trustworthy mark': (1) the model-price fallback uses the row's stored entry IV (schema has it) instead of 0.30; (2) a mark that came from the model fallback may update unrealized P&L display but must NEVER fire an exit - skip the exit check for that leg that run and log it; (3) prefer bid/ask mid over last trade when both are available, keeping last_price as fallback. This changes live exit behaviour - per the constraints, write it up and get operator sign-off before merging, and note in the calibration journal that post-change exits are on a different marking basis.",
+      "acceptance": "No exit can be recorded from a model-fallback mark (test asserts it); fallback sigma comes from the row; mid preferred over last; scripts/test.sh green; operator sign-off recorded."
+    },
+    {
+      "id": "ledger-duplicate-rows-audit",
+      "title": "Audit and guard against duplicate logged trades - identical rows are in the public record",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P0",
+      "thesis": "TRACK_RECORD.md shows ABBV Long Call on 2026-07-07 AND 2026-07-08 with identical entry ($8.30) and exit ($3.75) to the cent. Same pick auto-logged on consecutive scans is double-counted exposure in every summary stat, the gate cohort, and the published record. The catch-up auto-logger (due_autolog_windows) replays missed windows, which makes near-duplicate logging structurally easy. Separately, phase1_checkpoint.write_checkpoint appends to checkpoint_history.tsv unconditionally, so same-day re-runs produce duplicate rows (see 2026-06-15/16, 07-21, 07-27, 07-29 in the TSV) - cosmetic, but that TSV feeds evidence.load_model_evidence.",
+      "evidence": "reports/TRACK_RECORD.md rows dated 2026-07-07/2026-07-08 ABBV; reports/checkpoint_history.tsv duplicate dates; src/phase1_checkpoint.py:221-226.",
+      "next_step": "SHIPPED 2026-07-31 (commits c37b361, 612a820). scripts/audit_duplicate_trades.py is read-only (mode=ro URI) and wrote reports/duplicate_trades_audit.md: 18 candidate groups, 38 rows, 20 excess rows, $2,959.10 of double-counted P&L - including the known ABBV pair (entry_ids 520/540). NO rows were deleted or modified; the operator rules on which are true duplicates. Auto-log dedup guard added at the log_trade chokepoint, gated on the auto_log flag so manual logging is never refused, keyed on every leg (a first cut keyed only the anchor strike, which would have silently refused condors sharing a short-put strike with different call wings). checkpoint_history.tsv append is now idempotent per (date, n) and compares fields positionally so 6- and 8-column rows both parse.\n\nPRIOR NEXT STEP: (1) Write a read-only audit script that flags candidate duplicates in paper_trades.db: same ticker/strategy/strike/expiration with entry_price equal to the cent, logged within 3 days. Report, do not delete - the operator decides what is a true duplicate vs a legitimately re-signalled trade. (2) Add a guard in the auto-log path (not manual log_trade) refusing an entry identical on (ticker, strategy, strike, expiration) to one logged in the last N days, N configurable, logged loudly when it fires. (3) De-dupe the TSV append: skip when the last row already has today's date and the same n. (4) After the operator rules on duplicates, regenerate TRACK_RECORD.md and re-run the checkpoint so the gate reads a clean cohort.",
+      "acceptance": "Audit report produced and reviewed; auto-log dedup guard tested; TSV append idempotent per day; regenerated artifacts committed."
+    },
+    {
+      "id": "track-record-dollar-weighted",
+      "title": "Make the public track record dollar-weighted - the headline average is not a real number",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P0",
+      "thesis": "The TRACK_RECORD.md headline '+1.9% avg return per trade' is an unweighted mean of percentage returns across strategies whose capital bases differ by orders of magnitude - a -61% long call on $830 and a +14% bull put on $2,000 of collateral do not average meaningfully, and short-strategy percentages are on a different basis (credit vs collateral) than long ones. The repo already built the honest denominator: capital_at_risk is on all rows (schema v16) and get_strategy_breakdown already computes return_on_risk. The published record just doesn't use it. Also: the win-rate phrasing '49.1% (345/702 with a recorded return)' is ambiguous about the denominator - say it precisely.",
+      "evidence": "reports/TRACK_RECORD.md 2026-07-29; scripts/publish_track_record.py; see rank-strategies-by-return-on-risk (shipped) for the per-strategy machinery and its naked-short caveat.",
+      "next_step": "SHIPPED 2026-07-31 (commits 8d91ff2, 220f0ae). TRACK_RECORD.md now leads with net dollar P&L (+$7,655.00 over 807 closed) and return on total capital risked (+0.2% of $3,251,997), with the affordable subset beside it (+4.6% of $485,393 over 712 trades). Per-strategy table gained net $ and MEDIAN return-on-risk; win rate states numerator and denominator; cash-secured shorts show return-on-credit as the companion figure. A review caught four things worth recording: the reuse path imported a class name that does not exist (PaperTradeManager) and a broad except swallowed it; the headline quoted the book's net against the risked subset's denominator; the divergence explainer picked the largest WINNER even when a big loser was the cause; and the 807-row table's percentage column had no stated basis (it is percent of entry premium - a debit on longs, a credit on shorts). All fixed. Publishing also no longer constructs a PaperManager unless the ledger is already at the current schema, so publishing can never migrate an archived copy.\n\nPRIOR NEXT STEP: Rework scripts/publish_track_record.py: headline = net dollar P&L plus return on total capital risked (sum pnl / sum capital_at_risk); per-strategy table adds net $ and median return-on-risk columns (median so one large contract cannot carry a line - the Long Put lesson); state win-rate numerator and denominator explicitly; for cash-secured shorts show return-on-credit as the companion figure per the rank-strategies caveat. Also decide and document the publish flow: weekly maintenance regenerates the file, and it should be committed as part of that publish rather than sitting uncommitted in the working tree (it is uncommitted right now, 2026-07-30) - a public record that is locally ahead of its published copy defeats the purpose.",
+      "acceptance": "TRACK_RECORD.md leads with dollar-weighted figures; percentages carry their basis; regeneration-and-commit flow documented in the script header or runbook; uncommitted drift resolved."
+    },
+    {
+      "id": "track-record-exit-overshoot-artifact",
+      "title": "Quantify the stop-overshoot artifact from sparse exit checks and label it in the record",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P0",
+      "thesis": "With the scheduler dead since ~2026-06-15, update_positions runs only when the operator opens the app, so exits are checked at irregular multi-day intervals. Defined-stop credit trades therefore blow through their stops before anyone looks: the record shows -157.5% (TLT IC), -110.3% and -107.2% (AAPL ICs), -104.1% (SPY BC) on structures whose rule is 'stop at 100% of credit'. These are check-frequency artifacts, not market gaps, and they make every credit line look worse and noisier than its rules imply - which biases the very comparison (credit vs debit) the whole backlog turns on. The record currently presents them as if the rules were followed.",
+      "evidence": "reports/TRACK_RECORD.md stop rows exceeding -100% of credit; logs/launchagent.log stops 2026-06-15; launchctl list shows exit 78 on all three agents (re-confirmed 2026-07-30).",
+      "next_step": "SHIPPED 2026-07-31 (commit 8132dbf). scripts/overshoot_report.py measures overshoot = |realized loss| - |stated stop| off the stop level encoded in each exit_reason, and the distribution is published as a methodology note in TRACK_RECORD.md. MEASURED, split on the scheduler's death: before 2026-06-15, 70% of stopped trades ran past their stop (median +9.5%); after, 94% did (median +11.0%, p90 +48.3%). Worst is GLD Bear Call at -166.7% on a 100%-of-credit stop. 103 of 137 stop exits state a numeric level; the 30 strike-breach stops are counted separately rather than scored as zero overshoot. No recorded exit was modified - the note explains the record, it does not correct it, and it states its own removal condition.\n\nPRIOR NEXT STEP: (1) Measure it: for every closed trade with a stop exit, compute overshoot = |exit loss| - |stop level|, and report the distribution split by pre/post scheduler death. (2) Label it: TRACK_RECORD methodology note states that exit checks were manual-cadence in the affected window and stops are therefore overstated losses. (3) Prevent it: this is step_0_user_only (Login Items toggle) plus scheduler-dead-hard-confirm; no code can fix it retroactively. Do NOT retro-edit the recorded exits - the record stays as-traded, the label explains it.",
+      "acceptance": "Overshoot distribution published in the methodology note; no recorded exits modified; note removed only when the scheduler has been verifiably alive for a full window."
+    },
+    {
+      "id": "evidence-banner-staleness",
+      "title": "The live evidence banner quotes a two-month-old walk-forward as if current",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P0",
+      "thesis": "The only walk-forward artifact is reports/walk_forward_long_call_2026-05-29.json, yet the banner (and README, where the same numbers are hardcoded as an example) still print 'OOS IC +0.10 (p=0.48, n=94)'. The cohort side of the banner updates weekly; the pooled-IC side has been frozen since May and nothing displays its age. For a tool whose differentiator is honest uncertainty labeling, a stale trust label is the one bug it cannot afford.",
+      "evidence": "ls reports/walk_forward_*.json -> single file dated 2026-05-29; src/evidence.py load_model_evidence parses the latest artifact and already captures as_of; README 'What You Can Trust Today' hardcodes the example numbers.",
+      "next_step": "SHIPPED 2026-07-31 (commit 365cb99). The banner prints the walk-forward artifact's as_of date and flags it past 30 days; startup maintenance re-runs the walk-forward monthly on its own throttle alongside the weekly checkpoint and track-record jobs; README no longer hardcodes evidence numbers and points at reports/TRACK_RECORD.md for live values.\n\nPRIOR NEXT STEP: (1) format_evidence_banner prints the as_of date of the walk-forward artifact (e.g. 'OOS IC +0.10 as of 2026-05-29') and flags it visually when older than 30 days. (2) Add a monthly walk-forward re-run to the startup-maintenance throttle alongside the weekly track-record publish. (3) README stops hardcoding numbers - describe the banner's shape with placeholders and point at TRACK_RECORD.md for live values.",
+      "acceptance": "Banner shows artifact age; maintenance re-runs walk-forward on a throttle; README contains no frozen evidence numbers."
+    },
+    {
+      "id": "scheduler-dead-hard-confirm",
+      "title": "A dead scheduler should cost a keypress, not just print a banner",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P1",
+      "thesis": "The staleness banner shipped 2026-07-29 correctly detects exit 78 and prints the fix - and has been ignored ever since, exactly as banners are. The system's data quality (exit fidelity, cohort accrual) degrades silently while it scrolls past. When automation has been dead beyond a threshold, honesty should have friction: the interactive session should require an explicit acknowledgement before proceeding, every session, until fixed.",
+      "evidence": "launchctl list 2026-07-30: all three agents exit 78; banner fires; operator behaviour unchanged since June. See launchd-health-check for the detection machinery.",
+      "next_step": "SHIPPED 2026-07-31 (commits 6541d28, 3fb88f0, 4624f85). The interactive path now requires one Enter keypress before continuing when the scheduler has been dead more than 7 days, stating what is degrading; --auto, piped stdin and cron paths never block. launchctl carries no timestamps, so duration is tracked via a launchd_dead_since marker - and because stamping it on first observation would have delayed the ack a further 7 days on a machine already 6 weeks dead, it is seeded from logs/launchagent.log's last write instead. CRITICAL BUG FOUND while wiring the doctor: read_launchd_status defaulted to the prefix 'com.options-screener' (the repo's shipped plist), but the agents actually installed on this machine are 'com.ollie.options.*'. The parse returned [], and an empty list reads as 'nothing failing' - so this feature AND the 2026-07-29 banner were both inert on the only machine that needed them. Detection now matches either prefix; verified live: 3 dead jobs, 46 days.\n\nPRIOR NEXT STEP: In the interactive path only (guard on _interactive; automation and piped runs must never block): when maintenance_health reports the scheduler dead >7 days, print the escalated banner and require Enter to continue, stating plainly what is degrading (exit checks manual-cadence, cohort accrual manual-only). Do not add a bypass flag beyond the ack - the friction is the feature. Respects the existing health machinery; small change in options_screener startup.",
+      "acceptance": "Interactive session with dead scheduler >7d requires one keypress with the degradation stated; --auto/piped/cron paths unaffected (test both); banner unchanged below threshold."
+    },
+    {
+      "id": "idle-launcher-wal-guard",
+      "title": "An idle launcher poisons every other session's scans - fix it in code",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P1",
+      "thesis": "A launcher left open at a menu pins the yfinance tz-cache WAL, making scans in any other session 20-50x slower. Diagnosed 2026-07-25 after being misattributed to iCloud and rate limits. Today the mitigation is tribal knowledge ('quit the idle launcher') - a beta tester WILL leave the menu open and then report the tool as unusably slow, and nothing in the product will tell them why. This is arguably the single worst first-week beta experience risk.",
+      "evidence": "Operator-confirmed diagnosis 2026-07-25 (project memory feedback_quit_idle_launcher); perf commit c0cc133 addressed startup, not the idle-session lock.",
+      "next_step": "SHIPPED 2026-07-31 (commit 69b3d20) - but read the caveat, it matters. src/cache_release.py closes all three yfinance peewee caches (tz, cookie, ISIN, all journal_mode=wal) at every menu prompt; peewee's autoconnect=True makes the next read reconnect transparently. VERIFIED: closing drops the -wal and -shm sidecars, a subsequent read revives them. HOWEVER the 20-50x slowdown itself was NOT reproduced: a local contention benchmark measured holding the connection open as 5x FASTER than releasing it (0.020s vs 0.104s for 300 connect+read in a second process), because a released db recreates its sidecars per connection. So this ships on handle-hygiene grounds and must NOT be described as a proven fix. Next hypothesis, untested because it needs the operator's machine: the repo lives under ~/Desktop, so if that folder is synced, every sidecar create/delete is a sync event - which would also explain why the symptom was originally mistaken for an iCloud problem. See docs/IDLE_CACHE_RELEASE.md.\n\nPRIOR NEXT STEP: Fix at the source, not with docs. Options in preference order: (1) release/close the shared yfinance session and any sqlite handles (tz-cache, yf_disk_cache.db) whenever the process is idle at a menu prompt, reacquiring lazily on the next action - the menus are the natural release points; (2) if the handle is held inside yfinance internals and cannot be released cleanly, have the menu loop detect >N minutes idle and print a prominent 'this open session is slowing other scans' warning; (3) investigate whether the tz-cache can be opened read-only or with a non-WAL journal mode for our access pattern. Verify empirically: reproduce the slowdown with an idle launcher, apply the fix, confirm the second session's scan time returns to baseline.",
+      "acceptance": "Reproduction documented (before/after timings in the entry or a doc); an idle launcher no longer degrades a concurrent scan, or loudly warns; scripts/test.sh green."
+    },
+    {
+      "id": "first-run-doctor",
+      "title": "A --doctor command - the beta support load absorber",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P1",
+      "thesis": "The repo has execution.preflight (go-live checks) and maintenance_health (staleness), but nothing a fresh cloner runs to hear 'your install works'. Beta means strangers with broken venvs, missing lock-file pins, no network, unwritable directories, and no idea which of six entry points to use. Every one of those becomes a support conversation unless the tool diagnoses itself. config.json is ~60 hand-edited top-level keys; config_validator exists but a typo'd weight key can still silently change rankings if validation isn't loud at startup.",
+      "evidence": "src/execution/preflight.py and src/maintenance_health.py cover their own domains; README installation section carries the requirements-lock rationale; no unified self-check exists.",
+      "next_step": "SHIPPED 2026-07-31 (commit 4624f85). python -m src.doctor, plus SETTINGS > [2] DOCTOR in the launcher and a README quick-start reference. Read-only pass/warn/fail table with a one-line fix beside every non-passing row: Python version, dependency drift against requirements-lock.txt (reports, never installs), Yahoo and CBOE reachability (distinguishing rate-limited from down), reports/logs/db writability, config.json validation naming the failing key, scheduler state, and optional .env keys stated as optional. It never constructs a PaperManager (that would migrate the schema) - it reads user_version through a mode=ro URI. The scheduler row reports a DEAD scheduler ahead of a merely stale one, because 'open the app' is the one action that cannot fix exit 78.\n\nPRIOR NEXT STEP: Add python -m src.doctor (and a menu row under SETTINGS): checks Python version, key dependency versions against requirements-lock.txt (report drift, do not install), network reachability of Yahoo + CBOE (one cheap call each, honest about rate-limit vs down), writability of the DB/reports/logs paths, config.json validation via config_validator with the failing key named, scheduler state via maintenance_health, presence/absence of optional keys (.env OPENROUTER/POLYGON/SEC_EDGAR_CONTACT) stated as optional, and the canonical run command. Output is a short pass/warn/fail table with one-line fixes. Read-only - the doctor never mutates anything.",
+      "acceptance": "Fresh-clone simulation (moved-aside config, no .env) produces actionable output for each failure; all checks read-only; referenced from README quick-start."
+    },
+    {
+      "id": "canonical-entry-point",
+      "title": "Six front doors is five too many - pick one and demote the rest",
+      "area": "infra",
+      "status": "shipped",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P1",
+      "thesis": "run.py, run.sh, run.bat, start_all.py, python -m src.launcher, python -m src.options_screener all start something. The README quick-start, the docs, and the error messages do not consistently agree on which is canonical, and a beta user has no way to know run.py's shortcut-flag expansions from the filename. Entry-point sprawl also multiplies every future onboarding fix (the doctor, the guided flow) by six.",
+      "evidence": "Repo root listing 2026-07-30; launcher.py docstring describes the flag-forwarding contract; README quick-start.",
+      "next_step": "SHIPPED 2026-07-31 (commit 4624f85). README quick-start is now one command, python run.py, with every other entry point demoted to a purpose-labelled table (run.sh/run.bat wrappers, -m invocations, start_all.py, check_pnl, dashboard) and platform support stated plainly: the screener runs everywhere, scheduled automation is macOS/launchd only, and on Linux/Windows nothing runs on a timer. The launcher masthead names the front door. Worth recording: the old quick-start's 'Recommended (works every time)' told users to 'source venv/bin/activate' - the project-local venv with the broken pandas - so the documented happy path was one a fresh cloner could not follow.\n\nPRIOR NEXT STEP: Decide the front door (recommendation: python run.py, since it already forwards flags to the launcher/screener and works from a fresh clone), then: README quick-start shows exactly one command; the launcher masthead is the first thing it shows; other entry points stay for compatibility but their README mentions move to a 'power user / automation' subsection that says what each is for (run.sh/run.bat = platform wrappers, start_all.py = api+bots, -m invocations = direct module access). Platform honesty in the same pass: state that scheduled automation is macOS/launchd-only and what degrades on Windows/Linux.",
+      "acceptance": "One command in quick-start; every other entry point documented with its purpose; platform support stated."
+    },
+    {
+      "id": "yfinance-cboe-scan-failover",
+      "title": "CBOE is already integrated - use it as scan failover, not just cross-check",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P2",
+      "thesis": "yfinance is the sole live scanning source and rate-limits regularly; the retry-wave UX (shipped) makes the failure polite but the scan still fails. src/cboe_client.py already fetches full delayed chains with exchange-computed IV and Greeks, and the 2026-06-10 cross-check measured 99% mid / 90% IV agreement on AAPL. Provenance stamping (quote_source) was built for exactly this - a chain served from CBOE would be labelled, penalized appropriately for staleness, and better than no scan at all. 90% of the failover is already written.",
+      "evidence": "src/cboe_client.py; src/cross_check.py results in README; data-layer memory: chain archive already snapshots CBOE daily, so the fetch path is exercised in production.",
+      "next_step": "In fetch_options_yfinance's failure path (after the existing retry waves exhaust), attempt the CBOE chain for the same symbol, mapping its fields into the standard frame with quote_source='cboe' and honest quote_as_of. Scope: single-ticker and watchlist scans first (bounded symbol count); DISCOVER stays Yahoo-only to respect CBOE politeness. Surface 'served from CBOE fallback' in the data-quality line. Watch field-mapping details: CBOE strike/expiry formats and its IV convention differ; the cross_check joiner already solved the mapping once - reuse it.",
+      "acceptance": "Simulated Yahoo failure on a single-ticker scan completes via CBOE with provenance shown; no behaviour change when Yahoo is healthy; archive politeness unaffected."
+    },
+    {
+      "id": "guided-start-flow",
+      "title": "A stranger's first scan should not require reading a 40-section README",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P2",
+      "thesis": "The equity screener presents 13 modes plus the launcher's 6 sections, several tagged 'no edge' or 'read-only'. The README explains the maturity tiers well, but in-app nothing says where to start. The proven internal flow is INTEL (context) -> DISCOVER (candidates) -> drill-down (detail on any candidate) -> log with suggested ladder -> PORTFOLIO (track). One orienting line above the mode menu costs nothing and shapes every first session.",
+      "evidence": "Mode menu at src/options_screener.py:4880-4918; holdings desk already proved the guided-menu pattern works (project_holdings_guided_menu, merged 2026-07-20).",
+      "next_step": "Add a single muted line above the MODES rule: 'New here? [10] INTEL for context, then [3] DISCOVER and drill into any pick.' Optionally a first-run-only expanded hint (state file remembers it has been shown). Do not build a wizard; do not touch mode behaviour. Keep it one line - the menu is already tall.",
+      "acceptance": "One-line hint renders in both the enhanced and fallback menu paths; first-run expanded hint (if built) shows exactly once; no mode behaviour changes."
+    },
+    {
+      "id": "repo-hygiene-beta",
+      "title": "Root-directory and artifact hygiene before strangers clone it",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P2",
+      "thesis": "The repo root carries working residue a beta user will misread as load-bearing: scan_results_20260710_1115.csv, scan_errors.log, several .db/.sqlite caches, and src/launcher.py.bak (byte-identical to launcher.py, untracked since 2026-07-23). All are gitignored except the .bak, but a cloner still sees the operator's local clutter pattern reproduced in every doc screenshot, and new artifacts keep landing in the root. Absorbs the remaining step of canonical-test-runner (shipped): scripts/test.sh is still not referenced in CLAUDE.md.",
+      "evidence": "Repo root listing 2026-07-30; diff -q src/launcher.py.bak src/launcher.py reports identical; cleanup-dead-files-and-flags (superseded into this entry) recorded the .bak and the --ret5d as_written flag.",
+      "next_step": "(1) Delete src/launcher.py.bak. (2) Route future scan_errors.log and scan CSV exports into logs/ and exports/ respectively (both exist and are ignored); leave existing local files alone. (3) Reference scripts/test.sh as the canonical runner in CLAUDE.md. (4) Retire the backtest --ret5d as_written branch and its ret5d_scale parameter once the next squeeze re-run is confirmed reproducible (carried from cleanup-dead-files-and-flags). (5) Do NOT move the root DB paths (paper_trades.db etc.) - too many modules hardcode them and the churn buys nothing for beta.",
+      "acceptance": ".bak gone; new artifacts land under logs//exports/; CLAUDE.md names the test runner; ret5d branch removed after the reproducibility check."
+    },
+    {
+      "id": "split-options-screener",
+      "title": "options_screener.py is 5,888 lines - split the monolith, carefully, later",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P3",
+      "thesis": "The main module carries the CLI arg surface, the interactive menu loop, the scan pipeline, auto-log orchestration, and display glue in one 5,888-line file. Every bug hunt and every feature pays a navigation tax, and the file's comment blocks (thread-timing, buffering, race notes) show how much hard-won behaviour is entangled. This is the repo's biggest structural debt - and also the riskiest thing to touch, which is why it is P3 and why the module-level memory notes exist.",
+      "evidence": "wc -l 2026-07-30: 5,888. The launcher/menu/prompt behaviours have shipped multiple subtle fixes (prompt-input-honours-auto, interactive-loop guard, buffering races) whose regressions would be user-visible immediately.",
+      "next_step": "Only after P0-P2 land and with CI green: extract in dependency order with zero behaviour change per step - (1) the mode-menu loop and dispatch into src/menu.py; (2) the argparse surface and flag expansions into src/cli_args.py; (3) scan orchestration into src/scan_pipeline.py - each step a separate commit run through scripts/test.sh and smoke-tested interactively (menu, --ticker bypass, --auto, piped stdin). Preserve every timing/buffering comment with the code it annotates. If any step turns into a rewrite, stop and downscope.",
+      "acceptance": "Each extraction is a green, behaviour-identical commit; interactive smoke checklist recorded; total file under ~2,500 lines at the end without any lost comment context."
+    },
     {
       "id": "cohort-includes-unaffordable-trades",
       "title": "The book's loss is entirely trades the account could never afford",
@@ -11,7 +265,7 @@
       "cost_wall": "n/a",
       "thesis": "Capital at risk per logged trade ran from $22 to $83,650 against a default_budget of $750. Split the closed cohort on that budget: within it, +$3,283 on n=247 (+6.3% of capital risked); above it, -$19,741 on n=160. The whole book loss lives in positions the account cannot take. Long Call goes from -$21,718 to +$183 (+0.8%) once unaffordable trades are dropped — 49 of its 105 closed cohort trades risk more than the entire budget. This does NOT settle the scorer either way: the gate now reads IC +0.086 (p=0.50, n=64) nominal against +0.119 (p=0.52, n=31) affordable, both far from significance. It fixes the P&L headline, which is what most of this backlog was reasoning from.",
       "evidence": "Shipped 2026-07-29 on feat/capital-at-risk: src/capital_risk.py defines risk per structure, schema v16 stores it per row, all 827 rows backfilled, and log_trade refuses over-budget entries (config auto_log.max_capital_at_risk = 750). Root cause was src/options_screener.py:3376 applying the budget filter only when mode == 'Budget scan' while DISCOVER — the auto-log feeder — is labelled 'no budget limit' at line 4776.",
-      "next_step": "Re-derive docs/PROFITABILITY_FINDINGS.md section 2 on the affordable subset BEFORE acting on stop-lc-autolog-bleed. Watch the feeder's reject count for a fortnight: the gate refuses 108 of 242 historical Long Calls, 94 of 99 Short Puts and 116 of 160 Iron Condors, so accrual will slow markedly — that is the intended trade, but confirm it is gating rather than silently starving."
+      "next_step": "Re-derive docs/PROFITABILITY_FINDINGS.md section 2 on the affordable subset BEFORE acting on stop-lc-autolog-bleed. Watch the feeder's reject count for a fortnight: the gate refuses 108 of 242 historical Long Calls, 94 of 99 Short Puts and 116 of 160 Iron Condors, so accrual will slow markedly — that is the intended trade, but confirm it is gating rather than silently starving. AMENDED 2026-07-30: the short-put starvation half already bit and was fixed (affordability now filters before the top-N cut, commit 2e40266) — keep watching the other strategies' accrual rates."
     },
     {
       "id": "rank-strategies-by-return-on-risk",
@@ -22,7 +276,7 @@
       "cost_wall": "n/a",
       "thesis": "Every strategy comparison in the repo summed raw USD across trades whose capital at risk differs by orders of magnitude. That makes the ranking partly a notional-size ranking. Over the cohort window the book is -0.6% per dollar risked, and the lines read Bull Put +32.6%, Long Put +15.1%, Bear Call +9.1%, Iron Condor -0.6%, Short Put -0.2%, Long Call -19.0%. Long Put is the case that matters: aggregate +15.1% but MEDIAN return-on-risk -16.0%, because a single GS trade (+$3,256) is 68% of its +$4,787 total. Bull Put is the only line positive on both the aggregate and the median (+31.0%), and the only one that is also entirely inside the budget.",
       "evidence": "Shipped 2026-07-29: get_strategy_breakdown returns return_on_risk and check_pnl prints an 'On Risk' column. Numbers above are that function's own output over trades closed since 2026-05-27. Top-3-trade concentration: Long Put 128% of its own total, Short Put 66%, Iron Condor 575%.",
-      "next_step": "Read naked-short return-on-risk with care: a cash-secured put's denominator is collateral, so Short Put's -0.2% is small mostly because $2.5m of collateral sits underneath it, not because the line is flat. For those, per-trade return on the credit at stake is the more honest companion figure. Still to do: carry the same normalisation into docs/PROFITABILITY_FINDINGS.md, and prefer the median over the sum so one large contract cannot carry a line."
+      "next_step": "Read naked-short return-on-risk with care: a cash-secured put's denominator is collateral, so Short Put's -0.2% is small mostly because $2.5m of collateral sits underneath it, not because the line is flat. For those, per-trade return on the credit at stake is the more honest companion figure. Still to do: carry the same normalisation into docs/PROFITABILITY_FINDINGS.md, and prefer the median over the sum so one large contract cannot carry a line. AMENDED 2026-07-30: the public-record half of this is now its own P0 entry, track-record-dollar-weighted."
     },
     {
       "id": "multileg-slippage-is-a-flat-floor",
@@ -44,62 +298,7 @@
       "cost_wall": "fails",
       "thesis": "Long Call is -$17,620 over 98 closed trades at a 33% win rate, with a scorer IC of -0.020 (p=0.85). It is the only strategy the Phase-1 gate measures and the worst line in the book. AMENDED 2026-07-28: the dollar half of that case does not survive an affordability split — restricted to trades inside the $750 budget, Long Call is +$183 (+0.8% of capital risked, n=56), and all of the bleed sits in the 49 trades the account could never have opened. The IC half stands: -0.132 (p=0.34) on the affordable subset, still zero.",
       "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; ds feeder logs 5 LC/day. Affordability split: paper_trades.db 2026-07-28, see cohort-includes-unaffordable-trades.",
-      "next_step": "Do not stop the feeder on the -$17,620 figure — it is a sizing artifact. Stop it, or keep it, on the IC, which is the thing the gate actually reads and which is zero either way. If it keeps running, gate it on affordability first so the next 100 trades are worth measuring."
-    },
-    {
-      "id": "repoint-gate-credit",
-      "title": "Re-point Phase 1 at credit structures",
-      "area": "options",
-      "status": "proposed",
-      "conviction": "high",
-      "cost_wall": "unknown",
-      "thesis": "Bear Call has the best scorer IC (+0.152) and Bull Put the best P&L (+$3,630 at 66% win). Both are short premium, consistent with every prior repo result. The gate ignores both. Normalising for size sharpens rather than weakens this: Bull Put is the only line positive on both aggregate (+32.6%) and median (+31.0%) return-on-risk, and Bull Put and Bear Call are the only lines that sit entirely inside the budget (70/70 and 92/92 trades). AMENDED 2026-07-29: which of the two leads is not settled — re-pricing on measured spreads reverses it (Bull Put +6.6%, Bear Call +23.8%, see multileg-slippage-is-a-flat-floor). The robust claim is the family, not the name: both short-premium lines beat everything else on both cost models, and Long Put's dollar lead is one trade.",
-      "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; see rank-strategies-by-return-on-risk and cohort-includes-unaffordable-trades.",
-      "next_step": "Write a gate-redesign spec. DECISIONS.md 2026-06-07 forbids silent gate changes - propose, do not edit thresholds."
-    },
-    {
-      "id": "fix-gate-power-math",
-      "title": "Fix the gate's incoherent power math",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "thesis": "READY needs IC>=0.08 AND p<0.05, but proving IC=0.08 at p<0.05 requires n~601. At the n>=50 trigger, p<0.05 demands observed IC~0.286 - 3.6x the stated bar. The gate cannot fire on its own terms.",
-      "evidence": "Fisher-z: n = (1.96/atanh(IC))^2 + 3. docs/PROFITABILITY_FINDINGS.md section 1.",
-      "next_step": "Pick one: size n to the effect, switch to a one-sided test, or gate on net-EV instead of IC."
-    },
-    {
-      "id": "merge-btc-vrp-carry",
-      "title": "Merge and paper-trade the BTC short-vol carry",
-      "area": "crypto",
-      "status": "validated",
-      "conviction": "high",
-      "cost_wall": "clears",
-      "thesis": "BTC short-vol carry is the only strategy in this repo that has cleared the cost wall on its own numbers: NET +4 to +5.5 vol points, 68-74% hit rate.",
-      "evidence": "src/crypto/volbacktest; branch NOT merged. ETH did not validate - BTC only.",
-      "next_step": "Merge the branch and run it on the paper ledger before anything touches real money."
-    },
-    {
-      "id": "index-put-spread-capacity",
-      "title": "Re-examine the OOS-validated index put spread",
-      "area": "options",
-      "status": "validated",
-      "conviction": "medium",
-      "cost_wall": "clears",
-      "thesis": "Index put spreads validated out-of-sample on the cached DoltHub EOD chains, but were shelved as capacity-walled. At retail size the capacity wall may not bind.",
-      "evidence": "docs/DOLT_OPTIONS.md; project memory dolthub_real_options. Corpus check 2026-07-28: data/dolt_options.db is 595,074 rows but only NINE symbols (AAPL MSFT NVDA GOOG AMZN META AMD TSLA SPY), dense from 2022-01 to 2026-06-12, ~3 expirations and 17-19 strikes per date — not '7 years of chains' in any broad sense. SPY specifically stops at 2025-02.",
-      "next_step": "Quantify the capacity ceiling in dollars. If it exceeds intended size, the wall is irrelevant. Note the SPY leg was validated on 2022-2025 only, so it has never seen the last 18 months."
-    },
-    {
-      "id": "dolt-credit-line-backtest",
-      "title": "Backtest the credit lines on the Dolt chains instead of waiting a year for them",
-      "area": "options",
-      "status": "dead",
-      "conviction": "high",
-      "cost_wall": "fails",
-      "thesis": "gate-is-time-not-data says the binding constraint is calendar, not data — but that is only true for signals nothing historical can express. Bull Put and Bear Call CAN be expressed historically: data/dolt_options.db carries 595,074 chain rows with bid, ask and full Greeks, ~740 dense dates from 2022-01 to 2026-06, with strikes spanning roughly 0.02-0.97 delta. That is enough to construct verticals with real quotes and measure the two lines that carry the book, on data already sitting on disk, without waiting for live accrual.",
-      "evidence": "RUN 2026-07-29, docs/DOLT_CREDIT_SPREADS.md. 208 weekly entries x 8 megacaps, 2022-2025, real bid/ask crossed, ledger's own exit rules and intrinsic settlement. Bull Put n=1,528 win 66.6% mean -1.89% on max risk; Bear Call n=1,517 win 61.9% mean -2.95%. Both negative even with commissions at the configured US$0 and no FX charged. 29 full max-risk losses (1.9% of trades) carry two thirds of the damage.",
-      "next_step": "CLOSED on the pre-committed condition: the corpus cannot answer the question that was asked. Mean max risk is $1,753-$1,812 against a live median of $54 (Bear Call) and $128 (Bull Put) — 14-32x the structures actually traded — and 52% of positions were quoted on at most one day, so for half the sample the exit rules under test never ran. Reporting these as validation of the live lines would be the 'number that looks like validation' this entry warned against. The one usable negative to keep: wide megacap credit spreads under this book's exit rules lost money on capital at risk with zero commissions, which is worth knowing before anyone widens the live structures toward these sizes on the intuition that width means safety. The gate-shortening ambition fails on its own terms; see gate-is-time-not-data, which stands."
+      "next_step": "Do not stop the feeder on the -$17,620 figure — it is a sizing artifact. Stop it, or keep it, on the IC, which is the thing the gate actually reads and which is zero either way. If it keeps running, gate it on affordability first so the next 100 trades are worth measuring. AMENDED 2026-07-30: fold the stop/keep decision into the gate-redesign spec (gate-statistic-wrong-for-skewed-returns) — under rank IC the LC cohort reads zero at n=70, which strengthens the case for repointing the validation budget at short premium rather than accruing more LC."
     },
     {
       "id": "day-level-vs-trade-level",
@@ -121,7 +320,7 @@
       "cost_wall": "fails",
       "thesis": "A NFLX $1-wide spread hit its 50%-of-credit take-profit at +56% gross and settled at -1.5% net. Fixed percentage exits ignore what the round trip costs. REFRAMED 2026-07-29: costs are NOT a fixed dollar amount per contract on this broker — commission is US$0. What remains is the bid-ask (measured per structure: $0.163/share Bull Put, $0.025 Bear Call) plus 1.5% currency conversion each way, both proportional to what is traded. So the rule should compare modelled net against the spread being crossed, not against a fixed toll.",
       "evidence": "Auto-close log 2026-07-27; cost measurement in multileg-slippage-is-a-flat-floor; Wealthsimple fee schedule verified 2026-07-29.",
-      "next_step": "Require modelled net P&L > 0 before a take-profit fires. Note: changes live exit behaviour across the open book and the gate cohort - deliberate decision, not a cleanup."
+      "next_step": "Require modelled net P&L > 0 before a take-profit fires. Note: changes live exit behaviour across the open book and the gate cohort - deliberate decision, not a cleanup. If picked up, coordinate with mark-fallback-hardcoded-vol so both exit-path changes land as one reviewed, journaled change rather than two separate marking-basis shifts."
     },
     {
       "id": "effective-n-in-gate",
@@ -132,7 +331,7 @@
       "cost_wall": "n/a",
       "thesis": "Batch auto-logging clusters entries: 57 trades on 18 days, ICC +0.108, design effect 1.23, effective n ~46. The n>=50 trigger counts nominal trades and is therefore slightly overconfident.",
       "evidence": "docs/PROFITABILITY_FINDINGS.md section 3.",
-      "next_step": "Only matters if IC ever approaches the READY bar. Bundle with the gate-power redesign."
+      "next_step": "Bundle with the gate-power redesign (fix-gate-power-math) — the redesign spec should state n thresholds in effective-n terms."
     },
     {
       "id": "launchd-health-check",
@@ -142,8 +341,8 @@
       "conviction": "medium",
       "cost_wall": "n/a",
       "thesis": "All three LaunchAgents exited 78 (EX_CONFIG) since ~2026-06-15. maintenance_health reads the state file, which the interactive path also stamps, so it showed mild staleness rather than 'scheduler dead'.",
-      "evidence": "launchctl list; logs/launchagent.log stops 2026-06-15 while maintenance.log continues. Re-confirmed 2026-07-29: all three agents still report exit 78, so nothing has run on a timer for roughly six weeks.",
-      "next_step": "Shipped 2026-07-29: maintenance_health.read_launchd_status reads launchctl, and health_banner now fires on a dead scheduler INDEPENDENTLY of state freshness — the two occurring together is the whole bug, since interactive runs stamp the state file. Exit 78 prints the actual fix rather than a generic failure. THE UNDERLYING FIX IS STILL PENDING AND IS USER-ONLY: System Settings > General > Login Items & Extensions > Allow in the Background. Until that toggle is flipped, cohort filling only happens when the screener is opened by hand."
+      "evidence": "launchctl list; logs/launchagent.log stops 2026-06-15 while maintenance.log continues. Re-confirmed 2026-07-30: all three agents still report exit 78, so nothing has run on a timer for roughly six weeks.",
+      "next_step": "Shipped 2026-07-29: maintenance_health.read_launchd_status reads launchctl, and health_banner now fires on a dead scheduler INDEPENDENTLY of state freshness — the two occurring together is the whole bug, since interactive runs stamp the state file. Exit 78 prints the actual fix rather than a generic failure. THE UNDERLYING FIX IS STILL PENDING AND IS USER-ONLY: System Settings > General > Login Items & Extensions > Allow in the Background. Until that toggle is flipped, cohort filling only happens when the screener is opened by hand. AMENDED 2026-07-30: escalation to a blocking acknowledgement is now its own P1 entry, scheduler-dead-hard-confirm, and the measurement of the damage is track-record-exit-overshoot-artifact."
     },
     {
       "id": "hold-to-expiry-small-account",
@@ -166,6 +365,186 @@
       "thesis": "Median Bull Put credit is $122.50 vs Bear Call $47.50. The same fixed $22.60 round-trip is 18% vs 48% of max profit. Nothing to do with edge - it is credit-per-trade against a fixed toll. CONTRADICTED 2026-07-29: the toll is not fixed. It is $0.163/share for Bull Put and $0.025 for Bear Call — measured, not assumed — so the bigger credit comes with a proportionally wider market. Re-priced on real quotes the preference reverses: Bull Put +6.6% return on risk, Bear Call +23.8%. The whole argument was an artifact of costing both structures at the same flat constant.",
       "evidence": "docs/PROFITABILITY_FINDINGS.md section 7, n=159 credit spreads; superseded by scripts/cost_model_report.py and the measurement in multileg-slippage-is-a-flat-floor.",
       "next_step": "Do not act on either direction yet — the reversal rests on 28 Bull Put and 39 Bear Call contract-days. What is already safe to conclude is that 'fixed toll vs bigger credit' is the wrong frame: cost scales with the market you are crossing, so compare structures on measured cost per structure or not at all."
+    },
+    {
+      "id": "merge-btc-vrp-carry",
+      "title": "Merge and paper-trade the BTC short-vol carry",
+      "area": "crypto",
+      "status": "validated",
+      "conviction": "high",
+      "cost_wall": "clears",
+      "thesis": "BTC short-vol carry is the only strategy in this repo that has cleared the cost wall on its own numbers: NET +4 to +5.5 vol points, 68-74% hit rate.",
+      "evidence": "src/crypto/volbacktest; branch NOT merged. ETH did not validate - BTC only.",
+      "next_step": "Merge the branch and run it on the paper ledger before anything touches real money. Not part of the beta-readiness plan - scope expansion, operator's call on timing."
+    },
+    {
+      "id": "index-put-spread-capacity",
+      "title": "Re-examine the OOS-validated index put spread",
+      "area": "options",
+      "status": "validated",
+      "conviction": "medium",
+      "cost_wall": "clears",
+      "thesis": "Index put spreads validated out-of-sample on the cached DoltHub EOD chains, but were shelved as capacity-walled. At retail size the capacity wall may not bind.",
+      "evidence": "docs/DOLT_OPTIONS.md; project memory dolthub_real_options. Corpus check 2026-07-28: data/dolt_options.db is 595,074 rows but only NINE symbols (AAPL MSFT NVDA GOOG AMZN META AMD TSLA SPY), dense from 2022-01 to 2026-06-12, ~3 expirations and 17-19 strikes per date — not '7 years of chains' in any broad sense. SPY specifically stops at 2025-02.",
+      "next_step": "Quantify the capacity ceiling in dollars. If it exceeds intended size, the wall is irrelevant. Note the SPY leg was validated on 2022-2025 only, so it has never seen the last 18 months. If pursued on SPX rather than SPY, index-options-are-not-free applies: make the commission lookup per-symbol first."
+    },
+    {
+      "id": "sizing-engine-never-touches-the-ledger",
+      "title": "The sizing engine has never been exercised against the cohort it will size",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P2",
+      "thesis": "src/execution/sizing.py implements half-Kelly with a risk cap and a cost cap, and it is what real money would route through. The paper ledger has never used it: quantity is 1.0 on all 827 rows, which is the column default from the schema migration and is never written anywhere. So every statistic the gate reads describes a one-contract-per-signal book, while the thing the gate would authorise is a Kelly-sized book. Those differ in more than scale — sizing changes which trades get taken at all, and its cost cap is exactly the filter that would have excluded the 114 unaffordable trades.",
+      "evidence": "paper_manager.py:402 is the only mention of quantity (ALTER TABLE ... DEFAULT 1.0); src/execution/sizing.py:38 size_position, contracts = min(risk-capped, cost-capped).",
+      "next_step": "Replay the closed cohort through size_position at the intended account value and report the sized book alongside the unsized one. Cheap, no new data, and it is the only way to find out whether the gate's answer survives the sizing rule. Pairs with cohort-includes-unaffordable-trades — same root cause, different half."
+    },
+    {
+      "id": "retire-or-measure-ai-scorer",
+      "title": "Decide the AI rerank's fate — it is dormant and unmeasurable as it stands",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P3",
+      "thesis": "config.json ai_scoring.enabled is false, so the LLM rerank runs on nothing. It left 35 scored rows out of 827, all from 2026-05 and 2026-06, across 13 distinct score values — enough to compute an IC (+0.108) and nowhere near enough to believe one. Meanwhile src/ai_scorer.py (1,109 lines) plus prompts.py, config_ai.py, ai_cache.py and .ai_score_cache.db are carried, tested and maintained for a path nothing calls. The free-tier model chain was still being refreshed as recently as commit 5037fbb.",
+      "evidence": "config.json ai_scoring; paper_trades.db ai_score non-null on 35/827, months 2026-05 and 2026-06 only.",
+      "next_step": "Pick one and commit. Either run it enabled over a defined cohort until n is large enough to test its IC WITHIN a strategy (the lesson from dead-pop-score-as-ranker), or retire the subsystem to a branch and delete it from the tree. What should not continue is maintaining a disabled 1,100-line ranker that no evidence supports and no run exercises."
+    },
+    {
+      "id": "usd-account-vs-conversion-spread",
+      "title": "A USD account may pay for itself against the 1.5% conversion spread",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "priority": "P2",
+      "thesis": "Trading US-listed options from a CAD account converts currency both ways at Wealthsimple's 1.5% spread (below US$10k of conversions; 1.0% to $25k, 0.5% to $100k, 0% above). Nothing in this repo modelled that until now, and it is the largest remaining cost in the book once commissions are correctly set to zero: $1,098 of conversion across 187 closed credit trades in the cohort window alone. A USD account removes it for $10/month.",
+      "evidence": "Wealthsimple fee schedule verified 2026-07-29; scripts/cost_model_report.py prints the conversion total. Note the cost scales with money moved, not contract count, so it cannot be traded around by using fewer legs.",
+      "next_step": "Check actual annual conversion volume rather than this window's, then decide. Two things to confirm first, because both change the answer: whether the tiered rate is assessed on cumulative annual conversions or per transaction, and whether holding USD in the account leaves idle cash uninvested in a way that costs more than the spread saves. Operator decision, not code - the executor's only task here is presenting the two confirmations if asked."
+    },
+    {
+      "id": "index-options-are-not-free",
+      "title": "Index options carry a per-contract fee the model treats as zero",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "unknown",
+      "thesis": "Wealthsimple's US$0 contract fee covers equity and ETF options only. Index options are charged: SPX and SPXW US$1.00 per contract, VIX US$1.00, RUT/RUTW US$0.50, XSP US$0.25. config.paper_trading.commission_per_contract is a single number and now reads 0.0, so any index-option result the system produces understates its cost. Today this is latent rather than live — the ledger trades SPY, QQQ and IWM, which are ETFs and genuinely free — but index-put-spread-capacity is an active idea and SPX is the natural venue for it.",
+      "evidence": "Wealthsimple fee schedule verified 2026-07-29.",
+      "next_step": "Before any SPX work, make the commission lookup per-symbol rather than a single constant. A $1/contract fee on a 2-leg vertical is $4 round trip, which is small against SPX-sized credits but is not zero and must not be assumed away by a config field that cannot express it."
+    },
+    {
+      "id": "centralise-fee-defaults",
+      "title": "Six modules still hardcode a US-retail commission as their fallback",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "low",
+      "cost_wall": "n/a",
+      "priority": "P3",
+      "thesis": "Every path that reads a fee reads it from config.json, so the 2026-07-29 switch to Wealthsimple's US$0 took effect everywhere it matters. But the fallback defaults still carry 0.65: paper_manager.COMMISSION_PER_CONTRACT plus function defaults in dolt_spread, dolt_short, dolt_vol, trade_analysis and options_screener. A caller constructing one of those helpers directly, without threading a commission through, silently prices at a US broker's rates — and the number looks deliberate rather than stale.",
+      "evidence": "grep commission_per_contract across src/ 2026-07-29: six hardcoded 0.65 defaults, all reached only when config is absent. No falsy-zero bug — every read uses a .get default rather than `or`, so a configured 0.0 survives.",
+      "next_step": "Low priority precisely because it never fires in normal operation. If touched, put the default in one place (src/execution_costs) and have the rest import it, so there is a single number to change when the broker changes. Do not do this as a drive-by: each module's CLI has its own default and they are load-bearing for the standalone backtests."
+    },
+    {
+      "id": "uoa-needs-oi-history",
+      "title": "UOA cannot be validated — no source pairs open interest with history",
+      "area": "research",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "UOA is built on open-interest deltas between chain snapshots (uoa.py oi_deltas). Validating it needs point-in-time OI, and nothing available has it: dolt_chain carries 7 years of EOD chains with full Greeks but NO open-interest or volume column, while chain_archive.db has OI across only 19 snapshot dates (2026-06-10 to 2026-07-27). The one source with history cannot express the signal; the one that can has no history. For scale, the squeeze study needed 205 settlement dates and 480,744 observations to resolve a ~3pp effect.",
+      "evidence": "docs/OVERLAY_VALIDATION.md; schema check 2026-07-28.",
+      "next_step": "Do nothing and let chain_archive.db accumulate (~1 snapshot/trading day, testable in roughly a year). Optionally widen it by pulling OCC's free daily volume/OI-by-series files, which cover the whole market rather than just scanned symbols. Do NOT buy a tick-data vendor for this: OPRA carries trades and quotes, not OI, so Databento/dxFeed-class feeds do not contain the field. If buying, the sellers of historical EOD options WITH OI are CBOE DataShop (pay-per-dataset), ORATS (subscription) and OptionMetrics IvyDB (institutional, free via university WRDS). Verify current pricing directly."
+    },
+    {
+      "id": "edgar-insider-event-study",
+      "title": "Validate the EDGAR insider overlay — free data, squeeze-sized harness",
+      "area": "research",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "unknown",
+      "thesis": "The insider-cluster overlay is display-only and has never been validated, but unlike UOA the data problem is solvable for free: SEC Form 4 history is deep and public via the EDGAR daily index files. This is the overlay study that can actually be run.",
+      "evidence": "docs/OVERLAY_VALIDATION.md; pick_context.insider_summary fetches live with a per-day cache and stores nothing historical.",
+      "next_step": "Build it in the shape of src/squeeze/backtest/: backfill Form 4 from EDGAR daily indexes; enter on the FILED date, never the transaction date (the 2-business-day gap is exactly where look-ahead would flatter the result); reuse data/squeeze_prices.db for survivorship-free closes; event study at 21/42/63d with date-clustered moving-block bootstrap. Plan it as its own project, do not bolt it onto other work."
+    },
+    {
+      "id": "news-reaches-nothing",
+      "title": "News feeds no scoring — decide before paying for a better feed",
+      "area": "research",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "config.json weights.sentiment is 0.0, so nothing the news layer produces reaches quality_score. The 2026-07-28 relevance fix (substring matching was ranking 'Fed cuts rates' top for F and demoting 'Microsoft earnings beat' for MSFT) improved what the panels display, not what gets ranked. A paid news tier (Benzinga, Polygon news) would give cleaner ticker tagging and better severity than TextBlob — whose direction is reliable but whose magnitude is flat, scoring Chapter 11 the same as a routine downgrade — but it would still improve reading, not ranking.",
+      "evidence": "config.json composite_weights.sentiment = 0.0; docs and commit f246ed3; sentiment probe 8/8 correct direction, compressed magnitude. CORRECTION 2026-07-28: sentiment_score_norm is populated on 690/827 rows but takes exactly ONE distinct value — 0.5 on every row. It is a neutral placeholder, not a stored measurement.",
+      "next_step": "The cheap version of this test does not exist. Because the stored column has zero variance, no IC can be computed from history — correlating it returns undefined, not zero, and the 567 closed rows carrying it prove nothing either way. Answering the question requires backfilling a real per-trade sentiment value first, from data/news_archive.db (12MB, already accumulating) joined to entry dates, and only then computing IC. Decide whether that backfill is worth an afternoon BEFORE anyone reasons about paid feeds — and fix the writer so the column stops recording a constant, since a placeholder that looks populated is worse than a null."
+    },
+    {
+      "id": "gate-is-time-not-data",
+      "title": "The gate constraint is time, not data — no vendor sells a fix",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "When considering spending money on data, note the actual binding constraint: the Long Call cohort needs roughly n=600 to resolve and fills a handful per day. That is a calendar problem. Every dataset purchase considered so far addresses signals that are display-only, while the thing gating real money is sample accumulation.",
+      "evidence": "project gate notes; ds feeder logs 5 LC/day.",
+      "next_step": "Before any data purchase, ask whether it shortens the gate or only enriches a display layer. So far the answer has been the latter every time. AMENDED 2026-07-30: the calendar problem is also why the gate-redesign (rank IC, terminal conditions, short-premium cohort) matters more than any data acquisition — the cheapest way to shorten the wait is to measure the right thing on the samples already accruing."
+    },
+    {
+      "id": "squeeze-live-vs-backtest-budget-gap",
+      "title": "Squeeze SETUP is easier to reach live than in the backtest that calibrated it",
+      "area": "options",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "The backtest panel has no options history, so iv_skew is always None and the call-skew leg never scores: max 5 points there. Live, skew is available and the max is 6. SETUP_MIN_POINTS=3 was rescaled against the 5-point budget, which means live SETUP fires on strictly more configurations than the +4.73pp measurement covers. This is the exact mirror of the bug that produced 18 SETUP rows in 480,744 — a threshold calibrated against one point budget and applied to another.",
+      "evidence": "src/squeeze/backtest/panel.py passes iv_skew=None; backtest report prints 'iv_skew: unavailable'. detector.py SETUP_MIN_POINTS=3, live max 6 vs backtest max 5.",
+      "next_step": "Measure live SETUP frequency against the backtest's SETUP rate on the same universe. If live fires materially more often, either raise the live threshold to 4, or stop scoring skew until it can be validated — an unvalidated +1 is what the whole 2026-07-28 rescoring was meant to remove."
+    },
+    {
+      "id": "squeeze-si-only-baseline-recheck",
+      "title": "Re-run the SI-level-only baseline against the rescored grader",
+      "area": "options",
+      "status": "shipped",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "The original study's sharpest finding was that ranking by short-interest level ALONE beat the full grader: +4.36pp asymmetry vs +3.74pp. RE-MEASURED 2026-07-29 against the rescored grader on the same panel: the two are level at every horizon — 21d grader +5.38pp vs SI-only +5.31pp, difference -0.06pp with a 95% CI of [-0.93, +0.70]. The rescoring closed the gap. But the more useful result is that the ORIGINAL claim was never resolvable: it rested on a +0.62pp gap while the interval on that difference is about +/-0.9pp, wider than the effect being asserted. 'The scoring adds nothing' was a point estimate read as a result.",
+      "evidence": "Shipped as src/squeeze/backtest/study.si_only_comparison, printed by `--run`; docs/SQUEEZE_BACKTEST.md re-measurement section. Cohort overlap fell 77% -> 44%, so the rescored grader picks a substantially different cohort and lands in the same place.",
+      "next_step": "Do not delete the scoring on this evidence, and do not defend it either — an interval spanning zero is not proof of value. The decision now rests on parsimony rather than measurement, and that is a judgement call to make deliberately. What IS resolvable and unchanged: short-interest level carries the signal (monotone deciles) while evidence points correlate at +0.001. If the scoring is kept, it should be justified as a display aid, not as a ranker."
+    },
+    {
+      "id": "widen-outlook-universe",
+      "title": "Widen the outlook universe — 16 instruments is the resolution floor",
+      "area": "research",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "thesis": "The outlook z-scores cross-sectionally across 16 ETFs and rebalances every 21 days, giving ~83 observations. That is why the reversal_1m question came back 'indistinguishable' rather than answered: the study cannot resolve IC differences of ~0.01. Widening the universe helps twice — more names make each cross-sectional z-score less noisy, and more rebalance rows raise the power of every future factor test.",
+      "evidence": "DEFAULT_UNIVERSE is 16 tickers; run_backtest reported n=83 (42d) and n=82 (63d) rebalances over 2,037 aligned bars.",
+      "next_step": "Add liquid sector/industry ETFs with long histories (aiming for 30-40 names) and re-run the existing backtest to confirm the headline IC survives the wider universe before trusting it for factor tests. Widening must not be assumed free — it changes what the z-scores mean."
+    },
+    {
+      "id": "occ-daily-oi-archive",
+      "title": "Widen the chain archive with OCC free daily OI, whole-market",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "medium",
+      "cost_wall": "n/a",
+      "thesis": "chain_archive.db only stores symbols the screener happens to scan, at ~1 snapshot per trading day, and is the sole future path to validating UOA. The OCC publishes daily volume and open interest by series for free, covering the entire market rather than just scanned names. Pointing the archiver at that widens every future panel at zero cost while the clock runs.",
+      "evidence": "chain_archive.db: 300,726 rows, 19 snapshot dates, symbols limited to scans. See uoa-needs-oi-history.",
+      "next_step": "Add an OCC daily-file archiver to the maintenance heartbeat alongside the existing chain archive job. It shortens the wait on uoa-needs-oi-history and costs nothing but disk. Note it is worthless until the scheduler is alive - step_0_user_only gates this too."
+    },
+    {
+      "id": "dolt-credit-line-backtest",
+      "title": "Backtest the credit lines on the Dolt chains instead of waiting a year for them",
+      "area": "options",
+      "status": "dead",
+      "conviction": "high",
+      "cost_wall": "fails",
+      "thesis": "gate-is-time-not-data says the binding constraint is calendar, not data — but that is only true for signals nothing historical can express. Bull Put and Bear Call CAN be expressed historically: data/dolt_options.db carries 595,074 chain rows with bid, ask and full Greeks, ~740 dense dates from 2022-01 to 2026-06, with strikes spanning roughly 0.02-0.97 delta. That is enough to construct verticals with real quotes and measure the two lines that carry the book, on data already sitting on disk, without waiting for live accrual.",
+      "evidence": "RUN 2026-07-29, docs/DOLT_CREDIT_SPREADS.md. 208 weekly entries x 8 megacaps, 2022-2025, real bid/ask crossed, ledger's own exit rules and intrinsic settlement. Bull Put n=1,528 win 66.6% mean -1.89% on max risk; Bear Call n=1,517 win 61.9% mean -2.95%. Both negative even with commissions at the configured US$0 and no FX charged. 29 full max-risk losses (1.9% of trades) carry two thirds of the damage.",
+      "next_step": "CLOSED on the pre-committed condition: the corpus cannot answer the question that was asked. Mean max risk is $1,753-$1,812 against a live median of $54 (Bear Call) and $128 (Bull Put) — 14-32x the structures actually traded — and 52% of positions were quoted on at most one day, so for half the sample the exit rules under test never ran. Reporting these as validation of the live lines would be the 'number that looks like validation' this entry warned against. The one usable negative to keep: wide megacap credit spreads under this book's exit rules lost money on capital at risk with zero commissions, which is worth knowing before anyone widens the live structures toward these sizes on the intuition that width means safety. The gate-shortening ambition fails on its own terms; see gate-is-time-not-data, which stands."
     },
     {
       "id": "dead-pop-score-as-ranker",
@@ -234,180 +613,15 @@
       "next_step": "None for single names. The index leg is live in idea index-put-spread-capacity."
     },
     {
-      "id": "uoa-needs-oi-history",
-      "title": "UOA cannot be validated \u2014 no source pairs open interest with history",
-      "area": "research",
-      "status": "proposed",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "thesis": "UOA is built on open-interest deltas between chain snapshots (uoa.py oi_deltas). Validating it needs point-in-time OI, and nothing available has it: dolt_chain carries 7 years of EOD chains with full Greeks but NO open-interest or volume column, while chain_archive.db has OI across only 19 snapshot dates (2026-06-10 to 2026-07-27). The one source with history cannot express the signal; the one that can has no history. For scale, the squeeze study needed 205 settlement dates and 480,744 observations to resolve a ~3pp effect.",
-      "evidence": "docs/OVERLAY_VALIDATION.md; schema check 2026-07-28.",
-      "next_step": "Do nothing and let chain_archive.db accumulate (~1 snapshot/trading day, testable in roughly a year). Optionally widen it by pulling OCC's free daily volume/OI-by-series files, which cover the whole market rather than just scanned symbols. Do NOT buy a tick-data vendor for this: OPRA carries trades and quotes, not OI, so Databento/dxFeed-class feeds do not contain the field. If buying, the sellers of historical EOD options WITH OI are CBOE DataShop (pay-per-dataset), ORATS (subscription) and OptionMetrics IvyDB (institutional, free via university WRDS). Verify current pricing directly."
-    },
-    {
-      "id": "edgar-insider-event-study",
-      "title": "Validate the EDGAR insider overlay \u2014 free data, squeeze-sized harness",
-      "area": "research",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "unknown",
-      "thesis": "The insider-cluster overlay is display-only and has never been validated, but unlike UOA the data problem is solvable for free: SEC Form 4 history is deep and public via the EDGAR daily index files. This is the overlay study that can actually be run.",
-      "evidence": "docs/OVERLAY_VALIDATION.md; pick_context.insider_summary fetches live with a per-day cache and stores nothing historical.",
-      "next_step": "Build it in the shape of src/squeeze/backtest/: backfill Form 4 from EDGAR daily indexes; enter on the FILED date, never the transaction date (the 2-business-day gap is exactly where look-ahead would flatter the result); reuse data/squeeze_prices.db for survivorship-free closes; event study at 21/42/63d with date-clustered moving-block bootstrap. Plan it as its own project, do not bolt it onto other work."
-    },
-    {
-      "id": "news-reaches-nothing",
-      "title": "News feeds no scoring \u2014 decide before paying for a better feed",
-      "area": "research",
-      "status": "proposed",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "thesis": "config.json weights.sentiment is 0.0, so nothing the news layer produces reaches quality_score. The 2026-07-28 relevance fix (substring matching was ranking 'Fed cuts rates' top for F and demoting 'Microsoft earnings beat' for MSFT) improved what the panels display, not what gets ranked. A paid news tier (Benzinga, Polygon news) would give cleaner ticker tagging and better severity than TextBlob \u2014 whose direction is reliable but whose magnitude is flat, scoring Chapter 11 the same as a routine downgrade \u2014 but it would still improve reading, not ranking.",
-      "evidence": "config.json composite_weights.sentiment = 0.0; docs and commit f246ed3; sentiment probe 8/8 correct direction, compressed magnitude. CORRECTION 2026-07-28: sentiment_score_norm is populated on 690/827 rows but takes exactly ONE distinct value \u2014 0.5 on every row. It is a neutral placeholder, not a stored measurement.",
-      "next_step": "The cheap version of this test does not exist. Because the stored column has zero variance, no IC can be computed from history \u2014 correlating it returns undefined, not zero, and the 567 closed rows carrying it prove nothing either way. Answering the question requires backfilling a real per-trade sentiment value first, from data/news_archive.db (12MB, already accumulating) joined to entry dates, and only then computing IC. Decide whether that backfill is worth an afternoon BEFORE anyone reasons about paid feeds \u2014 and fix the writer so the column stops recording a constant, since a placeholder that looks populated is worse than a null."
-    },
-    {
-      "id": "gate-is-time-not-data",
-      "title": "The gate constraint is time, not data \u2014 no vendor sells a fix",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "thesis": "When considering spending money on data, note the actual binding constraint: the Long Call cohort needs roughly n=600 to resolve and fills a handful per day. That is a calendar problem. Every dataset purchase considered so far addresses signals that are display-only, while the thing gating real money is sample accumulation.",
-      "evidence": "project gate notes; ds feeder logs 5 LC/day.",
-      "next_step": "Before any data purchase, ask whether it shortens the gate or only enriches a display layer. So far the answer has been the latter every time."
-    },
-    {
-      "id": "squeeze-live-vs-backtest-budget-gap",
-      "title": "Squeeze SETUP is easier to reach live than in the backtest that calibrated it",
-      "area": "options",
-      "status": "proposed",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "thesis": "The backtest panel has no options history, so iv_skew is always None and the call-skew leg never scores: max 5 points there. Live, skew is available and the max is 6. SETUP_MIN_POINTS=3 was rescaled against the 5-point budget, which means live SETUP fires on strictly more configurations than the +4.73pp measurement covers. This is the exact mirror of the bug that produced 18 SETUP rows in 480,744 \u2014 a threshold calibrated against one point budget and applied to another.",
-      "evidence": "src/squeeze/backtest/panel.py passes iv_skew=None; backtest report prints 'iv_skew: unavailable'. detector.py SETUP_MIN_POINTS=3, live max 6 vs backtest max 5.",
-      "next_step": "Measure live SETUP frequency against the backtest's SETUP rate on the same universe. If live fires materially more often, either raise the live threshold to 4, or stop scoring skew until it can be validated \u2014 an unvalidated +1 is what the whole 2026-07-28 rescoring was meant to remove."
-    },
-    {
-      "id": "squeeze-si-only-baseline-recheck",
-      "title": "Re-run the SI-level-only baseline against the rescored grader",
-      "area": "options",
-      "status": "shipped",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "thesis": "The original study's sharpest finding was that ranking by short-interest level ALONE beat the full grader: +4.36pp asymmetry vs +3.74pp. RE-MEASURED 2026-07-29 against the rescored grader on the same panel: the two are level at every horizon — 21d grader +5.38pp vs SI-only +5.31pp, difference -0.06pp with a 95% CI of [-0.93, +0.70]. The rescoring closed the gap. But the more useful result is that the ORIGINAL claim was never resolvable: it rested on a +0.62pp gap while the interval on that difference is about +/-0.9pp, wider than the effect being asserted. 'The scoring adds nothing' was a point estimate read as a result.",
-      "evidence": "Shipped as src/squeeze/backtest/study.si_only_comparison, printed by `--run`; docs/SQUEEZE_BACKTEST.md re-measurement section. Cohort overlap fell 77% -> 44%, so the rescored grader picks a substantially different cohort and lands in the same place.",
-      "next_step": "Do not delete the scoring on this evidence, and do not defend it either — an interval spanning zero is not proof of value. The decision now rests on parsimony rather than measurement, and that is a judgement call to make deliberately. What IS resolvable and unchanged: short-interest level carries the signal (monotone deciles) while evidence points correlate at +0.001. If the scoring is kept, it should be justified as a display aid, not as a ranker."
-    },
-    {
       "id": "dead-retune-reversal-1m",
       "title": "Re-tune or flip the outlook's reversal_1m weight",
       "area": "research",
       "status": "dead",
       "conviction": "high",
       "cost_wall": "n/a",
-      "thesis": "reversal_1m is negated, so a selloff contributes POSITIVELY to a bullish score \u2014 on 2026-07-28 SMH read +0.130 on the factor while down 13% for the month, which looks like a defect. It was tested properly: four weight settings (current 0.15, removed and renormalised, sign-flipped, half) on identical price columns, paired bootstrap over per-rebalance ICs, 5,000 resamples. Every interval spans zero at both 42d and 63d, and the two horizons disagree on sign.",
-      "evidence": "docs/OUTLOOK_FINDINGS.md 'reversal_1m weight \u2014 tested 2026-07-28, no change warranted'. Largest effect ~0.017 IC against CIs of +/-0.03.",
-      "next_step": "Do not re-litigate on intuition. With n~83 rebalances the study cannot resolve ~0.01 IC differences, which is the size of every effect present. Only revisit if the rebalance count rises materially \u2014 see widen-outlook-universe."
-    },
-    {
-      "id": "widen-outlook-universe",
-      "title": "Widen the outlook universe \u2014 16 instruments is the resolution floor",
-      "area": "research",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "The outlook z-scores cross-sectionally across 16 ETFs and rebalances every 21 days, giving ~83 observations. That is why the reversal_1m question came back 'indistinguishable' rather than answered: the study cannot resolve IC differences of ~0.01. Widening the universe helps twice \u2014 more names make each cross-sectional z-score less noisy, and more rebalance rows raise the power of every future factor test.",
-      "evidence": "DEFAULT_UNIVERSE is 16 tickers; run_backtest reported n=83 (42d) and n=82 (63d) rebalances over 2,037 aligned bars.",
-      "next_step": "Add liquid sector/industry ETFs with long histories (aiming for 30-40 names) and re-run the existing backtest to confirm the headline IC survives the wider universe before trusting it for factor tests. Widening must not be assumed free \u2014 it changes what the z-scores mean."
-    },
-    {
-      "id": "occ-daily-oi-archive",
-      "title": "Widen the chain archive with OCC free daily OI, whole-market",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "chain_archive.db only stores symbols the screener happens to scan, at ~1 snapshot per trading day, and is the sole future path to validating UOA. The OCC publishes daily volume and open interest by series for free, covering the entire market rather than just scanned names. Pointing the archiver at that widens every future panel at zero cost while the clock runs.",
-      "evidence": "chain_archive.db: 300,726 rows, 19 snapshot dates, symbols limited to scans. See uoa-needs-oi-history.",
-      "next_step": "Add an OCC daily-file archiver to the maintenance heartbeat alongside the existing chain archive job. It shortens the wait on uoa-needs-oi-history and costs nothing but disk."
-    },
-    {
-      "id": "prompt-input-honours-auto",
-      "title": "prompt_input should honour --auto, not just a non-tty stdin",
-      "area": "infra",
-      "status": "shipped",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "prompt_input falls back to its default only when sys.stdin.isatty() is False; the --auto flag is never consulted. The 2026-07-28 fix gave spawned catch-up children stdin=DEVNULL, which covers every automated path, but an operator running `run.py -ds` by hand in a terminal still stalls at the ticker-source prompt and again at 'Re-sort?' despite --auto being in the expansion.",
-      "evidence": "src/options_screener.py prompt_input; run.py _SCORING_BASE includes --auto. Commit 761302d fixed the spawned path only.",
-      "next_step": "Shipped 2026-07-29: options_screener.set_auto_mode / is_auto_mode carry the parsed flag, and prompt_input resolves to its default when either --auto is set or the session is non-interactive. Removes the whole class of silent stall."
-    },
-    {
-      "id": "sizing-engine-never-touches-the-ledger",
-      "title": "The sizing engine has never been exercised against the cohort it will size",
-      "area": "execution",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "src/execution/sizing.py implements half-Kelly with a risk cap and a cost cap, and it is what real money would route through. The paper ledger has never used it: quantity is 1.0 on all 827 rows, which is the column default from the schema migration and is never written anywhere. So every statistic the gate reads describes a one-contract-per-signal book, while the thing the gate would authorise is a Kelly-sized book. Those differ in more than scale — sizing changes which trades get taken at all, and its cost cap is exactly the filter that would have excluded the 114 unaffordable trades.",
-      "evidence": "paper_manager.py:402 is the only mention of quantity (ALTER TABLE ... DEFAULT 1.0); src/execution/sizing.py:38 size_position, contracts = min(risk-capped, cost-capped).",
-      "next_step": "Replay the closed cohort through size_position at the intended account value and report the sized book alongside the unsized one. Cheap, no new data, and it is the only way to find out whether the gate's answer survives the sizing rule. Pairs with cohort-includes-unaffordable-trades — same root cause, different half."
-    },
-    {
-      "id": "retire-or-measure-ai-scorer",
-      "title": "Decide the AI rerank's fate — it is dormant and unmeasurable as it stands",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "config.json ai_scoring.enabled is false, so the LLM rerank runs on nothing. It left 35 scored rows out of 827, all from 2026-05 and 2026-06, across 13 distinct score values — enough to compute an IC (+0.108) and nowhere near enough to believe one. Meanwhile src/ai_scorer.py (1,109 lines) plus prompts.py, config_ai.py, ai_cache.py and .ai_score_cache.db are carried, tested and maintained for a path nothing calls. The free-tier model chain was still being refreshed as recently as commit 5037fbb.",
-      "evidence": "config.json ai_scoring; paper_trades.db ai_score non-null on 35/827, months 2026-05 and 2026-06 only.",
-      "next_step": "Pick one and commit. Either run it enabled over a defined cohort until n is large enough to test its IC WITHIN a strategy (the lesson from dead-pop-score-as-ranker), or retire the subsystem to a branch and delete it from the tree. What should not continue is maintaining a disabled 1,100-line ranker that no evidence supports and no run exercises."
-    },
-    {
-      "id": "canonical-test-runner",
-      "title": "Add a canonical local test command \u2014 the count is easy to get wrong",
-      "area": "infra",
-      "status": "shipped",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "There is no Makefile, justfile or scripts/test entry point, and the options venv deliberately has no pytest, so every local run is an ad-hoc loader. Globbing tests/test_*.py collects 962 tests; globbing tests/**/test_*.py recursively collects 1,885. The narrow form silently skips entire packages \u2014 tests/outlook, tests/squeeze \u2014 while still reporting a confident green.",
-      "evidence": "Observed 2026-07-28: 962 vs 1,885 from the two glob forms; both reported 0 failures. `unittest discover` cannot start at all — tests/ is not an importable package.",
-      "next_step": "Shipped 2026-07-29: scripts/test.sh -> scripts/run_tests.py loads every test module by path and prints what it collected AND what it could not (1,953 tests from 217 modules; 8 pytest-only modules named, not hidden). A module that fails to import only because pytest is absent is reported, not counted as red — an always-red exit code would be ignored, which is the failure mode this was meant to prevent. Remaining: reference it in CLAUDE.md."
-    },
-    {
-      "id": "usd-account-vs-conversion-spread",
-      "title": "A USD account may pay for itself against the 1.5% conversion spread",
-      "area": "execution",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "Trading US-listed options from a CAD account converts currency both ways at Wealthsimple's 1.5% spread (below US$10k of conversions; 1.0% to $25k, 0.5% to $100k, 0% above). Nothing in this repo modelled that until now, and it is the largest remaining cost in the book once commissions are correctly set to zero: $1,098 of conversion across 187 closed credit trades in the cohort window alone. A USD account removes it for $10/month.",
-      "evidence": "Wealthsimple fee schedule verified 2026-07-29; scripts/cost_model_report.py prints the conversion total. Note the cost scales with money moved, not contract count, so it cannot be traded around by using fewer legs.",
-      "next_step": "Check actual annual conversion volume rather than this window's, then decide. Two things to confirm first, because both change the answer: whether the tiered rate is assessed on cumulative annual conversions or per transaction, and whether holding USD in the account leaves idle cash uninvested in a way that costs more than the spread saves."
-    },
-    {
-      "id": "index-options-are-not-free",
-      "title": "Index options carry a per-contract fee the model treats as zero",
-      "area": "execution",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "unknown",
-      "thesis": "Wealthsimple's US$0 contract fee covers equity and ETF options only. Index options are charged: SPX and SPXW US$1.00 per contract, VIX US$1.00, RUT/RUTW US$0.50, XSP US$0.25. config.paper_trading.commission_per_contract is a single number and now reads 0.0, so any index-option result the system produces understates its cost. Today this is latent rather than live — the ledger trades SPY, QQQ and IWM, which are ETFs and genuinely free — but index-put-spread-capacity is an active idea and SPX is the natural venue for it.",
-      "evidence": "Wealthsimple fee schedule verified 2026-07-29.",
-      "next_step": "Before any SPX work, make the commission lookup per-symbol rather than a single constant. A $1/contract fee on a 2-leg vertical is $4 round trip, which is small against SPX-sized credits but is not zero and must not be assumed away by a config field that cannot express it."
-    },
-    {
-      "id": "centralise-fee-defaults",
-      "title": "Six modules still hardcode a US-retail commission as their fallback",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "low",
-      "cost_wall": "n/a",
-      "thesis": "Every path that reads a fee reads it from config.json, so the 2026-07-29 switch to Wealthsimple's US$0 took effect everywhere it matters. But the fallback defaults still carry 0.65: paper_manager.COMMISSION_PER_CONTRACT plus function defaults in dolt_spread, dolt_short, dolt_vol, trade_analysis and options_screener. A caller constructing one of those helpers directly, without threading a commission through, silently prices at a US broker's rates — and the number looks deliberate rather than stale.",
-      "evidence": "grep commission_per_contract across src/ 2026-07-29: six hardcoded 0.65 defaults, all reached only when config is absent. No falsy-zero bug — every read uses a .get default rather than `or`, so a configured 0.0 survives.",
-      "next_step": "Low priority precisely because it never fires in normal operation. If touched, put the default in one place (src/execution_costs) and have the rest import it, so there is a single number to change when the broker changes. Do not do this as a drive-by: each module's CLI has its own default and they are load-bearing for the standalone backtests."
+      "thesis": "reversal_1m is negated, so a selloff contributes POSITIVELY to a bullish score — on 2026-07-28 SMH read +0.130 on the factor while down 13% for the month, which looks like a defect. It was tested properly: four weight settings (current 0.15, removed and renormalised, sign-flipped, half) on identical price columns, paired bootstrap over per-rebalance ICs, 5,000 resamples. Every interval spans zero at both 42d and 63d, and the two horizons disagree on sign.",
+      "evidence": "docs/OUTLOOK_FINDINGS.md 'reversal_1m weight — tested 2026-07-28, no change warranted'. Largest effect ~0.017 IC against CIs of +/-0.03.",
+      "next_step": "Do not re-litigate on intuition. With n~83 rebalances the study cannot resolve ~0.01 IC differences, which is the size of every effect present. Only revisit if the rebalance count rises materially — see widen-outlook-universe."
     },
     {
       "id": "cleanup-dead-files-and-flags",
@@ -418,7 +632,7 @@
       "cost_wall": "n/a",
       "thesis": "Small dead weight worth removing while it is still remembered. src/launcher.py.bak is byte-identical to src/launcher.py and has been untracked in the tree since 2026-07-23. The backtest's --ret5d as_written mode now exists only to reproduce a bug that was fixed on 2026-07-28; it is a trap for anyone who reads it as the production path.",
       "evidence": "diff -q src/launcher.py.bak src/launcher.py reports identical; --ret5d default moved to as_intended in commit 14f94ac.",
-      "next_step": "Delete the .bak. Keep as_written only until the next squeeze re-run is confirmed reproducible, then remove the branch and the ret5d_scale parameter with it."
+      "next_step": "AMENDED 2026-07-30: absorbed into repo-hygiene-beta (P2) — execute it there. Kept for the flag-retirement condition: keep as_written only until the next squeeze re-run is confirmed reproducible, then remove the branch and the ret5d_scale parameter with it."
     }
   ]
 }
