@@ -54,8 +54,24 @@ Mark preference order becomes: **live mid → last trade → daily close → mod
 
 ## Sign-off
 
-- [ ] Part 1 (entry-IV fallback sigma): approved / amended: __________
-- [ ] Part 2 (model marks never fire exits; provenance-tagged cache): approved / amended: __________
-- [ ] Part 3 (mid preferred over last trade): approved / amended: __________
-- [ ] Calibration-journal entry at merge: acknowledged
-- [ ] Date + initials: __________
+- [x] Part 1 (entry-IV fallback sigma): **approved** as proposed
+- [x] Part 2 (model marks never fire exits; provenance-tagged cache): **approved** as proposed
+- [x] Part 3 (mid preferred over last trade): **approved** as proposed
+- [x] Calibration-journal entry at merge: **written** — docs/CALIBRATION_JOURNAL.md, 2026-07-31
+- [x] Date + approval: **2026-07-31, operator ("i give you premission and signature")**
+
+Implemented in commit 539c7e7; 19 tests in `tests/test_mark_trustworthiness.py`.
+
+**Two judgement calls made beyond the literal spec text, both easily reverted:**
+
+1. A model mark no longer updates `max_price_seen` / `max_price_date`. Those are
+   persisted ledger columns, so writing a fabricated price into them is the same
+   harm class as a fabricated exit — the spec's reasoning, applied one step
+   further than it was written.
+2. `_model_sigma` treats a stored `entry_iv` above 5.0 as a data error and falls
+   back to 0.30 rather than pricing a contract at 500%+ vol.
+
+**Operational note:** this adds one option-chain call per (ticker, expiration)
+per `update_positions` run, and logs one warning per model-marked row. Both are
+consequences the spec asked for; if the warning proves noisy at startup, lower
+its level rather than removing the gate it reports on.
