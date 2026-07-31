@@ -18,6 +18,8 @@ silent.
 """
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import List, Optional
@@ -353,20 +355,64 @@ def launchd_dead_days(jobs: Optional[List["LaunchdJob"]], state: dict,
     return max(0, (today - since).days)
 
 
+DEFAULT_LAUNCHAGENT_LOG_PATH = os.path.join("logs", "launchagent.log")
+
+_LOG_LINE_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2})[ T]\d{2}:\d{2}:\d{2}\]")
+
+
+def seed_dead_since_date(log_path: str = DEFAULT_LAUNCHAGENT_LOG_PATH) -> Optional[str]:
+    """Best lower-bound evidence for when the scheduler was last alive.
+
+    Reads `logs/launchagent.log`, written *only* by the LaunchAgents
+    themselves — unlike the maintenance state file, nothing about an
+    interactive run touches it, so its last write carries none of the
+    "opened the screener by hand" contamination `health_banner`'s own
+    docstring warns about. Prefers the last parsed `[YYYY-MM-DD HH:MM:SS]`
+    line; falls back to the file's own mtime if it exists but has no
+    parseable line. Returns None when the file doesn't exist at all (a
+    fresh clone, or a machine that never had the agents installed) — the
+    caller should fall back to "today" rather than invent a date from
+    nothing.
+    """
+    try:
+        with open(log_path) as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        m = _LOG_LINE_TS_RE.match(line)
+        if m:
+            return m.group(1)
+    try:
+        mtime = os.path.getmtime(log_path)
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime).date().isoformat()
+
+
 def next_launchd_dead_state(jobs: Optional[List["LaunchdJob"]], state: dict,
-                            today: date) -> dict:
+                            today: date, seed_date: Optional[str] = None) -> dict:
     """The state dict to persist after this read.
 
     Stamps `launchd_dead_since` the first time the scheduler is observed
     dead, and clears it the moment it recovers — so fixing the Login Items
     toggle resets the clock instead of leaving the ack permanently primed.
+
+    A first observation is seeded from `seed_date` (pass
+    `seed_dead_since_date()` — the LaunchAgent log's own last-write
+    evidence) rather than `today`, so a scheduler that has actually been
+    dead for weeks doesn't get handed a fresh one-day-old marker the moment
+    this code first runs. Falls back to `today` when `seed_date` is None
+    (no log to read evidence from). An *existing* marker is never
+    overwritten by seeding, whatever `seed_date` says.
+
     Returns a new dict; the input `state` is never mutated. Callers own the
     actual file write (and should skip it when the marker is unchanged).
     """
     new_state = dict(state or {})
     if any(j.failed for j in (jobs or [])):
         if not new_state.get("launchd_dead_since"):
-            new_state["launchd_dead_since"] = today.isoformat()
+            new_state["launchd_dead_since"] = seed_date or today.isoformat()
     else:
         new_state.pop("launchd_dead_since", None)
     return new_state

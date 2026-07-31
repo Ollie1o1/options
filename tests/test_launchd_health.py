@@ -249,6 +249,119 @@ class DeadSchedulerDurationTest(unittest.TestCase):
         self.assertEqual(state, {"launchd_dead_since": "2026-07-20"})
 
 
+class SeedDeadSinceFromLogTest(unittest.TestCase):
+    """The marker must not be stamped from "today" when better evidence
+    exists: `logs/launchagent.log` is written only by the LaunchAgents, so
+    its last entry is a sound lower bound on when the scheduler was last
+    genuinely alive — unlike the maintenance state file, which the
+    interactive path also stamps."""
+
+    def setUp(self):
+        import tempfile
+        from datetime import date
+
+        self.today = date(2026, 7, 31)
+        self.dead_jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+
+    def _log_path(self, name="launchagent.log"):
+        return os.path.join(self._tmpdir.name, name)
+
+    def test_seeds_from_the_last_parsed_log_line(self):
+        from src.maintenance_health import seed_dead_since_date
+
+        path = self._log_path()
+        with open(path, "w") as f:
+            f.write("[2026-06-10 20:07:36] maintenance: auto-log:ics\n")
+            f.write("  Forward cohort: 3/50 closed clean\n")
+            f.write("[2026-06-15 12:24:10] maintenance: auto-log:sps\n")
+            f.write("  Forward cohort: 4/50 closed clean\n")
+        self.assertEqual(seed_dead_since_date(path), "2026-06-15")
+
+    def test_falls_back_to_mtime_when_no_line_parses(self):
+        from datetime import datetime
+
+        from src.maintenance_health import seed_dead_since_date
+
+        path = self._log_path()
+        with open(path, "w") as f:
+            f.write("not a timestamped line\n")
+        # Noon UTC-ish on a fixed day, away from any local-timezone midnight
+        # boundary, so the assertion doesn't depend on the test machine's tz.
+        fixed_ts = 1750000000  # 2025-06-15 ~08:26 UTC
+        os.utime(path, (fixed_ts, fixed_ts))
+        expected = datetime.fromtimestamp(fixed_ts).date().isoformat()
+        self.assertEqual(seed_dead_since_date(path), expected)
+
+    def test_returns_none_when_the_log_does_not_exist(self):
+        from src.maintenance_health import seed_dead_since_date
+
+        self.assertIsNone(seed_dead_since_date(self._log_path("nope.log")))
+
+    def test_dead_no_marker_and_a_45_day_old_log_seeds_to_that_date_and_fires_immediately(self):
+        # Acceptance case 1: on the machine this was built for, the scheduler
+        # has genuinely been dead for weeks before this code ever ran. The
+        # very first observation must reflect that, not reset the clock to
+        # "just noticed today".
+        from datetime import date, timedelta
+
+        from src.maintenance_health import (launchd_dead_days, next_launchd_dead_state,
+                                            seed_dead_since_date)
+
+        old_date = (self.today - timedelta(days=45)).isoformat()
+        path = self._log_path()
+        with open(path, "w") as f:
+            f.write(f"[{old_date} 12:00:00] maintenance: auto-log:ds\n")
+
+        seed = seed_dead_since_date(path)
+        self.assertEqual(seed, old_date)
+
+        new_state = next_launchd_dead_state(self.dead_jobs, {}, self.today, seed_date=seed)
+        self.assertEqual(new_state["launchd_dead_since"], old_date)
+
+        dead_days = launchd_dead_days(self.dead_jobs, new_state, self.today)
+        self.assertEqual(dead_days, 45)
+        self.assertGreater(dead_days, 7)  # the ack threshold — must fire now
+
+    def test_dead_no_marker_and_no_log_seeds_to_today_and_does_not_fire(self):
+        # Acceptance case 2: a fresh clone with no LaunchAgent log at all has
+        # no evidence to seed from — must fall back to today, not block on
+        # its very first run.
+        from src.maintenance_health import (launchd_dead_days, next_launchd_dead_state,
+                                            seed_dead_since_date)
+
+        seed = seed_dead_since_date(self._log_path("does-not-exist.log"))
+        self.assertIsNone(seed)
+
+        new_state = next_launchd_dead_state(self.dead_jobs, {}, self.today, seed_date=seed)
+        self.assertEqual(new_state["launchd_dead_since"], self.today.isoformat())
+
+        dead_days = launchd_dead_days(self.dead_jobs, new_state, self.today)
+        self.assertEqual(dead_days, 0)
+        self.assertLessEqual(dead_days, 7)  # must not fire yet
+
+    def test_existing_marker_is_never_overwritten_by_seeding(self):
+        # Acceptance case 3: seeding only applies to a *first* observation.
+        # A marker already on record — however it got there — must win over
+        # whatever the log says, or a healthy log entry could rewind an
+        # already-correct, already-longer-running marker.
+        from datetime import timedelta
+
+        from src.maintenance_health import next_launchd_dead_state, seed_dead_since_date
+
+        existing = (self.today - timedelta(days=20)).isoformat()
+        state = {"launchd_dead_since": existing}
+        log_says = (self.today - timedelta(days=45)).isoformat()
+        path = self._log_path()
+        with open(path, "w") as f:
+            f.write(f"[{log_says} 12:00:00] maintenance: auto-log:ds\n")
+
+        new_state = next_launchd_dead_state(
+            self.dead_jobs, state, self.today, seed_date=seed_dead_since_date(path))
+        self.assertEqual(new_state["launchd_dead_since"], existing)
+
+
 class DeadSchedulerAckBannerTest(unittest.TestCase):
     def setUp(self):
         from src import formatting as fmt

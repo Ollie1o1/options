@@ -4811,7 +4811,8 @@ def main():
             from .maintenance import load_state, save_state, DEFAULT_STATE_PATH
             from .maintenance_health import (compute_health, health_banner,
                                              read_launchd_status, launchd_dead_days,
-                                             next_launchd_dead_state)
+                                             next_launchd_dead_state,
+                                             seed_dead_since_date)
             _mh_state = load_state(DEFAULT_STATE_PATH)
             _launchd_jobs = read_launchd_status()
             _banner = health_banner(compute_health(_mh_state, datetime.now()),
@@ -4821,12 +4822,17 @@ def main():
             # Escalated hard-confirm (interactive only): launchctl carries no
             # timestamps, so "how long has it been dead" is tracked by
             # stamping first-observed-dead into the maintenance state and
-            # diffing it on every later run.
+            # diffing it on every later run. A *first* observation is seeded
+            # from the LaunchAgent-only log rather than today, so a scheduler
+            # that has genuinely been dead for weeks doesn't get handed a
+            # fresh one-day-old marker (and a silent extra week before the
+            # ack fires) the first time this code runs on it.
             _today = datetime.now().date()
-            _dead_days = launchd_dead_days(_launchd_jobs, _mh_state, _today)
-            _next_mh_state = next_launchd_dead_state(_launchd_jobs, _mh_state, _today)
+            _next_mh_state = next_launchd_dead_state(
+                _launchd_jobs, _mh_state, _today, seed_date=seed_dead_since_date())
             if _next_mh_state.get("launchd_dead_since") != _mh_state.get("launchd_dead_since"):
                 save_state(DEFAULT_STATE_PATH, _next_mh_state)
+            _dead_days = launchd_dead_days(_launchd_jobs, _next_mh_state, _today)
             _dead_scheduler_ack(_dead_days, _interactive, WIDTH)
         except Exception:
             pass
