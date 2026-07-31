@@ -362,7 +362,7 @@ def _log_long_premium(row: pd.Series, currency: str, weight_profile: str = "cryp
         "quantity":             _quantity_for("debit", entry_price, None, None),
     }
     try:
-        if pm.log_trade_if_new(trade):
+        if pm.log_trade_if_new(trade, auto_log=True):
             print(f"  ✓ Logged {trade['strategy_name']} on {currency} "
                   f"${trade['strike']:,.0f} @ ${entry_price:,.2f} "
                   f"(score {trade['quality_score']:.3f})")
@@ -411,7 +411,7 @@ def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_b
         "quantity":     _quantity_for("debit", net_debit, None, None),
     }
     try:
-        if pm.log_trade_if_new(trade):
+        if pm.log_trade_if_new(trade, auto_log=True):
             print(f"  ✓ Logged {strat_name} on {currency} ${strike:,.0f} "
                   f"front {front_exp} / back {back_exp} "
                   f"net debit ${net_debit:,.0f} (score {row['score']:.3f})")
@@ -447,7 +447,7 @@ def _log_iron_condor(row: pd.Series, currency: str, weight_profile: str = "crypt
                                     float(row["net_credit"])),
     }
     try:
-        if pm.log_iron_condor_if_new(condor):
+        if pm.log_iron_condor_if_new(condor, auto_log=True):
             print(f"  ✓ Logged Iron Condor on {currency} "
                   f"{row['long_put_strike']:.0f}/{row['short_put_strike']:.0f}—"
                   f"{row['short_call_strike']:.0f}/{row['long_call_strike']:.0f} "
@@ -488,7 +488,7 @@ def _log_credit_spread(row: pd.Series, currency: str, weight_profile: str = "cry
                                     float(row["net_credit"])),
     }
     try:
-        if pm.log_spread_if_new(spread):
+        if pm.log_spread_if_new(spread, auto_log=True):
             print(f"  ✓ Logged {strat_name} on {currency} "
                   f"${row['short_strike']:,.0f}/${row['long_strike']:,.0f} "
                   f"credit ${row['net_credit']:,.0f} "

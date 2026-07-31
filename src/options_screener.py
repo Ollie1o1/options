@@ -5300,6 +5300,9 @@ def main():
                         _skipped_bear_calls = 0
                         # Split budget refusals out of the duplicate count below.
                         _rejected_before = getattr(pm, "unaffordable_rejected", 0)
+                        # Same for near-duplicates of an entry from the last few days —
+                        # the catch-up replay case the same-day dedup cannot see.
+                        _dup_before = getattr(pm, "duplicate_rejected", 0)
 
                         # Component-score fields carried over from the spread enrichment
                         _spread_score_keys = (
@@ -5349,7 +5352,7 @@ def main():
                                         "quality_score": row.get("quality_score", 0.5),
                                         "paper_only": _paper_only_flag,
                                     })
-                                    if pm.log_iron_condor_if_new(_payload):
+                                    if pm.log_iron_condor_if_new(_payload, auto_log=True):
                                         _inserted += 1
                                     else:
                                         _skipped += 1
@@ -5368,7 +5371,7 @@ def main():
                                         "quality_score": row.get("quality_score", 0.5),
                                         "paper_only": _paper_only_flag,
                                     })
-                                    if pm.log_spread_if_new(_payload):
+                                    if pm.log_spread_if_new(_payload, auto_log=True):
                                         _inserted += 1
                                     else:
                                         _skipped += 1
@@ -5378,11 +5381,14 @@ def main():
                         _bc_suffix = f", filtered {_skipped_bear_calls} disallowed structure(s)" if _skipped_bear_calls else ""
                         # A budget refusal is not a duplicate — see the single-leg path.
                         _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
-                        _dupes = max(0, _skipped - _refused)
+                        _near_dupes = getattr(pm, "duplicate_rejected", 0) - _dup_before
+                        _dupes = max(0, _skipped - _refused - _near_dupes)
                         _summary = (
                             f"Auto-logged {_inserted} spreads/condors, "
                             f"skipped {_dupes} duplicates{_bc_suffix} (profile: {_tag})"
                         )
+                        if _near_dupes:
+                            _summary += f", refused {_near_dupes} as re-logs of a recent entry"
                         if _refused:
                             _summary += f", refused {_refused} over budget"
                         if _displaced:
@@ -5446,6 +5452,9 @@ def main():
                         _skipped_long_puts = 0
                         # Split budget refusals out of the duplicate count below.
                         _rejected_before = getattr(pm, "unaffordable_rejected", 0)
+                        # Same for near-duplicates of an entry from the last few days —
+                        # the catch-up replay case the same-day dedup cannot see.
+                        _dup_before = getattr(pm, "duplicate_rejected", 0)
                         # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
                         # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
                         # and re-sorted, so positional alignment with picks is not preserved.
@@ -5540,7 +5549,7 @@ def main():
                             _trade["ai_score"] = _row_ai.get("ai_score")
                             _trade["ai_confidence"] = _row_ai.get("ai_confidence")
                             try:
-                                if pm.log_trade_if_new(_trade):
+                                if pm.log_trade_if_new(_trade, auto_log=True):
                                     _inserted += 1
                                 else:
                                     _skipped += 1
@@ -5552,8 +5561,11 @@ def main():
                         # "skipped 5 duplicates" for a window that logged nothing because every
                         # pick was over budget — the one line that would have shown the problem.
                         _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
-                        _dupes = max(0, _skipped - _refused)
+                        _near_dupes = getattr(pm, "duplicate_rejected", 0) - _dup_before
+                        _dupes = max(0, _skipped - _refused - _near_dupes)
                         _summary = f"Auto-logged {_inserted} new, skipped {_dupes} duplicates (profile: {_tag})"
+                        if _near_dupes:
+                            _summary += f", refused {_near_dupes} as re-logs of a recent entry"
                         if _refused:
                             _summary += f", refused {_refused} over budget"
                         if _skipped_long_puts:

@@ -138,7 +138,9 @@
     "cohort_min_dte": 30,
     "cohort_min_runway_days": 9,
     "_max_capital_at_risk_note": "Dollars a single position may tie up before the ledger refuses to log it. A hard ceiling, not a target: set to the most the operator would commit to a single conviction trade. The gate exists because the feeder had no limit at all and was logging $27k and $83k positions. null disables it.",
-    "max_capital_at_risk": 4000
+    "max_capital_at_risk": 4000,
+    "_dedup_window_days_note": "Days an auto-logged contract blocks a second AUTO-LOG of the same (ticker, strategy, strike, expiration). The per-day dedup only sees today, so a catch-up replay re-logs the same contract the next morning at a drifted price and double-counts one decision. Manual log_trade calls are never gated by this. 0 or null disables it.",
+    "dedup_window_days": 3
   },
   "dolt_options": {
     "cache_path": "data/dolt_options.db",

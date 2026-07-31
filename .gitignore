@@ -69,6 +69,9 @@ docs/superpowers/
 reports/*
 # ...except the public paper-trading track record, linked from the README.
 !reports/TRACK_RECORD.md
+# ...and the duplicate-row audit, which is a worklist the operator rules on
+# rather than a derived artifact — the rulings have to be reviewable in history.
+!reports/duplicate_trades_audit.md
 
 # Editor/tooling state
 .claude/

@@ -129,7 +129,7 @@ def autolog_lottery_sleeve(
         if open_debit + debit > max_exposure:
             continue  # respect the sleeve exposure cap
         try:
-            if pm.log_trade_if_new(trade):
+            if pm.log_trade_if_new(trade, auto_log=True):
                 open_debit += debit
                 seen_tickers.add(sym)
                 edge = "✦" if trade["lottery_edge"] else " "

@@ -318,6 +318,12 @@ SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half sp
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)
 
+# Days an auto-logged contract blocks a second auto-log of the same
+# (ticker, strategy, strike, expiration). Config key auto_log.dedup_window_days;
+# 0 or null disables the guard. Only the automated feeders are gated by it — a
+# deliberate manual entry is always the operator's call.
+DEFAULT_DEDUP_WINDOW_DAYS = 3
+
 _SCHEMA_VERSION = 16
 _MIGRATIONS = {
     1: [],
@@ -544,15 +550,22 @@ class PaperManager:
             self._fx_conversion_rate = float(_pt.get("fx_conversion_rate", 0.0) or 0.0)
             _cap = (_cfg.get("auto_log") or {}).get("max_capital_at_risk")
             self._max_capital_at_risk = float(_cap) if _cap not in (None, "", 0) else None
+            _win = (_cfg.get("auto_log") or {}).get("dedup_window_days",
+                                                    DEFAULT_DEDUP_WINDOW_DAYS)
+            self._dedup_window_days = int(_win) if _win not in (None, "", 0, False) else 0
         except Exception:
             self._commission_per_contract = COMMISSION_PER_CONTRACT
             self._slippage_per_share = SLIPPAGE_PER_SHARE
             self._fx_conversion_rate = 0.0
             self._max_capital_at_risk = None
+            self._dedup_window_days = DEFAULT_DEDUP_WINDOW_DAYS
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
         # Count of trades refused for exceeding the budget this session. Callers
         # print it so a feeder that has gone quiet is visibly gated, not broken.
         self.unaffordable_rejected = 0
+        # Same idea for near-duplicate auto-log entries: reported separately so a
+        # window that logged nothing shows *which* gate held it back.
+        self.duplicate_rejected = 0
         self._init_db()
 
     def _fx_per_share(self, premium: float) -> float:
@@ -637,6 +650,82 @@ class PaperManager:
             logger.warning("Invalid JSON in config %s: %s — using defaults", self.config_path, exc)
             return _default
 
+    def _is_recent_duplicate(self, trade_dict: Dict[str, Any]) -> bool:
+        """True when an automated feeder is about to re-log a contract it
+        already logged inside ``auto_log.dedup_window_days``.
+
+        The per-day dedup in the ``*_if_new`` helpers only sees *today*, so a
+        catch-up replay of a missed window — the normal way this system fills
+        gaps — logs the same contract again the next morning at a slightly
+        different price and slips straight past it. Two rows for one decision
+        double-count that decision in every cohort statistic and every dollar
+        total (see ``scripts/audit_duplicate_trades.py`` for what the ledger
+        already accumulated this way).
+
+        Match key is ``(ticker, strategy_name, strike, expiration)`` — price is
+        deliberately NOT in it, because a re-log at a drifted quote is exactly
+        the case the per-day dedup misses. The window is measured in absolute
+        days from the new row's own entry date, so a backdated catch-up is
+        caught the same as a forward one.
+
+        Fails open: a DB error here must not stop a trade being logged, so it
+        returns False and lets the insert proceed.
+        """
+        window = int(getattr(self, "_dedup_window_days", 0) or 0)
+        if window <= 0:
+            return False
+        try:
+            strike = float(trade_dict["strike"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        ticker = str(trade_dict.get("ticker") or "").upper()
+        strategy = str(trade_dict.get("strategy_name") or "")
+        expiration = str(trade_dict.get("expiration") or "")
+        effective_date = trade_dict.get("date") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT entry_id, date, entry_price FROM trades
+                    WHERE ticker = ?
+                      AND COALESCE(strategy_name, '') = ?
+                      AND ROUND(strike, 4) = ROUND(?, 4)
+                      AND COALESCE(expiration, '') = ?
+                      AND date(date) IS NOT NULL
+                      AND ABS(julianday(date(date)) - julianday(date(?))) <= ?
+                    ORDER BY date DESC, entry_id DESC
+                    LIMIT 1
+                    """,
+                    (ticker, strategy, strike, expiration, effective_date, window),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            logger.debug("Dedup check failed (%s) — allowing the insert", exc)
+            return False
+
+        if row is None:
+            return False
+
+        self.duplicate_rejected += 1
+        prior_id, prior_date, prior_price = row
+        try:
+            prior_price_s = f"${float(prior_price):.2f}"
+        except (TypeError, ValueError):
+            prior_price_s = "?"
+        try:
+            new_price_s = f"${float(trade_dict.get('entry_price')):.2f}"
+        except (TypeError, ValueError):
+            new_price_s = "?"
+        msg = (
+            f"AUTO-LOG DUPLICATE REFUSED: {strategy} on {ticker} ${strike:g} "
+            f"exp {expiration} at {new_price_s} matches entry_id {prior_id} "
+            f"logged {str(prior_date)[:10]} at {prior_price_s} "
+            f"(within the {window}-day auto_log.dedup_window_days window)"
+        )
+        logger.warning(msg)
+        print(f"  ! {msg}")
+        return True
+
     def log_trade(self, trade_dict: Dict[str, Any]):
         """
         Logs a new paper trade to the SQLite database.
@@ -653,11 +742,19 @@ class PaperManager:
         Returns True if the row was inserted, False if it was refused for
         exceeding ``auto_log.max_capital_at_risk``. Pass
         ``allow_unaffordable=True`` to log a deliberate over-budget entry.
+
+        Set ``auto_log=True`` for entries written by an automated feeder: that
+        arms the near-duplicate guard below. It is off by default so a manual,
+        deliberate entry is never second-guessed.
         """
         if not trade_dict.get("strategy_name"):
             raise ValueError("strategy_name is required; must include 'short'/'long' to set P&L direction")
         if float(trade_dict.get("entry_price", 0)) <= 0:
             raise ValueError(f"Cannot log trade: entry_price must be > 0, got {trade_dict.get('entry_price')}")
+
+        # Near-duplicate gate — automated feeders only.
+        if trade_dict.get("auto_log") and self._is_recent_duplicate(trade_dict):
+            return False
 
         # Budget gate. The feeder had no size limit, so 160 of 407 closed cohort
         # trades tied up more than the whole account and carried every dollar of
@@ -794,7 +891,7 @@ class PaperManager:
         print(f"Logged {trade_dict['strategy_name']} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
         return True
 
-    def log_trade_if_new(self, trade_dict: Dict[str, Any]) -> bool:
+    def log_trade_if_new(self, trade_dict: Dict[str, Any], auto_log: bool = False) -> bool:
         """Insert a paper trade unless an identical row already exists.
 
         Dedup key: ``(trade date, ticker, strike, expiration, type, strategy_name,
@@ -805,8 +902,15 @@ class PaperManager:
         ``None`` for untagged trades — NULL-equal rows still dedup against each
         other because ``IS`` is used instead of ``=``.
 
+        That key only spans one calendar day. ``auto_log=True`` additionally
+        arms the multi-day near-duplicate guard in ``log_trade``, which is what
+        a catch-up replay needs; it defaults off because this helper is also
+        used by the interactive log-trades menu.
+
         Returns ``True`` if inserted, ``False`` if skipped as duplicate.
         """
+        if auto_log:
+            trade_dict = dict(trade_dict, auto_log=True)
         ticker = trade_dict["ticker"].upper()
         typ = trade_dict["type"].lower()
         strike = float(trade_dict["strike"])
@@ -924,11 +1028,16 @@ class PaperManager:
 
         return self.log_trade(trade_dict)
 
-    def log_spread_if_new(self, spread_dict: dict) -> bool:
+    def log_spread_if_new(self, spread_dict: dict, auto_log: bool = False) -> bool:
         """Insert a credit spread unless an identical OPEN row already exists for
         the same (date, ticker, expiration, short_strike, long_strike, strategy, profile).
         Returns True if inserted, False if duplicate.
+
+        ``auto_log=True`` also arms the multi-day near-duplicate guard (see
+        ``log_trade_if_new``); default off so manual entries are never refused.
         """
+        if auto_log:
+            spread_dict = dict(spread_dict, auto_log=True)
         ticker = str(spread_dict.get("ticker", "")).upper()
         strategy = str(spread_dict.get("type", "Spread"))
         short_strike = float(spread_dict.get("short_strike") or 0)
@@ -957,8 +1066,11 @@ class PaperManager:
         # False also when the budget gate refuses it — nothing was written.
         return self.log_spread(spread_dict)
 
-    def log_iron_condor_if_new(self, condor_dict: dict) -> bool:
-        """Same dedup pattern as log_spread_if_new but for 4-leg iron condors."""
+    def log_iron_condor_if_new(self, condor_dict: dict, auto_log: bool = False) -> bool:
+        """Same dedup pattern as log_spread_if_new but for 4-leg iron condors,
+        including the ``auto_log`` opt-in to the multi-day guard."""
+        if auto_log:
+            condor_dict = dict(condor_dict, auto_log=True)
         ticker = str(condor_dict.get("ticker", "")).upper()
         sp_strike = float(condor_dict.get("short_put_strike") or 0)
         lp_strike = float(condor_dict.get("long_put_strike") or 0)

@@ -449,6 +449,48 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _last_history_row(hist_path: Path) -> Optional[list]:
+    """Fields of the last data row, or None if there is no data row yet.
+
+    Fields are returned positionally and of whatever width the row happens to
+    be: the history holds both 6-field legacy rows and 8-field current ones, so
+    callers index (date=0, n=2) rather than zipping against a header.
+    """
+    if not hist_path.exists():
+        return None
+    try:
+        text = hist_path.read_text()
+    except OSError:
+        return None
+    for line in reversed(text.splitlines()):
+        if not line.strip() or line.startswith("date\t"):
+            continue
+        return line.split("\t")
+    return None
+
+
+def _history_append_is_redundant(hist_path: Path, today: str, n_trades: int) -> bool:
+    """True when the last row already records this day at this cohort size.
+
+    The checkpoint is re-run whenever startup maintenance decides it is due, and
+    it used to append unconditionally — so a day with two launches got two rows,
+    and anything reading the history as a time series (the evidence banner, any
+    n-over-time read) saw a step that never happened.
+
+    Same day at a *different* n is a real new observation — the cohort grew
+    between runs — and still appends. Only the exact repeat is dropped.
+    """
+    fields = _last_history_row(hist_path)
+    if not fields or len(fields) < 3:
+        return False
+    if fields[0].strip() != str(today):
+        return False
+    try:
+        return int(float(fields[2])) == int(n_trades)
+    except (TypeError, ValueError):
+        return False
+
+
 def write_checkpoint(result: dict, output_dir: str = "reports") -> dict:
     out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
     md_path = out / f"checkpoint_{result['today']}.md"
@@ -456,10 +498,12 @@ def write_checkpoint(result: dict, output_dir: str = "reports") -> dict:
 
     hist_path = out / "checkpoint_history.tsv"
     _ensure_history_header(hist_path)
-    with hist_path.open("a") as f:
-        f.write(f"{result['today']}\t{result['weeks_elapsed']}\t{result['n_trades']}\t"
-                f"{result['ic_pearson']:.4f}\t{result['p_pearson']:.4f}\t{result['decision']}\t"
-                f"{result['ic_spearman']:.4f}\t{result['p_spearman']:.4f}\n")
+    appended = not _history_append_is_redundant(hist_path, result["today"], result["n_trades"])
+    if appended:
+        with hist_path.open("a") as f:
+            f.write(f"{result['today']}\t{result['weeks_elapsed']}\t{result['n_trades']}\t"
+                    f"{result['ic_pearson']:.4f}\t{result['p_pearson']:.4f}\t{result['decision']}\t"
+                    f"{result['ic_spearman']:.4f}\t{result['p_spearman']:.4f}\n")
 
     if result["decision"] in ("READY", "STOP"):
         (out / "GATE_STATUS.md").write_text(
@@ -470,7 +514,7 @@ def write_checkpoint(result: dict, output_dir: str = "reports") -> dict:
             f"{result['ic_spearman']:+.3f} (p={result['p_spearman']:.3f})\n"
             f"See `{md_path.name}` for details.\n"
         )
-    return {"md": str(md_path), "history": str(hist_path)}
+    return {"md": str(md_path), "history": str(hist_path), "history_appended": appended}
 
 
 def main() -> None:
