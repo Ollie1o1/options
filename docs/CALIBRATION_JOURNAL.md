@@ -349,3 +349,38 @@ rm -f ic_weights_cache.json
 ```
 
 ---
+
+## 2026-07-31 — Exit marking basis changed (no weight change)
+
+Not a calibration. Recorded here because it changes the **basis on which exits
+are recorded**, and any step-change in the cohort's statistics after this date
+needs its candidate explanation on the record.
+
+**What changed** (`docs/MARK_TRUSTWORTHINESS_SPEC.md`, signed 2026-07-31,
+commit 539c7e7):
+
+1. Marks now prefer the **live bid/ask mid** over the last traded price. A mid
+   is taken only from a two-sided, uncrossed book; anything else falls through
+   to last trade -> daily close -> model.
+2. The model fallback prices at the row's **stored `entry_iv`**, not a
+   hardcoded 0.30. Marking an 80-vol name at 30 vol is what made model marks
+   dangerous.
+3. **A model-sourced mark can no longer fire a price-based exit.** The row
+   stays OPEN and a warning names it. For multi-leg structures one modelled leg
+   gates the whole structure — it is only as trustworthy as its worst leg. The
+   pure-DTE time exit may still fire (its trigger never reads the mark) and
+   stamps `(model mark)` into the exit reason.
+
+**Expected effect on the numbers:** fewer spurious stop/take-profit exits on
+illiquid contracts, and slightly later exits on quoteless ones. Bounded by the
+deterministic expiry settlement, which is unchanged and still guarantees no row
+hangs OPEN forever.
+
+**No recorded exit was modified.** Exits before this date remain on the old
+basis; that discontinuity is real and is why this entry exists.
+
+**Also on this date, separately:** the Phase-1 gate moved to v2 (rank IC,
+posterior bands, effective n) and resolved **STOP** at n=92. See
+`status/DECISIONS.md`.
+
+---
