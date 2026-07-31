@@ -322,6 +322,84 @@ def health_banner(report: HealthReport, width: int = 100,
     return "\n".join([rule, "  " + styled_title] + ["  " + b for b in body] + [rule])
 
 
+# Days a dead scheduler must persist before the interactive path hard-blocks
+# with a required acknowledgement (`dead_scheduler_ack_banner`). `launchctl
+# list` carries no timestamps, so duration is tracked by stamping
+# first-observed-dead into the maintenance state (`launchd_dead_since`) and
+# diffing it against `today` on every later read — see `launchd_dead_days`
+# and `next_launchd_dead_state`.
+DEAD_SCHEDULER_ACK_DAYS = 7
+
+
+def launchd_dead_days(jobs: Optional[List["LaunchdJob"]], state: dict,
+                      today: date) -> Optional[int]:
+    """Calendar days the scheduler has been observed dead, or None while
+    healthy (or when launchctl gave us nothing to judge, e.g. it isn't
+    available — see `read_launchd_status`).
+
+    Pure: reads the `launchd_dead_since` marker already in `state` but never
+    touches the filesystem itself. Pair with `next_launchd_dead_state` to
+    persist the marker forward; the caller owns the actual write.
+    """
+    if not any(j.failed for j in (jobs or [])):
+        return None
+    since_str = (state or {}).get("launchd_dead_since")
+    if not since_str:
+        return 0
+    try:
+        since = date.fromisoformat(since_str)
+    except ValueError:
+        return 0
+    return max(0, (today - since).days)
+
+
+def next_launchd_dead_state(jobs: Optional[List["LaunchdJob"]], state: dict,
+                            today: date) -> dict:
+    """The state dict to persist after this read.
+
+    Stamps `launchd_dead_since` the first time the scheduler is observed
+    dead, and clears it the moment it recovers — so fixing the Login Items
+    toggle resets the clock instead of leaving the ack permanently primed.
+    Returns a new dict; the input `state` is never mutated. Callers own the
+    actual file write (and should skip it when the marker is unchanged).
+    """
+    new_state = dict(state or {})
+    if any(j.failed for j in (jobs or [])):
+        if not new_state.get("launchd_dead_since"):
+            new_state["launchd_dead_since"] = today.isoformat()
+    else:
+        new_state.pop("launchd_dead_since", None)
+    return new_state
+
+
+def dead_scheduler_ack_banner(dead_days: int, width: int = 100) -> str:
+    """The escalated card shown once the scheduler has been dead longer than
+    `DEAD_SCHEDULER_ACK_DAYS` — interactive path only, a required Enter
+    keypress, no bypass (see `options_screener._dead_scheduler_ack`).
+
+    States plainly what degrades without a running scheduler: exit checks
+    (stop-loss / take-profit) fall to manual cadence, and cohort accrual for
+    the gate stops advancing on its own.
+    """
+    warn = _glyph("warn", "!")
+    title = _style(f"{warn} SCHEDULER DEAD {dead_days} DAYS — confirm to continue",
+                   "bad", bold=True)
+    body = _wrap_body([
+        f"No scheduled job has run in {dead_days} days. Two things are "
+        "silently degrading:",
+        "exit checks (stop-loss / take-profit) are on manual cadence — a "
+        "position can run past its stop between visits.",
+        "cohort accrual for the gate is manual-only — the n>=50 threshold "
+        "advances only when you open the screener by hand.",
+        "Fix in System Settings > General > Login Items & Extensions > "
+        "Allow in the Background.",
+    ], width)
+    if _ui is not None:
+        return _ui.card(title, body, width, boxed=True)
+    rule = _style("─" * width, "bad")
+    return "\n".join([rule, "  " + title] + ["  " + b for b in body] + [rule])
+
+
 def health_lines(report: HealthReport) -> List[str]:
     """Per-job breakdown for the standalone `--health` command (all jobs, even
     healthy ones)."""

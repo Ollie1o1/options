@@ -2983,6 +2983,31 @@ def prompt_input(prompt: str, default: Optional[str] = None) -> str:
     return default if (not val and default is not None) else val
 
 
+def _dead_scheduler_ack(dead_days: Optional[int], interactive: bool, width: int,
+                        input_fn=input, print_fn=print) -> bool:
+    """Escalated hard-confirm when the scheduler has been dead beyond
+    `maintenance_health.DEAD_SCHEDULER_ACK_DAYS`.
+
+    Interactive path only (`interactive` is the caller's `_interactive`, the
+    same flag that guards the mode-menu loop) — automation, `--auto`,
+    `--mode`/`--ticker`, and piped stdin must never block here. No bypass
+    flag: exactly one Enter keypress is required, by design. Below the
+    threshold — or when we can't tell how long it's been dead — behaviour is
+    unchanged: no ack, the existing `health_banner` is the only output.
+
+    Returns True iff the ack fired (for tests).
+    """
+    from .maintenance_health import DEAD_SCHEDULER_ACK_DAYS, dead_scheduler_ack_banner
+    if not interactive or dead_days is None or dead_days <= DEAD_SCHEDULER_ACK_DAYS:
+        return False
+    print_fn(dead_scheduler_ack_banner(dead_days, width))
+    try:
+        input_fn("Press Enter to acknowledge and continue... ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return True
+
+
 def _open_briefing_file(path: str) -> None:
     """Open a written briefing in the default browser. Never raises or hangs.
 
@@ -4755,6 +4780,16 @@ def main():
     except Exception:
         pass
 
+    # ── Interactivity, decided once up front ────────────────────────────────
+    # Same flag the mode-menu loop below guards on: a real TTY with no
+    # --auto/--mode/--ticker/--auto-log automation flag. Computed here (rather
+    # than only later, next to the loop) so the dead-scheduler hard-confirm —
+    # which must fire in the startup maintenance block below — can gate on
+    # the exact same notion of "interactive" as everything else, instead of a
+    # second, possibly-divergent check.
+    _interactive = (sys.stdin.isatty() and not args.auto and not args.mode
+                    and not args.ticker and not getattr(args, "auto_log", False))
+
     # ── Startup maintenance (replaces retired cron) ─────────────────────────
     try:
         import json as _json
@@ -4773,13 +4808,26 @@ def main():
         # behind (silent when fresh). Catches the machine-was-asleep case that
         # otherwise stalls the gate invisibly.
         try:
-            from .maintenance import load_state, DEFAULT_STATE_PATH
-            from .maintenance_health import compute_health, health_banner, read_launchd_status
-            _banner = health_banner(compute_health(load_state(DEFAULT_STATE_PATH),
-                                                   datetime.now()),
-                                    launchd_jobs=read_launchd_status())
+            from .maintenance import load_state, save_state, DEFAULT_STATE_PATH
+            from .maintenance_health import (compute_health, health_banner,
+                                             read_launchd_status, launchd_dead_days,
+                                             next_launchd_dead_state)
+            _mh_state = load_state(DEFAULT_STATE_PATH)
+            _launchd_jobs = read_launchd_status()
+            _banner = health_banner(compute_health(_mh_state, datetime.now()),
+                                    launchd_jobs=_launchd_jobs)
             if _banner:
                 print(_banner)
+            # Escalated hard-confirm (interactive only): launchctl carries no
+            # timestamps, so "how long has it been dead" is tracked by
+            # stamping first-observed-dead into the maintenance state and
+            # diffing it on every later run.
+            _today = datetime.now().date()
+            _dead_days = launchd_dead_days(_launchd_jobs, _mh_state, _today)
+            _next_mh_state = next_launchd_dead_state(_launchd_jobs, _mh_state, _today)
+            if _next_mh_state.get("launchd_dead_since") != _mh_state.get("launchd_dead_since"):
+                save_state(DEFAULT_STATE_PATH, _next_mh_state)
+            _dead_scheduler_ack(_dead_days, _interactive, WIDTH)
         except Exception:
             pass
     except Exception as _e:
@@ -4863,8 +4911,8 @@ def main():
     # Re-show the mode menu after each action so a scan / intel / portfolio /
     # ticker returns the user here instead of exiting. Automation (cron, --auto,
     # --mode, --ticker, --auto-log) runs exactly one cycle and exits unchanged.
-    _interactive = (sys.stdin.isatty() and not args.auto and not args.mode
-                    and not args.ticker and not getattr(args, "auto_log", False))
+    # (`_interactive` itself is computed once, up in the startup-maintenance
+    # section above, so the dead-scheduler hard-confirm can gate on it too.)
     # Let prompt_input resolve to defaults too, so a hand-run `run.py -ds` does
     # not stall on the ticker-source prompt with --auto already in its expansion.
     # Deliberately narrower than _interactive — see suppress_prompts_for.

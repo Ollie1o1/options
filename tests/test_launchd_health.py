@@ -183,5 +183,100 @@ class TestBannerFitsItsBox(unittest.TestCase):
         self.assertIn("Allow in the Background", flat)
 
 
+class DeadSchedulerDurationTest(unittest.TestCase):
+    """`launchctl list` carries no timestamps, so "how long has the scheduler
+    been dead" is tracked by stamping a marker into the maintenance state the
+    first time it's observed dead, then diffing later reads against it."""
+
+    def setUp(self):
+        from datetime import date
+
+        self.today = date(2026, 7, 31)
+        self.dead_jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
+        self.healthy_jobs = parse_launchctl_list(_HEALTHY, "com.options-screener")
+
+    def test_healthy_scheduler_has_no_dead_days(self):
+        from src.maintenance_health import launchd_dead_days
+
+        self.assertIsNone(launchd_dead_days(self.healthy_jobs, {}, self.today))
+
+    def test_no_jobs_at_all_has_no_dead_days(self):
+        # launchctl unavailable, or nothing matched the prefix — must fail
+        # open (never the reason a run blocks), same as read_launchd_status.
+        from src.maintenance_health import launchd_dead_days
+
+        self.assertIsNone(launchd_dead_days([], {}, self.today))
+
+    def test_first_observation_is_zero_days(self):
+        from src.maintenance_health import launchd_dead_days
+
+        self.assertEqual(launchd_dead_days(self.dead_jobs, {}, self.today), 0)
+
+    def test_days_dead_is_measured_from_the_stamped_marker(self):
+        from datetime import date
+
+        from src.maintenance_health import launchd_dead_days
+
+        state = {"launchd_dead_since": "2026-07-20"}
+        self.assertEqual(
+            launchd_dead_days(self.dead_jobs, state, date(2026, 7, 31)), 11)
+
+    def test_next_state_stamps_the_marker_on_first_dead_observation(self):
+        from src.maintenance_health import next_launchd_dead_state
+
+        new_state = next_launchd_dead_state(self.dead_jobs, {}, self.today)
+        self.assertEqual(new_state["launchd_dead_since"], "2026-07-31")
+
+    def test_next_state_does_not_restamp_an_existing_marker(self):
+        from src.maintenance_health import next_launchd_dead_state
+
+        state = {"launchd_dead_since": "2026-07-20"}
+        new_state = next_launchd_dead_state(self.dead_jobs, state, self.today)
+        self.assertEqual(new_state["launchd_dead_since"], "2026-07-20")
+
+    def test_next_state_clears_the_marker_once_healthy_again(self):
+        from src.maintenance_health import next_launchd_dead_state
+
+        state = {"launchd_dead_since": "2026-07-20"}
+        new_state = next_launchd_dead_state(self.healthy_jobs, state, self.today)
+        self.assertNotIn("launchd_dead_since", new_state)
+
+    def test_next_state_never_mutates_the_input_dict(self):
+        from src.maintenance_health import next_launchd_dead_state
+
+        state = {"launchd_dead_since": "2026-07-20"}
+        next_launchd_dead_state(self.healthy_jobs, state, self.today)
+        self.assertEqual(state, {"launchd_dead_since": "2026-07-20"})
+
+
+class DeadSchedulerAckBannerTest(unittest.TestCase):
+    def setUp(self):
+        from src import formatting as fmt
+
+        self._saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+
+    def tearDown(self):
+        from src import formatting as fmt
+
+        fmt._COLOR_ENABLED = self._saved
+
+    def test_states_what_is_degrading_in_plain_terms(self):
+        from src.maintenance_health import dead_scheduler_ack_banner
+
+        banner = dead_scheduler_ack_banner(11, width=100)
+        flat = " ".join(ln.strip("│ ") for ln in banner.splitlines())
+        self.assertIn("manual cadence", flat)
+        self.assertIn("manual-only", flat)
+        self.assertIn("11", flat)
+
+    def test_every_line_fits_the_box(self):
+        from src.maintenance_health import dead_scheduler_ack_banner
+
+        banner = dead_scheduler_ack_banner(30, width=100)
+        widths = {len(ln) for ln in banner.splitlines()}
+        self.assertEqual(widths, {100})
+
+
 if __name__ == "__main__":
     unittest.main()
