@@ -1,6 +1,6 @@
 # Paper Trading Track Record
 
-_Generated 2026-07-31 14:09 • 807 closed trades_
+_Generated 2026-07-31 14:47 • 807 closed trades_
 
 > **Methodology & caveats.** These are **paper trades**, not live fills. Entries and exits use **delayed retail data** (Yahoo Finance) and a **modeled friction** assumption (spread/slippage), so realized results would differ. The descriptive stats below are real; the **predictive edge of the ranking model is still under out-of-sample evaluation** and is *not* established — see [docs/VALIDATION_POWER.md](../docs/VALIDATION_POWER.md).
 
@@ -15,7 +15,7 @@ _Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: EXTEND (n=7
 Secondary, size-blind figures:
 
 - Win rate: **49.1%** = 396 wins / 807 closed trades with a recorded return; 0 closed trades excluded for missing returns
-- Mean return per trade: **-0.3%** (unweighted mean of per-trade % returns — a $28 spread counts the same as a $27,000 cash-secured put; not the headline for that reason)
+- Mean return per trade: **-0.3%** (unweighted mean of per-trade returns **on entry premium** — a $28 spread counts the same as a $27,000 cash-secured put, and the premium denominator is a debit on long structures but a credit on short ones; not the headline for either reason)
 - Median return per trade: **-0.1%** of capital risked (typical trade, size-blind)
 
 ## By strategy
@@ -57,7 +57,7 @@ Size dominates the raw aggregate: of $3,251,997 risked across the book, only $48
 
 Aggregate return on risk is a dollar-weighted number: one large contract can carry a whole line. The median per-trade return on risk is published beside it so the typical trade is visible. Where the two disagree in sign, the aggregate is a story about one or two positions.
 
-- **Long Put**: aggregate +12.4% of capital risked but median -17.3% per trade — one GS trade (+$3,255.70) is 58% of the line's net.
+- **Long Put**: aggregate +12.4% of capital risked but median -17.3% per trade — one GS trade (+$3,255.70) is +58% of the line's net.
 
 ### Cash-secured collateral denominator
 
@@ -67,7 +67,10 @@ A cash-secured short posts the whole strike as collateral, so its capital_at_ris
 
 ## Closed trades
 
-| Date | Ticker | Structure | Entry | Exit | P&L % | P&L $ | Capital at risk | Exit reason |
+
+`P&L % of premium` is the per-trade return on the **entry premium** — the debit paid on Long Call/Long Put, and the credit received on Short Put and every spread. Those are different denominators, so this column is not comparable across structures; `P&L $` and `Capital at risk` are.
+
+| Date | Ticker | Structure | Entry | Exit | P&L % of premium | P&L $ | Capital at risk | Exit reason |
 |------|--------|-----------|------:|-----:|------:|------:|----------------:|-------------|
 | 2026-04-18 | WFC | Long Put | $1.90 | $2.18 | +8.1% | +$15.30 | $190 | Time Exit (21d to expiry) |
 | 2026-04-18 | WMT | Long Call | $2.34 | $3.45 | +40.9% | +$95.66 | $234 | — |

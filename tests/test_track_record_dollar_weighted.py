@@ -105,10 +105,38 @@ class TestDollarWeightedHeadline(unittest.TestCase):
         self.assertIn("-$450.00", md)
         self.assertIn("Return on capital risked", md)
         self.assertIn("of capital risked", md)
-        self.assertIn("unweighted mean of per-trade % returns", md)
+        self.assertIn("unweighted mean of per-trade returns **on entry premium**", md)
         # the headline precedes the size-blind secondary figures
         self.assertLess(md.index("Return on capital risked"),
                         md.index("Mean return per trade"))
+
+    def test_the_ratio_quotes_the_numerator_it_actually_divides(self):
+        # One trade carries a dollar result but no capital at risk. The book's
+        # net is -$450 while the ratio's numerator is only the risked -$500,
+        # so rendering net_pnl beside the risked denominator would publish
+        # arithmetic that does not reconcile.
+        rows = [
+            _row(pnl_usd=-500.0, pnl_pct=-0.10, capital_at_risk=5000.0),
+            _row(pnl_usd=50.0, pnl_pct=0.50, capital_at_risk=None),
+        ]
+        book = summarize_book(rows)
+        self.assertAlmostEqual(book["net_pnl"], -450.0)
+        self.assertAlmostEqual(book["net_pnl_risked"], -500.0)
+        self.assertAlmostEqual(book["return_on_risk"], -500.0 / 5000.0)
+
+        md = render_track_record(rows, _EVIDENCE)
+        line = next(ln for ln in md.splitlines()
+                    if "Return on capital risked" in ln)
+        self.assertIn("-$500.00", line)
+        self.assertNotIn("-$450.00", line)
+        # and the gap between the two is stated rather than left to be noticed
+        self.assertIn("no recorded capital at risk", md)
+
+    def test_premium_basis_is_stated_for_the_closed_trades_table(self):
+        md = render_track_record([_row()], _EVIDENCE)
+        self.assertIn("| P&L % of premium |", md)
+        self.assertIn("debit paid on Long Call", md)
+        self.assertIn("credit received on Short Put", md)
 
 
 class TestMedianReturnOnRisk(unittest.TestCase):
@@ -144,6 +172,33 @@ class TestMedianReturnOnRisk(unittest.TestCase):
         breakdown = [{"strategy": "Long Call", "return_on_risk": 0.4242}]
         (s,) = summarize_strategies(rows, breakdown=breakdown)
         self.assertAlmostEqual(s["return_on_risk"], 0.4242)
+
+    def test_the_divergence_explanation_names_the_big_loser_not_the_big_winner(self):
+        # Aggregate negative, median positive: the trade that explains the line
+        # is the large loser. Picking the largest signed P&L would name a small
+        # winner and publish a confidently wrong sentence.
+        rows = [_row(strategy_name="Iron Condor", pnl_usd=60.0, pnl_pct=0.20,
+                     capital_at_risk=300.0) for _ in range(4)]
+        rows.append(_row(strategy_name="Iron Condor", ticker="TLT",
+                         pnl_usd=-4000.0, pnl_pct=-1.5, capital_at_risk=2000.0))
+        (s,) = summarize_strategies(rows)
+        self.assertLess(s["return_on_risk"], 0)
+        self.assertGreater(s["median_return_on_risk"], 0)
+
+        md = render_track_record(rows, _EVIDENCE)
+        frag = next(ln for ln in md.splitlines()
+                    if "Iron Condor" in ln and "one " in ln)
+        self.assertIn("TLT", frag)
+        self.assertIn("-$4,000.00", frag)
+
+    def test_a_zero_return_on_risk_from_the_breakdown_is_not_recomputed(self):
+        # 0.0 is a legitimate value; a truthiness check would discard it and
+        # silently fall back to the private recomputation.
+        rows = [_row(strategy_name="Long Call", pnl_usd=100.0,
+                     capital_at_risk=1000.0)]
+        (s,) = summarize_strategies(
+            rows, breakdown=[{"strategy": "Long Call", "return_on_risk": 0.0}])
+        self.assertEqual(s["return_on_risk"], 0.0)
 
     def test_strategy_table_has_net_dollars_and_median_columns(self):
         md = render_track_record([_row()], _EVIDENCE)

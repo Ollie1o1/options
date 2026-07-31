@@ -25,11 +25,13 @@ the few files under reports/ that is git-tracked (see the `!reports/TRACK_RECORD
 negation in .gitignore). Left uncommitted it silently drifts from the ledger and
 the published record stops matching the DB. So, after any maintenance run:
 
-    ./scripts/test.sh publish_track_record          # sanity
+    ./scripts/test.sh track_record                  # sanity
     PYTHONPATH=$PWD ~/.venvs/options/bin/python scripts/publish_track_record.py
     git add reports/TRACK_RECORD.md && git commit -m "chore: refresh track record"
 
-The script only ever READS paper_trades.db. It never writes trade rows.
+The script never writes trade rows, and every query it issues opens the db
+through a read-only URI (`file:...?mode=ro`), so it cannot migrate the schema
+or take a write lock on a ledger another process is using.
 
 Pure rendering (`render_track_record`) is separated from I/O so it is testable
 against a seeded in-memory SQLite db.
@@ -185,6 +187,11 @@ def summarize_book(rows: Sequence[Dict[str, Any]],
         "n_with_pnl": sum(1 for r in rows if _f(r.get("pnl_usd")) is not None),
         "capital_at_risk": total_risk if risked else None,
         "return_on_risk": (pnl_on_risk / total_risk) if total_risk > 0 else None,
+        # The numerator `return_on_risk` actually divides. It differs from
+        # `net_pnl` whenever a closed trade has a dollar result but no recorded
+        # capital at risk, so the published ratio must quote this one to
+        # reconcile against its own denominator.
+        "net_pnl_risked": pnl_on_risk if risked else None,
         "n_risked": len(risked),
         "median_return_on_risk": _median(per_trade_returns_on_risk(rows)),
         "mean_return_unweighted": (
@@ -212,7 +219,7 @@ def summarize_strategies(
 ) -> List[Dict[str, Any]]:
     """Per-strategy stats, one dict per strategy, sorted by name.
 
-    `breakdown` is the output of `PaperTradeManager.get_strategy_breakdown()`,
+    `breakdown` is the output of `PaperManager.get_strategy_breakdown()`,
     which already defines `return_on_risk` as total P&L over total capital at
     risk. When supplied it is the authority for that field so the published
     number and the portfolio view's number cannot drift apart; the medians and
@@ -246,7 +253,11 @@ def summarize_strategies(
             "win_rate": (len(wins) / len(scored)) if scored else None,
             "net_pnl": net_pnl,
             "capital_at_risk": total_risk if risked else None,
-            "return_on_risk": ror_from_breakdown.get(strat, own_ror),
+            # Presence-and-not-None, never `or`: a legitimate 0.0 from the
+            # breakdown must survive rather than fall through to the recompute.
+            "return_on_risk": (ror_from_breakdown[strat]
+                               if ror_from_breakdown.get(strat) is not None
+                               else own_ror),
             "median_return_on_risk": _median(per_trade_returns_on_risk(srows)),
             "mean_return_unweighted": (
                 sum(_f(r["pnl_pct"]) for r in scored) / len(scored)) if scored else None,
@@ -320,7 +331,11 @@ def _largest_contributor(rows: Sequence[Dict[str, Any]],
              and _f(r.get("pnl_usd")) is not None]
     if not srows:
         return None
-    top = max(srows, key=lambda r: _f(r["pnl_usd"]))
+    # Largest by MAGNITUDE, not by signed value: when a line's aggregate is
+    # negative and its median positive, the trade that explains the divergence
+    # is the big loser, and picking the best winner would print a confidently
+    # wrong explanation.
+    top = max(srows, key=lambda r: abs(_f(r["pnl_usd"])))
     net = sum(_f(r["pnl_usd"]) for r in srows)
     return {
         "ticker": top.get("ticker") or "—",
@@ -446,7 +461,7 @@ def _note_median_vs_aggregate(rows: Sequence[Dict[str, Any]],
         if top and top.get("share_of_net") is not None:
             frag += (
                 f" — one {top['ticker']} trade ({_fmt_signed_money(top['pnl_usd'])}) "
-                f"is {abs(top['share_of_net']) * 100:.0f}% of the line's net"
+                f"is {top['share_of_net'] * 100:+.0f}% of the line's net"
             )
         lines.append(frag + ".")
     return ("Median vs aggregate", body + "\n\n" + "\n".join(lines))
@@ -511,10 +526,20 @@ def render_track_record(rows: List[Dict[str, Any]],
     out.append("")
     out.append(f"- Net P&L: **{_fmt_signed_money(book['net_pnl'])}** across "
                f"{book['n_with_pnl']} closed trades with a recorded dollar result")
+    # The ratio's numerator is the risked subset's net, not the book's — those
+    # differ whenever a closed trade has a dollar result but no capital_at_risk
+    # (legacy rows). Render the numerator that is actually divided, so the
+    # published line always reconciles against its own denominator.
     out.append(f"- Return on capital risked: **{_fmt_pct(book['return_on_risk'])}** "
-               f"({_fmt_signed_money(book['net_pnl'])} of "
+               f"({_fmt_signed_money(book['net_pnl_risked'])} of "
                f"{_fmt_dollars(book['capital_at_risk'])} risked across "
                f"{book['n_risked']} trades with capital_at_risk recorded)")
+    if book.get("n_with_pnl") != book.get("n_risked"):
+        out.append(
+            f"  - {_plural(book['n_with_pnl'] - book['n_risked'], 'closed trade')} "
+            f"carry a dollar result but no recorded capital at risk, so the "
+            f"ratio above is computed over less than the full net P&L"
+        )
     aff = book.get("affordable")
     if aff and book.get("budget_cap"):
         out.append(
@@ -536,8 +561,10 @@ def render_track_record(rows: List[Dict[str, Any]],
         "returns"
     )
     out.append(f"- Mean return per trade: **{_fmt_pct(book['mean_return_unweighted'])}** "
-               "(unweighted mean of per-trade % returns — a $28 spread counts the "
-               "same as a $27,000 cash-secured put; not the headline for that reason)")
+               "(unweighted mean of per-trade returns **on entry premium** — a "
+               "$28 spread counts the same as a $27,000 cash-secured put, and "
+               "the premium denominator is a debit on long structures but a "
+               "credit on short ones; not the headline for either reason)")
     out.append(f"- Median return per trade: **{_fmt_pct(book['median_return_on_risk'])}** "
                "of capital risked (typical trade, size-blind)")
     out.append("")
@@ -607,8 +634,15 @@ def render_track_record(rows: List[Dict[str, Any]],
     # --- Full table ----------------------------------------------------------
     out.append("## Closed trades")
     out.append("")
-    out.append("| Date | Ticker | Structure | Entry | Exit | P&L % | P&L $ | "
-               "Capital at risk | Exit reason |")
+    out.append("")
+    out.append("`P&L % of premium` is the per-trade return on the **entry "
+               "premium** — the debit paid on Long Call/Long Put, and the "
+               "credit received on Short Put and every spread. Those are "
+               "different denominators, so this column is not comparable "
+               "across structures; `P&L $` and `Capital at risk` are.")
+    out.append("")
+    out.append("| Date | Ticker | Structure | Entry | Exit | P&L % of premium | "
+               "P&L $ | Capital at risk | Exit reason |")
     out.append("|------|--------|-----------|------:|-----:|------:|------:|"
                "----------------:|-------------|")
     for r in rows:
@@ -629,13 +663,30 @@ def _load_breakdown(db_path: str) -> Optional[List[Dict[str, Any]]]:
 
     Reused rather than reimplemented so the published return-on-risk and the
     portfolio view's return-on-risk are the same definition by construction.
-    Read-only: the call itself is a single SELECT. A None here is not fatal —
-    `summarize_strategies` recomputes the same ratio from the rows — but it is
-    worth a warning, because silently falling back is how the two definitions
-    would drift apart unnoticed.
+
+    The query itself is a single SELECT, but constructing a `PaperManager`
+    is NOT read-only — it runs `_init_db`/`_migrate_db` (CREATE TABLE IF NOT
+    EXISTS, ALTER TABLEs, `PRAGMA user_version`). Publishing must never be the
+    thing that migrates a ledger, least of all an archived copy someone kept
+    precisely to preserve its old shape. So the schema version is read through
+    a read-only connection first, and the manager is constructed only when the
+    db is ALREADY at the current version — which makes the migration a
+    provable no-op rather than a hoped-for one.
+
+    Otherwise this returns None and `summarize_strategies` recomputes the same
+    ratio from the rows. A None is not fatal, but it is worth a warning —
+    silently falling back is how the two definitions drift apart unnoticed.
     """
     try:
-        from src.paper_manager import PaperManager
+        from src.paper_manager import _SCHEMA_VERSION, PaperManager
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as probe:
+            on_disk = probe.execute("PRAGMA user_version").fetchone()[0]
+        if on_disk != _SCHEMA_VERSION:
+            print(f"warning: {db_path} is at schema v{on_disk}, not "
+                  f"v{_SCHEMA_VERSION}; strategy breakdown skipped rather than "
+                  "migrating it (recomputing return on risk from rows)",
+                  file=sys.stderr)
+            return None
         return PaperManager(db_path=db_path).get_strategy_breakdown()
     except Exception as exc:  # pragma: no cover - defensive
         print(f"warning: strategy breakdown unavailable ({exc}); "
