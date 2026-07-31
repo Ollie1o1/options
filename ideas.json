@@ -12,8 +12,6 @@
       "reports/duplicate_trades_audit.md — 18 candidate groups, 38 rows, 20 excess, $2,959.10 of double-counted P&L. Nothing was deleted; which are true duplicates vs legitimate re-signals is a judgement call. Until ruled on, the excess rows double-count in the gate cohort and the track record."
     ],
     "P2_remaining": [
-      "guided-start-flow",
-      "sizing-engine-never-touches-the-ledger",
       "yfinance-cboe-scan-failover",
       "repo-hygiene-beta",
       "usd-account-vs-conversion-spread"
@@ -103,19 +101,6 @@
       "evidence": "src/cboe_client.py; src/cross_check.py results in README; data-layer memory: chain archive already snapshots CBOE daily, so the fetch path is exercised in production.",
       "next_step": "In fetch_options_yfinance's failure path (after the existing retry waves exhaust), attempt the CBOE chain for the same symbol, mapping its fields into the standard frame with quote_source='cboe' and honest quote_as_of. Scope: single-ticker and watchlist scans first (bounded symbol count); DISCOVER stays Yahoo-only to respect CBOE politeness. Surface 'served from CBOE fallback' in the data-quality line. Watch field-mapping details: CBOE strike/expiry formats and its IV convention differ; the cross_check joiner already solved the mapping once - reuse it.",
       "acceptance": "Simulated Yahoo failure on a single-ticker scan completes via CBOE with provenance shown; no behaviour change when Yahoo is healthy; archive politeness unaffected."
-    },
-    {
-      "id": "guided-start-flow",
-      "title": "A stranger's first scan should not require reading a 40-section README",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "priority": "P2",
-      "thesis": "The equity screener presents 13 modes plus the launcher's 6 sections, several tagged 'no edge' or 'read-only'. The README explains the maturity tiers well, but in-app nothing says where to start. The proven internal flow is INTEL (context) -> DISCOVER (candidates) -> drill-down (detail on any candidate) -> log with suggested ladder -> PORTFOLIO (track). One orienting line above the mode menu costs nothing and shapes every first session.",
-      "evidence": "Mode menu at src/options_screener.py:4880-4918; holdings desk already proved the guided-menu pattern works (project_holdings_guided_menu, merged 2026-07-20).",
-      "next_step": "Add a single muted line above the MODES rule: 'New here? [10] INTEL for context, then [3] DISCOVER and drill into any pick.' Optionally a first-run-only expanded hint (state file remembers it has been shown). Do not build a wizard; do not touch mode behaviour. Keep it one line - the menu is already tall.",
-      "acceptance": "One-line hint renders in both the enhanced and fallback menu paths; first-run expanded hint (if built) shows exactly once; no mode behaviour changes."
     },
     {
       "id": "repo-hygiene-beta",
@@ -241,18 +226,6 @@
       "thesis": "Index put spreads validated out-of-sample on the cached DoltHub EOD chains, but were shelved as capacity-walled. At retail size the capacity wall may not bind.",
       "evidence": "docs/DOLT_OPTIONS.md; project memory dolthub_real_options. Corpus check 2026-07-28: data/dolt_options.db is 595,074 rows but only NINE symbols (AAPL MSFT NVDA GOOG AMZN META AMD TSLA SPY), dense from 2022-01 to 2026-06-12, ~3 expirations and 17-19 strikes per date — not '7 years of chains' in any broad sense. SPY specifically stops at 2025-02.",
       "next_step": "Quantify the capacity ceiling in dollars. If it exceeds intended size, the wall is irrelevant. Note the SPY leg was validated on 2022-2025 only, so it has never seen the last 18 months. If pursued on SPX rather than SPY, index-options-are-not-free applies: make the commission lookup per-symbol first."
-    },
-    {
-      "id": "sizing-engine-never-touches-the-ledger",
-      "title": "The sizing engine has never been exercised against the cohort it will size",
-      "area": "execution",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "priority": "P2",
-      "thesis": "src/execution/sizing.py implements half-Kelly with a risk cap and a cost cap, and it is what real money would route through. The paper ledger has never used it: quantity is 1.0 on all 827 rows, which is the column default from the schema migration and is never written anywhere. So every statistic the gate reads describes a one-contract-per-signal book, while the thing the gate would authorise is a Kelly-sized book. Those differ in more than scale — sizing changes which trades get taken at all, and its cost cap is exactly the filter that would have excluded the 114 unaffordable trades.",
-      "evidence": "paper_manager.py:402 is the only mention of quantity (ALTER TABLE ... DEFAULT 1.0); src/execution/sizing.py:38 size_position, contracts = min(risk-capped, cost-capped).",
-      "next_step": "Replay the closed cohort through size_position at the intended account value and report the sized book alongside the unsized one. Cheap, no new data, and it is the only way to find out whether the gate's answer survives the sizing rule. Pairs with cohort-includes-unaffordable-trades — same root cause, different half."
     },
     {
       "id": "retire-or-measure-ai-scorer",
@@ -540,6 +513,31 @@
         "thesis": "The original study's sharpest finding was that ranking by short-interest level ALONE beat the full grader: +4.36pp asymmetry vs +3.74pp. RE-MEASURED 2026-07-29 against the rescored grader on the same panel: the two are level at every horizon — 21d grader +5.38pp vs SI-only +5.31pp, difference -0.06pp with a 95% CI of [-0.93, +0.70]. The rescoring closed the gap. But the more useful result is that the ORIGINAL claim was never resolvable: it rested on a +0.62pp gap while the interval on that difference is about +/-0.9pp, wider than the effect being asserted. 'The scoring adds nothing' was a point estimate read as a result.",
         "evidence": "Shipped as src/squeeze/backtest/study.si_only_comparison, printed by `--run`; docs/SQUEEZE_BACKTEST.md re-measurement section. Cohort overlap fell 77% -> 44%, so the rescored grader picks a substantially different cohort and lands in the same place.",
         "next_step": "Do not delete the scoring on this evidence, and do not defend it either — an interval spanning zero is not proof of value. The decision now rests on parsimony rather than measurement, and that is a judgement call to make deliberately. What IS resolvable and unchanged: short-interest level carries the signal (monotone deciles) while evidence points correlate at +0.001. If the scoring is kept, it should be justified as a display aid, not as a ranker."
+      },
+      {
+        "id": "guided-start-flow",
+        "title": "A stranger's first scan should not require reading a 40-section README",
+        "area": "infra",
+        "status": "shipped",
+        "conviction": "medium",
+        "cost_wall": "n/a",
+        "priority": "P2",
+        "thesis": "The equity screener presents 13 modes plus the launcher's 6 sections, several tagged 'no edge' or 'read-only'. The README explains the maturity tiers well, but in-app nothing says where to start. The proven internal flow is INTEL (context) -> DISCOVER (candidates) -> drill-down (detail on any candidate) -> log with suggested ladder -> PORTFOLIO (track). One orienting line above the mode menu costs nothing and shapes every first session.",
+        "evidence": "Mode menu at src/options_screener.py:4880-4918; holdings desk already proved the guided-menu pattern works (project_holdings_guided_menu, merged 2026-07-20).",
+        "next_step": "SHIPPED 2026-07-31 (commit 7d1192c): one muted line above the MODES rule — 'New here? [10] INTEL for context, then [3] DISCOVER and drill into any pick.' Renders in BOTH the enhanced and fallback menu paths (a test pins that, since the fallback terminal is the likelier one for a stranger). No wizard, no mode behaviour touched, no first-run state file — the line is cheap enough to always show.\n\nPRIOR NEXT STEP: Add a single muted line above the MODES rule: 'New here? [10] INTEL for context, then [3] DISCOVER and drill into any pick.' Optionally a first-run-only expanded hint (state file remembers it has been shown). Do not build a wizard; do not touch mode behaviour. Keep it one line - the menu is already tall.",
+        "acceptance": "One-line hint renders in both the enhanced and fallback menu paths; first-run expanded hint (if built) shows exactly once; no mode behaviour changes."
+      },
+      {
+        "id": "sizing-engine-never-touches-the-ledger",
+        "title": "The sizing engine has never been exercised against the cohort it will size",
+        "area": "execution",
+        "status": "shipped",
+        "conviction": "medium",
+        "cost_wall": "n/a",
+        "priority": "P2",
+        "thesis": "src/execution/sizing.py implements half-Kelly with a risk cap and a cost cap, and it is what real money would route through. The paper ledger has never used it: quantity is 1.0 on all 827 rows, which is the column default from the schema migration and is never written anywhere. So every statistic the gate reads describes a one-contract-per-signal book, while the thing the gate would authorise is a Kelly-sized book. Those differ in more than scale — sizing changes which trades get taken at all, and its cost cap is exactly the filter that would have excluded the 114 unaffordable trades.",
+        "evidence": "paper_manager.py:402 is the only mention of quantity (ALTER TABLE ... DEFAULT 1.0); src/execution/sizing.py:38 size_position, contracts = min(risk-capped, cost-capped).",
+        "next_step": "SHIPPED 2026-07-31 (commit 7d1192c): scripts/sizing_replay.py replays the closed LC cohort through size_position and reports the sized book beside the unsized one, with the scorer IC recomputed over survivors. MEASURED at n=92 (stop -50% of premium, 2% risk cap, 10% position cap): sizing is a FILTER, not a scale factor, and at small accounts it removes most of the cohort — 74 of 92 trades size to ZERO contracts at a $5,000 account, 68 of 92 at $10,000, 21 of 92 at $25,000, 11 of 92 at $50,000. So the gate is scoring a population the execution layer would largely have declined to open. The survivors' IC is unstable and insignificant at every account value tested (Pearson -0.095 at $5k, +0.143 at $10k, -0.097 at $25k), which is itself the result: there is no sized subset in which the scorer looks better. Sized net P&L is far smaller than the unsized book (-$621 vs -$19,177 at $5k) purely because most trades never open. CAVEAT printed with the report: deployed capital is cumulative across the window, not peak concurrent exposure — each trade is sized against the full account and overlaps are not netted. NEXT: fold this into the gate redesign — if the gate is meant to authorise a sized book, its cohort should be the sized one.\n\nPRIOR NEXT STEP: Replay the closed cohort through size_position at the intended account value and report the sized book alongside the unsized one. Cheap, no new data, and it is the only way to find out whether the gate's answer survives the sizing rule. Pairs with cohort-includes-unaffordable-trades — same root cause, different half."
       }
     ],
     "dead": [
