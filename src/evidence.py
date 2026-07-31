@@ -38,6 +38,8 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
           "cohort_n":      int,            # forward-cohort size (latest checkpoint)
           "gate_decision": str,            # e.g. "GATHERING" / "READY" / "UNKNOWN"
           "as_of":         str | None,     # most recent artifact timestamp/date
+          "cohort_ic_pearson":  float | None,  # gate statistic, latest checkpoint
+          "cohort_ic_spearman": float | None,  # rank IC beside it (None pre-2026-07)
         }
     """
     ev: Dict[str, Any] = {
@@ -47,6 +49,8 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
         "cohort_n": 0,
         "gate_decision": "UNKNOWN",
         "as_of": None,
+        "cohort_ic_pearson": None,
+        "cohort_ic_spearman": None,
     }
 
     # --- walk-forward report -------------------------------------------------
@@ -71,7 +75,9 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
     if os.path.exists(tsv_path):
         try:
             with open(tsv_path, newline="") as f:
-                rows = list(csv.DictReader(f, delimiter="\t"))
+                reader = csv.DictReader(f, delimiter="\t", restkey=_EXTRA)
+                fields = list(reader.fieldnames or [])
+                rows = list(reader)
             if rows:
                 last = rows[-1]
                 if last.get("n") not in (None, ""):
@@ -82,18 +88,52 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
                 if last.get("date"):
                     if not ev["as_of"] or str(last["date"]) > str(ev["as_of"])[:10]:
                         ev["as_of"] = str(last["date"])
+                ev["cohort_ic_pearson"] = _num(last.get("ic"))
+                ev["cohort_ic_spearman"] = _rank_ic_field(last, fields)
         except (OSError, ValueError, KeyError):
             pass
 
     return ev
 
 
+# csv.DictReader parks fields beyond the header under this key.
+_EXTRA = "_extra"
+
+
+def _num(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank_ic_field(row: Dict[str, Any], fields: list) -> Optional[float]:
+    """Spearman IC from a checkpoint-history row, whichever width it is.
+
+    The history holds 6-field rows written before the rank IC was recorded and
+    8-field rows written after. Under the current header the value is a named
+    column; under an older header (a checkout that has not run a checkpoint
+    since the column was added) it arrives as the first overflow field.
+    """
+    if "spearman" in fields:
+        return _num(row.get("spearman"))
+    extra = row.get(_EXTRA)
+    if isinstance(extra, list) and extra:
+        return _num(extra[0])
+    return None
+
+
 def format_evidence_banner(ev: Optional[Dict[str, Any]] = None) -> str:
     """
     One-line, honest evidence label for the ranking model, e.g.:
-      'Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING (n=2/50)'
+      'Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING
+       (n=2/50) | cohort IC +0.048 pearson / -0.020 rank'
 
-    Reads from load_model_evidence() when ``ev`` is not supplied.
+    The cohort IC is shown as both statistics because on floored option returns
+    they routinely disagree, and reporting only the Pearson one overstates the
+    evidence. Reads from load_model_evidence() when ``ev`` is not supplied.
     """
     if ev is None:
         ev = load_model_evidence()
@@ -111,4 +151,15 @@ def format_evidence_banner(ev: Optional[Dict[str, Any]] = None) -> str:
     return (
         f"Ranking model: EXPERIMENTAL — {oos} | "
         f"gate: {gate} (n={cohort_n}/{GATE_TARGET_N})"
+        f"{_cohort_ic_segment(ev)}"
     )
+
+
+def _cohort_ic_segment(ev: Dict[str, Any]) -> str:
+    """' | cohort IC +0.048 pearson / -0.020 rank', or '' when unrecorded."""
+    pearson = ev.get("cohort_ic_pearson")
+    if pearson is None:
+        return ""
+    rank = ev.get("cohort_ic_spearman")
+    rank_txt = "rank n/a" if rank is None else f"{rank:+.3f} rank"
+    return f" | cohort IC {pearson:+.3f} pearson / {rank_txt}"
