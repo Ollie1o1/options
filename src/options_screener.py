@@ -5087,6 +5087,17 @@ def main():
         is_lottery_mode = (symbol_input == "LOTTERY")
         is_squeeze_mode = (symbol_input == "SQUEEZE")
 
+        # CBOE failover is gated on how many symbols the scan will touch, not on
+        # the mode's name — MY LIST runs through the discovery flow but over a
+        # bounded watchlist, so it qualifies while a top-100 sweep does not.
+        # CBOE is a free unauthenticated endpoint; staying polite is the point.
+        _broad_sweep = (is_discovery_mode and not is_my_list_mode) or is_budget_mode
+        try:
+            from .data_fetching import set_cboe_fallback
+            set_cboe_fallback(not _broad_sweep)
+        except Exception:
+            pass
+
         if is_my_list_mode:
             mode = "Discovery scan"
         elif is_discovery_mode:

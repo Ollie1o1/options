@@ -20,7 +20,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from contextlib import closing
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, List, Dict, Any, Callable
+from typing import Optional, Tuple, List, Dict, Any, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 
@@ -1939,6 +1939,124 @@ def _no_frames_message(symbol: str, cause: Optional[BaseException]) -> str:
     return f"{base}: {type(cause).__name__}: {cause}"
 
 
+# ── CBOE scan failover ───────────────────────────────────────────────────────
+# Off by default. DISCOVER sweeps ~100 symbols and CBOE is an unauthenticated
+# free endpoint, so the failover is opt-in per scan: bounded symbol counts
+# (single ticker, watchlist) turn it on, broad sweeps never do.
+_CBOE_FALLBACK_ENABLED = False
+
+
+def set_cboe_fallback(enabled: bool) -> None:
+    """Allow (or forbid) falling back to CBOE when Yahoo's chain fetch fails."""
+    global _CBOE_FALLBACK_ENABLED
+    _CBOE_FALLBACK_ENABLED = bool(enabled)
+
+
+def cboe_fallback_enabled() -> bool:
+    return _CBOE_FALLBACK_ENABLED
+
+
+def _cboe_frames(symbol: str, expirations: Sequence[str]) -> List["pd.DataFrame"]:
+    """CBOE's delayed chain, shaped like the yfinance frames it stands in for.
+
+    Field mapping is deliberately narrow: CBOE's IV is already decimal (the same
+    convention `src.cross_check` compares against yfinance's `impliedVolatility`
+    with no scaling), and `parse_occ_symbol` already yields `YYYY-MM-DD`
+    expirations, so neither needs converting. What CBOE does NOT carry is a last
+    traded price, so `lastPrice` is the bid/ask mid — marked as such by
+    `quote_source`, never passed off as a print.
+
+    Returns [] on any failure: the failover must never turn a Yahoo outage into
+    a second exception.
+    """
+    try:
+        from . import cboe_client
+    except Exception:
+        return []
+    try:
+        rows = cboe_client.fetch_chain(symbol)
+    except Exception:
+        return []
+    if not rows:
+        return []
+
+    wanted = {str(e)[:10] for e in (expirations or [])}
+    frames: List[pd.DataFrame] = []
+    for opt_type in ("call", "put"):
+        recs = [r for r in rows
+                if r.get("type") == opt_type
+                and (not wanted or str(r.get("expiration"))[:10] in wanted)]
+        if not recs:
+            continue
+        sub = pd.DataFrame([{
+            "strike": r.get("strike"),
+            "bid": r.get("bid"),
+            "ask": r.get("ask"),
+            # No last print in the CBOE payload — mid stands in, and the
+            # provenance columns say where it came from.
+            "lastPrice": _cboe_mid(r.get("bid"), r.get("ask")),
+            "volume": r.get("volume"),
+            "openInterest": r.get("open_interest"),
+            "impliedVolatility": _cboe_iv(r.get("iv")),
+            "lastTradeDate": r.get("last_trade_time"),
+            "delta": r.get("delta"),
+            "gamma": r.get("gamma"),
+            "theta": r.get("theta"),
+            "vega": r.get("vega"),
+            "expiration": str(r.get("expiration"))[:10],
+        } for r in recs])
+        sub["type"] = opt_type
+        sub["symbol"] = symbol.upper()
+        sub["quote_source"] = "cboe"
+        frames.append(sub)
+
+    if not frames:
+        return []
+    combined = pd.concat(frames, ignore_index=True)
+    try:
+        max_pain_val = calculate_max_pain(combined)
+    except Exception:
+        max_pain_val = None
+    for sub in frames:
+        sub["max_pain"] = max_pain_val
+    return frames
+
+
+def _cboe_iv(iv):
+    """CBOE IV as a decimal, or None where it was not computed.
+
+    Measured on a live AAPL chain: 17% of contracts (3,646 total) come back
+    with `iv` exactly 0.0 — deep ITM and far OTM strikes CBOE does not solve.
+    That is "no measurement", not "zero volatility", and the difference is not
+    cosmetic: a real 0.0 would flow into IV rank, EV and every Greek as though
+    the contract could not move. Mapping it to None lets the existing
+    missing-data paths handle it, which is what they are for.
+
+    The other 83% are ordinary decimals (mean ~0.65 on that chain), the same
+    convention yfinance uses — `src.cross_check` compares the two unscaled.
+    """
+    v = safe_float(iv)
+    if v is None or v <= 0:
+        return None
+    return v
+
+
+def _cboe_mid(bid, ask):
+    """Bid/ask mid, or the one side that exists. None when the book is unusable.
+
+    A CROSSED book (bid above ask) returns None rather than falling back to one
+    side: crossing means the two quotes disagree about what the contract is
+    worth, so neither is evidence of a price. Picking one would launder a
+    data-quality failure into a number the scorer treats as real.
+    """
+    b, a = safe_float(bid), safe_float(ask)
+    b = b if (b is not None and b > 0) else None
+    a = a if (a is not None and a > 0) else None
+    if b is not None and a is not None:
+        return None if a < b else (b + a) / 2.0
+    return a if a is not None else b
+
+
 def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.DataFrame]:
     # yfinance returns an Options namedtuple defined dynamically — not pickleable.
     # Cache the (calls, puts) DataFrame pair as a plain dict instead.
@@ -2280,6 +2398,17 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
             _last_chain_err = _ce
             continue
 
+    _served_by_cboe = False
+    if not frames and _CBOE_FALLBACK_ENABLED:
+        # Yahoo's retry waves are exhausted by the time we get here. A delayed
+        # CBOE chain, labelled as such, beats no scan at all.
+        frames = _cboe_frames(symbol, expirations_to_scan)
+        _served_by_cboe = bool(frames)
+        if _served_by_cboe:
+            logging.warning("%s: Yahoo chain fetch failed (%s) — served from "
+                            "CBOE fallback (delayed, mid-priced)",
+                            symbol, _last_chain_err)
+
     if not frames:
         raise RuntimeError(_no_frames_message(symbol, _last_chain_err))
 
@@ -2491,6 +2620,10 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
         "df": df,
         "history_df": hist,
         "context": {
+            # True when Yahoo's chain failed and CBOE stood in. Surfaced in the
+            # data-quality line so a delayed, mid-priced chain is never mistaken
+            # for a live one.
+            "served_from_cboe": _served_by_cboe,
             "hv": hv_30d,
             "bb_width_pct": bb_width_pct,
             "hv_ewma": hv_ewma,

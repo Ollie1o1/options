@@ -1318,7 +1318,16 @@ def format_data_quality_summary(df_picks: pd.DataFrame) -> Optional[str]:
             parts.append(f"{n} {label}")
     if not parts:
         return None
-    return "Data quality: " + ", ".join(parts)
+    line = "Data quality: " + ", ".join(parts)
+    # A chain served by the CBOE failover is delayed AND mid-priced rather than
+    # last-traded. That has to travel with the freshness counts, or the reader
+    # sees "delayed" and assumes it is still Yahoo's book.
+    if "quote_source" in df_picks.columns:
+        n_cboe = int((df_picks["quote_source"] == "cboe").sum())
+        if n_cboe:
+            line += (f"  ·  {n_cboe} served from CBOE fallback "
+                     "(Yahoo unavailable; bid/ask mid, not last trade)")
+    return line
 
 
 def format_iv_crosscheck_summary(df_picks: pd.DataFrame) -> Optional[str]:
