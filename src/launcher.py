@@ -93,8 +93,13 @@ def _show_menu() -> str:
     after.append(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
                       tag="read-only"))
     after.append(_row("5", "HOLDINGS", "long-term stock accumulation — buy zones · tranches · TFSA book"))
-    after.append(_row("6", "SETTINGS", "theme · preferences"))
+    after.append(_row("6", "SETTINGS", "theme · preferences · doctor"))
     after.append(_row("Q", "QUIT", "", muted_key=True))
+    after.append("")
+    # The canonical entry point, stated where a first-time user is already
+    # looking. Six things start this project; only one of them needs learning.
+    _front_door = "  You are in the front door: python run.py  ·  new here? try [1] STOCKS"
+    after.append(fmt.style(_front_door, "muted") if HAS_UI else _front_door)
     after.append("")
     after.append(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
     for line in after:
@@ -214,6 +219,7 @@ def _settings_menu() -> None:
         print(ui.rule(WIDTH, "SETTINGS"))
         current_label = fmt.THEMES[fmt.get_theme()]["label"]
         print(_row("1", "THEME", f"currently: {current_label}"))
+        print(_row("2", "DOCTOR", "check this install: deps · network · config · scheduler"))
         print(_row("B", "BACK", "", muted_key=True))
         print(ui.rule(WIDTH))
         try:
@@ -225,8 +231,24 @@ def _settings_menu() -> None:
             return
         if choice in ("1", "THEME"):
             _theme_picker()
+        elif choice in ("2", "DOCTOR"):
+            _run_doctor()
         else:
-            print(f"  Unknown choice: {choice!r} — pick 1 or B")
+            print(f"  Unknown choice: {choice!r} — pick 1, 2 or B")
+
+
+def _run_doctor() -> None:
+    """Run the read-only install check and print its table.
+
+    Crash-isolated: a diagnostic that can take the launcher down with it is
+    worse than no diagnostic.
+    """
+    try:
+        from src.doctor import render, run_doctor
+        print()
+        print(render(run_doctor()))
+    except Exception as exc:  # noqa: BLE001 — diagnostics never break the menu
+        print(f"  Doctor unavailable: {exc}")
 
 
 def main() -> None:

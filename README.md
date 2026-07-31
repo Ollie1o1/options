@@ -123,29 +123,49 @@ The technical screener works out of the box — no API keys needed (uses Yahoo F
 
 > **Important:** Always run from the project root directory (`cd options`).
 
-### Recommended (works every time)
+### One command
 
 ```bash
-# Activate the venv first, then run normally
-source venv/bin/activate
-python -m src.options_screener
-python ai_rank.py AAPL TSLA NVDA
+python run.py
 ```
 
-### Auto-venv launchers (no activation needed)
+That is the front door. It finds the right interpreter, sets the working
+directory, opens the launcher menu, and forwards every flag through to the
+screener — so `python run.py -ds` and `python run.py --ticker AAPL --auto`
+work the same way. Nothing else needs activating first.
 
-If you don't want to activate the venv every time, use these launchers — they detect the venv automatically and re-launch under it:
+If something misbehaves, ask the install to describe itself:
 
 ```bash
-# Interactive screener (auto-activates venv)
-python3 run.py
-
-# AI-enhanced ranking (auto-activates venv)
-python3 ai_rank.py AAPL TSLA NVDA
-
-# Package-style entry point (auto-activates venv)
-python3 -m src
+python run.py            # then: [6] SETTINGS → [2] DOCTOR
+python -m src.doctor     # or run the same checks directly
 ```
+
+The doctor is read-only. It checks your Python version, dependency drift
+against `requirements-lock.txt`, network reachability, directory and database
+writability, `config.json` validity, and whether the scheduler is actually
+running — and prints a one-line fix beside anything that is not healthy.
+
+### Other entry points (power user / automation)
+
+These all still work; none of them is the one to learn first.
+
+| Entry point | What it is for |
+|---|---|
+| `run.sh` / `run.bat` | Platform wrappers around `run.py` (shell / Windows) |
+| `python -m src.launcher` | The launcher menu directly, skipping `run.py`'s interpreter handling |
+| `python -m src.options_screener` | The screener directly, skipping the launcher menu |
+| `start_all.py` | Starts the API and bots, not the interactive screener |
+| `python -m src.check_pnl` | Portfolio viewer |
+| `streamlit run src/dashboard.py` | Web dashboard |
+
+**Platform support:** the screener itself runs on macOS, Linux and Windows.
+*Scheduled automation is macOS-only* — it uses launchd, and the plists in
+`scripts/` install user LaunchAgents. On Linux and Windows nothing runs on a
+timer: auto-logging, exit checks, the weekly checkpoint and the track-record
+refresh only happen when you open the app, which is a supported way to run it
+but means the cohort fills more slowly and exits are checked less often. See
+the stop-overshoot note in `reports/TRACK_RECORD.md` for what that costs.
 
 ### Shortest: the `options` shell command (optional)
 
@@ -167,7 +187,7 @@ options --ticker AAPL --auto --no-ai    # single-ticker, unattended
 
 All `run.py` flags (including the `-ds`/`-sps`/`-ics`/`-ss` shortcuts and `--logging-help`) pass straight through.
 
-> **Why does this matter?** The project has ~30 dependencies (pandas, openai, rich, etc.) installed in the `venv/` directory. If you run `python3 -m src.options_screener` without activating the venv first, Python uses your system interpreter which doesn't have these packages — you'll get missing module errors, no colors in the AI table, and broken API calls. The launchers above handle this automatically.
+> **Why does this matter?** The project has ~30 dependencies (pandas, openai, rich, etc.). Invoking a module directly with a bare `python3` uses your system interpreter, which does not have them — you get missing-module errors, no colors, and broken API calls. `run.py` resolves the interpreter for you, which is why it is the documented front door. If you would rather manage that yourself, install from `requirements-lock.txt` (not `requirements.txt`) and run `python -m src.doctor` to confirm the versions match.
 
 ### All commands
 

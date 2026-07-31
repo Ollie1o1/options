@@ -22,7 +22,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple, Union
 
 try:  # colour when a TTY formatter is available; plain text otherwise
     from src import formatting as _fmt
@@ -85,20 +85,36 @@ class LaunchdJob:
 _EX_CONFIG = 78
 
 
-def parse_launchctl_list(output: str, prefix: str) -> List["LaunchdJob"]:
+# Every label prefix this project's scheduled jobs have shipped under. Both are
+# live in the wild: the repo installs `com.options-screener.*`, while agents
+# installed earlier are `com.ollie.options.*`. Detection must match either, or
+# the dead-scheduler machinery goes quiet on exactly the machines that need it.
+LAUNCHD_LABEL_PREFIXES: Tuple[str, ...] = ("com.options-screener", "com.ollie.options")
+
+
+def parse_launchctl_list(output: str,
+                         prefix: Union[str, Sequence[str]]) -> List["LaunchdJob"]:
     """Parse `launchctl list` into our jobs. Unparseable lines are skipped.
+
+    `prefix` may be one prefix or several. Several is the normal case: the
+    repo ships `scripts/com.options-screener.maintenance.plist`, but agents
+    installed before that naming carry `com.ollie.options.*`, and matching only
+    one of them means `launchctl list` returns nothing, which reads as "no
+    scheduler to worry about" rather than "three dead jobs" — the exact silent
+    failure this module exists to end.
 
     The state file cannot answer this question: the interactive path stamps it
     too, so a scheduler that has not fired in six weeks still looks recent
     whenever someone opens the screener by hand.
     """
+    prefixes = (prefix,) if isinstance(prefix, str) else tuple(prefix)
     jobs: List[LaunchdJob] = []
     for line in (output or "").splitlines():
         parts = line.split("\t") if "\t" in line else line.split()
         if len(parts) < 3:
             continue
         pid_raw, status_raw, label = parts[0], parts[1], parts[-1]
-        if not label.startswith(prefix):
+        if not any(label.startswith(p) for p in prefixes):
             continue
         try:
             status = int(status_raw)
@@ -124,7 +140,9 @@ def launchd_failure_message(jobs: List["LaunchdJob"]) -> Optional[str]:
     return msg
 
 
-def read_launchd_status(prefix: str = "com.options-screener") -> List["LaunchdJob"]:
+def read_launchd_status(
+    prefix: Union[str, Sequence[str]] = LAUNCHD_LABEL_PREFIXES,
+) -> List["LaunchdJob"]:
     """Live `launchctl list`. Returns [] if launchctl is unavailable — this is a
     diagnostic, and must never be the reason a run fails."""
     import subprocess

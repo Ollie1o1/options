@@ -13,9 +13,20 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.maintenance_health import (
+    LAUNCHD_LABEL_PREFIXES,
     launchd_failure_message,
     parse_launchctl_list,
 )
+
+# The labels actually installed on the operator's machine, which predate the
+# repo's own `com.options-screener.*` plist. Detection that matches only the
+# shipped prefix returns [] here, and an empty list reads as "healthy".
+_BROKEN_LEGACY_LABELS = """PID\tStatus\tLabel
+-\t78\tcom.ollie.options.crypto-enforce-exits
+-\t78\tcom.ollie.options.maintenance
+-\t78\tcom.ollie.options.crypto-auto-log
+-\t0\tcom.apple.something
+"""
 
 _HEALTHY = """PID\tStatus\tLabel
 -\t0\tcom.options-screener.maintenance
@@ -36,6 +47,22 @@ class TestParsing(unittest.TestCase):
         jobs = parse_launchctl_list(_HEALTHY, prefix="com.options-screener")
         self.assertEqual(len(jobs), 2)
         self.assertTrue(all(j.label.startswith("com.options-screener") for j in jobs))
+
+    def test_the_default_prefixes_match_the_labels_actually_installed(self):
+        # The regression this guards: with a single shipped prefix, the three
+        # agents that have been dead since 2026-06-15 parse to [], and every
+        # consumer downstream reads [] as "nothing failing".
+        jobs = parse_launchctl_list(_BROKEN_LEGACY_LABELS, LAUNCHD_LABEL_PREFIXES)
+        self.assertEqual(len(jobs), 3)
+        self.assertTrue(all(j.failed for j in jobs))
+
+    def test_the_default_prefixes_still_match_the_shipped_plist(self):
+        jobs = parse_launchctl_list(_BROKEN, LAUNCHD_LABEL_PREFIXES)
+        self.assertEqual(len(jobs), 3)
+
+    def test_a_single_prefix_string_is_still_accepted(self):
+        jobs = parse_launchctl_list(_HEALTHY, "com.options-screener")
+        self.assertEqual(len(jobs), 2)
 
     def test_reads_the_last_exit_status(self):
         jobs = {j.label: j for j in parse_launchctl_list(_BROKEN, "com.options-screener")}
