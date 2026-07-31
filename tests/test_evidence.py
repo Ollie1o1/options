@@ -5,8 +5,12 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import date
 
-from src.evidence import load_model_evidence, format_evidence_banner, GATE_TARGET_N
+from src.evidence import (
+    load_model_evidence, format_evidence_banner, GATE_TARGET_N,
+    WALK_FORWARD_STALE_DAYS,
+)
 
 
 class TestLoadModelEvidence(unittest.TestCase):
@@ -38,6 +42,11 @@ class TestLoadModelEvidence(unittest.TestCase):
             self.assertEqual(ev["cohort_n"], 2)
             self.assertEqual(ev["gate_decision"], "GATHERING")
             self.assertEqual(ev["as_of"], "2026-06-07")
+            # wf_as_of is the walk-forward artifact's OWN date — unlike
+            # as_of, it is never bumped forward by the (weekly, so almost
+            # always more recent) checkpoint date. Staleness flagging reads
+            # this field specifically.
+            self.assertEqual(ev["wf_as_of"], "2026-05-29T11:27:48")
 
     def test_missing_files_safe_defaults(self):
         with tempfile.TemporaryDirectory() as d:
@@ -48,6 +57,7 @@ class TestLoadModelEvidence(unittest.TestCase):
             self.assertEqual(ev["cohort_n"], 0)
             self.assertEqual(ev["gate_decision"], "UNKNOWN")
             self.assertIsNone(ev["as_of"])
+            self.assertIsNone(ev["wf_as_of"])
 
     def test_banner_with_evidence(self):
         ev = {
@@ -66,6 +76,73 @@ class TestLoadModelEvidence(unittest.TestCase):
         }
         banner = format_evidence_banner(ev)
         self.assertIn("OOS IC n/a", banner)
+
+
+class TestWalkForwardStaleness(unittest.TestCase):
+    """The banner shows the walk-forward artifact's own age and flags it once
+    it's older than WALK_FORWARD_STALE_DAYS — the artifact only regenerates
+    monthly (src/maintenance.py due_walk_forward), so a stale number left
+    unlabeled would read as current evidence."""
+
+    def _ev(self, wf_as_of):
+        return {
+            "pooled_ic": 0.10, "p_value": 0.48, "n_oos": 94,
+            "cohort_n": 2, "gate_decision": "GATHERING", "as_of": "2026-06-07",
+            "wf_as_of": wf_as_of,
+            "cohort_ic_pearson": 0.048, "cohort_ic_spearman": -0.020,
+        }
+
+    def test_shows_as_of_date_and_age(self):
+        ev = self._ev("2026-05-29T11:27:48")
+        banner = format_evidence_banner(ev, today=date(2026, 7, 31))
+        self.assertIn("as of 2026-05-29", banner)
+        self.assertIn("63d old", banner)  # 2026-05-29 -> 2026-07-31
+
+    def test_flags_when_older_than_30_days(self):
+        ev = self._ev("2026-05-29T11:27:48")
+        banner = format_evidence_banner(ev, today=date(2026, 7, 31))
+        self.assertIn(f"STALE >{WALK_FORWARD_STALE_DAYS}d", banner)
+
+    def test_no_flag_at_exactly_30_days(self):
+        ev = self._ev("2026-06-01")
+        banner = format_evidence_banner(ev, today=date(2026, 7, 1))  # 30 days
+        self.assertNotIn("STALE", banner)
+        self.assertIn("30d old", banner)
+
+    def test_no_flag_when_fresh(self):
+        ev = self._ev("2026-07-25")
+        banner = format_evidence_banner(ev, today=date(2026, 7, 31))
+        self.assertNotIn("STALE", banner)
+        self.assertIn("6d old", banner)
+
+    def test_no_age_segment_when_wf_as_of_unrecorded(self):
+        ev = self._ev(None)
+        banner = format_evidence_banner(ev, today=date(2026, 7, 31))
+        self.assertNotIn("walk-forward as of", banner)
+        self.assertNotIn("STALE", banner)
+        # cohort segment still renders on its own second line
+        self.assertIn("cohort IC", banner)
+
+    def test_lines_stay_within_ui_banner_100_char_budget(self):
+        # A reviewer flagged the pre-restructure single-line banner at ~123
+        # chars against ui.banner's 100-char rule; adding the as_of date only
+        # grows it further, so the banner is two lines instead. Every line
+        # must independently respect the budget.
+        ev = self._ev("2026-05-29T11:27:48")
+        banner = format_evidence_banner(ev, today=date(2026, 7, 31))
+        lines = banner.split("\n")
+        self.assertGreaterEqual(len(lines), 2)
+        for ln in lines:
+            self.assertLessEqual(len(ln), 100, msg=f"line too long ({len(ln)}): {ln!r}")
+
+    def test_single_line_when_nothing_extra_to_report(self):
+        ev = {
+            "pooled_ic": 0.10, "p_value": 0.48, "n_oos": 94,
+            "cohort_n": 2, "gate_decision": "GATHERING", "as_of": "2026-06-07",
+            "wf_as_of": None, "cohort_ic_pearson": None, "cohort_ic_spearman": None,
+        }
+        banner = format_evidence_banner(ev, today=date(2026, 7, 31))
+        self.assertNotIn("\n", banner)
 
 
 class TestTrackRecordRender(unittest.TestCase):

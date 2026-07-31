@@ -20,6 +20,15 @@ class TestThrottle(unittest.TestCase):
     def test_checkpoint_due_when_never_run(self):
         self.assertTrue(m.due_checkpoint({}, "2026-06-07"))
 
+    def test_walk_forward_due_after_30_days(self):
+        self.assertTrue(m.due_walk_forward({"last_walk_forward": "2026-05-01"}, "2026-05-31"))
+
+    def test_walk_forward_not_due_within_30_days(self):
+        self.assertFalse(m.due_walk_forward({"last_walk_forward": "2026-05-10"}, "2026-05-31"))
+
+    def test_walk_forward_due_when_never_run(self):
+        self.assertTrue(m.due_walk_forward({}, "2026-06-07"))
+
 
 class TestDueAutologWindows(unittest.TestCase):
     """Catch-up model: a single market-hours launch returns EVERY working
@@ -121,7 +130,8 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=state_path,
                 now=datetime(2026, 6, 4, 14, 30), runner=fake_runner,
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             flags = {f for c in calls for f in c if f in ("-ds", "-sps", "-ss", "-ics")}
             self.assertEqual(flags, {"-ds", "-sps", "-ss", "-ics"})
             st = m.load_state(state_path)
@@ -141,7 +151,8 @@ class TestOrchestrator(unittest.TestCase):
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
                 background=True, spawn_fn=lambda: spawned.append(True),
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertEqual(calls, [])           # no inline scans
             self.assertEqual(len(spawned), 1)     # detached catch-up fired once
             self.assertTrue(any("queued" in r for r in summary["ran"]))
@@ -207,7 +218,7 @@ class TestOrchestrator(unittest.TestCase):
                 now=datetime(2026, 6, 4, 10, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
                 checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
-                chain_archive_fn=lambda: 0)
+                chain_archive_fn=lambda: 0, walk_forward_fn=lambda **k: None)
             ds_cmds = [c for c in calls if "-ds" in c]
             self.assertEqual(len(ds_cmds), 1)
             joined = " ".join(ds_cmds[0])
@@ -224,7 +235,7 @@ class TestOrchestrator(unittest.TestCase):
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
                 checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
-                chain_archive_fn=lambda: 0)
+                chain_archive_fn=lambda: 0, walk_forward_fn=lambda **k: None)
             ics_cmds = [c for c in calls if "-ics" in c]
             self.assertEqual(len(ics_cmds), 1)
             self.assertNotIn("--min-dte", " ".join(ics_cmds[0]))
@@ -238,7 +249,8 @@ class TestOrchestrator(unittest.TestCase):
             sp = os.path.join(d, "state.json")
             kw = dict(db_path=db, phase1_start="2026-05-27", state_path=sp,
                       now=datetime(2026, 6, 4, 14, 30), runner=fake_runner,
-                      checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                      checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                      walk_forward_fn=lambda **k: None)
             m.run_startup_maintenance(**kw)
             calls.clear()
             m.run_startup_maintenance(**kw)
@@ -255,7 +267,8 @@ class TestOrchestrator(unittest.TestCase):
             m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
                 now=datetime(2026, 6, 7, 14, 30), runner=fake_runner,
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertFalse(calls)
 
     def test_checkpoint_runs_when_due_and_records_state(self):
@@ -267,7 +280,8 @@ class TestOrchestrator(unittest.TestCase):
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
                 now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
                 checkpoint_fn=lambda **k: ran.append(k),
-                track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertEqual(len(ran), 1)
             self.assertEqual(m.load_state(sp)["last_checkpoint"], "2026-06-07")
             self.assertIn("checkpoint", summary["ran"])
@@ -281,12 +295,60 @@ class TestOrchestrator(unittest.TestCase):
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
                 now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
                 checkpoint_fn=lambda **k: None,
-                track_record_fn=lambda **k: ran.append(k), chain_archive_fn=lambda: 0)
+                track_record_fn=lambda **k: ran.append(k), chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             # injected fn was used (no real reports/TRACK_RECORD.md written)
             self.assertEqual(len(ran), 1)
             self.assertEqual(ran[0]["db_path"], db)
             self.assertEqual(m.load_state(sp)["last_track_record"], "2026-06-07")
             self.assertIn("track_record", summary["ran"])
+
+    def test_walk_forward_runs_when_due_and_is_injectable(self):
+        ran = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: ran.append(k))
+            # injected fn was used (no real walk-forward artifact written)
+            self.assertEqual(len(ran), 1)
+            self.assertEqual(ran[0]["db_path"], db)
+            self.assertEqual(m.load_state(sp)["last_walk_forward"], "2026-06-07")
+            self.assertIn("walk-forward", summary["ran"])
+
+    def test_walk_forward_throttled_within_30_days(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            m.save_state(sp, {"last_walk_forward": "2026-06-01"})
+            calls = []
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: calls.append(k))
+            self.assertEqual(calls, [])
+            self.assertNotIn("walk-forward", summary["ran"])
+            self.assertEqual(m.load_state(sp)["last_walk_forward"], "2026-06-01")
+
+    def test_walk_forward_failure_does_not_propagate(self):
+        def boom(**k):
+            raise RuntimeError("scipy blew up")
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: 0, walk_forward_fn=boom)
+            self.assertIn("cohort", summary)
+            self.assertNotIn("walk-forward", summary["ran"])
 
     def test_runner_exception_does_not_propagate(self):
         def boom(cmd):
@@ -297,7 +359,8 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_startup_maintenance(
                 db_path=db, phase1_start="2026-05-27", state_path=sp,
                 now=datetime(2026, 6, 4, 14, 30), runner=boom,
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertIn("cohort", summary)
 
 
@@ -376,7 +439,8 @@ class TestChildGuard(unittest.TestCase):
                     state_path=os.path.join(d, "state.json"),
                     now=datetime(2026, 6, 4, 14, 30),  # in 'ics' window: would spawn
                     runner=lambda cmd: (calls.append(cmd), 0)[1],
-                    checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                    checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             finally:
                 if old is None:
                     os.environ.pop(m.CHILD_ENV_MARKER, None)
@@ -446,7 +510,8 @@ class TestChainArchiveJob(unittest.TestCase):
                       runner=lambda cmd: 0,
                       checkpoint_fn=lambda **k: None,
                       track_record_fn=lambda **k: None,
-                      chain_archive_fn=lambda: hits.append(1) or 7)
+                      chain_archive_fn=lambda: hits.append(1) or 7,
+                      walk_forward_fn=lambda **k: None)
             summary = m.run_startup_maintenance(**kw)
             self.assertEqual(len(hits), 1)
             self.assertIn("chain-archive:7rows", summary["ran"])
@@ -463,7 +528,8 @@ class TestChainArchiveJob(unittest.TestCase):
                 state_path=os.path.join(d, "state.json"),
                 now=datetime(2026, 6, 4, 9, 30), runner=lambda cmd: 0,
                 checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
-                chain_archive_fn=lambda: hits.append(1) or 0)
+                chain_archive_fn=lambda: hits.append(1) or 0,
+                walk_forward_fn=lambda **k: None)
             self.assertEqual(hits, [])
 
 
@@ -493,7 +559,8 @@ class TestHeadless(unittest.TestCase):
                 state_path=os.path.join(d, "state.json"),
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertIn("cohort", summary)
             self.assertTrue(any("-ics" in " ".join(c) for c in calls))
 
@@ -505,7 +572,8 @@ class TestHeadless(unittest.TestCase):
                 state_path=os.path.join(d, "state.json"),
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: 0,
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertIsInstance(summary, dict)
 
     def test_headless_enforces_exits_every_run(self):
@@ -524,7 +592,8 @@ class TestHeadless(unittest.TestCase):
                 now=datetime(2026, 6, 4, 9, 0),
                 runner=lambda cmd: 0,
                 enforce_exits_fn=lambda **k: enforced.append(k),
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertEqual(len(enforced), 1, "exits must be enforced exactly once per headless run")
             self.assertEqual(enforced[0]["db_path"], db)
 
@@ -539,7 +608,8 @@ class TestHeadless(unittest.TestCase):
                 now=datetime(2026, 6, 4, 9, 0),
                 runner=lambda cmd: 0,
                 enforce_exits_fn=_boom,
-                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0)
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None)
             self.assertIsInstance(summary, dict)
 
 

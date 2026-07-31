@@ -78,6 +78,19 @@ def due_track_record(state: dict, today: str, min_days: int = 7) -> bool:
         return True
 
 
+def due_walk_forward(state: dict, today: str, min_days: int = 30) -> bool:
+    """Walk-forward OOS re-validation runs at most monthly (same pattern as
+    checkpoint/track-record). This is what keeps ``reports/walk_forward_*.json``
+    — the artifact the evidence banner ages against — from going stale silently."""
+    last = (state or {}).get("last_walk_forward")
+    if not last:
+        return True
+    try:
+        return _days_between(last, today) >= min_days
+    except ValueError:
+        return True
+
+
 # The working strategies — the ones that have earned their place in the ledger —
 # each logged once per day. (key, run.py-flag). Order is the run order.
 #   ds  long calls (cohort feeder, carries the DTE floor)
@@ -321,6 +334,15 @@ def _run_track_record(db_path: str) -> None:
     publish(db_path=db_path, reports_dir="reports")
 
 
+def _run_walk_forward(db_path: str) -> None:
+    """Regenerate the walk-forward OOS artifact the evidence banner reads its
+    'as of' date from. Pure local computation over ``trades`` (fits/scores
+    folds, bootstraps a CI) — no network — so it runs in-process like the
+    checkpoint and track-record jobs rather than via the subprocess runner."""
+    from src import walk_forward
+    walk_forward.run_walk_forward(db_path=db_path, output_dir="reports")
+
+
 def _default_enforce_exits(db_path: str, config_path: str = "config.json") -> None:
     """Mark-to-market open paper trades and close any that hit a take-profit,
     stop-loss, time-exit, or expiry threshold. Same path the interactive
@@ -375,7 +397,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             checkpoint_fn: Optional[Callable] = None,
                             track_record_fn: Optional[Callable] = None,
                             chain_archive_fn: Optional[Callable] = None,
-                            morning_fn: Optional[Callable] = None) -> dict:
+                            morning_fn: Optional[Callable] = None,
+                            walk_forward_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -470,6 +493,20 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
+    # 6. Monthly walk-forward OOS re-validation (>=30 days), read-only over the
+    #    db. Refreshes reports/walk_forward_<strategy>_<date>.json, the artifact
+    #    the evidence banner reads its 'as of' date and staleness flag from —
+    #    without this it goes stale forever once nobody remembers to re-run it
+    #    by hand.
+    try:
+        if due_walk_forward(state, today):
+            fn = walk_forward_fn or _run_walk_forward
+            fn(db_path=db_path)
+            state["last_walk_forward"] = today
+            ran.append("walk-forward")
+    except Exception:
+        pass
+
     try:
         save_state(state_path, state)
     except Exception:
@@ -494,7 +531,8 @@ def run_headless(db_path: str = "paper_trades.db",
                  checkpoint_fn: Optional[Callable] = None,
                  track_record_fn: Optional[Callable] = None,
                  chain_archive_fn: Optional[Callable] = None,
-                 morning_fn: Optional[Callable] = None) -> dict:
+                 morning_fn: Optional[Callable] = None,
+                 walk_forward_fn: Optional[Callable] = None) -> dict:
     """Run startup maintenance without the interactive screener.
 
     The LaunchAgent entry: reads phase1_start from config.json itself,
@@ -528,7 +566,7 @@ def run_headless(db_path: str = "paper_trades.db",
             db_path=db_path, phase1_start=phase1_start, state_path=state_path,
             now=now, runner=runner, checkpoint_fn=checkpoint_fn,
             track_record_fn=track_record_fn, chain_archive_fn=chain_archive_fn,
-            morning_fn=morning_fn)
+            morning_fn=morning_fn, walk_forward_fn=walk_forward_fn)
     except Exception:
         return {"cohort": "", "ran": []}
 

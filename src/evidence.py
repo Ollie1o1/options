@@ -12,11 +12,17 @@ import csv
 import glob
 import json
 import os
+from datetime import date
 from typing import Any, Dict, Optional
 
 # Forward-cohort gate target: the checkpoint job needs >= this many closed
 # cohort trades before the validation gate can fire (see reports/checkpoint_*.md).
 GATE_TARGET_N = 50
+
+# The walk-forward artifact is only re-run monthly (src/maintenance.py
+# due_walk_forward); past this many days since its own generated_at, the
+# banner flags it so a stale OOS number is never read as fresh evidence.
+WALK_FORWARD_STALE_DAYS = 30
 
 
 def _latest_by_mtime(pattern: str) -> Optional[str]:
@@ -38,6 +44,10 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
           "cohort_n":      int,            # forward-cohort size (latest checkpoint)
           "gate_decision": str,            # e.g. "GATHERING" / "READY" / "UNKNOWN"
           "as_of":         str | None,     # most recent artifact timestamp/date
+          "wf_as_of":      str | None,     # walk-forward artifact's OWN date,
+                                            # never overridden by the (more
+                                            # frequent) checkpoint date, so the
+                                            # banner can flag it going stale
           "cohort_ic_pearson":  float | None,  # gate statistic, latest checkpoint
           "cohort_ic_spearman": float | None,  # rank IC beside it (None pre-2026-07)
         }
@@ -49,6 +59,7 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
         "cohort_n": 0,
         "gate_decision": "UNKNOWN",
         "as_of": None,
+        "wf_as_of": None,
         "cohort_ic_pearson": None,
         "cohort_ic_spearman": None,
     }
@@ -67,6 +78,7 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
                 ev["n_oos"] = int(wf["n_total_trades"])
             if wf.get("generated_at"):
                 ev["as_of"] = str(wf["generated_at"])
+                ev["wf_as_of"] = str(wf["generated_at"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             pass
 
@@ -125,15 +137,28 @@ def _rank_ic_field(row: Dict[str, Any], fields: list) -> Optional[float]:
     return None
 
 
-def format_evidence_banner(ev: Optional[Dict[str, Any]] = None) -> str:
+def format_evidence_banner(ev: Optional[Dict[str, Any]] = None,
+                           today: Optional[date] = None) -> str:
     """
-    One-line, honest evidence label for the ranking model, e.g.:
-      'Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate: GATHERING
-       (n=2/50) | cohort IC +0.048 pearson / -0.020 rank'
+    Honest evidence label for the ranking model. One line when there is
+    nothing to say about walk-forward age or the cohort rank IC, two when
+    there is (each line kept under ui.banner's 100-char budget rather than
+    growing one line without bound), e.g.:
+
+      'Ranking model: EXPERIMENTAL — OOS IC +0.10 (p=0.48, n=94) | gate:
+       GATHERING (n=2/50)
+       OOS walk-forward as of 2026-05-29 (63d old, STALE >30d) | cohort IC
+       +0.048 pearson / -0.020 rank'
 
     The cohort IC is shown as both statistics because on floored option returns
     they routinely disagree, and reporting only the Pearson one overstates the
-    evidence. Reads from load_model_evidence() when ``ev`` is not supplied.
+    evidence. The walk-forward artifact is only regenerated monthly (see
+    src/maintenance.py due_walk_forward), so its own age is surfaced and
+    flagged past WALK_FORWARD_STALE_DAYS — reading it as fresh past that point
+    would overstate how current the OOS number is.
+
+    Reads from load_model_evidence() when ``ev`` is not supplied. ``today``
+    is injectable for deterministic tests; defaults to date.today().
     """
     if ev is None:
         ev = load_model_evidence()
@@ -148,11 +173,43 @@ def format_evidence_banner(ev: Optional[Dict[str, Any]] = None) -> str:
 
     gate = ev.get("gate_decision", "UNKNOWN") or "UNKNOWN"
     cohort_n = ev.get("cohort_n") or 0
-    return (
+    line1 = (
         f"Ranking model: EXPERIMENTAL — {oos} | "
         f"gate: {gate} (n={cohort_n}/{GATE_TARGET_N})"
-        f"{_cohort_ic_segment(ev)}"
     )
+
+    line2_parts = [seg for seg in (
+        _walk_forward_age_segment(ev, today),
+        _cohort_ic_segment(ev).lstrip(" |"),
+    ) if seg]
+    if not line2_parts:
+        return line1
+    return line1 + "\n" + " | ".join(line2_parts)
+
+
+def _walk_forward_age_days(wf_as_of: Optional[str], today: Optional[date] = None) -> Optional[int]:
+    """Calendar days between the walk-forward artifact's own date and today."""
+    if not wf_as_of:
+        return None
+    try:
+        as_of_date = date.fromisoformat(str(wf_as_of)[:10])
+    except ValueError:
+        return None
+    return ((today or date.today()) - as_of_date).days
+
+
+def _walk_forward_age_segment(ev: Dict[str, Any], today: Optional[date] = None) -> str:
+    """'OOS walk-forward as of 2026-05-29 (63d old, STALE >30d)', or '' when
+    the walk-forward artifact's own date is unrecorded."""
+    wf_as_of = ev.get("wf_as_of")
+    if not wf_as_of:
+        return ""
+    date_str = str(wf_as_of)[:10]
+    age = _walk_forward_age_days(wf_as_of, today)
+    if age is None:
+        return f"OOS walk-forward as of {date_str}"
+    flag = f", STALE >{WALK_FORWARD_STALE_DAYS}d" if age > WALK_FORWARD_STALE_DAYS else ""
+    return f"OOS walk-forward as of {date_str} ({age}d old{flag})"
 
 
 def _cohort_ic_segment(ev: Dict[str, Any]) -> str:
