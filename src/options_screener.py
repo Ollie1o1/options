@@ -73,6 +73,7 @@ from .filters import (
 )
 from .paper_manager import PaperManager
 from .capital_risk import pick_within_budget
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 # Enhanced CLI modules
 try:
@@ -1267,7 +1268,7 @@ def calculate_metrics(
     # Was: deducted only one half-spread (entry). Now: full round-trip spread crossing
     # (open + close) plus commission both sides. gross/cost broken out for transparency.
     from .trade_analysis import net_ev_per_contract as _net_ev
-    _commission = float(config.get("paper_trading", {}).get("commission_per_contract", 0.65))
+    _commission = float(config.get("paper_trading", {}).get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     _spread_arr = df["spread_pct"].fillna(0.0).values
     _gross_edge = hv_payoff - prem_vals
     df["ev_gross_per_contract"] = 100.0 * _gross_edge
@@ -3536,7 +3537,9 @@ def _score_fetched_data(
         tb = traceback.format_exc()
         result["error"] = str(e)
         try:
-            debug_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_errors.log")
+            _logdir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+            os.makedirs(_logdir, exist_ok=True)
+            debug_path = os.path.join(_logdir, "scan_errors.log")
             with open(debug_path, "a") as _f:
                 _f.write(f"\n=== {symbol} ({mode}) ===\n{tb}\n")
         except Exception:
@@ -3560,6 +3563,22 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
 
 
 _MULTILEG_MODES = ("Credit Spreads", "Iron Condor", "Vertical Spreads")
+
+
+def _export_path(filename: str) -> str:
+    """Put generated CSVs under exports/ rather than the repo root.
+
+    Both directories already exist and are gitignored; the root is what a
+    cloner sees first, and scan exports accumulating there read as though they
+    were part of the project.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = os.path.join(root, "exports")
+    try:
+        os.makedirs(out, exist_ok=True)
+    except OSError:
+        return filename  # last resort: cwd, rather than failing the export
+    return os.path.join(out, filename)
 
 # Shown above the mode menu. The menu is already tall and several modes are
 # tagged "no edge" or "read-only", so a newcomer cannot tell which of thirteen
@@ -4495,7 +4514,7 @@ def run_top_scan(
 
     if export_csv:
         ts = datetime.now().strftime("%Y%m%d_%H%M")
-        fname = f"scan_results_{ts}.csv"
+        fname = _export_path(f"scan_results_{ts}.csv")
         export_cols = [
             "symbol", "type", "strike", "expiration", "T_years",
             "bid", "ask", "premium", "delta", "impliedVolatility",
@@ -4642,7 +4661,7 @@ def main():
                 ("--close-trades", "Update trade log with closing P/L"),
                 ("--ui",           "Launch the Streamlit dashboard"),
                 ("--top N",        "Cross-ticker top-N scan (default 10), grouped by DTE bucket"),
-                ("--export csv",   "Export top scan results to scan_results_YYYYMMDD_HHMM.csv"),
+                ("--export csv",   "Export top scan results to exports/scan_results_YYYYMMDD_HHMM.csv"),
                 ("--watchlist N",  "Use named watchlist from config (liquid_large_cap, sector_etfs, high_iv, income)"),
                 ("--no-cache",    "Disable all caching (requests, AI scores, IV history)"),
                 ("--tearsheet N",  "Open an HTML tearsheet for pick N (skips the prompt)"),
@@ -5277,7 +5296,7 @@ def main():
                 # ── Auto-export if --export csv was passed ──────────────────────
                 if getattr(args, "export", None) and str(args.export).lower() == "csv" and not picks.empty:
                     _ts = datetime.now().strftime("%Y%m%d_%H%M")
-                    _auto_fname = f"scan_results_{_ts}.csv"
+                    _auto_fname = _export_path(f"scan_results_{_ts}.csv")
                     _export_cols = [
                         "symbol", "type", "strike", "expiration",
                         "bid", "ask", "premium", "delta", "impliedVolatility",

@@ -32,6 +32,22 @@ DEFAULT_LEDGER = "paper_trades.db"
 # Below this many matched contract-days a bucket cannot set a cost constant.
 MIN_OBSERVATIONS = 10
 
+# The commission used ONLY when no config is reachable. Every normal path reads
+# `config.paper_trading.commission_per_contract`, which is 0.0 — this operator's
+# broker (Wealthsimple) charges nothing per equity or ETF option contract.
+#
+# This fallback is deliberately NOT 0.0. It fires when a helper is constructed
+# directly without a commission threaded through — typically a standalone
+# backtest — and in that situation a US-retail rate overstates cost, while 0.0
+# would understate it. Overstating is the safe direction: it can make a
+# strategy look worse than it is, never better.
+#
+# One number, one place. When the broker changes, change it here. Note that a
+# single scalar cannot express index options, which DO carry a per-contract fee
+# (SPX/SPXW $1.00, VIX $1.00, RUT $0.50, XSP $0.25) — see the
+# `index-options-are-not-free` entry before any SPX work.
+FALLBACK_COMMISSION_PER_CONTRACT = 0.65
+
 
 def _key(strategy: str) -> str:
     return (strategy or "").strip().lower()
@@ -129,7 +145,7 @@ class CostModel:
 
     def __init__(self, table: Optional[Dict[str, Dict[str, Any]]] = None,
                  default_half_spread: float = 0.05,
-                 commission_per_contract: float = 0.65,
+                 commission_per_contract: float = FALLBACK_COMMISSION_PER_CONTRACT,
                  fx_rate: float = 0.0,
                  multiplier: float = 100.0):
         self.table = table or {}

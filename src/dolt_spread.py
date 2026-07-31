@@ -19,6 +19,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.dolt_cohort import _stats
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 from src.paper_manager import (_evaluate_multileg_exit,
                                _legs_intrinsic_close_value,
                                _normalize_exit_rules)
@@ -99,7 +100,7 @@ def _leg(chain, strike, expiration, side: str = "put"):
 
 def simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
                     short_delta=0.25, long_delta=0.10, target_dte=35, db_path=None,
-                    commission_per_contract=0.65, contract_multiplier=100,
+                    commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT, contract_multiplier=100,
                     entry_filter=None, side: str = "put") -> Optional[Dict[str, Any]]:
     """Sell one credit spread, manage via canonical spread exits.
 
@@ -212,9 +213,9 @@ def run_spread_backtest(symbols, dates, short_delta=0.25, long_delta=0.10,
     rules = _normalize_exit_rules(_load_cfg(config_path))
     try:
         commission = float(_load_cfg(config_path).get("paper_trading", {})
-                           .get("commission_per_contract", 0.65))
+                           .get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     except Exception:
-        commission = 0.65
+        commission = FALLBACK_COMMISSION_PER_CONTRACT
     spot_db = db_path or "data/dolt_options.db"
     import sys
     _missing = [s.upper() for s in symbols if not _do.symbol_has_data(s, spot_db)]

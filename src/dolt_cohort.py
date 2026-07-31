@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 # Single source of truth: the SAME exit evaluator the paper ledger + live
 # execution use (TP, deep-ITM delta TP, time exit, SL — researched, config-driven).
 from src.paper_manager import _evaluate_long_single_leg_exit, _normalize_exit_rules
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 _RFR = 0.045
 
@@ -53,7 +54,7 @@ def _reason_bucket(reason: str) -> str:
 
 def simulate_trade(symbol, entry_date, spot, sdates, rules,
                    spots=None, target_dte=35, db_path=None,
-                   commission_per_contract=0.65,
+                   commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT,
                    contract_multiplier=100, entry_filter=None) -> Optional[Dict[str, Any]]:
     """Simulate one cohort long-call trade on real marks, exiting via the canonical
     _evaluate_long_single_leg_exit (TP / deep-ITM delta TP / time exit / SL).
@@ -131,9 +132,9 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
     # Real commission from config (paper_trading.commission_per_contract).
     try:
         commission = float(json.load(open(config_path)).get("paper_trading", {})
-                           .get("commission_per_contract", 0.65))
+                           .get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     except Exception:
-        commission = 0.65
+        commission = FALLBACK_COMMISSION_PER_CONTRACT
     trades: List[Dict[str, Any]] = []
     _spot_db = db_path or "data/dolt_options.db"
     import sys

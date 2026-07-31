@@ -8,10 +8,11 @@ import math
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 
 def net_ev_per_contract(gross_edge_per_share, premium, spread_pct,
-                        commission_per_contract=0.65, contract_multiplier=100,
+                        commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT, contract_multiplier=100,
                         round_trip=True):
     """Expected value per contract AFTER realistic transaction costs.
 

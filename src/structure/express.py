@@ -10,8 +10,9 @@ from .types import (BEARISH_STRUCTURES, BULLISH_STRUCTURES, CREDIT_STRUCTURES,
                     DEBIT_STRUCTURES, LEG_COUNT, NEUTRAL_STRUCTURES,
                     Expression, Rejection, View)
 from .view import implied_hit
+from ..execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
-DEFAULT_COMMISSION = 0.65
+DEFAULT_COMMISSION = FALLBACK_COMMISSION_PER_CONTRACT
 DEFAULT_SLIPPAGE = 0.05
 
 

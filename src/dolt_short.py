@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from src.dolt_cohort import _stats
 from src.paper_manager import _evaluate_short_single_leg_exit, _normalize_exit_rules
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 _RFR = 0.045
 
@@ -48,7 +49,7 @@ def _pick_short(chain, opt_type, target_delta, asof, min_dte):
 
 def simulate_short_trade(symbol, entry_date, spot, sdates, spots, rules,
                          opt_type="put", target_delta=0.25, target_dte=35,
-                         db_path=None, commission_per_contract=0.65,
+                         db_path=None, commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT,
                          contract_multiplier=100, entry_filter=None) -> Optional[Dict[str, Any]]:
     """Sell one ~target_delta OTM option, manage with the canonical short exits."""
     from src import dolt_options as _do
@@ -122,9 +123,9 @@ def run_short_backtest(symbols, dates, opt_type="put", target_delta=0.25,
     rules = _normalize_exit_rules(_load_cfg(config_path))
     try:
         commission = float(_load_cfg(config_path).get("paper_trading", {})
-                           .get("commission_per_contract", 0.65))
+                           .get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     except Exception:
-        commission = 0.65
+        commission = FALLBACK_COMMISSION_PER_CONTRACT
     spot_db = db_path or "data/dolt_options.db"
     import sys
     _missing = [s.upper() for s in symbols if not _do.symbol_has_data(s, spot_db)]

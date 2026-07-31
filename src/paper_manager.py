@@ -313,7 +313,11 @@ def _evaluate_long_single_leg_exit(
 
 
 # Realistic execution cost constants (deprecated fallbacks — use config.json paper_trading section)
-COMMISSION_PER_CONTRACT = 0.65   # $ per contract per leg (retail ~$0.65, e.g. Tastytrade/TDA)
+# Sourced from src.execution_costs so there is ONE number to change when the
+# broker changes; see the note there for why the fallback is not 0.0.
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
+
+COMMISSION_PER_CONTRACT = FALLBACK_COMMISSION_PER_CONTRACT  # $ per contract per leg
 SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half spread)
 # Round-trip friction per share = entry slippage + exit slippage + 2 commissions
 _FRICTION_PER_SHARE = (2 * SLIPPAGE_PER_SHARE) + (2 * COMMISSION_PER_CONTRACT / 100.0)

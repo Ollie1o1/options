@@ -26,6 +26,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from src.dolt_cohort import _stats
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 
 _SPLIT_GUARD = 0.40   # a >40% one-day move in RAW prices is a split, not a market move
@@ -60,7 +61,7 @@ def _leg(chain, opt_type, strike, expiration):
 
 def simulate_delta_hedged_straddle(symbol, entry_date, spots, sdates, db_path=None,
                                    target_days=21, min_dte=30, max_dte=70,
-                                   commission_per_contract=0.65, contract_multiplier=100
+                                   commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT, contract_multiplier=100
                                    ) -> Optional[Dict[str, Any]]:
     """Sell one ATM straddle, delta-hedge along the real spot path, close at
     target_days (or expiry). Returns delta-hedged (vol) P&L per contract."""
@@ -136,9 +137,9 @@ def run_vol_backtest(symbols, dates, db_path=None, config_path="config.json") ->
     from src.dolt_stocks import close_history
     try:
         commission = float(json.load(open(config_path)).get("paper_trading", {})
-                           .get("commission_per_contract", 0.65))
+                           .get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     except Exception:
-        commission = 0.65
+        commission = FALLBACK_COMMISSION_PER_CONTRACT
     spot_db = db_path or "data/dolt_options.db"
     import sys
     trades: List[Dict[str, Any]] = []

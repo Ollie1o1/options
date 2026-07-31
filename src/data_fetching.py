@@ -1118,7 +1118,13 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)
                         if not is_rate_limit and "no options" not in msg and "price history" not in msg:
                             try:
                                 import os, traceback
-                                _log = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_errors.log")
+                                # logs/, not the repo root — a cloner should
+                                # not find the operator's scan debris beside
+                                # the source.
+                                _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                                _logdir = os.path.join(_root, "logs")
+                                os.makedirs(_logdir, exist_ok=True)
+                                _log = os.path.join(_logdir, "scan_errors.log")
                                 sym_hint = args[0] if args else kwargs.get("symbol", "?")
                                 with open(_log, "a") as _f:
                                     _f.write(f"\n=== {func.__name__}({sym_hint}) ===\n{traceback.format_exc()}\n")

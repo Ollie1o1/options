@@ -23,6 +23,7 @@ from statistics import mean, median
 from typing import Any, Dict, List, Optional
 
 from src.dolt_cohort import _stats
+from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 
 def _dte(asof: str, expiration: str) -> int:
@@ -55,7 +56,7 @@ def _leg(chain, opt_type, strike, expiration):
 def simulate_earnings_strangle(symbol, earnings_date, db_path=None,
                                call_delta=0.20, put_delta=0.20,
                                entry_offset=2, min_dte=30, max_dte=70,
-                               commission_per_contract=0.65, contract_multiplier=100,
+                               commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT, contract_multiplier=100,
                                spots=None, exit_scan_days=10) -> Optional[Dict[str, Any]]:
     """Sell a strangle ~entry_offset days before earnings, buy it back the first
     data day after. Return dict with ret-on-credit + raw pnl + realized move.
