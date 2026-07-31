@@ -3561,6 +3561,13 @@ def process_ticker(symbol: str, mode: str, max_expiries: int, min_dte: int, max_
 
 _MULTILEG_MODES = ("Credit Spreads", "Iron Condor", "Vertical Spreads")
 
+# Shown above the mode menu. The menu is already tall and several modes are
+# tagged "no edge" or "read-only", so a newcomer cannot tell which of thirteen
+# is the front of the funnel. This is the flow that works in practice:
+# context first, then candidates, then drill into one, then track it.
+_START_HINT = ("  New here? [10] INTEL for context, then [3] DISCOVER and "
+               "drill into any pick.")
+
 
 def _retry_waves_for(n_tickers: int) -> list:
     """Cool-down seconds per serial retry wave, scaled to batch size.
@@ -4931,6 +4938,10 @@ def main():
             from . import ui as _menu_ui
             print()
             print(_menu_ui.rule(WIDTH, "MODES"))
+            # Thirteen modes, several tagged "no edge" or "read-only", and
+            # nothing saying where to begin. One line is the whole fix; the
+            # order below is the flow that actually works.
+            print(fmt.style(_START_HINT, 'muted'))
             modes = [
                 ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
                 ("2", "ALL",       "Budget-based multi-stock scan"),
@@ -4955,6 +4966,7 @@ def main():
             print(_menu_ui.rule(WIDTH))
         else:
             print("\nModes:")
+            print(_START_HINT)
             print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")
             print("  [2] ALL        \u2014 Budget-based multi-stock scan")
             print("  [3] DISCOVER   \u2014 Top 100 most-traded tickers (no budget limit)")
