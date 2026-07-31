@@ -113,6 +113,12 @@ def _show_menu() -> str:
                 art_rows, lambda _w: ui_motion.art_frame(art_w),
                 offset=len(after))
             motion.start()
+    # About to wait on a human, possibly for hours. Hold no cache handles while
+    # doing it — yfinance's WAL sidecars live exactly as long as the connection,
+    # and peewee reconnects by itself on the next read. See src/cache_release.py.
+    from src.cache_release import release_yfinance_caches
+    release_yfinance_caches()
+
     try:
         choice = input("  Choice [1]: ").strip() or "1"
     except (EOFError, KeyboardInterrupt):
