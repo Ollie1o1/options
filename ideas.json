@@ -2,11 +2,10 @@
   "updated": "2026-07-31",
   "note": "Idea backlog for the research desk Ideas tab. Statuses: proposed, testing, validated, shipped, dead. cost_wall records whether the idea's edge survives slippage+commissions - the recurring killer in this repo. Dead ideas are kept deliberately so they are not re-litigated. Where a later measurement contradicts an earlier one, the entry is AMENDED in place rather than replaced, so the reasoning that was acted on stays visible. 2026-07-30: a full beta-readiness audit added a prioritised execution plan - see beta_readiness_plan and constraints_for_executor below. Entries carrying a priority field (P0-P3) are that plan; the executor model should work them in beta_readiness_plan order and honour every constraint listed. 2026-07-31: the beta-readiness plan was executed - P0 through P2 are shipped or specced, see each entry's status and next_step. The two gate/exit decisions are deliberately NOT applied: they are specs awaiting operator sign-off (docs/GATE_REDESIGN_SPEC.md, docs/MARK_TRUSTWORTHINESS_SPEC.md). P3 (split-options-screener, retire-or-measure-ai-scorer, centralise-fee-defaults) was not started.",
   "beta_readiness_plan": {
-    "purpose": "Beta-readiness plan: P0, P1 and P2 are COMPLETE — shipped, or specced and awaiting operator sign-off (see `awaiting_operator_signoff`). Only P3 structural debt remains, and neither remaining item is urgent. Completed entries live in `archive.shipped` with their findings.",
+    "purpose": "Beta-readiness plan COMPLETE: P0, P1 and P2 are shipped, and both gate/exit specs were signed off and implemented on 2026-07-31. The Phase-1 Long Call gate has resolved STOP under both the old and new rules. Only P3 structural debt remains. The live question is no longer 'does the long call work' — it is whether the short-premium family earns a gate of its own (see repoint-gate-credit).",
     "step_0_user_only": "OPERATOR ACTION, still not done: System Settings > General > Login Items & Extensions > Allow in the Background, for the three com.ollie.options.* LaunchAgents. All three have exited 78 since 2026-06-15 — 46 days as of 2026-07-31. No code change substitutes for this toggle. Note the detection that reports this was itself broken until 2026-07-31 (it matched the wrong label prefix), so the banner had never actually fired.",
     "awaiting_operator_signoff": [
-      "docs/GATE_REDESIGN_SPEC.md — covers gate-statistic-wrong-for-skewed-returns, fix-gate-power-math, repoint-gate-credit stage 2, effective-n-in-gate, and the stop-lc-autolog-bleed feeder ruling. URGENT: the cohort now reads n=92, Pearson -0.065, so the next checkpoint fires STOP under the unchanged rules.",
-      "docs/MARK_TRUSTWORTHINESS_SPEC.md — covers mark-fallback-hardcoded-vol; pairs with tp-threshold-vs-costs if that is picked up, so both exit-path changes land as one reviewed, journaled change."
+      "BOTH SPECS SIGNED AND IMPLEMENTED 2026-07-31. Nothing is awaiting sign-off."
     ],
     "operator_ruling_needed": [
       "reports/duplicate_trades_audit.md — 18 candidate groups, 38 rows, 20 excess, $2,959.10 of double-counted P&L. Nothing was deleted; which are true duplicates vs legitimate re-signals is a judgement call. Until ruled on, the excess rows double-count in the gate cohort and the track record."
@@ -33,32 +32,6 @@
   ],
   "ideas": [
     {
-      "id": "gate-statistic-wrong-for-skewed-returns",
-      "title": "The gate reads Pearson IC on skewed option returns - rank IC says the edge is zero",
-      "area": "infra",
-      "status": "testing",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "priority": "P0",
-      "thesis": "Long-call returns are floored at -100% and unbounded above, so Pearson IC is dominated by a handful of +100% take-profit outliers. Checkpoint 2026-07-29 (n=70): Pearson +0.048 (p=0.690) drives an EXTEND, while Spearman is -0.020 (p=0.873) - the two statistics disagree in SIGN, and the bootstrap CI is [-0.175, +0.248]. Rank IC is the industry standard for exactly this distribution shape. src/phase1_checkpoint.py already computes Spearman on line 131; the decision block (lines 135-144) reads only ic_p. Under rank IC the current state is not 'positive but below the bar', it is 'no forward information detected'. This is the single most decision-relevant number in the repo and it is currently flattering the system.",
-      "evidence": "reports/checkpoint_2026-07-29.md; reports/checkpoint_history.tsv shows the Pearson IC decaying monotonically as n grows (0.22 at n=4, 0.20 at n=23, 0.11 at n=43, 0.048 at n=70) - the classic signature of an effect that was never there.",
-      "next_step": "AMENDED 2026-07-31: the reporting half SHIPPED (commit 49edfd1/a8acd83) - checkpoint markdown, GATE_STATUS.md, checkpoint_history.tsv (new spearman/p_spearman columns, append-only) and the evidence banner now all render Pearson and Spearman side by side, with an explicit sign-disagreement line. The DECISION half is written up but NOT applied: see docs/GATE_REDESIGN_SPEC.md, which is a draft awaiting the operator's sign-off block. The decision function still reads Pearson, byte-identical, pinned by a regression test. NOTE the cohort has since grown to n=92 with Pearson -0.065, so the next real checkpoint reads STOP under the UNCHANGED rules - the redesign is now urgent rather than theoretical.\n\nPRIOR NEXT STEP: Write the gate-redesign spec (one spec covering this entry, fix-gate-power-math, and repoint-gate-credit - they are one decision). Proposal: decision reads Spearman, or requires Pearson AND Spearman to agree in sign with Spearman clearing the bar. Immediately (allowed without sign-off): render both statistics side-by-side in the checkpoint markdown, the evidence banner, and TRACK_RECORD.md so the operator sees the disagreement every week. Then apply the decision change only on operator approval per DECISIONS.md.",
-      "acceptance": "Checkpoint markdown and evidence banner show both statistics; a signed-off spec exists in docs/; the decision function's statistic matches the spec; scripts/test.sh green."
-    },
-    {
-      "id": "fix-gate-power-math",
-      "title": "Fix the gate's incoherent power math - and give EXTEND a terminal condition",
-      "area": "infra",
-      "status": "testing",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "priority": "P0",
-      "thesis": "READY needs IC>=0.08 AND p<0.05, but proving IC=0.08 at p<0.05 requires n~601. At the n>=50 trigger, p<0.05 demands observed IC~0.286 - 3.6x the stated bar. The gate cannot fire on its own terms. AMENDED 2026-07-30: the mirror problem is that EXTEND has no exit. STOP requires IC<0.03 and READY requires p<0.05, so an IC drifting in the 0.03-0.08 band extends forever - at ~70 trades per 9 weeks, resolving IC~0.05 at p<0.05 needs n~1,500, i.e. years. The explainer text says 'continue gathering for 2 more weeks' but nothing enforces any deadline. The gate currently has three states and one of them is an infinite loop.",
-      "evidence": "Fisher-z: n = (1.96/atanh(IC))^2 + 3. docs/PROFITABILITY_FINDINGS.md section 1; src/phase1_checkpoint.py:135-144; checkpoint_history.tsv accrual rate.",
-      "next_step": "AMENDED 2026-07-31: specced, not applied. docs/GATE_REDESIGN_SPEC.md section 2.3 gives every gate state an entry AND an exit condition, caps EXTEND at 2 grants x 2 weeks, replaces the p-value cliff with posterior bands (READY P>=0.85, STOP P<=0.15) on the already-computed posterior_ic_above, and states all thresholds in effective-n terms (folding in effective-n-in-gate). Awaiting operator sign-off.\n\nPRIOR NEXT STEP: Fold into the gate-redesign spec with gate-statistic-wrong-for-skewed-returns. Proposal to put in front of the operator: (a) EXTEND is granted at most twice (2 weeks each), after which the decision falls to STOP unless the Bayesian posterior P(true IC>=0.08) >= 0.85 (the posterior is already computed and printed, reporting-only, by posterior_ic_above); (b) size the READY test to the effect actually claimed, or switch the claim to one the sample can support. Also fold in effective-n-in-gate (design effect ~1.23 from clustered entries).",
-      "acceptance": "The spec enumerates every gate state with an entry AND exit condition; no state is unbounded; operator sign-off recorded; implementation matches."
-    },
-    {
       "id": "repoint-gate-credit",
       "title": "Stand up a parallel short-premium gate cohort - stop validating only the worst strategy",
       "area": "options",
@@ -68,21 +41,8 @@
       "priority": "P0",
       "thesis": "Bear Call has the best scorer IC (+0.152) and Bull Put the best P&L (66% win). Both are short premium, consistent with every prior repo result. The gate ignores both. Normalising for size sharpens rather than weakens this: Bull Put is the only line positive on both aggregate (+32.6%) and median (+31.0%) return-on-risk, and Bull Put and Bear Call sit entirely inside the budget. AMENDED 2026-07-29: which of the two leads is not settled - re-pricing on measured spreads reverses it (Bull Put +6.6%, Bear Call +23.8%, see multileg-slippage-is-a-flat-floor). The robust claim is the family, not the name. AMENDED 2026-07-30: this is now urgent rather than optional, because the LC gate's rank IC is zero (see gate-statistic-wrong-for-skewed-returns) and the strategy real money would actually trade first is short premium. Validating LC to authorise going live, then trading credit structures anyway, is a mismatch between the experiment and the decision it authorises. TRACK_RECORD 2026-07-29: Bull Put 64.2% win +14.5% avg over 120 closed; Long Call 38.4% win +1.5% and falling over 211.",
       "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; reports/TRACK_RECORD.md 2026-07-29; see rank-strategies-by-return-on-risk and cohort-includes-unaffordable-trades.",
-      "next_step": "AMENDED 2026-07-31: Stage 1 SHIPPED (reporting only, no sign-off needed). compute_checkpoint now reports a second cohort - Bull Put + Bear Call + Short Put, closed, post-window, affordability-capped - with n, rank IC, sum and median return-on-risk, labelled REPORTING ONLY beneath the gate. First real read: n=186, +18.9% on capital risked, median +14.5%/trade, rank IC +0.108 (p=0.141). A review caught the weekly maintenance job passing no budget cap, which would have published the uncapped n=270 / -0.2% figure instead - fixed in a8acd83. Stage 2 (making it a gate) is in docs/GATE_REDESIGN_SPEC.md section 2.4, awaiting sign-off.\n\nPRIOR NEXT STEP: Two stages. Stage 1 (no sign-off needed, reporting only): extend compute_checkpoint with a second cohort query over the short-premium family (Bull Put + Bear Call + Short Put, closed, post-window, affordable), report its n / rank IC / return-on-risk alongside the LC gate in the checkpoint markdown every week. Stage 2 (needs the gate-redesign spec sign-off): make it a first-class gate with its own thresholds sized to short-premium return distributions - which are negatively skewed, the OPPOSITE tail problem from LC, so the statistic choice matters here too.",
+      "next_step": "UPDATED 2026-07-31: stage 1 (reporting) is live and now reads n=188, rank IC +0.106 (p=0.150), +18.8% on capital risked, median +13.3% per trade. Stage 2 — wiring this family to decide_v2 as a first-class gate — is APPROVED in principle by the 2026-07-31 sign-off but NOT yet implemented: it needs its own cohort/threshold work because short-premium returns are negatively skewed, the opposite tail problem from LC. This is now the most decision-relevant open item in the file, because the LC gate has resolved STOP and short premium is what real money would trade.\n\nPRIOR NEXT STEP: AMENDED 2026-07-31: Stage 1 SHIPPED (reporting only, no sign-off needed). compute_checkpoint now reports a second cohort - Bull Put + Bear Call + Short Put, closed, post-window, affordability-capped - with n, rank IC, sum and median return-on-risk, labelled REPORTING ONLY beneath the gate. First real read: n=186, +18.9% on capital risked, median +14.5%/trade, rank IC +0.108 (p=0.141). A review caught the weekly maintenance job passing no budget cap, which would have published the uncapped n=270 / -0.2% figure instead - fixed in a8acd83. Stage 2 (making it a gate) is in docs/GATE_REDESIGN_SPEC.md section 2.4, awaiting sign-off.\n\nPRIOR NEXT STEP: Two stages. Stage 1 (no sign-off needed, reporting only): extend compute_checkpoint with a second cohort query over the short-premium family (Bull Put + Bear Call + Short Put, closed, post-window, affordable), report its n / rank IC / return-on-risk alongside the LC gate in the checkpoint markdown every week. Stage 2 (needs the gate-redesign spec sign-off): make it a first-class gate with its own thresholds sized to short-premium return distributions - which are negatively skewed, the OPPOSITE tail problem from LC, so the statistic choice matters here too.",
       "acceptance": "Weekly checkpoint prints both cohorts; the short-premium cohort uses capital_at_risk-affordable trades only; gate-status change gated on the signed spec."
-    },
-    {
-      "id": "mark-fallback-hardcoded-vol",
-      "title": "Exit decisions can fire off a Black-Scholes mark at a hardcoded 30 vol",
-      "area": "execution",
-      "status": "testing",
-      "conviction": "high",
-      "cost_wall": "n/a",
-      "priority": "P0",
-      "thesis": "paper_manager.update_positions marks each leg by fast_info.last_price, falling back to daily close, falling back to american_price(..., 0.30) - a model price at sigma=0.30 regardless of the name (src/paper_manager.py:1205). Marking an 80-IV name at 30 vol misprices it severely, and that fabricated mark can TRIGGER a stop-loss or take-profit, i.e. write a permanent exit into the ledger the gate then reads. Separately, preferring last_price over bid/ask mid means marks can be hours stale on illiquid contracts - inconsistent with the repo's own quote-freshness philosophy, and the single-leg close path already knows how to read the live spread (_get_spread_slippage, line ~1361).",
-      "evidence": "src/paper_manager.py:1181-1212 (fetch chain: last_price -> 1d close -> american_price at 0.30); schema v16 stores entry IV per row.",
-      "next_step": "AMENDED 2026-07-31: specced, NOT implemented - it changes live exit behaviour, so per the exit-rules constraint it needs sign-off first. docs/MARK_TRUSTWORTHINESS_SPEC.md covers all three parts as one decision (entry-IV fallback sigma, model-fallback marks may never fire an exit, bid/ask mid preferred over stale last trade), plus the test plan and the calibration-journal requirement.\n\nPRIOR NEXT STEP: Three changes, one entry, because they all define 'what is a trustworthy mark': (1) the model-price fallback uses the row's stored entry IV (schema has it) instead of 0.30; (2) a mark that came from the model fallback may update unrealized P&L display but must NEVER fire an exit - skip the exit check for that leg that run and log it; (3) prefer bid/ask mid over last trade when both are available, keeping last_price as fallback. This changes live exit behaviour - per the constraints, write it up and get operator sign-off before merging, and note in the calibration journal that post-change exits are on a different marking basis.",
-      "acceptance": "No exit can be recorded from a model-fallback mark (test asserts it); fallback sigma comes from the row; mid preferred over last; scripts/test.sh green; operator sign-off recorded."
     },
     {
       "id": "split-options-screener",
@@ -109,17 +69,6 @@
       "next_step": "Do NOT read this as 'Bear Call is better'. The defensible claim is that one flat constant cannot price both structures and the line that looked best was the one it flattered — which means prefer-bull-put-at-small-size rests on a cost assumption its own data contradicts. Before rewiring live exits (which changes the open book), widen the measurement: the archive grows ~1 snapshot/trading day, so re-run the report monthly and see whether the per-structure gap holds at larger n."
     },
     {
-      "id": "stop-lc-autolog-bleed",
-      "title": "Stop auto-logging Long Calls into the cohort",
-      "area": "options",
-      "status": "proposed",
-      "conviction": "high",
-      "cost_wall": "fails",
-      "thesis": "Long Call is -$17,620 over 98 closed trades at a 33% win rate, with a scorer IC of -0.020 (p=0.85). It is the only strategy the Phase-1 gate measures and the worst line in the book. AMENDED 2026-07-28: the dollar half of that case does not survive an affordability split — restricted to trades inside the $750 budget, Long Call is +$183 (+0.8% of capital risked, n=56), and all of the bleed sits in the 49 trades the account could never have opened. The IC half stands: -0.132 (p=0.34) on the affordable subset, still zero.",
-      "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; ds feeder logs 5 LC/day. Affordability split: paper_trades.db 2026-07-28, see cohort-includes-unaffordable-trades.",
-      "next_step": "Do not stop the feeder on the -$17,620 figure — it is a sizing artifact. Stop it, or keep it, on the IC, which is the thing the gate actually reads and which is zero either way. If it keeps running, gate it on affordability first so the next 100 trades are worth measuring. AMENDED 2026-07-30: fold the stop/keep decision into the gate-redesign spec (gate-statistic-wrong-for-skewed-returns) — under rank IC the LC cohort reads zero at n=70, which strengthens the case for repointing the validation budget at short premium rather than accruing more LC."
-    },
-    {
       "id": "day-level-vs-trade-level",
       "title": "Test whether the scorer ranks days better than contracts",
       "area": "research",
@@ -140,17 +89,6 @@
       "thesis": "A NFLX $1-wide spread hit its 50%-of-credit take-profit at +56% gross and settled at -1.5% net. Fixed percentage exits ignore what the round trip costs. REFRAMED 2026-07-29: costs are NOT a fixed dollar amount per contract on this broker — commission is US$0. What remains is the bid-ask (measured per structure: $0.163/share Bull Put, $0.025 Bear Call) plus 1.5% currency conversion each way, both proportional to what is traded. So the rule should compare modelled net against the spread being crossed, not against a fixed toll.",
       "evidence": "Auto-close log 2026-07-27; cost measurement in multileg-slippage-is-a-flat-floor; Wealthsimple fee schedule verified 2026-07-29.",
       "next_step": "Require modelled net P&L > 0 before a take-profit fires. Note: changes live exit behaviour across the open book and the gate cohort - deliberate decision, not a cleanup. If picked up, coordinate with mark-fallback-hardcoded-vol so both exit-path changes land as one reviewed, journaled change rather than two separate marking-basis shifts."
-    },
-    {
-      "id": "effective-n-in-gate",
-      "title": "Count effective n, not nominal n, in the gate",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "thesis": "Batch auto-logging clusters entries: 57 trades on 18 days, ICC +0.108, design effect 1.23, effective n ~46. The n>=50 trigger counts nominal trades and is therefore slightly overconfident.",
-      "evidence": "docs/PROFITABILITY_FINDINGS.md section 3.",
-      "next_step": "Bundle with the gate-power redesign (fix-gate-power-math) — the redesign spec should state n thresholds in effective-n terms."
     },
     {
       "id": "hold-to-expiry-small-account",
@@ -533,6 +471,67 @@
         "thesis": "Trading US-listed options from a CAD account converts currency both ways at Wealthsimple's 1.5% spread (below US$10k of conversions; 1.0% to $25k, 0.5% to $100k, 0% above). Nothing in this repo modelled that until now, and it is the largest remaining cost in the book once commissions are correctly set to zero: $1,098 of conversion across 187 closed credit trades in the cohort window alone. A USD account removes it for $10/month.",
         "evidence": "Wealthsimple fee schedule verified 2026-07-29; scripts/cost_model_report.py prints the conversion total. Note the cost scales with money moved, not contract count, so it cannot be traded around by using fewer legs.",
         "next_step": "RESOLVED 2026-07-31 by operator decision: the USD trading subscription is ACTIVE, so config.paper_trading.fx_conversion_rate is now 0.0 (was 0.015). There is no per-trade CAD->USD conversion spread to model. The US$10/month subscription is a FIXED cost and is deliberately NOT folded into per-trade friction — it does not scale with activity and would distort a per-trade number — but it is real: at zero trading it is pure overhead, and the break-even against the old 1.5% is roughly US$8k/yr of conversions. For scale, the cohort window alone carried $1,098 of conversion across 187 closed credit trades, so at the book's historical activity the subscription pays for itself many times over. The two open questions this entry used to carry (whether tiering was per-transaction or cumulative, and whether idle USD cash goes uninvested) are now MOOT for the conversion decision, though the idle-cash question still applies to however much USD is held. Revert fx_conversion_rate to 0.015 if the subscription lapses.\n\nPRIOR NEXT STEP: Check actual annual conversion volume rather than this window's, then decide. Two things to confirm first, because both change the answer: whether the tiered rate is assessed on cumulative annual conversions or per transaction, and whether holding USD in the account leaves idle cash uninvested in a way that costs more than the spread saves. Operator decision, not code - the executor's only task here is presenting the two confirmations if asked."
+      },
+      {
+        "id": "gate-statistic-wrong-for-skewed-returns",
+        "title": "The gate reads Pearson IC on skewed option returns - rank IC says the edge is zero",
+        "area": "infra",
+        "status": "shipped",
+        "conviction": "high",
+        "cost_wall": "n/a",
+        "priority": "P0",
+        "thesis": "Long-call returns are floored at -100% and unbounded above, so Pearson IC is dominated by a handful of +100% take-profit outliers. Checkpoint 2026-07-29 (n=70): Pearson +0.048 (p=0.690) drives an EXTEND, while Spearman is -0.020 (p=0.873) - the two statistics disagree in SIGN, and the bootstrap CI is [-0.175, +0.248]. Rank IC is the industry standard for exactly this distribution shape. src/phase1_checkpoint.py already computes Spearman on line 131; the decision block (lines 135-144) reads only ic_p. Under rank IC the current state is not 'positive but below the bar', it is 'no forward information detected'. This is the single most decision-relevant number in the repo and it is currently flattering the system.",
+        "evidence": "reports/checkpoint_2026-07-29.md; reports/checkpoint_history.tsv shows the Pearson IC decaying monotonically as n grows (0.22 at n=4, 0.20 at n=23, 0.11 at n=43, 0.048 at n=70) - the classic signature of an effect that was never there.",
+        "next_step": "SIGNED OFF AND IMPLEMENTED 2026-07-31 (commit 391e47f). The gate now decides on the SPEARMAN rank IC. config.gate.version = 2; decide_v1 is preserved verbatim and both verdicts print on every checkpoint and in GATE_STATUS.md, because a superseded rule that vanishes cannot be audited. A sign-agreement guard withholds READY whenever rank and Pearson disagree in sign. OUTCOME AT n=92: both rules say STOP (Pearson -0.065, Spearman -0.132, posterior 4%). The redesign did not rescue the long call — it reached the same verdict on a sounder statistic and showed its working.\n\nPRIOR NEXT STEP: AMENDED 2026-07-31: the reporting half SHIPPED (commit 49edfd1/a8acd83) - checkpoint markdown, GATE_STATUS.md, checkpoint_history.tsv (new spearman/p_spearman columns, append-only) and the evidence banner now all render Pearson and Spearman side by side, with an explicit sign-disagreement line. The DECISION half is written up but NOT applied: see docs/GATE_REDESIGN_SPEC.md, which is a draft awaiting the operator's sign-off block. The decision function still reads Pearson, byte-identical, pinned by a regression test. NOTE the cohort has since grown to n=92 with Pearson -0.065, so the next real checkpoint reads STOP under the UNCHANGED rules - the redesign is now urgent rather than theoretical.\n\nPRIOR NEXT STEP: Write the gate-redesign spec (one spec covering this entry, fix-gate-power-math, and repoint-gate-credit - they are one decision). Proposal: decision reads Spearman, or requires Pearson AND Spearman to agree in sign with Spearman clearing the bar. Immediately (allowed without sign-off): render both statistics side-by-side in the checkpoint markdown, the evidence banner, and TRACK_RECORD.md so the operator sees the disagreement every week. Then apply the decision change only on operator approval per DECISIONS.md.",
+        "acceptance": "Checkpoint markdown and evidence banner show both statistics; a signed-off spec exists in docs/; the decision function's statistic matches the spec; scripts/test.sh green."
+      },
+      {
+        "id": "fix-gate-power-math",
+        "title": "Fix the gate's incoherent power math - and give EXTEND a terminal condition",
+        "area": "infra",
+        "status": "shipped",
+        "conviction": "high",
+        "cost_wall": "n/a",
+        "priority": "P0",
+        "thesis": "READY needs IC>=0.08 AND p<0.05, but proving IC=0.08 at p<0.05 requires n~601. At the n>=50 trigger, p<0.05 demands observed IC~0.286 - 3.6x the stated bar. The gate cannot fire on its own terms. AMENDED 2026-07-30: the mirror problem is that EXTEND has no exit. STOP requires IC<0.03 and READY requires p<0.05, so an IC drifting in the 0.03-0.08 band extends forever - at ~70 trades per 9 weeks, resolving IC~0.05 at p<0.05 needs n~1,500, i.e. years. The explainer text says 'continue gathering for 2 more weeks' but nothing enforces any deadline. The gate currently has three states and one of them is an infinite loop.",
+        "evidence": "Fisher-z: n = (1.96/atanh(IC))^2 + 3. docs/PROFITABILITY_FINDINGS.md section 1; src/phase1_checkpoint.py:135-144; checkpoint_history.tsv accrual rate.",
+        "next_step": "SIGNED OFF AND IMPLEMENTED 2026-07-31 (commit 391e47f). READY is now P(true rank IC >= 0.08) >= 0.85 rather than the incoherent 'IC>=0.08 AND p<0.05' (which demanded an observed IC of ~0.286 at n=50). STOP fires at posterior <= 0.15, at a rank IC below 0.03, or when the EXTEND allowance is spent. EXTEND IS NOW BOUNDED: at most 2 grants of 2 weeks, tracked in config.gate.extensions_used, after which the gate must resolve. Every state has an entry AND an exit; no state is unbounded — tests/test_gate_v2.py pins that, and also demonstrates the old defect (a 0.05 Pearson IC EXTENDs under v1 at week 600).\n\nPRIOR NEXT STEP: AMENDED 2026-07-31: specced, not applied. docs/GATE_REDESIGN_SPEC.md section 2.3 gives every gate state an entry AND an exit condition, caps EXTEND at 2 grants x 2 weeks, replaces the p-value cliff with posterior bands (READY P>=0.85, STOP P<=0.15) on the already-computed posterior_ic_above, and states all thresholds in effective-n terms (folding in effective-n-in-gate). Awaiting operator sign-off.\n\nPRIOR NEXT STEP: Fold into the gate-redesign spec with gate-statistic-wrong-for-skewed-returns. Proposal to put in front of the operator: (a) EXTEND is granted at most twice (2 weeks each), after which the decision falls to STOP unless the Bayesian posterior P(true IC>=0.08) >= 0.85 (the posterior is already computed and printed, reporting-only, by posterior_ic_above); (b) size the READY test to the effect actually claimed, or switch the claim to one the sample can support. Also fold in effective-n-in-gate (design effect ~1.23 from clustered entries).",
+        "acceptance": "The spec enumerates every gate state with an entry AND exit condition; no state is unbounded; operator sign-off recorded; implementation matches."
+      },
+      {
+        "id": "mark-fallback-hardcoded-vol",
+        "title": "Exit decisions can fire off a Black-Scholes mark at a hardcoded 30 vol",
+        "area": "execution",
+        "status": "shipped",
+        "conviction": "high",
+        "cost_wall": "n/a",
+        "priority": "P0",
+        "thesis": "paper_manager.update_positions marks each leg by fast_info.last_price, falling back to daily close, falling back to american_price(..., 0.30) - a model price at sigma=0.30 regardless of the name (src/paper_manager.py:1205). Marking an 80-IV name at 30 vol misprices it severely, and that fabricated mark can TRIGGER a stop-loss or take-profit, i.e. write a permanent exit into the ledger the gate then reads. Separately, preferring last_price over bid/ask mid means marks can be hours stale on illiquid contracts - inconsistent with the repo's own quote-freshness philosophy, and the single-leg close path already knows how to read the live spread (_get_spread_slippage, line ~1361).",
+        "evidence": "src/paper_manager.py:1181-1212 (fetch chain: last_price -> 1d close -> american_price at 0.30); schema v16 stores entry IV per row.",
+        "next_step": "SIGNED OFF AND IMPLEMENTED 2026-07-31 (commit see git log). Spec docs/MARK_TRUSTWORTHINESS_SPEC.md implemented: model-fallback sigma comes from the row's stored entry_iv, a model-sourced mark can never fire an exit, and bid/ask mid is preferred over a stale last trade. Expiry settlement is unaffected and remains the guarantee that no row hangs OPEN forever.\n\nPRIOR NEXT STEP: AMENDED 2026-07-31: specced, NOT implemented - it changes live exit behaviour, so per the exit-rules constraint it needs sign-off first. docs/MARK_TRUSTWORTHINESS_SPEC.md covers all three parts as one decision (entry-IV fallback sigma, model-fallback marks may never fire an exit, bid/ask mid preferred over stale last trade), plus the test plan and the calibration-journal requirement.\n\nPRIOR NEXT STEP: Three changes, one entry, because they all define 'what is a trustworthy mark': (1) the model-price fallback uses the row's stored entry IV (schema has it) instead of 0.30; (2) a mark that came from the model fallback may update unrealized P&L display but must NEVER fire an exit - skip the exit check for that leg that run and log it; (3) prefer bid/ask mid over last trade when both are available, keeping last_price as fallback. This changes live exit behaviour - per the constraints, write it up and get operator sign-off before merging, and note in the calibration journal that post-change exits are on a different marking basis.",
+        "acceptance": "No exit can be recorded from a model-fallback mark (test asserts it); fallback sigma comes from the row; mid preferred over last; scripts/test.sh green; operator sign-off recorded."
+      },
+      {
+        "id": "stop-lc-autolog-bleed",
+        "title": "Stop auto-logging Long Calls into the cohort",
+        "area": "options",
+        "status": "shipped",
+        "conviction": "high",
+        "cost_wall": "fails",
+        "thesis": "Long Call is -$17,620 over 98 closed trades at a 33% win rate, with a scorer IC of -0.020 (p=0.85). It is the only strategy the Phase-1 gate measures and the worst line in the book. AMENDED 2026-07-28: the dollar half of that case does not survive an affordability split — restricted to trades inside the $750 budget, Long Call is +$183 (+0.8% of capital risked, n=56), and all of the bleed sits in the 49 trades the account could never have opened. The IC half stands: -0.132 (p=0.34) on the affordable subset, still zero.",
+        "evidence": "docs/PROFITABILITY_FINDINGS.md section 2; ds feeder logs 5 LC/day. Affordability split: paper_trades.db 2026-07-28, see cohort-includes-unaffordable-trades.",
+        "next_step": "RESOLVED 2026-07-31 by the signed gate spec (section 2.5): KEEP the Long Call feeder running, affordable-only as already enforced — paper accrual is free and stopping it would make the STOP verdict impossible to ever revisit with data. Real-money authority moves to the short-premium gate instead. The LC gate has now resolved STOP on its own bounded schedule, which is what it was for.\n\nPRIOR NEXT STEP: Do not stop the feeder on the -$17,620 figure — it is a sizing artifact. Stop it, or keep it, on the IC, which is the thing the gate actually reads and which is zero either way. If it keeps running, gate it on affordability first so the next 100 trades are worth measuring. AMENDED 2026-07-30: fold the stop/keep decision into the gate-redesign spec (gate-statistic-wrong-for-skewed-returns) — under rank IC the LC cohort reads zero at n=70, which strengthens the case for repointing the validation budget at short premium rather than accruing more LC."
+      },
+      {
+        "id": "effective-n-in-gate",
+        "title": "Count effective n, not nominal n, in the gate",
+        "area": "infra",
+        "status": "shipped",
+        "conviction": "medium",
+        "cost_wall": "n/a",
+        "thesis": "Batch auto-logging clusters entries: 57 trades on 18 days, ICC +0.108, design effect 1.23, effective n ~46. The n>=50 trigger counts nominal trades and is therefore slightly overconfident.",
+        "evidence": "docs/PROFITABILITY_FINDINGS.md section 3.",
+        "next_step": "SIGNED OFF AND IMPLEMENTED 2026-07-31 (commit 391e47f). design_effect() clusters cohort returns by entry date, estimates ICC by one-way ANOVA with the m0 correction for unequal cluster sizes, and the gate's n threshold is now stated and evaluated in EFFECTIVE n. Live: 92 nominal -> 72.5 effective (ICC 0.080, design effect 1.27). ICC is floored at 0 — a negative estimate means 'no positive clustering detected', never 'better than independent'.\n\nPRIOR NEXT STEP: Bundle with the gate-power redesign (fix-gate-power-math) — the redesign spec should state n thresholds in effective-n terms."
       }
     ],
     "dead": [
