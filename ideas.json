@@ -12,14 +12,11 @@
       "reports/duplicate_trades_audit.md — 18 candidate groups, 38 rows, 20 excess, $2,959.10 of double-counted P&L. Nothing was deleted; which are true duplicates vs legitimate re-signals is a judgement call. Until ruled on, the excess rows double-count in the gate cohort and the track record."
     ],
     "P2_remaining": [
-      "yfinance-cboe-scan-failover",
-      "repo-hygiene-beta",
       "usd-account-vs-conversion-spread"
     ],
     "P3_remaining": [
       "split-options-screener",
-      "retire-or-measure-ai-scorer",
-      "centralise-fee-defaults"
+      "retire-or-measure-ai-scorer"
     ],
     "explicitly_not_in_plan": "merge-btc-vrp-carry and index-put-spread-capacity are validated research paths but expand scope; do not start them as part of beta-readiness. The dead graveyard in `archive.dead` is settled — do not revive any of it."
   },
@@ -88,32 +85,6 @@
       "evidence": "src/paper_manager.py:1181-1212 (fetch chain: last_price -> 1d close -> american_price at 0.30); schema v16 stores entry IV per row.",
       "next_step": "AMENDED 2026-07-31: specced, NOT implemented - it changes live exit behaviour, so per the exit-rules constraint it needs sign-off first. docs/MARK_TRUSTWORTHINESS_SPEC.md covers all three parts as one decision (entry-IV fallback sigma, model-fallback marks may never fire an exit, bid/ask mid preferred over stale last trade), plus the test plan and the calibration-journal requirement.\n\nPRIOR NEXT STEP: Three changes, one entry, because they all define 'what is a trustworthy mark': (1) the model-price fallback uses the row's stored entry IV (schema has it) instead of 0.30; (2) a mark that came from the model fallback may update unrealized P&L display but must NEVER fire an exit - skip the exit check for that leg that run and log it; (3) prefer bid/ask mid over last trade when both are available, keeping last_price as fallback. This changes live exit behaviour - per the constraints, write it up and get operator sign-off before merging, and note in the calibration journal that post-change exits are on a different marking basis.",
       "acceptance": "No exit can be recorded from a model-fallback mark (test asserts it); fallback sigma comes from the row; mid preferred over last; scripts/test.sh green; operator sign-off recorded."
-    },
-    {
-      "id": "yfinance-cboe-scan-failover",
-      "title": "CBOE is already integrated - use it as scan failover, not just cross-check",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "priority": "P2",
-      "thesis": "yfinance is the sole live scanning source and rate-limits regularly; the retry-wave UX (shipped) makes the failure polite but the scan still fails. src/cboe_client.py already fetches full delayed chains with exchange-computed IV and Greeks, and the 2026-06-10 cross-check measured 99% mid / 90% IV agreement on AAPL. Provenance stamping (quote_source) was built for exactly this - a chain served from CBOE would be labelled, penalized appropriately for staleness, and better than no scan at all. 90% of the failover is already written.",
-      "evidence": "src/cboe_client.py; src/cross_check.py results in README; data-layer memory: chain archive already snapshots CBOE daily, so the fetch path is exercised in production.",
-      "next_step": "In fetch_options_yfinance's failure path (after the existing retry waves exhaust), attempt the CBOE chain for the same symbol, mapping its fields into the standard frame with quote_source='cboe' and honest quote_as_of. Scope: single-ticker and watchlist scans first (bounded symbol count); DISCOVER stays Yahoo-only to respect CBOE politeness. Surface 'served from CBOE fallback' in the data-quality line. Watch field-mapping details: CBOE strike/expiry formats and its IV convention differ; the cross_check joiner already solved the mapping once - reuse it.",
-      "acceptance": "Simulated Yahoo failure on a single-ticker scan completes via CBOE with provenance shown; no behaviour change when Yahoo is healthy; archive politeness unaffected."
-    },
-    {
-      "id": "repo-hygiene-beta",
-      "title": "Root-directory and artifact hygiene before strangers clone it",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "priority": "P2",
-      "thesis": "The repo root carries working residue a beta user will misread as load-bearing: scan_results_20260710_1115.csv, scan_errors.log, several .db/.sqlite caches, and src/launcher.py.bak (byte-identical to launcher.py, untracked since 2026-07-23). All are gitignored except the .bak, but a cloner still sees the operator's local clutter pattern reproduced in every doc screenshot, and new artifacts keep landing in the root. Absorbs the remaining step of canonical-test-runner (shipped): scripts/test.sh is still not referenced in CLAUDE.md.",
-      "evidence": "Repo root listing 2026-07-30; diff -q src/launcher.py.bak src/launcher.py reports identical; cleanup-dead-files-and-flags (superseded into this entry) recorded the .bak and the --ret5d as_written flag.",
-      "next_step": "(1) Delete src/launcher.py.bak. (2) Route future scan_errors.log and scan CSV exports into logs/ and exports/ respectively (both exist and are ignored); leave existing local files alone. (3) Reference scripts/test.sh as the canonical runner in CLAUDE.md. (4) Retire the backtest --ret5d as_written branch and its ret5d_scale parameter once the next squeeze re-run is confirmed reproducible (carried from cleanup-dead-files-and-flags). (5) Do NOT move the root DB paths (paper_trades.db etc.) - too many modules hardcode them and the churn buys nothing for beta.",
-      "acceptance": ".bak gone; new artifacts land under logs//exports/; CLAUDE.md names the test runner; ret5d branch removed after the reproducibility check."
     },
     {
       "id": "split-options-screener",
@@ -261,18 +232,6 @@
       "thesis": "Wealthsimple's US$0 contract fee covers equity and ETF options only. Index options are charged: SPX and SPXW US$1.00 per contract, VIX US$1.00, RUT/RUTW US$0.50, XSP US$0.25. config.paper_trading.commission_per_contract is a single number and now reads 0.0, so any index-option result the system produces understates its cost. Today this is latent rather than live — the ledger trades SPY, QQQ and IWM, which are ETFs and genuinely free — but index-put-spread-capacity is an active idea and SPX is the natural venue for it.",
       "evidence": "Wealthsimple fee schedule verified 2026-07-29.",
       "next_step": "Before any SPX work, make the commission lookup per-symbol rather than a single constant. A $1/contract fee on a 2-leg vertical is $4 round trip, which is small against SPX-sized credits but is not zero and must not be assumed away by a config field that cannot express it."
-    },
-    {
-      "id": "centralise-fee-defaults",
-      "title": "Six modules still hardcode a US-retail commission as their fallback",
-      "area": "infra",
-      "status": "proposed",
-      "conviction": "low",
-      "cost_wall": "n/a",
-      "priority": "P3",
-      "thesis": "Every path that reads a fee reads it from config.json, so the 2026-07-29 switch to Wealthsimple's US$0 took effect everywhere it matters. But the fallback defaults still carry 0.65: paper_manager.COMMISSION_PER_CONTRACT plus function defaults in dolt_spread, dolt_short, dolt_vol, trade_analysis and options_screener. A caller constructing one of those helpers directly, without threading a commission through, silently prices at a US broker's rates — and the number looks deliberate rather than stale.",
-      "evidence": "grep commission_per_contract across src/ 2026-07-29: six hardcoded 0.65 defaults, all reached only when config is absent. No falsy-zero bug — every read uses a .get default rather than `or`, so a configured 0.0 survives.",
-      "next_step": "Low priority precisely because it never fires in normal operation. If touched, put the default in one place (src/execution_costs) and have the rest import it, so there is a single number to change when the broker changes. Do not do this as a drive-by: each module's CLI has its own default and they are load-bearing for the standalone backtests."
     },
     {
       "id": "uoa-needs-oi-history",
@@ -538,6 +497,44 @@
         "thesis": "src/execution/sizing.py implements half-Kelly with a risk cap and a cost cap, and it is what real money would route through. The paper ledger has never used it: quantity is 1.0 on all 827 rows, which is the column default from the schema migration and is never written anywhere. So every statistic the gate reads describes a one-contract-per-signal book, while the thing the gate would authorise is a Kelly-sized book. Those differ in more than scale — sizing changes which trades get taken at all, and its cost cap is exactly the filter that would have excluded the 114 unaffordable trades.",
         "evidence": "paper_manager.py:402 is the only mention of quantity (ALTER TABLE ... DEFAULT 1.0); src/execution/sizing.py:38 size_position, contracts = min(risk-capped, cost-capped).",
         "next_step": "SHIPPED 2026-07-31 (commit 7d1192c): scripts/sizing_replay.py replays the closed LC cohort through size_position and reports the sized book beside the unsized one, with the scorer IC recomputed over survivors. MEASURED at n=92 (stop -50% of premium, 2% risk cap, 10% position cap): sizing is a FILTER, not a scale factor, and at small accounts it removes most of the cohort — 74 of 92 trades size to ZERO contracts at a $5,000 account, 68 of 92 at $10,000, 21 of 92 at $25,000, 11 of 92 at $50,000. So the gate is scoring a population the execution layer would largely have declined to open. The survivors' IC is unstable and insignificant at every account value tested (Pearson -0.095 at $5k, +0.143 at $10k, -0.097 at $25k), which is itself the result: there is no sized subset in which the scorer looks better. Sized net P&L is far smaller than the unsized book (-$621 vs -$19,177 at $5k) purely because most trades never open. CAVEAT printed with the report: deployed capital is cumulative across the window, not peak concurrent exposure — each trade is sized against the full account and overlaps are not netted. NEXT: fold this into the gate redesign — if the gate is meant to authorise a sized book, its cohort should be the sized one.\n\nPRIOR NEXT STEP: Replay the closed cohort through size_position at the intended account value and report the sized book alongside the unsized one. Cheap, no new data, and it is the only way to find out whether the gate's answer survives the sizing rule. Pairs with cohort-includes-unaffordable-trades — same root cause, different half."
+      },
+      {
+        "id": "yfinance-cboe-scan-failover",
+        "title": "CBOE is already integrated - use it as scan failover, not just cross-check",
+        "area": "infra",
+        "status": "shipped",
+        "conviction": "medium",
+        "cost_wall": "n/a",
+        "priority": "P2",
+        "thesis": "yfinance is the sole live scanning source and rate-limits regularly; the retry-wave UX (shipped) makes the failure polite but the scan still fails. src/cboe_client.py already fetches full delayed chains with exchange-computed IV and Greeks, and the 2026-06-10 cross-check measured 99% mid / 90% IV agreement on AAPL. Provenance stamping (quote_source) was built for exactly this - a chain served from CBOE would be labelled, penalized appropriately for staleness, and better than no scan at all. 90% of the failover is already written.",
+        "evidence": "src/cboe_client.py; src/cross_check.py results in README; data-layer memory: chain archive already snapshots CBOE daily, so the fetch path is exercised in production.",
+        "next_step": "SHIPPED 2026-07-31 (commit d253aa9): after Yahoo's retry waves exhaust, fetch_options_yfinance falls back to the CBOE delayed chain, mapped into the yfinance column shape with quote_source='cboe'. Gated on SCAN BREADTH, not mode name — MY LIST runs the discovery flow over a bounded watchlist so it qualifies, while a top-100 DISCOVER sweep and ALL do not (CBOE is free and unauthenticated; politeness is the point). Default OFF. The data-quality line now names it: 'N served from CBOE fallback (Yahoo unavailable; bid/ask mid, not last trade)'. TWO MAPPING FINDINGS from a live AAPL chain (3,646 contracts, 24 expirations): (1) 17% of contracts return iv exactly 0.0 — deep ITM/far OTM strikes CBOE does not solve. That is 'not measured', not 'zero vol', and passing it through would flow into IV rank, EV and every Greek as though the contract could not move; it now maps to None so the existing missing-data paths handle it. (2) CBOE carries no last-traded price, so lastPrice is the bid/ask mid — and a CROSSED book returns None rather than falling back to one side, since crossing means the two quotes disagree and neither is evidence of a price. IV needs no scaling (same decimal convention as yfinance, per cross_check) and OCC parsing already yields YYYY-MM-DD.\n\nPRIOR NEXT STEP: In fetch_options_yfinance's failure path (after the existing retry waves exhaust), attempt the CBOE chain for the same symbol, mapping its fields into the standard frame with quote_source='cboe' and honest quote_as_of. Scope: single-ticker and watchlist scans first (bounded symbol count); DISCOVER stays Yahoo-only to respect CBOE politeness. Surface 'served from CBOE fallback' in the data-quality line. Watch field-mapping details: CBOE strike/expiry formats and its IV convention differ; the cross_check joiner already solved the mapping once - reuse it.",
+        "acceptance": "Simulated Yahoo failure on a single-ticker scan completes via CBOE with provenance shown; no behaviour change when Yahoo is healthy; archive politeness unaffected."
+      },
+      {
+        "id": "repo-hygiene-beta",
+        "title": "Root-directory and artifact hygiene before strangers clone it",
+        "area": "infra",
+        "status": "shipped",
+        "conviction": "medium",
+        "cost_wall": "n/a",
+        "priority": "P2",
+        "thesis": "The repo root carries working residue a beta user will misread as load-bearing: scan_results_20260710_1115.csv, scan_errors.log, several .db/.sqlite caches, and src/launcher.py.bak (byte-identical to launcher.py, untracked since 2026-07-23). All are gitignored except the .bak, but a cloner still sees the operator's local clutter pattern reproduced in every doc screenshot, and new artifacts keep landing in the root. Absorbs the remaining step of canonical-test-runner (shipped): scripts/test.sh is still not referenced in CLAUDE.md.",
+        "evidence": "Repo root listing 2026-07-30; diff -q src/launcher.py.bak src/launcher.py reports identical; cleanup-dead-files-and-flags (superseded into this entry) recorded the .bak and the --ret5d as_written flag.",
+        "next_step": "MOSTLY SHIPPED 2026-07-31 (commit 66a009f). Done: scan_errors.log now writes to logs/ (both write sites), scan CSV exports go to exports/ via a shared _export_path helper, and the --export help text names the new location. NOT done and still open: (a) deleting src/launcher.py.bak — the operator's permission settings denied the removal twice; it is byte-identical to launcher.py at main (3fed963) so nothing unique is in it, delete at will; (b) CLAUDE.md does not exist in this repo, so 'reference scripts/test.sh in CLAUDE.md' has no target — the canonical runner is recorded in project memory instead; (c) the backtest --ret5d as_written branch is untouched, still pending the squeeze re-run reproducibility check.\n\nPRIOR NEXT STEP: (1) Delete src/launcher.py.bak. (2) Route future scan_errors.log and scan CSV exports into logs/ and exports/ respectively (both exist and are ignored); leave existing local files alone. (3) Reference scripts/test.sh as the canonical runner in CLAUDE.md. (4) Retire the backtest --ret5d as_written branch and its ret5d_scale parameter once the next squeeze re-run is confirmed reproducible (carried from cleanup-dead-files-and-flags). (5) Do NOT move the root DB paths (paper_trades.db etc.) - too many modules hardcode them and the churn buys nothing for beta.",
+        "acceptance": ".bak gone; new artifacts land under logs//exports/; CLAUDE.md names the test runner; ret5d branch removed after the reproducibility check."
+      },
+      {
+        "id": "centralise-fee-defaults",
+        "title": "Six modules still hardcode a US-retail commission as their fallback",
+        "area": "infra",
+        "status": "shipped",
+        "conviction": "low",
+        "cost_wall": "n/a",
+        "priority": "P3",
+        "thesis": "Every path that reads a fee reads it from config.json, so the 2026-07-29 switch to Wealthsimple's US$0 took effect everywhere it matters. But the fallback defaults still carry 0.65: paper_manager.COMMISSION_PER_CONTRACT plus function defaults in dolt_spread, dolt_short, dolt_vol, trade_analysis and options_screener. A caller constructing one of those helpers directly, without threading a commission through, silently prices at a US broker's rates — and the number looks deliberate rather than stale.",
+        "evidence": "grep commission_per_contract across src/ 2026-07-29: six hardcoded 0.65 defaults, all reached only when config is absent. No falsy-zero bug — every read uses a .get default rather than `or`, so a configured 0.0 survives.",
+        "next_step": "SHIPPED 2026-07-31 (commit 66a009f): FALLBACK_COMMISSION_PER_CONTRACT lives in src/execution_costs.py and every consumer imports it — dolt_cohort, dolt_short, dolt_spread, dolt_vol, dolt_earnings_sell, trade_analysis, options_screener, paper_manager, and structure/express.py. That last one is a SEVENTH copy the original audit missed; the new regression test found it, and the test now fails if any module reintroduces a `commission... = 0.65` literal. VALUE DELIBERATELY UNCHANGED at 0.65 rather than dropped to the broker's real 0.0: this fallback only fires when no config is reachable (typically a standalone backtest), and there overstating cost is the safe direction — 0.0 would let a backtest price as though trading were free. Normal paths still read config's 0.0, and a test pins that a configured zero beats the fallback. Noted at the constant: a single scalar cannot express index options, so see index-options-are-not-free before SPX work.\n\nPRIOR NEXT STEP: Low priority precisely because it never fires in normal operation. If touched, put the default in one place (src/execution_costs) and have the rest import it, so there is a single number to change when the broker changes. Do not do this as a drive-by: each module's CLI has its own default and they are load-bearing for the standalone backtests."
       }
     ],
     "dead": [
