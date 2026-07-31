@@ -2,7 +2,7 @@
   "updated": "2026-07-31",
   "note": "Idea backlog for the research desk Ideas tab. Statuses: proposed, testing, validated, shipped, dead. cost_wall records whether the idea's edge survives slippage+commissions - the recurring killer in this repo. Dead ideas are kept deliberately so they are not re-litigated. Where a later measurement contradicts an earlier one, the entry is AMENDED in place rather than replaced, so the reasoning that was acted on stays visible. 2026-07-30: a full beta-readiness audit added a prioritised execution plan - see beta_readiness_plan and constraints_for_executor below. Entries carrying a priority field (P0-P3) are that plan; the executor model should work them in beta_readiness_plan order and honour every constraint listed. 2026-07-31: the beta-readiness plan was executed - P0 through P2 are shipped or specced, see each entry's status and next_step. The two gate/exit decisions are deliberately NOT applied: they are specs awaiting operator sign-off (docs/GATE_REDESIGN_SPEC.md, docs/MARK_TRUSTWORTHINESS_SPEC.md). P3 (split-options-screener, retire-or-measure-ai-scorer, centralise-fee-defaults) was not started.",
   "beta_readiness_plan": {
-    "purpose": "What remains of the beta-readiness plan. P0 and P1 are done or specced (see `archive.shipped` and the four P0 entries still in `ideas`, which are code-complete on their reporting half and waiting on operator sign-off for their decision half). Work the phases in order; within a phase, order is by decision-relevance.",
+    "purpose": "Beta-readiness plan: P0, P1 and P2 are COMPLETE — shipped, or specced and awaiting operator sign-off (see `awaiting_operator_signoff`). Only P3 structural debt remains, and neither remaining item is urgent. Completed entries live in `archive.shipped` with their findings.",
     "step_0_user_only": "OPERATOR ACTION, still not done: System Settings > General > Login Items & Extensions > Allow in the Background, for the three com.ollie.options.* LaunchAgents. All three have exited 78 since 2026-06-15 — 46 days as of 2026-07-31. No code change substitutes for this toggle. Note the detection that reports this was itself broken until 2026-07-31 (it matched the wrong label prefix), so the banner had never actually fired.",
     "awaiting_operator_signoff": [
       "docs/GATE_REDESIGN_SPEC.md — covers gate-statistic-wrong-for-skewed-returns, fix-gate-power-math, repoint-gate-credit stage 2, effective-n-in-gate, and the stop-lc-autolog-bleed feeder ruling. URGENT: the cohort now reads n=92, Pearson -0.065, so the next checkpoint fires STOP under the unchanged rules.",
@@ -11,9 +11,7 @@
     "operator_ruling_needed": [
       "reports/duplicate_trades_audit.md — 18 candidate groups, 38 rows, 20 excess, $2,959.10 of double-counted P&L. Nothing was deleted; which are true duplicates vs legitimate re-signals is a judgement call. Until ruled on, the excess rows double-count in the gate cohort and the track record."
     ],
-    "P2_remaining": [
-      "usd-account-vs-conversion-spread"
-    ],
+    "P2_remaining": [],
     "P3_remaining": [
       "split-options-screener",
       "retire-or-measure-ai-scorer"
@@ -209,18 +207,6 @@
       "thesis": "config.json ai_scoring.enabled is false, so the LLM rerank runs on nothing. It left 35 scored rows out of 827, all from 2026-05 and 2026-06, across 13 distinct score values — enough to compute an IC (+0.108) and nowhere near enough to believe one. Meanwhile src/ai_scorer.py (1,109 lines) plus prompts.py, config_ai.py, ai_cache.py and .ai_score_cache.db are carried, tested and maintained for a path nothing calls. The free-tier model chain was still being refreshed as recently as commit 5037fbb.",
       "evidence": "config.json ai_scoring; paper_trades.db ai_score non-null on 35/827, months 2026-05 and 2026-06 only.",
       "next_step": "Pick one and commit. Either run it enabled over a defined cohort until n is large enough to test its IC WITHIN a strategy (the lesson from dead-pop-score-as-ranker), or retire the subsystem to a branch and delete it from the tree. What should not continue is maintaining a disabled 1,100-line ranker that no evidence supports and no run exercises."
-    },
-    {
-      "id": "usd-account-vs-conversion-spread",
-      "title": "A USD account may pay for itself against the 1.5% conversion spread",
-      "area": "execution",
-      "status": "proposed",
-      "conviction": "medium",
-      "cost_wall": "n/a",
-      "priority": "P2",
-      "thesis": "Trading US-listed options from a CAD account converts currency both ways at Wealthsimple's 1.5% spread (below US$10k of conversions; 1.0% to $25k, 0.5% to $100k, 0% above). Nothing in this repo modelled that until now, and it is the largest remaining cost in the book once commissions are correctly set to zero: $1,098 of conversion across 187 closed credit trades in the cohort window alone. A USD account removes it for $10/month.",
-      "evidence": "Wealthsimple fee schedule verified 2026-07-29; scripts/cost_model_report.py prints the conversion total. Note the cost scales with money moved, not contract count, so it cannot be traded around by using fewer legs.",
-      "next_step": "Check actual annual conversion volume rather than this window's, then decide. Two things to confirm first, because both change the answer: whether the tiered rate is assessed on cumulative annual conversions or per transaction, and whether holding USD in the account leaves idle cash uninvested in a way that costs more than the spread saves. Operator decision, not code - the executor's only task here is presenting the two confirmations if asked."
     },
     {
       "id": "index-options-are-not-free",
@@ -535,6 +521,18 @@
         "thesis": "Every path that reads a fee reads it from config.json, so the 2026-07-29 switch to Wealthsimple's US$0 took effect everywhere it matters. But the fallback defaults still carry 0.65: paper_manager.COMMISSION_PER_CONTRACT plus function defaults in dolt_spread, dolt_short, dolt_vol, trade_analysis and options_screener. A caller constructing one of those helpers directly, without threading a commission through, silently prices at a US broker's rates — and the number looks deliberate rather than stale.",
         "evidence": "grep commission_per_contract across src/ 2026-07-29: six hardcoded 0.65 defaults, all reached only when config is absent. No falsy-zero bug — every read uses a .get default rather than `or`, so a configured 0.0 survives.",
         "next_step": "SHIPPED 2026-07-31 (commit 66a009f): FALLBACK_COMMISSION_PER_CONTRACT lives in src/execution_costs.py and every consumer imports it — dolt_cohort, dolt_short, dolt_spread, dolt_vol, dolt_earnings_sell, trade_analysis, options_screener, paper_manager, and structure/express.py. That last one is a SEVENTH copy the original audit missed; the new regression test found it, and the test now fails if any module reintroduces a `commission... = 0.65` literal. VALUE DELIBERATELY UNCHANGED at 0.65 rather than dropped to the broker's real 0.0: this fallback only fires when no config is reachable (typically a standalone backtest), and there overstating cost is the safe direction — 0.0 would let a backtest price as though trading were free. Normal paths still read config's 0.0, and a test pins that a configured zero beats the fallback. Noted at the constant: a single scalar cannot express index options, so see index-options-are-not-free before SPX work.\n\nPRIOR NEXT STEP: Low priority precisely because it never fires in normal operation. If touched, put the default in one place (src/execution_costs) and have the rest import it, so there is a single number to change when the broker changes. Do not do this as a drive-by: each module's CLI has its own default and they are load-bearing for the standalone backtests."
+      },
+      {
+        "id": "usd-account-vs-conversion-spread",
+        "title": "A USD account may pay for itself against the 1.5% conversion spread",
+        "area": "execution",
+        "status": "shipped",
+        "conviction": "medium",
+        "cost_wall": "n/a",
+        "priority": "P2",
+        "thesis": "Trading US-listed options from a CAD account converts currency both ways at Wealthsimple's 1.5% spread (below US$10k of conversions; 1.0% to $25k, 0.5% to $100k, 0% above). Nothing in this repo modelled that until now, and it is the largest remaining cost in the book once commissions are correctly set to zero: $1,098 of conversion across 187 closed credit trades in the cohort window alone. A USD account removes it for $10/month.",
+        "evidence": "Wealthsimple fee schedule verified 2026-07-29; scripts/cost_model_report.py prints the conversion total. Note the cost scales with money moved, not contract count, so it cannot be traded around by using fewer legs.",
+        "next_step": "RESOLVED 2026-07-31 by operator decision: the USD trading subscription is ACTIVE, so config.paper_trading.fx_conversion_rate is now 0.0 (was 0.015). There is no per-trade CAD->USD conversion spread to model. The US$10/month subscription is a FIXED cost and is deliberately NOT folded into per-trade friction — it does not scale with activity and would distort a per-trade number — but it is real: at zero trading it is pure overhead, and the break-even against the old 1.5% is roughly US$8k/yr of conversions. For scale, the cohort window alone carried $1,098 of conversion across 187 closed credit trades, so at the book's historical activity the subscription pays for itself many times over. The two open questions this entry used to carry (whether tiering was per-transaction or cumulative, and whether idle USD cash goes uninvested) are now MOOT for the conversion decision, though the idle-cash question still applies to however much USD is held. Revert fx_conversion_rate to 0.015 if the subscription lapses.\n\nPRIOR NEXT STEP: Check actual annual conversion volume rather than this window's, then decide. Two things to confirm first, because both change the answer: whether the tiered rate is assessed on cumulative annual conversions or per transaction, and whether holding USD in the account leaves idle cash uninvested in a way that costs more than the spread saves. Operator decision, not code - the executor's only task here is presenting the two confirmations if asked."
       }
     ],
     "dead": [

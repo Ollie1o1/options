@@ -1,6 +1,6 @@
 # Paper Trading Track Record
 
-_Generated 2026-07-31 15:30 • 807 closed trades_
+_Generated 2026-07-31 19:19 • 807 closed trades_
 
 > **Methodology & caveats.** These are **paper trades**, not live fills. Entries and exits use **delayed retail data** (Yahoo Finance) and a **modeled friction** assumption (spread/slippage), so realized results would differ. The descriptive stats below are real; the **predictive edge of the ranking model is still under out-of-sample evaluation** and is *not* established — see [docs/VALIDATION_POWER.md](../docs/VALIDATION_POWER.md).
 
