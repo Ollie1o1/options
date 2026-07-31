@@ -37,35 +37,61 @@ three databases it is not using. That is worth not doing regardless of what it
 costs, which is what `src/cache_release.py` now prevents: every menu prompt
 releases the caches before waiting on the human.
 
-## What could NOT be reproduced
+## The mechanism, as actually diagnosed
 
-The 20-50x slowdown itself. A local contention benchmark — one process holding
-a WAL connection open while a second process did 300 connect-and-read cycles
-against the same file — measured the opposite of the hypothesis:
+This was diagnosed on the operator's machine on 2026-07-29, and the detail
+matters because it is what makes the release the right fix:
+
+An idle launcher holds **~41 open handles** to
+`~/Library/Caches/py-yfinance/tkr-tz.db`. The WAL cannot **checkpoint** while a
+reader is alive — the file's mtime freezes at the launcher's start time — so
+the WAL grows unbounded and every new connection from a concurrent scan
+re-scans the whole thing under lock contention. The stack sits in
+`sqlite3_step -> btreeBeginTrans -> sqlite3PagerSharedLock -> pread/fcntl`,
+around 58% of samples, with no ESTABLISHED socket — which is why it looks like
+a network stall and is not one.
+
+Measured cost at the time: a `-ds` window that ran 2m22s went to **55 minutes
+with zero rows** with a day-old launcher open; after quitting it, the same
+window finished in ~2.5 minutes.
+
+Diagnose a recurrence with `sample <pid>` and
+`lsof ~/Library/Caches/py-yfinance/tkr-tz.db`.
+
+## A benchmark that did NOT reproduce it, and why it was the wrong test
+
+A naive local experiment — one connection held open while a second process did
+300 connect-and-read cycles — measured the opposite:
 
 | holder state | 300 connect+read in a second process |
 |---|---|
 | connection HELD open | 0.020 s |
 | connection RELEASED | 0.104 s |
 
-Holding the WAL open made the second process **five times faster**, because a
-released database has to recreate the `-wal`/`-shm` sidecars on each new
-connection. Plain WAL contention on a local disk therefore does not explain the
-reported slowdown, and this change should not be described as having fixed it.
+That is a real result but it does not bear on the problem, because it recreates
+neither of the conditions that cause it: a single handle rather than ~41, and a
+tiny WAL that never had the chance to grow un-checkpointed. Cheap reads against
+a small WAL are faster when a connection is already warm. The pathology is a
+*large, un-checkpointable* WAL, which takes a long-lived idle session to build.
+Recorded here so the negative result is not mistaken for evidence that holding
+handles is harmless.
 
-## What this means
+## Why the release is the right fix
 
-- The release is shipped on handle-hygiene grounds: a process waiting on a
-  human should not hold database handles. That is defensible on its own.
-- It is **not** an established fix for the 20-50x slowdown. If the slowdown
-  persists with this in place, the cause is elsewhere.
-- The next place to look is the enclosing directory rather than the connection.
-  The repo lives under `~/Desktop`, and on a synced Desktop every create and
-  delete of a `-wal`/`-shm` sidecar is a sync event. That would make sidecar
-  *churn* expensive in a way a local-disk benchmark cannot show — and it would
-  also explain why the symptom was originally mistaken for an iCloud problem.
-  Testing that means timing the same scan with the repo on local-only storage,
-  which needs the operator's machine and was out of scope here.
+Closing the handles is precisely what lets the WAL checkpoint. The release
+targets the diagnosed mechanism rather than a guess at it: no reader alive at
+the menu prompt means the WAL can truncate, so it never reaches the size that
+makes concurrent scans pathological.
+
+What has NOT been done is an end-to-end confirmation on the operator's machine
+— leaving a launcher idle for hours, then timing a concurrent scan with and
+without the release. That is the check that would close this out, and it needs
+a real session and real elapsed time.
+
+**A dead end, already chased twice — do not chase it again.** iCloud is not the
+cause. The project lives under a synced `~/Desktop` and `fileproviderd` does
+hold a write handle on `yf_disk_cache.db`, but a timed read of a synced copy
+against a `/private/tmp` copy is identical (0.005s both).
 
 ## Reproducing the measurements
 

@@ -13,16 +13,18 @@ Verified against the installed yfinance (see `docs/IDLE_CACHE_RELEASE.md`):
 closing drops both sidecar files, and a subsequent read revives the connection
 and recreates them.
 
-Honesty about scope, because this module was written to chase a specific
-complaint: an idle launcher has been observed to make scans in other sessions
-20-50x slower, and a local WAL contention benchmark did **not** reproduce that
-slowdown — holding the connection open measured *faster* than reopening per
-read. So this is not a proven fix for that symptom. What it is: the process no
-longer holds database handles it has no use for while waiting on a human, which
-removes a whole class of cross-session interference from the picture and costs
-one reconnect. If the slowdown survives this, the cause is elsewhere and the
-next place to look is the enclosing directory (a synced folder makes sidecar
-file churn expensive) rather than the connection.
+Why this is the fix rather than a guess at one: an idle launcher was measured
+holding ~41 handles to the tz cache, and **a WAL cannot checkpoint while a
+reader is alive**. The WAL therefore grows unbounded and every connection from
+a concurrent scan re-scans it under lock contention — a `-ds` window went from
+2m22s to 55 minutes with a day-old launcher open. Closing the handles is
+exactly what lets the WAL truncate, so it never reaches that size.
+
+Not yet done: an end-to-end confirmation on the operator's machine (idle for
+hours, then time a concurrent scan with and without this). See
+`docs/IDLE_CACHE_RELEASE.md`, which also records a naive benchmark that failed
+to reproduce the slowdown and why it was the wrong test — and that iCloud is a
+dead end already chased twice.
 """
 from __future__ import annotations
 
