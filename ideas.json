@@ -32,6 +32,19 @@
   ],
   "ideas": [
     {
+      "id": "watch-the-tradeability-gate",
+      "title": "Watch the new tradeability gate for a fortnight — confirm it gates rather than starves",
+      "area": "execution",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P1",
+      "thesis": "config.auto_log.max_friction_to_credit = 0.50 now refuses credit trades whose round-trip friction exceeds half the credit. On the historical cohort that would have refused 48 of 188 short-premium trades, 31 of which could not have profited at any win rate. The accrual cost is real and falls hardest on the cheap-looking small spreads the feeder logs most of, so it must be watched the same way the affordability gate was.",
+      "evidence": "DECISIONS.md 2026-07-31; measured over the short-premium cohort while building src/short_premium_gate.py. The 2026-07-29 affordability gate had exactly this risk and the short-put half of it DID bite (see the starvation entry) before being fixed.",
+      "next_step": "Watch `untradeable_rejected` in the auto-log summary for two weeks. If a window logs zero, check whether the gate or the affordability cap held it back — they are counted separately for this reason. If credit accrual collapses rather than thins, loosen the threshold toward 0.75 rather than disabling it: the trades above 1.0 are unwinnable at any setting and should never come back.",
+      "acceptance": "Two weeks of auto-log summaries reviewed; threshold confirmed or adjusted with a dated note here."
+    },
+    {
       "id": "split-options-screener",
       "title": "options_screener.py is 5,888 lines - split the monolith, carefully, later",
       "area": "infra",
