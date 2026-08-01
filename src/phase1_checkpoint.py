@@ -331,7 +331,8 @@ def posterior_ic_above(ic: float, n: int, threshold: float = 0.08) -> Optional[f
 def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = None,
                        max_capital_at_risk: Optional[float] = None,
                        gate_version: int = 2,
-                       extensions_used: int = 0) -> dict:
+                       extensions_used: int = 0,
+                       short_premium_extensions_used: int = 0) -> dict:
     """Cohort IC and the gate decision.
 
     ``gate_version`` selects which rule governs. 2 is the signed redesign
@@ -363,6 +364,18 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
          ic_s_affordable, p_s_affordable) = _dual_ic(aff_scores, aff_returns)
 
     short_premium = short_premium_report(db_path, phase1_start, max_capital_at_risk)
+
+    # The short-premium gate (spec §2.4). Imported lazily and defensively: it is
+    # a second gate reported beside the first, and a failure in it must never
+    # stop the Long Call checkpoint from being written.
+    short_premium_gate = None
+    try:
+        from src.short_premium_gate import evaluate as _sp_evaluate
+        short_premium_gate = _sp_evaluate(
+            db_path, phase1_start, max_capital_at_risk,
+            extensions_used=short_premium_extensions_used)
+    except Exception:
+        short_premium_gate = None
 
     ic_p, p_p, ic_s, p_s = _dual_ic(scores, returns)
 
@@ -402,6 +415,7 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
         "ic_spearman_affordable": ic_s_affordable,
         "p_spearman_affordable": p_s_affordable,
         "short_premium": short_premium,
+        "short_premium_gate": short_premium_gate,
     }
 
 
@@ -422,8 +436,20 @@ def _format_markdown(r: dict) -> str:
         f"## Gate decision: **{r['decision']}**", "",
         _decision_explainer(r["decision"]), "",
         *_gate_version_lines(r),
+        *_short_premium_gate_lines(r.get("short_premium_gate")),
         *_short_premium_lines(r.get("short_premium")),
     ]) + "\n"
+
+
+def _short_premium_gate_lines(g: Optional[dict]) -> list:
+    """The short-premium gate's own verdict, rendered by its own module."""
+    if not g:
+        return []
+    try:
+        from src.short_premium_gate import format_report
+        return format_report(g).splitlines() + [""]
+    except Exception:
+        return []
 
 
 def _gate_version_lines(r: dict) -> list:
@@ -721,6 +747,8 @@ def main() -> None:
         max_capital_at_risk=float(cap) if cap else None,
         gate_version=int(gate_cfg.get("version", 2)),
         extensions_used=int(gate_cfg.get("extensions_used", 0)),
+        short_premium_extensions_used=int(
+            gate_cfg.get("short_premium_extensions_used", 0)),
     )
     print(json.dumps(result, indent=2))
     if not args.dry_run:

@@ -527,6 +527,8 @@
     "_note": "Phase-1 gate rule. version 2 is the signed redesign (docs/GATE_REDESIGN_SPEC.md, operator sign-off 2026-07-31): decides on the SPEARMAN rank IC via posterior bands at EFFECTIVE n, with a bounded EXTEND. version 1 is the superseded Pearson/p-value rule, kept runnable so its verdict can still be computed; both are reported on every checkpoint regardless of which governs.",
     "version": 2,
     "_extensions_used_note": "How many 2-week EXTENDs have been granted under v2. At 2 the gate must resolve to READY or STOP rather than extending again — this is the terminal condition v1 lacked. Increment when an EXTEND is acted on.",
-    "extensions_used": 0
+    "extensions_used": 0,
+    "_short_premium_note": "The short-premium gate (spec section 2.4) runs beside the Long Call gate every checkpoint. Arm A (family viability, clustered-bootstrap posterior on the median net return-on-risk) is the arm that would authorise capital; Arm B (rank IC) only decides whether live trading would use the scorer to pick contracts. It is REPORTING until the operator rules on the paper_only question — every row in its cohort is paper_only=1.",
+    "short_premium_extensions_used": 0
   }
 }

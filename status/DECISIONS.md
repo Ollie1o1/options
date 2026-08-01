@@ -4,6 +4,59 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-07-31 — Short-premium gate: a different statistic, and a tradeability filter
+
+**Why a new gate at all:** the Long Call gate resolved STOP, and Long Call is
+not what the book earns on. Validating one strategy to authorise going live and
+then trading another is a mismatch between the experiment and the decision it
+licenses (spec section 2.4).
+
+**Why not the same machinery:** short-premium returns are the mirror image of
+long-call returns — many small wins, occasional large losses (66% win rate,
+skew -0.25). So Arm A asks about the MEDIAN net return-on-risk, not an IC, and
+gets a **bootstrap** rather than a Fisher-z posterior, because "does this family
+make money" is a question about a location parameter, not a correlation.
+
+**The bootstrap resamples ENTRY DAYS, not trades.** 188 trades landed on 27
+entry days, up to 33 in one day. Resampling trades would treat correlated
+observations as independent and manufacture confidence; a test pins that
+clustered resampling widens the interval relative to ignoring clustering.
+
+**The finding that changed the design.** Re-costing on measured per-structure
+spreads moved the MEAN by -12.7pp while barely moving the median, because the
+cohort is full of micro-spreads: median capital at risk is $57, and a Bull Put
+with $26.50 at risk carries $64.80 of round-trip friction. **31 of 188 trades
+have friction exceeding the entire credit received** — they cannot profit at any
+win rate. Measuring them is measuring a population no rational trader would
+open, exactly like the unaffordable trades of 2026-07-29, but at the other end
+of the size range.
+
+**Decision:** exclude trades whose round-trip friction exceeds 50% of the credit
+(`TRADEABILITY_MAX_FRICTION_RATIO`). On what remains (n=140) the median
+(+28.1%), mean (+19.1%) and capital-weighted return (+18.6%) all agree in sign,
+and the verdict is robust from a 25% to a 100% threshold. The loose 50% setting
+is the conservative choice: tightening it improves the result.
+
+**A coherence guard, mirroring the Long Call gate's sign guard.** Arm A will not
+fire READY when the median and the capital-weighted return disagree in sign. A
+positive median with a negative book is the signature failure of short premium —
+picking up pennies in front of a steamroller — and it is exactly what the raw,
+unfiltered cohort showed (+12.6% median against -0.6% mean).
+
+**Current verdict: Arm A READY (posterior 100%), Arm B EXTEND (rank IC +0.091).**
+Arm B does not veto Arm A; it decides whether live trading would use the scorer
+to pick contracts or trade the family on structural rules.
+
+**This gate is REPORTING ONLY and does not authorise anything yet.** Every row
+in its cohort is `paper_only=1` — the family was quarantined in 2026-05-29 as a
+strategy-selection choice, not a data-quality one. Promoting a quarantined
+cohort to a validation cohort is an operator decision. And the window is under
+two months with no volatility shock: short premium's characteristic failure is
+a single tail event, so a high posterior here means "no evidence against", not
+"the tail has been survived". Both caveats print with every run.
+
+---
+
 ## 2026-07-31 — Gate v2 adopted: rank IC, posterior bands, bounded EXTEND
 
 **Why:** the v1 gate could not answer its own question. It decided on the
