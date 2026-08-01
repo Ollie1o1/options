@@ -60,6 +60,18 @@ _MAX_SANE_SIGMA = 5.0
 # the ledger carries the provenance of the fill it recorded.
 MODEL_MARK_SUFFIX = " (model mark)"
 
+# Refuse an auto-logged CREDIT trade when round-trip friction exceeds this
+# fraction of the credit received. Above 1.0 the trade cannot profit at any win
+# rate; 0.50 still demands roughly 2:1 accuracy just to clear the spread.
+# Measured on the 2026-07-31 cohort: 31 of 188 short-premium trades were above
+# 1.0, and excluding those above 0.50 moved the family's median return on risk
+# from +12.6% to +28.1%. Set to null to disable.
+DEFAULT_MAX_FRICTION_TO_CREDIT = 0.50
+
+# Legs per credit structure, for costing the round trip.
+_CREDIT_LEG_COUNTS = {"Bull Put": 2, "Bear Call": 2, "Short Put": 1,
+                      "Iron Condor": 4, "Credit Spread": 2}
+
 
 def _mid_from_quote(bid: Any, ask: Any) -> Optional[float]:
     """Bid/ask midpoint, or None when the book is unusable.
@@ -644,12 +656,17 @@ class PaperManager:
             _win = (_cfg.get("auto_log") or {}).get("dedup_window_days",
                                                     DEFAULT_DEDUP_WINDOW_DAYS)
             self._dedup_window_days = int(_win) if _win not in (None, "", 0, False) else 0
+            _fric = (_cfg.get("auto_log") or {}).get(
+                "max_friction_to_credit", DEFAULT_MAX_FRICTION_TO_CREDIT)
+            self._max_friction_to_credit = (
+                float(_fric) if _fric not in (None, "", 0, False) else None)
         except Exception:
             self._commission_per_contract = COMMISSION_PER_CONTRACT
             self._slippage_per_share = SLIPPAGE_PER_SHARE
             self._fx_conversion_rate = 0.0
             self._max_capital_at_risk = None
             self._dedup_window_days = DEFAULT_DEDUP_WINDOW_DAYS
+            self._max_friction_to_credit = DEFAULT_MAX_FRICTION_TO_CREDIT
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
         # Count of trades refused for exceeding the budget this session. Callers
         # print it so a feeder that has gone quiet is visibly gated, not broken.
@@ -657,7 +674,37 @@ class PaperManager:
         # Same idea for near-duplicate auto-log entries: reported separately so a
         # window that logged nothing shows *which* gate held it back.
         self.duplicate_rejected = 0
+        # And for credit trades whose bid-ask cost swallows the credit. Counted
+        # separately so a quiet feeder names the gate that held it back.
+        self.untradeable_rejected = 0
         self._init_db()
+
+    def _friction_to_credit_ratio(self, trade_dict: dict) -> Optional[float]:
+        """Round-trip friction as a fraction of the credit received, or None.
+
+        None whenever the question does not apply — a debit structure, or a row
+        with no recorded credit. Returning None rather than 0.0 matters: a
+        missing credit is a row the guard should not judge, never a free trade.
+        """
+        strategy = trade_dict.get("strategy_name") or ""
+        n_legs = _CREDIT_LEG_COUNTS.get(strategy)
+        if n_legs is None:
+            return None  # not a credit structure
+        credit = trade_dict.get("net_credit")
+        if credit in (None, "", 0):
+            credit = trade_dict.get("entry_price")
+        try:
+            credit = float(credit or 0)
+        except (TypeError, ValueError):
+            return None
+        if credit <= 0:
+            return None
+        # Friction per share, both ways, every leg — the same shape
+        # src.execution_costs prices, using this manager's configured costs.
+        friction = ((2 * self._slippage_per_share * n_legs)
+                    + (2 * self._commission_per_contract * n_legs / 100.0)
+                    + self._fx_per_share(credit))
+        return friction / credit
 
     def _fx_per_share(self, premium: float) -> float:
         """Currency conversion cost per share on a round trip of this premium.
@@ -877,6 +924,25 @@ class PaperManager:
             quantity=trade_dict.get("quantity", 1.0),
             ticker=trade_dict.get("ticker"),
         )
+        # Tradeability: a credit trade whose round-trip friction eats the credit
+        # cannot profit at any win rate. Measured 2026-07-31 over the logged
+        # cohort, 31 of 188 short-premium trades were in that state — micro
+        # spreads with $57 of median capital at risk against ~$65 of spread. The
+        # affordability gate refuses positions too LARGE for the account; this
+        # one refuses positions too SMALL to survive their own market.
+        _fric_ratio = self._friction_to_credit_ratio(trade_dict)
+        if (not trade_dict.get("allow_untradeable")
+                and self._max_friction_to_credit is not None
+                and _fric_ratio is not None
+                and _fric_ratio > self._max_friction_to_credit):
+            self.untradeable_rejected += 1
+            print(
+                f"Skipped {trade_dict['strategy_name']} on {trade_dict.get('ticker')}: "
+                f"round-trip friction is {_fric_ratio:.0%} of the credit "
+                f"(limit {self._max_friction_to_credit:.0%}) — the spread eats the trade"
+            )
+            return False
+
         if not trade_dict.get("allow_unaffordable") and not within_budget(
             risk, self._max_capital_at_risk
         ):

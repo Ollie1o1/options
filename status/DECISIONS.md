@@ -4,6 +4,44 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-07-31 — Auto-log refuses credit trades the spread would eat
+
+**Why:** building the short-premium gate surfaced that **31 of 188 logged
+short-premium trades carried round-trip friction exceeding the entire credit
+received** — micro-spreads with $57 of median capital at risk against roughly
+$65 of spread. Those cannot profit at any win rate. The finding was worth
+nothing as a note in a document: the screener would keep suggesting them and the
+feeder would keep logging them, so every future cohort would carry the same
+contamination.
+
+**Decision:** `config.auto_log.max_friction_to_credit = 0.50`, enforced in
+`PaperManager.log_trade` beside the affordability gate. Refusals increment
+`untradeable_rejected` and print, so a feeder that has gone quiet names the gate
+that held it back rather than looking broken. `allow_untradeable=True` bypasses
+it for a deliberate manual entry; `null` disables it.
+
+**This is the mirror of the 2026-07-29 affordability gate.** That one refuses
+positions too LARGE for the account; this one refuses positions too SMALL to
+survive their own market. Both are the same error — measuring a population no
+rational trader would open — at opposite ends of the size range.
+
+**Scope, deliberately narrow:** credit structures only. A debit trade has no
+credit to compare against, so `_friction_to_credit_ratio` returns None and the
+guard never fires on Long Call or Long Put. A missing credit also returns None
+rather than 0.0 — an unrecorded credit is a row the guard should not judge, not
+a free trade.
+
+**Cost accepted:** the feeder will log fewer credit trades, and the ones it
+drops are disproportionately the cheap-looking small ones. That is the intended
+trade. Watch `untradeable_rejected` for a fortnight to confirm it is gating
+rather than starving, the same way the affordability gate was watched.
+
+**Not retroactive.** No logged row was deleted or altered; the existing cohort
+still contains the 31, which is why the short-premium gate applies the same
+filter at read time and reports how many it excluded.
+
+---
+
 ## 2026-07-31 — Short-premium gate: a different statistic, and a tradeability filter
 
 **Why a new gate at all:** the Long Call gate resolved STOP, and Long Call is
