@@ -43,9 +43,30 @@ import math
 import numpy as np
 from scipy.stats import norm, pearsonr, spearmanr
 
+from src import gate_extensions
+
+
+def exclude_ruled_duplicates(conn: sqlite3.Connection) -> str:
+    """SQL fragment dropping rows ruled double-logs, or '' on older ledgers.
+
+    `duplicate_of` arrived in schema v17. Probing for it rather than assuming it
+    keeps every cohort query working against a ledger written before the
+    migration — including the minimal fixtures the tests build by hand.
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+    except sqlite3.Error:
+        return ""
+    return " AND duplicate_of IS NULL" if "duplicate_of" in cols else ""
+
 
 def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[float] = None):
     """Cohort scores and returns.
+
+    Rows RULED double-logs are excluded (`duplicate_of IS NOT NULL`). A ruled
+    duplicate is one real decision recorded twice, so counting it twice inflates
+    both n and the evidence; it stays in the ledger because the ledger records
+    what happened, but it is not evidence.
 
     With ``max_capital_at_risk`` set, restricts to trades the account could
     actually have opened. Rows with NULL capital_at_risk are excluded from that
@@ -64,6 +85,7 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
         params = (phase1_start, float(max_capital_at_risk))
     scores, returns, dates = [], [], []
     with sqlite3.connect(db_path) as conn:
+        sql += exclude_ruled_duplicates(conn)
         for q, p, d in conn.execute(sql, params).fetchall():
             try:
                 scores.append(float(q)); returns.append(float(p))
@@ -332,7 +354,9 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
                        max_capital_at_risk: Optional[float] = None,
                        gate_version: int = 2,
                        extensions_used: int = 0,
-                       short_premium_extensions_used: int = 0) -> dict:
+                       short_premium_extensions_used: int = 0,
+                       extension_note: Optional[str] = None,
+                       short_premium_extension_note: Optional[str] = None) -> dict:
     """Cohort IC and the gate decision.
 
     ``gate_version`` selects which rule governs. 2 is the signed redesign
@@ -373,7 +397,8 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
         from src.short_premium_gate import evaluate as _sp_evaluate
         short_premium_gate = _sp_evaluate(
             db_path, phase1_start, max_capital_at_risk,
-            extensions_used=short_premium_extensions_used)
+            extensions_used=short_premium_extensions_used,
+            extension_note=short_premium_extension_note)
     except Exception:
         short_premium_gate = None
 
@@ -403,6 +428,8 @@ def compute_checkpoint(db_path: str, phase1_start: str, today: Optional[str] = N
         "design_effect": de,
         "n_effective": n_eff,
         "extensions_used": extensions_used,
+        "extension_note": extension_note,
+        "short_premium_extension_note": short_premium_extension_note,
         # v2 reads RANK IC, so its posterior is the rank one. The Pearson
         # posterior stays below under its original key for continuity.
         "posterior_rank_ic_ge_008": posterior_ic_above(
@@ -481,6 +508,8 @@ def _gate_version_lines(r: dict) -> list:
         lines.append(f"- P(true rank IC >= 0.08) = **{post:.0%}** "
                      f"(READY at >= {GATE_V2_READY_POSTERIOR:.0%}, "
                      f"STOP at <= {GATE_V2_STOP_POSTERIOR:.0%})")
+    if r.get("extension_note"):
+        lines.append(f"- Extension clock: {r['extension_note']}")
     if v1 != v2:
         lines.append("")
         lines.append(f"> **The two rules disagree** (v1 {v1}, v2 {v2}). v{active} "
@@ -731,6 +760,8 @@ def main() -> None:
     ap.add_argument("--db", default="paper_trades.db")
     ap.add_argument("--config", default="config.json")
     ap.add_argument("--output", default="reports")
+    ap.add_argument("--extension-state", default=gate_extensions.DEFAULT_STATE_PATH,
+                    help="Where the gate's extension clock is persisted")
     ap.add_argument("--dry-run", action="store_true", help="Compute and print only; do not write")
     args = ap.parse_args()
 
@@ -742,16 +773,62 @@ def main() -> None:
 
     cap = (cfg.get("auto_log") or {}).get("max_capital_at_risk")
     gate_cfg = cfg.get("gate") or {}
+
+    # The extension clock. config.json's two counters are the SEED only — from
+    # here the calendar advances them, because an integer nobody remembered to
+    # increment is how a bounded EXTEND became an unbounded one (see
+    # src/gate_extensions.py).
+    today = datetime.now().strftime("%Y-%m-%d")
+    ext_state = gate_extensions.load(
+        args.extension_state,
+        seed={gate_extensions.LONG_CALL: int(gate_cfg.get("extensions_used", 0)),
+              gate_extensions.SHORT_PREMIUM: int(
+                  gate_cfg.get("short_premium_extensions_used", 0))})
+    lc = gate_extensions.resolve(ext_state[gate_extensions.LONG_CALL], today,
+                                 GATE_V2_MAX_EXTENSIONS)
+    sp = gate_extensions.resolve(ext_state[gate_extensions.SHORT_PREMIUM], today,
+                                 GATE_V2_MAX_EXTENSIONS)
+
     result = compute_checkpoint(
         db_path=args.db, phase1_start=phase1_start,
         max_capital_at_risk=float(cap) if cap else None,
         gate_version=int(gate_cfg.get("version", 2)),
-        extensions_used=int(gate_cfg.get("extensions_used", 0)),
-        short_premium_extensions_used=int(
-            gate_cfg.get("short_premium_extensions_used", 0)),
+        extensions_used=lc.extensions_used,
+        short_premium_extensions_used=sp.extensions_used,
+        extension_note=gate_extensions.describe(lc, today, GATE_V2_MAX_EXTENSIONS),
+        short_premium_extension_note=gate_extensions.describe(
+            sp, today, GATE_V2_MAX_EXTENSIONS),
     )
+    # The verdict decides what happens to the clock, so the window can only be
+    # opened or closed after the fact — and the report must show the clock as
+    # it stands AFTER that, not the state it was read in. The short-premium
+    # gate has two arms sharing one allowance, so its window runs while EITHER
+    # is unresolved: the family is being given more time whichever arm needs it.
+    sp_gate = result.get("short_premium_gate") or {}
+    sp_verdict = ("EXTEND" if "EXTEND" in (sp_gate.get("arm_a"),
+                                           sp_gate.get("arm_b"))
+                  else str(sp_gate.get("arm_a") or ""))
+    lc = gate_extensions.apply_verdict(
+        lc, str(result.get("decision_v2") or ""), today)
+    sp = gate_extensions.apply_verdict(sp, sp_verdict, today)
+
+    result["extension_note"] = gate_extensions.describe(
+        lc, today, GATE_V2_MAX_EXTENSIONS)
+    if sp_gate:
+        sp_gate["extension_note"] = gate_extensions.describe(
+            sp, today, GATE_V2_MAX_EXTENSIONS)
+    result["short_premium_extension_note"] = gate_extensions.describe(
+        sp, today, GATE_V2_MAX_EXTENSIONS)
+
     print(json.dumps(result, indent=2))
+
     if not args.dry_run:
+        # Persist only on a real run: a dry run must not be able to open or
+        # expire a window, or "just checking" would consume the allowance.
+        ext_state[gate_extensions.LONG_CALL] = lc.as_dict()
+        ext_state[gate_extensions.SHORT_PREMIUM] = sp.as_dict()
+        gate_extensions.save(ext_state, args.extension_state)
+
         paths = write_checkpoint(result, output_dir=args.output)
         print(f"\nWrote: {paths}")
 

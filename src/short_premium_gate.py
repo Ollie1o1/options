@@ -56,7 +56,8 @@ from src.phase1_checkpoint import (GATE_V2_MAX_EXTENSIONS,
                                    GATE_V2_MIN_N_EFF,
                                    GATE_V2_READY_POSTERIOR,
                                    GATE_V2_STOP_POSTERIOR,
-                                   decide_v2, design_effect)
+                                   decide_v2, design_effect,
+                                   exclude_ruled_duplicates)
 
 SHORT_PREMIUM_STRATEGIES: Tuple[str, ...] = ("Bull Put", "Bear Call", "Short Put")
 
@@ -93,7 +94,8 @@ def load_cohort(db_path: str, phase1_start: str,
     """Closed short-premium trades in the window, with what costing needs.
 
     ``paper_only`` is deliberately NOT filtered — see `cohort_caveats`, which
-    reports what that means rather than hiding it.
+    reports what that means rather than hiding it. Rows RULED double-logs ARE
+    filtered: that is not a classification question but a counting error.
     """
     placeholders = ",".join("?" for _ in SHORT_PREMIUM_STRATEGIES)
     sql = (
@@ -110,6 +112,7 @@ def load_cohort(db_path: str, phase1_start: str,
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             conn.row_factory = sqlite3.Row
+            sql += exclude_ruled_duplicates(conn)
             return [dict(r) for r in conn.execute(sql, params)]
     except sqlite3.Error:
         return []
@@ -339,12 +342,14 @@ def cohort_caveats(rows: Sequence[Dict[str, Any]]) -> List[str]:
 def evaluate(db_path: str, phase1_start: str,
              max_capital_at_risk: Optional[float] = None,
              extensions_used: int = 0,
-             use_measured_costs: bool = True) -> Dict[str, Any]:
+             use_measured_costs: bool = True,
+             extension_note: Optional[str] = None) -> Dict[str, Any]:
     """Both arms over the short-premium cohort. Pure read."""
     rows = load_cohort(db_path, phase1_start, max_capital_at_risk)
     result: Dict[str, Any] = {
         "strategies": list(SHORT_PREMIUM_STRATEGIES),
         "max_capital_at_risk": max_capital_at_risk,
+        "extension_note": extension_note,
         "n": len(rows),
         "n_effective": 0.0, "icc": 0.0, "design_effect": 1.0,
         "median_net_ror": None, "mean_net_ror": None, "ror_sum": None,
@@ -474,6 +479,8 @@ def format_report(r: Dict[str, Any]) -> str:
         L.append(f"- Rank IC: **{r['ic_spearman']:+.3f}** "
                  f"(Pearson {r['ic_pearson']:+.3f})")
     L.append(f"- **{r['arm_b']}** — {r['arm_b_reason']}")
+    if r.get("extension_note"):
+        L.append(f"- Extension clock: {r['extension_note']}")
     L.append("- Arm B does not veto Arm A. It decides whether live trading "
              "would use the scorer to pick contracts, or trade the family on "
              "structural rules and ignore the ranking.")

@@ -1,0 +1,11 @@
+{
+  "_note": "Machine-advanced gate extension state \u2014 do NOT hand-edit to change a verdict. `window_opened` is the date the current 2-week EXTEND began; an extension is counted when its window EXPIRES, not when it opens. Policy (how many extensions are allowed, how long each runs) lives in config.json and src/gate_extensions.py, not here.",
+  "long_call": {
+    "extensions_used": 0,
+    "window_opened": null
+  },
+  "short_premium": {
+    "extensions_used": 0,
+    "window_opened": "2026-08-01"
+  }
+}
