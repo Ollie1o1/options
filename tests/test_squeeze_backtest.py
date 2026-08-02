@@ -74,7 +74,8 @@ class PriceBookTest(unittest.TestCase):
         _make_price_db(db2, n=200, spike_at=130)
         book = panel.PriceBook(db2)
         f = book.features("TEST", self.dates[125])
-        mx, end, mn = book.forward("TEST", f["_i"], 21)
+        fwd = book.forward("TEST", f["_i"], 21)
+        mx, end, mn = fwd.max_up, fwd.end, fwd.min_dn
         # A mid-path 50% spike must show in the max even though drift is tiny.
         self.assertGreater(mx, 0.4)
         self.assertGreater(mx, end - 0.001)
@@ -97,8 +98,8 @@ class PriceBookTest(unittest.TestCase):
         # Spike lands 4 bars after settlement — inside the publication gap.
         no_lag = book.features("TEST", self.dates[120], lag=0)
         lagged = book.features("TEST", self.dates[120], lag=8)
-        mx_no_lag, _, _ = book.forward("TEST", no_lag["_i"], 21)
-        mx_lagged, _, _ = book.forward("TEST", lagged["_i"], 21)
+        mx_no_lag = book.forward("TEST", no_lag["_i"], 21).max_up
+        mx_lagged = book.forward("TEST", lagged["_i"], 21).max_up
         # Trading on unpublished data would have captured the move; a real
         # entry after publication would not.
         self.assertGreater(mx_no_lag, 0.4)

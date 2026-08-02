@@ -25,7 +25,7 @@ import bisect
 import datetime as _dt
 import math
 import sqlite3
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -48,6 +48,23 @@ PUB_LAG_DAYS = 8
 # Eight trading days is ~12 calendar days; anything past this means the name was
 # halted or barely trading, so the "entry" would not correspond to publication.
 MAX_ENTRY_GAP_DAYS = 30
+
+
+class Forward(NamedTuple):
+    """Forward outcome over a horizon window.
+
+    ``t_max`` is the 1-based bar index at which the path maximum occurred, and
+    ``dd_after_max`` the worst fractional drawdown from that maximum over the
+    remainder of the window (0.0 when the max is the last bar). Neither is used
+    by the asymmetry study; both exist so a trailing exit can be calibrated
+    instead of invented — the study measured (max, end, min) only, which is why
+    the sleeve ships a fixed ladder rather than a trail.
+    """
+    max_up: float
+    end: float
+    min_dn: float
+    t_max: int
+    dd_after_max: float
 
 
 class PriceBook:
@@ -134,8 +151,8 @@ class PriceBook:
 
         return {"spot": spot, "ret_5d": ret_5d, "rvol": rvol, "sigma_d": sigma_d, "_i": i}
 
-    def forward(self, sym: str, i: int, horizon: int) -> Optional[Tuple[float, float, float]]:
-        """(max up-move, end return, min move) over the next *horizon* bars."""
+    def forward(self, sym: str, i: int, horizon: int) -> Optional[Forward]:
+        """Forward outcomes over the next *horizon* bars."""
         close = self._close[sym]
         if i + horizon >= close.size:
             return None
@@ -145,9 +162,15 @@ class PriceBook:
         path = close[i + 1: i + horizon + 1]
         if path.size < horizon:
             return None
-        return (float(path.max() / base - 1.0),
-                float(path[-1] / base - 1.0),
-                float(path.min() / base - 1.0))
+        j = int(path.argmax())
+        peak = float(path[j])
+        tail = path[j + 1:]
+        dd = float(tail.min() / peak - 1.0) if tail.size and peak > 0 else 0.0
+        return Forward(max_up=float(peak / base - 1.0),
+                       end=float(path[-1] / base - 1.0),
+                       min_dn=float(path.min() / base - 1.0),
+                       t_max=j + 1,
+                       dd_after_max=min(0.0, dd))
 
 
 def _trend(shares_short: Optional[float], shares_prior: Optional[float]) -> Optional[str]:
@@ -227,13 +250,15 @@ def build(db_path: str = DEFAULT_DB, prices_db: str = PRICES_DB,
             "spot": feats["spot"], "sigma_d": feats["sigma_d"],
             "ret_5d": feats["ret_5d"], "rvol": feats["rvol"],
         }
-        for h, (mx, end, mn) in fwd.items():
+        for h, f in fwd.items():
             sigma_h = feats["sigma_d"] * math.sqrt(h)
-            rec[f"max_{h}"] = mx
-            rec[f"end_{h}"] = end
-            rec[f"min_{h}"] = mn
-            rec[f"z_{h}"] = mx / sigma_h
-            rec[f"zdn_{h}"] = mn / sigma_h
+            rec[f"max_{h}"] = f.max_up
+            rec[f"end_{h}"] = f.end
+            rec[f"min_{h}"] = f.min_dn
+            rec[f"tmax_{h}"] = f.t_max
+            rec[f"dd_{h}"] = f.dd_after_max
+            rec[f"z_{h}"] = f.max_up / sigma_h
+            rec[f"zdn_{h}"] = f.min_dn / sigma_h
         out.append(rec)
 
     if verbose:
