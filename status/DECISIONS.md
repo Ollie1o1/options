@@ -4,14 +4,129 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-08-01 — The walk-forward was re-run after 64 days and reversed sign
+
+**Why:** the evidence banner on every report quoted OOS IC **+0.10 (p=0.48,
+n=94)** from a 2026-05-29 artifact. The job that refreshes it monthly exists
+(commit 365cb99) but lives on a scheduler dead since 2026-06-15, so the figure
+had been 64 days stale — flagged as STALE in the banner, and quoted anyway.
+
+**What it says now:** pooled OOS IC **-0.144 (p=0.089)** over 192 trades and 14
+folds. On twice the data the ranking model is not weakly positive out of
+sample; it is weakly negative, and nearer significance than the positive figure
+ever was.
+
+**How to read it, and how not to.** This corroborates the Long Call gate's STOP
+from an independent direction — the cohort Pearson (-0.065), the cohort
+Spearman (-0.132) and now the pooled OOS IC all sit at or below zero, and none
+is significant. It does NOT establish a negative edge that could be traded in
+reverse: `fold_ic_mean` is still slightly POSITIVE (+0.027, 8 of 14 folds
+positive) while the pooled statistic is negative, which is what a null looks
+like, not a reliable signal. Treat it as confirmation of no edge. It says
+nothing about the short-premium family, which this harness does not measure.
+
+**Consequence:** the +0.10 figure should never be quoted again. It is not a
+number that got worse — it is a number that was measured on 94 trades and did
+not survive contact with 192.
+
+---
+
+## 2026-08-01 — The gate's EXTEND allowance got a clock
+
+**Why:** v2's terminal condition — at most two 2-week EXTENDs, then resolve —
+was implemented as `gate.extensions_used` in config.json, with a note telling
+the operator to increment it by hand. Nobody did, and nobody could have done it
+correctly: an integer records how many extensions were granted but never when
+one STARTED, so no code could tell whether two weeks had elapsed. Checkpoints
+run daily, so a gate sitting at EXTEND reprinted "extension 1 of 2" every day,
+indefinitely. The unbounded EXTEND that v2 existed to remove was still there,
+wearing a bound nothing enforced.
+
+**What changed:** `src/gate_extensions.py` keeps a dated window per gate in
+`status/gate_extensions.json`, advanced by the calendar on every checkpoint. An
+extension is consumed when its window EXPIRES, not when it opens, so the
+allowance means what the spec says: 28 days of extra evidence, then READY or
+STOP. The two config counters are now SEED ONLY. A dry run cannot open or spend
+a window. A checkpoint that runs late does not gift back the days it missed —
+the next window starts where the last one ended, which matters because this
+repo's schedulers have been dead since 2026-06-15.
+
+**Live effect:** the short-premium gate's Arm B is EXTEND, so window 1 opened
+2026-08-01 and closes 2026-08-15. If it is still unresolved on 2026-08-29 the
+allowance is spent and Arm B resolves STOP on its own.
+
+---
+
+## 2026-08-01 — Which gate authorises execution is now written down
+
+**Why:** `src/execution/pipeline.py` printed `gate: STOP` while the
+short-premium family — promoted to validation evidence that same day — read Arm
+A READY. Neither number was wrong; the report simply never said which question
+it had answered, because reading the Long Call gate was implicit in the module
+being that gate's only caller. Two gates that disagree cannot both be "the gate".
+
+**What changed:** `config.gate.authorising_gate` names it, defaulting to
+`long_call` — the historical wiring, unchanged. Every gate's verdict is printed
+on every status line; only the authorising one can arm. A READY on a
+non-authorising gate is reported and cannot arm, and an unknown gate name reads
+as GATHERING rather than as permission.
+
+**Also fixed, and it mattered:** the pipeline evaluated the short-premium gate
+UNCAPPED while the checkpoint evaluates it at `max_capital_at_risk` = $4,000.
+Different cohort, different verdict — the pipeline read Arm A as EXTEND where
+the checkpoint read READY. It now takes the cap from config, so the two agree.
+
+**Not changed, deliberately:** `authorising_gate` is still `long_call`, which
+resolved STOP. Pointing the pipeline at the arm that says yes is a real-money
+decision. It is not implied by the promotion that made the cohort readable, and
+this change deliberately makes it a one-line config edit that says what it is.
+
+---
+
+## 2026-08-01 — Duplicate-trade audit ruled: 17 of 18 groups are real trades
+
+**Why:** the audit had sat unruled since 2026-07-31, with a headline of 20
+excess rows and $2,959.10 of possibly double-counted P&L inflating the gate
+cohort and the track record.
+
+**What settled it:** a test the audit did not run — did the flagged day log
+anything ELSE? The failure mode it was built to catch is the catch-up replay
+behind `auto_log.dedup_window_days`, which re-logs the previous day's whole set.
+A replay would make the repeats most of that day's rows. They were not: every
+flagged day carries a full batch of unrelated fresh trades (2026-06-09 logged
+16, of which only 5 were repeats of the previous day's 33). These are normal
+scans in which a deterministic screener re-picked a few of the same contracts.
+
+The identical-looking `entry_price` and `capital_at_risk` are a stale MARKET,
+not a stale log: an unchanged bid/ask reproduces the same mid to the last bit.
+`entry_iv` differs across those pairs, because one day less to expiry re-prices
+the vol off an unchanged quote.
+
+**The one exception:** WFC Short Put entry_ids 90/91, entered the SAME day with
+bit-identical `entry_iv`. The screener ran once that day, so one snapshot cannot
+yield two decisions. It is the only same-day, same-contract, identical-IV pair
+in 882 rows.
+
+**What changed:** schema v17 adds `duplicate_of`, and entry_id 91 points at 90.
+MARKED, not deleted — the audit's own rule is that the ledger records what
+happened and rewriting it silently is worse than the double-count it fixes.
+Cohort and track-record queries exclude marked rows; the ledger keeps them, and
+`scripts/rule_duplicate_trades.py --undo` reverses it. Impact is $64.70, on a
+position whose $7,598 of collateral already excluded it from the affordable
+cohort — so no gate verdict moves.
+
+---
+
 ## 2026-08-01 — Short-premium family promoted out of paper_only
 
 **Why:** the short-premium gate's Arm A reads READY, but every row in its cohort
 was `paper_only=1`, so the evidence was formally disqualified from authorising
 anything. The operator ruled that these rows should count.
 
-**What changed:** 285 rows (Bull Put 131, Bear Call 135, Short Put 109... 
-counted before promotion: 81/104/100 flipped) set to `paper_only=0`, and
+**What changed:** 285 rows set to `paper_only=0` — Bull Put 81, Bear Call 104,
+Short Put 100. (The other 90 rows of those three strategies were already
+`paper_only=0`, so the family now totals 375: Bull Put 131, Bear Call 135,
+Short Put 109. Verified against the backup below on 2026-08-01.) And
 `auto_log.paper_only_strategies` reduced from
 `[Bear Call, Iron Condor, Bull Put, Short Put]` to `[Iron Condor]` so future
 rows log clean. Backup taken first:

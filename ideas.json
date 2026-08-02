@@ -1,21 +1,22 @@
 {
-  "updated": "2026-07-31",
-  "note": "Idea backlog for the research desk Ideas tab. Statuses: proposed, testing, validated, shipped, dead. cost_wall records whether the idea's edge survives slippage+commissions - the recurring killer in this repo. Dead ideas are kept deliberately so they are not re-litigated. Where a later measurement contradicts an earlier one, the entry is AMENDED in place rather than replaced, so the reasoning that was acted on stays visible. 2026-07-30: a full beta-readiness audit added a prioritised execution plan - see beta_readiness_plan and constraints_for_executor below. Entries carrying a priority field (P0-P3) are that plan; the executor model should work them in beta_readiness_plan order and honour every constraint listed. 2026-07-31: the beta-readiness plan was executed - P0 through P2 are shipped or specced, see each entry's status and next_step. The two gate/exit decisions are deliberately NOT applied: they are specs awaiting operator sign-off (docs/GATE_REDESIGN_SPEC.md, docs/MARK_TRUSTWORTHINESS_SPEC.md). P3 (split-options-screener, retire-or-measure-ai-scorer, centralise-fee-defaults) was not started.",
+  "updated": "2026-08-01",
+  "note": "Idea backlog for the research desk Ideas tab. Statuses: proposed, testing, validated, shipped, dead. cost_wall records whether the idea's edge survives slippage+commissions - the recurring killer in this repo. Dead ideas are kept deliberately so they are not re-litigated. Where a later measurement contradicts an earlier one, the entry is AMENDED in place rather than replaced, so the reasoning that was acted on stays visible. 2026-07-30: a full beta-readiness audit added a prioritised execution plan - see beta_readiness_plan and constraints_for_executor below. Entries carrying a priority field (P0-P3) are that plan; the executor model should work them in beta_readiness_plan order and honour every constraint listed. 2026-07-31: the beta-readiness plan was executed - P0 through P2 are shipped or specced, see each entry's status and next_step. The two gate/exit decisions are deliberately NOT applied: they are specs awaiting operator sign-off (docs/GATE_REDESIGN_SPEC.md, docs/MARK_TRUSTWORTHINESS_SPEC.md). P3 (split-options-screener, retire-or-measure-ai-scorer, centralise-fee-defaults) was not started. 2026-08-01: a close-out pass cleared the operator-blocked items and the structural gaps the 07-31 work left behind. The duplicate audit is RULED (17 of 18 groups are genuine trades; one true double-log, $64.70, marked not deleted). The bounded EXTEND got the clock it never had, so its terminal condition can actually fire. Which gate authorises execution is now explicit in config rather than implied. The walk-forward was re-run after 64 days stale and REVERSED SIGN: pooled OOS IC -0.144 (p=0.089, n=192) against the +0.10 (p=0.48, n=94) it had been showing. Everything still outstanding is either P3 structural debt or the one thing no code can do: the Login Items toggle in step_0_user_only.",
   "beta_readiness_plan": {
-    "purpose": "Beta-readiness plan COMPLETE: P0, P1 and P2 are shipped, and both gate/exit specs were signed off and implemented on 2026-07-31. The Phase-1 Long Call gate has resolved STOP under both the old and new rules. Only P3 structural debt remains. The live question is no longer 'does the long call work' — it is whether the short-premium family earns a gate of its own (see repoint-gate-credit).",
+    "purpose": "Beta-readiness plan COMPLETE. P0-P2 shipped; both gate/exit specs signed and implemented 2026-07-31; the 2026-08-01 close-out pass ruled the duplicate audit, gave the EXTEND allowance a working clock, and made the authorising gate explicit. The Long Call gate has resolved STOP and the re-run walk-forward now agrees with it (OOS IC -0.144). Only P3 structural debt remains, plus the operator-only Login Items toggle. The live question is whether the short-premium family earns capital — and the answer is gated on an unobserved tail, not on more code.",
     "step_0_user_only": "OPERATOR ACTION, still not done: System Settings > General > Login Items & Extensions > Allow in the Background, for the three com.ollie.options.* LaunchAgents. All three have exited 78 since 2026-06-15 — 46 days as of 2026-07-31. No code change substitutes for this toggle. Note the detection that reports this was itself broken until 2026-07-31 (it matched the wrong label prefix), so the banner had never actually fired.",
     "awaiting_operator_signoff": [
       "BOTH SPECS SIGNED AND IMPLEMENTED 2026-07-31. Nothing is awaiting sign-off."
     ],
     "operator_ruling_needed": [
-      "reports/duplicate_trades_audit.md — 18 candidate groups, 38 rows, 20 excess, $2,959.10 of double-counted P&L. Nothing was deleted; which are true duplicates vs legitimate re-signals is a judgement call. Until ruled on, the excess rows double-count in the gate cohort and the track record."
+      "RESOLVED 2026-08-01. reports/duplicate_trades_audit.md is ruled: 17 of 18 candidate groups are genuine re-signals (every flagged day logged a full batch of fresh trades alongside, so they are not catch-up replays); one group — WFC entry_id 91, same day and bit-identical entry_iv — is a true double-log, marked duplicate_of=90 and excluded from cohorts and the track record. Impact $64.70, above the affordability cap, so no gate verdict moved. Reversible via scripts/rule_duplicate_trades.py --undo."
     ],
     "P2_remaining": [],
     "P3_remaining": [
       "split-options-screener",
       "retire-or-measure-ai-scorer"
     ],
-    "explicitly_not_in_plan": "merge-btc-vrp-carry and index-put-spread-capacity are validated research paths but expand scope; do not start them as part of beta-readiness. The dead graveyard in `archive.dead` is settled — do not revive any of it."
+    "explicitly_not_in_plan": "merge-btc-vrp-carry and index-put-spread-capacity are validated research paths but expand scope; do not start them as part of beta-readiness. The dead graveyard in `archive.dead` is settled — do not revive any of it.",
+    "decision_not_made": "config.gate.authorising_gate is still 'long_call', which reads STOP, while the short-premium gate's Arm A reads READY. Pointing the pipeline at the arm that says yes is a real-money decision and is deliberately a one-line config edit that says what it is. live_execution.enabled is a second, separate switch. Nothing is armed."
   },
   "constraints_for_executor": [
     "Tests: run ONLY via scripts/test.sh (wraps scripts/run_tests.py under ~/.venvs/options/bin/python). The project-local venv/ has broken pandas; the options venv has NO pytest. Globbing under-collects and unittest discover cannot start. CI (GitHub Actions, pytest) is the second check - it is green on main as of 2026-07-30; keep it green.",
@@ -41,7 +42,7 @@
       "priority": "P1",
       "thesis": "config.auto_log.max_friction_to_credit = 0.50 now refuses credit trades whose round-trip friction exceeds half the credit. On the historical cohort that would have refused 48 of 188 short-premium trades, 31 of which could not have profited at any win rate. The accrual cost is real and falls hardest on the cheap-looking small spreads the feeder logs most of, so it must be watched the same way the affordability gate was.",
       "evidence": "DECISIONS.md 2026-07-31; measured over the short-premium cohort while building src/short_premium_gate.py. The 2026-07-29 affordability gate had exactly this risk and the short-put half of it DID bite (see the starvation entry) before being fixed.",
-      "next_step": "Watch `untradeable_rejected` in the auto-log summary for two weeks. If a window logs zero, check whether the gate or the affordability cap held it back — they are counted separately for this reason. If credit accrual collapses rather than thins, loosen the threshold toward 0.75 rather than disabling it: the trades above 1.0 are unwinnable at any setting and should never come back.",
+      "next_step": "Watch `untradeable_rejected` in the auto-log summary for two weeks. If a window logs zero, check whether the gate or the affordability cap held it back — they are counted separately for this reason. If credit accrual collapses rather than thins, loosen the threshold toward 0.75 rather than disabling it: the trades above 1.0 are unwinnable at any setting and should never come back. ADDED 2026-08-01: this watch now shares a calendar with the short-premium gate's Arm B extension window, which opened 2026-08-01 and closes 2026-08-15 (see status/gate_extensions.json). Both want the same two weeks of auto-log output, and neither will get it while the schedulers are dead — step_0_user_only gates this too.",
       "acceptance": "Two weeks of auto-log summaries reviewed; threshold confirmed or adjusted with a dated note here."
     },
     {
@@ -242,8 +243,33 @@
       "conviction": "low",
       "cost_wall": "n/a",
       "thesis": "Small dead weight worth removing while it is still remembered. src/launcher.py.bak is byte-identical to src/launcher.py and has been untracked in the tree since 2026-07-23. The backtest's --ret5d as_written mode now exists only to reproduce a bug that was fixed on 2026-07-28; it is a trap for anyone who reads it as the production path.",
-      "evidence": "diff -q src/launcher.py.bak src/launcher.py reports identical; --ret5d default moved to as_intended in commit 14f94ac.",
-      "next_step": "AMENDED 2026-07-30: absorbed into repo-hygiene-beta (P2) — execute it there. Kept for the flag-retirement condition: keep as_written only until the next squeeze re-run is confirmed reproducible, then remove the branch and the ret5d_scale parameter with it."
+      "evidence": "AMENDED 2026-08-01: `diff -q src/launcher.py.bak src/launcher.py` no longer reports identical — launcher.py moved in 69b3d20 (idle cache release), so the .bak had become an OLD copy rather than a byte-identical one. Still nothing unique in it, but the reason recorded here for deleting it had stopped being true, which is exactly how a stale justification outlives the fact it rested on. --ret5d default moved to as_intended in commit 14f94ac.",
+      "next_step": "DONE 2026-08-01 for the .bak — src/launcher.py.bak is deleted. STILL OPEN: keep the backtest's --ret5d as_written branch only until the next squeeze re-run is confirmed reproducible, then remove it and the ret5d_scale parameter with it."
+    },
+    {
+      "id": "walk-forward-reversed-sign",
+      "title": "The re-run walk-forward reversed sign — OOS IC is -0.144, not +0.10",
+      "area": "validation",
+      "status": "validated",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "priority": "P1",
+      "thesis": "The evidence banner had been quoting OOS IC +0.10 (p=0.48, n=94) from a 2026-05-29 artifact that went 64 days stale because the monthly re-run job lives on a dead scheduler. Re-run on 2026-08-01 over 192 trades and 14 folds, the pooled OOS IC is -0.144 (p=0.089). The ranking model is not weakly positive out of sample; on twice the data it is weakly NEGATIVE, and closer to significance than the old positive figure ever was.",
+      "evidence": "reports/walk_forward_long_call_2026-08-01.json: n_total_trades 192, n_folds 14, pooled_ic -0.1443, pooled_pvalue 0.0889, fold_ic_mean +0.027, folds_ic_positive 8 of 14. Compare walk_forward_long_call_2026-05-29.json: pooled_ic +0.102, p 0.480, n 94. Note fold_ic_mean stays slightly POSITIVE while the pooled IC is negative — the folds disagree with their own pooled statistic, which is what a null relationship looks like, not a reliable negative.",
+      "next_step": "Do not over-read the sign. The honest reading is that this corroborates the Long Call gate's STOP from an independent direction: two statistics on the cohort (Pearson -0.065, Spearman -0.132) and now the pooled OOS IC all sit at or below zero, and none is significant. The scorer's Long Call ranking is not merely unproven, it has now failed to show positive edge on every measurement made of it. What this does NOT license is a claim of negative edge that could be traded in reverse — fold_ic_mean is positive and p is 0.089. Treat it as confirmation of no edge. It also says nothing about the short-premium family, which this harness does not measure.",
+      "acceptance": "Recorded. The gate is already STOP; this changes no decision, and is logged so the +0.10 figure is never quoted again."
+    },
+    {
+      "id": "duplicate-audit-needs-two-discriminators",
+      "title": "The duplicate audit's match key has a known false-positive mode",
+      "area": "infra",
+      "status": "proposed",
+      "conviction": "high",
+      "cost_wall": "n/a",
+      "thesis": "The audit matched on (ticker, strategy, strike, expiration) plus entry_price equal to the cent, and produced 18 groups of which 17 turned out to be genuine trades. The false-positive mode is structural: an unchanged bid/ask reproduces the same mid to the last bit, so a deterministic screener re-picking a contract on a quiet day is indistinguishable from a double-log on that key alone. It cost a day of operator hesitation and a $2,959.10 headline that was really $64.70.",
+      "evidence": "Ruling of 2026-08-01, recorded at the top of reports/duplicate_trades_audit.md. Two discriminators settled it: same-day bit-identical entry_iv (conclusive — one snapshot cannot yield two decisions) and the flagged share of that day's log (a replay approaches 100%; these ran 15-40%).",
+      "next_step": "If this audit is ever re-run, compute both discriminators in the report rather than leaving the reader to. The cheap version is one extra column per group and one summary table per flagged day.",
+      "acceptance": "Next generation of the audit reports both columns."
     }
   ],
   "archive": {
