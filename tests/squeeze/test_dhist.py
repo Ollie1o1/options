@@ -79,3 +79,23 @@ class DHistTest(unittest.TestCase):
     def test_an_empty_panel_returns_zero_dates(self):
         got = dhist.compute([], horizon=42)
         self.assertEqual(got["n_dates"], 0)
+
+    def test_the_dict_shape_is_invariant_across_success_and_no_data_paths(self):
+        # Task 9 must be able to read any key without first checking n_dates:
+        # a fully-flagged panel is a real state (the INVALID verdict), not an
+        # excuse for the dict to change shape underneath its consumer.
+        success = dhist.compute(self._panel(), horizon=42,
+                                variant="conservative")
+        empty = dhist.compute([], horizon=42)
+        all_flagged_rows = []
+        for d in range(5):
+            date = f"2022-{1 + d:02d}-01"
+            for i in range(3):
+                all_flagged_rows.append(_row(date, f"T{i}", 10, _flat(), rv=1.0))
+            for i in range(6):
+                # far outside the rv caliper -> every date is flagged
+                all_flagged_rows.append(_row(date, f"C{i}", 2, _flat(), rv=9.0))
+        flagged = dhist.compute(all_flagged_rows, horizon=42,
+                                variant="conservative")
+        self.assertEqual(set(empty), set(success))
+        self.assertEqual(set(flagged), set(success))

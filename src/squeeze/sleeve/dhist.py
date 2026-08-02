@@ -103,7 +103,14 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
                          len(t_rets), len(c_rets)))
 
     if not dates:
-        return {"n_dates": 0, "treat_n": 0, "control_n": 0, "draws": np.array([]),
+        # Same nine keys as the success path: a fully-flagged panel is a real
+        # state the gate has to describe (the INVALID verdict), and a dict
+        # that changes shape underneath its consumer is the wrong way to say
+        # "no data". NaN, not None — the success path already says NaN for an
+        # unobtainable interval, and one sentinel convention is enough.
+        return {"n_dates": 0, "treat_n": 0, "control_n": 0,
+                "observed": float("nan"), "draws": np.array([]),
+                "ci_lo": float("nan"), "ci_hi": float("nan"),
                 "flagged_dates": flagged, "used_symbols": sorted(used)}
 
     arr = np.array([(t, c) for t, c, _, _ in per_date], dtype=float)
