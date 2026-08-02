@@ -54,6 +54,18 @@ class MatchingTest(unittest.TestCase):
         for value in got.smd.values():
             self.assertLessEqual(value, matching.MAX_SMD)
 
+    def test_a_constant_covariate_is_not_spurious_imbalance(self):
+        # Both arms share exactly identical covariates. Float noise in the
+        # variance of a repeated constant once produced pooled_sd ~1e-16,
+        # which cleared the zero guard and turned noise/noise into an SMD of
+        # sqrt(2) — rejecting every observation date downstream.
+        treated = [_u(f"T{i}") for i in range(6)]
+        controls = [_u(f"C{i}") for i in range(12)]
+        got = matching.match(treated, controls, k=3)
+        for value in got.smd.values():
+            self.assertEqual(value, 0.0)
+        self.assertTrue(matching.is_valid(got))
+
     def test_a_biased_cohort_fails_the_standardised_difference_check(self):
         treated = [_u(f"T{i}", rv=1.10 + 0.001 * i) for i in range(10)]
         # inside the 20% rv caliper, but systematically lower

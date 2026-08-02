@@ -29,6 +29,7 @@ CALIPER_LOG_MCAP = 1.0
 CALIPER_LOG_PRICE = 0.7
 MAX_DROP_RATE = 0.30       # above this a cycle is flagged
 MAX_SMD = 0.25             # standardised mean difference, post-match
+_SD_FLOOR_REL = 1e-12      # below this, the covariate is constant to float precision
 
 _COVARIATES = ("rv", "log_mcap", "log_price")
 
@@ -113,7 +114,16 @@ def _smd(treated: Sequence[Unit], controls: Sequence[Unit],
         t_vals = np.array([[u.rv, u.log_mcap, u.log_price][idx] for u in t_units])
         c_vals = np.array([[u.rv, u.log_mcap, u.log_price][idx] for u in c_units])
         pooled_sd = math.sqrt((t_vals.var(ddof=0) + c_vals.var(ddof=0)) / 2.0)
-        if pooled_sd <= 0:
+        # The floor is relative, not `<= 0`: the variance of a repeated
+        # constant carries float noise (~1e-32), so a covariate identical
+        # across both arms once yielded pooled_sd ~1e-16, cleared the zero
+        # guard, and turned noise-over-noise into a sqrt(2) "imbalance" that
+        # rejected every observation date. A pooled SD at float-noise scale
+        # means the covariate is constant and imbalance is undefined; the
+        # honest value is 0. Relative because rv (~0.9) and log_mcap (~20)
+        # live at different magnitudes.
+        scale = max(1.0, abs(float(t_vals.mean())), abs(float(c_vals.mean())))
+        if pooled_sd <= _SD_FLOOR_REL * scale:
             out[name] = 0.0
         else:
             out[name] = float(abs(t_vals.mean() - c_vals.mean()) / pooled_sd)
