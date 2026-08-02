@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 DEFAULT_DB = os.path.join("data", "chain_archive.db")
 
@@ -77,6 +77,28 @@ def filter_rows(rows: List[Dict[str, Any]], today: str,
             continue
         kept.append(r)
     return kept
+
+
+def symbols_for_run(config: Dict[str, Any],
+                    extra: Optional[Sequence[str]] = None) -> List[str]:
+    """Symbols to archive on this run: the configured basket plus *extra*.
+
+    The configured list is a fixed set of liquid names chosen for backtest
+    coverage. The squeeze cohort changes every FINRA cycle and cannot be
+    enumerated in advance, so it is passed in per run rather than written to
+    config. Configured symbols keep their order and win on collision, so
+    turning the sleeve on can never quietly reorder or drop the standing basket.
+    """
+    out: List[str] = []
+    seen = set()
+    configured = (config.get("data_archive") or {}).get("symbols") or []
+    for group in (configured, extra or []):
+        for raw in group:
+            sym = str(raw or "").strip().upper()
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
+    return out
 
 
 def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
