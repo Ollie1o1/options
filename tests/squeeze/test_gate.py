@@ -41,6 +41,16 @@ class DecideTest(unittest.TestCase):
                           n_cycles=6, covered_of_first_six=6, match_valid=True)
         self.assertNotEqual(got, "GO")
 
+    def test_a_none_central_on_the_partner_fails_agreement_without_raising(self):
+        # posterior_above_zero is Optional[float]: a partner whose central
+        # posterior could not be computed is not evidence of sign agreement.
+        got = gate.decide(
+            {30: {"conservative": 0.95, "central": 0.99},
+             60: {"conservative": 0.60, "central": None}},
+            n_cycles=6, covered_of_first_six=6, match_valid=True)
+        self.assertNotEqual(got, "GO")
+        self.assertIn(got, ("STOP", "EXTEND", "NO-GO", "INVALID"))
+
     def test_stop_fires_when_both_tenors_are_dead_on_the_central_variant(self):
         got = gate.decide(_posteriors(0.01, 0.05, 0.01, 0.08),
                           n_cycles=6, covered_of_first_six=6, match_valid=True)

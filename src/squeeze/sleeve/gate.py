@@ -63,6 +63,13 @@ def posterior_above_zero(draws: np.ndarray) -> Optional[float]:
     return float((arr > 0).mean())
 
 
+def _agrees(posteriors: Dict[str, float]) -> bool:
+    """A partner tenor whose central posterior could not be computed is not
+    evidence of sign agreement — None fails the test rather than raising."""
+    c = posteriors.get("central")
+    return c is not None and c >= SIGN_AGREEMENT
+
+
 def decide(tenor_posteriors: Dict[int, Dict[str, float]], n_cycles: int,
            covered_of_first_six: int, match_valid: bool,
            extensions_used: int = 0) -> str:
@@ -82,8 +89,7 @@ def decide(tenor_posteriors: Dict[int, Dict[str, float]], n_cycles: int,
             if tenor_posteriors[tenor]["conservative"] < GO_POSTERIOR:
                 continue
             others = [t for t in tenors if t != tenor]
-            if any(tenor_posteriors[o].get("central", 0.0) >= SIGN_AGREEMENT
-                   for o in others):
+            if any(_agrees(tenor_posteriors[o]) for o in others):
                 return GO
 
         centrals = [tenor_posteriors[t].get("central") for t in tenors]
