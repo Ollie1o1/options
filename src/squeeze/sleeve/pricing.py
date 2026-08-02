@@ -30,19 +30,29 @@ def _atm_rows(chain: Sequence[dict], spot: float) -> dict:
     for row in chain:
         if str(row.get("option_type", "call")).lower() != "call":
             continue
-        bid, ask = row.get("bid"), row.get("ask")
-        iv, strike, dte = row.get("iv"), row.get("strike"), row.get("dte")
-        if None in (bid, ask, iv, strike, dte):
+        # Coerce rather than compare: NaN passes every comparison-based
+        # rejection (nan < MIN_BID is False), so a NaN quote would be
+        # accepted and leak out as nan instead of None. Anything that
+        # cannot become a finite number is not a usable quote.
+        try:
+            bid = float(row.get("bid"))
+            ask = float(row.get("ask"))
+            iv = float(row.get("iv"))
+            strike = float(row.get("strike"))
+            dte = int(row.get("dte"))
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(x) for x in (bid, ask, iv, strike)):
             continue
         if bid < MIN_BID or ask <= bid or iv <= 0:
             continue
         mid = (bid + ask) / 2.0
         if mid <= 0 or (ask - bid) / mid > MAX_REL_SPREAD:
             continue
-        gap = abs(float(strike) - spot)
-        cur = best.get(int(dte))
+        gap = abs(strike - spot)
+        cur = best.get(dte)
         if cur is None or gap < cur[0]:
-            best[int(dte)] = (gap, float(iv), (ask - bid) / mid)
+            best[dte] = (gap, iv, (ask - bid) / mid)
     return best
 
 
@@ -82,8 +92,13 @@ def relative_spread(chain: Sequence[dict], spot: float,
     best = _atm_rows(chain, spot)
     if not best:
         return None
+    # Same tenor-eligibility rule as atm_call_iv, deliberately: F_live must
+    # not exist for a name whose P_live is unmeasurable, or the two terms of
+    # the same arithmetic would disagree about whether the name is priceable.
     lo, hi = TENOR_BAND
-    usable = [d for d in best if lo * tenor_days <= d <= hi * tenor_days] or list(best)
+    usable = [d for d in best if lo * tenor_days <= d <= hi * tenor_days]
+    if not usable:
+        return None
     nearest = min(usable, key=lambda d: abs(d - tenor_days))
     return best[nearest][2]
 
