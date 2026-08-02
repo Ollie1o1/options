@@ -1,5 +1,50 @@
 # Duplicate-trade audit — candidate rows in the paper ledger
 
+> ## RULED 2026-08-01 — 17 of 18 groups are NOT duplicates
+>
+> **Verdict: one true double-log in 882 rows — group 9 (WFC, entry_id 91).**
+> It is marked `duplicate_of=90` and excluded from every cohort and from the
+> published track record. The other 17 groups stand as genuine trades.
+>
+> **The test that settled it: did the flagged day log anything else?** The
+> failure mode this audit was built to catch is the catch-up replay documented
+> at `auto_log.dedup_window_days` — the feeder re-logging the PREVIOUS day's set
+> the next morning. A replay would make the repeats most of what that day
+> contains. They are not:
+>
+> | day | logged | flagged | fresh |
+> |---|---|---|---|
+> | 2026-04-18 | 15 | 6 | 9 |
+> | 2026-04-19 | 10 | 6 | 4 |
+> | 2026-06-08 | 33 | 5 | 28 |
+> | 2026-06-09 | 16 | 5 | 11 |
+> | 2026-07-09 | 24 | 1 | 23 |
+>
+> Every flagged day carries a full batch of unrelated fresh trades. On
+> 2026-06-09 only 5 of the previous day's 33 reappear. That is a normal scan in
+> which a deterministic screener re-picked a few of the same contracts, not a
+> replay of the previous day.
+>
+> **Why they look identical anyway.** `entry_price` and `capital_at_risk` are
+> bit-identical across the pairs because the quoted bid/ask had not moved, so
+> the mid recomputes to the same float. `entry_iv` differs in every one of those
+> groups — one day less to expiry re-prices the vol off an unchanged quote. The
+> apparent identity is a stale market, not a stale log.
+>
+> **Group 9 is the exception, and the reason is structural.** Its two rows were
+> entered on the SAME day (2026-04-26, adjacent entry_ids 90/91) with
+> bit-identical `entry_iv`. The screener ran once that day; one snapshot cannot
+> produce two independent decisions. It is the only same-day, same-contract,
+> bit-identical-IV pair in the entire ledger.
+>
+> **Impact is smaller than the headline suggested.** The $2,959.10 figure below
+> assumed all 18 groups were duplicates. The ruling removes **$64.70**, on a
+> Short Put with $7,598 of collateral — already above the $4,000 affordability
+> cap, so it was never in the short-premium gate cohort or the affordable track
+> record. No gate verdict moves.
+>
+> Reversible: `python scripts/rule_duplicate_trades.py --undo`.
+
 - Generated: 2026-07-31 13:49:20
 - Database: `paper_trades.db` (opened read-only; this audit never writes)
 - Rows scanned: **882**
@@ -184,7 +229,21 @@ A group whose rows also share an exit price and exit date is marked `identical e
 
 ## What to do with this
 
-1. Rule on each group: true double-log, or a real re-entry that happens to match.
-2. True duplicates stay in the ledger until the operator decides otherwise — the record is what was traded, and rewriting it silently is worse than the double-count it fixes.
+1. ~~Rule on each group~~ — **done 2026-08-01, see the ruling at the top.**
+2. True duplicates stay in the ledger — the record is what was traded, and rewriting it silently is worse than the double-count it fixes. The ruling therefore MARKS (`duplicate_of`, schema v17) rather than deletes: cohort and track-record queries exclude marked rows, the ledger keeps them.
 3. The auto-log dedup guard (`auto_log.dedup_window_days`) refuses new entries matching the same key inside the window, so this list should stop growing from the automated feeders regardless of how the existing rows are ruled on.
+
+### A note for the next run of this audit
+
+The match key that produced these 18 groups has a known false-positive mode: an
+unchanged bid/ask reproduces the same mid to the last bit, so a deterministic
+screener re-picking a contract on a quiet day is indistinguishable from a
+double-log on `(ticker, strategy, strike, expiration, entry_price)` alone. Two
+cheap discriminators separate them, and a future version of this audit should
+compute both rather than leaving the reader to:
+
+- **Same-day, bit-identical `entry_iv`** — one snapshot, so at most one decision.
+  This is the only pattern that is conclusive on its own.
+- **Batch share of the flagged day** — what fraction of that day's log is
+  flagged. A replay approaches 100%; the groups here ran 15-40%.
 

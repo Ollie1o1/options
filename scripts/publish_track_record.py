@@ -88,10 +88,14 @@ def fetch_closed_trades(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     cols = [c for c in _CLOSED_COLUMNS if c in have]
     if not cols:
         return []
+    # Rows ruled double-logs are one decision recorded twice; publishing both
+    # double-counts their P&L in the headline. They stay in the ledger, and out
+    # of the record. Older ledgers have no such column and are unaffected.
+    dupes = " AND duplicate_of IS NULL" if "duplicate_of" in have else ""
     try:
         cur.execute(
             f"SELECT {', '.join(cols)} FROM trades "
-            "WHERE UPPER(status) = 'CLOSED' ORDER BY date ASC"
+            f"WHERE UPPER(status) = 'CLOSED'{dupes} ORDER BY date ASC"
         )
     except sqlite3.OperationalError:
         return []

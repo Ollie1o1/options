@@ -427,7 +427,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 16
+_SCHEMA_VERSION = 17
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -551,6 +551,20 @@ _MIGRATIONS = {
         # comparisons and the auto-log budget gate both read this column.
         # NULL means risk could not be bounded from the stored fields.
         "ALTER TABLE trades ADD COLUMN capital_at_risk REAL",
+    ],
+    17: [
+        # duplicate_of holds the entry_id this row double-counts, when a row has
+        # been RULED a double-log rather than merely flagged as a candidate by
+        # reports/duplicate_trades_audit.md. NULL on every genuine row.
+        #
+        # A column rather than a deletion, because the audit's own rule is that
+        # the ledger records what happened and rewriting it silently is worse
+        # than the double-count it fixes. Marking is reversible and auditable;
+        # DELETE is neither. Cohort and track-record queries exclude
+        # `duplicate_of IS NOT NULL`, so a marked row stops inflating the
+        # evidence without vanishing from the record.
+        "ALTER TABLE trades ADD COLUMN duplicate_of INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_duplicate_of ON trades(duplicate_of)",
     ],
 }
 
