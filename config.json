@@ -128,10 +128,7 @@
       "Long Call"
     ],
     "paper_only_strategies": [
-      "Bear Call",
-      "Iron Condor",
-      "Bull Put",
-      "Short Put"
+      "Iron Condor"
     ],
     "weight_profile": null,
     "phase1_start_date": "2026-05-27",
@@ -142,7 +139,8 @@
     "_dedup_window_days_note": "Days an auto-logged contract blocks a second AUTO-LOG of the same (ticker, strategy, strike, expiration). The per-day dedup only sees today, so a catch-up replay re-logs the same contract the next morning at a drifted price and double-counts one decision. Manual log_trade calls are never gated by this. 0 or null disables it.",
     "dedup_window_days": 3,
     "_max_friction_to_credit_note": "Refuse to auto-log a CREDIT trade whose round-trip friction exceeds this fraction of the credit received. Above 1.0 the trade cannot profit at any win rate. Measured 2026-07-31: 31 of 188 logged short-premium trades were above 1.0 — micro-spreads with $57 median capital at risk against ~$65 of spread — and excluding those above 0.50 moved the family's median return on risk from +12.6% to +28.1%. This is the mirror of max_capital_at_risk: that refuses positions too LARGE for the account, this refuses positions too SMALL to survive their own market. null disables it; allow_untradeable=True bypasses it for a deliberate manual entry.",
-    "max_friction_to_credit": 0.5
+    "max_friction_to_credit": 0.5,
+    "_paper_only_strategies_note": "Strategies logged as paper_only=1, i.e. kept OUT of any validation cohort. 2026-08-01: Bull Put, Bear Call and Short Put were PROMOTED out of this list by operator decision so the short-premium gate's cohort can authorise capital; the 285 historical rows were flipped to paper_only=0 in the same change (backup: backups/paper_trades.db.bak.20260801-223429). Iron Condor stays quarantined — it is not part of the short-premium gate's family. NOTE paper_only means two different things in this ledger: strategy-selection quarantine (this list) and DTE-contamination marking on Long Call/Long Put rows. Only the first was promoted."
   },
   "dolt_options": {
     "cache_path": "data/dolt_options.db",

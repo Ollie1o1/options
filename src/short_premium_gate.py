@@ -279,13 +279,21 @@ def cohort_caveats(rows: Sequence[Dict[str, Any]]) -> List[str]:
     n_paper = sum(1 for r in rows if int(r.get("paper_only") or 0) == 1)
     if n_paper == len(rows):
         out.append(
-            "**Every row is `paper_only=1`.** The whole family is quarantined by "
-            "`auto_log.paper_only_strategies` — a 2026-05-29 decision to trade "
-            "only Long Calls, not a judgement about data quality. These rows "
-            "were never intended as a validation cohort, and promoting them to "
-            "one is an operator decision that this gate does not make for you.")
+            "**Every row is `paper_only=1`.** The family is quarantined by "
+            "`auto_log.paper_only_strategies` — a strategy-selection decision, "
+            "not a judgement about data quality. These rows were not intended "
+            "as a validation cohort, and promoting them to one is an operator "
+            "decision that this gate does not make for you.")
     elif n_paper:
-        out.append(f"{n_paper} of {len(rows)} rows are `paper_only=1`.")
+        out.append(
+            f"{n_paper} of {len(rows)} rows are still `paper_only=1` — a mixed "
+            "cohort, which is worth resolving one way or the other.")
+    else:
+        out.append(
+            "Cohort promoted out of `paper_only` on 2026-08-01 by operator "
+            "decision, so these rows now count as validation evidence. That "
+            "removed a CLASSIFICATION, not a limitation: the caveats below are "
+            "unchanged by it, and the tail one still binds.")
 
     counts: Dict[str, int] = {}
     for r in rows:

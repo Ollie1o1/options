@@ -4,6 +4,44 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-08-01 — Short-premium family promoted out of paper_only
+
+**Why:** the short-premium gate's Arm A reads READY, but every row in its cohort
+was `paper_only=1`, so the evidence was formally disqualified from authorising
+anything. The operator ruled that these rows should count.
+
+**What changed:** 285 rows (Bull Put 131, Bear Call 135, Short Put 109... 
+counted before promotion: 81/104/100 flipped) set to `paper_only=0`, and
+`auto_log.paper_only_strategies` reduced from
+`[Bear Call, Iron Condor, Bull Put, Short Put]` to `[Iron Condor]` so future
+rows log clean. Backup taken first:
+`backups/paper_trades.db.bak.20260801-223429`.
+
+**Scope was deliberately narrow, because `paper_only` means two different
+things in this ledger.** For the credit family it is a STRATEGY-SELECTION
+quarantine (the 2026-05-29 "trade only Long Calls" decision). For Long Call and
+Long Put rows it marks DTE CONTAMINATION (2026-06-03) — those rows are bad
+data, not merely out of scope. Only the first was promoted: Long Call's 41 and
+Long Put's 26 contaminated rows are untouched, as is Iron Condor, which is not
+part of the short-premium gate's family.
+
+**What this does NOT change, and the distinction matters:** promoting a row
+changes its CLASSIFICATION, not the evidence it carries. The binding caveat is
+untouched — the window is under two months with no volatility shock, and short
+premium's characteristic failure is a single tail event, not a slow bleed. Every
+large loss in the wider ledger is a cash-secured put at $32k-$83k of collateral,
+all excluded by the affordability cap, so this cohort has never actually taken a
+big loss. The gate now says so in place of the paper_only caveat rather than
+simply dropping a line.
+
+**Nothing is armed.** `python -m src.execution.pipeline` still reports DISARMED
+on two blockers: `live_execution.enabled=false`, and `gate=STOP` — because the
+execution pipeline reads the LONG CALL gate, which resolved STOP. Wiring the
+pipeline to authorise off the short-premium gate instead is a separate decision
+that has not been made and is not implied by this one.
+
+---
+
 ## 2026-07-31 — Auto-log refuses credit trades the spread would eat
 
 **Why:** building the short-premium gate surfaced that **31 of 188 logged
