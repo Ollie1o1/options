@@ -174,7 +174,7 @@ shell function and launch the screener from **any** directory. Add to `~/.zshrc`
 (or `~/.bashrc`):
 
 ```bash
-options() { python3 "$HOME/Desktop/options/run.py" "$@"; }
+options() { python3 "$HOME/Projects/options/run.py" "$@"; }
 ```
 
 Then `source ~/.zshrc` once and run:
