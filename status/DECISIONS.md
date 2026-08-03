@@ -4,6 +4,101 @@ A short log of the non-obvious choices we made, so future-us remembers the reaso
 
 ---
 
+## 2026-08-03 — D_hist cannot pass its validity bar, and the reason is not a tunable
+
+**Why this was looked at:** the first D_hist run returned **INVALID** — 198 of
+200 settlement dates failed the matching tripwires, leaving 2 survivors. The
+obvious suspect was the newest and tightest threshold, `CALIPER_RET5D = 0.05`.
+
+**What the sweeps found.** Forty-four configurations were measured on the full
+panel (horizon 42, 198 dates carrying treated names). No committed constant was
+changed; every candidate was patched in memory.
+
+1. *Loosening `CALIPER_RET5D` alone does nothing.* From 0.05 out to ∞ (the
+   caliper removed entirely), the median drop rate falls 0.545 → 0.095 and
+   clears its 0.30 bar from 0.15 onward — but every treated unit it rescues is
+   one whose nearest control is far away, so `smd:ret_5d` blows out 0.53 → 1.29.
+   Validity never exceeds **2%** of dates.
+2. *Conditioning the control pool on momentum alone does nothing.* A pool
+   restricted to `ret_5d ≥ 0.10` fixes the momentum imbalance (0.53 → 0.31) but
+   collapses to ~37 names per date, pushing the drop rate to 0.50–0.60. Best
+   case **3.5%**.
+3. *Widening the control SI band alone does not either.* Bottom-50% → bottom-90%
+   improves every diagnostic monotonically and lifts validity to **6.1%**.
+4. *Combining all three* reaches its best at SI band 0.90, control momentum floor
+   +0.10, caliper 0.10: drop rate 0.294 ✓, `smd:ret_5d` 0.236 ✓, `smd:log_mcap`
+   and `smd:log_price` ✓ — and **`smd:rv` 0.269 ✗** against a 0.25 bar.
+   **17.7%** of dates valid. Still not the majority the tripwire requires.
+
+**The binding constraint is `smd:rv`, and it is structural.** In all 44
+configurations its median sits between **0.251 and 0.381** — never under the
+0.25 bar. A top-5%-SI name that has just run +10% in five days sits at the very
+top of the realized-vol distribution. The ±20% *relative* RV caliper admits a
+band that the low-SI pool only populates at its lower edge, so matched controls
+are systematically less volatile than their treated partners on essentially
+every date. That is a lack of common support between two populations, and no
+caliper setting creates overlap that the universe does not contain.
+
+**Consequence:** D_hist as specified in
+`docs/superpowers/specs/2026-08-02-squeeze-call-sleeve-design.md` §4.3 is not
+measurable on this panel. The sleeve gate stays unresolved. **No constant was
+changed** — a stack of loosened thresholds that still returns INVALID is
+strictly worse than the signed spec, because it spends the spec's credibility
+and buys nothing.
+
+**The indicative number, and how not to use it.** At the best corner above the
+matchable subsample is large enough to bootstrap (35 dates, 946 treated, 2,574
+matched controls):
+
+| horizon | variant | observed | 95% CI |
+|---:|---|---:|---|
+| 21td | central | +10.24% | [+3.29%, +18.12%] |
+| 21td | conservative | +9.36% | [+3.26%, +16.77%] |
+| 42td | central | +25.99% | [+17.48%, +38.12%] |
+| 42td | conservative | +26.31% | [+17.22%, +38.77%] |
+
+Two things make this worth writing down and neither makes it quotable. It is
+**stable**: the original 2-date run read +10.11% / +29.96% central, and growing
+the subsample 17× moved it to +10.24% / +25.99%. And its sign is what the
+asymmetry study predicts, with the horizon effect still growing from 21td to
+42td. But the sample is selected on *matchability*, which is exactly the bias
+the matched design existed to prevent, so a stable estimate here is a stable
+estimate of the matchable minority. **It is not evidence the sleeve has an
+edge**, and it is two subtractions short of being evidence of anything:
+`P_live` and `F_live` only ever reduce it.
+
+**Operator ruling, same day: accept the matchable subsample and document the
+selection.** The alternatives were a different control design (vol-standardized
+benchmark or pre-period comparison) or abandoning D_hist as unmeasurable.
+
+**What that changed in the code.** The drop-rate arm was split out of the
+validity test. `matching.is_balanced` is `is_valid` minus that arm, and
+`dhist.compute` now flags a cycle only on covariate IMBALANCE. A treated name
+with no in-caliper control is dropped, counted, and characterised rather than
+invalidating its cycle. `MAX_DROP_RATE` is unchanged and still computed — it
+is now the size of a reported selection instead of a tripwire. `MAX_SMD`,
+`CALIPER_RET5D`, `CONTROL_SI_MAX` and every other committed constant are
+untouched: the ruling changed which question is asked, not where any bar sits.
+
+**And what "document the selection" was made to mean.** A selected sample whose
+selection is not characterised is just a biased sample, so the report now prints,
+before the number: the estimand in words, coverage (matched treated / eligible
+treated), the median per-cycle drop rate with a count of cycles above the old
+0.30 bar, and the mean of every matching covariate for the DROPPED treated units
+beside the kept ones. That last table is the load-bearing one — it is what lets
+a reader see which way the estimand was narrowed instead of being asked to trust
+that it was not.
+
+**The cost, stated plainly.** Matchability is not random. A treated name is
+matchable when the low-SI pool happens to contain something at its volatility,
+so the selection runs against exactly the high-vol names the signal is about.
+A GO built on this number would authorise trading the matchable cohort, not the
+cohort the screener produces, and those coincide only if the covariate table
+shows the dropped names resembling the kept ones. That check is now a standing
+part of reading the report, not a one-off.
+
+---
+
 ## 2026-08-01 — The walk-forward was re-run after 64 days and reversed sign
 
 **Why:** the evidence banner on every report quoted OOS IC **+0.10 (p=0.48,
