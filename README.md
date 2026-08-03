@@ -134,7 +134,11 @@ one a number that could not change when the thing it described changed.
 
 ## Installation
 
-**Prerequisites:** Python 3.10+, pip (Compatible with Python 3.14+)
+**Prerequisites:** Python 3.11+, pip.
+
+CI runs the suite on **3.11 and 3.12**; it is also developed and run daily on
+**3.14**. 3.10 is not tested — the code may well run on it, but nothing here
+verifies that.
 
 ```bash
 git clone https://github.com/Ollie1o1/options.git
