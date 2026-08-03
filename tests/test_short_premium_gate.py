@@ -6,7 +6,9 @@ whose friction exceeds their credit must not count as evidence, and READY must
 not fire when the typical trade and the book disagree.
 """
 import os
+import sqlite3
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -167,6 +169,75 @@ class CaveatTest(unittest.TestCase):
 
     def test_an_empty_cohort_is_not_silently_fine(self):
         self.assertEqual(cohort_caveats([]), ["Cohort is empty."])
+
+
+class ExitFidelityCaveatTest(unittest.TestCase):
+    """The exit-fidelity caveat states two facts — when the scheduler died and
+    what share of stopped trades ran past their stop. Both were string
+    literals, so the caveat asserted "dead since 2026-06-15" and "94%" no
+    matter what the ledger said, and would go on asserting them after the
+    scheduler was fixed. A caveat that cannot stop being true is not evidence
+    about anything; it has to be measured from the same ledger it qualifies.
+    """
+
+    def _ledger(self, path, overshot, on_rule):
+        """A ledger with `overshot` trades past their stop and `on_rule` on it."""
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE trades (entry_id INTEGER PRIMARY KEY, "
+                     "date TEXT, ticker TEXT, strategy_name TEXT, status TEXT, "
+                     "exit_date TEXT, exit_reason TEXT, pnl_pct REAL, "
+                     "pnl_usd REAL, capital_at_risk REAL)")
+        n = 0
+        for _ in range(overshot):
+            n += 1
+            conn.execute("INSERT INTO trades (entry_id, date, ticker, "
+                         "strategy_name, status, exit_date, exit_reason, pnl_pct) "
+                         "VALUES (?,?,?,?,?,?,?,?)",
+                         (n, "2026-07-01", "AAPL", "Bull Put", "CLOSED",
+                          "2026-07-10", "Stop Loss (-50%)", -0.90))
+        for _ in range(on_rule):
+            n += 1
+            conn.execute("INSERT INTO trades (entry_id, date, ticker, "
+                         "strategy_name, status, exit_date, exit_reason, pnl_pct) "
+                         "VALUES (?,?,?,?,?,?,?,?)",
+                         (n, "2026-07-01", "AAPL", "Bull Put", "CLOSED",
+                          "2026-07-10", "Stop Loss (-50%)", -0.50))
+        conn.commit(); conn.close()
+
+    def test_the_share_is_measured_from_the_ledger(self):
+        rows = [_row(date="2026-07-01") for _ in range(30)]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            self._ledger(p, overshot=3, on_rule=1)  # 75%, not 94%
+            text = " ".join(cohort_caveats(rows, db_path=p))
+        self.assertIn("75%", text)
+        self.assertNotIn("94%", text)
+
+    def test_a_different_ledger_gives_a_different_share(self):
+        rows = [_row(date="2026-07-01") for _ in range(30)]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            self._ledger(p, overshot=1, on_rule=1)  # 50%
+            text = " ".join(cohort_caveats(rows, db_path=p))
+        self.assertIn("50%", text)
+
+    def test_a_ledger_with_no_stop_exits_claims_no_share(self):
+        # Nothing to measure is not the same as "94%". Inventing a number here
+        # is the exact failure the literal represented.
+        rows = [_row(date="2026-07-01") for _ in range(30)]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            self._ledger(p, overshot=0, on_rule=0)
+            text = " ".join(cohort_caveats(rows, db_path=p))
+        self.assertNotIn("94%", text)
+        self.assertNotIn("% of stopped", text)
+
+    def test_it_still_warns_without_a_readable_ledger(self):
+        # The caveat qualifies the verdict; losing the measurement must not
+        # silently drop the warning it carries.
+        rows = [_row(date="2026-07-01") for _ in range(30)]
+        text = " ".join(cohort_caveats(rows, db_path="/nonexistent/ledger.db"))
+        self.assertIn("manual cadence", text)
 
 
 if __name__ == "__main__":

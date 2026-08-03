@@ -58,6 +58,7 @@ from src.phase1_checkpoint import (GATE_V2_MAX_EXTENSIONS,
                                    GATE_V2_STOP_POSTERIOR,
                                    decide_v2, design_effect,
                                    exclude_ruled_duplicates)
+from src.overshoot import fetch_stop_exits, summarize
 
 SHORT_PREMIUM_STRATEGIES: Tuple[str, ...] = ("Bull Put", "Bear Call", "Short Put")
 
@@ -269,11 +270,51 @@ def decide_arm_a(n_eff: float, posterior: Optional[float],
                       f"{extensions_used + 1} of {GATE_V2_MAX_EXTENSIONS}")
 
 
-def cohort_caveats(rows: Sequence[Dict[str, Any]]) -> List[str]:
+def _exit_fidelity_caveat(db_path: Optional[str]) -> str:
+    """The exit-fidelity caveat, measured from the ledger it qualifies.
+
+    Both facts here — when the scheduler died, and what share of stopped trades
+    ran past their stop — used to be string literals. That made the caveat
+    unable to change when the ledger changed, and unable to stop being true
+    once the scheduler was fixed: it would have gone on reporting a dead
+    scheduler and "94%" forever. A caveat that cannot be falsified is not
+    evidence about anything.
+
+    Degrades in the honest direction. With no readable ledger the warning still
+    prints without a number, because losing the measurement is not grounds for
+    dropping the qualification it carries.
+    """
+    head = ("Exit fidelity: stops in this window were checked at manual "
+            "cadence")
+    tail = (" Losses here are overstated relative to the rules that were meant "
+            "to govern them — see the stop-overshoot note in "
+            "reports/TRACK_RECORD.md. This biases the result DOWN, so it is "
+            "the one caveat that does not threaten a positive verdict.")
+    if not db_path:
+        return head + "." + tail
+    try:
+        summary = summarize(fetch_stop_exits(db_path))
+    except Exception:
+        return head + "." + tail
+    after = summary.get("after") or {}
+    share = after.get("share_overshot")
+    since = f" (the scheduler has been dead since {summary.get('cutoff')})"
+    if share is None or not after.get("n"):
+        # Nothing measurable. Say so rather than reciting a remembered number.
+        return head + since + "." + tail
+    return (head + since + f", and {share * 100:.0f}% of stopped trades ran "
+            f"past their stop." + tail)
+
+
+def cohort_caveats(rows: Sequence[Dict[str, Any]],
+                   db_path: Optional[str] = None) -> List[str]:
     """What this cohort is NOT, stated plainly beside whatever it says.
 
     A gate that would authorise real money has to declare the ways its evidence
     falls short, or the number it prints is worth less than it looks.
+
+    ``db_path`` is the ledger the cohort was drawn from; the exit-fidelity
+    caveat is measured from it rather than remembered.
     """
     out: List[str] = []
     if not rows:
@@ -315,13 +356,7 @@ def cohort_caveats(rows: Sequence[Dict[str, Any]]) -> List[str]:
             f"({len(rows) / len(days):.1f} per day). The bootstrap resamples "
             "days for this reason; nominal n materially overstates the evidence.")
 
-    out.append(
-        "Exit fidelity: stops in this window were checked at manual cadence "
-        "(the scheduler has been dead since 2026-06-15), and 94% of stopped "
-        "trades ran past their stop. Losses here are overstated relative to the "
-        "rules that were meant to govern them — see the stop-overshoot note in "
-        "reports/TRACK_RECORD.md. This biases the result DOWN, so it is the one "
-        "caveat that does not threaten a positive verdict.")
+    out.append(_exit_fidelity_caveat(db_path))
 
     days_sorted = sorted(d for d in days if d)
     if days_sorted:
@@ -359,7 +394,7 @@ def evaluate(db_path: str, phase1_start: str,
         "arm_a": "GATHERING", "arm_a_reason": "empty cohort",
         "arm_b": "GATHERING", "arm_b_reason": "empty cohort",
         "ic_spearman": None, "ic_pearson": None,
-        "caveats": cohort_caveats(rows),
+        "caveats": cohort_caveats(rows, db_path),
         "costs_measured": False,
     }
     if not rows:
