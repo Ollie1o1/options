@@ -1,6 +1,8 @@
 """Synthetic call return under the frozen ladder, both valuation variants."""
 import unittest
 
+import numpy as np
+
 from src.squeeze.sleeve import payoff
 
 
@@ -61,13 +63,25 @@ class PayoffTest(unittest.TestCase):
         self.assertGreater(otm, atm)
 
 
+class _NoCopyArray(np.ndarray):
+    """An array that refuses to be converted. The production path only indexes
+    and measures length, so this stays invisible to correct code — but
+    `list(path)` or `path.tolist()` inside the callee raises, which is the
+    regression the plain shares_memory assertion could never catch."""
+
+    def __iter__(self):
+        raise AssertionError("path was iterated — a copy was made")
+
+    def tolist(self):
+        raise AssertionError("path was converted via tolist — a copy was made")
+
+
 class PayoffNumpyPathTest(unittest.TestCase):
     SPOT = 100.0
     SIG_D = 0.05
     IV = 0.80
 
     def test_a_numpy_path_behaves_exactly_like_a_list(self):
-        import numpy as np
         as_list = [self.SPOT] * 5 + [self.SPOT * 2.0] * 37
         as_array = np.array(as_list, dtype=float)
         want = payoff.synthetic_call_return(
@@ -78,16 +92,13 @@ class PayoffNumpyPathTest(unittest.TestCase):
         self.assertAlmostEqual(got, want, places=12)
 
     def test_an_empty_numpy_path_returns_none_without_raising(self):
-        import numpy as np
         got = payoff.synthetic_call_return(
             np.array([], dtype=float), self.SPOT, self.SIG_D, self.IV)
         self.assertIsNone(got)
 
     def test_a_numpy_view_is_not_copied_before_use(self):
-        import numpy as np
-        base = np.array([self.SPOT] * 60, dtype=float)
-        view = base[5:47]
+        data = np.array([self.SPOT] * 42, dtype=float)
+        no_copy_array = np.asarray(data).view(_NoCopyArray)
         got = payoff.synthetic_call_return(
-            view, self.SPOT, self.SIG_D, self.IV, variant="conservative")
+            no_copy_array, self.SPOT, self.SIG_D, self.IV, variant="conservative")
         self.assertIsNotNone(got)
-        self.assertTrue(np.shares_memory(base, view))
