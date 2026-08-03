@@ -76,7 +76,14 @@ def decide(tenor_posteriors: Dict[int, Dict[str, float]], n_cycles: int,
     """The committed verdict. Validity is checked before anything else."""
     if not match_valid:
         return INVALID
-    if n_cycles >= MIN_CYCLES and covered_of_first_six < MIN_COVERED_OF_FIRST_SIX:
+    # The coverage tripwire is "fewer than 4 of the FIRST 6 cycles covered",
+    # and it must not fire before it is decided: at n_cycles=4 with 3 covered,
+    # cycles 5 and 6 could still lift coverage to 5 of 6. Invalidate only when
+    # even perfect coverage of the remaining first-six cycles could not reach
+    # the threshold — otherwise one missed snapshot would mute the gate during
+    # exactly the window the spec reserves for an early decisive STOP.
+    _remaining = max(0, 6 - min(n_cycles, 6))
+    if covered_of_first_six + _remaining < MIN_COVERED_OF_FIRST_SIX:
         return INVALID
     if n_cycles < MIN_CYCLES:
         return EXTEND

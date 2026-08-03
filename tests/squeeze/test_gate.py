@@ -86,6 +86,41 @@ class DecideTest(unittest.TestCase):
                           n_cycles=3, covered_of_first_six=3, match_valid=True)
         self.assertEqual(got, "EXTEND")
 
+    def test_coverage_not_yet_failed_does_not_invalidate_the_early_window(self):
+        # At n_cycles=4 with 3 of 4 covered the tripwire is not yet decided:
+        # cycles 5 and 6 could still bring coverage to 5 of 6. INVALID here
+        # would mute the gate during exactly the window the spec reserves for
+        # an early decisive STOP.
+        got = gate.decide(_posteriors(0.01, 0.05, 0.01, 0.08),
+                          n_cycles=4, covered_of_first_six=3, match_valid=True)
+        self.assertNotEqual(got, "INVALID")
+        self.assertEqual(got, "STOP")
+
+    def test_coverage_invalidates_once_it_is_mathematically_decided(self):
+        # 1 of 4 covered: even perfect coverage of cycles 5 and 6 tops out at
+        # 3 of 6 — the tripwire is already failed, so INVALID now.
+        got = gate.decide(_posteriors(0.99, 0.99, 0.99, 0.99),
+                          n_cycles=4, covered_of_first_six=1, match_valid=True)
+        self.assertEqual(got, "INVALID")
+
+    def test_a_decisive_stop_at_the_hard_stop_is_stop_not_no_go(self):
+        # STOP means "disproven"; NO-GO means "the budget ran out". A dead
+        # central posterior on both tenors at the hard stop must resolve as
+        # the former even with the extension budget exhausted — the bands are
+        # evaluated before the clock, and this pins that ordering.
+        got = gate.decide(_posteriors(0.01, 0.05, 0.01, 0.08),
+                          n_cycles=gate.HARD_STOP_CYCLES,
+                          covered_of_first_six=6, match_valid=True,
+                          extensions_used=gate.MAX_EXTENSIONS)
+        self.assertEqual(got, "STOP")
+
+    def test_a_decisive_go_at_the_hard_stop_is_go_not_no_go(self):
+        got = gate.decide(_posteriors(0.95, 0.99, 0.60, 0.70),
+                          n_cycles=gate.HARD_STOP_CYCLES,
+                          covered_of_first_six=6, match_valid=True,
+                          extensions_used=gate.MAX_EXTENSIONS)
+        self.assertEqual(got, "GO")
+
     def test_thin_coverage_invalidates_rather_than_deciding(self):
         got = gate.decide(_posteriors(0.99, 0.99, 0.99, 0.99),
                           n_cycles=6, covered_of_first_six=2, match_valid=True)
