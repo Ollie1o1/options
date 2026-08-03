@@ -65,4 +65,5 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat mypy-out.txt
+          python scripts/mypy_annotate.py mypy-out.txt
           exit $status
