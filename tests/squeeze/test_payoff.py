@@ -59,3 +59,35 @@ class PayoffTest(unittest.TestCase):
             path, self.SPOT, self.SIG_D, self.IV, strike_mult=1.15,
             variant="conservative")
         self.assertGreater(otm, atm)
+
+
+class PayoffNumpyPathTest(unittest.TestCase):
+    SPOT = 100.0
+    SIG_D = 0.05
+    IV = 0.80
+
+    def test_a_numpy_path_behaves_exactly_like_a_list(self):
+        import numpy as np
+        as_list = [self.SPOT] * 5 + [self.SPOT * 2.0] * 37
+        as_array = np.array(as_list, dtype=float)
+        want = payoff.synthetic_call_return(
+            as_list, self.SPOT, self.SIG_D, self.IV, variant="conservative")
+        got = payoff.synthetic_call_return(
+            as_array, self.SPOT, self.SIG_D, self.IV, variant="conservative")
+        self.assertIsNotNone(got)
+        self.assertAlmostEqual(got, want, places=12)
+
+    def test_an_empty_numpy_path_returns_none_without_raising(self):
+        import numpy as np
+        got = payoff.synthetic_call_return(
+            np.array([], dtype=float), self.SPOT, self.SIG_D, self.IV)
+        self.assertIsNone(got)
+
+    def test_a_numpy_view_is_not_copied_before_use(self):
+        import numpy as np
+        base = np.array([self.SPOT] * 60, dtype=float)
+        view = base[5:47]
+        got = payoff.synthetic_call_return(
+            view, self.SPOT, self.SIG_D, self.IV, variant="conservative")
+        self.assertIsNotNone(got)
+        self.assertTrue(np.shares_memory(base, view))

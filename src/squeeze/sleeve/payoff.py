@@ -38,8 +38,13 @@ def synthetic_call_return(path: Sequence[float], spot0: float, sigma_d: float,
     ``sigma_d`` is the trailing daily realised vol used to scale the ladder
     (the study's own normaliser). ``iv`` prices the option and is deliberately
     separate: the gap between them is exactly what the live measurement is for.
+
+    ``path`` may be a list or a NumPy view. The emptiness test is ``len(...)``
+    rather than ``not path`` because NumPy refuses the truth value of an array
+    with more than one element, and the historical adapter supplies views to
+    avoid materialising a few hundred thousand paths.
     """
-    if not path or spot0 <= 0 or sigma_d <= 0 or iv <= 0:
+    if len(path) == 0 or spot0 <= 0 or sigma_d <= 0 or iv <= 0:
         return None
     if not (math.isfinite(spot0) and math.isfinite(sigma_d) and math.isfinite(iv)):
         return None
