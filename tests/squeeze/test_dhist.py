@@ -6,12 +6,12 @@ import numpy as np
 from src.squeeze.sleeve import dhist
 
 
-def _row(date, symbol, decile, path, rv=0.9, sigma_d=0.05):
+def _row(date, symbol, decile, path, rv=0.9, sigma_d=0.05, spot0=100.0):
     # No "iv" field: the pricing vol is derived inside dhist from the row's
     # own sigma_d (annualised), so market IV cannot leak into D_hist.
     return {"date": date, "symbol": symbol, "si_decile": decile,
             "rv": rv, "log_mcap": 20.0, "log_price": 3.0,
-            "sigma_d": sigma_d, "path": path}
+            "sigma_d": sigma_d, "spot0": spot0, "path": path}
 
 
 def _flat(n=42, level=100.0):
@@ -118,3 +118,17 @@ class DHistTest(unittest.TestCase):
                                 variant="conservative")
         self.assertEqual(set(empty), set(success))
         self.assertEqual(set(flagged), set(success))
+
+
+class EntrySpotTest(unittest.TestCase):
+    def test_a_row_without_spot0_raises_rather_than_guessing(self):
+        row = _row("2020-01-01", "T0", 10, _flat())
+        row.pop("spot0", None)
+        with self.assertRaises(KeyError):
+            dhist._entry_spot(row)
+
+    def test_spot0_is_used_even_when_it_differs_from_the_first_path_bar(self):
+        row = _row("2020-01-01", "T0", 10, _flat())
+        row["spot0"] = 55.0
+        self.assertAlmostEqual(dhist._entry_spot(row), 55.0)
+        self.assertNotAlmostEqual(float(row["path"][0]), 55.0)

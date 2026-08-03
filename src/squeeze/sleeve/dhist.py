@@ -69,12 +69,14 @@ def _mean_return(rows: Sequence[dict], keys: Sequence[str], horizon: int,
 
 
 def _entry_spot(row: dict) -> float:
-    """Entry spot. Rows carry the post-entry path, so the entry level is
-    supplied explicitly when present and otherwise inferred as the level the
-    path starts from."""
-    if row.get("spot0") is not None:
-        return float(row["spot0"])
-    return float(row["path"][0])
+    """Entry spot, always supplied explicitly.
+
+    There is no fallback to ``path[0]``. The path begins one bar AFTER entry, so
+    inferring the entry level from it would shift every trade forward a day and
+    misprice every strike and every ladder threshold — with no test failing and
+    no number looking wrong. A missing ``spot0`` is a caller bug and says so.
+    """
+    return float(row["spot0"])
 
 
 def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
