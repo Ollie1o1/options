@@ -70,6 +70,36 @@ Not every part of this repo is equally proven. These tiers are honest about wher
 
 This tool separates **verifiable facts** from **unproven predictions**, and labels each honestly.
 
+### Where the evidence stands — snapshot, 2026-08-03
+
+A summary of settled questions. It is a snapshot and will go stale; the live
+numbers come from `reports/TRACK_RECORD.md` and the checkpoint reports, which
+are generated, not written by hand.
+
+| Question | Verdict | Evidence |
+|---|---|---|
+| Does the scorer rank **long calls**? | **STOP** — resolved 2026-07-31, do not re-litigate without new data | n=92 closed, Pearson −0.065, rank IC −0.132, P(true rank IC ≥ 0.08) = 4%. Gate v1 and v2 agree. |
+| Does the **short-premium family** (bull put / bear call / short put) make money? | **READY** (Arm A) — authorises capital, not a trade | P(true median net RoR > 0) = 100% on a clustered bootstrap over entry days. |
+| Does the scorer rank **within** that family? | **EXTEND** (Arm B) — decides 2026-08-15 | Rank IC ≈ +0.10, posterior between the bands. Extension 1 of 2. |
+| Is real money switched on? | **No.** | No gate authorises it and no live path is wired. |
+
+**Read Arm A's READY with its caveats attached, not separately.** The gate
+prints them on every run: the tail is unobserved (under two months, no
+volatility shock, and the affordability cap excludes every large loss the wider
+ledger contains), and exit fidelity is degraded — see below. A high posterior on
+this data means *no evidence against*, not *the tail has been survived*.
+
+**The scheduler is not running, and that is an operator-only fix.** The three
+`com.ollie.options.*` LaunchAgents have not fired since 2026-06-15, so exit
+checks happen only when someone opens the screener; 94% of stopped trades ran
+past their stop. This biases recorded losses *upward*, so it does not threaten a
+positive verdict — but the exit rules in this repo describe what was intended,
+not what was enforced. To fix it: **System Settings → General → Login Items &
+Extensions → Allow in the Background**, enable the three `com.ollie.options.*`
+entries. Nothing scheduled runs until then. Verify afterwards with `python -m
+src.maintenance --health` — the banner clears on its own once the agents start
+writing `logs/launchagent.log` again.
+
 **Descriptive layer — verifiable (trust the numbers, mind the staleness).**
 Market prices, IV rank/percentile, spreads, open interest, and Greeks are computed from the live chain. As of the trust-data-integrity work, every contract also carries:
 - **Quote provenance & freshness** — `quote_source`, `quote_as_of`, `quote_age_min`, and a `quote_freshness` label (`fresh` / `delayed` / `stale` / `unknown`). Stale quotes are flagged in the output and lightly penalized, never silently served. Aggregate freshness is reported after each scan.
@@ -77,6 +107,11 @@ Market prices, IV rank/percentile, spreads, open interest, and Greeks are comput
 
 **Predictive layer — experimental (do not treat as established).**
 The composite `quality_score`, the AI `final_score`, and the ranked order are **models under evaluation**, not proven edges. The out-of-sample evidence is surfaced live in the output as an evidence banner shaped like `Ranking model: EXPERIMENTAL — OOS IC ±0.XX (p=0.XX, n=XX) | gate: <STATE> (n=X/50)`, followed by a second line giving the walk-forward artifact's own age (flagged once it's over 30 days stale — it only re-runs monthly) and the cohort's Pearson/rank IC side by side. It is read live from the validation artifacts, not hardcoded — it updates as evidence accumulates and will only read READY once the forward-cohort gate fires. **For current numbers, see [reports/TRACK_RECORD.md](reports/TRACK_RECORD.md)** (refreshed weekly) and [docs/VALIDATION_POWER.md](docs/VALIDATION_POWER.md) for the power analysis behind the gate.
+
+**Audit trail.** [docs/TRUST_AUDIT_20260803.md](docs/TRUST_AUDIT_20260803.md)
+walks every decision-feeding number back to the code that produces it, records
+what reproduced and what did not, and names the three defects it found — each
+one a number that could not change when the thing it described changed.
 
 **Public track record.** The running paper-trading record (win rate, returns, per-strategy breakdown, full closed-trade table, and gate status) is published to [reports/TRACK_RECORD.md](reports/TRACK_RECORD.md), refreshed weekly. It states the paper/delayed-data/friction caveats plainly.
 
