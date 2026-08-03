@@ -49,4 +49,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-lock.txt -r requirements-dev.txt
       - name: mypy
-        run: mypy src/ --config-file mypy.ini
+        # Published to the job summary, not just the log: this job is
+        # continue-on-error, so its output is the only thing that makes it
+        # worth running at all — and nobody opens the log of a job that
+        # cannot fail the build.
+        run: |
+          set +e
+          mypy src/ --config-file mypy.ini > mypy-out.txt 2>&1
+          status=$?
+          {
+            echo '### mypy'
+            echo ''
+            echo '```'
+            tail -n 400 mypy-out.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat mypy-out.txt
+          exit $status
