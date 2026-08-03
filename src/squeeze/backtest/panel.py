@@ -249,6 +249,7 @@ def build(db_path: str = DEFAULT_DB, prices_db: str = PRICES_DB,
             "si_ratio": si_ratio, "dtc": dtc, "trend": _trend(ss, prior),
             "spot": feats["spot"], "sigma_d": feats["sigma_d"],
             "ret_5d": feats["ret_5d"], "rvol": feats["rvol"],
+            "entry_index": feats["_i"],
         }
         for h, f in fwd.items():
             sigma_h = feats["sigma_d"] * math.sqrt(h)

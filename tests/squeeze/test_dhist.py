@@ -6,11 +6,11 @@ import numpy as np
 from src.squeeze.sleeve import dhist
 
 
-def _row(date, symbol, decile, path, rv=0.9, sigma_d=0.05, spot0=100.0):
+def _row(date, symbol, arm, path, rv=0.9, sigma_d=0.05, spot0=100.0):
     # No "iv" field: the pricing vol is derived inside dhist from the row's
     # own sigma_d (annualised), so market IV cannot leak into D_hist.
-    return {"date": date, "symbol": symbol, "si_decile": decile,
-            "rv": rv, "log_mcap": 20.0, "log_price": 3.0,
+    return {"date": date, "symbol": symbol, "arm": arm,
+            "rv": rv, "log_mcap": 20.0, "log_price": 3.0, "ret_5d": 0.12,
             "sigma_d": sigma_d, "spot0": spot0, "path": path}
 
 
@@ -29,9 +29,9 @@ class DHistTest(unittest.TestCase):
             date = f"2020-{1 + d % 12:02d}-{1 + d % 28:02d}"
             for i in range(6):
                 path = _spike() if (treated_spikes and i < 3) else _flat()
-                rows.append(_row(date, f"T{i}", 10, path))
+                rows.append(_row(date, f"T{i}", "treated", path))
             for i in range(12):
-                rows.append(_row(date, f"C{i}", 2, _flat()))
+                rows.append(_row(date, f"C{i}", "control", _flat()))
         return rows
 
     def test_a_planted_effect_is_recovered_with_a_positive_interval(self):
@@ -46,9 +46,9 @@ class DHistTest(unittest.TestCase):
         self.assertLessEqual(got["ci_lo"], 0.0)
         self.assertGreaterEqual(got["ci_hi"], 0.0)
 
-    def test_deciles_six_to_nine_are_excluded_from_both_arms(self):
+    def test_rows_in_neither_arm_are_excluded(self):
         rows = self._panel()
-        rows.append(_row("2020-01-01", "MID", 7, _spike()))
+        rows.append(_row("2020-01-01", "MID", None, _spike()))
         got = dhist.compute(rows, horizon=42, variant="conservative")
         self.assertNotIn("MID", got["used_symbols"])
 
@@ -71,10 +71,10 @@ class DHistTest(unittest.TestCase):
         for d in range(20):
             date = f"2021-{1 + d % 12:02d}-{1 + d % 28:02d}"
             for i in range(3):
-                rows.append(_row(date, f"T{i}", 10, _flat(), rv=1.0))
+                rows.append(_row(date, f"T{i}", "treated", _flat(), rv=1.0))
             for i in range(6):
                 # far outside the rv caliper -> every treated unit drops
-                rows.append(_row(date, f"C{i}", 2, _flat(), rv=9.0))
+                rows.append(_row(date, f"C{i}", "control", _flat(), rv=9.0))
         got = dhist.compute(rows, horizon=42, variant="conservative")
         self.assertEqual(len(got["flagged_dates"]), 20)
 
@@ -83,7 +83,7 @@ class DHistTest(unittest.TestCase):
         # miss; skipping it silently would under-count the flags feeding the
         # majority-flagged tripwire in the direction that flatters the strategy.
         rows = self._panel(n_dates=10)
-        rows.append(_row("2025-06-01", "T0", 10, _flat()))
+        rows.append(_row("2025-06-01", "T0", "treated", _flat()))
         got = dhist.compute(rows, horizon=42, variant="conservative")
         self.assertIn("2025-06-01", got["flagged_dates"])
 
@@ -91,7 +91,7 @@ class DHistTest(unittest.TestCase):
         # No treated units means no observation of the effect at all — that is
         # a non-event, not a validity failure.
         rows = self._panel(n_dates=10)
-        rows.append(_row("2025-06-01", "C0", 2, _flat()))
+        rows.append(_row("2025-06-01", "C0", "control", _flat()))
         got = dhist.compute(rows, horizon=42, variant="conservative")
         self.assertNotIn("2025-06-01", got["flagged_dates"])
 
@@ -110,10 +110,10 @@ class DHistTest(unittest.TestCase):
         for d in range(5):
             date = f"2022-{1 + d:02d}-01"
             for i in range(3):
-                all_flagged_rows.append(_row(date, f"T{i}", 10, _flat(), rv=1.0))
+                all_flagged_rows.append(_row(date, f"T{i}", "treated", _flat(), rv=1.0))
             for i in range(6):
                 # far outside the rv caliper -> every date is flagged
-                all_flagged_rows.append(_row(date, f"C{i}", 2, _flat(), rv=9.0))
+                all_flagged_rows.append(_row(date, f"C{i}", "control", _flat(), rv=9.0))
         flagged = dhist.compute(all_flagged_rows, horizon=42,
                                 variant="conservative")
         self.assertEqual(set(empty), set(success))
@@ -122,13 +122,13 @@ class DHistTest(unittest.TestCase):
 
 class EntrySpotTest(unittest.TestCase):
     def test_a_row_without_spot0_raises_rather_than_guessing(self):
-        row = _row("2020-01-01", "T0", 10, _flat())
+        row = _row("2020-01-01", "T0", "treated", _flat())
         row.pop("spot0", None)
         with self.assertRaises(KeyError):
             dhist._entry_spot(row)
 
     def test_spot0_is_used_even_when_it_differs_from_the_first_path_bar(self):
-        row = _row("2020-01-01", "T0", 10, _flat())
+        row = _row("2020-01-01", "T0", "treated", _flat())
         row["spot0"] = 55.0
         self.assertAlmostEqual(dhist._entry_spot(row), 55.0)
         self.assertNotAlmostEqual(float(row["path"][0]), 55.0)

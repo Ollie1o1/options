@@ -23,6 +23,11 @@ drift. The decomposition only avoids double-counting because the market's IV
 markup lives exclusively in P_live: feed market IV into D_hist and the premium
 is subtracted twice, biasing the gate toward STOP; let the two arms price on
 different conventions and the bias direction is unknown.
+
+Rows arrive already labelled into arms. Cohort policy — who counts as treated,
+who is an eligible control, and who is excluded as partially treated — lives in
+``cohort.py`` and deliberately not here: this module does the statistics and
+should not also hold an opinion about short-interest percentiles.
 """
 from __future__ import annotations
 
@@ -37,14 +42,15 @@ SEED = 12345
 N_BOOT = 4000
 BLOCK_BY_HORIZON = {21: 2, 42: 4}
 
-TREATED_DECILE = 10
-CONTROL_DECILES = (1, 2, 3, 4, 5)   # 6-9 excluded: partially treated
+TREATED_ARM = "treated"
+CONTROL_ARM = "control"
 
 
 def _unit(row: dict) -> matching.Unit:
     return matching.Unit(key=row["symbol"], rv=float(row["rv"]),
                          log_mcap=float(row["log_mcap"]),
-                         log_price=float(row["log_price"]))
+                         log_price=float(row["log_price"]),
+                         ret_5d=float(row["ret_5d"]))
 
 
 def _mean_return(rows: Sequence[dict], keys: Sequence[str], horizon: int,
@@ -93,8 +99,8 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
 
     for date in sorted(by_date):
         day = by_date[date]
-        treated = [r for r in day if r["si_decile"] == TREATED_DECILE]
-        controls = [r for r in day if r["si_decile"] in CONTROL_DECILES]
+        treated = [r for r in day if r.get("arm") == TREATED_ARM]
+        controls = [r for r in day if r.get("arm") == CONTROL_ARM]
         if not treated:
             # No treated units: genuinely not an observation of the effect.
             continue
