@@ -161,14 +161,25 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
         draws[b] = sample[:, 0].mean() - sample[:, 1].mean()
     draws = draws[np.isfinite(draws)]
 
+    # A degenerate resampling space cannot support an interval. With
+    # ``n_dates <= block`` every start index is zero, so all n_boot draws are
+    # the identical full sample and the percentile band collapses onto the
+    # observed value — a zero-width "95% CI" that is fabricated precision, not
+    # a confidence interval. Zero variance across the draws is the same
+    # degeneracy detected after the fact. Refuse rather than fabricate: NaN is
+    # already this module's convention for an unobtainable value. The point
+    # estimate stays — it is real — only the interval is unsupportable.
+    degenerate = (n_dates <= block or draws.size == 0
+                  or bool(np.all(draws == draws[0])))
+
     return {
         "n_dates": n_dates,
         "treat_n": int(sum(t for _, _, t, _ in per_date)),
         "control_n": int(sum(c for _, _, _, c in per_date)),
         "observed": observed,
         "draws": draws,
-        "ci_lo": float(np.percentile(draws, 2.5)) if draws.size else float("nan"),
-        "ci_hi": float(np.percentile(draws, 97.5)) if draws.size else float("nan"),
+        "ci_lo": float("nan") if degenerate else float(np.percentile(draws, 2.5)),
+        "ci_hi": float("nan") if degenerate else float(np.percentile(draws, 97.5)),
         "flagged_dates": flagged,
         "used_symbols": sorted(used),
     }

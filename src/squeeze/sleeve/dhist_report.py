@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import math
 import os
 from typing import Any, Dict, Optional, Sequence
 
@@ -25,30 +26,67 @@ OUT_DIR = "reports/dhist"
 def summarise(results: Dict[tuple, dict], stats: Dict[str, int]) -> Dict[str, Any]:
     cells = []
     for (horizon, variant), r in sorted(results.items()):
+        n_dates = r.get("n_dates", 0)
+        flagged = len(r.get("flagged_dates") or [])
         cells.append({
             "horizon": horizon,
             "variant": variant,
             "observed": r.get("observed"),
             "ci_lo": r.get("ci_lo"),
             "ci_hi": r.get("ci_hi"),
-            "n_dates": r.get("n_dates", 0),
+            "n_dates": n_dates,
             "treat_n": r.get("treat_n", 0),
             "control_n": r.get("control_n", 0),
-            "flagged": len(r.get("flagged_dates") or []),
+            "flagged": flagged,
+            # The parent spec's non-tunable tripwire: a majority of flagged
+            # cycles -> INVALID. n_dates counts only the dates that SURVIVED,
+            # so the majority test is flagged-vs-surviving.
+            "verdict": "INVALID" if flagged > n_dates else "VALID",
         })
     return {"generated": _dt.date.today().isoformat(),
             "cells": cells, "stats": dict(stats)}
 
 
 def _pct(x: Optional[float]) -> str:
-    return "n/a" if x is None else f"{x * 100.0:.2f}%"
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "n/a"
+    return f"{x * 100.0:.2f}%"
 
 
 def render(payload: Dict[str, Any]) -> str:
     lines = ["# D_hist — the payoff term", "",
-             f"_Generated {payload['generated']}_", "",
-             "| horizon | variant | observed | 95% CI | dates | treated | control | flagged |",
-             "|---:|---|---:|---|---:|---:|---:|---:|"]
+             f"_Generated {payload['generated']}_", ""]
+
+    # The verdict prints BEFORE the table. A reader must not meet a percentage
+    # computed from a matchability-selected subsample without first being told
+    # the measurement failed its own committed validity bar.
+    # Older JSON sidecars re-rendered via --from carry no verdict field;
+    # derive it from the counts rather than let them render as clean.
+    def _verdict(c: Dict[str, Any]) -> str:
+        v = c.get("verdict")
+        if v is not None:
+            return v
+        return "INVALID" if c.get("flagged", 0) > c.get("n_dates", 0) else "VALID"
+
+    invalid = [c for c in payload["cells"] if _verdict(c) == "INVALID"]
+    if invalid:
+        lines += ["## VERDICT: INVALID — the measurement did not clear its own validity bar", ""]
+        for c in invalid:
+            total = c["flagged"] + c["n_dates"]
+            lines.append(
+                f"- **{c['horizon']}td {c['variant']}: INVALID** — "
+                f"{c['flagged']} of {total} settlement dates failed the "
+                f"matching validity tripwires; only {c['n_dates']} survived.")
+        lines += ["",
+                  "A majority of flagged cycles means, by the design spec's non-tunable",
+                  "tripwire, that **no verdict is quotable in either direction**. The point",
+                  "estimates below are computed from the matchable minority only; they are",
+                  "context, not a headline.", ""]
+    else:
+        lines += ["## Verdict: VALID — every cell cleared the majority-flagged tripwire", ""]
+
+    lines += ["| horizon | variant | observed | 95% CI | dates | treated | control | flagged |",
+              "|---:|---|---:|---|---:|---:|---:|---:|"]
     for c in payload["cells"]:
         ci = f"[{_pct(c['ci_lo'])}, {_pct(c['ci_hi'])}]"
         lines.append(
@@ -58,7 +96,9 @@ def render(payload: Dict[str, Any]) -> str:
     s = payload["stats"]
     lines += ["", "## Universe accounting", "",
               f"- Rows without short interest, never ranked: **{s.get('ungradeable', 0):,}**",
-              f"- Rows whose price series ended inside the window: **{s.get('short_path', 0):,}**",
+              f"- Rows whose price series ended inside the window: **{s.get('short_path', 0):,}** "
+              f"(treated {s.get('short_path_treated', 0):,} · "
+              f"control {s.get('short_path_control', 0):,})",
               f"- Treated: **{s.get('treated', 0):,}** · control: **{s.get('control', 0):,}** "
               f"· excluded as partially treated: **{s.get('excluded', 0):,}**",
               "", "## What this number is not", "",

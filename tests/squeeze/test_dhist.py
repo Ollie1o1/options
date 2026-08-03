@@ -1,4 +1,5 @@
 """D_hist: matched treated-vs-control call payoff with a moving-block bootstrap."""
+import math
 import unittest
 
 import numpy as np
@@ -24,11 +25,18 @@ def _spike(n=42, level=100.0, mult=2.0, at=5):
 
 class DHistTest(unittest.TestCase):
     def _panel(self, n_dates=40, treated_spikes=True):
+        # The spike magnitude varies BY DATE. A panel whose dates are all
+        # identical has a constant per-date statistic, every bootstrap draw
+        # equals the observed value, and the zero-variance refusal (rightly)
+        # returns a NaN interval — so a panel meant to exercise the CI must
+        # carry real cross-date variation.
         rows = []
         for d in range(n_dates):
             date = f"2020-{1 + d % 12:02d}-{1 + d % 28:02d}"
+            mult = 2.0 + 0.02 * (d % 5)
             for i in range(6):
-                path = _spike() if (treated_spikes and i < 3) else _flat()
+                path = (_spike(mult=mult) if (treated_spikes and i < 3)
+                        else _flat())
                 rows.append(_row(date, f"T{i}", "treated", path))
             for i in range(12):
                 rows.append(_row(date, f"C{i}", "control", _flat()))
@@ -40,11 +48,49 @@ class DHistTest(unittest.TestCase):
         self.assertGreater(got["ci_lo"], 0.0)
 
     def test_no_effect_gives_an_interval_spanning_zero(self):
-        got = dhist.compute(self._panel(treated_spikes=False), horizon=42,
-                            variant="conservative")
+        # Zero effect ON AVERAGE, with genuine cross-date variation: the arm
+        # that spikes alternates by date, so per-date differentials are +/-x
+        # and the bootstrap has variance to work with.
+        rows = []
+        for d in range(40):
+            date = f"2020-{1 + d % 12:02d}-{1 + d % 28:02d}"
+            t_path = _spike() if d % 2 == 0 else _flat()
+            c_path = _flat() if d % 2 == 0 else _spike()
+            for i in range(3):
+                rows.append(_row(date, f"T{i}", "treated", t_path))
+            for i in range(6):
+                rows.append(_row(date, f"C{i}", "control", c_path))
+        got = dhist.compute(rows, horizon=42, variant="conservative")
         self.assertAlmostEqual(got["observed"], 0.0, places=6)
         self.assertLessEqual(got["ci_lo"], 0.0)
         self.assertGreaterEqual(got["ci_hi"], 0.0)
+
+    def test_too_few_dates_to_resample_refuse_an_interval(self):
+        # With n_dates <= block every draw is the identical full sample; a
+        # zero-width band labelled 95% would be fabricated precision. The
+        # point estimate survives; the interval is NaN.
+        got = dhist.compute(self._panel(n_dates=2), horizon=42,
+                            variant="conservative")
+        self.assertEqual(got["n_dates"], 2)
+        self.assertTrue(math.isfinite(got["observed"]))
+        self.assertTrue(math.isnan(got["ci_lo"]))
+        self.assertTrue(math.isnan(got["ci_hi"]))
+
+    def test_zero_variance_draws_refuse_an_interval(self):
+        # Plenty of dates, but every one identical: the resampled statistic
+        # is a constant, so no interval is supportable even though the
+        # resampling space itself is rich.
+        rows = []
+        for d in range(20):
+            date = f"2022-{1 + d % 12:02d}-{1 + d % 28:02d}"
+            for i in range(3):
+                rows.append(_row(date, f"T{i}", "treated", _spike()))
+            for i in range(6):
+                rows.append(_row(date, f"C{i}", "control", _flat()))
+        got = dhist.compute(rows, horizon=42, variant="conservative")
+        self.assertGreater(got["observed"], 0.0)
+        self.assertTrue(math.isnan(got["ci_lo"]))
+        self.assertTrue(math.isnan(got["ci_hi"]))
 
     def test_rows_in_neither_arm_are_excluded(self):
         rows = self._panel()

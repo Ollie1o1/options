@@ -10,6 +10,15 @@ def _result(observed, lo, hi, n_dates=40):
             "flagged_dates": ["2020-01-01"], "used_symbols": ["A", "B"]}
 
 
+def _invalid_result(n_flagged=198, n_dates=2):
+    # The shape run() actually produced: nearly every date flagged, a point
+    # estimate from the surviving sliver, and a NaN (refused) interval.
+    return {"observed": 0.1011, "ci_lo": float("nan"), "ci_hi": float("nan"),
+            "n_dates": n_dates, "treat_n": 4, "control_n": 8,
+            "flagged_dates": [f"d{i}" for i in range(n_flagged)],
+            "used_symbols": []}
+
+
 class SummariseTest(unittest.TestCase):
     STATS = {"ungradeable": 12, "short_path": 3,
              "treated": 120, "control": 360, "excluded": 400}
@@ -33,6 +42,23 @@ class SummariseTest(unittest.TestCase):
         cell = self._payload()["cells"][0]
         self.assertEqual(cell["flagged"], 1)
         self.assertNotIn("flagged_dates", cell)
+
+    def test_a_majority_flagged_cell_is_ruled_invalid(self):
+        got = dhist_report.summarise({(21, "central"): _invalid_result()},
+                                     self.STATS)
+        self.assertEqual(got["cells"][0]["verdict"], "INVALID")
+
+    def test_a_majority_surviving_cell_is_ruled_valid(self):
+        self.assertTrue(all(c["verdict"] == "VALID"
+                            for c in self._payload()["cells"]))
+
+    def test_a_flagged_tie_is_not_a_majority(self):
+        # The tripwire is a MAJORITY of flagged cycles: flagged must exceed
+        # the survivors, not merely equal them.
+        got = dhist_report.summarise(
+            {(21, "central"): _invalid_result(n_flagged=5, n_dates=5)},
+            self.STATS)
+        self.assertEqual(got["cells"][0]["verdict"], "VALID")
 
 
 class RenderTest(unittest.TestCase):
