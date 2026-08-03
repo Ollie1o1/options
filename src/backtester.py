@@ -34,6 +34,10 @@ from typing import Optional, List, Dict, Any, Tuple
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = str(_PROJECT_ROOT / "paper_trades.db")
 
+# Dependency-free by design — see src/ledger_filters. pandas/numpy are optional
+# here, so the cohort filter must not arrive through a module that requires them.
+from src.ledger_filters import exclude_ruled_duplicates  # noqa: E402
+
 try:
     import numpy as np
     HAS_NP = True
@@ -789,6 +793,7 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
                 f"SELECT {_col_list} "
                 "FROM trades WHERE status='CLOSED' "
                 "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
+                + exclude_ruled_duplicates(conn)
             ).fetchall()
     except Exception as e:
         empty_result["verdict"] = f"Could not read database: {e}"
@@ -1328,6 +1333,7 @@ def run_paper_trade_ic_for_structure(
                 f"SELECT {col_list} FROM trades "
                 f"WHERE status='CLOSED' AND quality_score IS NOT NULL "
                 f"AND pnl_pct IS NOT NULL AND {where}"
+                + exclude_ruled_duplicates(conn)
             ).fetchall()
     except Exception as exc:
         out["error"] = str(exc)
@@ -1661,6 +1667,7 @@ def get_calibration_status(
             n = conn.execute(
                 "SELECT COUNT(*) FROM trades WHERE status='CLOSED' "
                 "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
+                + exclude_ruled_duplicates(conn)
             ).fetchone()[0]
     except Exception:
         return 0, "no paper trade db yet"

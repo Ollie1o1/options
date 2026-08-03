@@ -77,6 +77,114 @@ class TestShortPremiumCohort(unittest.TestCase):
             self.assertEqual(len(load_cohort(p, "2026-05-27")), 3)
 
 
+class TestPooledICCohort(unittest.TestCase):
+    """`run_paper_trade_ic` filters on status/quality_score/pnl_pct and nothing
+    else — no strategy, no duplicate rule. The one row ruled a double-log on
+    2026-08-01 satisfies all three, so it was still being counted as evidence
+    here (821 rows against the ledger's 820) after the ruling removed it from
+    the two gate cohorts. Same row, same ledger, two different answers to "is
+    this evidence".
+    """
+
+    def test_ruled_duplicate_is_excluded(self):
+        from src.backtester import run_paper_trade_ic
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            conn = _db(p)
+            for i in (1, 2, 3):
+                _insert(conn, i)
+            _insert(conn, 4, dup=1)
+            conn.commit(); conn.close()
+            self.assertEqual(run_paper_trade_ic(p).get("n_trades"), 3)
+
+    def test_it_loads_without_the_column(self):
+        from src.backtester import run_paper_trade_ic
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            conn = _db(p, with_column=False)
+            for i in (1, 2):
+                _insert(conn, i, has_col=False)
+            conn.commit(); conn.close()
+            self.assertEqual(run_paper_trade_ic(p).get("n_trades"), 2)
+
+
+class TestCalibrationCount(unittest.TestCase):
+    """`get_calibration_status` counts the same cohort, and the count is what
+    tells the operator how much evidence exists."""
+
+    def test_ruled_duplicate_is_not_counted(self):
+        from src.backtester import get_calibration_status
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            conn = _db(p)
+            for i in (1, 2, 3):
+                _insert(conn, i)
+            _insert(conn, 4, dup=1)
+            conn.commit(); conn.close()
+            n_closed, _label = get_calibration_status(p)
+            self.assertEqual(n_closed, 3)
+
+
+class TestWalkForwardCohort(unittest.TestCase):
+    """The walk-forward OOS IC is what the evidence banner prints on every
+    scan. It filters by strategy today, which is the only reason the ruled row
+    does not reach it — an accident of that row's strategy, not a rule."""
+
+    def _wf_db(self, path, with_column=True):
+        """Walk-forward selects every scorer component, so its fixture needs
+        the full component column set rather than the shared minimal one."""
+        from src.walk_forward import _COMPONENT_COLS
+
+        conn = sqlite3.connect(path)
+        cols = ["date TEXT", "strategy_name TEXT", "status TEXT",
+                "paper_only INTEGER", "pnl_pct REAL"]
+        cols += [f"{c} REAL" for c in _COMPONENT_COLS]
+        if with_column:
+            cols.append("duplicate_of INTEGER")
+        conn.execute(f"CREATE TABLE trades (entry_id INTEGER PRIMARY KEY, "
+                     f"{', '.join(cols)})")
+        return conn
+
+    def _wf_insert(self, conn, entry_id, dup=None, has_col=True):
+        from src.walk_forward import _COMPONENT_COLS
+
+        names = ["entry_id", "date", "strategy_name", "status", "paper_only",
+                 "pnl_pct"] + list(_COMPONENT_COLS)
+        vals = [entry_id, "2026-06-01", "Long Call", "CLOSED", 0, 0.05]
+        vals += [0.5] * len(_COMPONENT_COLS)
+        if has_col:
+            names.append("duplicate_of")
+            vals.append(dup)
+        conn.execute(f"INSERT INTO trades ({', '.join(names)}) VALUES "
+                     f"({','.join('?' * len(vals))})", vals)
+
+    def test_ruled_duplicate_is_excluded(self):
+        from src.walk_forward import load_trades
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            conn = self._wf_db(p)
+            for i in (1, 2, 3):
+                self._wf_insert(conn, i)
+            self._wf_insert(conn, 4, dup=1)
+            conn.commit(); conn.close()
+            self.assertEqual(len(load_trades(p, "Long Call")), 3)
+
+    def test_it_loads_without_the_column(self):
+        from src.walk_forward import load_trades
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            conn = self._wf_db(p, with_column=False)
+            for i in (1, 2):
+                self._wf_insert(conn, i, has_col=False)
+            conn.commit(); conn.close()
+            self.assertEqual(len(load_trades(p, "Long Call")), 2)
+
+
 class TestBackwardCompatibility(unittest.TestCase):
     """Ledgers written before schema v17 have no such column and must still
     load — the filter probes rather than assumes."""

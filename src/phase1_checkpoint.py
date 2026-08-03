@@ -46,18 +46,10 @@ from scipy.stats import norm, pearsonr, spearmanr
 from src import gate_extensions
 
 
-def exclude_ruled_duplicates(conn: sqlite3.Connection) -> str:
-    """SQL fragment dropping rows ruled double-logs, or '' on older ledgers.
-
-    `duplicate_of` arrived in schema v17. Probing for it rather than assuming it
-    keeps every cohort query working against a ledger written before the
-    migration — including the minimal fixtures the tests build by hand.
-    """
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
-    except sqlite3.Error:
-        return ""
-    return " AND duplicate_of IS NULL" if "duplicate_of" in cols else ""
+# Re-exported: the definition moved to `ledger_filters` so every cohort query in
+# the project shares one answer to "is this row evidence". Importers here keep
+# working.
+from src.ledger_filters import exclude_ruled_duplicates  # noqa: E402,F401
 
 
 def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[float] = None):

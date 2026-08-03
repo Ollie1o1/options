@@ -15,6 +15,7 @@ from scipy.stats import pearsonr, spearmanr
 from src.backtest_optimizer import (
     BacktestResult, CURRENT_WEIGHTS, WEIGHT_KEYS, optimize_weights,
 )
+from src.ledger_filters import exclude_ruled_duplicates
 
 # Map WEIGHT_KEYS names to their actual column names in paper_trades.db.
 # Most follow the pattern "<key>_score", but a few deviate.
@@ -66,10 +67,12 @@ def load_trades(db_path: str, strategy: str = "Long Call") -> List[Trade]:
         "WHERE status='CLOSED' AND pnl_pct IS NOT NULL "
         "AND COALESCE(paper_only, 0) = 0 "
         "AND strategy_name = ? "
-        "ORDER BY date ASC, rowid ASC"
     )
     out: List[Trade] = []
     with sqlite3.connect(db_path) as conn:
+        # A ruled double-log is one decision recorded twice; counting it twice
+        # inflates the OOS IC this function feeds into the evidence banner.
+        sql += exclude_ruled_duplicates(conn) + " ORDER BY date ASC, rowid ASC"
         for row in conn.execute(sql, (strategy,)).fetchall():
             rowid, entry_date, pnl = row[0], row[1], row[2]
             comps = np.array(
