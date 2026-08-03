@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections import Counter
 from typing import Iterable, List
 
 # `path:line: error: message  [code]` — the column field is optional, and mypy
@@ -32,6 +33,9 @@ _LINE = re.compile(
 MAX_ANNOTATIONS = 50
 
 _LEVEL = {"error": "error", "warning": "warning", "note": "notice"}
+
+# mypy appends its error code in brackets: `... [arg-type]`.
+_CODE = re.compile(r"\[([a-z][a-z0-9-]+)\]\s*$")
 
 
 def _escape(text: str) -> str:
@@ -73,6 +77,42 @@ def annotations_for(lines: Iterable[str],
     return out
 
 
+def breakdown(lines: Iterable[str]) -> dict:
+    """Counts of errors by mypy error code and by file.
+
+    With hundreds of diagnostics the capped annotation list says nothing about
+    the shape of the problem — whether it is one bad pattern repeated across a
+    package, or that many distinct ones. This is the part worth reading first.
+    """
+    codes: Counter = Counter()
+    files: Counter = Counter()
+    total = 0
+    for raw in lines:
+        m = _LINE.match(raw.rstrip("\n"))
+        if not m or m.group("level") != "error":
+            continue
+        total += 1
+        files[m.group("file")] += 1
+        code = _CODE.search(m.group("msg"))
+        codes[code.group(1) if code else "(none)"] += 1
+    return {"total": total, "codes": codes, "files": files}
+
+
+def render_breakdown(breakdown_: dict = None,
+                     lines: Iterable[str] = (),
+                     top: int = 12) -> str:
+    """The histogram as one annotation-sized block of text."""
+    b = breakdown_ if breakdown_ is not None else breakdown(lines)
+    if not b["total"]:
+        return "mypy: no errors"
+    out = [f"{b['total']} errors"]
+    out.append("by code: " + ", ".join(
+        f"{c}={n}" for c, n in b["codes"].most_common(top)))
+    out.append("by file: " + ", ".join(
+        f"{f}={n}" for f, n in b["files"].most_common(top)))
+    return "\n".join(out)
+
+
 def main(argv: List[str]) -> int:
     if len(argv) > 1:
         try:
@@ -83,6 +123,10 @@ def main(argv: List[str]) -> int:
             return 0
     else:
         lines = sys.stdin.readlines()
+    # Shape first, then the individual diagnostics: with hundreds of errors the
+    # histogram is the only part that fits in a glance.
+    summary = render_breakdown(lines=lines)
+    print(f"::notice title=mypy summary::{_escape(summary)}")
     for line in annotations_for(lines):
         print(line)
     return 0

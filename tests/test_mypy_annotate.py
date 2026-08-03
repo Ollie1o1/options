@@ -83,6 +83,54 @@ class EscapingTest(unittest.TestCase):
         self.assertEqual(_escape("50%\n"), "50%25%0A")
 
 
+class BreakdownTest(unittest.TestCase):
+    """With hundreds of errors, the capped annotation list says nothing about
+    the shape of the problem. A histogram by error code and by file is what
+    tells you whether this is one bad pattern repeated or 349 separate ones."""
+
+    _SAMPLE = [
+        'src/a.py:1: error: Need type annotation for "x"  [var-annotated]',
+        'src/a.py:2: error: Need type annotation for "y"  [var-annotated]',
+        "src/a.py:3: error: bad operand  [operator]",
+        "src/b.py:9: error: bad operand  [operator]",
+        "src/b.py:9: note: elaboration that is not its own error",
+        "Found 4 errors in 2 files (checked 289 source files)",
+    ]
+
+    def test_counts_by_error_code(self):
+        from scripts.mypy_annotate import breakdown
+
+        b = breakdown(self._SAMPLE)
+        self.assertEqual(b["codes"]["var-annotated"], 2)
+        self.assertEqual(b["codes"]["operator"], 2)
+
+    def test_counts_by_file(self):
+        from scripts.mypy_annotate import breakdown
+
+        b = breakdown(self._SAMPLE)
+        self.assertEqual(b["files"]["src/a.py"], 3)
+        self.assertEqual(b["files"]["src/b.py"], 1)
+
+    def test_notes_are_not_counted(self):
+        from scripts.mypy_annotate import breakdown
+
+        self.assertEqual(breakdown(self._SAMPLE)["total"], 4)
+
+    def test_an_error_without_a_code_is_still_counted(self):
+        from scripts.mypy_annotate import breakdown
+
+        b = breakdown(["src/a.py:1: error: something odd"])
+        self.assertEqual(b["total"], 1)
+        self.assertEqual(b["codes"]["(none)"], 1)
+
+    def test_the_rendered_breakdown_names_the_worst_code(self):
+        from scripts.mypy_annotate import render_breakdown
+
+        text = render_breakdown(breakdown_=None, lines=self._SAMPLE)
+        self.assertIn("var-annotated", text)
+        self.assertIn("src/a.py", text)
+
+
 class CapTest(unittest.TestCase):
     def test_the_annotation_count_is_capped(self):
         lines = [f"src/a.py:{i}: error: bad  [misc]" for i in range(1, 80)]
