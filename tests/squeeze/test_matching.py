@@ -4,8 +4,9 @@ import unittest
 from src.squeeze.sleeve import matching
 
 
-def _u(key, rv=0.9, mcap=20.0, price=3.0):
-    return matching.Unit(key=key, rv=rv, log_mcap=mcap, log_price=price)
+def _u(key, rv=0.9, mcap=20.0, price=3.0, ret5d=0.12):
+    return matching.Unit(key=key, rv=rv, log_mcap=mcap, log_price=price,
+                         ret_5d=ret5d)
 
 
 class MatchingTest(unittest.TestCase):
@@ -76,4 +77,31 @@ class MatchingTest(unittest.TestCase):
     def test_no_controls_at_all_drops_everything(self):
         got = matching.match([_u("T1")], [], k=3)
         self.assertEqual(got.dropped, ["T1"])
+        self.assertFalse(matching.is_valid(got))
+
+
+class MomentumMatchingTest(unittest.TestCase):
+    def test_a_flat_control_cannot_match_a_name_that_ran(self):
+        treated = [_u("T1", ret5d=0.12)]
+        controls = [_u("C_flat", ret5d=0.00), _u("C_ran", ret5d=0.10)]
+        got = matching.match(treated, controls, k=2)
+        self.assertEqual(got.pairs["T1"], ["C_ran"])
+
+    def test_no_control_inside_the_momentum_caliper_drops_the_treated_unit(self):
+        treated = [_u("T1", ret5d=0.12)]
+        controls = [_u(f"C{i}", ret5d=-0.20) for i in range(5)]
+        got = matching.match(treated, controls, k=3)
+        self.assertEqual(got.dropped, ["T1"])
+
+    def test_smd_now_reports_the_momentum_covariate(self):
+        treated = [_u(f"T{i}") for i in range(10)]
+        controls = [_u(f"C{i}") for i in range(30)]
+        got = matching.match(treated, controls, k=3)
+        self.assertIn("ret_5d", got.smd)
+        self.assertTrue(matching.is_valid(got))
+
+    def test_a_momentum_imbalance_inside_the_caliper_still_fails_validity(self):
+        treated = [_u(f"T{i}", ret5d=0.14 + 0.0001 * i) for i in range(10)]
+        controls = [_u(f"C{i}", ret5d=0.10 + 0.0001 * i) for i in range(30)]
+        got = matching.match(treated, controls, k=3)
         self.assertFalse(matching.is_valid(got))

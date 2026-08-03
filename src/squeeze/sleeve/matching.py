@@ -13,6 +13,13 @@ absorbed by the date-level clustering in the bootstrap, but it is logged so it
 can be inspected. A fitted propensity model was rejected: four covariates and a
 transparent decision beat a model fitted on a small forward sample.
 
+Five-day return is matched too, and that is not cosmetic. The treated arm is
+defined partly BY momentum — top short interest that has already run — so a
+control pool without a momentum condition would make the contrast "short
+interest plus whatever momentum contributes" rather than short interest. The
+live pricing arm matches without any momentum term, and two halves measuring
+different populations cannot be subtracted from one another.
+
 Treated units with no in-caliper control are dropped AND counted. Silent
 dropping would select the cohort toward whatever happens to be matchable.
 """
@@ -27,11 +34,12 @@ K_CONTROLS = 3
 CALIPER_RV_REL = 0.20      # trailing realised vol, relative
 CALIPER_LOG_MCAP = 1.0
 CALIPER_LOG_PRICE = 0.7
+CALIPER_RET5D = 0.05       # five-day return, absolute (fractions, not percent)
 MAX_DROP_RATE = 0.30       # above this a cycle is flagged
 MAX_SMD = 0.25             # standardised mean difference, post-match
 _SD_FLOOR_REL = 1e-12      # below this, the covariate is constant to float precision
 
-_COVARIATES = ("rv", "log_mcap", "log_price")
+_COVARIATES = ("rv", "log_mcap", "log_price", "ret_5d")
 
 
 class Unit(NamedTuple):
@@ -39,6 +47,7 @@ class Unit(NamedTuple):
     rv: float
     log_mcap: float
     log_price: float
+    ret_5d: float
 
 
 class MatchResult(NamedTuple):
@@ -50,7 +59,8 @@ class MatchResult(NamedTuple):
 
 
 def _matrix(units: Sequence[Unit]) -> np.ndarray:
-    return np.array([[u.rv, u.log_mcap, u.log_price] for u in units], dtype=float)
+    return np.array([[u.rv, u.log_mcap, u.log_price, u.ret_5d] for u in units],
+                    dtype=float)
 
 
 def _within_calipers(t: Unit, c: Unit) -> bool:
@@ -61,6 +71,8 @@ def _within_calipers(t: Unit, c: Unit) -> bool:
     if abs(c.log_mcap - t.log_mcap) > CALIPER_LOG_MCAP:
         return False
     if abs(c.log_price - t.log_price) > CALIPER_LOG_PRICE:
+        return False
+    if abs(c.ret_5d - t.ret_5d) > CALIPER_RET5D:
         return False
     return True
 
@@ -87,7 +99,8 @@ def match(treated: Sequence[Unit], controls: Sequence[Unit],
         if not eligible:
             dropped.append(t.key)
             continue
-        t_scaled = np.array([t.rv, t.log_mcap, t.log_price], dtype=float) / scale
+        t_scaled = np.array([t.rv, t.log_mcap, t.log_price, t.ret_5d],
+                            dtype=float) / scale
         dist = np.linalg.norm(c_scaled[eligible] - t_scaled, axis=1)
         order = np.argsort(dist, kind="stable")[:k]
         chosen = [controls[eligible[i]].key for i in order]
@@ -111,8 +124,10 @@ def _smd(treated: Sequence[Unit], controls: Sequence[Unit],
 
     out: Dict[str, float] = {}
     for idx, name in enumerate(_COVARIATES):
-        t_vals = np.array([[u.rv, u.log_mcap, u.log_price][idx] for u in t_units])
-        c_vals = np.array([[u.rv, u.log_mcap, u.log_price][idx] for u in c_units])
+        t_vals = np.array([[u.rv, u.log_mcap, u.log_price, u.ret_5d][idx]
+                           for u in t_units])
+        c_vals = np.array([[u.rv, u.log_mcap, u.log_price, u.ret_5d][idx]
+                           for u in c_units])
         pooled_sd = math.sqrt((t_vals.var(ddof=0) + c_vals.var(ddof=0)) / 2.0)
         # The floor is relative, not `<= 0`: the variance of a repeated
         # constant carries float noise (~1e-32), so a covariate identical
