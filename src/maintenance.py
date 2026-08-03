@@ -170,6 +170,33 @@ def cohort_progress_line(db_path: str, phase1_start: str, today: Optional[str] =
 
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
+# Rotate the maintenance log past this size. Three fires per weekday append
+# full scan output forever, which reached 11MB by 2026-08-03. Nothing reads the
+# file — it is a human-facing record of what the unattended runs did — so the
+# old bytes are compressed rather than dropped.
+MAX_LOG_BYTES = 5 * 1024 * 1024
+
+
+def _rotate_log_if_large(path: str, max_bytes: int = MAX_LOG_BYTES) -> None:
+    """Compress and reset `path` once it exceeds `max_bytes`.
+
+    Never raises: log hygiene must not be the reason an unattended maintenance
+    run fails. A missing, unreadable or otherwise unrotatable path is skipped.
+    """
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) <= max_bytes:
+            return
+        import gzip
+        import shutil
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        with open(path, "rb") as src, gzip.open(f"{path}.{stamp}.gz", "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        open(path, "w").close()
+    except Exception:
+        return
+
+
 def _default_runner(cmd) -> int:
     """Run a subprocess, capturing output to logs/maintenance.log.
 
@@ -178,6 +205,7 @@ def _default_runner(cmd) -> int:
     race the interactive screener for keystrokes (see the stdin-isolation test).
     """
     os.makedirs("logs", exist_ok=True)
+    _rotate_log_if_large(os.path.join("logs", "maintenance.log"))
     with open(os.path.join("logs", "maintenance.log"), "a") as logf:
         logf.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] $ {' '.join(cmd)}\n")
         logf.flush()

@@ -674,5 +674,73 @@ class TestCheckpointJobUsesTheBudget(unittest.TestCase):
         self.assertIsNone(seen["max_capital_at_risk"])
 
 
+class TestLogRotation(unittest.TestCase):
+    """`_default_runner` appends to logs/maintenance.log and nothing ever
+    truncated it. Three fires per weekday for months took it to 11MB — a slow
+    leak on a machine whose whole point is running unattended. Nothing reads
+    the file, so the old bytes are kept compressed rather than discarded.
+    """
+
+    def _write(self, path, size):
+        with open(path, "w") as f:
+            f.write("x" * size)
+
+    def test_an_oversized_log_is_rotated_before_the_next_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                os.makedirs("logs", exist_ok=True)
+                path = os.path.join("logs", "maintenance.log")
+                self._write(path, m.MAX_LOG_BYTES + 1)
+                m._rotate_log_if_large(path)
+                self.assertTrue(os.path.getsize(path) == 0
+                                or not os.path.exists(path))
+            finally:
+                os.chdir(old_cwd)
+
+    def test_rotation_keeps_the_old_bytes_compressed(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                os.makedirs("logs", exist_ok=True)
+                path = os.path.join("logs", "maintenance.log")
+                self._write(path, m.MAX_LOG_BYTES + 1)
+                m._rotate_log_if_large(path)
+                archives = [f for f in os.listdir("logs") if f.endswith(".gz")]
+                self.assertEqual(len(archives), 1,
+                                 "the rotated content must be kept, not dropped")
+            finally:
+                os.chdir(old_cwd)
+
+    def test_a_small_log_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                os.makedirs("logs", exist_ok=True)
+                path = os.path.join("logs", "maintenance.log")
+                self._write(path, 128)
+                m._rotate_log_if_large(path)
+                self.assertEqual(os.path.getsize(path), 128)
+                self.assertEqual([f for f in os.listdir("logs")
+                                  if f.endswith(".gz")], [])
+            finally:
+                os.chdir(old_cwd)
+
+    def test_a_missing_log_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            m._rotate_log_if_large(os.path.join(d, "nope.log"))  # must not raise
+
+    def test_rotation_never_stops_the_run(self):
+        # Logging hygiene must not be the reason maintenance fails. A path that
+        # cannot be rotated (here: a directory) is skipped, not raised.
+        with tempfile.TemporaryDirectory() as d:
+            blocked = os.path.join(d, "a-directory")
+            os.makedirs(blocked)
+            m._rotate_log_if_large(blocked)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
