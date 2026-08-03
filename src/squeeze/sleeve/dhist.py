@@ -15,9 +15,18 @@ Resampling follows the precedent set by the asymmetry study: never resample
 rows, resample DATES, in contiguous blocks. Every name on a settlement date
 shares that day's market move, and settlement dates ~11 trading days apart
 observe overlapping futures at horizons out to 42.
+
+The synthetic call is priced at a FAIR vol — the row's own trailing daily
+realised vol, annualised as ``sigma_d * sqrt(252)`` — never at market IV, and
+the vol is derived here rather than accepted per row so the convention cannot
+drift. The decomposition only avoids double-counting because the market's IV
+markup lives exclusively in P_live: feed market IV into D_hist and the premium
+is subtracted twice, biasing the gate toward STOP; let the two arms price on
+different conventions and the bias direction is unknown.
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Sequence
 
 import numpy as np
@@ -46,9 +55,13 @@ def _mean_return(rows: Sequence[dict], keys: Sequence[str], horizon: int,
         row = by_symbol.get(key)
         if row is None:
             continue
+        sigma_d = float(row["sigma_d"])
+        # Fair-vol pricing by construction: both arms use the row's own
+        # annualised realised vol, so no per-row field can smuggle market IV
+        # (and its premium markup, which belongs to P_live) into D_hist.
         got = payoff.synthetic_call_return(
             row["path"], _entry_spot(row),
-            float(row["sigma_d"]), float(row["iv"]),
+            sigma_d, sigma_d * math.sqrt(252.0),
             horizon_bars=horizon, variant=variant)
         if got is not None:
             out.append(got)
@@ -80,7 +93,16 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
         day = by_date[date]
         treated = [r for r in day if r["si_decile"] == TREATED_DECILE]
         controls = [r for r in day if r["si_decile"] in CONTROL_DECILES]
-        if not treated or not controls:
+        if not treated:
+            # No treated units: genuinely not an observation of the effect.
+            continue
+        if not controls:
+            # Treated units with an EMPTY eligible-control pool is a matching
+            # failure, same as a caliper miss — skipping it silently would
+            # under-count the flags that feed the majority-flagged tripwire,
+            # weakening a validity check in the direction that flatters the
+            # strategy.
+            flagged.append(date)
             continue
         result = matching.match([_unit(r) for r in treated],
                                 [_unit(r) for r in controls])

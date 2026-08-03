@@ -6,10 +6,12 @@ import numpy as np
 from src.squeeze.sleeve import dhist
 
 
-def _row(date, symbol, decile, path, rv=0.9, sigma_d=0.05, iv=0.80):
+def _row(date, symbol, decile, path, rv=0.9, sigma_d=0.05):
+    # No "iv" field: the pricing vol is derived inside dhist from the row's
+    # own sigma_d (annualised), so market IV cannot leak into D_hist.
     return {"date": date, "symbol": symbol, "si_decile": decile,
             "rv": rv, "log_mcap": 20.0, "log_price": 3.0,
-            "sigma_d": sigma_d, "iv": iv, "path": path}
+            "sigma_d": sigma_d, "path": path}
 
 
 def _flat(n=42, level=100.0):
@@ -75,6 +77,23 @@ class DHistTest(unittest.TestCase):
                 rows.append(_row(date, f"C{i}", 2, _flat(), rv=9.0))
         got = dhist.compute(rows, horizon=42, variant="conservative")
         self.assertEqual(len(got["flagged_dates"]), 20)
+
+    def test_a_date_with_treated_but_no_controls_is_flagged_not_dropped(self):
+        # An empty eligible-control pool is a matching failure like any caliper
+        # miss; skipping it silently would under-count the flags feeding the
+        # majority-flagged tripwire in the direction that flatters the strategy.
+        rows = self._panel(n_dates=10)
+        rows.append(_row("2025-06-01", "T0", 10, _flat()))
+        got = dhist.compute(rows, horizon=42, variant="conservative")
+        self.assertIn("2025-06-01", got["flagged_dates"])
+
+    def test_a_date_with_controls_but_no_treated_is_skipped_silently(self):
+        # No treated units means no observation of the effect at all — that is
+        # a non-event, not a validity failure.
+        rows = self._panel(n_dates=10)
+        rows.append(_row("2025-06-01", "C0", 2, _flat()))
+        got = dhist.compute(rows, horizon=42, variant="conservative")
+        self.assertNotIn("2025-06-01", got["flagged_dates"])
 
     def test_an_empty_panel_returns_zero_dates(self):
         got = dhist.compute([], horizon=42)
