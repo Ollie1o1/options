@@ -418,6 +418,82 @@ class DeadSchedulerAckBannerTest(unittest.TestCase):
         self.assertEqual(widths, {100})
 
 
+class NeverRanIsNotAMeasurementTest(unittest.TestCase):
+    """`_NEVER = 99` is a sentinel meaning "no recorded run". It was being
+    rendered as if it were a measurement: "last ran never (99 business days
+    ago)" and "≈ 99 trading day(s) of cohort filling missed".
+
+    Both are fabrications. Nothing measured 99 of anything, and on a fresh
+    clone nothing was missed at all. This bites even when the state dict is
+    non-empty, because startup maintenance seeds `last_track_record` and
+    `last_chain_archive` before the banner renders — so the fresh-install
+    check alone cannot catch it.
+    """
+
+    def setUp(self):
+        from datetime import date
+
+        from src.maintenance_health import compute_health
+
+        # Exactly what a fresh clone looks like at banner time: the startup
+        # jobs have stamped themselves, auto-log has never run.
+        self.report = compute_health(
+            {"last_track_record": "2026-08-03", "last_chain_archive": "2026-08-03"},
+            date(2026, 8, 3))
+
+    def test_the_state_is_not_empty_so_the_first_run_check_cannot_help(self):
+        self.assertFalse(self.report.first_run)
+
+    def test_the_banner_never_invents_a_day_count(self):
+        from src.maintenance_health import health_banner
+
+        banner = health_banner(self.report, width=100)
+        self.assertNotIn("99", banner)
+
+    def test_the_banner_does_not_claim_days_were_missed(self):
+        from src.maintenance_health import health_banner
+
+        banner = health_banner(self.report, width=100)
+        self.assertNotIn("missed", banner)
+
+    def test_it_says_there_is_no_recorded_run(self):
+        from src.maintenance_health import health_banner
+
+        self.assertIn("no recorded run",
+                      health_banner(self.report, width=100).lower())
+
+    def test_health_lines_do_not_invent_a_day_count_either(self):
+        from src.maintenance_health import health_lines
+
+        text = "\n".join(health_lines(self.report))
+        self.assertIn("never", text.lower())
+        self.assertNotIn("99", text)
+
+    def test_a_real_measured_staleness_still_reports_its_number(self):
+        # The fix must not blunt the alarm it exists to sharpen.
+        from datetime import date
+
+        from src.maintenance_health import WORKING_WINDOWS, compute_health, health_banner
+
+        state = {"last_autolog": {w: "2026-07-20" for w in WORKING_WINDOWS}}
+        rep = compute_health(state, date(2026, 8, 3))
+        banner = health_banner(rep, width=100)
+        self.assertIn("missed", banner)
+        self.assertIn("2026-07-20", banner)
+
+    def test_the_banner_still_fits_its_box(self):
+        from src import formatting as fmt
+        from src.maintenance_health import health_banner
+
+        saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+        try:
+            banner = health_banner(self.report, width=100)
+            self.assertEqual({len(ln) for ln in banner.splitlines()}, {100})
+        finally:
+            fmt._COLOR_ENABLED = saved
+
+
 class FreshInstallTest(unittest.TestCase):
     """A brand-new clone has no maintenance state, so every job reads "never
     ran" — which the `_NEVER = 99` sentinel turns into 99 business days stale

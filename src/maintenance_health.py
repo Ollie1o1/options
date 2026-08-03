@@ -387,12 +387,20 @@ def health_banner(report: HealthReport, width: int = 100,
     if autolog.severity != "OK":
         # The important case: the cohort filler itself is behind.
         title = f"{warn} AUTOMATION {report.worst} — cohort auto-log is behind"
-        body += [
-            f"auto-log last ran {autolog.last_run or 'never'} "
-            f"({autolog.business_days_stale} business days ago)",
-            f"≈ {report.autolog_missed_days} trading day(s) of cohort filling missed "
-            f"— the n≥50 gate is that far behind",
-        ]
+        if autolog.last_run is None:
+            # `business_days_stale` is the _NEVER sentinel here, not a count.
+            # Printing it says "99 business days ago" and "99 trading day(s)
+            # missed" about an install that may be minutes old — a fabrication,
+            # and the kind that teaches an operator to distrust the banner.
+            body.append("auto-log has no recorded run yet — open the screener "
+                        "on a weekday during market hours to start it")
+        else:
+            body += [
+                f"auto-log last ran {autolog.last_run} "
+                f"({autolog.business_days_stale} business days ago)",
+                f"≈ {report.autolog_missed_days} trading day(s) of cohort "
+                f"filling missed — the n≥50 gate is that far behind",
+            ]
     else:
         # Auto-log is current; only the background refreshes have fallen behind.
         title = (f"{warn} MAINTENANCE {report.worst} — background jobs behind "
@@ -401,8 +409,12 @@ def health_banner(report: HealthReport, width: int = 100,
     for j in report.jobs:
         if j.name == "auto-log" or j.severity == "OK":
             continue
-        body.append(f"{j.name} last ran {j.last_run or 'never'} "
-                    f"({j.business_days_stale} business days ago) [{j.severity}]")
+        if j.last_run is None:
+            body.append(f"{j.name} has no recorded run yet [{j.severity}]")
+        else:
+            body.append(f"{j.name} last ran {j.last_run} "
+                        f"({j.business_days_stale} business days ago) "
+                        f"[{j.severity}]")
     if launchd_msg:
         body.append(launchd_msg)
     body.append("Launch during market hours to catch up, or run "
@@ -582,7 +594,11 @@ def health_lines(report: HealthReport) -> List[str]:
     out = [f"Maintenance health as of {report.now.isoformat()} "
            f"(worst: {report.worst})", "-" * 60]
     for j in report.jobs:
-        last = j.last_run or "never"
-        out.append(f"  {j.name:<14} last {last:<12} "
-                   f"{j.business_days_stale:>3} business days ago  [{j.severity}]")
+        if j.last_run is None:
+            # business_days_stale is the _NEVER sentinel, not a measurement.
+            out.append(f"  {j.name:<14} never run{'':<20}[{j.severity}]")
+        else:
+            out.append(f"  {j.name:<14} last {j.last_run:<12} "
+                       f"{j.business_days_stale:>3} business days ago  "
+                       f"[{j.severity}]")
     return out
