@@ -21,7 +21,12 @@ from src.squeeze.sleeve import cohort
 def build(records: Sequence[dict], book, shares, horizon: int
           ) -> Tuple[List[dict], Dict[str, int]]:
     """``dhist`` rows for one horizon, plus counts of what did not make it."""
+    # short_path is split by arm because the censoring is not arm-neutral: a
+    # heavily-shorted microcap that just ran +10% is more likely to delist
+    # mid-window than a bottom-half-SI control, and one shared counter cannot
+    # show a differential. The total is kept for compatibility.
     stats = {"ungradeable": 0, "short_path": 0,
+             "short_path_treated": 0, "short_path_control": 0,
              "treated": 0, "control": 0, "excluded": 0}
 
     by_date: Dict[str, List[dict]] = {}
@@ -42,6 +47,7 @@ def build(records: Sequence[dict], book, shares, horizon: int
             row = _row(rec, arm, book, shares, horizon)
             if row is None:
                 stats["short_path"] += 1
+                stats["short_path_" + arm] += 1
                 continue
             stats[arm] += 1
             out.append(row)
@@ -65,14 +71,16 @@ def _row(rec: dict, arm: str, book, shares, horizon: int):
     if not shares_out or spot <= 0:
         return None
     sigma_d = float(rec["sigma_d"])
-    ret_5d = rec.get("ret_5d")
 
     return {
         "date": rec["date"], "symbol": sym, "arm": arm,
         "rv": sigma_d * math.sqrt(252.0),
         "log_mcap": math.log(float(shares_out) * spot),
         "log_price": math.log(spot),
-        "ret_5d": 0.0 if ret_5d is None else float(ret_5d),
+        # cohort.label gives arm None to any row without a ret_5d, and only
+        # labelled rows reach here — so this is never None, and no value is
+        # ever fabricated for a matching covariate.
+        "ret_5d": float(rec["ret_5d"]),
         "sigma_d": sigma_d,
         "spot0": spot,
         "path": path,

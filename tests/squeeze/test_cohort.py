@@ -41,13 +41,16 @@ class CohortTest(unittest.TestCase):
         rows = self._spread(ret5d=0.10)
         self.assertEqual(cohort.label(rows)[-1], "treated")
 
-    def test_a_missing_five_day_return_is_never_treated_but_may_control(self):
+    def test_a_missing_five_day_return_joins_neither_arm(self):
+        # Spec 3.1: a row with no ret_5d cannot satisfy the momentum condition
+        # AND cannot be a control — ret_5d is a matching covariate, and a row
+        # without one would need a fabricated value to be matchable.
         rows = self._spread()
         rows[-1]["ret_5d"] = None
         rows[0]["ret_5d"] = None
         got = cohort.label(rows)
         self.assertNotEqual(got[-1], "treated")
-        self.assertEqual(got[0], "control")
+        self.assertIsNone(got[0])
 
     def test_ranking_is_within_the_batch_not_against_absolute_levels(self):
         # every name lightly shorted: the top of THIS date is still treated

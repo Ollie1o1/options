@@ -51,5 +51,9 @@ def label(rows: Sequence[dict]) -> List[Optional[str]]:
             if ret_5d is not None and float(ret_5d) >= TREATED_RET5D:
                 out[i] = TREATED
         elif pos < control_to:
-            out[i] = CONTROL
+            # Spec 3.1: a control must carry a ret_5d value at all. ret_5d is
+            # a matching covariate, and a row without one would need a
+            # fabricated value to be matchable — so it joins neither arm.
+            if rows[i].get("ret_5d") is not None:
+                out[i] = CONTROL
     return out

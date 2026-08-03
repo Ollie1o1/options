@@ -73,6 +73,22 @@ class PanelRowsTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(stats["short_path"], 1)
 
+    def test_short_path_drops_are_counted_per_arm(self):
+        # The censoring is not arm-neutral — a treated name that just ran +10%
+        # is likelier to delist mid-window than a low-SI control — so the
+        # drops must be visible per arm, with the total kept for compatibility.
+        recs = [_rec("A", entry_index=190, si_ratio=0.1),
+                _rec("B", entry_index=190, si_ratio=0.9)]
+        book = _book(self.closes, symbol="A")
+        book._close["B"] = book._close["A"]
+        book._dates["B"] = book._dates["A"]
+        shares = _Shares({"A": 50_000_000.0, "B": 50_000_000.0})
+        rows, stats = panel_rows.build(recs, book, shares, horizon=42)
+        self.assertEqual(rows, [])
+        self.assertEqual(stats["short_path"], 2)
+        self.assertEqual(stats["short_path_treated"], 1)
+        self.assertEqual(stats["short_path_control"], 1)
+
     def test_covariates_are_derived_as_specified(self):
         rec = _rec("T0", entry_index=100, si_ratio=0.9, spot=200.0)
         rows, _ = panel_rows.build([rec], self.book, self.shares, horizon=42)
