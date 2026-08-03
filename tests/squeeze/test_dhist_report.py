@@ -83,3 +83,55 @@ class RenderTest(unittest.TestCase):
     def test_a_negative_result_is_reported_plainly(self):
         text = dhist_report.render(self._payload(-0.08))
         self.assertIn("-8.00%", text)
+
+
+def _selection(coverage=0.42, matched_rv=0.90, dropped_rv=1.60):
+    return {"treated_eligible": 1000, "treated_matched": int(1000 * coverage),
+            "coverage": coverage, "dates_over_drop_bar": 7,
+            "median_drop_rate": 0.58, "n_dropped": 580,
+            "matched_mean": {"rv": matched_rv, "ret_5d": 0.18,
+                             "log_mcap": 20.1, "log_price": 2.9},
+            "dropped_mean": {"rv": dropped_rv, "ret_5d": 0.31,
+                             "log_mcap": 19.2, "log_price": 2.1}}
+
+
+class SelectionSectionTest(unittest.TestCase):
+    STATS = {"ungradeable": 0, "short_path": 0, "treated": 1,
+             "control": 3, "excluded": 0}
+
+    def _payload(self):
+        results = {}
+        for h in dhist_report.HORIZONS:
+            for v in dhist_report.VARIANTS:
+                r = _result(0.10, 0.03, 0.18)
+                r["selection"] = _selection()
+                results[(h, v)] = r
+        return dhist_report.summarise(results, self.STATS)
+
+    def test_selection_is_keyed_by_horizon_not_duplicated_per_variant(self):
+        # Matching does not depend on the payoff variant, so two variants of
+        # the same horizon must not print two identical selection blocks.
+        got = self._payload()
+        self.assertEqual(sorted(got["selection"]), ["21", "42"])
+
+    def test_the_report_states_the_estimand_and_its_coverage(self):
+        text = dhist_report.render(self._payload())
+        self.assertIn("matchable subsample", text)
+        self.assertIn("42.0%", text)
+
+    def test_the_dropped_units_covariates_are_printed_beside_the_kept_ones(self):
+        text = dhist_report.render(self._payload())
+        self.assertIn("dropped treated", text)
+        self.assertIn("1.600", text)   # dropped mean rv
+        self.assertIn("0.900", text)   # matched mean rv
+
+    def test_the_report_says_the_number_is_not_the_uniform_treated_effect(self):
+        text = dhist_report.render(self._payload())
+        self.assertIn("not the effect on a uniformly-drawn treated name", text)
+
+    def test_a_payload_without_selection_still_renders(self):
+        # Older JSON sidecars carry no selection block; --from must not break.
+        results = {(21, "central"): _result(0.05, 0.0, 0.1)}
+        payload = dhist_report.summarise(results, self.STATS)
+        self.assertEqual(payload["selection"], {})
+        self.assertIn("D_hist", dhist_report.render(payload))

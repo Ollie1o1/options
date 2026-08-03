@@ -28,6 +28,23 @@ Rows arrive already labelled into arms. Cohort policy — who counts as treated,
 who is an eligible control, and who is excluded as partially treated — lives in
 ``cohort.py`` and deliberately not here: this module does the statistics and
 should not also hold an opinion about short-interest percentiles.
+
+THE ESTIMAND IS THE MATCHABLE SUBSAMPLE (operator decision, 2026-08-03). The
+original estimand was the effect on a uniformly-drawn treated name, and it is
+not measurable on this panel: a top-5%-SI name that has just run +10% sits at
+the top of the realised-vol distribution, and the low-SI control pool populates
+that band only at its lower edge, so matched controls come out systematically
+less volatile. Across 44 tested configurations the post-match SMD on realised
+vol never fell below its 0.25 bar. That is missing common support between two
+populations, not a threshold that needs tuning — see status/DECISIONS.md.
+
+So a treated unit with no in-caliper control is now a SELECTION rather than a
+failure: it is dropped, counted, and characterised against the units that did
+match. Only covariate BALANCE still invalidates a cycle. This buys a measurable
+quantity at the price of a narrower one, and the price is real — the sample is
+selected on matchability, which is exactly the bias the matched design was
+built to avoid. Every consumer therefore gets ``selection`` alongside the
+estimate, and the report prints it before the number.
 """
 from __future__ import annotations
 
@@ -44,6 +61,56 @@ BLOCK_BY_HORIZON = {21: 2, 42: 4}
 
 TREATED_ARM = "treated"
 CONTROL_ARM = "control"
+
+_COVARIATES = ("rv", "log_mcap", "log_price", "ret_5d")
+
+
+def _empty_selection() -> Dict[str, object]:
+    return {"treated_eligible": 0, "treated_matched": 0,
+            "dates_over_drop_bar": 0, "drop_rates": [],
+            "matched": {c: [] for c in _COVARIATES},
+            "dropped": {c: [] for c in _COVARIATES}}
+
+
+def _record_selection(sel: Dict[str, object], units: Sequence[matching.Unit],
+                      result: matching.MatchResult) -> None:
+    """Accumulate who was matched, who was not, and how they differed.
+
+    This is the documentation half of the matchable-subsample estimand. A
+    selected sample whose selection is not characterised is just a biased
+    sample, so the covariates of the DROPPED treated units are kept alongside
+    the matched ones and reported side by side.
+    """
+    dropped = set(result.dropped)
+    sel["treated_eligible"] += len(units)
+    sel["treated_matched"] += len(result.pairs)
+    sel["drop_rates"].append(result.drop_rate)
+    if result.drop_rate > matching.MAX_DROP_RATE:
+        sel["dates_over_drop_bar"] += 1
+    for unit in units:
+        bucket = sel["dropped"] if unit.key in dropped else sel["matched"]
+        for name in _COVARIATES:
+            bucket[name].append(float(getattr(unit, name)))
+
+
+def _finalise_selection(sel: Dict[str, object]) -> Dict[str, object]:
+    """Collapse the accumulated lists into the numbers the report prints."""
+    rates = sel.pop("drop_rates")
+    eligible = sel["treated_eligible"]
+    out: Dict[str, object] = {
+        "treated_eligible": eligible,
+        "treated_matched": sel["treated_matched"],
+        "coverage": (sel["treated_matched"] / eligible) if eligible else float("nan"),
+        "dates_over_drop_bar": sel["dates_over_drop_bar"],
+        "median_drop_rate": float(np.median(rates)) if rates else float("nan"),
+    }
+    for label in ("matched", "dropped"):
+        vals = sel[label]
+        out[label + "_mean"] = {
+            name: (float(np.mean(vals[name])) if vals[name] else float("nan"))
+            for name in _COVARIATES}
+    out["n_dropped"] = len(sel["dropped"][_COVARIATES[0]])
+    return out
 
 
 def _unit(row: dict) -> matching.Unit:
@@ -96,6 +163,7 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
     per_date: List[tuple] = []
     flagged: List[str] = []
     used: set = set()
+    sel = _empty_selection()
 
     for date in sorted(by_date):
         day = by_date[date]
@@ -112,11 +180,15 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
             # strategy.
             flagged.append(date)
             continue
-        result = matching.match([_unit(r) for r in treated],
-                                [_unit(r) for r in controls])
-        if not matching.is_valid(result):
+        t_units = [_unit(r) for r in treated]
+        result = matching.match(t_units, [_unit(r) for r in controls])
+        # Balance, not full validity: under the matchable-subsample estimand a
+        # high drop rate is the size of the selection, not a defect in the
+        # comparison. It is recorded below and reported, never silently.
+        if not matching.is_balanced(result):
             flagged.append(date)
             continue
+        _record_selection(sel, t_units, result)
 
         t_keys = list(result.pairs)
         c_keys = [k for keys in result.pairs.values() for k in keys]
@@ -141,7 +213,8 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
         return {"n_dates": 0, "treat_n": 0, "control_n": 0,
                 "observed": float("nan"), "draws": np.array([]),
                 "ci_lo": float("nan"), "ci_hi": float("nan"),
-                "flagged_dates": flagged, "used_symbols": sorted(used)}
+                "flagged_dates": flagged, "used_symbols": sorted(used),
+                "selection": _finalise_selection(sel)}
 
     arr = np.array([(t, c) for t, c, _, _ in per_date], dtype=float)
     observed = float(arr[:, 0].mean() - arr[:, 1].mean())
@@ -182,4 +255,5 @@ def compute(rows: Sequence[dict], horizon: int, variant: str = "central",
         "ci_hi": float("nan") if degenerate else float(np.percentile(draws, 97.5)),
         "flagged_dates": flagged,
         "used_symbols": sorted(used),
+        "selection": _finalise_selection(sel),
     }

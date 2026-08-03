@@ -105,3 +105,35 @@ class MomentumMatchingTest(unittest.TestCase):
         controls = [_u(f"C{i}", ret5d=0.10 + 0.0001 * i) for i in range(30)]
         got = matching.match(treated, controls, k=3)
         self.assertFalse(matching.is_valid(got))
+
+
+class BalanceTest(unittest.TestCase):
+    """`is_balanced` is `is_valid` minus the drop-rate arm.
+
+    D_hist's estimand is the matchable subsample, so a treated unit with no
+    in-caliper control is a SELECTION to be documented, not a defect in the
+    comparison. Balance between the units that did match is what still has to
+    hold: it is the only thing making treated-minus-control a fair difference.
+    """
+
+    def test_balance_holds_even_when_most_treated_units_are_unmatchable(self):
+        # Ten well-matched units, ten with no control within any caliper.
+        treated = ([_u(f"T{i}", rv=0.9 + 0.001 * i) for i in range(10)]
+                   + [_u(f"X{i}", rv=9.0) for i in range(10)])
+        controls = [_u(f"C{i}", rv=0.9 + 0.001 * i) for i in range(30)]
+        got = matching.match(treated, controls, k=3)
+        self.assertGreater(got.drop_rate, matching.MAX_DROP_RATE)
+        self.assertFalse(matching.is_valid(got))
+        self.assertTrue(matching.is_balanced(got))
+
+    def test_an_imbalanced_cohort_is_still_not_balanced(self):
+        treated = [_u(f"T{i}", rv=1.10 + 0.001 * i) for i in range(10)]
+        controls = [_u(f"C{i}", rv=0.92 + 0.001 * i) for i in range(30)]
+        got = matching.match(treated, controls, k=3)
+        self.assertFalse(matching.is_balanced(got))
+
+    def test_a_cohort_with_no_pairs_at_all_is_not_balanced(self):
+        # Nothing matched means there is no comparison to be balanced, and an
+        # empty SMD dict must never read as "no imbalance detected".
+        got = matching.match([_u("T1")], [], k=3)
+        self.assertFalse(matching.is_balanced(got))

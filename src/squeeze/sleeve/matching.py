@@ -149,6 +149,24 @@ def is_valid(result: MatchResult) -> bool:
     """Both committed match-quality tripwires, per the spec's section 4.5."""
     if result.drop_rate > MAX_DROP_RATE:
         return False
+    return is_balanced(result)
+
+
+def is_balanced(result: MatchResult) -> bool:
+    """Covariate balance alone — `is_valid` without the drop-rate arm.
+
+    D_hist's estimand was changed on 2026-08-03 to the matchable subsample
+    (see status/DECISIONS.md), which makes an unmatchable treated unit a
+    selection to be documented rather than a defect in the comparison. Balance
+    between the units that DID match is the part that still has to hold: it is
+    the whole reason treated-minus-control is a fair difference. The drop rate
+    is still computed and still reported — it is the size of the selection —
+    it just no longer invalidates.
+
+    An empty `smd` means nothing matched, so there is no comparison to be
+    balanced. `all()` over an empty dict is True, which would read as "no
+    imbalance detected"; the honest answer is False.
+    """
     if not result.smd:
         return False
     return all(v <= MAX_SMD for v in result.smd.values())

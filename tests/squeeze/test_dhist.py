@@ -42,6 +42,70 @@ class DHistTest(unittest.TestCase):
                 rows.append(_row(date, f"C{i}", "control", _flat()))
         return rows
 
+    def test_an_unmatchable_treated_unit_selects_rather_than_invalidates(self):
+        # Half the treated units sit far outside every caliper. Under the old
+        # all-treated estimand the drop rate (0.5) flagged the cycle; under the
+        # matchable-subsample estimand the cycle survives and the drop is
+        # recorded instead.
+        rows = []
+        for d in range(20):
+            date = f"2020-{1 + d % 12:02d}-{1 + d % 28:02d}"
+            mult = 2.0 + 0.02 * (d % 5)
+            for i in range(3):
+                rows.append(_row(date, f"T{i}", "treated", _spike(mult=mult)))
+            for i in range(3):
+                # rv far outside the +/-20% caliper: no control can match
+                rows.append(_row(date, f"X{i}", "treated", _spike(mult=mult),
+                                 rv=9.0))
+            for i in range(9):
+                rows.append(_row(date, f"C{i}", "control", _flat()))
+        got = dhist.compute(rows, horizon=42, variant="conservative")
+        self.assertEqual(got["flagged_dates"], [])
+        self.assertEqual(got["n_dates"], 20)
+        sel = got["selection"]
+        self.assertEqual(sel["treated_matched"], 60)
+        self.assertEqual(sel["treated_eligible"], 120)
+        self.assertAlmostEqual(sel["coverage"], 0.5)
+        self.assertAlmostEqual(sel["median_drop_rate"], 0.5)
+        self.assertEqual(sel["dates_over_drop_bar"], 20)
+
+    def test_the_selection_records_how_dropped_units_differed(self):
+        # The whole point of accepting a selected sample is being able to see
+        # WHICH way it is selected, so the dropped units' covariates must be
+        # carried, not just their count.
+        rows = []
+        for d in range(20):
+            date = f"2020-{1 + d % 12:02d}-{1 + d % 28:02d}"
+            for i in range(3):
+                rows.append(_row(date, f"T{i}", "treated",
+                                 _spike(mult=2.0 + 0.02 * (d % 5))))
+            for i in range(3):
+                rows.append(_row(date, f"X{i}", "treated", _flat(), rv=9.0))
+            for i in range(9):
+                rows.append(_row(date, f"C{i}", "control", _flat()))
+        sel = dhist.compute(rows, horizon=42)["selection"]
+        self.assertAlmostEqual(sel["matched_mean"]["rv"], 0.9)
+        self.assertAlmostEqual(sel["dropped_mean"]["rv"], 9.0)
+
+    def test_an_imbalanced_cycle_is_still_flagged(self):
+        # Balance is the arm that survived the estimand change. Controls sit
+        # inside the rv caliper but systematically below the treated units.
+        # The covariates must VARY: a covariate that is constant across both
+        # arms is reported as balanced by design (the sqrt(2) float-noise fix
+        # in matching._smd), so a constant-rv panel would prove nothing here.
+        rows = []
+        for d in range(6):
+            date = f"2020-0{1 + d}-01"
+            for i in range(10):
+                rows.append(_row(date, f"T{i}", "treated", _flat(),
+                                 rv=1.10 + 0.001 * i))
+            for i in range(30):
+                rows.append(_row(date, f"C{i}", "control", _flat(),
+                                 rv=0.92 + 0.001 * i))
+        got = dhist.compute(rows, horizon=42)
+        self.assertEqual(len(got["flagged_dates"]), 6)
+        self.assertEqual(got["n_dates"], 0)
+
     def test_a_planted_effect_is_recovered_with_a_positive_interval(self):
         got = dhist.compute(self._panel(), horizon=42, variant="conservative")
         self.assertGreater(got["observed"], 0.0)
