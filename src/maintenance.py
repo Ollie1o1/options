@@ -576,10 +576,11 @@ def main() -> None:
     if "--health" in sys.argv[1:]:
         # On-demand staleness report — no scan, no network.
         from src.maintenance_health import (compute_health, health_lines, health_banner,
-                                            read_launchd_status)
+                                            launchd_silence_days, read_launchd_status)
         rep = compute_health(load_state(DEFAULT_STATE_PATH), datetime.now())
         print("\n".join(health_lines(rep)))
-        banner = health_banner(rep, launchd_jobs=read_launchd_status())
+        banner = health_banner(rep, launchd_jobs=read_launchd_status(),
+                               silence_days=launchd_silence_days())
         if banner:
             print("\n" + banner)
         return

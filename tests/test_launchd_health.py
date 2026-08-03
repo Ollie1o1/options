@@ -418,5 +418,212 @@ class DeadSchedulerAckBannerTest(unittest.TestCase):
         self.assertEqual(widths, {100})
 
 
+class SilentSchedulerTest(unittest.TestCase):
+    """Exit status alone cannot answer "is the scheduler running".
+
+    On 2026-08-03 all three agents reported `last_exit_status = 0` while
+    `logs/launchagent.log` — which only the agents themselves write — had not
+    been touched since 2026-06-15. Status 0 means "the last run, whenever that
+    was, succeeded"; it does not mean a run happened. Detection keyed on
+    `failed` therefore went silent on exactly the seven-week outage it was
+    built to catch, and `next_launchd_dead_state` *cleared* the marker that
+    arms the acknowledgement block.
+
+    A job that is loaded but has not written its log in `days` is dead,
+    whatever launchctl says about its last exit.
+    """
+
+    def setUp(self):
+        import tempfile
+        from datetime import date
+
+        self.today = date(2026, 7, 31)  # a Friday
+        self.healthy_jobs = parse_launchctl_list(_HEALTHY, "com.options-screener")
+        self.dead_jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+
+    def _log_with_last_entry(self, day, name="launchagent.log"):
+        path = os.path.join(self._tmpdir.name, name)
+        with open(path, "w") as f:
+            f.write(f"[{day} 12:24:10] maintenance: auto-log:sps\n")
+        return path
+
+    # --- measuring the silence ---
+
+    def test_counts_business_days_since_the_agents_last_wrote(self):
+        from src.maintenance_health import launchd_silence_days
+
+        path = self._log_with_last_entry("2026-07-24")  # Friday, one week before
+        self.assertEqual(launchd_silence_days(path, self.today), 5)
+
+    def test_a_log_written_today_is_not_silent(self):
+        from src.maintenance_health import launchd_silence_days
+
+        path = self._log_with_last_entry(self.today.isoformat())
+        self.assertEqual(launchd_silence_days(path, self.today), 0)
+
+    def test_a_weekend_alone_does_not_count_as_silence(self):
+        from datetime import date
+
+        from src.maintenance_health import launchd_silence_days
+
+        # Last fired Friday; it is now Monday. The agents are weekday-only, so
+        # nothing has been missed and this must not read as an outage.
+        path = self._log_with_last_entry("2026-07-31")
+        self.assertEqual(launchd_silence_days(path, date(2026, 8, 3)), 1)
+
+    def test_no_log_at_all_means_unknown_not_silent(self):
+        from src.maintenance_health import launchd_silence_days
+
+        missing = os.path.join(self._tmpdir.name, "nope.log")
+        self.assertIsNone(launchd_silence_days(missing, self.today))
+
+    # --- reporting it ---
+
+    def test_loaded_but_silent_jobs_produce_a_message(self):
+        from src.maintenance_health import launchd_failure_message
+
+        msg = launchd_failure_message(self.healthy_jobs, silence_days=49)
+        self.assertIsNotNone(msg)
+        self.assertIn("49", msg)
+
+    def test_the_silence_message_names_the_same_remedy(self):
+        # The cause is the same Login Items refusal; a reader who is told only
+        # "silent" goes hunting through the scripts instead of the toggle.
+        from src.maintenance_health import launchd_failure_message
+
+        msg = launchd_failure_message(self.healthy_jobs, silence_days=49)
+        self.assertIn("Login Items", msg)
+
+    def test_silence_within_the_threshold_is_not_reported(self):
+        from src.maintenance_health import LAUNCHD_SILENCE_DEAD_DAYS, launchd_failure_message
+
+        self.assertIsNone(
+            launchd_failure_message(self.healthy_jobs,
+                                    silence_days=LAUNCHD_SILENCE_DEAD_DAYS))
+
+    def test_unknown_silence_leaves_healthy_jobs_alone(self):
+        from src.maintenance_health import launchd_failure_message
+
+        self.assertIsNone(launchd_failure_message(self.healthy_jobs, silence_days=None))
+
+    def test_no_jobs_loaded_never_reports_silence(self):
+        # launchctl gave us nothing to judge — same fail-open rule as everywhere
+        # else in this module. A missing scheduler is not a silent one.
+        from src.maintenance_health import launchd_failure_message
+
+        self.assertIsNone(launchd_failure_message([], silence_days=90))
+
+    def test_a_nonzero_exit_still_wins_the_message(self):
+        # Exit 78 is the more specific diagnosis; silence is the fallback for
+        # when the status is uninformative.
+        from src.maintenance_health import launchd_failure_message
+
+        msg = launchd_failure_message(self.dead_jobs, silence_days=49)
+        self.assertIn("last exit", msg)
+
+    # --- arming the duration clock ---
+
+    def test_silence_counts_as_dead_for_the_duration_clock(self):
+        from datetime import date
+
+        from src.maintenance_health import launchd_dead_days
+
+        state = {"launchd_dead_since": "2026-06-15"}
+        self.assertEqual(
+            launchd_dead_days(self.healthy_jobs, state, date(2026, 7, 31),
+                              silence_days=33),
+            46)
+
+    def test_silence_stamps_the_marker(self):
+        from src.maintenance_health import next_launchd_dead_state
+
+        new_state = next_launchd_dead_state(self.healthy_jobs, {}, self.today,
+                                            seed_date="2026-06-15", silence_days=33)
+        self.assertEqual(new_state["launchd_dead_since"], "2026-06-15")
+
+    def test_silence_does_not_let_a_zero_exit_clear_the_marker(self):
+        # The regression in one line: status 0 across the board used to wipe
+        # `launchd_dead_since`, disarming the acknowledgement block while the
+        # scheduler was still dead.
+        from src.maintenance_health import next_launchd_dead_state
+
+        state = {"launchd_dead_since": "2026-06-15"}
+        new_state = next_launchd_dead_state(self.healthy_jobs, state, self.today,
+                                            silence_days=33)
+        self.assertEqual(new_state["launchd_dead_since"], "2026-06-15")
+
+    def test_a_recovered_scheduler_still_clears_the_marker(self):
+        from src.maintenance_health import next_launchd_dead_state
+
+        state = {"launchd_dead_since": "2026-06-15"}
+        new_state = next_launchd_dead_state(self.healthy_jobs, state, self.today,
+                                            silence_days=0)
+        self.assertNotIn("launchd_dead_since", new_state)
+
+    # --- the banner ---
+
+    def test_a_silent_scheduler_forces_a_banner_despite_fresh_state(self):
+        from src.maintenance_health import health_banner
+
+        banner = health_banner(_fresh_report(), launchd_jobs=self.healthy_jobs,
+                               silence_days=49)
+        self.assertNotEqual(banner, "")
+        self.assertIn("Login Items", banner)
+
+    def test_the_silent_banner_fits_its_box(self):
+        from src import formatting as fmt
+        from src.maintenance_health import health_banner
+
+        saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+        try:
+            banner = health_banner(_fresh_report(), width=100,
+                                   launchd_jobs=self.healthy_jobs, silence_days=49)
+            self.assertEqual({len(ln) for ln in banner.splitlines()}, {100})
+        finally:
+            fmt._COLOR_ENABLED = saved
+
+    def test_the_operators_actual_machine_on_2026_08_03(self):
+        # Acceptance: three agents loaded, all exit 0, log last written
+        # 2026-06-15. Before this change every one of these assertions failed.
+        from datetime import date
+
+        from src.maintenance_health import (health_banner, launchd_dead_days,
+                                            launchd_failure_message,
+                                            launchd_silence_days,
+                                            next_launchd_dead_state)
+
+        today = date(2026, 8, 3)
+        loaded_but_silent = parse_launchctl_list(
+            "PID\tStatus\tLabel\n"
+            "-\t0\tcom.ollie.options.crypto-enforce-exits\n"
+            "-\t0\tcom.ollie.options.maintenance\n"
+            "-\t0\tcom.ollie.options.crypto-auto-log\n",
+            LAUNCHD_LABEL_PREFIXES)
+        self.assertEqual(len(loaded_but_silent), 3)
+        self.assertEqual([j for j in loaded_but_silent if j.failed], [])
+
+        path = self._log_with_last_entry("2026-06-15")
+        silence = launchd_silence_days(path, today)
+        self.assertEqual(silence, 35)  # business days
+
+        self.assertIsNotNone(launchd_failure_message(loaded_but_silent,
+                                                     silence_days=silence))
+
+        state = next_launchd_dead_state(loaded_but_silent, {}, today,
+                                        seed_date="2026-06-15",
+                                        silence_days=silence)
+        self.assertEqual(state["launchd_dead_since"], "2026-06-15")
+        self.assertEqual(launchd_dead_days(loaded_but_silent, state, today,
+                                           silence_days=silence), 49)
+
+        self.assertNotEqual(
+            health_banner(_fresh_report(), launchd_jobs=loaded_but_silent,
+                          silence_days=silence),
+            "")
+
+
 if __name__ == "__main__":
     unittest.main()

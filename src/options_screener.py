@@ -4838,11 +4838,17 @@ def main():
             from .maintenance_health import (compute_health, health_banner,
                                              read_launchd_status, launchd_dead_days,
                                              next_launchd_dead_state,
+                                             launchd_silence_days,
                                              seed_dead_since_date)
             _mh_state = load_state(DEFAULT_STATE_PATH)
             _launchd_jobs = read_launchd_status()
+            # Exit status alone misses the outage: loaded jobs report 0 whether
+            # they ran or not. The agents' own log is the only record of an
+            # actual firing — see launchd_silence_days.
+            _silence = launchd_silence_days()
             _banner = health_banner(compute_health(_mh_state, datetime.now()),
-                                    launchd_jobs=_launchd_jobs)
+                                    launchd_jobs=_launchd_jobs,
+                                    silence_days=_silence)
             if _banner:
                 print(_banner)
             # Escalated hard-confirm (interactive only): launchctl carries no
@@ -4855,10 +4861,12 @@ def main():
             # ack fires) the first time this code runs on it.
             _today = datetime.now().date()
             _next_mh_state = next_launchd_dead_state(
-                _launchd_jobs, _mh_state, _today, seed_date=seed_dead_since_date())
+                _launchd_jobs, _mh_state, _today, seed_date=seed_dead_since_date(),
+                silence_days=_silence)
             if _next_mh_state.get("launchd_dead_since") != _mh_state.get("launchd_dead_since"):
                 save_state(DEFAULT_STATE_PATH, _next_mh_state)
-            _dead_days = launchd_dead_days(_launchd_jobs, _next_mh_state, _today)
+            _dead_days = launchd_dead_days(_launchd_jobs, _next_mh_state, _today,
+                                           silence_days=_silence)
             _dead_scheduler_ack(_dead_days, _interactive, WIDTH)
         except Exception:
             pass

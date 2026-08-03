@@ -305,24 +305,32 @@ def check_scheduler(state_path: Optional[str] = None, now=None,
     # the app will never fix it. Reporting only staleness sends the operator
     # to the one action that cannot work.
     from src.maintenance_health import (launchd_dead_days, launchd_failure_message,
-                                        read_launchd_status, seed_dead_since_date)
+                                        launchd_silence_days, read_launchd_status,
+                                        seed_dead_since_date)
     if jobs is None:
         try:
             jobs = read_launchd_status()
         except Exception:  # pragma: no cover - diagnostics never fail a run
             jobs = []
-    failure = launchd_failure_message(jobs) if jobs else None
+    # Silence is the second symptom, and on this machine it was the only one:
+    # loaded agents report exit 0 whether or not they ever fired.
+    try:
+        silence = launchd_silence_days()
+    except Exception:  # pragma: no cover - diagnostics never fail a run
+        silence = None
+    failure = launchd_failure_message(jobs, silence) if jobs else None
     if failure:
         _now = now or _dt.now()
         # Callers pass either a date or a datetime; launchd_dead_days wants a date.
         today = _now.date() if hasattr(_now, "date") else _now
         days = launchd_dead_days(
-            jobs, {"launchd_dead_since": seed_dead_since_date()}, today)
+            jobs, {"launchd_dead_since": seed_dead_since_date()}, today,
+            silence_days=silence)
         span = f" for ~{days} days" if days else ""
         return CheckResult(
             "scheduler", "FAIL", f"scheduled jobs are not running{span}",
             "System Settings > General > Login Items & Extensions > Allow in "
-            "the Background (exit 78 is macOS refusing to launch them)")
+            "the Background (macOS refusing to launch them is the usual cause)")
 
     report = compute_health(state, now or _dt.now())
     sev_map = {"OK": "PASS", "WARN": "WARN", "STALE": "WARN", "CRITICAL": "FAIL"}

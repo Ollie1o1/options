@@ -125,19 +125,53 @@ def parse_launchctl_list(output: str,
     return jobs
 
 
-def launchd_failure_message(jobs: List["LaunchdJob"]) -> Optional[str]:
-    """One line naming dead schedulers, or None when they are all healthy."""
+_LOGIN_ITEMS_REMEDY = ("fix in System Settings > General > Login Items & "
+                       "Extensions > Allow in the Background. Nothing "
+                       "scheduled runs until then")
+
+
+# Business days of agent silence before a loaded job is called dead. The
+# maintenance agent fires Mon-Fri (10:20 / 12:20 / 14:05), so anything past a
+# few working days without a single write is an outage, not a quiet stretch.
+LAUNCHD_SILENCE_DEAD_DAYS = 3
+
+
+def launchd_failure_message(jobs: List["LaunchdJob"],
+                            silence_days: Optional[int] = None) -> Optional[str]:
+    """One line naming dead schedulers, or None when they are all healthy.
+
+    Two independent symptoms, because either alone can miss the outage:
+
+    - a nonzero exit status, which is macOS reporting a refusal outright;
+    - `silence_days`, business days since the agents last wrote their own log
+      (`launchd_silence_days`), for when the status is uninformative.
+
+    The second exists because status 0 does not mean "ran". On 2026-08-03 all
+    three agents reported 0 while nothing had fired since 2026-06-15 — a clean
+    status on a run that never happened. Keyed on exit status alone, this
+    function returned None straight through the seven-week outage it was
+    written to catch.
+    """
     failed = [j for j in jobs if j.failed]
-    if not failed:
+    if failed:
+        names = ", ".join(j.label.rsplit(".", 1)[-1] for j in failed)
+        msg = (f"{len(failed)} scheduled job(s) are not running: {names} "
+               f"(last exit {', '.join(str(j.last_exit_status) for j in failed)})")
+        if any(j.last_exit_status == _EX_CONFIG for j in failed):
+            msg += (". Exit 78 is macOS refusing to launch them — "
+                    + _LOGIN_ITEMS_REMEDY)
+        return msg
+    # No jobs loaded means launchctl gave us nothing to judge — fail open,
+    # exactly as read_launchd_status does. A missing scheduler is not a silent
+    # one, and blocking on "cannot tell" is how a diagnostic becomes an outage.
+    if not jobs or silence_days is None:
         return None
-    names = ", ".join(j.label.rsplit(".", 1)[-1] for j in failed)
-    msg = (f"{len(failed)} scheduled job(s) are not running: {names} "
-           f"(last exit {', '.join(str(j.last_exit_status) for j in failed)})")
-    if any(j.last_exit_status == _EX_CONFIG for j in failed):
-        msg += (". Exit 78 is macOS refusing to launch them — fix in "
-                "System Settings > General > Login Items & Extensions > "
-                "Allow in the Background. Nothing scheduled runs until then")
-    return msg
+    if silence_days <= LAUNCHD_SILENCE_DEAD_DAYS:
+        return None
+    return (f"{len(jobs)} scheduled job(s) are loaded but have not run in "
+            f"{silence_days} business days (last exit 0 — a clean status on a "
+            f"run that never happened). Usually macOS refusing to launch "
+            f"them — " + _LOGIN_ITEMS_REMEDY)
 
 
 def read_launchd_status(
@@ -278,7 +312,8 @@ def _wrap_body(lines: List[str], width: int) -> List[str]:
 
 
 def health_banner(report: HealthReport, width: int = 100,
-                  launchd_jobs: Optional[List["LaunchdJob"]] = None) -> str:
+                  launchd_jobs: Optional[List["LaunchdJob"]] = None,
+                  silence_days: Optional[int] = None) -> str:
     """A loud, escalating banner — empty string when everything is fresh.
 
     Rendered as a boxed `ui.card` so the banner sits on the same component kit
@@ -288,8 +323,12 @@ def health_banner(report: HealthReport, width: int = 100,
     scheduler and a fresh state file happen together all the time — opening the
     screener by hand stamps the file — and that combination is precisely how
     three agents sat dead for six weeks without the banner ever firing.
+
+    ``silence_days`` (from `launchd_silence_days`) is the second symptom, for
+    the case where the jobs are loaded and reporting exit 0 but have not
+    actually fired. Pass it or the banner is blind to that.
     """
-    launchd_msg = launchd_failure_message(launchd_jobs or [])
+    launchd_msg = launchd_failure_message(launchd_jobs or [], silence_days)
     if report.worst == "OK" and not launchd_msg:
         return ""
     if report.worst == "OK" and launchd_msg:
@@ -351,8 +390,21 @@ def health_banner(report: HealthReport, width: int = 100,
 DEAD_SCHEDULER_ACK_DAYS = 7
 
 
+def _scheduler_is_dead(jobs: Optional[List["LaunchdJob"]],
+                       silence_days: Optional[int] = None) -> bool:
+    """Either symptom counts — see `launchd_failure_message` for why exit
+    status alone is not enough. Kept in one place so the banner, the duration
+    clock, and the state marker can never disagree about what "dead" means."""
+    jobs = jobs or []
+    if any(j.failed for j in jobs):
+        return True
+    if not jobs or silence_days is None:
+        return False
+    return silence_days > LAUNCHD_SILENCE_DEAD_DAYS
+
+
 def launchd_dead_days(jobs: Optional[List["LaunchdJob"]], state: dict,
-                      today: date) -> Optional[int]:
+                      today: date, silence_days: Optional[int] = None) -> Optional[int]:
     """Calendar days the scheduler has been observed dead, or None while
     healthy (or when launchctl gave us nothing to judge, e.g. it isn't
     available — see `read_launchd_status`).
@@ -361,7 +413,7 @@ def launchd_dead_days(jobs: Optional[List["LaunchdJob"]], state: dict,
     touches the filesystem itself. Pair with `next_launchd_dead_state` to
     persist the marker forward; the caller owns the actual write.
     """
-    if not any(j.failed for j in (jobs or [])):
+    if not _scheduler_is_dead(jobs, silence_days):
         return None
     since_str = (state or {}).get("launchd_dead_since")
     if not since_str:
@@ -408,8 +460,32 @@ def seed_dead_since_date(log_path: str = DEFAULT_LAUNCHAGENT_LOG_PATH) -> Option
     return datetime.fromtimestamp(mtime).date().isoformat()
 
 
+def launchd_silence_days(log_path: str = DEFAULT_LAUNCHAGENT_LOG_PATH,
+                         today: Optional[date] = None) -> Optional[int]:
+    """Business days since the LaunchAgents last wrote their own log.
+
+    `logs/launchagent.log` is written *only* by the agents, so unlike the
+    maintenance state file it carries no contamination from someone opening
+    the screener by hand. That makes its last write the one honest answer to
+    "did anything actually fire" — and the only symptom available when every
+    job reports a clean exit status it never earned.
+
+    Returns None when the log does not exist: no evidence is not evidence of
+    silence, and a fresh clone must not read as an outage.
+    """
+    last = seed_dead_since_date(log_path)
+    if last is None:
+        return None
+    try:
+        last_date = date.fromisoformat(last)
+    except ValueError:
+        return None
+    return business_days_between(last_date, today or date.today())
+
+
 def next_launchd_dead_state(jobs: Optional[List["LaunchdJob"]], state: dict,
-                            today: date, seed_date: Optional[str] = None) -> dict:
+                            today: date, seed_date: Optional[str] = None,
+                            silence_days: Optional[int] = None) -> dict:
     """The state dict to persist after this read.
 
     Stamps `launchd_dead_since` the first time the scheduler is observed
@@ -428,7 +504,7 @@ def next_launchd_dead_state(jobs: Optional[List["LaunchdJob"]], state: dict,
     actual file write (and should skip it when the marker is unchanged).
     """
     new_state = dict(state or {})
-    if any(j.failed for j in (jobs or [])):
+    if _scheduler_is_dead(jobs, silence_days):
         if not new_state.get("launchd_dead_since"):
             new_state["launchd_dead_since"] = seed_date or today.isoformat()
     else:
