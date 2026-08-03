@@ -194,6 +194,11 @@ class HealthReport:
     worst: str
     autolog_missed_days: int
     now: date
+    # True when the maintenance state is empty — nothing has EVER run, which is
+    # a fresh clone rather than an outage. Without this, `_NEVER` makes a new
+    # install look 99 business days behind and shout CRITICAL on its first
+    # launch. Defaulted so older constructions keep working.
+    first_run: bool = False
 
 
 def business_days_between(d1: date, d2: date) -> int:
@@ -261,13 +266,26 @@ def compute_health(state: dict, now) -> HealthReport:
         _job("chain-archive", "daily", (state or {}).get("last_chain_archive"), today),
         _job("morning-briefing", "daily", (state or {}).get("last_morning_briefing"), today),
     ]
+    # Nothing recorded at all means nothing was ever scheduled to be missed.
+    # A fresh clone is a setup state, and reporting it as a 99-day outage is
+    # how an operator learns to scroll past this banner.
+    #
+    # The signal is the STATE being empty, not "no job has a last_run": auto-log
+    # reports None whenever any single window is missing, so keying on that
+    # would read a live install with three unrun windows — the starving-cohort
+    # case this banner exists for — as a fresh clone and mute it.
+    first_run = not (state or {})
     worst = "OK"
     for j in jobs:
-        if _RANK[j.severity] > _RANK[worst]:
-            worst = j.severity
+        sev = j.severity
+        if first_run and _RANK[sev] > _RANK["WARN"]:
+            sev = "WARN"
+        if _RANK[sev] > _RANK[worst]:
+            worst = sev
     autolog = next(j for j in jobs if j.name == "auto-log")
     return HealthReport(jobs=jobs, worst=worst,
-                        autolog_missed_days=autolog.business_days_stale, now=today)
+                        autolog_missed_days=autolog.business_days_stale,
+                        now=today, first_run=first_run)
 
 
 def _style(text: str, name: str, bold: bool = None) -> str:
@@ -346,6 +364,24 @@ def health_banner(report: HealthReport, width: int = 100,
     autolog = next(j for j in report.jobs if j.name == "auto-log")
     sev = _SEV_STYLE.get(report.worst, "warn")
     warn = _glyph("warn", "!")
+
+    if report.first_run:
+        # Nothing has ever run here. Say that, and say what starts it — the
+        # staleness arithmetic below describes an outage that never happened.
+        title = _style(f"{warn} SETUP — scheduled jobs have not run yet",
+                       "warn", bold=True)
+        first_body = [
+            "This looks like a fresh install: no maintenance run is on record.",
+            "Open the screener on a weekday during market hours and startup "
+            "maintenance will seed the cohort, the checkpoint and the archive.",
+        ]
+        if launchd_msg:
+            first_body.append(launchd_msg)
+        first_body = _wrap_body(first_body, width)
+        if _ui is not None:
+            return _ui.card(title, first_body, width, boxed=True)
+        rule = _style("─" * width, "warn")
+        return "\n".join([rule, "  " + title] + ["  " + b for b in first_body] + [rule])
 
     body: List[str] = []
     if autolog.severity != "OK":

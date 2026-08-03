@@ -418,6 +418,73 @@ class DeadSchedulerAckBannerTest(unittest.TestCase):
         self.assertEqual(widths, {100})
 
 
+class FreshInstallTest(unittest.TestCase):
+    """A brand-new clone has no maintenance state, so every job reads "never
+    ran" — which the `_NEVER = 99` sentinel turns into 99 business days stale
+    and an AUTOMATION CRITICAL banner claiming "99 trading day(s) of cohort
+    filling missed". Nothing was missed. Nothing was ever scheduled.
+
+    Crying wolf on first run is how an operator learns to scroll past the
+    banner, which is the same failure the dead-scheduler guard already had
+    once. A report with no state at all is a setup state, not an outage.
+    """
+
+    def setUp(self):
+        from datetime import date
+
+        from src.maintenance_health import compute_health
+
+        self.report = compute_health({}, date(2026, 8, 3))
+
+    def test_an_empty_state_is_marked_a_first_run(self):
+        self.assertTrue(self.report.first_run)
+
+    def test_a_populated_state_is_not_a_first_run(self):
+        from datetime import date
+
+        from src.maintenance_health import WORKING_WINDOWS, compute_health
+
+        state = {"last_autolog": {w: "2026-08-03" for w in WORKING_WINDOWS}}
+        self.assertFalse(compute_health(state, date(2026, 8, 3)).first_run)
+
+    def test_a_first_run_does_not_shout_critical(self):
+        self.assertNotEqual(self.report.worst, "CRITICAL")
+
+    def test_the_banner_does_not_claim_missed_days(self):
+        from src.maintenance_health import health_banner
+
+        banner = health_banner(self.report, width=100)
+        self.assertNotIn("missed", banner)
+        self.assertNotIn("99", banner)
+
+    def test_the_banner_says_what_to_do_instead(self):
+        from src.maintenance_health import health_banner
+
+        banner = health_banner(self.report, width=100)
+        self.assertIn("not run yet", banner.lower())
+
+    def test_the_first_run_banner_fits_its_box(self):
+        from src import formatting as fmt
+        from src.maintenance_health import health_banner
+
+        saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+        try:
+            banner = health_banner(self.report, width=100)
+            self.assertEqual({len(ln) for ln in banner.splitlines()}, {100})
+        finally:
+            fmt._COLOR_ENABLED = saved
+
+    def test_a_dead_scheduler_still_shows_on_a_first_run(self):
+        # "Nothing has run yet" and "the scheduler is refusing to start" are
+        # different problems, and the second must not be hidden by the first.
+        from src.maintenance_health import health_banner
+
+        jobs = parse_launchctl_list(_BROKEN, "com.options-screener")
+        banner = health_banner(self.report, width=100, launchd_jobs=jobs)
+        self.assertIn("Login Items", banner)
+
+
 class SilentSchedulerTest(unittest.TestCase):
     """Exit status alone cannot answer "is the scheduler running".
 

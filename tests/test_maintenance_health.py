@@ -100,10 +100,23 @@ class ComputeHealthTest(unittest.TestCase):
         archive = [j for j in rep.jobs if j.name == "chain-archive"][0]
         self.assertEqual(archive.severity, "STALE")
 
-    def test_missing_state_file_is_critical(self):
+    def test_missing_state_file_still_warns(self):
+        # An absent state file must never read as silently fine. It is NOT an
+        # outage though: nothing was ever scheduled to be missed, so it warns
+        # as a setup state rather than shouting a 99-day cohort loss at every
+        # fresh clone. See FreshInstallTest in test_launchd_health.
         rep = H.compute_health({}, date(2026, 7, 7))
-        self.assertIn(rep.worst, ("STALE", "CRITICAL"))
+        self.assertTrue(rep.first_run)
+        self.assertEqual(rep.worst, "WARN")
         self.assertNotEqual(H.health_banner(rep), "")
+
+    def test_a_partly_run_install_is_not_mistaken_for_a_fresh_one(self):
+        # auto-log reports last_run None whenever a single window is missing,
+        # so "no job has a last_run" cannot be the fresh-install signal — it
+        # would mute the starving-cohort alarm on a live install.
+        rep = H.compute_health(_state(autolog={"ds": "2026-07-07"}), date(2026, 7, 7))
+        self.assertFalse(rep.first_run)
+        self.assertIn(rep.worst, ("STALE", "CRITICAL"))
 
 
 class HealthLinesTest(unittest.TestCase):

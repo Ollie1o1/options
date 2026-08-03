@@ -710,10 +710,22 @@ def _load_breakdown(db_path: str) -> Optional[List[Dict[str, Any]]]:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as probe:
             on_disk = probe.execute("PRAGMA user_version").fetchone()[0]
         if on_disk != _SCHEMA_VERSION:
-            print(f"warning: {db_path} is at schema v{on_disk}, not "
-                  f"v{_SCHEMA_VERSION}; strategy breakdown skipped rather than "
-                  "migrating it (recomputing return on risk from rows)",
-                  file=sys.stderr)
+            # An empty ledger has no strategies to break down, so nothing is
+            # being skipped and the two definitions cannot drift. Warning here
+            # greets every fresh clone with `schema v0, not v17` before
+            # anything has happened, and a warning that fires when nothing is
+            # wrong is what makes the real one easy to miss.
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as probe:
+                try:
+                    has_rows = probe.execute(
+                        "SELECT 1 FROM trades LIMIT 1").fetchone() is not None
+                except sqlite3.Error:
+                    has_rows = False
+            if has_rows:
+                print(f"warning: {db_path} is at schema v{on_disk}, not "
+                      f"v{_SCHEMA_VERSION}; strategy breakdown skipped rather "
+                      "than migrating it (recomputing return on risk from rows)",
+                      file=sys.stderr)
             return None
         return PaperManager(db_path=db_path).get_strategy_breakdown()
     except Exception as exc:  # pragma: no cover - defensive

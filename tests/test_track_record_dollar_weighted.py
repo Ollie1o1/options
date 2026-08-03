@@ -335,5 +335,70 @@ class TestFetchToleratesOlderSchema(unittest.TestCase):
         self.assertAlmostEqual(book["return_on_risk"], 150.0 / 350.0)
 
 
+class EmptyLedgerIsSilentTest(unittest.TestCase):
+    """The schema-mismatch warning exists to stop two definitions of
+    return-on-risk drifting apart unnoticed. An empty ledger has no strategies
+    to break down, so nothing is being skipped and there is nothing to drift.
+
+    On a fresh clone the first startup created an empty ledger at
+    `user_version = 0` and the publisher greeted the user with
+    `warning: paper_trades.db is at schema v0, not v17` before anything had
+    happened. A warning that fires when nothing is wrong is noise, and noise
+    is what makes the real one easy to miss.
+    """
+
+    def _empty_db(self, path, user_version=0):
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE trades (entry_id INTEGER PRIMARY KEY, "
+                     "date TEXT, ticker TEXT, strategy_name TEXT, status TEXT, "
+                     "pnl_pct REAL, pnl_usd REAL, capital_at_risk REAL)")
+        conn.execute(f"PRAGMA user_version = {user_version}")
+        conn.commit(); conn.close()
+
+    def _warnings_from(self, path):
+        import contextlib
+        import io
+
+        from scripts.publish_track_record import _load_breakdown
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = _load_breakdown(path)
+        return result, err.getvalue()
+
+    def test_an_empty_ledger_warns_about_nothing(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.db")
+            self._empty_db(path)
+            _result, warnings = self._warnings_from(path)
+        self.assertEqual(warnings, "", "an empty ledger has nothing to skip")
+
+    def test_an_old_ledger_with_rows_still_warns(self):
+        # The drift this guards against is real once there are rows whose
+        # breakdown is being skipped. That warning must survive.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.db")
+            self._empty_db(path)
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "INSERT INTO trades (date, ticker, strategy_name, status, "
+                "pnl_pct, pnl_usd, capital_at_risk) VALUES "
+                "('2026-05-10','AAPL','Long Call','CLOSED',0.3,150.0,500.0)")
+            conn.commit(); conn.close()
+            _result, warnings = self._warnings_from(path)
+        self.assertIn("schema", warnings)
+
+    def test_a_missing_ledger_is_not_a_crash(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            result, _warnings = self._warnings_from(os.path.join(d, "nope.db"))
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
