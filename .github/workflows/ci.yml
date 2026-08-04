@@ -35,9 +35,11 @@ jobs:
         run: pytest tests/ -q --ignore=tests/_phase3_stress.py -m "not network"
 
   typecheck:
-    name: mypy (non-blocking)
+    name: mypy
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # Blocking as of the ratchet in mypy.ini: 213 of 289 modules check clean,
+    # and this job exists to keep them that way. It was continue-on-error while
+    # it was permanently red, which meant it proved nothing for weeks.
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -49,10 +51,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-lock.txt -r requirements-dev.txt
       - name: mypy
-        # Published to the job summary, not just the log: this job is
-        # continue-on-error, so its output is the only thing that makes it
-        # worth running at all — and nobody opens the log of a job that
-        # cannot fail the build.
+        # Findings go to the job summary and to commit annotations as well as
+        # the log, so a failure says WHAT broke without anyone opening a log.
         run: |
           set +e
           mypy src/ --config-file mypy.ini > mypy-out.txt 2>&1
