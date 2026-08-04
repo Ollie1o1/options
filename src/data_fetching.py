@@ -25,13 +25,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 
 # Lazy import for slow modules
-requests_cache = None
+requests_cache: Any = None
 
 logger = logging.getLogger(__name__)
 
 # Lazy imports for slow modules (yfinance, finvizfinance)
-yf = None  # yfinance Ticker imported on first use
-Performance = None  # finvizfinance imported on first use
+yf: Any = None  # yfinance Ticker imported on first use
+Performance: Any = None  # finvizfinance imported on first use
 
 try:
     from .news_fetcher import fetch_news_and_events
@@ -183,7 +183,7 @@ def _yf_disk_init() -> None:
 _YF_PRUNE_INTERVAL_S = 86400  # once a day; VACUUM rewrites the whole file
 
 
-def prune_yf_disk_cache(db_path: str = None, now: int = None,
+def prune_yf_disk_cache(db_path: Optional[str] = None, now: Optional[int] = None,
                         min_interval_s: int = _YF_PRUNE_INTERVAL_S,
                         force: bool = False) -> dict:
     """Delete expired rows and reclaim the space they occupied.
@@ -203,7 +203,7 @@ def prune_yf_disk_cache(db_path: str = None, now: int = None,
     """
     db_path = db_path or _YF_DISK_DB
     now = int(time.time()) if now is None else int(now)
-    out = {"deleted": 0, "vacuumed": False, "skipped": None}
+    out: Dict[str, Any] = {"deleted": 0, "vacuumed": False, "skipped": None}
     if not os.path.exists(db_path):
         out["skipped"] = "no-db"
         return out
@@ -504,6 +504,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     hv_30d_rolling = calculate_historical_volatility(hist, period=30)
     hv_ewma = calculate_ewma_volatility(hist, span=20)
     hv_parkinson = calculate_parkinson_volatility(hist, period=30)
+    hv_30d: Optional[float]
     if hv_30d_rolling and hv_ewma and hv_parkinson:
         hv_30d = 0.34 * hv_30d_rolling + 0.33 * hv_ewma + 0.33 * hv_parkinson
     elif hv_30d_rolling and hv_ewma:
@@ -2283,6 +2284,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     hv_ewma = calculate_ewma_volatility(hist, span=20)
     hv_parkinson = calculate_parkinson_volatility(hist, period=30)
     # Blend rolling, EWMA, and Parkinson vol: rolling gives stability, EWMA gives recency, Parkinson captures intraday range
+    hv_30d: Optional[float]
     if hv_30d_rolling and hv_ewma and hv_parkinson:
         hv_30d = 0.34 * hv_30d_rolling + 0.33 * hv_ewma + 0.33 * hv_parkinson
     elif hv_30d_rolling and hv_ewma:

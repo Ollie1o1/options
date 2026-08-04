@@ -236,5 +236,32 @@ class WiredIntoCacheInit(unittest.TestCase):
         self.assertNotIn("vacuum failed", err.getvalue())
 
 
+class OmittedArgumentsTest(PruneTestBase):
+    """`db_path` and `now` default to None and the body substitutes for both —
+    the signature said `str` and `int` and was simply wrong about its own
+    contract. These pin the behaviour the corrected annotations describe.
+
+    `db_path` is always passed explicitly here: defaulting it would prune the
+    operator's real cache, and a test that touches live data is a worse bug
+    than the one it checks.
+    """
+
+    def test_now_defaults_to_the_current_time(self):
+        self.add("expired-long-ago", self.now - 10_000)
+        self.add("far-future", self.now + 10_000)
+        prune_yf_disk_cache(db_path=self.db, force=True)
+        self.assertEqual(self.keys(), {"far-future"})
+
+    def test_a_missing_database_reports_rather_than_raising(self):
+        out = prune_yf_disk_cache(db_path=os.path.join(self.dir, "absent.db"),
+                                  force=True)
+        self.assertEqual(out["skipped"], "no-db")
+        self.assertEqual(out["deleted"], 0)
+
+    def test_the_result_carries_all_three_keys(self):
+        out = prune_yf_disk_cache(db_path=self.db, now=self.now, force=True)
+        self.assertEqual(set(out), {"deleted", "vacuumed", "skipped"})
+
+
 if __name__ == "__main__":
     unittest.main()
