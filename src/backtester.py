@@ -417,7 +417,10 @@ def run_backtest(
                     K = _find_30d_otm_strike(direction, S, sigma, T_entry, risk_free, target_delta=0.30)
 
                     real_used = False
-                    actual_exit_price = None
+                    # Same sentinel discipline as entry_price_gross below:
+                    # every path assigns this before its first read, and
+                    # nothing tests it for None.
+                    actual_exit_price = 0.0
                     # 0.0 rather than None: both branches below assign it
                     # before the only read (the gross-P&L line), and the
                     # BS path `continue`s when it comes back <= 0.001, so a
