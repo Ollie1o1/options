@@ -94,5 +94,39 @@ class TestFetchDetail(unittest.TestCase):
         self.assertEqual(result.ticker, "MU")
 
 
+class TypedFieldsTest(unittest.TestCase):
+    """`short_interest` and `news` were annotated `Optional[object]` with the
+    real class named only in a trailing comment. `render_detail` reads
+    .pct_float, .days_to_cover, .trend, .items, .analyst_changes and the
+    catalyst flags off them, and against `object` every one of those accesses
+    was unverifiable — 20 of this module's 23 mypy errors.
+
+    The annotations now name the real classes (imported under TYPE_CHECKING,
+    so there is no runtime import and no cycle). This guards against a
+    weakening back to `object`, which would silently un-check the drill-down.
+    """
+
+    def test_the_annotations_name_the_real_classes(self):
+        ann = DTL.DetailRead.__annotations__
+        self.assertIn("ShortInterest", str(ann["short_interest"]))
+        self.assertIn("NewsData", str(ann["news"]))
+        self.assertNotIn("object", str(ann["short_interest"]))
+        self.assertNotIn("object", str(ann["news"]))
+
+    def test_the_attributes_the_board_reads_exist_on_those_classes(self):
+        # If a field is ever renamed upstream, this fails here rather than in
+        # a drill-down the operator is looking at.
+        for attr in ("pct_float", "days_to_cover", "trend"):
+            self.assertIn(attr, ShortInterest.__dataclass_fields__)
+        for attr in ("items", "analyst_changes",
+                     "has_positive_catalyst", "has_negative_catalyst"):
+            self.assertIn(attr, NewsData.__dataclass_fields__)
+
+    def test_typing_imports_stay_out_of_the_runtime_namespace(self):
+        # TYPE_CHECKING-only: importing the module must not pull these in.
+        self.assertFalse(hasattr(DTL, "NewsData"))
+        self.assertFalse(hasattr(DTL, "ShortInterest"))
+
+
 if __name__ == "__main__":
     unittest.main()

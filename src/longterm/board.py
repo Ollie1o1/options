@@ -50,7 +50,8 @@ def banner(reads: List[ZoneRead], plan: Plan, remaining_usd: float,
     for r in triggered:
         name = _name_for(plan, r.ticker)
         tranche = _tranche_at(name, r.next_level) if name and r.next_level is not None else None
-        size = suggested_size(plan, name, tranche, remaining_usd) if tranche else 0.0
+        size = (suggested_size(plan, name, tranche, remaining_usd)
+                if name and tranche else 0.0)
         segs = [
             fmt.style(r.ticker, "emph"),
             fmt.style(f"{r.spot:,.2f}", "value"),
@@ -694,6 +695,8 @@ def _guided_fill(plan: Plan, reads: List[ZoneRead],
     idx = _choose(tickers_with_opens, "which ticker did you buy?")
     ticker = tickers_with_opens[idx]
     name = _name_for(plan, ticker)
+    if name is None:  # unreachable: ticker came from the plan's own names
+        return plan
     r = by_ticker.get(ticker)
     levels = open_tranche_levels(name, r)
     lidx = _choose([f"{lvl:g}" for lvl in levels],
@@ -944,7 +947,7 @@ def menu(width: int = 100) -> None:
             try:
                 with ui.spinner(f"scanning {arg.upper()}…"):
                     last_discovery = scan(arg)
-                print(render_discover_board(last_discovery, arg, width=width))
+                print(render_discover_board(last_discovery or [], arg, width=width))
             except ValueError as exc:
                 print("  " + fmt.style(str(exc), "bad"))
             continue

@@ -12,10 +12,14 @@ a buy/sell recommendation.
 """
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from . import discover
 from .discover import DeepRead
+
+if TYPE_CHECKING:  # annotations only — no runtime import, no cycle, no cost
+    from ..news_fetcher import NewsData
+    from ..short_interest import ShortInterest
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +28,11 @@ logger = logging.getLogger(__name__)
 class DetailRead:
     ticker: str
     deep: DeepRead
-    short_interest: Optional["object"] = None  # src.short_interest.ShortInterest
-    news: Optional["object"] = None            # src.news_fetcher.NewsData
+    # Typed for real rather than as `object`: the board reads .pct_float,
+    # .days_to_cover, .trend, .items, .analyst_changes and the catalyst flags
+    # off these, and `object` made every one of those accesses unverifiable.
+    short_interest: Optional["ShortInterest"] = None
+    news: Optional["NewsData"] = None
 
 
 def fetch_detail(ticker: str, deep: Optional[DeepRead] = None) -> DetailRead:
