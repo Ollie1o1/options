@@ -418,7 +418,11 @@ def run_backtest(
 
                     real_used = False
                     actual_exit_price = None
-                    entry_price_gross = None
+                    # 0.0 rather than None: both branches below assign it
+                    # before the only read (the gross-P&L line), and the
+                    # BS path `continue`s when it comes back <= 0.001, so a
+                    # zero can never reach the division.
+                    entry_price_gross = 0.0
                     if price_source == "dolt":
                         _exit_i = min(i + exit_dte, len(sig_dates) - 1)
                         _fill = _real_marks_fill(ticker, direction, K,
