@@ -694,11 +694,14 @@ def _guided_fill(plan: Plan, reads: List[ZoneRead],
         return plan
     idx = _choose(tickers_with_opens, "which ticker did you buy?")
     ticker = tickers_with_opens[idx]
-    name = _name_for(plan, ticker)
-    if name is None:  # unreachable: ticker came from the plan's own names
+    # A distinct name from the loop variable above: that one walks every plan
+    # entry, this one is the single chosen entry, and reusing the binding made
+    # one variable hold two different things.
+    chosen = _name_for(plan, ticker)
+    if chosen is None:  # unreachable: ticker came from the plan's own names
         return plan
     r = by_ticker.get(ticker)
-    levels = open_tranche_levels(name, r)
+    levels = open_tranche_levels(chosen, r)
     lidx = _choose([f"{lvl:g}" for lvl in levels],
                    f"which tranche did you fill on {ticker}?")
     level = levels[lidx]
