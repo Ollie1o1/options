@@ -127,3 +127,43 @@ class RankingTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class NetEvPrimaryTest(unittest.TestCase):
+    """Cost is a GATE, not the sort key.
+
+    Running a live scan exposed this: among single legs, round-trip cost sits
+    at 1-4% across the whole board and barely separates anything, so sorting on
+    it put a pick with net EV -36 and a SKIP verdict above the only pick on the
+    board that cleared its costs (+253, TAKE). Among candidates that pass the
+    gate, order by how much they are actually worth."""
+
+    ROWS = [
+        {"symbol": "CHEAP_BAD", "strategy_name": "Long Call", "bid": 9.95, "ask": 10.05,
+         "quality_score": 0.9, "ev_per_contract": -36.0},
+        {"symbol": "DEARER_GOOD", "strategy_name": "Long Call", "bid": 9.90, "ask": 10.10,
+         "quality_score": 0.3, "ev_per_contract": 253.0},
+    ]
+
+    def test_the_positive_ev_pick_outranks_the_marginally_cheaper_one(self):
+        self.assertEqual(cv.rank(self.ROWS)[0]["symbol"], "DEARER_GOOD")
+
+    def test_a_refused_candidate_still_sorts_below_every_passing_one(self):
+        rows = self.ROWS + [{"symbol": "REFUSED", "strategy_name": "Long Call",
+                             "bid": 5.0, "ask": 15.0, "quality_score": 1.0,
+                             "ev_per_contract": 9999.0}]
+        self.assertEqual(cv.rank(rows)[-1]["symbol"], "REFUSED")
+
+    def test_without_any_ev_it_falls_back_to_ordering_by_cost(self):
+        rows = [{"symbol": "WIDE", "strategy_name": "Long Call", "bid": 9.0, "ask": 11.0,
+                 "quality_score": 0.9},
+                {"symbol": "TIGHT", "strategy_name": "Long Call", "bid": 9.95,
+                 "ask": 10.05, "quality_score": 0.1}]
+        self.assertEqual(cv.rank(rows)[0]["symbol"], "TIGHT")
+
+    def test_a_missing_ev_never_outranks_a_measured_positive_one(self):
+        rows = [{"symbol": "UNKNOWN", "strategy_name": "Long Call", "bid": 9.95,
+                 "ask": 10.05, "quality_score": 0.9},
+                {"symbol": "GOOD", "strategy_name": "Long Call", "bid": 9.90,
+                 "ask": 10.10, "quality_score": 0.1, "ev_per_contract": 253.0}]
+        self.assertEqual(cv.rank(rows)[0]["symbol"], "GOOD")

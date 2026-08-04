@@ -163,7 +163,29 @@ def rank(rows: Sequence[Dict[str, Any]],
                                    max_friction_pct=max_friction_pct)
         out.append(r)
 
-    out.sort(key=lambda r: (r["verdict"].sort_key,
+    def _ev(r) -> float:
+        """Net-of-cost EV per contract, or -inf when it was never computed.
+
+        An absent EV must never outrank a measured positive one — treating
+        'unknown' as 'zero' would float unpriced candidates above the ones
+        that demonstrably clear their costs."""
+        v = r.get("ev_per_contract")
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return float("-inf")
+        return f if f == f else float("-inf")     # NaN is not a number either
+
+    # Cost is a GATE, not the sort key. A live scan made this obvious: among
+    # single legs the round-trip cost sits at 1-4% across the whole board and
+    # separates almost nothing, so ranking on it put a pick with net EV -36 and
+    # a SKIP verdict above the only board pick that cleared its costs (+253,
+    # TAKE). Order: survives the gate, then net-of-cost EV, then cheapest to
+    # trade, then quality_score purely to break ties.
+    out.sort(key=lambda r: (1 if r["verdict"].passed else 0,
+                            _ev(r),
+                            -(r["verdict"].round_trip_pct
+                              if r["verdict"].round_trip_pct is not None else 9e9),
                             float(r.get("quality_score") or 0.0)), reverse=True)
     return out
 

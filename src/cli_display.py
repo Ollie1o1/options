@@ -180,10 +180,12 @@ def _style_verdict(decision: str) -> str:
 def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     """Print a ranked cross-ticker table grouped by DTE bucket.
 
-    Ranks by quality_score but shows the round-trip net-EV verdict beside it, so
-    a high-ranked pick that does not survive its transaction cost — the common
-    case, since the scorer has no demonstrated directional edge — is visible at
-    the point of selection rather than only inside a tearsheet.
+    Rows arrive ordered by `options_screener.rank_by_verdict`: candidates that
+    clear the friction gate first, then by net-of-cost EV, with quality_score
+    only breaking ties. Both the Cost column and the Net EV column are part of
+    that key, so both are shown. `quality_score` correlates -0.132 with return
+    on the long-premium book; presenting it as the ranking, as this table used
+    to, pointed the reader at the one number that does not predict.
     """
     if contracts.empty:
         print("No contracts to display.")
@@ -195,7 +197,7 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     header = (
         f"{'Rank':<5} {'Ticker':<7} {'Type':<5} {'Strike':>7} {'Expiry':<12} "
         f"{'DTE':>4} {'Delta':>6} {'IV%ile':>6} {'PoP%':>6} {'Prem':>7} "
-        f"{'Net EV':>7} {'P2x':>5} {'Call':<5} {'Score':>6}  Drivers"
+        f"{'Net EV':>7} {'Cost':>5} {'P2x':>5} {'Call':<5} {'Score':>6}  Drivers"
     )
 
     dte_bucket_order = ["Short (1-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"]
@@ -242,11 +244,21 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
                 p2x_cell = f"{_p2*100:>4.0f}%"
             except Exception:
                 p2x_cell = "  n/a"
+            # Round-trip crossing cost as a share of this pick's own reward —
+            # the key this table is sorted by. Measured 0.7-1.7% for a single
+            # leg against 33% for a two-leg credit spread.
+            _fr = row.get("friction_pct")
+            try:
+                cost_cell = f"{float(_fr)*100:>4.0f}%" if _fr is not None else "  n/a"
+            except (TypeError, ValueError):
+                cost_cell = "  n/a"
+            if HAS_ENHANCED_CLI and row.get("verdict_passed") is False:
+                cost_cell = fmt.style(cost_cell, "warn")
             line = (
                 f"{rank:<5} {str(row.get('symbol','')):<7} {str(row.get('type','')):<5} "
                 f"{row.get('strike', 0):>7.1f} {str(row.get('expiration', '')):<12} "
                 f"{dte_val:>4} {delta:>6.2f} {iv_pct*100:>5.0f}% {pop*100:>5.1f}% "
-                f"${prem:>6.2f} {net_cell} {p2x_cell:>5} {_style_verdict(decision)} "
+                f"${prem:>6.2f} {net_cell} {cost_cell:>5} {p2x_cell:>5} {_style_verdict(decision)} "
                 f"{score:>6.3f}  {drivers}"
             )
             print(line)
@@ -260,7 +272,8 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     if rejected and total:
         msg = (f"{rejected} of {total} ranked pick{'s' if total != 1 else ''} "
                f"do not clear their round-trip cost by net EV (Call = SKIP/INDET). "
-               f"Rank is quality_score; the verdict is cost-aware.")
+               f"Ranked by net-of-cost EV among picks that clear the "
+               f"friction gate (Cost column), not by Score.")
         print("\n" + (fmt.style(msg, "warn") if HAS_ENHANCED_CLI else msg))
     print(f"\nTop {n} contracts shown. Run with --export csv to save full results.")
 
