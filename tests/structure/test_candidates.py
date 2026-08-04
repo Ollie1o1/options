@@ -124,3 +124,51 @@ class TestCapitalAdaptiveWidth(unittest.TestCase):
         # ATM call costs $300; a $150 budget must find a cheaper OTM strike
         out = C.build_candidates(_chain(), 100.0, RULES, capital_usd=150.0)
         self.assertLessEqual(out["Long Call"]["capital_required"], 150.0)
+
+
+class UnusableQuotesTest(unittest.TestCase):
+    """mypy reads lines 165/197 as `None * float` because `_mid` is called
+    twice — once to test and once to use — and a second call cannot be
+    narrowed by the first. The guard is real, so these pin the behaviour that
+    collapsing the two calls must preserve.
+    """
+
+    def _chain_with(self, **quote):
+        """The standard chain with every row's quote replaced."""
+        chain = _chain()
+        for key, value in quote.items():
+            chain[key] = value
+        return chain
+
+    def test_a_zero_quote_yields_no_structures_rather_than_crashing(self):
+        out = C.build_candidates(self._chain_with(bid=0.0, ask=0.0), 100.0, RULES)
+        self.assertEqual(out, {})
+
+    def test_a_crossed_quote_yields_no_structures(self):
+        # ask < bid is unusable; _mid returns None for every row.
+        out = C.build_candidates(self._chain_with(bid=5.0, ask=1.0), 100.0, RULES)
+        self.assertEqual(out, {})
+
+    def test_a_one_sided_quote_still_builds(self):
+        # _mid falls back to the live side rather than returning None, so the
+        # guard passes and the arithmetic must run on that value.
+        out = C.build_candidates(self._chain_with(bid=0.0), 100.0, RULES)
+        self.assertIn("Long Call", out)
+        self.assertGreater(out["Long Call"]["capital_required"], 0.0)
+
+
+class NoExitRulesTest(unittest.TestCase):
+    """`build_candidates` declares `exit_rules: Optional[dict] = None`, and
+    `_take_profit_fraction` opens with `rules = exit_rules or {}` — so None is
+    handled by design. Only the annotation disagreed, which is why mypy called
+    line 203 an incompatible argument."""
+
+    def test_omitting_exit_rules_is_supported(self):
+        out = C.build_candidates(_chain(), 100.0)
+        self.assertIn("Long Call", out)
+
+    def test_none_falls_back_to_the_documented_defaults(self):
+        # long_option 1.0, spread 0.5, short_premium 0.5 — the defaults named
+        # in _take_profit_fraction, so None must match an explicit RULES dict.
+        self.assertEqual(C.build_candidates(_chain(), 100.0, None),
+                         C.build_candidates(_chain(), 100.0, RULES))

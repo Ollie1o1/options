@@ -101,8 +101,13 @@ def _widest_affordable(legs: pd.DataFrame, short_row, capital_usd: float,
     return best
 
 
-def _take_profit_fraction(exit_rules: dict, strategy: str) -> float:
-    """Fraction of gross max profit the exit model actually targets."""
+def _take_profit_fraction(exit_rules: Optional[dict], strategy: str) -> float:
+    """Fraction of gross max profit the exit model actually targets.
+
+    `exit_rules` is Optional because `build_candidates` declares it that way
+    and defaults it to None; the `or {}` below has always handled that. The
+    annotation said `dict` and was simply wrong about its own contract.
+    """
     rules = exit_rules or {}
     if strategy in ("Long Call", "Long Put"):
         return float((rules.get("long_option") or {}).get("take_profit", 1.0))
@@ -161,8 +166,13 @@ def build_candidates(chain: pd.DataFrame, spot: float,
             if mid * 100.0 <= capital_usd:
                 chosen = row
                 break
-        if chosen is not None and _mid(chosen) is not None:
-            cost = _mid(chosen) * 100.0
+        # Bind the mid once. Testing `_mid(x) is not None` and then calling
+        # `_mid(x)` again re-derives it from the same row, so the guard does
+        # not actually cover the value being used — it covers a separate call
+        # that merely happens to agree today.
+        chosen_mid = _mid(chosen) if chosen is not None else None
+        if chosen_mid is not None:
+            cost = chosen_mid * 100.0
             raw[name] = {"capital_required": cost, "gross_max_profit": cost}
 
     # --- Bull Put: short put below spot, long put as far below as fits ------
@@ -193,8 +203,9 @@ def build_candidates(chain: pd.DataFrame, spot: float,
                                   "gross_max_profit": credit}
 
     # --- Short Put: cash-secured, capital is the strike ----------------------
-    if short_p is not None and _mid(short_p) is not None:
-        premium = _mid(short_p) * 100.0
+    short_p_mid = _mid(short_p) if short_p is not None else None
+    if short_p_mid is not None:
+        premium = short_p_mid * 100.0
         raw["Short Put"] = {
             "capital_required": float(short_p["strike"]) * 100.0 - premium,
             "gross_max_profit": premium}
