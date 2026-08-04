@@ -65,7 +65,7 @@ CONTROL_ARM = "control"
 _COVARIATES = ("rv", "log_mcap", "log_price", "ret_5d")
 
 
-def _empty_selection() -> Dict[str, object]:
+def _empty_selection() -> Dict[str, Any]:
     return {"treated_eligible": 0, "treated_matched": 0,
             "dates_over_drop_bar": 0, "drop_rates": [],
             "matched": {c: [] for c in _COVARIATES},
@@ -93,11 +93,11 @@ def _record_selection(sel: Dict[str, Any], units: Sequence[matching.Unit],
             bucket[name].append(float(getattr(unit, name)))
 
 
-def _finalise_selection(sel: Dict[str, object]) -> Dict[str, object]:
+def _finalise_selection(sel: Dict[str, Any]) -> Dict[str, Any]:
     """Collapse the accumulated lists into the numbers the report prints."""
     rates = sel.pop("drop_rates")
     eligible = sel["treated_eligible"]
-    out: Dict[str, object] = {
+    out: Dict[str, Any] = {
         "treated_eligible": eligible,
         "treated_matched": sel["treated_matched"],
         "coverage": (sel["treated_matched"] / eligible) if eligible else float("nan"),
