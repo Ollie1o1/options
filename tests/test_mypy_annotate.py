@@ -162,6 +162,45 @@ class DirtyModulesTest(unittest.TestCase):
         self.assertEqual(dirty_modules(["Success: no issues found"]), [])
 
 
+class FullListTest(unittest.TestCase):
+    """Working a module off the exemption list produces a small, complete error
+    set — and that is exactly when you need every line, not the annotated ten.
+    GitHub caps error annotations per step, so the full list rides in notices."""
+
+    def test_a_small_error_set_is_emitted_in_full(self):
+        from scripts.mypy_annotate import full_list_chunks
+
+        lines = [f"src/a.py:{i}: error: bad {i}  [misc]" for i in range(1, 21)]
+        chunks = full_list_chunks(lines)
+        joined = "\n".join(chunks)
+        for i in range(1, 21):
+            self.assertIn(f"bad {i}", joined)
+
+    def test_a_large_error_set_is_not_dumped(self):
+        # 349 errors is a log, not a report; the histogram is the right lead.
+        from scripts.mypy_annotate import full_list_chunks
+
+        lines = [f"src/a.py:{i}: error: bad  [misc]" for i in range(1, 400)]
+        self.assertEqual(full_list_chunks(lines), [])
+
+    def test_it_stays_within_the_annotation_budget(self):
+        from scripts.mypy_annotate import full_list_chunks
+
+        lines = [f"src/a.py:{i}: error: bad {i}  [misc]" for i in range(1, 41)]
+        self.assertLessEqual(len(full_list_chunks(lines)), 8)
+
+    def test_line_numbers_survive_so_the_error_can_be_found(self):
+        from scripts.mypy_annotate import full_list_chunks
+
+        chunks = full_list_chunks(["src/a.py:123: error: bad  [misc]"])
+        self.assertIn("123", "\n".join(chunks))
+
+    def test_nothing_to_report_produces_no_chunks(self):
+        from scripts.mypy_annotate import full_list_chunks
+
+        self.assertEqual(full_list_chunks(["Success: no issues found"]), [])
+
+
 class CapTest(unittest.TestCase):
     def test_the_annotation_count_is_capped(self):
         lines = [f"src/a.py:{i}: error: bad  [misc]" for i in range(1, 80)]

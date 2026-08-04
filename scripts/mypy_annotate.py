@@ -98,6 +98,31 @@ def breakdown(lines: Iterable[str]) -> dict:
     return {"total": total, "codes": codes, "files": files}
 
 
+# Above this the full list stops being a report and becomes a log; the
+# histogram is the right lead instead. Below it, the set is small enough that
+# every line is worth carrying — which is the case when a single module has
+# just been taken off the exemption list to be cleaned.
+FULL_LIST_MAX = 60
+
+# A step may only create a handful of annotations per level.
+_FULL_LIST_CHUNKS = 8
+
+
+def full_list_chunks(lines: Iterable[str],
+                     max_errors: int = FULL_LIST_MAX) -> List[str]:
+    """Every error line, batched into at most `_FULL_LIST_CHUNKS` blocks.
+
+    Empty when there are more than `max_errors`: a full dump of hundreds is a
+    log, and the point of this reporter is to be readable without opening one.
+    """
+    errors = [raw.rstrip("\n") for raw in lines
+              if (m := _LINE.match(raw.rstrip("\n"))) and m.group("level") == "error"]
+    if not errors or len(errors) > max_errors:
+        return []
+    size = max(1, (len(errors) + _FULL_LIST_CHUNKS - 1) // _FULL_LIST_CHUNKS)
+    return ["\n".join(errors[i:i + size]) for i in range(0, len(errors), size)]
+
+
 def dirty_modules(lines: Iterable[str]) -> List[str]:
     """Sorted module paths for every file that still has an error.
 
@@ -147,6 +172,8 @@ def main(argv: List[str]) -> int:
     # histogram is the only part that fits in a glance.
     summary = render_breakdown(lines=lines)
     print(f"::notice title=mypy summary::{_escape(summary)}")
+    for i, chunk in enumerate(full_list_chunks(lines)):
+        print(f"::notice title=mypy detail {i}::{_escape(chunk)}")
     mods = dirty_modules(lines)
     if mods:
         # The ratchet's input: everything NOT here is already clean and can be
