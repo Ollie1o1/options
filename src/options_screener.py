@@ -155,7 +155,7 @@ def _build_report_bounded(label, fn, timeout_s=None, **kwargs):
     import threading as _t
     if timeout_s is None:
         timeout_s = _INTEL_BUILD_TIMEOUT_S
-    q = queue.Queue()
+    q: queue.Queue = queue.Queue()
 
     def _run():
         try:
@@ -418,7 +418,7 @@ def auto_log_budget_cap(cfg_path: str = "config.json"):
         with open(cfg_path) as f:
             cfg = json.load(f)
         cap = (cfg.get("auto_log") or {}).get("max_capital_at_risk")
-        return float(cap) if cap not in (None, "", 0) else None
+        return float(cap) if cap is not None and cap not in ("", 0) else None
     except Exception:
         return None
 
@@ -701,7 +701,7 @@ def calculate_probability_of_touch(option_type: Union[str, np.ndarray], S: Union
         # Clip T to 1 hour minimum to prevent division-by-zero on expiration day
         T = np.maximum(T, 1.0 / (365.0 * 24.0))
 
-        scalar_input = isinstance(option_type, str) and S.ndim == 0
+        scalar_input = isinstance(option_type, str) and S.ndim == 0  # type: ignore[union-attr]
 
         if isinstance(option_type, str):
             is_call = option_type.lower() == "call"
@@ -756,7 +756,7 @@ def calculate_risk_reward(
         else:
             is_call = np.char.lower(np.asanyarray(option_type).astype(str)) == "call"
 
-        max_loss = premium * 100  # Per contract
+        max_loss: Any = premium * 100  # Per contract
 
         # Break-even price
         breakeven = np.where(is_call, K + premium, K - premium)
@@ -776,7 +776,7 @@ def calculate_risk_reward(
         with np.errstate(divide='ignore', invalid='ignore'):
             risk_reward_ratio = np.where(premium > 0, max_gain_per_share / premium, 0.0)
 
-        if premium.ndim == 0:
+        if premium.ndim == 0:  # type: ignore[union-attr]
             return float(max_loss), float(breakeven), float(risk_reward_ratio)
             
         return max_loss, breakeven, risk_reward_ratio
@@ -2187,7 +2187,7 @@ def enrich_and_score(
     next_ex_div: Optional[object] = None,
     earnings_move_data: Optional[dict] = None,
     hv_ewma: Optional[float] = None,
-    vrp_data: dict = None,
+    vrp_data: Optional[dict] = None,
     news_data=None,
     dividend_yield: float = 0.0,
 ) -> pd.DataFrame:
@@ -2788,7 +2788,8 @@ def find_iron_condors(df: pd.DataFrame, config: Optional[dict] = None) -> pd.Dat
 
 
 
-def export_to_csv(df_picks: pd.DataFrame, mode: str, budget: Optional[float] = None) -> str:
+def export_to_csv(df_picks: pd.DataFrame, mode: str,
+                  budget: Optional[float] = None) -> Optional[str]:
     """Export picks to CSV with timestamp."""
     try:
         # Create exports directory if it doesn't exist
@@ -3409,7 +3410,7 @@ def _score_fetched_data(
     budget=None, macro_risk_active: bool = False, tnx_change_pct: float = 0.0,
 ) -> dict:
     """Score and filter already-fetched options data for one symbol."""
-    result = {
+    result: Dict[str, Any] = {
         "symbol": symbol,
         "picks": [],
         "credit_spreads": [],
@@ -4431,7 +4432,7 @@ def _macro_scan_section(symbols, focus_symbol=None) -> None:
         # AI call is the ranking, gated on an explicit 'yes'.
         ctx = _mp.build_context(use_ai=False)
     except Exception as exc:
-        logger.debug("macro scan section skipped: %s", exc)
+        logging.getLogger(__name__).debug("macro scan section skipped: %s", exc)
         return
 
     sectors = {s: _mp._lookup_sector(s) for s in uniq}
@@ -4440,7 +4441,7 @@ def _macro_scan_section(symbols, focus_symbol=None) -> None:
     try:
         print("\n" + _mpt.render_ticker(ctx, focus, focus_sector))
     except Exception as exc:
-        logger.debug("macro panel render failed: %s", exc)
+        logging.getLogger(__name__).debug("macro panel render failed: %s", exc)
         return
 
     if not uniq:
@@ -4453,7 +4454,7 @@ def _macro_scan_section(symbols, focus_symbol=None) -> None:
             rows = _mpr.rank_tickers(uniq, ctx, sectors=sectors, use_ai=True)
             print("\n" + _mpr.render_ranking(rows))
         except Exception as exc:
-            logger.debug("macro ranking failed: %s", exc)
+            logging.getLogger(__name__).debug("macro ranking failed: %s", exc)
 
 
 def run_top_scan(
