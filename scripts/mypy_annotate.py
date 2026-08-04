@@ -98,6 +98,26 @@ def breakdown(lines: Iterable[str]) -> dict:
     return {"total": total, "codes": codes, "files": files}
 
 
+def dirty_modules(lines: Iterable[str]) -> List[str]:
+    """Sorted module paths for every file that still has an error.
+
+    This is what scoping mypy needs: a top-N histogram cannot answer "which
+    modules are already clean", and clean is the set the ratchet protects.
+    """
+    mods = set()
+    for raw in lines:
+        m = _LINE.match(raw.rstrip("\n"))
+        if not m or m.group("level") != "error":
+            continue
+        path = m.group("file")
+        if path.endswith(".py"):
+            path = path[:-3]
+        if path.endswith("/__init__"):
+            path = path[: -len("/__init__")]
+        mods.add(path.replace("/", "."))
+    return sorted(mods)
+
+
 def render_breakdown(breakdown_: dict = None,
                      lines: Iterable[str] = (),
                      top: int = 12) -> str:
@@ -127,6 +147,15 @@ def main(argv: List[str]) -> int:
     # histogram is the only part that fits in a glance.
     summary = render_breakdown(lines=lines)
     print(f"::notice title=mypy summary::{_escape(summary)}")
+    mods = dirty_modules(lines)
+    if mods:
+        # The ratchet's input: everything NOT here is already clean and can be
+        # checked strictly. Emitted in chunks because a step may only create a
+        # handful of annotations per level.
+        chunk = max(1, (len(mods) + 7) // 8)
+        for i in range(0, len(mods), chunk):
+            part = ",".join(mods[i:i + chunk])
+            print(f"::notice title=mypy dirty {i // chunk}::{_escape(part)}")
     for line in annotations_for(lines):
         print(line)
     return 0

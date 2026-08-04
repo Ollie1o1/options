@@ -131,6 +131,37 @@ class BreakdownTest(unittest.TestCase):
         self.assertIn("src/a.py", text)
 
 
+class DirtyModulesTest(unittest.TestCase):
+    """Scoping mypy needs the full list of files that still have errors — a
+    top-N histogram cannot answer "which modules are already clean"."""
+
+    def test_every_offending_file_is_listed_as_a_module_path(self):
+        from scripts.mypy_annotate import dirty_modules
+
+        mods = dirty_modules([
+            "src/a.py:1: error: x  [misc]",
+            "src/pkg/b.py:2: error: y  [misc]",
+        ])
+        self.assertEqual(mods, ["src.a", "src.pkg.b"])
+
+    def test_a_file_is_listed_once_however_many_errors_it_has(self):
+        from scripts.mypy_annotate import dirty_modules
+
+        mods = dirty_modules([f"src/a.py:{i}: error: x  [misc]" for i in range(9)])
+        self.assertEqual(mods, ["src.a"])
+
+    def test_a_package_dunder_init_becomes_the_package(self):
+        from scripts.mypy_annotate import dirty_modules
+
+        self.assertEqual(dirty_modules(["src/pkg/__init__.py:1: error: x  [misc]"]),
+                         ["src.pkg"])
+
+    def test_clean_output_lists_nothing(self):
+        from scripts.mypy_annotate import dirty_modules
+
+        self.assertEqual(dirty_modules(["Success: no issues found"]), [])
+
+
 class CapTest(unittest.TestCase):
     def test_the_annotation_count_is_capped(self):
         lines = [f"src/a.py:{i}: error: bad  [misc]" for i in range(1, 80)]
