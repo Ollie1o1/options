@@ -521,8 +521,14 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
     #     book overlap, flow/insider overlays (display only; failure-safe) ---
     try:
         from src.pick_context import context_lines as _ctx_lines
+        from src.pick_context import cost_line as _cost_line
         from src.pick_context import exit_lines as _exit_lines
-        for _cl in _ctx_lines(dict(row)) + _exit_lines(dict(row)):
+        from src.candidate_verdict import win_rates_from_ledger as _wr
+        # What it costs to trade this, ahead of everything else in the block:
+        # crossing cost was invisible across 907 logged trades and is the
+        # largest measured term in whether a structure can win at all.
+        _cost = _cost_line(dict(row), win_rates=_wr())
+        for _cl in ([_cost] if _cost else []) + _ctx_lines(dict(row)) + _exit_lines(dict(row)):
             if HAS_ENHANCED_CLI and ":" in _cl:
                 _lab, _rest = _cl.split(":", 1)
                 lines.append(ui.kv_line(_lab.strip(), _rest.strip()))

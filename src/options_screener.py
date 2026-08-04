@@ -470,6 +470,43 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
     return ("drop", None)
 
 
+def rank_by_verdict(df, win_rates: Optional[Dict[str, float]] = None):
+    """Order candidates by what survives their own trading costs.
+
+    Replaces `sort_values("quality_score")` on the display paths. The composite
+    cannot rank: Spearman against return on capital is -0.132 on the
+    long-premium book and +0.047 on short premium, and its top bucket is the
+    worst cell in the ledger — 31.6% win rate, -19.9% return on capital, versus
+    +5.2% for the [0.55, 0.65) bucket. Sorting by it selects the worst
+    candidates. It survives here only as a tie-breaker.
+
+    What replaces it is the round-trip crossing cost as a share of the reward,
+    measured per candidate from its own quotes: 0.7-1.7% for a single leg
+    against 33% for a two-leg credit spread.
+
+    Failure-safe by design, matching the rest of the scan path: if quotes are
+    missing or anything raises, the old `quality_score` ordering is returned so
+    a scan still produces a report. See src/candidate_verdict.py and
+    docs/EXECUTION_TRUTH.md.
+    """
+    if df is None or len(df) == 0:
+        return df
+    try:
+        from . import candidate_verdict as _cv
+        ranked = _cv.rank(df.to_dict("records"), win_rates=win_rates)
+        out = pd.DataFrame(ranked)
+        verdicts = out.pop("verdict")
+        out["verdict_passed"] = [v.passed for v in verdicts]
+        out["verdict_reason"] = [v.reason for v in verdicts]
+        out["friction_pct"] = [v.round_trip_pct for v in verdicts]
+        out["breakeven_win_rate"] = [v.breakeven for v in verdicts]
+        return out.reset_index(drop=True)
+    except Exception:
+        if "quality_score" in getattr(df, "columns", []):
+            return df.sort_values("quality_score", ascending=False).reset_index(drop=True)
+        return df
+
+
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults."""
     default_config = {
@@ -2515,7 +2552,15 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
                     "net_credit": net_credit,
                     "max_profit": net_credit * 100,
                     "max_loss": (strike_width - net_credit) * 100,
-                    "quality_score": (short_leg['quality_score'] + long_leg['quality_score']) / 2
+                    "quality_score": (short_leg['quality_score'] + long_leg['quality_score']) / 2,
+                    # Per-leg quotes so the candidate can be priced at what it
+                    # would actually FILL for. `net_credit` above is built from
+                    # mids (`premium` is the mid), and on the logged Bull Puts
+                    # crossing cost 27% of that credit — the difference between
+                    # a 58% and a 73% breakeven win rate. See candidate_verdict.
+                    "short_bid": short_leg.get('bid'), "short_ask": short_leg.get('ask'),
+                    "long_bid": long_leg.get('bid'), "long_ask": long_leg.get('ask'),
+                    "spread_width": strike_width,
                 })
 
     # --- Bear Call Spreads (Sell a Call, Buy a higher Call) ---
@@ -2564,7 +2609,15 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
                     "net_credit": net_credit,
                     "max_profit": net_credit * 100,
                     "max_loss": (strike_width - net_credit) * 100,
-                    "quality_score": (short_leg['quality_score'] + long_leg['quality_score']) / 2
+                    "quality_score": (short_leg['quality_score'] + long_leg['quality_score']) / 2,
+                    # Per-leg quotes so the candidate can be priced at what it
+                    # would actually FILL for. `net_credit` above is built from
+                    # mids (`premium` is the mid), and on the logged Bull Puts
+                    # crossing cost 27% of that credit — the difference between
+                    # a 58% and a 73% breakeven win rate. See candidate_verdict.
+                    "short_bid": short_leg.get('bid'), "short_ask": short_leg.get('ask'),
+                    "long_bid": long_leg.get('bid'), "long_ask": long_leg.get('ask'),
+                    "spread_width": strike_width,
                 })
 
     return pd.DataFrame(spreads).sort_values(by="quality_score", ascending=False) if spreads else pd.DataFrame()
@@ -4053,7 +4106,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Generate Final Reports
     if mode == "Budget scan":
         if not picks.empty:
-            final_df = picks.sort_values("quality_score", ascending=False)
+            final_df = rank_by_verdict(picks)
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
@@ -4063,7 +4116,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     elif mode in ("Discovery scan", "Squeeze Hunt"):
         if not picks.empty:
-            final_df = picks.sort_values("quality_score", ascending=False)
+            final_df = rank_by_verdict(picks)
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
@@ -4073,7 +4126,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             
     elif mode == "Credit Spreads":
         if not credit_spreads_df.empty:
-            final_spreads = credit_spreads_df.sort_values("quality_score", ascending=False)
+            final_spreads = rank_by_verdict(credit_spreads_df)
             if verbose:
                 print_credit_spreads_report(final_spreads)
         elif verbose:
@@ -4089,7 +4142,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     elif mode == "Premium Selling":
         if not picks.empty:
-            final_df = picks.sort_values("quality_score", ascending=False)
+            final_df = rank_by_verdict(picks)
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
@@ -4503,7 +4556,7 @@ def run_top_scan(
         return None
 
     combined = pd.concat(all_rows, ignore_index=True)
-    combined = combined.sort_values("quality_score", ascending=False).reset_index(drop=True)
+    combined = rank_by_verdict(combined)
     top = combined.head(top_n).copy()
 
     print_top_n_table(top, top_n)

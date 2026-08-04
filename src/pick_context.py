@@ -189,6 +189,38 @@ def insider_summary(ticker: str, cache_path: str = INSIDER_CACHE,
 
 # ── Renderer ─────────────────────────────────────────────────────────────────
 
+def cost_line(row: Dict[str, Any],
+              win_rates: Optional[Dict[str, float]] = None) -> str:
+    """What this pick costs to trade, and the win rate it has to beat.
+
+    The scan path prices every candidate at the bid/ask mid and displays no
+    friction, which is how a crossing cost worth 27% of the credit stayed
+    invisible across 907 logged trades. Measured per structure: one crossing is
+    0.7-1.7% of a single leg's premium and 33% of a two-leg spread's credit.
+
+    Display only — nothing here touches scoring. Returns "" rather than a guess
+    when the pick has no two-sided quote, and never raises."""
+    try:
+        from . import candidate_verdict as _cv
+        strategy = row.get("strategy_name")
+        wr = (win_rates or {}).get(strategy) if strategy else None
+        v = _cv.verdict_for(row, historical_win_rate=wr)
+        if not v.priced or v.round_trip_pct is None:
+            return ""
+
+        parts = [f"Cost: {v.round_trip_pct:.0%} of reward round-trip"]
+        if v.breakeven is not None:
+            parts.append(f"breakeven {v.breakeven:.0%}")
+            if wr is not None:
+                parts.append(f"your history {wr:.0%}")
+        line = " · ".join(parts)
+        if not v.passed:
+            line += f"  [REFUSED: {v.reason}]"
+        return line
+    except Exception:
+        return ""
+
+
 def context_lines(row: Dict[str, Any], today: Optional[str] = None,
                   db_path: str = PAPER_DB,
                   with_insider: bool = True) -> List[str]:
