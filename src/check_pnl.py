@@ -34,13 +34,14 @@ try:
         from . import formatting as fmt
         from . import ui
     except (ImportError, ValueError):
-        import formatting as fmt
-        import ui
+        import formatting as fmt  # type: ignore[no-redef]
+        import ui  # type: ignore[no-redef]
     HAS_FMT = fmt.supports_color()
 except Exception:
     HAS_FMT = False
-    fmt = None
-    ui = None
+    # Sentinels, not modules: every use is guarded by HAS_FMT / _HAS_UI_CP.
+    fmt = None  # type: ignore[assignment]
+    ui = None  # type: ignore[assignment]
 
 # `ui` is always bound above (to None on failure), so test the value, not the name.
 _HAS_UI_CP = ui is not None
@@ -72,8 +73,9 @@ try:
         from .utils import is_short_position as _is_short
         from .utils import bs_delta, bs_gamma, bs_vega, bs_theta, american_price
     except (ImportError, ValueError):
-        from utils import is_short_position as _is_short
-        from utils import bs_delta, bs_gamma, bs_vega, bs_theta, american_price
+        from utils import is_short_position as _is_short  # type: ignore[no-redef]
+        from utils import (  # type: ignore[no-redef]
+            bs_delta, bs_gamma, bs_vega, bs_theta, american_price)
     HAS_BS = True
 except Exception:
     HAS_BS = False
@@ -86,8 +88,9 @@ try:
         from .stress_test import print_stress_test, _classify_structure
         from .backtester import print_paper_trade_ic
     except (ImportError, ValueError):
-        from stress_test import print_stress_test, _classify_structure
-        from backtester import print_paper_trade_ic
+        from stress_test import (  # type: ignore[no-redef]
+            print_stress_test, _classify_structure)
+        from backtester import print_paper_trade_ic  # type: ignore[no-redef]
     HAS_STRESS = True
 except Exception:
     HAS_STRESS = False
@@ -103,12 +106,36 @@ try:
     try:
         from .data_fetching import get_risk_free_rate as _get_rfr
     except (ImportError, ValueError):
-        from data_fetching import get_risk_free_rate as _get_rfr
+        from data_fetching import get_risk_free_rate as _get_rfr  # type: ignore[no-redef]
     HAS_RFR = True
 except Exception:
     HAS_RFR = False
 
 DB_PATH = "paper_trades.db"
+
+
+def _num_or_none(value: Any) -> Optional[float]:
+    """A ledger column as a usable float, or None when there is no figure.
+
+    `max_loss_usd` and `long_strike` arrive as float, int, str, None or empty
+    string depending on the row's age and which writer produced it. Three sites
+    in `view_portfolio` each carried the same coercion inline; this is that
+    expression, once.
+
+    **Zero counts as absent.** A defined-risk structure recording a max loss of
+    0 has a missing figure, not a riskless trade, and the callers fall back to
+    cost basis rather than reporting nothing at risk.
+
+    NaN is rejected too: it parses cleanly and then poisons every sum it
+    reaches, which would quietly NaN the whole concentration total.
+    """
+    if value is None or value == "" or value == 0:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if out != out else out  # NaN is the only value unequal to itself
 
 
 def _get_multiplier(ticker: str) -> float:
@@ -745,7 +772,7 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
         try:
             from .paper_manager import PaperManager
         except (ImportError, ValueError):
-            from paper_manager import PaperManager
+            from paper_manager import PaperManager  # type: ignore[no-redef]
         print("  Enforcing exit rules...", end="", flush=True)
         PaperManager(db_path=DB_PATH, config_path="config.json").update_positions()
         print("\r" + " " * 30 + "\r", end="")
@@ -899,11 +926,7 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
             elif structure == "spread":
                 sn_low = (r.get("strategy_name") or "").lower()
                 opt_type_disp = "BPS" if "bull put" in sn_low else ("BCS" if "bear call" in sn_low else "SPR")
-                long_k = r.get("long_strike")
-                try:
-                    long_k = float(long_k) if long_k not in (None, "", 0) else None
-                except (TypeError, ValueError):
-                    long_k = None
+                long_k = _num_or_none(r.get("long_strike"))
                 strike_disp = f"{strike:.0f}/{long_k:.0f}" if long_k else f"{strike:.0f}"
             else:
                 opt_type_disp = str(r["type"]).upper()
@@ -962,18 +985,15 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
                     pnl_pct_row = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
                     live_str = f"${current_credit:.2f}"
                     # Cost basis ≈ max_loss (true defined risk) for concentration math
-                    ml_col = r.get("max_loss_usd")
-                    try:
-                        cost_basis = abs(float(ml_col)) if ml_col not in (None, "", 0) else entry_price * mult
-                    except (TypeError, ValueError):
-                        cost_basis = entry_price * mult
+                    _ml = _num_or_none(r.get("max_loss_usd"))
+                    cost_basis = abs(_ml) if _ml is not None else entry_price * mult
                 else:
                     pnl_usd_row = None
                     pnl_pct_row = None
                     live_str = None
                     cost_basis = 0.0
 
-            if pnl_usd_row is not None:
+            if pnl_usd_row is not None and pnl_pct_row is not None:
                 total_pnl_usd  += pnl_usd_row
                 total_cost_usd += cost_basis
                 fetched_count  += 1
@@ -1136,13 +1156,8 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
             structure = _classify_structure(r)
             sn = str(r.get("strategy_name", ""))
             if structure in ("spread", "iron_condor"):
-                ml_col = r.get("max_loss_usd")
-                ml_val = None
-                try:
-                    if ml_col not in (None, "", 0):
-                        ml_val = abs(float(ml_col))
-                except (TypeError, ValueError):
-                    ml_val = None
+                _ml = _num_or_none(r.get("max_loss_usd"))
+                ml_val = abs(_ml) if _ml is not None else None
                 if ml_val is None and sn.startswith("SPREAD:"):
                     # Legacy fallback parsing
                     try:
@@ -1394,12 +1409,12 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
                     print(strat_hdr)
                 for strat, rets in sorted(strat_map.items(), key=lambda x: -sum(x[1])):
                     sw = len([x for x in rets if x > 0])
-                    sn = len(rets)
-                    avg = sum(rets) / sn
+                    n_trades = len(rets)
+                    avg = sum(rets) / n_trades
                     spf_val = sum(x for x in rets if x > 0)
                     spl_val = abs(sum(x for x in rets if x <= 0))
                     spf = f"{spf_val/spl_val:.2f}x" if spl_val > 0 else "∞"
-                    line = f"    {strat:<24} {sw}/{sn} wins  avg {avg:+.1%}  PF {spf}"
+                    line = f"    {strat:<24} {sw}/{n_trades} wins  avg {avg:+.1%}  PF {spf}"
                     if HAS_FMT and fmt:
                         lc = fmt.Colors.GREEN if avg > 0 else fmt.Colors.RED
                         print(fmt.colorize(line, lc))
