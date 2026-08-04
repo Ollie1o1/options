@@ -134,13 +134,108 @@ blocks on the 213 clean modules, with the 76 exempted one section each in
 | `operator` | 11 | arithmetic on a possibly-`None` value |
 | `index` | 11 | indexing a possibly-`None` value |
 
-Those 76 are latent crashes, not style — e.g. `src/structure/candidates.py:197`,
-`Unsupported operand types for * ("None" and "float")`. Shrinking the list is
-real work and the possible-`None` codes are where it should start.
+**Corrected 2026-08-04 by the campaign below.** This section originally called
+those 76 "latent crashes", citing `src/structure/candidates.py:197`,
+`Unsupported operand types for * ("None" and "float")`. Working the modules off
+showed that reading was wrong: that site was already guarded, and across 186
+errors only **two** were real bugs. mypy cannot see across a repeated call, a
+lazy import, or two variables assigned in lockstep, and most of these are that.
+The list is worth shrinking, but it is a list of places worth *reading*, not a
+count of defects.
 
 CI findings are readable without admin rights: job logs return 403 anonymously,
 but check-run annotations are public. `scripts/mypy_annotate.py` publishes each
 diagnostic plus a histogram by error code and by file.
+
+## The mypy campaign — 13 modules cleared (2026-08-03/04)
+
+Making the typecheck job blocking left 349 errors quarantined in `mypy.ini`.
+Those were worked off module by module. The record, so the next person does not
+have to rediscover it:
+
+| module | errors | real bugs |
+|---|---:|---|
+| `structure/candidates.py` | 3 | none |
+| `data_fetching.py` | 28 | none |
+| `check_pnl.py` | 20 | **1 — NaN poisoning the portfolio cost basis** |
+| `options_screener.py` | 27 | **1 — `NameError` crashing a completed scan** |
+| `longterm/board.py` + `detail.py` | 23 | none |
+| `backtester.py`, `exit_model.py`, `paper_manager.py` | 43 | none |
+| `crypto/__main__.py`, `formatting.py`, `crypto/data_fetching.py`, `squeeze/sleeve/dhist.py`, `lottery/data.py` | 42 | none |
+| **total** | **186** | **2** |
+
+### The two real bugs
+
+**`check_pnl._num_or_none` let NaN through.** The guard was
+`float(x) if x not in (None, "", 0)`, and NaN passes it — it is not equal to
+None, `""` or `0`. The caller adds the result straight into `total_cost_usd`,
+so one NaN `max_loss_usd` turned the portfolio's entire cost basis, and every
+percentage computed off it, into NaN. NaN now reads as "no figure" and falls
+back to cost basis like any missing column.
+
+**`_macro_scan_section`'s error handlers raised `NameError`.** All three
+handlers called `logger.debug(...)`; there is no module-level `logger` in
+`options_screener`. Reaching any handler raised out of the `except` block,
+turning a swallowed overlay failure into a crash at the end of a *completed*
+scan. It never surfaced in testing because the handlers only run when a macro
+import or render fails.
+
+Both were in code that only runs when something else has already gone wrong —
+which is where tests do not reach and a checker does.
+
+### The six patterns behind the other 184
+
+Recognising these is most of the work:
+
+1. **Lazy-import globals** — `yf = None` at module scope with `_init_yfinance()`
+   binding it later. mypy sees `Any | None` forever.
+2. **`object`-typed fields** — the real class named in a trailing comment. 20 of
+   `longterm`'s 23 errors were two such lines.
+3. **Coupled invariants** — two variables assigned in lockstep, one tested.
+4. **Heterogeneous dicts** — a payload dict mypy narrows to `Dict[str, str]` off
+   its first entry.
+5. **Contracts stricter than the body** — a function coercing its inputs and
+   returning None on failure, while declaring `float`.
+6. **One name, two things** — a loop variable reused for a different value, or
+   six different callables imported as `m`.
+
+### Near-miss worth remembering
+
+Silencing mypy in `paper_manager` with `float(trade_dict.get("entry_price") or 0)`
+would have printed **`$0.00` for a missing entry price**, where the code
+deliberately printed `"?"`. Caught on re-reading the diff. The risk in this work
+is not the code — it is satisfying the checker in ways that quietly invent a
+number.
+
+### What remains
+
+63 modules, roughly 137 errors, all single-digit counts. Every module above 7
+errors is done, including all five that touch money math: `paper_manager`,
+`backtester`, `check_pnl`, `exit_model`, `data_fetching`.
+
+**Expected yield from here is tidiness, not defects.** The last two batches
+produced zero bugs and only repeats of the six patterns above. Treat the
+remaining list as documented debt rather than a queue that must be emptied.
+
+### How to work one off
+
+CI runs on `main` and on pull requests only, so reading a module's errors
+without reddening the build:
+
+```bash
+git checkout -b chore/mypy-<module>
+# delete its [mypy-<module>] section from mypy.ini
+# temporarily widen the CI trigger to [main, 'chore/**'] IN THE BRANCH
+git push -u origin chore/mypy-<module>
+```
+
+Job logs return 403 anonymously, but **check-run annotations are public**:
+`GET /repos/Ollie1o1/options/commits/<sha>/check-runs`, then each run's
+`/annotations`. `scripts/mypy_annotate.py` publishes every error line (under 60)
+plus a histogram by code and by file. Revert the trigger before merging.
+
+The anonymous API allows 60 requests/hour — poll slowly or set a `GITHUB_TOKEN`.
+
 
 ## Not fixed here
 

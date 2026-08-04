@@ -110,8 +110,11 @@ The composite `quality_score`, the AI `final_score`, and the ranked order are **
 
 **Audit trail.** [docs/TRUST_AUDIT_20260803.md](docs/TRUST_AUDIT_20260803.md)
 walks every decision-feeding number back to the code that produces it, records
-what reproduced and what did not, and names the three defects it found — each
-one a number that could not change when the thing it described changed.
+what reproduced and what did not, and names the defects it found — each one a
+number that could not change when the thing it described changed. It also
+carries the CI history (red for weeks, and why), the mypy ratchet, and the
+module-by-module record of working that debt down, including how to read CI
+findings without admin rights.
 
 **Public track record.** The running paper-trading record (win rate, returns, per-strategy breakdown, full closed-trade table, and gate status) is published to [reports/TRACK_RECORD.md](reports/TRACK_RECORD.md), refreshed weekly. It states the paper/delayed-data/friction caveats plainly.
 
