@@ -56,12 +56,12 @@ def _f(v) -> Optional[float]:
 
 
 def simulate_exits(
-    spot: float,
-    strike: float,
-    opt_type: str,
-    entry_price: float,
-    t_years: float,
-    sigma_real: float,
+    spot: Any,
+    strike: Any,
+    opt_type: Any,
+    entry_price: Any,
+    t_years: Any,
+    sigma_real: Any,
     iv_mark: Optional[float] = None,
     *,
     rules: dict,
@@ -77,6 +77,13 @@ def simulate_exits(
     """Simulate the book's exit rules on one single-leg contract.
 
     Returns a plain-JSON dict (sidecar-safe) or None when inputs are unusable.
+
+    The numeric inputs are typed `Any` because that is the real contract: each
+    is coerced through `_f()` below and the function returns None when any of
+    them fails to become a usable finite float. Callers rely on that — the row
+    convenience wrapper passes `row.get(...)` straight through, which is None
+    whenever the column is absent. Declaring them `float` described a stricter
+    contract than the body implements.
     """
     spot, strike = _f(spot), _f(strike)
     entry_price, t_years = _f(entry_price), _f(t_years)
@@ -109,12 +116,12 @@ def simulate_exits(
     time_exit_dte = int(rules["time_exit_dte"])
     min_days_held = int(rules["min_days_held"])
 
-    alive = np.ones(n_paths, dtype=bool)
-    exit_kind = np.zeros(n_paths, dtype=np.int8)      # 1 tp, 2 time, 3 sl, 4 expiry
+    alive: np.ndarray = np.ones(n_paths, dtype=bool)
+    exit_kind: np.ndarray = np.zeros(n_paths, dtype=np.int8)      # 1 tp, 2 time, 3 sl, 4 expiry
     exit_value = np.zeros(n_paths)                    # per-share mark at exit
-    exit_day = np.full(n_paths, n_steps, dtype=np.int32)
+    exit_day: np.ndarray = np.full(n_paths, n_steps, dtype=np.int32)
     peak_mid = np.zeros(n_paths)
-    profit_touch = np.zeros(n_paths, dtype=bool)
+    profit_touch: np.ndarray = np.zeros(n_paths, dtype=bool)
 
     basis = entry_price + half_spread + comm_share    # long all-in cost/share
 
@@ -149,7 +156,7 @@ def simulate_exits(
             break
 
         # --- trigger evaluation, same priority order as paper_manager ---
-        trig = np.zeros(n_paths, dtype=np.int8)
+        trig: np.ndarray = np.zeros(n_paths, dtype=np.int8)
         if is_short:
             tp_target = (sht["tp_ge_21"] if dte_t >= 21
                          else sht["tp_7_21"] if dte_t >= 7 else sht["tp_lt_7"])

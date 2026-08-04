@@ -68,7 +68,7 @@ try:
     HAS_FMT = True
 except ImportError:
     HAS_FMT = False
-    fmt = None
+    fmt = None  # type: ignore[assignment]
 
 try:
     from .utils import bs_call, bs_put, bs_delta, _d1d2
@@ -590,7 +590,7 @@ def run_backtest(
                 except Exception:
                     pass
 
-            all_ticker_results.append({
+            _ticker_row: Dict[str, Any] = {
                 "ticker": ticker,
                 "n_trades": n_trades,
                 "win_rate": win_rate,
@@ -605,7 +605,8 @@ def run_backtest(
                 "profit_factor": profit_factor,
                 "regime_summary": regime_summary,
                 "em_within_pct": em_within_pct,
-            })
+            }
+            all_ticker_results.append(_ticker_row)
 
         except Exception as e:
             all_ticker_results.append({"ticker": ticker, "error": str(e)})
@@ -758,7 +759,7 @@ def run_paper_trade_ic(db_path: str = DEFAULT_DB_PATH) -> dict:
     Reads paper_trades.db via sqlite3.
     Returns structured IC analysis.
     """
-    empty_result = {
+    empty_result: Dict[str, Any] = {
         "n_trades": 0,
         "ic": None,
         "ic_pvalue": None,
@@ -1320,7 +1321,7 @@ def run_paper_trade_ic_for_structure(
 ) -> dict:
     """Per-structure IC: filters trades to one structure (single/spread/IC),
     computes per-component IC against pnl_pct over feature_cols only."""
-    out = {"n_trades": 0, "component_ic": {}, "component_n": {}}
+    out: Dict[str, Any] = {"n_trades": 0, "component_ic": {}, "component_n": {}}
     where = _structure_filter_clause(structure)
     # Build column list, filter to columns that actually exist
     try:
@@ -1374,6 +1375,7 @@ def recommend_weights_for_structure(
     if structure == "single":
         return recommend_weights_from_paper_trades(db_path, config_path)
 
+    feature_cols: Tuple[str, ...]
     if structure == "spread":
         feature_cols = _SPREAD_FEATURE_COLS
         col_to_key = _SPREAD_COL_TO_KEY

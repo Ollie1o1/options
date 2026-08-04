@@ -276,7 +276,7 @@ def _legs_for_row(row) -> List[Tuple[float, str, int]]:
                 v = row[col] if col in row.keys() else None
             except (KeyError, IndexError):
                 v = None
-            if v in (None, "", 0):
+            if v is None or v in ("", 0):
                 continue
             try:
                 legs.append((float(v), opt_t, qty))
@@ -290,7 +290,7 @@ def _legs_for_row(row) -> List[Tuple[float, str, int]]:
             opt_type = "put" if "bull put" in sn else "call"
         ls = row["long_strike"] if "long_strike" in row.keys() else None
         try:
-            long_strike = float(ls) if ls not in (None, "", 0) else None
+            long_strike = float(ls) if ls is not None and ls not in ("", 0) else None
         except (TypeError, ValueError):
             long_strike = None
         if long_strike is None:
@@ -666,7 +666,8 @@ class PaperManager:
             self._slippage_per_share = float(_pt.get("slippage_per_share", SLIPPAGE_PER_SHARE))
             self._fx_conversion_rate = float(_pt.get("fx_conversion_rate", 0.0) or 0.0)
             _cap = (_cfg.get("auto_log") or {}).get("max_capital_at_risk")
-            self._max_capital_at_risk = float(_cap) if _cap not in (None, "", 0) else None
+            self._max_capital_at_risk = (float(_cap) if _cap is not None
+                                         and _cap not in ("", 0) else None)
             _win = (_cfg.get("auto_log") or {}).get("dedup_window_days",
                                                     DEFAULT_DEDUP_WINDOW_DAYS)
             self._dedup_window_days = int(_win) if _win not in (None, "", 0, False) else 0
@@ -882,8 +883,12 @@ class PaperManager:
             prior_price_s = f"${float(prior_price):.2f}"
         except (TypeError, ValueError):
             prior_price_s = "?"
+        _new_price = trade_dict.get("entry_price")
         try:
-            new_price_s = f"${float(trade_dict.get('entry_price')):.2f}"
+            # `or 0` would print $0.00 for a missing price, which reads as a
+            # real number. An absent price is unknown, and says so.
+            new_price_s = ("?" if _new_price is None
+                           else f"${float(_new_price):.2f}")
         except (TypeError, ValueError):
             new_price_s = "?"
         msg = (
@@ -1691,14 +1696,15 @@ class PaperManager:
             # expired iron condors stuck for weeks). Settle straight off spot.
             if dte <= 0:
                 spot = spot_cache[ticker]
-                reason = "Expired (settled at intrinsic)"
+                reason: Optional[str] = "Expired (settled at intrinsic)"
                 if structure in ("spread", "iron_condor"):
                     legs = _legs_for_row(row)
                     if not legs:
                         continue
                     try:
                         nc = row["net_credit"] if "net_credit" in row.keys() else None
-                        entry_credit = float(nc) if nc not in (None, "", 0) else float(entry_price or 0)
+                        entry_credit = (float(nc) if nc is not None and nc not in ("", 0)
+                                        else float(entry_price or 0))
                     except (TypeError, ValueError):
                         entry_credit = float(entry_price or 0)
                     if entry_credit <= 0:
@@ -1758,7 +1764,8 @@ class PaperManager:
                 except Exception:
                     nc = None
                 try:
-                    entry_credit = float(nc) if nc not in (None, "", 0) else float(entry_price or 0)
+                    entry_credit = (float(nc) if nc is not None and nc not in ("", 0)
+                                    else float(entry_price or 0))
                 except (TypeError, ValueError):
                     entry_credit = float(entry_price or 0)
 
@@ -1807,7 +1814,8 @@ class PaperManager:
                             spread_width_val = max(abs(sp_v - lp_sv), abs(lc_v - sc_v))
                         else:
                             ls_raw = row["long_strike"] if "long_strike" in row.keys() else None
-                            ls_f = float(ls_raw) if ls_raw not in (None, "", 0) else None
+                            ls_f = (float(ls_raw) if ls_raw is not None
+                                    and ls_raw not in ("", 0) else None)
                             if ls_f is not None:
                                 spread_width_val = abs(float(strike) - ls_f)
                     except (TypeError, ValueError, KeyError):
