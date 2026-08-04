@@ -100,6 +100,48 @@ in both the screener and the checkpoint. No hardcoded copy exists.
 
 ---
 
+## CI — red for weeks, now green and blocking (2026-08-04)
+
+Two independent causes, neither visible from a local test run.
+
+**The test failure.** `tests/test_cache_release.py` installs a fake
+`yfinance.cache`. Its helper calls `setdefault("yfinance", ...)`, which returns
+the *real* module whenever yfinance is already imported, then assigns `.cache`
+on it. `tearDown` restored both `sys.modules` entries — but they point at the
+object that was mutated, so restoring them undid nothing, and every later test
+in the session saw `_FakeManager`.
+
+It passed locally because the local runner imports yfinance *after* the fake is
+installed; under pytest the order flips. Which is the lesson worth keeping:
+**`scripts/test.sh` passing has never proved CI passes.** There is no pytest in
+the venv, and 6 test modules use pytest-only constructs and are skipped locally
+altogether. They are genuinely different test runs.
+
+**The mypy job.** It was `continue-on-error: true` *and* red — the worst
+combination, because it cost time on every push while proving nothing. It
+reported **349 errors in 76 of 289 modules**; the other **213 were already
+clean**.
+
+Rather than make 349 type edits across the pricing and ledger code, the job now
+blocks on the 213 clean modules, with the 76 exempted one section each in
+`mypy.ini`. A module leaves the list by deleting its own two lines.
+
+**The exemption list is debt, not a clean bill of health.** Among the 349:
+
+| code | n | meaning |
+|---|---|---|
+| `union-attr` | 54 | attribute access on a possibly-`None` value |
+| `operator` | 11 | arithmetic on a possibly-`None` value |
+| `index` | 11 | indexing a possibly-`None` value |
+
+Those 76 are latent crashes, not style — e.g. `src/structure/candidates.py:197`,
+`Unsupported operand types for * ("None" and "float")`. Shrinking the list is
+real work and the possible-`None` codes are where it should start.
+
+CI findings are readable without admin rights: job logs return 403 anonymously,
+but check-run annotations are public. `scripts/mypy_annotate.py` publishes each
+diagnostic plus a histogram by error code and by file.
+
 ## Not fixed here
 
 **Exit fidelity itself.** The measurement is now honest, but the underlying
