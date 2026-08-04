@@ -154,7 +154,7 @@ def get_options_chain(currency: str = "BTC") -> pd.DataFrame:
 
 # ── Binance funding (perp) ───────────────────────────────────────────────
 
-def get_funding_rate(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+def get_funding_rate(symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
     """Latest funding rate + mark/index price from Binance USDT-M perp.
 
     Returns dict {funding_rate, mark_price, index_price, basis_pct} or None.
@@ -189,7 +189,7 @@ def _normalize_to_8h(rate: float, cycle_hours: int) -> float:
     return float(rate) * (8.0 / float(cycle_hours))
 
 
-def _funding_binance(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+def _funding_binance(symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
     data = _http_get(f"{_BINANCE_FAPI}/premiumIndex", {"symbol": symbol.upper()})
     if not data or "lastFundingRate" not in data:
         return None
@@ -207,7 +207,7 @@ def _funding_binance(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
         return None
 
 
-def _funding_bybit(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+def _funding_bybit(symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
     data = _http_get(
         f"{_BYBIT_BASE}/tickers",
         {"category": "linear", "symbol": symbol.upper()},
@@ -232,7 +232,7 @@ def _funding_bybit(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
         return None
 
 
-def _funding_okx(currency: str = "BTC") -> Optional[Dict[str, float]]:
+def _funding_okx(currency: str = "BTC") -> Optional[Dict[str, Any]]:
     inst = f"{currency.upper()}-USDT-SWAP"
     data = _http_get(f"{_OKX_BASE}/funding-rate", {"instId": inst})
     if not data or data.get("code") != "0":
@@ -265,7 +265,7 @@ def _funding_okx(currency: str = "BTC") -> Optional[Dict[str, float]]:
         return None
 
 
-def _funding_dydx(currency: str = "BTC") -> Optional[Dict[str, float]]:
+def _funding_dydx(currency: str = "BTC") -> Optional[Dict[str, Any]]:
     ticker = f"{currency.upper()}-USD"
     data = _http_get(f"{_DYDX_BASE}/perpetualMarkets", {"ticker": ticker})
     if not data:
@@ -350,7 +350,7 @@ def get_aggregated_funding(currency: str = "BTC") -> Dict[str, Any]:
 
 # ── Open Interest ────────────────────────────────────────────────────────
 
-def _oi_binance_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+def _oi_binance_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
     """Current Binance USDT-M open interest (BTC-denominated)."""
     data = _http_get(f"{_BINANCE_FAPI}/openInterest", {"symbol": symbol.upper()})
     if not data or "openInterest" not in data:
@@ -365,7 +365,7 @@ def _oi_binance_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
         return None
 
 
-def _oi_bybit_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
+def _oi_bybit_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
     """Bybit OI is on the ticker payload."""
     data = _http_get(f"{_BYBIT_BASE}/tickers",
                      {"category": "linear", "symbol": symbol.upper()})
@@ -384,7 +384,7 @@ def _oi_bybit_now(symbol: str = "BTCUSDT") -> Optional[Dict[str, float]]:
         return None
 
 
-def _oi_okx_now(currency: str = "BTC") -> Optional[Dict[str, float]]:
+def _oi_okx_now(currency: str = "BTC") -> Optional[Dict[str, Any]]:
     """OKX OI from the public open-interest endpoint."""
     inst = f"{currency.upper()}-USDT-SWAP"
     data = _http_get(f"{_OKX_BASE}/open-interest",
@@ -405,7 +405,7 @@ def _oi_okx_now(currency: str = "BTC") -> Optional[Dict[str, float]]:
         return None
 
 
-def _oi_dydx_now(currency: str = "BTC") -> Optional[Dict[str, float]]:
+def _oi_dydx_now(currency: str = "BTC") -> Optional[Dict[str, Any]]:
     """dYdX OI from the perpetualMarkets payload."""
     ticker = f"{currency.upper()}-USD"
     data = _http_get(f"{_DYDX_BASE}/perpetualMarkets", {"ticker": ticker})
@@ -608,7 +608,7 @@ def get_stablecoin_history(symbol: str = "USDT", days: int = 90) -> pd.DataFrame
     return df
 
 
-def stablecoin_flow_z_score(history: pd.DataFrame, window: int = 7) -> Optional[Dict[str, float]]:
+def stablecoin_flow_z_score(history: pd.DataFrame, window: int = 7) -> Optional[Dict[str, Any]]:
     """Compute z-score of the most-recent `window`-day pct change vs the
     full distribution of rolling `window`-day pct changes in `history`.
 

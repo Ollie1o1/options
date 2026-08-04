@@ -21,28 +21,33 @@ def main(argv=None) -> int:
     sub.add_parser("backtest", help="Run the crypto backtester")
     sub.add_parser("volcarry", help="Delta-hedged vol-carry backtester (DVOL-anchored, real costs)")
     args, rest = p.parse_known_args(argv)
+    # One distinct name per verb. Reusing a single `m` made one variable hold
+    # six different callables — some take argv, some do not; some return int,
+    # some return None — which is why their signatures could not be checked.
     if args.verb == "scan":
-        from src.crypto.screener import main as m
-        return int(m() or 0)
+        from src.crypto.screener import main as scan_main
+        scan_main()          # returns None
+        return 0
     if args.verb == "log":
-        from src.crypto.auto_logger import main as m
-        return int(m(rest) or 0)
+        from src.crypto.auto_logger import main as log_main
+        return int(log_main(rest) or 0)
     if args.verb == "exits":
-        from src.crypto.exit_enforcer import main as m
-        return _call(m, rest)
+        from src.crypto.exit_enforcer import main as exits_main
+        exits_main()         # returns None
+        return 0
     if args.verb == "pnl":
-        from src.crypto.check_pnl import main as m
-        return int(m() or 0)
+        from src.crypto.check_pnl import main as pnl_main
+        return int(pnl_main() or 0)
     if args.verb == "backtest":
         try:
-            from src.crypto.backtester import main as m
+            from src.crypto.backtester import main as bt_main  # type: ignore[attr-defined]
         except ImportError:
             print("backtest: src.crypto.backtester has no standalone main()", file=sys.stderr)
             return 1
-        return _call(m, rest)
+        return _call(bt_main, rest)
     if args.verb == "volcarry":
-        from src.crypto.volbacktest.__main__ import main as m
-        return int(m(rest) or 0)
+        from src.crypto.volbacktest.__main__ import main as vol_main
+        return int(vol_main(rest) or 0)
     return 2
 
 

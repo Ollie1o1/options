@@ -49,7 +49,7 @@ estimate, and the report prints it before the number.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 import numpy as np
 
@@ -72,7 +72,7 @@ def _empty_selection() -> Dict[str, object]:
             "dropped": {c: [] for c in _COVARIATES}}
 
 
-def _record_selection(sel: Dict[str, object], units: Sequence[matching.Unit],
+def _record_selection(sel: Dict[str, Any], units: Sequence[matching.Unit],
                       result: matching.MatchResult) -> None:
     """Accumulate who was matched, who was not, and how they differed.
 

@@ -8,7 +8,7 @@ import math
 import os
 import re
 import sys
-from typing import Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 # ANSI Color Codes
@@ -320,7 +320,7 @@ def draw_box(title: str, width: int = 80, double: bool = False) -> str:
     return style(top_line, 'heading')
 
 
-def draw_separator(width: int = 80, char: str = None) -> str:
+def draw_separator(width: int = 80, char: Optional[str] = None) -> str:
     """
     Draw a horizontal separator line.
 
@@ -656,8 +656,10 @@ _THEME_ORDER = ['quant_desk', 'cyberpunk_neon', 'matrix_terminal', 'amber_crt']
 _DEFAULT_THEME = 'quant_desk'
 _CURRENT_THEME = _DEFAULT_THEME
 
-_THEME_RGB = dict(_THEME_DEFS[_DEFAULT_THEME]['rgb'])
-_THEME_ANSI = dict(_THEME_DEFS[_DEFAULT_THEME]['ansi'])
+# The theme tables are str -> (r,g,b) tuple and str -> ansi code; _THEME_DEFS
+# is a nested literal mypy reads as a Collection of its keys.
+_THEME_RGB: Dict[str, Any] = dict(_THEME_DEFS[_DEFAULT_THEME]['rgb'])  # type: ignore[arg-type]
+_THEME_ANSI: Dict[str, Any] = dict(_THEME_DEFS[_DEFAULT_THEME]['ansi'])  # type: ignore[arg-type]
 _THEME_BOLD = {'heading', 'emph'}
 
 
@@ -668,8 +670,8 @@ def set_theme(name: str) -> bool:
     if name not in _THEME_DEFS:
         return False
     _CURRENT_THEME = name
-    _THEME_RGB = dict(_THEME_DEFS[name]['rgb'])
-    _THEME_ANSI = dict(_THEME_DEFS[name]['ansi'])
+    _THEME_RGB = dict(_THEME_DEFS[name]['rgb'])  # type: ignore[arg-type]
+    _THEME_ANSI = dict(_THEME_DEFS[name]['ansi'])  # type: ignore[arg-type]
     return True
 
 
@@ -694,7 +696,7 @@ GLYPHS = {
 }
 
 
-def style(text, name: str, bold: bool = None) -> str:
+def style(text, name: str, bold: Optional[bool] = None) -> str:
     """Apply a semantic theme style. Unknown style or color-off → plain text."""
     text = str(text)
     if name not in _THEME_ANSI or not supports_color():

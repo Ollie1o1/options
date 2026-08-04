@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Any, Dict, List, Optional
+from typing import Sequence, Any, Dict, List, Optional
 
 
 # ── calibration math (pure) ────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ def atm_iv_from_chain(chain: List[Dict[str, Any]], spot: float) -> Optional[floa
     return float(nearest["iv"])
 
 
-def measure_vrp(atm_iv: float, realized_vol: float) -> Optional[float]:
+def measure_vrp(atm_iv: Any, realized_vol: Any) -> Optional[float]:
     """Volatility risk premium = ATM implied / realized − 1."""
     if not realized_vol or realized_vol <= 0 or not atm_iv:
         return None
@@ -43,7 +43,7 @@ def measure_vrp(atm_iv: float, realized_vol: float) -> Optional[float]:
 
 
 def measure_skew_per_sigma(
-    chain: List[Dict[str, Any]], spot: float, atm_iv: float, t_years: float
+    chain: List[Dict[str, Any]], spot: Any, atm_iv: Any, t_years: Any
 ) -> Optional[float]:
     """Least-squares slope of (iv/atm_iv − 1) vs sigma-OTM over the OTM wing.
 
@@ -75,7 +75,7 @@ def measure_skew_per_sigma(
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
 
 
-def _median(vals: List[float]) -> Optional[float]:
+def _median(vals: Sequence[Optional[float]]) -> Optional[float]:
     vals = sorted(v for v in vals if v is not None and math.isfinite(v))
     if not vals:
         return None
