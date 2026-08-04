@@ -427,7 +427,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 17
+_SCHEMA_VERSION = 18
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -565,6 +565,32 @@ _MIGRATIONS = {
         # evidence without vanishing from the record.
         "ALTER TABLE trades ADD COLUMN duplicate_of INTEGER",
         "CREATE INDEX IF NOT EXISTS idx_duplicate_of ON trades(duplicate_of)",
+    ],
+    18: [
+        # What the fill actually was, under src/execution_truth.py's three
+        # policies. The scan path prices every leg at the bid/ask MID
+        # (options_screener.py:2160 sets `premium = mid`) and charges slippage
+        # only on exit, so entry friction has always been modelled as zero.
+        # Measured against archived CBOE quotes for 30 logged Bull Puts,
+        # crossing costs $0.35/share — 27% of the credit — which moves the
+        # breakeven win rate on that structure from 58% to over 70%. The book
+        # wins 70.4%. An edge and a loss are on opposite sides of that number.
+        #
+        # `entry_price` KEEPS ITS v17 MEANING and is never rewritten by this
+        # migration or the restate script: every existing reader stays correct.
+        # Analysis that wants the honest number reads `entry_price_fill`.
+        # NULL everywhere until scripts/restate_execution.py or a new log_*
+        # call populates it — absent, not assumed.
+        "ALTER TABLE trades ADD COLUMN entry_price_mid REAL",
+        "ALTER TABLE trades ADD COLUMN entry_price_fill REAL",
+        "ALTER TABLE trades ADD COLUMN entry_price_cross REAL",
+        # 'mid' | 'limit' | 'cross' — which policy entry_price_fill reflects.
+        "ALTER TABLE trades ADD COLUMN fill_policy TEXT",
+        # 'live_quote' when the legs carried a real two-sided quote at entry,
+        # 'modeled' when the half-spread table supplied it, 'unknown' when
+        # neither could. Never pool the three into one headline number.
+        "ALTER TABLE trades ADD COLUMN fill_source TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_fill_source ON trades(fill_source)",
     ],
 }
 
@@ -716,10 +742,37 @@ class PaperManager:
             return None
         # Friction per share, both ways, every leg — the same shape
         # src.execution_costs prices, using this manager's configured costs.
-        friction = ((2 * self._slippage_per_share * n_legs)
+        #
+        # `slippage_per_share` is a flat $0.05 assumption. Measured against
+        # archived CBOE quotes for 30 logged Bull Puts the real ENTRY cost
+        # alone is $0.35/share, so the flat number understates a two-leg credit
+        # spread by roughly 3.5x — on the very guard that decides which trades
+        # are too small to survive their own market. When the payload carries
+        # real leg quotes, measure instead of assume; when it does not, the
+        # flat estimate stands and nothing changes for that caller.
+        measured = self._measured_slippage_per_share(trade_dict)
+        slip = measured if measured is not None else self._slippage_per_share * n_legs
+        friction = ((2 * slip)
                     + (2 * self._commission_per_contract * n_legs / 100.0)
                     + self._fx_per_share(credit))
         return friction / credit
+
+    @staticmethod
+    def _measured_slippage_per_share(trade_dict: dict) -> Optional[float]:
+        """One-way cost of crossing every leg, from real quotes, or None.
+
+        None whenever any leg lacks a usable two-sided market: a structure
+        priced from one real quote and one guess is not measured, and falling
+        back to the flat estimate is honest where half-counting is not."""
+        legs = trade_dict.get("legs")
+        if not legs:
+            return None
+        from . import execution_truth as _et
+        crossed = _et.structure_fill(legs, "cross")
+        mid = _et.structure_fill(legs, "mid")
+        if crossed is None or mid is None:
+            return None
+        return mid.price - crossed.price
 
     def _fx_per_share(self, premium: float) -> float:
         """Currency conversion cost per share on a round trip of this premium.

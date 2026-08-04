@@ -1,0 +1,602 @@
+[
+ {
+  "entry_id": 376,
+  "ticker": "QQQ",
+  "date": "2026-06-10",
+  "expiration": "2026-06-26",
+  "logged_net_credit": 0.48499999999999943,
+  "width": 1.0,
+  "short": {
+   "strike": 685.0,
+   "bid": 14.99,
+   "ask": 15.4,
+   "delta": -0.4175
+  },
+  "long": {
+   "strike": 684.0,
+   "bid": 14.04,
+   "ask": 16.38,
+   "delta": -0.4096
+  }
+ },
+ {
+  "entry_id": 377,
+  "ticker": "SPY",
+  "date": "2026-06-10",
+  "expiration": "2026-06-26",
+  "logged_net_credit": 0.5100000000000016,
+  "width": 1.0,
+  "short": {
+   "strike": 723.0,
+   "bid": 11.41,
+   "ask": 11.49,
+   "delta": -0.4733
+  },
+  "long": {
+   "strike": 722.0,
+   "bid": 11.01,
+   "ask": 11.09,
+   "delta": -0.4604
+  }
+ },
+ {
+  "entry_id": 378,
+  "ticker": "INTC",
+  "date": "2026-06-10",
+  "expiration": "2026-07-10",
+  "logged_net_credit": 2.450000000000001,
+  "width": 5.0,
+  "short": {
+   "strike": 105.0,
+   "bid": 8.6,
+   "ask": 9.2,
+   "delta": -0.4159
+  },
+  "long": {
+   "strike": 100.0,
+   "bid": 6.35,
+   "ask": 6.85,
+   "delta": -0.3386
+  }
+ },
+ {
+  "entry_id": 379,
+  "ticker": "NVDA",
+  "date": "2026-06-10",
+  "expiration": "2026-06-26",
+  "logged_net_credit": 0.9749999999999996,
+  "width": 2.5,
+  "short": {
+   "strike": 200.0,
+   "bid": 6.65,
+   "ask": 6.9,
+   "delta": -0.465
+  },
+  "long": {
+   "strike": 197.5,
+   "bid": 5.5,
+   "ask": 5.8,
+   "delta": -0.4109
+  }
+ },
+ {
+  "entry_id": 380,
+  "ticker": "ORCL",
+  "date": "2026-06-10",
+  "expiration": "2026-06-18",
+  "logged_net_credit": 1.2750000000000004,
+  "width": 2.5,
+  "short": {
+   "strike": 197.5,
+   "bid": 10.35,
+   "ask": 12.4,
+   "delta": -0.4044
+  },
+  "long": {
+   "strike": 195.0,
+   "bid": 9.25,
+   "ask": 11.15,
+   "delta": -0.3766
+  }
+ },
+ {
+  "entry_id": 399,
+  "ticker": "INTC",
+  "date": "2026-06-11",
+  "expiration": "2026-07-02",
+  "logged_net_credit": 0.5,
+  "width": 1.0,
+  "short": {
+   "strike": 110.0,
+   "bid": 5.95,
+   "ask": 6.4,
+   "delta": -0.3418
+  },
+  "long": {
+   "strike": 109.0,
+   "bid": 5.45,
+   "ask": 6.0,
+   "delta": -0.326
+  }
+ },
+ {
+  "entry_id": 400,
+  "ticker": "ORCL",
+  "date": "2026-06-11",
+  "expiration": "2026-07-10",
+  "logged_net_credit": 1.25,
+  "width": 2.5,
+  "short": {
+   "strike": 177.5,
+   "bid": 7.95,
+   "ask": 8.8,
+   "delta": -0.3777
+  },
+  "long": {
+   "strike": 175.0,
+   "bid": 6.9,
+   "ask": 7.75,
+   "delta": -0.3446
+  }
+ },
+ {
+  "entry_id": 403,
+  "ticker": "AMD",
+  "date": "2026-06-11",
+  "expiration": "2026-07-10",
+  "logged_net_credit": 4.325000000000003,
+  "width": 10.0,
+  "short": {
+   "strike": 460.0,
+   "bid": 24.95,
+   "ask": 25.9,
+   "delta": -0.3417
+  },
+  "long": {
+   "strike": 450.0,
+   "bid": 20.9,
+   "ask": 22.3,
+   "delta": -0.304
+  }
+ },
+ {
+  "entry_id": 418,
+  "ticker": "ORCL",
+  "date": "2026-06-15",
+  "expiration": "2026-06-26",
+  "logged_net_credit": 1.0750000000000002,
+  "width": 2.5,
+  "short": {
+   "strike": 190.0,
+   "bid": 5.95,
+   "ask": 6.25,
+   "delta": -0.4113
+  },
+  "long": {
+   "strike": 187.5,
+   "bid": 4.85,
+   "ask": 5.15,
+   "delta": -0.3611
+  }
+ },
+ {
+  "entry_id": 438,
+  "ticker": "INTC",
+  "date": "2026-06-17",
+  "expiration": "2026-07-17",
+  "logged_net_credit": 1.9749999999999996,
+  "width": 5.0,
+  "short": {
+   "strike": 115.0,
+   "bid": 7.2,
+   "ask": 7.5,
+   "delta": -0.3329
+  },
+  "long": {
+   "strike": 110.0,
+   "bid": 5.35,
+   "ask": 5.6,
+   "delta": -0.2686
+  }
+ },
+ {
+  "entry_id": 460,
+  "ticker": "QQQ",
+  "date": "2026-06-22",
+  "expiration": "2026-06-30",
+  "logged_net_credit": 0.48499999999999943,
+  "width": 1.0,
+  "short": {
+   "strike": 726.0,
+   "bid": 7.53,
+   "ask": 7.59,
+   "delta": -0.3638
+  },
+  "long": {
+   "strike": 725.0,
+   "bid": 7.24,
+   "ask": 7.3,
+   "delta": -0.3521
+  }
+ },
+ {
+  "entry_id": 463,
+  "ticker": "INTC",
+  "date": "2026-06-22",
+  "expiration": "2026-07-10",
+  "logged_net_credit": 0.9749999999999996,
+  "width": 2.0,
+  "short": {
+   "strike": 135.0,
+   "bid": 8.95,
+   "ask": 9.2,
+   "delta": -0.3986
+  },
+  "long": {
+   "strike": 133.0,
+   "bid": 7.85,
+   "ask": 8.35,
+   "delta": -0.3709
+  }
+ },
+ {
+  "entry_id": 464,
+  "ticker": "ORCL",
+  "date": "2026-06-22",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 2.1750000000000007,
+  "width": 5.0,
+  "short": {
+   "strike": 170.0,
+   "bid": 8.1,
+   "ask": 8.6,
+   "delta": -0.3945
+  },
+  "long": {
+   "strike": 165.0,
+   "bid": 5.8,
+   "ask": 6.5,
+   "delta": -0.3236
+  }
+ },
+ {
+  "entry_id": 479,
+  "ticker": "AMZN",
+  "date": "2026-06-24",
+  "expiration": "2026-07-17",
+  "logged_net_credit": 1.7749999999999995,
+  "width": 5.0,
+  "short": {
+   "strike": 235.0,
+   "bid": 5.65,
+   "ask": 5.85,
+   "delta": -0.4002
+  },
+  "long": {
+   "strike": 230.0,
+   "bid": 3.8,
+   "ask": 4.0,
+   "delta": -0.304
+  }
+ },
+ {
+  "entry_id": 485,
+  "ticker": "QQQ",
+  "date": "2026-06-25",
+  "expiration": "2026-07-17",
+  "logged_net_credit": 0.6750000000000007,
+  "width": 1.0,
+  "short": {
+   "strike": 705.0,
+   "bid": 14.83,
+   "ask": 14.91,
+   "delta": -0.3932
+  },
+  "long": {
+   "strike": 704.0,
+   "bid": 14.5,
+   "ask": 14.58,
+   "delta": -0.386
+  }
+ },
+ {
+  "entry_id": 488,
+  "ticker": "META",
+  "date": "2026-06-25",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 2.4250000000000007,
+  "width": 5.0,
+  "short": {
+   "strike": 545.0,
+   "bid": 20.5,
+   "ask": 21.6,
+   "delta": -0.473
+  },
+  "long": {
+   "strike": 540.0,
+   "bid": 18.1,
+   "ask": 19.1,
+   "delta": -0.436
+  }
+ },
+ {
+  "entry_id": 489,
+  "ticker": "INTC",
+  "date": "2026-06-25",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 0.5499999999999989,
+  "width": 1.0,
+  "short": {
+   "strike": 125.0,
+   "bid": 9.85,
+   "ask": 10.75,
+   "delta": -0.3684
+  },
+  "long": {
+   "strike": 124.0,
+   "bid": 9.35,
+   "ask": 10.45,
+   "delta": -0.357
+  }
+ },
+ {
+  "entry_id": 550,
+  "ticker": "SPY",
+  "date": "2026-07-08",
+  "expiration": "2026-07-17",
+  "logged_net_credit": 0.5049999999999999,
+  "width": 1.0,
+  "short": {
+   "strike": 739.0,
+   "bid": 3.8,
+   "ask": 3.82,
+   "delta": -0.3431
+  },
+  "long": {
+   "strike": 738.0,
+   "bid": 3.55,
+   "ask": 3.57,
+   "delta": -0.3232
+  }
+ },
+ {
+  "entry_id": 551,
+  "ticker": "QQQ",
+  "date": "2026-07-08",
+  "expiration": "2026-07-17",
+  "logged_net_credit": 0.495000000000001,
+  "width": 1.0,
+  "short": {
+   "strike": 696.0,
+   "bid": 6.01,
+   "ask": 6.05,
+   "delta": -0.308
+  },
+  "long": {
+   "strike": 695.0,
+   "bid": 5.77,
+   "ask": 5.81,
+   "delta": -0.2976
+  }
+ },
+ {
+  "entry_id": 554,
+  "ticker": "AMD",
+  "date": "2026-07-08",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 2.4499999999999993,
+  "width": 5.0,
+  "short": {
+   "strike": 495.0,
+   "bid": 23.95,
+   "ask": 25.8,
+   "delta": -0.3708
+  },
+  "long": {
+   "strike": 490.0,
+   "bid": 21.95,
+   "ask": 23.5,
+   "delta": -0.3489
+  }
+ },
+ {
+  "entry_id": 573,
+  "ticker": "META",
+  "date": "2026-07-09",
+  "expiration": "2026-07-17",
+  "logged_net_credit": 2.1750000000000007,
+  "width": 5.0,
+  "short": {
+   "strike": 600.0,
+   "bid": 4.85,
+   "ask": 5.25,
+   "delta": -0.2104
+  },
+  "long": {
+   "strike": 595.0,
+   "bid": 3.9,
+   "ask": 4.2,
+   "delta": -0.1772
+  }
+ },
+ {
+  "entry_id": 595,
+  "ticker": "INTC",
+  "date": "2026-07-10",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 0.9000000000000004,
+  "width": 2.0,
+  "short": {
+   "strike": 105.0,
+   "bid": 6.1,
+   "ask": 6.3,
+   "delta": -0.3657
+  },
+  "long": {
+   "strike": 103.0,
+   "bid": 5.25,
+   "ask": 5.5,
+   "delta": -0.3307
+  }
+ },
+ {
+  "entry_id": 597,
+  "ticker": "QQQ",
+  "date": "2026-07-10",
+  "expiration": "2026-07-20",
+  "logged_net_credit": 0.40499999999999936,
+  "width": 1.0,
+  "short": {
+   "strike": 721.0,
+   "bid": 6.4,
+   "ask": 6.46,
+   "delta": -0.4009
+  },
+  "long": {
+   "strike": 720.0,
+   "bid": 6.08,
+   "ask": 6.13,
+   "delta": -0.3844
+  }
+ },
+ {
+  "entry_id": 603,
+  "ticker": "INTC",
+  "date": "2026-07-10",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 0.4499999999999993,
+  "width": 1.0,
+  "short": {
+   "strike": 105.0,
+   "bid": 6.1,
+   "ask": 6.3,
+   "delta": -0.3657
+  },
+  "long": {
+   "strike": 104.0,
+   "bid": 5.65,
+   "ask": 5.95,
+   "delta": -0.3481
+  }
+ },
+ {
+  "entry_id": 627,
+  "ticker": "GOOGL",
+  "date": "2026-07-13",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 1.1500000000000021,
+  "width": 2.5,
+  "short": {
+   "strike": 350.0,
+   "bid": 9.05,
+   "ask": 9.55,
+   "delta": -0.4
+  },
+  "long": {
+   "strike": 347.5,
+   "bid": 7.95,
+   "ask": 8.25,
+   "delta": -0.3684
+  }
+ },
+ {
+  "entry_id": 628,
+  "ticker": "INTC",
+  "date": "2026-07-13",
+  "expiration": "2026-07-31",
+  "logged_net_credit": 0.47499999999999964,
+  "width": 1.0,
+  "short": {
+   "strike": 101.0,
+   "bid": 7.8,
+   "ask": 8.15,
+   "delta": -0.4159
+  },
+  "long": {
+   "strike": 100.0,
+   "bid": 7.3,
+   "ask": 7.65,
+   "delta": -0.3987
+  }
+ },
+ {
+  "entry_id": 701,
+  "ticker": "TSLA",
+  "date": "2026-07-16",
+  "expiration": "2026-07-24",
+  "logged_net_credit": 1.3500000000000014,
+  "width": 2.5,
+  "short": {
+   "strike": 385.0,
+   "bid": 12.5,
+   "ask": 12.65,
+   "delta": -0.4315
+  },
+  "long": {
+   "strike": 382.5,
+   "bid": 11.35,
+   "ask": 11.5,
+   "delta": -0.405
+  }
+ },
+ {
+  "entry_id": 745,
+  "ticker": "MSFT",
+  "date": "2026-07-21",
+  "expiration": "2026-08-21",
+  "logged_net_credit": 2.174999999999997,
+  "width": 5.0,
+  "short": {
+   "strike": 390.0,
+   "bid": 16.35,
+   "ask": 16.7,
+   "delta": -0.4036
+  },
+  "long": {
+   "strike": 385.0,
+   "bid": 14.15,
+   "ask": 14.55,
+   "delta": -0.3664
+  }
+ },
+ {
+  "entry_id": 869,
+  "ticker": "QQQ",
+  "date": "2026-07-30",
+  "expiration": "2026-08-14",
+  "logged_net_credit": 0.5200000000000014,
+  "width": 1.0,
+  "short": {
+   "strike": 670.0,
+   "bid": 8.83,
+   "ask": 8.94,
+   "delta": -0.3431
+  },
+  "long": {
+   "strike": 669.0,
+   "bid": 8.51,
+   "ask": 8.64,
+   "delta": -0.3339
+  }
+ },
+ {
+  "entry_id": 872,
+  "ticker": "INTC",
+  "date": "2026-07-30",
+  "expiration": "2026-08-28",
+  "logged_net_credit": 1.5,
+  "width": 3.0,
+  "short": {
+   "strike": 90.0,
+   "bid": 7.45,
+   "ask": 8.0,
+   "delta": -0.4263
+  },
+  "long": {
+   "strike": 87.0,
+   "bid": 6.0,
+   "ask": 6.65,
+   "delta": -0.371
+  }
+ }
+]
