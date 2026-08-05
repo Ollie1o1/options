@@ -92,9 +92,11 @@ def resolve(entry: Optional[Dict[str, Any]], today: Optional[str] = None,
 
     Any window whose two weeks have elapsed is closed and counted. The loop
     rolls forward rather than closing a single window, because checkpoints are
-    not guaranteed to run: this repo's schedulers have been dead since
-    2026-06-15, and a gate that under-counts extensions merely because nobody
-    ran the job would hand back the unbounded EXTEND by a different route.
+    not guaranteed to run: this repo's schedulers were dead from 2026-06-15 to
+    2026-08-04 and could stop again, and a gate that under-counts extensions
+    merely because nobody ran the job would hand back the unbounded EXTEND by a
+    different route. The roll-forward is the protection against that, so it
+    stays whether or not the scheduler is currently healthy.
 
     Counting stops at ``max_extensions`` — beyond the allowance the number
     carries no further meaning, and the decision rule resolves STOP regardless.

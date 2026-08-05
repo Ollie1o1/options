@@ -15,6 +15,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.overshoot import SCHEDULER_RECOVERED  # noqa: E402
 from src.short_premium_gate import (  # noqa: E402
     LEG_COUNTS,
     TRADEABILITY_MAX_FRICTION_RATIO,
@@ -238,6 +239,19 @@ class ExitFidelityCaveatTest(unittest.TestCase):
         rows = [_row(date="2026-07-01") for _ in range(30)]
         text = " ".join(cohort_caveats(rows, db_path="/nonexistent/ledger.db"))
         self.assertIn("manual cadence", text)
+
+    def test_the_outage_is_stated_as_a_closed_window(self):
+        """The scheduler resumed on 2026-08-04. The caveat has to describe the
+        outage that degraded this cohort's exits without implying it is still
+        happening — the same falsifiability the share is held to."""
+        rows = [_row(date="2026-07-01") for _ in range(30)]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.db")
+            self._ledger(p, overshot=3, on_rule=1)
+            text = " ".join(cohort_caveats(rows, db_path=p))
+        self.assertIn(SCHEDULER_RECOVERED, text, "the outage needs an end date")
+        self.assertIn("was down", text)
+        self.assertNotIn("has been dead", text)
 
 
 if __name__ == "__main__":

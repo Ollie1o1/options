@@ -58,7 +58,7 @@ from src.phase1_checkpoint import (GATE_V2_MAX_EXTENSIONS,
                                    GATE_V2_STOP_POSTERIOR,
                                    decide_v2, design_effect,
                                    exclude_ruled_duplicates)
-from src.overshoot import fetch_stop_exits, summarize
+from src.overshoot import SCHEDULER_RECOVERED, fetch_stop_exits, summarize
 
 SHORT_PREMIUM_STRATEGIES: Tuple[str, ...] = ("Bull Put", "Bear Call", "Short Put")
 
@@ -298,7 +298,12 @@ def _exit_fidelity_caveat(db_path: Optional[str]) -> str:
         return head + "." + tail
     after = summary.get("after") or {}
     share = after.get("share_overshot")
-    since = f" (the scheduler has been dead since {summary.get('cutoff')})"
+    # Past tense, with both ends. The outage is what degraded exit fidelity in
+    # this cohort's window, but it ended on SCHEDULER_RECOVERED — writing it as
+    # an open-ended present condition would overstate a fixed problem to whoever
+    # reads this verdict.
+    since = (f" (the scheduler was down from {summary.get('cutoff')} to "
+             f"{SCHEDULER_RECOVERED}, covering this cohort's whole window)")
     if share is None or not after.get("n"):
         # Nothing measurable. Say so rather than reciting a remembered number.
         return head + since + "." + tail

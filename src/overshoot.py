@@ -27,7 +27,14 @@ import statistics
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
+# The scheduler outage was a closed window, not an ongoing condition. It stopped
+# firing after 2026-06-15 and resumed on 2026-08-04 (launchd shows the agent
+# active with a clean exit; logs/launchagent.log has the gap and the recovery).
+# The window matters because exits went unenforced inside it, which is what the
+# overshoot below measures — but a caveat written in the present tense would now
+# overstate a problem that has been fixed.
 SCHEDULER_DIED = "2026-06-15"
+SCHEDULER_RECOVERED = "2026-08-04"
 
 # Stop levels are written into the exit reason itself, which makes the rule that
 # fired recoverable per trade rather than inferred from config that has changed
