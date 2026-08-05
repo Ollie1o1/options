@@ -56,3 +56,30 @@ class CostColumnTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class LeapsBucketTest(unittest.TestCase):
+    """`format_dte_bucket` returns "LEAPS (45+ DTE)" but the table's bucket
+    order stopped at "Swing (31-45 DTE)", so every longer-dated pick was
+    silently dropped from the display — the exact horizon the single-leg
+    friction work says is worth trading."""
+
+    def _long_dated(self):
+        return pd.DataFrame([{
+            "symbol": "MSFT", "type": "call", "strike": 505.0,
+            "expiration": "2026-12-18", "T_years": 120 / 365, "delta": 0.42,
+            "premium": 30.0, "quality_score": 0.5, "friction_pct": 0.01,
+            "verdict_passed": True, "prob_profit": 0.45,
+        }])
+
+    def test_a_long_dated_pick_is_actually_displayed(self):
+        self.assertIn("MSFT", _render(self._long_dated()))
+
+    def test_its_bucket_header_is_shown(self):
+        self.assertIn("LEAPS", _render(self._long_dated()))
+
+    def test_a_mixed_frame_shows_both_horizons(self):
+        df = pd.concat([_df(), self._long_dated()], ignore_index=True)
+        out = _render(df)
+        for sym in ("QQQ", "COIN", "MSFT"):
+            self.assertIn(sym, out)

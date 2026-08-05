@@ -200,7 +200,12 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
         f"{'Net EV':>7} {'Cost':>5} {'P2x':>5} {'Call':<5} {'Score':>6}  Drivers"
     )
 
-    dte_bucket_order = ["Short (1-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"]
+    # Must cover every bucket `format_dte_bucket` can return. It stopped at
+    # "Swing (31-45 DTE)" while the classifier also returns "LEAPS (45+ DTE)",
+    # so any pick past 45 DTE was silently dropped — including everything on
+    # the horizon where a single leg's crossing cost falls to 0.7% of premium.
+    dte_bucket_order = ["Short (1-14 DTE)", "Standard (15-30 DTE)",
+                        "Swing (31-45 DTE)", "LEAPS (45+ DTE)"]
     contracts = contracts.copy()
     contracts["_dte"] = (contracts["T_years"] * 365.0).round(0) if "T_years" in contracts.columns else 0
     contracts["_bucket"] = contracts["_dte"].apply(format_dte_bucket)

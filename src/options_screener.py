@@ -4538,7 +4538,13 @@ def run_top_scan(
     all_rows = []
     for sym in tickers:
         try:
-            data = fetch_options_yfinance(sym, max_expiries)
+            # The bounds decide WHICH expiries are pulled, not just which rows
+            # survive scoring: fetch_options_yfinance skips out-of-range
+            # expirations BEFORE the max_expiries slice. Omitting them here
+            # took the front 4 expiries regardless of what was asked for, so a
+            # 25-70 DTE request came back with 7-23 DTE contracts.
+            data = fetch_options_yfinance(sym, max_expiries,
+                                          min_dte=min_dte, max_dte=max_dte)
             result = _score_fetched_data(
                 sym, data, mode, min_dte, max_dte,
                 rfr, config, vix_weights, "swing",
@@ -4833,8 +4839,16 @@ def main():
         _do_export = (args.export or "").lower() == "csv"
         _ts_pick = None if getattr(args, "no_tearsheet", False) else getattr(args, "tearsheet", None)
         print(f"\nRunning top-{_top_n} scan across {len(_top_tickers)} tickers...")
+        # --min-dte / --max-dte parse fine but were dropped here, so the scan
+        # silently used run_top_scan's own 7/45 defaults. Passed through only
+        # when set, so omitting the flags keeps those defaults.
+        _dte_kw = {}
+        if getattr(args, "min_dte", None) is not None:
+            _dte_kw["min_dte"] = args.min_dte
+        if getattr(args, "max_dte", None) is not None:
+            _dte_kw["max_dte"] = args.max_dte
         run_top_scan(_top_tickers, top_n=_top_n, export_csv=_do_export,
-                     tearsheet_pick=_ts_pick)
+                     tearsheet_pick=_ts_pick, **_dte_kw)
         sys.exit(0)
 
     # ── Startup Banner (Phase 1) ─────────────────────────────────────────────
