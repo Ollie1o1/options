@@ -1268,9 +1268,21 @@ def calculate_metrics(
     # HV-adjusted EV: BS(realized_vol) - market_price
     # Positive = options cheap vs realized vol (edge for buyers)
     # Negative = options expensive vs realized vol (edge for sellers)
-    # Prefer EWMA vol for EV (more responsive to recent moves); fall back to 30d HV
-    # If HV unavailable, flag as unreliable instead of silently using IV (which defeats EV purpose)
-    hv_for_ev = df["hv_ewma"] if "hv_ewma" in df.columns else df["hv_30d"]
+    #
+    # Prefer the LONG realized-vol window. EWMA (span 20) was chosen for being
+    # "more responsive to recent moves", but responsiveness is the defect for a
+    # multi-month option: checked against live quotes 2026-08-04, a 163-DTE
+    # MSFT 535 call quoted $28.80 mid and Black-Scholes at 252-day realized
+    # (31.6%) prices it at $28.85 — a $5/contract edge. The short window read
+    # 51.8% off a single earnings gap and the model reported +$4,664, roughly
+    # 900x overstated, on calls and puts simultaneously.
+    #
+    # If HV is unavailable, flag as unreliable instead of silently using IV
+    # (which defeats the purpose of the EV).
+    _hv_cols = [c for c in ("hv_252d", "hv_ewma", "hv_30d") if c in df.columns]
+    hv_for_ev = df[_hv_cols[0]] if _hv_cols else df["hv_30d"]
+    for _c in _hv_cols[1:]:
+        hv_for_ev = hv_for_ev.fillna(df[_c])
     _hv_raw = hv_for_ev.fillna(df["hv_30d"])
     _hv_fallback_mask = _hv_raw.isna()
     hv_arr = np.maximum(_hv_raw.fillna(df["impliedVolatility"]).values, 1e-9)
@@ -1315,6 +1327,17 @@ def calculate_metrics(
     # Null out EV where HV was missing (IV fallback produces meaningless ~0 values)
     df["ev_hv_fallback"] = _hv_fallback_mask
     df.loc[_hv_fallback_mask, "ev_per_contract"] = np.nan
+
+    # ...and where realized and implied vol are too far apart to both describe
+    # one market. A stale earnings gap leaves realized far above implied and
+    # the EV reads the difference as free money on every strike of the name,
+    # calls and puts alike. Same treatment as a missing HV: an EV built on a
+    # basis this suspect is absent, not zero.
+    from .trade_analysis import implausible_vol_gap as _bad_gap
+    _gap_mask = pd.Series(
+        _bad_gap(_hv_raw.values, df["impliedVolatility"].values), index=df.index)
+    df["ev_vol_gap_refused"] = _gap_mask
+    df.loc[_gap_mask, "ev_per_contract"] = np.nan
 
     # Earnings-adjusted EV for earnings plays
     df["ev_earnings"] = pd.NA
@@ -2224,6 +2247,7 @@ def enrich_and_score(
     next_ex_div: Optional[object] = None,
     earnings_move_data: Optional[dict] = None,
     hv_ewma: Optional[float] = None,
+    hv_252d: Optional[float] = None,
     vrp_data: Optional[dict] = None,
     news_data=None,
     dividend_yield: float = 0.0,
@@ -2367,6 +2391,8 @@ def enrich_and_score(
     # Attach EWMA vol column if provided
     if hv_ewma is not None and "hv_ewma" not in df.columns:
         df["hv_ewma"] = hv_ewma
+    if hv_252d is not None and "hv_252d" not in df.columns:
+        df["hv_252d"] = hv_252d
 
     # Attach VRP data
     if vrp_data:
@@ -3483,6 +3509,7 @@ def _score_fetched_data(
 
         hv = context.get("hv")
         hv_ewma = context.get("hv_ewma")
+        hv_252d = context.get("hv_252d")
         iv_rank = context.get("iv_rank")
         iv_percentile = context.get("iv_percentile")
         earnings_date = context.get("earnings_date")
@@ -3530,6 +3557,7 @@ def _score_fetched_data(
             next_ex_div=next_ex_div,
             earnings_move_data=earnings_move_data,
             hv_ewma=hv_ewma,
+            hv_252d=hv_252d,
             vrp_data=vrp_data,
             news_data=news_data,
         )

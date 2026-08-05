@@ -11,6 +11,33 @@ from typing import Dict, List, Optional, Tuple
 from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 
+# A realized/implied ratio outside this band is a data artifact, not an edge.
+# Measured 2026-08-04: MSFT read 51.8% realized (a stale earnings gap) against
+# 35.1% implied, ratio 1.48, and the EV model turned that into a reported
+# +$4,664 on a contract whose real edge was $5. The band is deliberately wide —
+# a genuine variance risk premium lives comfortably inside it — so this refuses
+# only the cases where the two numbers cannot both be describing one market.
+VOL_GAP_MIN_RATIO = 0.55
+VOL_GAP_MAX_RATIO = 1.80
+
+
+def implausible_vol_gap(hv, iv, min_ratio=VOL_GAP_MIN_RATIO,
+                        max_ratio=VOL_GAP_MAX_RATIO):
+    """True where realized and implied vol are too far apart to both be real.
+
+    Callers null the EV on these rows, exactly as it is already nulled when HV
+    is missing. Absent or non-positive inputs are refused rather than assumed
+    fine: an unknown basis is not a safe one. Scalars or NumPy arrays."""
+    import numpy as _np
+    hv_a = _np.asarray(hv, dtype=float)
+    iv_a = _np.asarray(iv, dtype=float)
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        ratio = hv_a / iv_a
+        bad = (~_np.isfinite(ratio)) | (hv_a <= 0) | (iv_a <= 0) \
+            | (ratio < min_ratio) | (ratio > max_ratio)
+    return bad if bad.ndim else bool(bad)
+
+
 def net_ev_per_contract(gross_edge_per_share, premium, spread_pct,
                         commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT, contract_multiplier=100,
                         round_trip=True):

@@ -504,6 +504,9 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     hv_30d_rolling = calculate_historical_volatility(hist, period=30)
     hv_ewma = calculate_ewma_volatility(hist, span=20)
     hv_parkinson = calculate_parkinson_volatility(hist, period=30)
+    # Long-window realized vol: the right basis for valuing a multi-month
+    # option, and immune to a single earnings gap. See long_window_volatility.
+    hv_252d = long_window_volatility(hist)
     hv_30d: Optional[float]
     if hv_30d_rolling and hv_ewma and hv_parkinson:
         hv_30d = 0.34 * hv_30d_rolling + 0.33 * hv_ewma + 0.33 * hv_parkinson
@@ -599,6 +602,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
     # 5. Enrich DataFrame (identical to fetch_options_yfinance lines 922+) -------
     df["underlying"] = underlying
     df["hv_30d"] = hv_30d
+    df["hv_252d"] = hv_252d
     df["ret_5d"] = ret_5d
     df["rsi_14"] = rsi_14
     df["adx_14"] = adx_14
@@ -677,6 +681,7 @@ def fetch_options_yahooquery(symbol: str, max_expiries: int) -> Dict[str, Any]:
             "hv": hv_30d,
             "bb_width_pct": bb_width_pct,
             "hv_ewma": hv_ewma,
+            "hv_252d": hv_252d,
             "hv_parkinson": hv_parkinson,
             "iv_rank": iv_rank_30,
             "iv_percentile": iv_pct_30,
@@ -1460,6 +1465,31 @@ def determine_vix_regime(vix_level: Optional[float], config: Dict) -> Tuple[str,
     return regime, w
 
 # --- New / Refactored Calculation Functions (Using Cached History) ---
+
+def long_window_volatility(hist: pd.DataFrame, target: int = 252,
+                           minimum: int = 120) -> Optional[float]:
+    """Annualised realized vol over the longest window available, up to a year.
+
+    The EV model valued every option at Black-Scholes on `hv_ewma` (span 20).
+    For a multi-month option that is the wrong basis: checked against live
+    quotes on 2026-08-04, a 163-DTE MSFT 535 call quoted $28.80 mid and BS at
+    252-day realized (31.6%) gives $28.85 — a $5/contract edge — while the
+    short window read 51.8% after an earnings gap and produced a reported
+    +$4,664.
+
+    Asking `calculate_historical_volatility` for exactly 252 is fragile: a
+    one-year fetch lands near 252 bars and it returns None whenever
+    `len(hist) < period`. So this takes the longest window actually present,
+    and returns None below `minimum` rather than a noisy short-window number
+    wearing a long-window name."""
+    try:
+        n = len(hist)
+    except TypeError:
+        return None
+    if not n or n < minimum:
+        return None
+    return calculate_historical_volatility(hist, period=min(target, n - 1))
+
 
 def calculate_historical_volatility(hist: pd.DataFrame, period: int = 30) -> Optional[float]:
     """Calculate annualized volatility from history DataFrame."""
@@ -2282,6 +2312,10 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     underlying = safe_float(hist["Close"].iloc[-1])
     hv_30d_rolling = calculate_historical_volatility(hist, period=30)
     hv_ewma = calculate_ewma_volatility(hist, span=20)
+    # Long-window realized vol — the basis the EV values multi-month
+    # options against. See long_window_volatility for why the short
+    # window overstated edge by ~900x on a single earnings gap.
+    hv_252d = long_window_volatility(hist)
     hv_parkinson = calculate_parkinson_volatility(hist, period=30)
     # Blend rolling, EWMA, and Parkinson vol: rolling gives stability, EWMA gives recency, Parkinson captures intraday range
     hv_30d: Optional[float]
@@ -2453,6 +2487,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     # 5. Enrich DataFrame with Context
     df["underlying"] = underlying
     df["hv_30d"] = hv_30d
+    df["hv_252d"] = hv_252d
     df["max_pain_strike"] = max_pain_strike
     df["ret_5d"] = ret_5d
     df["rsi_14"] = rsi_14
@@ -2635,6 +2670,7 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
             "hv": hv_30d,
             "bb_width_pct": bb_width_pct,
             "hv_ewma": hv_ewma,
+            "hv_252d": hv_252d,
             "hv_parkinson": hv_parkinson,
             "iv_rank": iv_rank_30,
             "iv_percentile": iv_pct_30,
