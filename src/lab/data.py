@@ -49,17 +49,21 @@ def adjust_splits(bars: Bars) -> Bars:
     continuous and total return is preserved."""
     if len(bars) < 2:
         return list(bars)
-    out = [list(b) for b in bars]
+    # Split the pairs apart rather than mutating a list of mixed-type rows: the
+    # dates never change, and keeping the closes in their own float list is what
+    # makes the arithmetic below well-typed.
+    dates = [d for d, _ in bars]
+    closes = [float(c) for _, c in bars]
     # Walk backwards so each adjustment applies to everything already before it.
-    for i in range(len(out) - 1, 0, -1):
-        prev, cur = out[i - 1][1], out[i][1]
+    for i in range(len(closes) - 1, 0, -1):
+        prev, cur = closes[i - 1], closes[i]
         if prev <= 0 or cur <= 0:
             continue
         ratio = cur / prev
         if ratio - 1 <= _SPLIT_DROP or ratio - 1 >= _SPLIT_JUMP:
             for j in range(i):
-                out[j][1] *= ratio
-    return [(d, c) for d, c in out]
+                closes[j] *= ratio
+    return list(zip(dates, closes))
 
 
 def load_universe(symbols: Sequence[str], db_path: str = DEFAULT_PRICES,

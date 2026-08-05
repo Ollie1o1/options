@@ -748,7 +748,7 @@ class PaperManager:
     # peaked at +100% was exited at +100%, leaving nothing to learn.
     SHADOW_EXIT_PREFIXES = ("stop loss", "time exit")
 
-    def open_shadow_window(self, entry_id: int, exit_reason: str) -> bool:
+    def open_shadow_window(self, entry_id: int, exit_reason: Optional[str]) -> bool:
         """Start tracking what this trade does after being exited.
 
         Runs to the original expiry, which is the only date by which the
@@ -776,7 +776,7 @@ class PaperManager:
         data and must never be able to disturb the live book. Returns the
         number of rows marked."""
         if today is None:
-            today = _dt.datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now().strftime("%Y-%m-%d")
         rows = self.shadowed_positions(today=today)
         if not rows:
             return 0
@@ -829,7 +829,7 @@ class PaperManager:
     def shadowed_positions(self, today: Optional[str] = None) -> list:
         """Closed trades whose shadow window is still open, for the updater."""
         if today is None:
-            today = _dt.datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now().strftime("%Y-%m-%d")
         try:
             with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row

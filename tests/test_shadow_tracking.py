@@ -119,6 +119,17 @@ class ShadowSelectionTest(unittest.TestCase):
     def test_an_expired_window_drops_out(self):
         self.assertEqual(self.pm.shadowed_positions(today="2027-01-01"), [])
 
+    def test_the_default_today_resolves(self):
+        """Every other test here passes today= explicitly, which is exactly how
+        `_dt.datetime.now()` survived in the default branch: the name was never
+        imported, so calling without a date raised NameError and shadow marking
+        could not run at all. Leave one caller that takes the default path."""
+        self.assertIsInstance(self.pm.shadowed_positions(), list)
+
+    def test_update_shadow_marks_takes_the_default_path(self):
+        # Reached from update_positions() with no argument — the live call.
+        self.assertIsInstance(self.pm.update_shadow_marks(), int)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

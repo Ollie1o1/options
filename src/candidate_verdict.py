@@ -158,7 +158,10 @@ def rank(rows: Sequence[Dict[str, Any]],
     out: List[Dict[str, Any]] = []
     for row in rows:
         r = dict(row)
-        wr = (win_rates or {}).get(r.get("strategy_name"))
+        # A row with no strategy name (or a non-string one) has no historical
+        # win rate to look up — it must not fall back to an arbitrary entry.
+        name = r.get("strategy_name")
+        wr = (win_rates or {}).get(name) if isinstance(name, str) else None
         r["verdict"] = verdict_for(r, historical_win_rate=wr,
                                    max_friction_pct=max_friction_pct)
         out.append(r)
