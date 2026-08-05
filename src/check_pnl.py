@@ -676,72 +676,65 @@ def _print_portfolio_greeks(open_trades: list, width: int):
         print(note)
 
 
-# ── Cohort split (pre / post calibration) ─────────────────────────────────────
-# The entry-date column stores YYYY-MM-DD only, so a same-day calibration apply
-# (like the 2026-05-11 11:17 one) can't be split by date. We use entry_id as
-# the cutoff instead: it's monotonic and assigned at the moment the row is
-# inserted. Each tuple is (first_post_entry_id, human_label, iso_timestamp).
-# Trades with entry_id < first_post_entry_id are PRE; >= are POST.
-CALIBRATION_CUTOFFS = [
-    (220, "Calibration #1", "2026-05-11 11:17:22"),
-]
+# ── Book split (current vs closed history) ────────────────────────────────────
+# The book was restarted on BOOK_RESTART_DATE. Everything closed before it was
+# scored under superseded models and is kept as history only, which is why the
+# viewer no longer offers the old pre/post-calibration and pre-data/finalized
+# splits — they carved up trades nobody reads any more.
+#
+# The date is frozen on purpose. A rolling date.today() would empty the current
+# book every morning and quietly reclassify yesterday's work as history.
+#
+# CURRENT also carries every still-OPEN position regardless of entry date: 83 of
+# the 93 open positions predate the restart, and routing those into history would
+# hide live exposure from the one view where the book actually gets looked at.
+# The `era` column is untouched by all this — src/portfolio_eras.py still reports
+# the old-vs-new process split, which is separate evidence.
+BOOK_RESTART_DATE = "2026-08-05"
 
 
-def _cohort_for_entry_id(entry_id: int) -> str:
-    if not CALIBRATION_CUTOFFS:
-        return "post"
-    first_post = CALIBRATION_CUTOFFS[-1][0]
-    return "post" if int(entry_id or 0) >= first_post else "pre"
+def _entry_date(r) -> str:
+    """Entry date as YYYY-MM-DD. The column is a fixed-width 10-char date string
+    with no nulls, so a plain lexicographic compare is chronological. A blank
+    date sorts below any real one, i.e. as history — never silently current."""
+    return str(r.get("date") or "")[:10]
 
 
-def _filter_by_cohort(rows: list, cohort: Optional[str]) -> list:
-    if cohort not in ("pre", "post"):
+def _period_for_row(r) -> str:
+    if str(r.get("status") or "").upper() == "OPEN":
+        return "current"
+    return "current" if _entry_date(r) >= BOOK_RESTART_DATE else "before"
+
+
+def _filter_by_period(rows: list, period: Optional[str]) -> list:
+    """period: 'current' = restart date onward, plus every open position;
+    'before' = closed trades from before the restart; None = the whole book."""
+    if period not in ("current", "before"):
         return rows
-    return [r for r in rows if _cohort_for_entry_id(r.get("entry_id") or 0) == cohort]
-
-
-# ── Era split (pre-data vs finalized) ─────────────────────────────────────────
-# The `era` column marks when a trade was logged relative to the data-layer
-# build-out: 'pre_data' = older trades from before the DoltHub / data work,
-# 'finalized' = logged 2026-06-16 onward. A missing era is treated as 'pre_data'
-# (matches src/portfolio_eras.py), so this stays correct on legacy rows.
-def _era_for_row(r) -> str:
-    return r.get("era") or "pre_data"
-
-
-def _filter_by_era(rows: list, era: Optional[str]) -> list:
-    if era not in ("pre_data", "finalized"):
-        return rows
-    return [r for r in rows if _era_for_row(r) == era]
+    return [r for r in rows if _period_for_row(r) == period]
 
 
 def view_portfolio_menu() -> None:
-    """Interactive entry point — prompt for cohort filter, then render."""
+    """Interactive entry point — prompt for which slice of the book, then render."""
     print()
     print("  PORTFOLIO VIEW — choose what to show:")
-    print("    [A] All trades (default — includes calibration marker on chart)")
-    print("    [F] Finalized only (logged today/2026-06-16 onward — post data-layer)")
-    print("    [O] Older / pre-data (before the DoltHub data work)")
-    print("    [1] Pre-calibration  (trades scored under old hand-tuned weights)")
-    print("    [2] Post-calibration (trades scored under IC-tuned weights, 2026-05-11 onward)")
+    print(f"    [C] Current book (default — logged {BOOK_RESTART_DATE} onward, plus every open position)")
+    print(f"    [B] Before {BOOK_RESTART_DATE} (closed history, superseded scoring)")
+    print("    [A] All trades")
     try:
-        choice = input("  Choice [A/F/O/1/2]: ").strip().upper() or "A"
+        choice = input("  Choice [C/B/A]: ").strip().upper() or "C"
     except (EOFError, KeyboardInterrupt):
-        choice = "A"
+        choice = "C"
         print()
-    cohort = {"1": "pre", "2": "post"}.get(choice)
-    era = {"F": "finalized", "O": "pre_data"}.get(choice)
-    view_portfolio(cohort=cohort, era=era)
+    period = {"C": "current", "B": "before"}.get(choice)
+    view_portfolio(period=period)
 
-    # Auto-refresh the SVG chart for the chosen cohort (era filters use all).
+    # Auto-refresh the SVG chart. The calibration-cohort views are gone from this
+    # menu, so the chart always renders the whole equity book.
     try:
         import subprocess
         script = Path(__file__).resolve().parent.parent / "scripts" / "make_pnl_chart.py"
-        args = [sys.executable, str(script), "--equity-only"]
-        if cohort:
-            args += ["--cohort", cohort]
-        else:
-            args += ["--cohort", "all"]
+        args = [sys.executable, str(script), "--equity-only", "--cohort", "all"]
         print()
         print("  Refreshing equity curve chart...")
         subprocess.run(args, check=False)
@@ -749,14 +742,13 @@ def view_portfolio_menu() -> None:
         print(f"  (chart refresh skipped: {e})")
 
 
-def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
+def view_portfolio(period: Optional[str] = None):
     """Display paper portfolio from paper_trades.db.
 
     Args:
-        cohort: None for all trades, 'pre' for trades opened before the
-            calibration cutoff, 'post' for trades opened on/after.
-        era: None for all trades, 'finalized' for trades logged 2026-06-16
-            onward (post data-layer), 'pre_data' for older trades.
+        period: None for the whole book, 'current' for trades logged
+            BOOK_RESTART_DATE onward plus every still-open position,
+            'before' for closed trades from before the restart.
     """
     width = _width()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -801,16 +793,12 @@ def view_portfolio(cohort: Optional[str] = None, era: Optional[str] = None):
 
     # ── Header ─────────────────────────────────────────────────────────────────
     print()
-    all_rows = _filter_by_cohort(all_rows, cohort)
-    all_rows = _filter_by_era(all_rows, era)
-    cohort_label = {"pre": "PRE-CALIBRATION", "post": "POST-CALIBRATION"}.get(cohort or "", "")
-    era_label = {"finalized": "FINALIZED (today onward)",
-                 "pre_data": "PRE-DATA (older)"}.get(era or "", "")
+    all_rows = _filter_by_period(all_rows, period)
+    period_label = {"current": f"CURRENT BOOK ({BOOK_RESTART_DATE} ONWARD)",
+                    "before": f"BEFORE {BOOK_RESTART_DATE}"}.get(period or "", "")
     header_text = f"PAPER PORTFOLIO  \u2014  {now_str}"
-    if cohort_label:
-        header_text += f"  [{cohort_label}]"
-    if era_label:
-        header_text += f"  [{era_label}]"
+    if period_label:
+        header_text += f"  [{period_label}]"
 
     if HAS_FMT and fmt:
         print(ui.banner(header_text, [], width))
@@ -1526,15 +1514,13 @@ if __name__ == "__main__":
     import argparse
 
     _p = argparse.ArgumentParser(description="Paper portfolio viewer")
-    _p.add_argument("--era", choices=["finalized", "pre_data"], default=None,
-                    help="Filter by era: 'finalized' = logged 2026-06-16 onward, "
-                         "'pre_data' = older trades")
-    _p.add_argument("--finalized", "--today", dest="finalized", action="store_true",
-                    help="Show only trades logged today onward (era=finalized)")
-    _p.add_argument("--pre-data", "--older", dest="pre_data", action="store_true",
-                    help="Show only older pre-data trades (era=pre_data)")
-    _p.add_argument("--cohort", choices=["pre", "post"], default=None,
-                    help="Filter by calibration cohort")
+    _p.add_argument("--period", choices=["current", "before"], default=None,
+                    help=f"Filter the book: 'current' = logged {BOOK_RESTART_DATE} "
+                         "onward plus every open position, 'before' = closed history")
+    _p.add_argument("--current", dest="current", action="store_true",
+                    help=f"Show the current book ({BOOK_RESTART_DATE} onward + open positions)")
+    _p.add_argument("--before", dest="before", action="store_true",
+                    help=f"Show only closed trades from before {BOOK_RESTART_DATE}")
     _p.add_argument("--menu", action="store_true",
                     help="Open the interactive view chooser instead")
     _args = _p.parse_args()
@@ -1542,9 +1528,9 @@ if __name__ == "__main__":
     if _args.menu:
         view_portfolio_menu()
     else:
-        _era = _args.era
-        if _args.finalized:
-            _era = "finalized"
-        elif _args.pre_data:
-            _era = "pre_data"
-        view_portfolio(cohort=_args.cohort, era=_era)
+        _period = _args.period
+        if _args.current:
+            _period = "current"
+        elif _args.before:
+            _period = "before"
+        view_portfolio(period=_period)

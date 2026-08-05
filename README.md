@@ -759,18 +759,21 @@ Log any pick directly from the CLI and track it going forward:
 - Enforce exits standalone (e.g. from cron) with `python3 run.py --enforce-exits`
 - View portfolio with `python -m src.check_pnl` (or press `7` / `PORTFOLIO` at the mode menu) — viewer runs exit enforcement before display
 
-**Filtering the portfolio view.** Trades carry an `era` tag — `pre_data` (logged before the DoltHub / data-layer build-out) vs `finalized` (logged 2026-06-16 onward). Filter the viewer to focus on a single era:
+**Filtering the portfolio view.** The book was restarted on **2026-08-05**. The viewer splits on that frozen date rather than on the old era / calibration-cohort tags, which carved up trades scored under superseded models:
 
 ```bash
-python -m src.check_pnl --finalized   # only trades logged today onward (alias: --today)
-python -m src.check_pnl --older       # only older pre-data trades (alias: --pre-data)
-python -m src.check_pnl --era finalized | --era pre_data
-python -m src.check_pnl --cohort pre | post   # pre/post-calibration cohort split
-python -m src.check_pnl --menu        # interactive view chooser (All / Finalized / Older / cohorts)
-python -m src.check_pnl               # all trades (default)
+python -m src.check_pnl --current     # current book: 2026-08-05 onward + every open position
+python -m src.check_pnl --before      # closed history from before 2026-08-05
+python -m src.check_pnl --period current | --period before
+python -m src.check_pnl --menu        # interactive view chooser (Current / Before / All)
+python -m src.check_pnl               # whole book (default)
 ```
 
-The interactive `[7] PORTFOLIO` menu offers the same choices: `[A]` all · `[F]` finalized only · `[O]` older/pre-data · `[1]` pre-calibration · `[2]` post-calibration.
+The interactive `[7] PORTFOLIO` menu offers the same choices, defaulting to the current book: `[C]` current · `[B]` before 2026-08-05 · `[A]` all trades.
+
+`--current` deliberately includes **every still-open position regardless of entry date** — most open positions predate the restart, and filing them under history would hide live exposure. `--before` is therefore closed trades only. The cutoff is a frozen constant (`check_pnl.BOOK_RESTART_DATE`), not `date.today()`: a rolling date would empty the current book every morning.
+
+The underlying `era` column is unchanged, and `python -m src.portfolio_eras` still reports the pre-data vs finalized process split — that's separate evidence from what the viewer shows.
 
 ### Context-aware exit rules
 
