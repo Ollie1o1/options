@@ -427,7 +427,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 18
+_SCHEMA_VERSION = 19
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -592,6 +592,28 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN fill_source TEXT",
         "CREATE INDEX IF NOT EXISTS idx_fill_source ON trades(fill_source)",
     ],
+    19: [
+        # Shadow-tracking: what a CLOSED trade went on to do.
+        #
+        # The stop fires on 40 of 82 single-leg long trades, realising -60.3%
+        # from an average peak of +16.6%. Whether the stop helps or hurts is
+        # unanswerable from the ledger as it stood: max_price_seen stops
+        # updating the moment the position closes, so there is no post-exit
+        # path to compare the realised outcome against.
+        #
+        # shadow_until is the date to keep marking to (the original expiry).
+        # The post_exit_* columns are written by shadow_mark and are READ-ONLY
+        # to every existing consumer — status, exit_price, exit_reason, pnl_usd
+        # and max_price_seen are never touched, so the realised record stands
+        # exactly as it was. The high answers "could it have recovered"; the
+        # last answers "where did it actually end up". Judging a stop needs both.
+        "ALTER TABLE trades ADD COLUMN shadow_until TEXT",
+        "ALTER TABLE trades ADD COLUMN post_exit_max_price REAL",
+        "ALTER TABLE trades ADD COLUMN post_exit_max_date TEXT",
+        "ALTER TABLE trades ADD COLUMN post_exit_last_price REAL",
+        "ALTER TABLE trades ADD COLUMN post_exit_last_date TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_shadow_until ON trades(shadow_until)",
+    ],
 }
 
 
@@ -719,6 +741,104 @@ class PaperManager:
         # separately so a quiet feeder names the gate that held it back.
         self.untradeable_rejected = 0
         self._init_db()
+
+    # Exit reasons worth a counterfactual. Stop-outs realise -60.3% from an
+    # average peak of +16.6% and time exits realise +8.0% against a +60.2%
+    # peak, so both are open questions. A take-profit is not: every trade that
+    # peaked at +100% was exited at +100%, leaving nothing to learn.
+    SHADOW_EXIT_PREFIXES = ("stop loss", "time exit")
+
+    def open_shadow_window(self, entry_id: int, exit_reason: str) -> bool:
+        """Start tracking what this trade does after being exited.
+
+        Runs to the original expiry, which is the only date by which the
+        question "should I have held?" is fully settled."""
+        if not exit_reason:
+            return False
+        low = str(exit_reason).strip().lower()
+        if not any(low.startswith(p) for p in self.SHADOW_EXIT_PREFIXES):
+            return False
+        try:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    "UPDATE trades SET shadow_until = expiration "
+                    "WHERE entry_id = ? AND expiration IS NOT NULL", (entry_id,))
+                return cur.rowcount > 0
+        except Exception:
+            return False
+
+    def update_shadow_marks(self, today: Optional[str] = None) -> int:
+        """Quote every trade with an open shadow window and record the mark.
+
+        Runs after the live book is updated, on the same chain requests shape:
+        one option-chain call per (ticker, expiration), shared by every shadowed
+        row on that pair. Failure-safe throughout — a shadow mark is research
+        data and must never be able to disturb the live book. Returns the
+        number of rows marked."""
+        if today is None:
+            today = _dt.datetime.now().strftime("%Y-%m-%d")
+        rows = self.shadowed_positions(today=today)
+        if not rows:
+            return 0
+
+        marked = 0
+        chains: Dict[Tuple[str, str], dict] = {}
+        for r in rows:
+            ticker, expiration = r.get("ticker"), r.get("expiration")
+            strike, opt_type = r.get("strike"), str(r.get("type") or "").lower()
+            if not ticker or not expiration or strike is None or not opt_type:
+                continue
+            key = (ticker, expiration)
+            if key not in chains:
+                try:
+                    chains[key] = self._fetch_chain_quotes(ticker, expiration)
+                except Exception:
+                    chains[key] = {}
+            bid, ask = chains[key].get((round(float(strike), 4), opt_type), (None, None))
+            mid = _mid_from_quote(bid, ask)
+            if mid and self.shadow_mark(r["entry_id"], mid, today):
+                marked += 1
+        return marked
+
+    def shadow_mark(self, entry_id: int, price: float, today: str) -> bool:
+        """Record where a CLOSED trade's premium went after it was exited.
+
+        Writes only the post_exit_* columns. The realised record — status,
+        exit_price, exit_reason, pnl_usd, max_price_seen — is never touched, so
+        this adds a counterfactual beside the outcome rather than rewriting it.
+
+        Ignored unless the trade has an open shadow window: `shadow_until` set
+        and not yet passed. Returns whether a mark was written."""
+        if price is None or price <= 0 or not today:
+            return False
+        try:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    "UPDATE trades SET "
+                    "post_exit_max_date = CASE WHEN ? > COALESCE(post_exit_max_price, 0) "
+                    "THEN ? ELSE post_exit_max_date END, "
+                    "post_exit_max_price = MAX(COALESCE(post_exit_max_price, 0), ?), "
+                    "post_exit_last_price = ?, post_exit_last_date = ? "
+                    "WHERE entry_id = ? AND shadow_until IS NOT NULL "
+                    "AND shadow_until >= ?",
+                    (price, today, price, price, today, entry_id, today))
+                return cur.rowcount > 0
+        except Exception:
+            return False
+
+    def shadowed_positions(self, today: Optional[str] = None) -> list:
+        """Closed trades whose shadow window is still open, for the updater."""
+        if today is None:
+            today = _dt.datetime.now().strftime("%Y-%m-%d")
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                return [dict(r) for r in conn.execute(
+                    "SELECT * FROM trades WHERE status='CLOSED' "
+                    "AND shadow_until IS NOT NULL AND shadow_until >= ? "
+                    "AND duplicate_of IS NULL", (today,))]
+        except Exception:
+            return []
 
     def _friction_to_credit_ratio(self, trade_dict: dict) -> Optional[float]:
         """Round-trip friction as a fraction of the credit received, or None.
@@ -1911,6 +2031,10 @@ class PaperManager:
                             "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, pnl_usd=?, exit_reason=? WHERE entry_id=?",
                             (safe_exit, now, clamped_pct, pnl_usd, reason, entry_id),
                         )
+                    # Keep marking a stopped-out or time-exited trade to its
+                    # original expiry, so "should I have held?" becomes data
+                    # instead of a question the ledger cannot answer.
+                    self.open_shadow_window(entry_id, reason)
                 continue
 
             # Single-leg path
@@ -2006,6 +2130,18 @@ class PaperManager:
                     """
                     with self._get_connection() as conn:
                         conn.execute(update_query, (safe_exit, now, clamped_pct, pnl_usd, reason, entry_id))
+                    # Single-leg longs are where the stop question actually
+                    # bites: it fires on 40 of 82 of them, realising -60.3%
+                    # from an average peak of +16.6%.
+                    self.open_shadow_window(entry_id, reason)
+
+        # Counterfactual pass: keep marking stopped-out and time-exited trades
+        # to their original expiry. Research data only — wrapped so it can
+        # never disturb the live book it runs behind.
+        try:
+            self.update_shadow_marks()
+        except Exception:
+            pass
 
         if closed_this_run:
             print(f"  Auto-closed {len(closed_this_run)} position(s):")
