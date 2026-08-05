@@ -5,7 +5,13 @@ every still-open position regardless of entry date — 83 open positions predate
 the restart, and routing them into history would hide live exposure from the
 view where the book actually gets looked at.
 """
+import io
+import os
+import sqlite3
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
 
 from src import check_pnl
 
@@ -86,6 +92,74 @@ class FrozenCutoffTest(unittest.TestCase):
         for attr in ("_filter_by_era", "_filter_by_cohort", "CALIBRATION_CUTOFFS"):
             self.assertFalse(hasattr(check_pnl, attr),
                              f"{attr} should have been retired with the era/cohort split")
+
+
+class EmptyResultPathTest(unittest.TestCase):
+    """Drives view_portfolio far enough to execute the no-rows branch.
+
+    That branch reported which filter was active and kept referring to the
+    retired `cohort`/`era` locals after the split was rewritten — a NameError
+    that no unit test reached, because nothing ran view_portfolio end to end.
+    Only mypy caught it. These run the real function against a temp ledger.
+    """
+
+    # The renderer reads a wide slice of columns once a row survives the filter,
+    # so build the table from the live schema instead of guessing at a stub —
+    # a stub fails on whichever column the renderer happens to touch next, for
+    # reasons that have nothing to do with the split under test. Only the columns
+    # the split and the renderer's header path need are populated; the rest stay
+    # NULL, which is what a real sparse legacy row looks like anyway.
+    COLUMNS = ("entry_id INTEGER PRIMARY KEY, date TEXT, ticker TEXT, expiration TEXT, "
+               "strike REAL, type TEXT, entry_price REAL, quality_score REAL, "
+               "strategy_name TEXT, status TEXT, exit_price REAL, exit_date TEXT, "
+               "pnl_pct REAL, pnl_usd REAL, weight_profile TEXT, exit_reason TEXT, "
+               "long_strike REAL, spread_width REAL, net_credit REAL, "
+               "max_profit_usd REAL, max_loss_usd REAL, net_delta REAL, "
+               "quantity REAL, paper_only INTEGER, era TEXT, capital_at_risk REAL, "
+               "duplicate_of INTEGER, entry_price_mid REAL, entry_price_fill REAL, "
+               "entry_price_cross REAL, fill_policy TEXT, fill_source TEXT, "
+               "shadow_until TEXT")
+
+    def _db(self, rows):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        with sqlite3.connect(path) as conn:
+            conn.execute(f"CREATE TABLE trades ({self.COLUMNS})")
+            conn.executemany(
+                "INSERT INTO trades (entry_id, date, ticker, expiration, strike, "
+                "type, entry_price, quantity, status, strategy_name) "
+                "VALUES (?,?,'SPY','2026-12-18',500.0,'CALL',1.0,1,?,'Long Call')",
+                rows)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def _run(self, path, period):
+        """Render with exit enforcement stubbed out — it would hit the network."""
+        out = io.StringIO()
+        with mock.patch.object(check_pnl, "DB_PATH", path), \
+                mock.patch("src.paper_manager.PaperManager"), \
+                redirect_stdout(out):
+            check_pnl.view_portfolio(period=period)
+        return out.getvalue()
+
+    def test_filtered_to_nothing_reports_the_filter(self):
+        # One closed trade from well before the restart, asking for current.
+        path = self._db([(1, "2026-01-01", "CLOSED")])
+        self.assertIn("No trades match this filter", self._run(path, "current"))
+
+    def test_empty_ledger_reports_no_trades_at_all(self):
+        self.assertIn("No trades logged yet", self._run(self._db([]), None))
+
+    def test_both_periods_render_without_raising(self):
+        path = self._db([(1, "2026-01-01", "CLOSED"), (2, CUT, "OPEN")])
+        for period in ("current", "before", None):
+            with self.subTest(period=period):
+                self._run(path, period)  # must not raise
+
+    def test_header_names_the_active_period(self):
+        path = self._db([(1, "2026-01-01", "CLOSED"), (2, CUT, "OPEN")])
+        self.assertIn("CURRENT BOOK", self._run(path, "current"))
+        self.assertIn(f"BEFORE {CUT}", self._run(path, "before"))
 
 
 if __name__ == "__main__":

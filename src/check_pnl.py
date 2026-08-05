@@ -822,7 +822,7 @@ def view_portfolio(period: Optional[str] = None):
         pass
 
     if not all_rows:
-        msg = ("\n  No trades match this filter.\n" if (cohort or era)
+        msg = ("\n  No trades match this filter.\n" if period
                else "\n  No trades logged yet.\n")
         print(msg)
         return
