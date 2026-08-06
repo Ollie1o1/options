@@ -3622,8 +3622,12 @@ def _score_fetched_data(
             _logdir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
             os.makedirs(_logdir, exist_ok=True)
             debug_path = os.path.join(_logdir, "scan_errors.log")
+            # Timestamped: without it, dating a recurring failure means diffing
+            # the traceback's line numbers against every commit that touched
+            # this file. Same header format as data_fetching's writer.
+            _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(debug_path, "a") as _f:
-                _f.write(f"\n=== {symbol} ({mode}) ===\n{tb}\n")
+                _f.write(f"\n=== {_ts} | {symbol} ({mode}) ===\n{tb}\n")
         except Exception:
             pass
 
@@ -4418,13 +4422,21 @@ def _check_market_hours() -> tuple:
     return check_market_hours()
 
 
-def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: bool = True, sector_ctx=None) -> "Optional[pd.DataFrame]":
-    """Thin wrapper: delegates to ai_rank pipeline so CLI and ai_rank.py share one code path."""
+def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: bool = True,
+                     sector_ctx=None, ticker_contexts: "Optional[dict]" = None) -> "Optional[pd.DataFrame]":
+    """Thin wrapper: delegates to ai_rank pipeline so CLI and ai_rank.py share one code path.
+
+    `ticker_contexts` is the per-symbol context the scan already computed
+    (`ScanResults.ticker_contexts`). It has to be handed in: this used to be
+    rebuilt here by looking symbols up in `data_fetching._CHAIN_CACHE`, but that
+    cache is keyed by `(symbol, min_dte, max_dte)`, so a bare-symbol lookup never
+    hit. Two-pass scoring degraded to single-pass on every run, and the
+    "two-pass" label is gated on the same empty dict, so nothing reported it.
+    """
     try:
         from ai_rank import score_and_rank
         from src.ranking import print_ranked_table
         from src.config_ai import AI_CONFIG
-        from src.data_fetching import _CHAIN_CACHE
     except Exception as exc:
         msg = f"AI scoring unavailable — import failed: {type(exc).__name__}: {exc}"
         if HAS_ENHANCED_CLI:
@@ -4455,17 +4467,20 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
 
         candidates = picks.sort_values("quality_score", ascending=False).head(20).copy()
 
-        ticker_contexts = {}
+        # Only the symbols that actually produced candidates: context for a
+        # ticker with no picks is tokens spent on a row the model never ranks.
+        _supplied = ticker_contexts or {}
+        contexts: dict = {}
         if AI_CONFIG.get("two_pass_enabled", True):
             for sym in candidates["symbol"].unique():
-                if sym in _CHAIN_CACHE:
-                    ticker_contexts[sym] = _CHAIN_CACHE[sym].get("context", {})
+                if sym in _supplied:
+                    contexts[sym] = _supplied[sym]
 
         if verbose:
-            _tp = "two-pass " if ticker_contexts else ""
+            _tp = "two-pass " if contexts else ""
             print(f"\n  Running AI {_tp}analysis on top {len(candidates)} picks...")
 
-        ranked = score_and_rank(candidates, ticker_contexts, vix_regime, sector_ctx=sector_ctx)
+        ranked = score_and_rank(candidates, contexts, vix_regime, sector_ctx=sector_ctx)
         if verbose:
             print_ranked_table(ranked, top_n=10)
         return ranked
@@ -4573,6 +4588,13 @@ def run_top_scan(
             # 25-70 DTE request came back with 7-23 DTE contracts.
             data = fetch_options_yfinance(sym, max_expiries,
                                           min_dte=min_dte, max_dte=max_dte)
+            # Same guard the parallel scan path applies before scoring. Without
+            # it a fetch result with no chain reached _score_fetched_data, which
+            # raised KeyError('df') into its own handler and logged the ticker
+            # to scan_errors.log as `error: 'df'` — naming the missing key
+            # rather than the fetch that failed.
+            if not isinstance(data, dict) or "error" in data or "df" not in data:
+                continue
             result = _score_fetched_data(
                 sym, data, mode, min_dte, max_dte,
                 rfr, config, vix_weights, "swing",
@@ -5386,7 +5408,8 @@ def main():
                 _ai_ranked = None
                 if not picks.empty and not getattr(args, 'no_ai', False):
                     _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True,
-                                                   sector_ctx=scan_results.market_context.get("sector_ctx"))
+                                                   sector_ctx=scan_results.market_context.get("sector_ctx"),
+                                                   ticker_contexts=scan_results.ticker_contexts)
 
                 # Pull spread/condor results for the save menu
                 _credit_spreads = scan_results.credit_spreads
