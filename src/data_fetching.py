@@ -1132,8 +1132,12 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1, error_types=(Exception,)
                                 os.makedirs(_logdir, exist_ok=True)
                                 _log = os.path.join(_logdir, "scan_errors.log")
                                 sym_hint = args[0] if args else kwargs.get("symbol", "?")
+                                # Timestamped so a recurring failure can be
+                                # dated by reading, not by git archaeology.
+                                # Same header format as the screener's writer.
+                                _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 with open(_log, "a") as _f:
-                                    _f.write(f"\n=== {func.__name__}({sym_hint}) ===\n{traceback.format_exc()}\n")
+                                    _f.write(f"\n=== {_ts} | {func.__name__}({sym_hint}) ===\n{traceback.format_exc()}\n")
                             except Exception:
                                 pass
                         raise e

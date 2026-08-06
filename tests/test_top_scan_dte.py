@@ -13,6 +13,15 @@ import pandas as pd
 from src import options_screener as osc
 
 
+def _fetch_result():
+    """The keys `_score_fetched_data` reads off a fetch result.
+
+    run_top_scan now skips anything without "df" (the guard the parallel scan
+    path always had), so a fake must carry the real shape to reach the scorer.
+    """
+    return {"df": pd.DataFrame(), "history_df": pd.DataFrame(), "context": {}}
+
+
 class TopScanForwardsDteTest(unittest.TestCase):
     def test_the_fetch_receives_the_dte_bounds(self):
         """Without these the fetch takes the front `max_expiries` expiries,
@@ -21,9 +30,14 @@ class TopScanForwardsDteTest(unittest.TestCase):
 
         def fake_fetch(symbol, max_expiries, min_dte=None, max_dte=None):
             seen["min_dte"], seen["max_dte"] = min_dte, max_dte
-            return {"success": False}
+            # Shaped like a real fetch result. Returning a bare {"success": ...}
+            # meant the scorer was handed a dict with no chain, which it logged
+            # to the operator's real scan_errors.log on every suite run.
+            return _fetch_result()
 
         with mock.patch.object(osc, "fetch_options_yfinance", fake_fetch), \
+             mock.patch.object(osc, "_score_fetched_data",
+                               lambda *a, **k: {"success": False}), \
              mock.patch.object(osc, "get_risk_free_rate", lambda: 0.045), \
              mock.patch.object(osc, "get_vix_level", lambda: 15.0), \
              mock.patch.object(osc, "get_market_context",
@@ -42,7 +56,7 @@ class TopScanForwardsDteTest(unittest.TestCase):
             return {"success": False}
 
         with mock.patch.object(osc, "fetch_options_yfinance",
-                               lambda *a, **k: {"success": True}), \
+                               lambda *a, **k: _fetch_result()), \
              mock.patch.object(osc, "_score_fetched_data", fake_score), \
              mock.patch.object(osc, "get_risk_free_rate", lambda: 0.045), \
              mock.patch.object(osc, "get_vix_level", lambda: 15.0), \
