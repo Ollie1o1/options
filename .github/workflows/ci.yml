@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger. During the 2026-08-06 Actions outage GitHub throttled
+  # webhooks to ~15%, so a push to main registered as an event but never
+  # created a run — and with only push/pull_request there was no way to ask
+  # for one short of an empty commit. Dispatch goes through the API instead
+  # of the webhook path.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
