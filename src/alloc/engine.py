@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from src.alloc.fills import (Leg, SKIP_CROSSED, SKIP_MISSING, fill_with_reason,
                              quotes_from_chain, reverse)
+from src.alloc.settle import implied_spot, settle
 from src.strategies.spec import StrategySpec
 
 # Structures whose net fill should be a credit. Everything else is a debit.
@@ -234,8 +235,17 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
             # ── manage what is already open ──
             for t in list(live):
                 if chain:
-                    price, reason = fill_with_reason(reverse(t.legs), quotes,
-                                                     allow_worthless=True)
+                    at_expiry = _dte(date, t.expiration) <= 0
+                    if at_expiry:
+                        # Settle at intrinsic value. At expiry there is no
+                        # spread to cross — ITM contracts are assigned, OTM ones
+                        # expire — and pricing off stale quotes let a defined-
+                        # risk spread post a loss larger than its own width.
+                        spot = implied_spot(chain, t.expiration)
+                        price = settle(t.legs, spot) if spot is not None else None
+                    else:
+                        price, _reason = fill_with_reason(reverse(t.legs),
+                                                          quotes)
                     if price is not None:
                         why = _should_exit(spec, t, price, date)
                         if why:
