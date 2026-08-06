@@ -19,36 +19,53 @@ from __future__ import annotations
 from collections import namedtuple
 from typing import Dict, List, Optional, Tuple
 
-Leg = namedtuple("Leg", "strike type action")   # action: "buy" | "sell"
+# Expiration is part of a leg's identity, not decoration. A chain holds many
+# expirations at once, so keying a quote on (strike, type) alone lets a March
+# 100-put collide with a June 100-put — the fill then comes from an arbitrary
+# expiry and the resulting P&L is meaningless.
+Leg = namedtuple("Leg", "expiration strike type action")  # action: buy | sell
 
 SKIP_MISSING = "missing_quote"
 SKIP_CROSSED = "crossed_quote"
 
-Quotes = Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]]
+Quotes = Dict[Tuple[str, float, str], Tuple[Optional[float], Optional[float]]]
 
 # Strikes arrive both from the chain and from arithmetic (short strike minus
 # width), so they must be compared at a tolerance rather than exactly.
 _STRIKE_DP = 4
 
 
-def _key(strike: float, typ: str) -> Tuple[float, str]:
-    return (round(float(strike), _STRIKE_DP), str(typ).lower())
+def _key(expiration: str, strike: float, typ: str) -> Tuple[str, float, str]:
+    return (str(expiration)[:10], round(float(strike), _STRIKE_DP),
+            str(typ).lower())
 
 
-def fill_with_reason(legs: List[Leg],
-                     quotes: Quotes) -> Tuple[Optional[float], Optional[str]]:
+def fill_with_reason(legs: List[Leg], quotes: Quotes,
+                     allow_worthless: bool = False
+                     ) -> Tuple[Optional[float], Optional[str]]:
     """Net fill per share for the whole structure.
 
     Positive = net credit received. Negative = net debit paid.
     Returns (None, reason) when any leg cannot be filled honestly.
+
+    `allow_worthless` matters enormously on the CLOSING side. An option that has
+    expired out of the money genuinely has a zero bid — that is a price, not an
+    absence of data. Treating it as missing meant winning positions could never
+    be closed while losing ones always could, which by itself drove a 25-delta
+    put spread to a 13% win rate. Entries keep the strict rule: opening a
+    position on a zero bid would be inventing a fill.
     """
     net = 0.0
     for leg in legs:
-        quote = quotes.get(_key(leg.strike, leg.type))
+        quote = quotes.get(_key(leg.expiration, leg.strike, leg.type))
         if quote is None:
             return None, SKIP_MISSING
         bid, ask = quote
-        if bid is None or ask is None or bid <= 0 or ask <= 0:
+        if bid is None or ask is None:
+            return None, SKIP_MISSING
+        if not allow_worthless and (bid <= 0 or ask <= 0):
+            return None, SKIP_MISSING
+        if bid < 0 or ask < 0:
             return None, SKIP_MISSING
         if bid > ask:
             return None, SKIP_CROSSED
@@ -68,11 +85,17 @@ def reverse(legs: List[Leg]) -> List[Leg]:
     holding to expiry is cheaper than managing at a profit target: held to
     expiry you pay the opening legs only.
     """
-    return [Leg(l.strike, l.type, "buy" if l.action == "sell" else "sell")
+    return [Leg(l.expiration, l.strike, l.type,
+                "buy" if l.action == "sell" else "sell")
             for l in legs]
 
 
 def quotes_from_chain(chain) -> Quotes:
-    """Build the quote lookup a chain row list implies."""
-    return {_key(c["strike"], c["type"]): (c.get("bid"), c.get("ask"))
-            for c in chain}
+    """Build the quote lookup a chain row list implies.
+
+    Keyed by expiration as well as strike and type — a chain spans many
+    expirations, and collapsing them would silently price one expiry's leg off
+    another's quote.
+    """
+    return {_key(c["expiration"], c["strike"], c["type"]):
+            (c.get("bid"), c.get("ask")) for c in chain}
