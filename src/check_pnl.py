@@ -13,6 +13,7 @@ from contextlib import closing
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 from pathlib import Path
+from src.paths import repo_path
 
 # Add project root and src to sys.path for direct execution
 _file_path = Path(__file__).resolve()
@@ -111,7 +112,7 @@ try:
 except Exception:
     HAS_RFR = False
 
-DB_PATH = "paper_trades.db"
+DB_PATH = repo_path("paper_trades.db")
 
 
 def _num_or_none(value: Any) -> Optional[float]:

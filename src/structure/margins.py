@@ -14,8 +14,9 @@ from typing import Dict, Optional
 import numpy as np
 
 from .types import StructureMargin
+from src.paths import repo_path
 
-DEFAULT_DB = "paper_trades.db"
+DEFAULT_DB = repo_path("paper_trades.db")
 DEFAULT_HISTORY = os.path.join("data", "structure_margins.tsv")
 _HISTORY_COLS = ("date", "strategy", "n", "breakeven_hit", "realized_hit",
                  "margin", "state")

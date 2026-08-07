@@ -10,8 +10,10 @@ the DoltHub ``stocks`` cross-section, which still carries names that later
 delisted (BBBY, MULN, ...). Nothing here touches the live screener.
 """
 
-DEFAULT_DB = "data/squeeze_backtest.db"      # FINRA short interest
-PRICES_DB = "data/squeeze_prices.db"         # daily closes
+from src.paths import repo_path
+
+DEFAULT_DB = repo_path("data/squeeze_backtest.db")   # FINRA short interest
+PRICES_DB = repo_path("data/squeeze_prices.db")      # daily closes
 # Separate file on purpose: the EDGAR backfill and the FINRA backfill run
 # concurrently, and sharing one SQLite file makes them fight for the write lock.
-SHARES_DB = "data/squeeze_shares.db"
+SHARES_DB = repo_path("data/squeeze_shares.db")

@@ -5,10 +5,11 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable, Dict, List, NamedTuple, Optional
 import numpy as np
+from src.paths import repo_path
 
 HORIZONS: Dict[str, int] = {"EOW": 5, "EOM": 21, "3M": 63}
 THRESHOLDS = (0.05, 0.10, 0.20)
-DEFAULT_DB = "data/equity_ohlcv.db"
+DEFAULT_DB = repo_path("data/equity_ohlcv.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (

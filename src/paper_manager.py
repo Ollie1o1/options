@@ -724,7 +724,12 @@ class PaperManager:
     """Manages paper trades stored in a SQLite database."""
     
     def __init__(self, db_path: str = "paper_trades.db", config_path: str = "config.json"):
-        self.db_path = db_path
+        # Anchored on assignment so every later use — connect, migrations, the
+        # exit enforcer — targets one ledger. A relative path here meant a run
+        # from another directory would CREATE a second, empty paper_trades.db
+        # and log real trades into it, while check_pnl from the repo root kept
+        # showing the old book. Absolute paths (every test fixture) pass through.
+        self.db_path = repo_path(db_path)
         self.config_path = config_path
         # Load friction costs from config (fall back to module-level constants)
         try:

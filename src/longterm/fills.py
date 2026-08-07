@@ -8,8 +8,9 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from typing import List, Optional, Set
+from src.paths import repo_path
 
-DEFAULT_DB = "data/longterm.db"
+DEFAULT_DB = repo_path("data/longterm.db")
 
 _SCHEMA = """CREATE TABLE IF NOT EXISTS fills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 from src.leverage import __main__ as M
+from src.leverage import paper as P
 from src.leverage.__main__ import build_signal_ticket, gate_progress
 from src.leverage.signals import Params
 
@@ -146,9 +147,15 @@ class TestMenuResilience(unittest.TestCase):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
             os.chdir(d)
+            # The chdir alone no longer sandboxes the ledger: PaperLedger's
+            # path is anchored to the repo root, so without this patch these
+            # menu paths would write into the REAL paper_trades_leverage.db.
+            _orig_db = P.DEFAULT_LEDGER_DB
+            P.DEFAULT_LEDGER_DB = os.path.join(d, "paper_trades_leverage.db")
             try:
                 M.menu()  # must return, not raise
             finally:
+                P.DEFAULT_LEDGER_DB = _orig_db
                 os.chdir(cwd)
                 D.load_history, D.fetch_funding = orig_load, orig_fund
                 builtins.input = orig_input
@@ -210,10 +217,16 @@ class TestPaperLog(unittest.TestCase):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
             os.chdir(d)
+            # This test LOGS a paper trade. The chdir used to be what kept it
+            # out of the real ledger; anchoring the path removed that, so the
+            # sandbox is now explicit. Without it this writes real trades.
+            _orig_db = P.DEFAULT_LEDGER_DB
+            P.DEFAULT_LEDGER_DB = os.path.join(d, "paper_trades_leverage.db")
             try:
                 M._menu_paper_log()
                 return PaperLedger().open_positions()
             finally:
+                P.DEFAULT_LEDGER_DB = _orig_db
                 os.chdir(cwd)
                 D.load_history, M._strategy = orig_load, orig_strat
                 builtins.input = orig_input

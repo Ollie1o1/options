@@ -32,6 +32,7 @@ def _get_yf():
     return _yf
 
 import time as _time
+from src.paths import repo_path
 _IV_CACHE: dict = {}          # {key: (iv_value, timestamp)}
 _IV_CACHE_TTL = 900           # 15 minutes
 
@@ -102,7 +103,7 @@ class RiskAggregator:
         db_path: str = "paper_trades.db",
         config: Optional[Dict] = None,
     ) -> None:
-        self.db_path = db_path
+        self.db_path = repo_path(db_path)
         self.config = config or {}
 
     # ------------------------------------------------------------------

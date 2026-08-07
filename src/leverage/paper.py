@@ -3,9 +3,18 @@ nothing here ever sends an order; the (future) live path is gated elsewhere."""
 from __future__ import annotations
 import sqlite3
 from typing import List
+from typing import Optional
 from .signals import Signal
 from .sizing import Sizing
 from src.core.pnl import realized_pnl
+from src.paths import repo_path
+
+# Module-level so a test can point the ledger somewhere else by patching THIS,
+# rather than by chdir'ing and relying on a relative path to sandbox the write.
+# That is how tests/leverage/test_cli.py used to isolate itself, and it is a
+# sandbox that silently disappears the moment the path is anchored — which is
+# exactly what happened here.
+DEFAULT_LEDGER_DB = repo_path("paper_trades_leverage.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS perp_trades (
@@ -19,8 +28,11 @@ CREATE TABLE IF NOT EXISTS perp_trades (
 
 
 class PaperLedger:
-    def __init__(self, db_path: str = "paper_trades_leverage.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        # Resolved at call time, not import time, so patching DEFAULT_LEDGER_DB
+        # takes effect. An explicit relative path still anchors; an absolute one
+        # passes through.
+        self.db_path = repo_path(db_path) if db_path else DEFAULT_LEDGER_DB
         with self._conn() as c:
             c.executescript(_SCHEMA)
 

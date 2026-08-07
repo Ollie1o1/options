@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import sqlite3
 from typing import Dict, List, Sequence
+from src.paths import repo_path
 
-DEFAULT_DB = "data/squeeze_sleeve.db"
+DEFAULT_DB = repo_path("data/squeeze_sleeve.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cohort (

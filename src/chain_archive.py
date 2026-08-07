@@ -21,8 +21,9 @@ import os
 import sqlite3
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence
+from src.paths import repo_path
 
-DEFAULT_DB = os.path.join("data", "chain_archive.db")
+DEFAULT_DB = repo_path(os.path.join("data", "chain_archive.db"))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS chain_snapshots (
