@@ -42,10 +42,25 @@ class TestLedgerDefaultsAreAnchored(unittest.TestCase):
             self.assertEqual(PaperManager(db_path=db).db_path, db,
                              "an absolute path must pass through untouched")
 
-    def test_paper_manager_default_is_the_repo_ledger(self):
-        from src.paper_manager import PaperManager
-        pm = PaperManager(db_path=str(REPO_ROOT / "paper_trades.db"))
-        self.assertEqual(Path(pm.db_path), REPO_ROOT / "paper_trades.db")
+    def test_paper_manager_resolves_through_repo_path(self):
+        """Proves the wiring WITHOUT opening the real ledger.
+
+        This assertion used to construct `PaperManager(db_path=REPO_ROOT /
+        "paper_trades.db")`, and PaperManager runs schema migrations in
+        __init__ — so the test silently migrated the live 947-trade book on
+        every suite run. It was caught by a checksum, not by anything failing.
+        A test must never name the real ledger, even to read it.
+        """
+        from unittest.mock import patch
+
+        import src.paper_manager as pm_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "t.db")
+            with patch.object(pm_mod, "repo_path",
+                              side_effect=pm_mod.repo_path) as spy:
+                pm = pm_mod.PaperManager(db_path=db)
+            spy.assert_any_call(db)
+            self.assertEqual(pm.db_path, db)
 
     def test_module_level_defaults(self):
         from src.breakout.data import DEFAULT_DB as BREAKOUT_DB
@@ -111,6 +126,48 @@ class TestLeverageLedgerSandbox(unittest.TestCase):
         from src.leverage.paper import PaperLedger
         self.assertEqual(Path(PaperLedger(str(REPO_ROOT / "paper_trades_leverage.db")).db_path),
                          REPO_ROOT / "paper_trades_leverage.db")
+
+
+class TestDiagnosticsNeverCreateTheLedger(unittest.TestCase):
+    """A read must not bring the thing it is reading into existence.
+
+    `sqlite3.connect` on a missing path CREATES an empty database. Every gate
+    and banner read did that, so a fresh clone's first scan left behind a
+    zero-row paper_trades.db — which then reads as a real book with no trades
+    rather than as an absent one. Read-only opens fail instead.
+    """
+
+    def _probe(self, fn):
+        p = os.path.join(tempfile.mkdtemp(), "no_such.db")
+        try:
+            fn(p)
+        except Exception:
+            pass
+        return os.path.exists(p)
+
+    def test_checkpoint_does_not_create_it(self):
+        from src.phase1_checkpoint import compute_checkpoint
+        self.assertFalse(self._probe(lambda p: compute_checkpoint(p, "2026-01-01")))
+
+    def test_open_cohort_count_does_not_create_it(self):
+        from src.maintenance import _open_cohort_count
+        self.assertFalse(self._probe(lambda p: _open_cohort_count(p, "2026-01-01")))
+
+    def test_preflight_does_not_create_it(self):
+        from src.execution.preflight import run_preflight
+        self.assertFalse(self._probe(
+            lambda p: run_preflight(db_path=p, config_path="config.json")))
+
+    def test_a_missing_ledger_still_reads_as_UNAVAILABLE_not_as_empty(self):
+        """Load-bearing distinction. Swallowing the error and returning an
+        empty cohort turns 'no ledger' into 'ledger with no evidence', and the
+        gate then says GATHERING when it should say do-not-trade."""
+        from src.execution.preflight import run_preflight
+        p = os.path.join(tempfile.mkdtemp(), "no_such.db")
+        result, checks = run_preflight(db_path=p, config_path="config.json")
+        gate = next(c for c in checks if c.name == "gate")
+        self.assertIn("unavailable", gate.detail)
+        self.assertFalse(result["cleared"])
 
 
 class TestRepoPathAcceptsBothShapes(unittest.TestCase):

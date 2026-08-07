@@ -50,6 +50,21 @@ from src import gate_extensions
 # the project shares one answer to "is this row evidence". Importers here keep
 # working.
 from src.ledger_filters import exclude_ruled_duplicates  # noqa: E402,F401
+
+
+def _ro_uri(db_path: str) -> str:
+    """SQLite URI opening ``db_path`` read-only.
+
+    The checkpoint is a diagnostic: it reports on the ledger and has no business
+    creating, migrating or write-locking it. A plain ``sqlite3.connect`` on a
+    missing path silently CREATES an empty database, which for a gate reading
+    means a fresh file quietly returning "no evidence" instead of saying the
+    ledger is absent.
+
+    Matches the idiom already in `short_premium_gate`. Note the two gates
+    differed on this for no stated reason — one read-only, one read-write.
+    """
+    return f"file:{db_path}?mode=ro"
 from src.paths import repo_path
 
 
@@ -77,7 +92,19 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
         sql += " AND capital_at_risk IS NOT NULL AND capital_at_risk <= ?"
         params = (phase1_start, float(max_capital_at_risk))
     scores, returns, dates = [], [], []
-    with sqlite3.connect(db_path) as conn:
+    # Read-only: a diagnostic must not create, migrate or write-lock the ledger
+    # it reports on. Same idiom as short_premium_gate.
+    #
+    # An absent ledger still RAISES sqlite3.OperationalError, and that is
+    # load-bearing — preflight turns the exception into "gate unavailable — do
+    # not trade", which is a different verdict from GATHERING. Read-write
+    # `connect` used to reach the same place by the scenic route: it created an
+    # empty file, then failed on `no such table: trades`. Read-only fails at the
+    # open instead, so the signal survives and the stray file does not appear.
+    # Do NOT wrap this in a try/except returning an empty cohort — that reads a
+    # missing ledger as a ledger with no evidence, which is the same conflation
+    # the score_adjustments NULL convention exists to avoid.
+    with sqlite3.connect(_ro_uri(db_path), uri=True) as conn:
         sql += exclude_ruled_duplicates(conn)
         for q, p, d in conn.execute(sql, params).fetchall():
             try:
@@ -250,7 +277,7 @@ def _load_short_premium_cohort(db_path: str, phase1_start: str,
         params.append(float(max_capital_at_risk))
     rows: list = []
     try:
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(_ro_uri(db_path), uri=True) as conn:
             fetched = conn.execute(sql, params).fetchall()
     except sqlite3.Error:
         return []

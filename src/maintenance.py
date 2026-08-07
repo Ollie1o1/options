@@ -155,8 +155,12 @@ def save_state(path: str, state: dict) -> None:
 def _open_cohort_count(db_path: str, phase1_start: str) -> int:
     sql = ("SELECT COUNT(*) FROM trades WHERE strategy_name='Long Call' "
            "AND status='OPEN' AND COALESCE(paper_only,0)=0 AND date >= ?")
+    # Read-only, same reason as phase1_checkpoint: counting open positions must
+    # not CREATE the ledger it is counting from. It did — a fresh clone's first
+    # scan banner left behind an empty paper_trades.db, which then read as a
+    # real book with zero trades rather than as an absent one.
     try:
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             return int(conn.execute(sql, (phase1_start,)).fetchone()[0])
     except sqlite3.Error:
         return 0
