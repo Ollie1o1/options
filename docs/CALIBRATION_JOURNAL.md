@@ -384,3 +384,42 @@ posterior bands, effective n) and resolved **STOP** at n=92. See
 `status/DECISIONS.md`.
 
 ---
+
+## 2026-08-06 — friction ceiling tightened 0.50 → 0.25
+
+**Changed:** `config.max_friction_to_credit` 0.50 → 0.25.
+**Backup:** `config.bak.20260806-224238-friction.json`.
+**Applied by:** allocation-backtest evidence, not a calibration run.
+
+**Why.** The allocation backtester measured the median crossing cost at exactly
+**50% of credit** — $90 at mid, $45 actually received, over 400 real trades with
+a median per-leg bid-ask of $0.35. A 0.50 ceiling therefore admitted roughly
+half of all candidates, and the backtest says those are the ones that lose.
+
+The supporting effect is the largest measured anywhere in this system:
+restricting to names whose spreads are 3.6% of mid rather than 16-21% moved the
+identical strategy from **-6.76% to -0.64%** return on capital, t=-17.84 over
+10,363 trades. Full evidence in `docs/ALLOCATION_BACKTEST_FINDINGS.md`.
+
+**Direction of risk.** This filter only ever REFUSES trades; it cannot add one.
+Tightening it is the conservative direction — it removes candidates the evidence
+says lose money, at the cost of a smaller cohort.
+
+**Cohort impact, stated plainly.** Fewer auto-logged trades means the gates
+accrue more slowly. That is a real cost and it is deliberate: the alternative is
+continuing to accrue trades that the friction measurement says cannot profit.
+
+**What was NOT changed, and why.** Six further proposals in
+`docs/SCORER_IMPROVEMENTS.md` are documented and left unapplied:
+
+- raising `composite_weights.spread` (0.0768) — would require renormalising all
+  26 weights and re-ranks everything; larger blast radius than the evidence
+  justifies in one step
+- raising `iv_rank` (0.0260) and gating on it — suggestive only, clustered t=0.83
+- a trend gate for short puts — clustered t=-1.42, not established
+- the 50% take-profit on spreads — changes LIVE EXIT behaviour, which alters the
+  open book and the gate cohort, and requires operator sign-off per DECISIONS.md
+- tail-risk display, and ranking by something other than `quality_score`
+
+Applying several at once would also be several more configurations against a
+deflation bar that already reflects 34.
