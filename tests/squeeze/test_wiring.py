@@ -53,6 +53,32 @@ class TestSqueezeWiring(unittest.TestCase):
         # Weeklies plus monthlies: 4 expirations is ~1 month out, not 2.
         self.assertGreaterEqual(SQUEEZE_MAX_EXPIRIES, 8)
 
+    def test_config_carries_the_squeeze_window_keys(self):
+        # The constants are only the fallback. Without the keys in config.json
+        # the window cannot be retuned without editing code.
+        import json
+        with open(os.path.join(os.path.dirname(__file__), "..", "..",
+                               "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        self.assertIn("max_days_to_expiration_squeeze", cfg.get("filters", {}),
+                      "max-DTE key must sit in filters, beside the _iron variant")
+        self.assertIn("max_expirations_squeeze", cfg,
+                      "expiration-count key must sit at top level, beside "
+                      "max_expirations — the code reads config.get(), not "
+                      "config['filters'].get()")
+
+    def test_configured_window_still_clears_the_dte_floor(self):
+        # A tuned window that ends below SQUEEZE_MIN_DTE would make every board
+        # degrade to the "shorter than the measured window" warning, silently.
+        import json
+        from src.squeeze.board import SQUEEZE_MIN_DTE
+        with open(os.path.join(os.path.dirname(__file__), "..", "..",
+                               "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        self.assertGreater(cfg["filters"]["max_days_to_expiration_squeeze"],
+                           SQUEEZE_MIN_DTE)
+        self.assertGreaterEqual(cfg["max_expirations_squeeze"], 11)
+
     def test_window_reaches_the_january_leaps(self):
         # The intermediate monthlies are often too thin near the money: on
         # 2026-08-07 RH's 105d and 133d expiries had no in-band call under a
