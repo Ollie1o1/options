@@ -53,6 +53,16 @@ class TestSqueezeWiring(unittest.TestCase):
         # Weeklies plus monthlies: 4 expirations is ~1 month out, not 2.
         self.assertGreaterEqual(SQUEEZE_MAX_EXPIRIES, 8)
 
+    def test_window_reaches_the_january_leaps(self):
+        # The intermediate monthlies are often too thin near the money: on
+        # 2026-08-07 RH's 105d and 133d expiries had no in-band call under a
+        # 15% spread, while 2027-01-15 (161d) had four passing every filter on
+        # 1,288 open interest. That expiry sits at index 8-10 across these
+        # names, so both bounds have to clear it or the fix misses.
+        from src.options_screener import SQUEEZE_MAX_DTE, SQUEEZE_MAX_EXPIRIES
+        self.assertGreaterEqual(SQUEEZE_MAX_DTE, 161)
+        self.assertGreaterEqual(SQUEEZE_MAX_EXPIRIES, 11)
+
 
 if __name__ == "__main__":
     unittest.main()

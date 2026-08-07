@@ -287,14 +287,22 @@ _SCAN_WARNINGS = [0]
 # with nothing to select, and the nearest 4 expirations on these weekly-heavy
 # names are all inside a month.
 #
-# 150 rather than something just past the floor, because these ladders are
-# sparse past the weeklies and the gap is not uniform: on 2026-08-07 QUBT and
-# SOUN both listed 2026-10-16 (70d), while ONDS jumped from 2026-09-18 (42d)
-# straight to 2026-12-18 (133d). A 75-day window lands in that hole and reports
-# "no calls past the floor" on a name that has four of them. Overpaying for
-# time is penalised by the ranking itself — more premium, lower multiple.
-SQUEEZE_MAX_DTE = 150
-SQUEEZE_MAX_EXPIRIES = 10
+# Wide, because these ladders are sparse past the weeklies and the gap is not
+# uniform: on 2026-08-07 QUBT and SOUN both listed 2026-10-16 (70d), while ONDS
+# jumped from 2026-09-18 (42d) straight to 2026-12-18 (133d). A 75-day window
+# lands in that hole and reports "no calls past the floor" on a name that has
+# four of them.
+#
+# The bound is the January LEAPS. Being listed is not enough — the intermediate
+# monthlies are frequently too thin near the money to trade. RH that day had
+# 105d and 133d expiries fetched and no in-band call under a 15% spread in
+# either, because its tight quotes sat at $120-$160 against a $195.68 spot,
+# outside the 15% moneyness band; 2027-01-15 (161d) had four calls clearing
+# every filter on up to 1,288 open interest. That expiry lands at index 8-10
+# across these names, so the count has to clear it too. Overpaying for time is
+# penalised by the ranking itself — more premium, lower multiple.
+SQUEEZE_MAX_DTE = 180
+SQUEEZE_MAX_EXPIRIES = 12
 
 # Optional imports (relative to this package)
 try:
