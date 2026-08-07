@@ -25,6 +25,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path as _Path
 from typing import Optional, Tuple, List, Dict, Union, Any
 from .schemas import ScanResult
+from . import absolute_scores
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
 import warnings
@@ -1741,12 +1742,14 @@ def calculate_scores(
             _SCAN_WARNINGS[0] += 1
             logging.getLogger(__name__).debug("Earnings EV blend failed: %s", _ev_blend_exc)
     em_realism_score = pd.to_numeric(df["em_realism_score"], errors='coerce').fillna(0.5).clip(0, 1)
-    theta_raw = df["theta_decay_pressure"].replace([pd.NA, pd.NaT], np.nan)
-    theta_ranked = rank_norm(theta_raw.fillna(theta_raw.median()))
-    if mode == "Premium Selling":
-        theta_score = theta_ranked.clip(0, 1)        # fast decay = good for sellers
-    else:
-        theta_score = (1.0 - theta_ranked).clip(0, 1) # fast decay = bad for buyers
+    # Absolute rather than rank_norm over the chain. calculate_scores runs once
+    # per symbol, so the rank ranked each contract only against its own chain,
+    # while the composite it feeds is compared ACROSS tickers — a contract's
+    # score moved with whatever else happened to be fetched. Constants are
+    # frozen from the chain archive; see src/absolute_scores and
+    # docs/ABSOLUTE_SCORES_20260807.md.
+    theta_score = absolute_scores.theta_pressure_score(
+        df["theta"], df["premium"], mode == "Premium Selling")
     theta_score = theta_score.where((df["T_years"] * 365.0) > 7, theta_score * 0.7)
     
     # Multi-timeframe momentum confluence (replaces simple momentum_score)
@@ -1925,11 +1928,11 @@ def calculate_scores(
 
         # Vega risk score: penalizes high vega exposure when IV rank is already elevated
         # High vega + high IV rank = mean-reversion risk (IV likely to compress)
-        vega_vals = pd.to_numeric(df.get("vega", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0).abs()
-        vega_dollar = vega_vals * 100  # per contract
-        iv_rank_for_vega = pd.to_numeric(df.get("iv_percentile_30", pd.Series(0.5, index=df.index)), errors="coerce").fillna(0.5)
-        vega_risk_raw = vega_dollar.rank(pct=True) * iv_rank_for_vega
-        vega_risk_score = (1.0 - vega_risk_raw).clip(0, 1)
+        # Absolute rather than .rank(pct=True) over the chain — same reason as
+        # theta above. See docs/ABSOLUTE_SCORES_20260807.md.
+        vega_risk_score = absolute_scores.vega_risk_score_absolute(
+            df.get("vega", pd.Series(0.0, index=df.index)),
+            df.get("iv_percentile_30", pd.Series(0.5, index=df.index)))
         df["vega_risk_score"] = vega_risk_score
 
         # Gamma pin score — always compute. Active only for near-expiry trades
@@ -2007,7 +2010,14 @@ def calculate_scores(
         else:
             iv_mispricing_score = pd.Series(np.clip(-resid * 5, 0, 1), index=df.index)
         # Dampen mispricing score by surface fit confidence
-        surf_conf = pd.to_numeric(df.get("iv_surface_confidence", 1.0), errors="coerce").fillna(0.0)
+        # Series default, not a bare float: pd.to_numeric(1.0) returns a float,
+        # which has no .fillna, so the scalar fallback raised AttributeError
+        # rather than degrading. Unreachable in production — enrich_and_score
+        # always sets the column, via fit_svi_surface or its except branch —
+        # but it made calculate_scores uncallable on a hand-built frame.
+        surf_conf = pd.to_numeric(
+            df.get("iv_surface_confidence", pd.Series(1.0, index=df.index)),
+            errors="coerce").fillna(0.0)
         iv_mispricing_score = iv_mispricing_score * surf_conf.clip(0, 1)
         # Bug fix: when no SVI surface fit exists (surf_conf ≈ 0), the multiplication
         # above yields 0.0 — not the neutral 0.5.  Restore neutrality for unfit contracts.
