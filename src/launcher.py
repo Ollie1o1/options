@@ -60,6 +60,23 @@ def _art_width() -> int:
         return WIDTH
 
 
+def _menu_rows() -> list:
+    """The numbered rows of the top menu, in order."""
+    rows = []
+    rows.append(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
+    rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
+    rows.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
+    rows.append(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
+                     tag="read-only"))
+    rows.append(_row("5", "HOLDINGS", "long-term stock accumulation — buy zones · tranches · TFSA book"))
+    rows.append(_row("6", "STRATEGIES",
+                     "your setups — signal · account · friction · evidence · verdict",
+                     tag="display-only"))
+    rows.append(_row("7", "SETTINGS", "theme · preferences · doctor"))
+    rows.append(_row("Q", "QUIT", "", muted_key=True))
+    return rows
+
+
 def _show_menu() -> str:
     # ── Wordmark masthead: the animated art lives HERE, at the very top of
     # the launcher, and nowhere else. The painter below re-styles exactly
@@ -87,14 +104,7 @@ def _show_menu() -> str:
         after.extend(("", "=" * WIDTH, "  OPTIONS SCREENER  ·  QUANT DESK",
                       "=" * WIDTH))
     after.append("")
-    after.append(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
-    after.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
-    after.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
-    after.append(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
-                      tag="read-only"))
-    after.append(_row("5", "HOLDINGS", "long-term stock accumulation — buy zones · tranches · TFSA book"))
-    after.append(_row("6", "SETTINGS", "theme · preferences · doctor"))
-    after.append(_row("Q", "QUIT", "", muted_key=True))
+    after.extend(_menu_rows())
     after.append("")
     # The canonical entry point, stated where a first-time user is already
     # looking. Six things start this project; only one of them needs learning.
@@ -295,13 +305,17 @@ def main() -> None:
             from src.longterm.board import menu as _holdings_menu
             _holdings_menu()
             continue
-        if choice in ("6", "SETTINGS"):
+        if choice in ("6", "STRATEGIES", "ST"):
+            from src.strategies.menu import run_menu
+            run_menu()
+            continue
+        if choice in ("7", "SETTINGS"):
             _settings_menu()
             continue
         if choice in ("Q", "QUIT", "EXIT", ""):
             print("  Goodbye.")
             return
-        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, 6, or Q")
+        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, 6, 7, or Q")
 
 
 if __name__ == "__main__":
