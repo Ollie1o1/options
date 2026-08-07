@@ -152,8 +152,8 @@ LIBRARY = [
           {"dte": [30, 45], "short_delta": 0.25, "width": 5.0,
            "iv_rank_min": 50}, _HELD, universe={"strata": ["liquid"]}),
        "Put credit spread, IV rank > 50, held to expiry",
-       "Holding pays only the opening legs and roughly halves the toll — 53% of "
-       "credit falls to 27% on measured friction. Paired with the managed "
+       "Holding pays only the opening legs and roughly halves the toll — 68% of "
+       "credit falls to 34% on measured friction. Paired with the managed "
        "version, this IS the cost experiment.",
        {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "candidate"),
     _r(_s("call_spread_extended", "bear_call",

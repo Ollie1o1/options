@@ -40,8 +40,9 @@ Median per-leg bid-ask spread: **$0.35**.
 This is the cost wall, quantified on real chains rather than assumed. It is
 larger than any previous estimate in this repo — `PROFITABILITY_FINDINGS.md` §7
 assumed a flat $0.05/share, and the ledger re-derivation on 2026-08-06 measured
-$0.050-$0.288 depending on structure. On the wider 115-symbol universe the toll
-is **half the credit**.
+**$0.050-$0.350** depending on structure (`docs/SCORER_IMPROVEMENTS.md` §5; Bull
+Put's round trip is 68% of its credit, Bear Call's 23%). On the wider
+115-symbol universe the toll is **half the credit**.
 
 ### Why that is fatal at these parameters
 

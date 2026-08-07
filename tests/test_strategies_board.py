@@ -64,8 +64,8 @@ class FrictionColumnTest(unittest.TestCase):
         out = format_board(LIBRARY, table=fr.RECORDED)
         managed = [ln for ln in out.splitlines() if "put_spread_ivr50 " in ln][0]
         held = [ln for ln in out.splitlines() if "put_spread_ivr50_hold" in ln][0]
-        self.assertIn("54%", managed)
-        self.assertIn("27%", held)
+        self.assertIn("68%", managed)
+        self.assertIn("34%", held)
 
     def test_an_unmeasured_structure_shows_a_dash_not_a_zero(self):
         out = format_board(LIBRARY, table=fr.RECORDED)

@@ -97,11 +97,27 @@ crossing the spread a **second** time.
 Measured, holding to expiry roughly halves the total toll — you pay the opening
 legs only. Per structure, round-trip vs held:
 
-| structure | round trip | held to expiry |
-|---|---:|---:|
-| Bull Put | 53% of credit | 27% |
-| Bear Call | 23% | 11% |
-| Iron Condor | 4% | 2% |
+| structure | n | friction/share | median credit | round trip | held to expiry |
+|---|---:|---:|---:|---:|---:|
+| Bull Put | 30 | $0.350 | $102.50 | **68% of credit** | 34% |
+| Bear Call | 41 | $0.050 | $44 | 23% | 11% |
+| Iron Condor | 59 | $0.175 | $964.50 | 4% | 2% |
+| Short Put | 25 | $0.100 | $634.50 | 3% | 2% |
+| Long Call | 34 | $0.100 | $838.75 | 2% | 1% |
+
+**Method, because an earlier version of this table said 53% for Bull Put.** The
+figures are the median of `|entry_price_cross - entry_price_mid|` and the median
+of `|entry_price_mid|` per structure, over the 194 ledger trades that recorded
+both prices, with **no quote filtering**. The earlier 53% dropped the 4 Bull Put
+fills (13% of that bucket) whose crossed price was not a tradeable credit —
+which measures the friction of the trades you would have *wanted*, not the
+friction the chain offered. Those quotes are real, so they stay in.
+
+`src/strategies/friction.py` computes this live off the ledger and the
+`[6] STRATEGIES` desk shows it as a column per setup, so the number here moves
+when the ledger does rather than sitting frozen in a doc. Bull Put remains
+**5.8× more expensive to cross than Bear Call**, which is the part that matters
+and which the flat $0.05/share assumption hid entirely.
 
 **Caveat, and it is a real one:** holding to expiry means accepting assignment
 risk and full max loss on breach, and the backtest's weekly cadence cannot

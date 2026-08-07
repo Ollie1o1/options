@@ -38,9 +38,11 @@ def _profile(setup_id, table=None):
 class RecordedTableTest(unittest.TestCase):
     """The fallback must reproduce the published figures, or it is folklore."""
 
-    def test_bull_put_costs_about_half_its_credit(self):
+    def test_bull_put_costs_two_thirds_of_its_credit(self):
+        """Unfiltered, as measured: 68%. The 53% once published dropped the
+        four fills whose crossed price was not a tradeable credit."""
         p = _profile("put_spread_ivr50")
-        self.assertAlmostEqual(p.pct_of_credit, 0.53, delta=0.03)
+        self.assertAlmostEqual(p.pct_of_credit, 0.68, delta=0.03)
 
     def test_bear_call_is_the_cheapest_credit_structure(self):
         bull = _profile("put_spread_ivr50")

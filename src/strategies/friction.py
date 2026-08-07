@@ -2,7 +2,7 @@
 
 The allocation backtest settled the ordering of problems for this desk: the
 binding constraint on short premium is not *when* to trade, it is the spread
-paid to get in. A Bull Put whose round trip costs 53% of its credit needs a win
+paid to get in. A Bull Put whose round trip costs 68% of its credit needs a win
 rate no signal in this repo has ever produced; a Bear Call at 23% does not. That
 difference is invisible on a board that only shows the hypothesis, which is why
 every setup carries a friction figure beside it.
@@ -39,21 +39,28 @@ DEFAULT_CONFIG = "config.json"
 MIN_OBSERVATIONS = 10
 
 # Fallback only. Median crossing cost per share and median position price per
-# share, from the 194 ledger trades that recorded both a mid and a crossed fill
-# on 2026-08-06. Round trip is 2x per_share, so bull_put reads 53% of credit and
-# bear_call 23% — the figures published in docs/ALLOCATION_BACKTEST_FINDINGS.md.
+# share, over the 194 ledger trades that recorded both a mid and a crossed fill,
+# re-derived 2026-08-06 by exactly the query `measure_from_ledger` runs — no
+# quote filtering. Round trip is 2x per_share, so bull_put reads 68% of credit
+# and bear_call 23%, the figures in docs/SCORER_IMPROVEMENTS.md §5.
+#
+# An earlier derivation published 53% for bull_put because it dropped the 4
+# trades whose crossed price was not a tradeable credit. Those are real quotes
+# on real chains; excluding them measures the friction of the trades you would
+# have wanted, not the friction the chain offered. The unfiltered figure is the
+# one this desk shows, so the fallback and the live measurement agree by method.
 _RECORDED_SOURCE = "recorded 2026-08-06 (n=194 ledger fills)"
 
 RECORDED: Dict[str, Dict[str, Any]] = {
-    "bull_put":    {"per_share": 0.288, "credit": 1.07, "n": 26,
+    "bull_put":    {"per_share": 0.350, "credit": 1.025, "n": 30,
                     "source": _RECORDED_SOURCE},
     "bear_call":   {"per_share": 0.050, "credit": 0.44, "n": 41,
                     "source": _RECORDED_SOURCE},
-    "iron_condor": {"per_share": 0.175, "credit": 9.64, "n": 59,
+    "iron_condor": {"per_share": 0.175, "credit": 9.645, "n": 59,
                     "source": _RECORDED_SOURCE},
-    "short_put":   {"per_share": 0.100, "credit": 6.34, "n": 25,
+    "short_put":   {"per_share": 0.100, "credit": 6.345, "n": 25,
                     "source": _RECORDED_SOURCE},
-    "long_call":   {"per_share": 0.100, "credit": 8.39, "n": 34,
+    "long_call":   {"per_share": 0.100, "credit": 8.3875, "n": 34,
                     "source": _RECORDED_SOURCE},
 }
 
