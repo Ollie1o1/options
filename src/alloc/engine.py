@@ -323,6 +323,11 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
             chain = source.chain(sym, date)          # only today's data, ever
             quotes = quotes_from_chain(chain) if chain else {}
             live = open_by_symbol.setdefault(sym, [])
+            # Portfolio-wide, not per symbol: an account holds ONE book. Keeping
+            # the cap per symbol let 14 names run 3 positions each — 42 open
+            # against a $4,000 account — and made every account-level return
+            # figure meaningless.
+            total_open = sum(len(v) for v in open_by_symbol.values())
 
             # ── manage what is already open ──
             for t in list(live):
@@ -365,7 +370,7 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
             if conditions and not passes(signals.features(sym), conditions):
                 stats["skipped_signal"] += 1
                 continue
-            if len(live) >= max_open:
+            if total_open >= max_open:
                 continue
             if entry_days == "random" and rng.random() > 0.5:
                 continue
