@@ -148,3 +148,40 @@ Applying all of it still does not produce a demonstrated edge — the best
 signalled configuration reaches t=0.83 clustered, against Harvey's hurdle of
 3.0. But it removes most of the cells where money was measurably lost, and that
 is worth more than a marginal positive result that has not survived deflation.
+
+---
+
+## Appendix: two data hazards found 2026-08-06
+
+### The dataset is NOT split-adjusted
+
+Seventeen split events affect fifteen universe symbols, six of them mega-caps:
+GOOG 2245→108 (2022-07-18), AMZN 2434→109, NVDA 1210→122, TSLA, AAPL, XLY.
+
+Unhandled this corrupts two things: a trend signal reads a 20:1 split as a 95%
+crash and keeps reading a catastrophic downtrend for a year, and a short put
+struck pre-split becomes absurdly in-the-money in the data although the real
+contract adjusts too. Contract adjustment cannot be reconstructed from this
+data, so `src/alloc/splits.py` detects the events, closes positions spanning one
+at the last clean mark, and resets the signal history.
+
+**Handling splits cut the mega-cap bull-put result from +3.38% to +2.44% RoC.**
+
+### The 2022-2026 window is a bull market, and it shows
+
+`bull_put` +2.44% against `bear_call` -9.43% — **the same names, the same
+period, both short premium.** A variance risk premium would reward both. The
+divergence says the driver is directional exposure, not premium.
+
+Year by year, the same strategy:
+
+| | 2022 | 2023 | 2024 | 2025 | 2026 |
+|---|---:|---:|---:|---:|---:|
+| bull put | **-9.9%** | +12.3% | +10.3% | +3.6% | -1.6% |
+| bear call | -4.2% | -18.0% | -6.8% | -6.3% | -16.7% |
+
+Negative in the bear year, positive through the rally. **Any positive result on
+this universe is bull-market beta until proven otherwise.**
+
+**The downtrend rule survives all of it**: -5.92% in downtrends against +2.44%
+overall, after split handling.

@@ -166,3 +166,36 @@ class PassesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitForgetTest(unittest.TestCase):
+    """A 20:1 split is not a 95% crash, and must not be read as one."""
+
+    def test_forget_clears_the_series(self):
+        h = SignalHistory()
+        for i in range(15):
+            h.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 2000.0, 0.2))
+        self.assertTrue(h.features("AAA"))
+        h.forget("AAA")
+        self.assertEqual(h.features("AAA"), {})
+
+    def test_history_restarts_cleanly_after_a_split(self):
+        h = SignalHistory()
+        for i in range(15):
+            h.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 2000.0, 0.2))
+        h.forget("AAA")
+        for i in range(15):
+            h.update("AAA", Snapshot(f"2024-02-{i+1:02d}", 100.0, 0.2))
+        # trend is measured against the POST-split series only
+        self.assertAlmostEqual(h.features("AAA")["trend"], 0.0, places=6)
+
+    def test_without_forget_a_split_looks_like_a_crash(self):
+        """Documents the bug this prevents."""
+        h = SignalHistory()
+        for i in range(15):
+            h.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 2000.0, 0.2))
+        h.update("AAA", Snapshot("2024-02-01", 100.0, 0.2))
+        self.assertLess(h.features("AAA")["trend"], -80)
+
+    def test_forgetting_an_unknown_symbol_is_harmless(self):
+        SignalHistory().forget("NOPE")

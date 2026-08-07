@@ -293,6 +293,7 @@ def _should_exit(spec: StrategySpec, trade: Trade, close_price: float,
 def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
            source: ChainSource,
            terminal: Optional[Dict[str, str]] = None,
+           splits: Optional[Dict[str, Any]] = None,
            stratum_of: Optional[Dict[str, str]] = None,
            seed: int = 20260806) -> Tuple[List[Trade], Dict[str, int]]:
     """Walk the calendar forward, opening and managing positions.
@@ -306,12 +307,14 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
                   if k.endswith(('_min', '_max'))
                   and k != 'max_friction_pct_of_credit'}
     terminal = terminal or {}
+    splits = splits or {}
     stratum_of = stratum_of or {}
     trades: List[Trade] = []
     open_by_symbol: Dict[str, List[Trade]] = {}
     stats = {"opened": 0, "closed": 0, "skipped_missing": 0,
              "skipped_crossed": 0, "skipped_no_legs": 0,
              "skipped_capital": 0, "skipped_friction": 0, "skipped_signal": 0,
+             "split_closed": 0,
              "ticker_ended": 0}
 
     cap = float(spec.sizing.get("max_capital_at_risk", 4000))
@@ -323,6 +326,22 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
             chain = source.chain(sym, date)          # only today's data, ever
             quotes = quotes_from_chain(chain) if chain else {}
             live = open_by_symbol.setdefault(sym, [])
+
+            # A split lands today: this dataset is not split-adjusted, so the
+            # chain's strikes and spot jump by the split factor while the real
+            # CONTRACTS adjust too. That cannot be reconstructed here, so open
+            # positions are closed at their last clean mark and the signal
+            # history is dropped rather than reading the jump as a 95% crash.
+            if date in splits.get(sym, ()):
+                for t in list(live):
+                    t.exit_date = date
+                    t.exit_reason = "split"
+                    t.exit_price = t.exit_price if t.exit_price is not None else 0.0
+                    t.pnl = (t.entry_price + (t.exit_price or 0.0)) * 100
+                    live.remove(t)
+                    stats["split_closed"] += 1
+                signals.forget(sym)
+                continue
             # Portfolio-wide, not per symbol: an account holds ONE book. Keeping
             # the cap per symbol let 14 names run 3 positions each — 42 open
             # against a $4,000 account — and made every account-level return

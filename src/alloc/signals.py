@@ -78,6 +78,16 @@ class SignalHistory:
             return                      # never rewrite or go backwards
         series.append(snap)
 
+    def forget(self, symbol: str) -> None:
+        """Drop a symbol's history entirely.
+
+        Called on a split. The price series either side of a 20:1 split are not
+        comparable, and a trend signal that spans one reads a 95% crash that
+        never happened — so the history restarts rather than being rescaled from
+        a factor this data does not record.
+        """
+        self._hist.pop(symbol, None)
+
     def features(self, symbol: str) -> Dict[str, Optional[float]]:
         """Signals as of the most recent snapshot fed in for this symbol."""
         series = self._hist.get(symbol, [])
