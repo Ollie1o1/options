@@ -6,18 +6,50 @@ Display-layer only. All styling goes through fmt.style / src.ui components
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 
 from src import formatting as fmt
 from src import ui
 from src.squeeze.detector import SETUP, WATCH, SqueezeSetup
+from src.squeeze.universe import SqueezeUniverse
 
 WIDTH = 100
 
 # yfinance SI is the bi-monthly FINRA number — often weeks stale.
 _STALENESS_CAVEAT = "SI is the bi-monthly FINRA print via yfinance — often weeks stale; confirm before sizing"
+
+
+def sourcing_lines(uni: SqueezeUniverse) -> List[str]:
+    """Where this scan's candidates came from — momentum cohort vs. fill.
+
+    The two screens have different measured base rates (P(+20% in 42d) 50.5%
+    vs 39.0%, docs/SQUEEZE_BACKTEST.md), so which one a name arrived on is
+    part of reading the board, not sourcing trivia.
+    """
+    tickers = list(uni.tickers or [])
+    momentum = list(uni.momentum or [])
+    lines: List[str] = []
+    if uni.source == "fallback":
+        lines.append(fmt.style(
+            f"{fmt.GLYPHS.get('warn', '!')} Finviz screens unavailable — scanning the "
+            f"hardcoded fallback list ({len(tickers)} names, refreshed by hand and "
+            "likely stale)", "warn"))
+        return lines
+    head = f"{len(momentum)} of {len(tickers)} cleared the +10% week filter"
+    if momentum:
+        lines.append(fmt.style(
+            f"{head}: {', '.join(momentum[:10])}"
+            f"{'...' if len(momentum) > 10 else ''}", "good"))
+    else:
+        lines.append(fmt.style(
+            f"{head} — no momentum cohort today; these are short-float rank only",
+            "muted"))
+    lines.append(fmt.style(
+        "  measured: heavy SI + upward momentum hits +20% in 42d 50.5% of the "
+        "time vs 39.0% on SI alone (22.5% base)", "muted"))
+    return lines
 
 
 def banner(setup: SqueezeSetup, ticker: str, width: int = WIDTH) -> Optional[str]:

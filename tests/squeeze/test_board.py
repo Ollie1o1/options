@@ -10,6 +10,7 @@ import pandas as pd
 from src import formatting as fmt
 from src.squeeze import board as B
 from src.squeeze import detector as D
+from src.squeeze import universe as U
 
 
 def _setup_nbis():
@@ -103,6 +104,32 @@ class TestScanBoard(unittest.TestCase):
         self.assertIn("SETUP", text)
         self.assertIn("WATCH", text)
         self.assertIn("$185C 08/14", text)
+
+
+class TestSourcingLines(unittest.TestCase):
+    def setUp(self):
+        self._saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = self._saved
+
+    def test_reports_how_many_names_cleared_the_momentum_screen(self):
+        uni = U.SqueezeUniverse(tickers=["AAA", "BBB", "CCC"], momentum=["AAA", "BBB"])
+        text = "\n".join(B.sourcing_lines(uni))
+        self.assertIn("2 of 3", text)
+        self.assertIn("AAA", text)
+
+    def test_quiet_week_says_the_momentum_cohort_is_empty(self):
+        uni = U.SqueezeUniverse(tickers=["AAA", "BBB"], momentum=[])
+        text = "\n".join(B.sourcing_lines(uni))
+        self.assertIn("0 of 2", text)
+
+    def test_fallback_universe_is_called_out_as_stale(self):
+        # An 8-name hardcoded list must never read as a live Finviz screen.
+        uni = U.SqueezeUniverse(tickers=U.FALLBACK_TICKERS, source="fallback")
+        text = "\n".join(B.sourcing_lines(uni))
+        self.assertIn("fallback", text.lower())
 
 
 if __name__ == "__main__":

@@ -55,6 +55,101 @@ class TestSqueezeUniverse(unittest.TestCase):
         self.assertIn("sh_short_o20", U.SQUEEZE_FILTERS_F)
         self.assertIn("sh_opt_option", U.SQUEEZE_FILTERS_F)
 
+    def test_momentum_filter_adds_week_gain_to_the_base_screen(self):
+        # docs/SQUEEZE_BACKTEST.md: top-5% SI *and* 5d return >= +10% is the
+        # measured cohort (P(+20% in 42d) 50.5% vs 22.5% base).
+        self.assertTrue(U.SQUEEZE_FILTERS_MOMENTUM_F.startswith(U.SQUEEZE_FILTERS_F))
+        self.assertIn("ta_perf_1w10o", U.SQUEEZE_FILTERS_MOMENTUM_F)
+
+
+def _screens(momentum, base):
+    """Fake finviz_tickers dispatching on the filter string it is handed."""
+    calls = []
+
+    def fake(f_params, order="-averagevolume", limit=25):
+        calls.append({"f": f_params, "order": order, "limit": limit})
+        out = momentum if "ta_perf_1w10o" in f_params else base
+        if isinstance(out, Exception):
+            raise out
+        return list(out)[:limit]
+
+    return fake, calls
+
+
+class TestSqueezeUniverseComposition(unittest.TestCase):
+    def test_momentum_names_lead_and_base_screen_fills_the_rest(self):
+        fake, _ = _screens(["AAA", "BBB"], ["CCC", "DDD", "EEE"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            uni = U.get_squeeze_universe_detailed(max_tickers=4)
+        self.assertEqual(uni.tickers, ["AAA", "BBB", "CCC", "DDD"])
+        self.assertEqual(uni.momentum, ["AAA", "BBB"])
+        self.assertEqual(uni.source, "finviz")
+
+    def test_overlap_between_the_screens_does_not_shrink_the_scan(self):
+        # The momentum screen is a subset of the base filter set, so the base
+        # screen returns those same names again. Asking it for only the
+        # remaining slots leaves the scan short after dedup.
+        fake, _ = _screens(["AAA", "BBB"], ["AAA", "BBB", "CCC", "DDD", "EEE"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            uni = U.get_squeeze_universe_detailed(max_tickers=5)
+        self.assertEqual(uni.tickers, ["AAA", "BBB", "CCC", "DDD", "EEE"])
+
+    def test_a_name_on_both_screens_is_not_scanned_twice(self):
+        fake, _ = _screens(["AAA"], ["AAA", "BBB"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            uni = U.get_squeeze_universe_detailed(max_tickers=3)
+        self.assertEqual(uni.tickers, ["AAA", "BBB"])
+
+    def test_screens_are_ranked_by_short_interest_not_liquidity(self):
+        # SI deciles are monotone in the study; average volume carries no
+        # measured signal, so it must not decide which names survive the cut.
+        fake, calls = _screens(["AAA"], ["BBB", "CCC"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            U.get_squeeze_universe_detailed(max_tickers=3)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertEqual(call["order"], U.SQUEEZE_ORDER)
+
+    def test_base_screen_is_skipped_when_momentum_fills_the_quota(self):
+        fake, calls = _screens(["AAA", "BBB", "CCC"], ["DDD"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            uni = U.get_squeeze_universe_detailed(max_tickers=2)
+        self.assertEqual(uni.tickers, ["AAA", "BBB"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("ta_perf_1w10o", calls[0]["f"])
+
+    def test_quiet_week_with_no_momentum_names_still_scans_the_base_screen(self):
+        fake, _ = _screens([], ["CCC", "DDD"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            uni = U.get_squeeze_universe_detailed(max_tickers=3)
+        self.assertEqual(uni.tickers, ["CCC", "DDD"])
+        self.assertEqual(uni.momentum, [])
+        self.assertEqual(uni.source, "finviz")
+
+    def test_momentum_screen_failure_degrades_to_the_base_screen(self):
+        # A momentum-screen error must not cost the whole universe — the base
+        # screen is the same edge, minus one leg.
+        fake, _ = _screens(RuntimeError("finviz 429"), ["CCC", "DDD"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            uni = U.get_squeeze_universe_detailed(max_tickers=3)
+        self.assertEqual(uni.tickers, ["CCC", "DDD"])
+        self.assertEqual(uni.momentum, [])
+        self.assertEqual(uni.source, "finviz")
+
+    def test_both_screens_failing_degrades_to_the_hardcoded_list(self):
+        fake, _ = _screens(RuntimeError("finviz 429"), RuntimeError("finviz 429"))
+        with mock.patch.object(U, "finviz_tickers", fake):
+            uni = U.get_squeeze_universe_detailed(max_tickers=3)
+        self.assertEqual(uni.tickers, U.FALLBACK_TICKERS[:3])
+        self.assertEqual(uni.momentum, [])
+        self.assertEqual(uni.source, "fallback")
+
+    def test_plain_helper_still_returns_a_bare_ticker_list(self):
+        fake, _ = _screens(["AAA"], ["BBB"])
+        with mock.patch.object(U, "finviz_tickers", fake):
+            tickers = U.get_squeeze_universe(max_tickers=2)
+        self.assertEqual(tickers, ["AAA", "BBB"])
+
 
 class TestFinvizTickersPagination(unittest.TestCase):
     def test_stops_on_short_page_and_respects_limit(self):

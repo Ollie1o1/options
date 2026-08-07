@@ -254,3 +254,48 @@ The holdout alone beats the old full-sample result, and SETUP population is
 ```bash
 python -m src.squeeze.backtest --run --rebuild
 ```
+
+## Applied to the universe (2026-08-07)
+
+The 2026-07-28 pass fixed the *grader* but left the *sourcing* untouched, so
+the two disagreed. `[11] SQUEEZE` scanned 15 names drawn from a Float-Short>20%
+screen ordered by **average volume** — the most liquid names above the floor,
+which is a liquidity slice of the 22.5%-base cohort rather than the sharp end.
+Two consequences, both measured above:
+
+- **The momentum leg arrived too late to select anything.** "Top-5% SI *and*
+  5d return ≥ +10%" is the best rule in this study (P(+20% in 42d) 50.5%), but
+  it was only applied as a +2 score *after* 15 volume-picked names were chosen.
+  On a flat week the screen could hand back 15 candidates of which none carried
+  the strongest factor.
+- **The 20% floor flattens SI level.** Every name in the universe clears
+  `SI_HEAVY`, so all 15 collect the same +2 and the board's ordering falls to
+  the weaker legs — while SI level, the factor that beats the whole scoring
+  system, cannot separate anyone.
+
+`src/squeeze/universe.py` now runs the momentum screen first
+(`SQUEEZE_FILTERS_MOMENTUM_F`, base filters + Finviz `ta_perf_1w10o`) and fills
+any remaining slots from the plain short-float screen, both ordered
+`-shortinterestshare` rather than `-averagevolume`. Liquidity stays where it
+belongs, in the filters (`sh_avgvol_o500`, `sh_opt_option`), not in the
+ranking. `get_squeeze_universe_detailed()` reports which names came from which
+screen, and `board.sourcing_lines()` prints that split above the scan — the two
+screens have different base rates (50.5% vs 39.0%), so it is part of reading
+the board.
+
+Checked live on 2026-08-07: the new list overlapped the old volume-ranked one
+by **2 of 15** — a near-total change of universe. The base screen held 239
+names, the momentum screen 81 (a proper subset), so all 15 slots came from the
+momentum cohort that day and the fill path did not fire.
+
+Note the count mismatch against this study's "~16 names per settlement date":
+Finviz's Float Short is a share of *float*, while the panel here uses shares
+outstanding with an assumed float fraction (`--si-scale`), so the live screen's
+20% floor is looser than the study's top-5% bucket and admits more names. The
+direction of the finding is unaffected — SI rank is monotone either way — but
+the live cohort is not literally the top-5% bucket, and a quiet week will still
+shrink the momentum screen toward the fill path.
+
+**Unchanged by this:** the mode is still display-only, and the study still
+measures the *underlying's* move, not the option trade. High-SI names carry
+expensive vol; a fat right tail is necessary, not sufficient.

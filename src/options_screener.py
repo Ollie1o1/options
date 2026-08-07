@@ -5275,10 +5275,14 @@ def main():
             tickers = prompt_for_tickers()
             print(f"  Scanning {len(tickers)} tickers for lottery ticket setups: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
         elif is_squeeze_mode:
-            from src.squeeze.universe import get_squeeze_universe
-            print("  Sourcing high-short-float candidates from Finviz (Float Short > 20%)...")
-            tickers = get_squeeze_universe(max_tickers=15)
+            from src.squeeze.board import sourcing_lines
+            from src.squeeze.universe import get_squeeze_universe_detailed
+            print("  Sourcing from Finviz (Float Short > 20%, +10% week first, ranked by short interest)...")
+            _uni = get_squeeze_universe_detailed(max_tickers=15)
+            tickers = _uni.tickers
             print(f"  Scanning {len(tickers)} squeeze candidates: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+            for _line in sourcing_lines(_uni):
+                print(f"  {_line}")
         elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
             tickers = prompt_for_tickers()
             print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
