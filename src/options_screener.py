@@ -5448,6 +5448,7 @@ def main():
                 if mode == "Squeeze Hunt" and not picks.empty and "symbol" in picks.columns:
                     try:
                         from src.squeeze.board import squeeze_scan_board as _sq_scan_board
+                        from src.squeeze.board import best_call_label as _sq_best_call
                         from src.squeeze.detector import assess_squeeze_row as _sq_assess_row
                         _sq_stash_map = getattr(scan_results, "squeeze_calls", {}) or {}
                         _sq_per = []
@@ -5458,14 +5459,9 @@ def main():
                             # the delta band had already emptied of calls.
                             _sq_calls = _sq_stash_map.get(_sq_sym)
                             if _sq_calls is None or _sq_calls.empty:
-                                _sq_calls = _sq_grp[_sq_grp["type"] == "call"]
-                            _sq_best = None
-                            if not _sq_calls.empty and "quality_score" in _sq_calls.columns:
-                                _sq_r = _sq_calls.sort_values("quality_score", ascending=False).iloc[0]
-                                _sq_best = (f"${_sq_r.get('strike'):g}C "
-                                            f"{str(_sq_r.get('expiration', ''))[:10]}")
+                                _sq_calls = _sq_grp
                             _sq_per.append({"ticker": _sq_sym, "setup": _sq_s,
-                                            "best_call": _sq_best})
+                                            "best_call": _sq_best_call(_sq_calls)})
                         if _sq_per:
                             print("\n" + _sq_scan_board(_sq_per, width=WIDTH))
                     except Exception as _sqb_exc:

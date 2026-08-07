@@ -78,20 +78,98 @@ def _fmt_num(value, spec: str, na: str = "—") -> str:
         return na
 
 
-def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
-               width: int = WIDTH) -> Optional[str]:
-    """Calls-only slice of an enriched chain, ranked by existing quality_score.
+# The move to rank against: median path max of the backtest's best cohort
+# (top-5% SI and 5d return >= +10%) was +20.5% over 42 trading days.
+SQUEEZE_TARGET_MOVE = 0.20
 
-    The squeeze thesis is long the underlying, so surface the best calls even
-    when the mode's own ranking picked puts (the NBIS 2026-07-16 failure).
+
+def convexity_multiple(row, target_move: float = SQUEEZE_TARGET_MOVE) -> Optional[float]:
+    """What one contract pays if the underlying makes the measured move.
+
+    Intrinsic at expiry over premium paid. That assumes nothing about vol and
+    ignores extrinsic the contract would still hold if the move came early, so
+    it is conservative — and conservative in a stated direction, which a
+    repriced number with a guessed IV would not be.
+
+    The shape is what earns it: deep ITM scores low (all premium, little
+    leverage), a strike the move never reaches scores zero, and the ranking
+    peaks just out of the money. Returns None when it cannot be computed, so
+    "unknown" never sorts as "pays nothing".
+    """
+    get = row.get if hasattr(row, "get") else lambda k, d=None: d
+    spot = _num(get("underlying", get("spot")))
+    strike = _num(get("strike"))
+    premium = _num(get("premium"))
+    if spot is None or strike is None or premium is None:
+        return None
+    if spot <= 0 or premium <= 0:
+        return None
+    return max(0.0, spot * (1.0 + target_move) - strike) / premium
+
+
+def _num(value) -> Optional[float]:
+    try:
+        f = float(value)
+        return None if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank_calls(df: pd.DataFrame) -> pd.DataFrame:
+    """Calls from an enriched chain, best convexity first.
+
+    Falls back to quality_score when no row carries a spot, so a chain without
+    ``underlying`` still ranks on something rather than on row order.
+    """
+    calls = df[df["type"] == "call"].copy()
+    if calls.empty:
+        return calls
+    mult = calls.apply(convexity_multiple, axis=1)
+    if mult.notna().any():
+        calls["_convexity"] = mult
+        return calls.sort_values("_convexity", ascending=False, na_position="last")
+    calls["_convexity"] = None
+    if "quality_score" in calls.columns:
+        return calls.sort_values("quality_score", ascending=False)
+    return calls
+
+
+def best_call_label(df: pd.DataFrame) -> Optional[str]:
+    """The one contract the scan board names — same ranking as call_board.
+
+    Shared so the summary board's "Best call" column and the per-ticker board's
+    top row can never name different contracts.
     """
     if df is None or len(df) == 0 or "type" not in df.columns:
         return None
-    calls = df[df["type"] == "call"]
+    ranked = _rank_calls(df)
+    if ranked.empty:
+        return None
+    row = ranked.iloc[0]
+    strike = _num(row.get("strike"))
+    if strike is None:
+        return None
+    return f"${strike:g}C {str(row.get('expiration', ''))[:10]}".strip()
+
+
+def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
+               width: int = WIDTH) -> Optional[str]:
+    """Calls-only slice of an enriched chain, ranked for convexity.
+
+    The squeeze thesis is long the underlying, so surface the best calls even
+    when the mode's own ranking picked puts (the NBIS 2026-07-16 failure).
+
+    Ranked by ``convexity_multiple`` rather than quality_score: the scorer
+    rewards probability of profit, which on a call ladder means deep ITM, and
+    the backtest is explicit that this is a right-tail trade — SETUP names show
+    a fatter right tail *and* a worse median. quality_score stays on the board
+    as ``Score`` so the scorer's own verdict is still visible.
+    """
+    if df is None or len(df) == 0 or "type" not in df.columns:
+        return None
+    calls = _rank_calls(df)
     if calls.empty:
         return None
-    if "quality_score" in calls.columns:
-        calls = calls.sort_values("quality_score", ascending=False)
     calls = calls.head(top_n)
 
     cols = [
@@ -101,11 +179,13 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
         {"h": "Delta", "w": 6, "align": "right"},
         {"h": "Prem", "w": 8, "align": "right"},
         {"h": "Sprd%", "w": 6, "align": "right"},
+        {"h": "+20%", "w": 7, "align": "right"},
         {"h": "Net EV", "w": 8, "align": "right"},
         {"h": "Score", "w": 6, "align": "right"},
     ]
     rows = []
     for _, r in calls.iterrows():
+        _mult = r.get("_convexity")
         rows.append([
             f"${_fmt_num(r.get('strike'), '.1f')}",
             str(r.get("expiration", "—"))[:10],
@@ -115,11 +195,21 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
             # spread_pct is a fraction pipeline-wide ((ask-bid)/mid); the
             # column header is a percent, as in cli_display.
             _fmt_num(pd.to_numeric(r.get("spread_pct"), errors="coerce") * 100, ".1f"),
+            "—" if _mult is None or pd.isna(_mult) else f"{float(_mult):.1f}x",
             f"${_fmt_num(r.get('ev_per_contract'), '+.0f')}",
             _fmt_num(r.get("quality_score"), ".2f"),
         ])
     title = fmt.style(f"SQUEEZE CALLS — {ticker} (long side of the setup)", "heading")
-    return ui.card(title, ui.table(cols, rows).splitlines(), width)
+    body = ui.table(cols, rows).splitlines()
+    body.append(fmt.style(
+        f"{fmt.GLYPHS.get('bullet', '*')} +20% = contract value if the underlying makes the "
+        "cohort's median move, at expiry, over premium paid — ranked on this, not on PoP",
+        "muted"))
+    body.append(fmt.style(
+        f"{fmt.GLYPHS.get('warn', '!')} dividing by premium favours cheap, short-dated "
+        "contracts; the cohort's 50.5% hit rate is over 42 trading days, so check DTE "
+        "before reading a multiple as that trade", "muted"))
+    return ui.card(title, body, width)
 
 
 def squeeze_scan_board(per_ticker: list, width: int = WIDTH) -> str:
