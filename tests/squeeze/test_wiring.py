@@ -35,6 +35,24 @@ class TestSqueezeWiring(unittest.TestCase):
         self.assertIn("assess_squeeze_row", self.src)
         self.assertIn("squeeze read skipped", self.src)
 
+    def test_squeeze_mode_reaches_past_the_dte_floor(self):
+        # The board floors at SQUEEZE_MIN_DTE (60 calendar days). Discovery's
+        # defaults fetch the nearest 4 expirations out to 45 DTE, which on
+        # weekly-heavy squeeze names never reaches 60 — the floor would warn
+        # on every run instead of ever selecting anything.
+        self.assertTrue("max_days_to_expiration_squeeze" in self.src,
+                        "squeeze mode has no max-DTE default of its own")
+        self.assertTrue("max_expirations_squeeze" in self.src,
+                        "squeeze mode has no expiration-count default of its own")
+
+    def test_squeeze_fetch_window_covers_the_floor(self):
+        from src.squeeze.board import SQUEEZE_MIN_DTE
+        from src.options_screener import SQUEEZE_MAX_DTE, SQUEEZE_MAX_EXPIRIES
+        self.assertGreater(SQUEEZE_MAX_DTE, SQUEEZE_MIN_DTE,
+                           "fetch window ends at or before the floor")
+        # Weeklies plus monthlies: 4 expirations is ~1 month out, not 2.
+        self.assertGreaterEqual(SQUEEZE_MAX_EXPIRIES, 8)
+
 
 if __name__ == "__main__":
     unittest.main()

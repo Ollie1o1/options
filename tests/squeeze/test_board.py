@@ -172,11 +172,10 @@ class TestConvexityRanking(unittest.TestCase):
         self.assertLess(pos["10.0"], pos["13.0"])
         self.assertTrue(order)
 
-    def test_footnote_warns_that_short_dated_is_not_the_measured_trade(self):
-        # Dividing by premium favours cheap, short-dated contracts, and the
-        # cohort's hit rate is measured over 42 trading days. A 13-DTE call
-        # priced at 3.3x is not the trade the 50.5% describes.
-        text = B.call_board(_ladder(), "ONDS", top_n=1)
+    def test_footnote_states_the_window_the_multiple_assumes(self):
+        # Dividing by premium favours cheap, short-dated contracts, so the
+        # board has to say which window the number is measured over.
+        text = B.call_board(_mixed_dte(), "ONDS", top_n=1)
         self.assertIn("42 trading days", text)
 
     def test_board_shows_the_multiple_it_ranked_on(self):
@@ -205,6 +204,73 @@ class TestConvexityRanking(unittest.TestCase):
         text = B.call_board(df, "ONDS", top_n=1)
         self.assertIsNotNone(text)
         self.assertIn("$6.0", text)  # best quality_score wins again
+
+
+def _mixed_dte(spot=8.69):
+    """Same strike across expiries: a cheap near one, a costlier far one."""
+    return pd.DataFrame([
+        {"type": "call", "strike": 9.0, "expiration": "2026-08-21", "dte": 13,
+         "delta": 0.49, "premium": 0.40, "spread_pct": 0.07,
+         "ev_per_contract": -8.0, "quality_score": 0.35, "underlying": spot},
+        {"type": "call", "strike": 9.0, "expiration": "2026-10-16", "dte": 69,
+         "delta": 0.55, "premium": 1.10, "spread_pct": 0.09,
+         "ev_per_contract": -9.0, "quality_score": 0.40, "underlying": spot},
+    ])
+
+
+class TestDteFloor(unittest.TestCase):
+    """The multiple is only that trade if the contract lives long enough.
+
+    The cohort's 50.5% is measured over 42 TRADING days, which is ~59 calendar
+    days — `dte` here is calendar (T_years * 365). Dividing by premium favours
+    the cheapest contract on the board, which is the shortest-dated one, so
+    without a floor the ranking systematically picks options that expire well
+    before the measured window closes.
+    """
+
+    def setUp(self):
+        self._saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = self._saved
+
+    def test_floor_covers_the_measured_window_in_calendar_days(self):
+        # 42 trading days * 7/5 = 58.8 — a 30-day floor covers barely half.
+        self.assertGreaterEqual(B.SQUEEZE_MIN_DTE, 59)
+
+    def test_short_dated_is_dropped_even_though_it_ranks_higher(self):
+        # 13-DTE pays (10.43-9)/0.40 = 3.6x vs the 69-DTE's 1.3x.
+        text = B.call_board(_mixed_dte(), "ONDS", top_n=3)
+        self.assertIn("2026-10-16", text)
+        self.assertNotIn("2026-08-21", text)
+
+    def test_best_call_label_applies_the_same_floor(self):
+        self.assertEqual(B.best_call_label(_mixed_dte()), "$9C 2026-10-16")
+
+    def test_a_board_with_nothing_past_the_floor_degrades_loudly(self):
+        # Better to show the short-dated calls with a warning than to print an
+        # empty board on a name whose chain has no long expiries listed.
+        short_only = _mixed_dte().head(1)
+        text = B.call_board(short_only, "ONDS", top_n=3)
+        self.assertIsNotNone(text)
+        self.assertIn("2026-08-21", text)
+        self.assertIn("shorter than the measured window", text)
+        # Must not claim the chain lacks long calls — it may simply have none
+        # inside the scan's DTE window (ONDS 2026-08-07: 42d then 133d).
+        self.assertIn("scan's DTE window", text)
+
+    def test_footnote_says_the_multiple_is_a_floor_for_long_dated(self):
+        # Intrinsic-at-expiry understates a 132-DTE call that catches the move
+        # in month one and still holds three months of extrinsic. Without this,
+        # comparing 0.9x (132d) against 3.6x (13d) reads as "short-dated wins".
+        text = B.call_board(_mixed_dte(), "ONDS", top_n=2)
+        self.assertIn("floor", text.lower())
+
+    def test_rows_without_a_dte_are_not_silently_dropped(self):
+        df = _mixed_dte().drop(columns=["dte"])
+        text = B.call_board(df, "ONDS", top_n=3)
+        self.assertIsNotNone(text)
 
 
 class TestCallBoardSpreadUnits(unittest.TestCase):

@@ -82,6 +82,15 @@ def _fmt_num(value, spec: str, na: str = "—") -> str:
 # (top-5% SI and 5d return >= +10%) was +20.5% over 42 trading days.
 SQUEEZE_TARGET_MOVE = 0.20
 
+# The window that move was measured over, in the units `dte` uses.
+# `dte` is calendar days (T_years * 365), and 42 trading days is 42 * 7/5 =
+# 58.8 of them before holidays — so a "30-day" floor would cover barely half
+# the window. Ranking divides by premium, which favours the cheapest contract
+# on the board, and the cheapest is always the shortest-dated: without this
+# floor the board systematically picks options that expire before the measured
+# move has had time to happen.
+SQUEEZE_MIN_DTE = 60
+
 
 def convexity_multiple(row, target_move: float = SQUEEZE_TARGET_MOVE) -> Optional[float]:
     """What one contract pays if the underlying makes the measured move.
@@ -115,6 +124,24 @@ def _num(value) -> Optional[float]:
         return None
 
 
+def _apply_dte_floor(calls: pd.DataFrame):
+    """Keep only contracts that outlive the measured window.
+
+    Returns ``(frame, floored)``. When nothing clears the floor the original
+    frame comes back with ``floored=False`` so the caller can show it under a
+    warning — a name whose chain simply lists no long expiries is worth seeing,
+    and an empty board is what this whole fix set out to stop printing.
+    Rows without a ``dte`` are kept: unknown is not the same as too short.
+    """
+    if "dte" not in calls.columns:
+        return calls, False
+    dte = pd.to_numeric(calls["dte"], errors="coerce")
+    long_enough = calls[dte.isna() | (dte >= SQUEEZE_MIN_DTE)]
+    if long_enough.empty:
+        return calls, False
+    return long_enough, True
+
+
 def _rank_calls(df: pd.DataFrame) -> pd.DataFrame:
     """Calls from an enriched chain, best convexity first.
 
@@ -124,6 +151,7 @@ def _rank_calls(df: pd.DataFrame) -> pd.DataFrame:
     calls = df[df["type"] == "call"].copy()
     if calls.empty:
         return calls
+    calls, _ = _apply_dte_floor(calls)
     mult = calls.apply(convexity_multiple, axis=1)
     if mult.notna().any():
         calls["_convexity"] = mult
@@ -170,6 +198,7 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
     calls = _rank_calls(df)
     if calls.empty:
         return None
+    _, _floored = _apply_dte_floor(df[df["type"] == "call"])
     calls = calls.head(top_n)
 
     cols = [
@@ -206,9 +235,21 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
         "cohort's median move, at expiry, over premium paid — ranked on this, not on PoP",
         "muted"))
     body.append(fmt.style(
-        f"{fmt.GLYPHS.get('warn', '!')} dividing by premium favours cheap, short-dated "
-        "contracts; the cohort's 50.5% hit rate is over 42 trading days, so check DTE "
-        "before reading a multiple as that trade", "muted"))
+        f"{fmt.GLYPHS.get('bullet', '*')} it is a FLOOR, and a looser one the longer the "
+        "contract: a 132d call that catches the move in month one still holds months of "
+        "extrinsic this ignores. Compare multiples across similar DTE, not across the board",
+        "muted"))
+    if _floored:
+        body.append(fmt.style(
+            f"{fmt.GLYPHS.get('bullet', '*')} DTE >= {SQUEEZE_MIN_DTE}d only — the cohort's "
+            "50.5% is measured over 42 trading days (~59 calendar), and ranking on premium "
+            "would otherwise always pick the shortest-dated contract", "muted"))
+    else:
+        body.append(fmt.style(
+            f"{fmt.GLYPHS.get('warn', '!')} every call in the scan's DTE window is shorter "
+            f"than the measured window ({SQUEEZE_MIN_DTE}d) — these multiples are NOT the "
+            "cohort's 50.5% trade; the move has less time to happen than the number assumes. "
+            "The chain may list longer expiries the scan did not fetch", "warn"))
     return ui.card(title, body, width)
 
 

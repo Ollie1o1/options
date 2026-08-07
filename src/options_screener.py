@@ -281,6 +281,21 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None,
 # Scan-level warning counter (incremented in except blocks, reported at end of scan)
 _SCAN_WARNINGS = [0]
 
+# Squeeze Hunt fetches a longer window than Discovery so the calls board has
+# something to floor on. squeeze.board.SQUEEZE_MIN_DTE is 60 calendar days
+# (the 42-trading-day measured window); fetching to 45 would leave the floor
+# with nothing to select, and the nearest 4 expirations on these weekly-heavy
+# names are all inside a month.
+#
+# 150 rather than something just past the floor, because these ladders are
+# sparse past the weeklies and the gap is not uniform: on 2026-08-07 QUBT and
+# SOUN both listed 2026-10-16 (70d), while ONDS jumped from 2026-09-18 (42d)
+# straight to 2026-12-18 (133d). A 75-day window lands in that hole and reports
+# "no calls past the floor" on a name that has four of them. Overpaying for
+# time is penalised by the ranking itself — more premium, lower multiple.
+SQUEEZE_MAX_DTE = 150
+SQUEEZE_MAX_EXPIRIES = 10
+
 # Optional imports (relative to this package)
 try:
     from .simulation import monte_carlo_pop, batch_monte_carlo_pop
@@ -5389,6 +5404,13 @@ def main():
         if is_iron_condor_mode:
             default_min_dte = str(f_config.get("min_days_to_expiration_iron", 30))
             default_max_dte = str(f_config.get("max_days_to_expiration_iron", 60))
+        elif is_squeeze_mode:
+            # The calls board floors at SQUEEZE_MIN_DTE so its multiples mean
+            # what they say. Discovery's 45-day window never reaches that, so
+            # the mode would warn on every run instead of selecting anything.
+            default_min_dte = str(f_config.get("min_days_to_expiration", 7))
+            default_max_dte = str(f_config.get("max_days_to_expiration_squeeze",
+                                              SQUEEZE_MAX_DTE))
         else:
             default_min_dte = str(f_config.get("min_days_to_expiration", 7))
             default_max_dte = str(f_config.get("max_days_to_expiration", 45))
@@ -5399,14 +5421,22 @@ def main():
         if getattr(args, "max_dte", None) is not None:
             default_max_dte = str(args.max_dte)
 
+        # Squeeze names are weekly-heavy: the nearest 4 expirations are all
+        # inside a month, so the count has to rise with the DTE window or the
+        # far expiries never get fetched to be floored on.
+        _default_expiries = str(
+            config.get("max_expirations_squeeze", SQUEEZE_MAX_EXPIRIES)
+            if is_squeeze_mode else config.get("max_expirations", 4)
+        )
         if args.auto:
-            max_expiries = config.get("max_expirations", 4)
+            max_expiries = int(_default_expiries)
             min_dte = int(default_min_dte)
             max_dte = int(default_max_dte)
             trader_profile = "swing"
         else:
             try:
-                max_expiries = int(prompt_input("How many nearest expirations to scan", "4"))
+                max_expiries = int(prompt_input("How many nearest expirations to scan",
+                                                _default_expiries))
             except Exception:
                 print("Invalid number for expirations.")
                 sys.exit(1)
