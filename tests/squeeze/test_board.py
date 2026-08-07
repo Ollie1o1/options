@@ -349,6 +349,67 @@ class TestRepricingAtTheWindow(unittest.TestCase):
         self.assertIn("IV held constant", text)
 
 
+class TestBreakevenVol(unittest.TestCase):
+    """What realized vol does this contract need to be worth buying?
+
+    Net EV was negative on every squeeze call, and the reason is definitional:
+    fair value is Black-Scholes on TRAILING realized vol (hv_252d first), so on
+    a name that just ran +18% on heavy short interest, IV exceeds it by
+    construction. That number measures against exactly what the squeeze thesis
+    disputes.
+
+    Breakeven vol sidesteps the argument. Gross EV = 0 at precisely IV — that
+    is the definition of implied vol and says nothing. The useful number is NET
+    EV = 0: the vol that also clears round-trip friction, which sits ABOVE IV.
+    The gap is what the spread costs you in vol points.
+    """
+
+    def setUp(self):
+        self._saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = self._saved
+
+    def _row(self, spread=0.10, iv=0.90):
+        # premium MUST be the BS price at this iv, or "breaks even at its own
+        # IV" is not a property of the row and the test proves nothing.
+        from src.utils import bs_call
+        premium = bs_call(8.69, 9.0, 69 / 365.0, 0.045, iv)
+        return {"type": "call", "strike": 9.0, "expiration": "2026-10-16",
+                "dte": 69, "delta": 0.55, "premium": premium, "spread_pct": spread,
+                "impliedVolatility": iv, "underlying": 8.69,
+                "ev_per_contract": -9.0, "quality_score": 0.40}
+
+    def test_a_frictionless_contract_breaks_even_at_its_own_iv(self):
+        # Zero spread, zero commission: net EV = gross EV, which is zero at IV.
+        got = B.breakeven_vol(self._row(spread=0.0), commission=0.0)
+        self.assertAlmostEqual(got, 0.90, places=3)
+
+    def test_friction_pushes_the_breakeven_above_iv(self):
+        got = B.breakeven_vol(self._row(spread=0.10), commission=0.0)
+        self.assertGreater(got, 0.90)
+
+    def test_a_wider_spread_demands_more_vol(self):
+        tight = B.breakeven_vol(self._row(spread=0.05), commission=0.0)
+        wide = B.breakeven_vol(self._row(spread=0.25), commission=0.0)
+        self.assertGreater(wide, tight)
+
+    def test_returns_none_when_it_cannot_be_solved(self):
+        self.assertIsNone(B.breakeven_vol({"strike": 9.0, "premium": 0.0,
+                                           "underlying": 8.69, "dte": 69}))
+        self.assertIsNone(B.breakeven_vol({"strike": 9.0, "premium": 1.1,
+                                           "underlying": 8.69}))
+
+    def test_board_shows_the_breakeven_and_its_gap_over_iv(self):
+        text = B.call_board(pd.DataFrame([self._row()]), "ONDS", top_n=1)
+        self.assertIn("BE vol", text)
+
+    def test_footnote_says_what_the_breakeven_means(self):
+        text = B.call_board(pd.DataFrame([self._row()]), "ONDS", top_n=1)
+        self.assertIn("realized vol", text.lower())
+
+
 class TestCallBoardSpreadUnits(unittest.TestCase):
     """`spread_pct` is a FRACTION everywhere in the pipeline.
 

@@ -158,6 +158,46 @@ def _num(value) -> Optional[float]:
         return None
 
 
+# Wealthsimple: $0 commission, spread is the whole cost. [[project_broker_costs]]
+_DEFAULT_COMMISSION = 0.0
+
+
+def breakeven_vol(row, rfr: float = 0.045,
+                  commission: float = _DEFAULT_COMMISSION) -> Optional[float]:
+    """Realized vol at which this contract's NET EV is zero.
+
+    The scan's `ev_per_contract` prices fair value on *trailing* realized vol
+    (`hv_252d` first), so on a name that just ran +18% on heavy short interest
+    it is negative by construction — it measures against precisely what the
+    squeeze thesis disputes. This number takes no view on future vol at all: it
+    reports the vol the trade needs, and lets the reader supply the view.
+
+    Gross EV is zero at exactly IV, which is the definition of implied vol and
+    tells you nothing. So this solves for NET zero — the vol that also repays
+    round-trip friction — by inverting Black-Scholes at ``premium + costs``.
+    The gap over IV is what crossing the spread costs in vol points.
+    """
+    get = row.get if hasattr(row, "get") else lambda k, d=None: d
+    spot = _num(get("underlying", get("spot")))
+    strike = _num(get("strike"))
+    premium = _num(get("premium"))
+    dte = _num(get("dte"))
+    if None in (spot, strike, premium, dte) or premium <= 0 or dte <= 0:
+        return None
+
+    spread = _num(get("spread_pct")) or 0.0
+    # Mirrors trade_analysis.net_ev_per_contract: half the spread per side,
+    # both sides, per share; commission is per contract so scale it down.
+    cost_per_share = spread * premium + (2.0 * commission / 100.0)
+    try:
+        from src.data_quality import implied_vol_from_price
+        return implied_vol_from_price("call", spot, strike, dte / 365.0, rfr,
+                                      premium + cost_per_share,
+                                      _num(get("dividend_yield")) or 0.0)
+    except Exception:
+        return None
+
+
 def _apply_dte_floor(calls: pd.DataFrame):
     """Keep only contracts that outlive the measured window.
 
@@ -243,12 +283,20 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
         {"h": "Prem", "w": 8, "align": "right"},
         {"h": "Sprd%", "w": 6, "align": "right"},
         {"h": "+20%", "w": 7, "align": "right"},
+        {"h": "IV", "w": 6, "align": "right"},
+        {"h": "BE vol", "w": 8, "align": "right"},
         {"h": "Net EV", "w": 8, "align": "right"},
         {"h": "Score", "w": 6, "align": "right"},
     ]
     rows = []
     for _, r in calls.iterrows():
         _mult = r.get("_convexity")
+        _iv = pd.to_numeric(r.get("impliedVolatility"), errors="coerce")
+        _be = breakeven_vol(r, rfr=rfr)
+        if _be is None or _iv is None or pd.isna(_iv):
+            _be_cell = "—"
+        else:
+            _be_cell = f"{_be * 100:.0f} +{(_be - float(_iv)) * 100:.0f}"
         rows.append([
             f"${_fmt_num(r.get('strike'), '.1f')}",
             str(r.get("expiration", "—"))[:10],
@@ -259,6 +307,8 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
             # column header is a percent, as in cli_display.
             _fmt_num(pd.to_numeric(r.get("spread_pct"), errors="coerce") * 100, ".1f"),
             "—" if _mult is None or pd.isna(_mult) else f"{float(_mult):.1f}x",
+            _fmt_num(_iv * 100 if _iv is not None else None, ".0f"),
+            _be_cell,
             f"${_fmt_num(r.get('ev_per_contract'), '+.0f')}",
             _fmt_num(r.get("quality_score"), ".2f"),
         ])
@@ -273,6 +323,11 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
         "what makes these comparable across DTE — a longer contract keeps the extrinsic it "
         "has left. Constant IV assumes neither the squeeze bid nor the crush after",
         "muted"))
+    body.append(fmt.style(
+        f"{fmt.GLYPHS.get('bullet', '*')} BE vol = the realized vol this contract needs for "
+        "net EV zero, and how far that sits above its IV — the +N is what crossing the "
+        "spread costs in vol points. Takes no view on future vol; Net EV does, and its view "
+        "is trailing hv_252d", "muted"))
     if _floored:
         body.append(fmt.style(
             f"{fmt.GLYPHS.get('bullet', '*')} DTE >= {SQUEEZE_MIN_DTE}d only — the cohort's "
