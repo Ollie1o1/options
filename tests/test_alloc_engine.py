@@ -321,3 +321,55 @@ class NearestStrikeWingTest(unittest.TestCase):
         from src.alloc.engine import actual_width
         self.assertEqual(actual_width([Leg("2024-03-15", 100.0, "call", "buy")]),
                          0.0)
+
+
+class SignalGatingTest(unittest.TestCase):
+    """Signal conditions must actually gate entries, and must not leak."""
+
+    def _chain(self, iv):
+        c = _bull_put_chain()
+        for row in c:
+            row["iv"] = iv
+        # a call at the same strike so put-call parity can recover spot
+        call = _c(100.0, "call", 2.0, 2.3, delta=0.25)
+        call["iv"] = iv
+        return c + [call]
+
+    def _dates(self, n):
+        return [f"2024-01-{i+1:02d}" for i in range(n)]
+
+    def test_an_impossible_condition_blocks_every_entry(self):
+        dates = self._dates(20)
+        data = {("AAA", d): self._chain(0.20) for d in dates}
+        spec = _spec(entry={"dte": [20, 90], "short_delta": 0.25, "width": 5.0,
+                            "iv_rank_min": 200})       # unreachable
+        trades, stats = replay(spec, ["AAA"], dates, FakeSource(data))
+        self.assertEqual(trades, [])
+        self.assertGreater(stats["skipped_signal"], 0)
+
+    def test_a_satisfiable_condition_allows_entries(self):
+        dates = self._dates(20)
+        data = {("AAA", d): self._chain(0.20) for d in dates}
+        spec = _spec(entry={"dte": [20, 90], "short_delta": 0.25, "width": 5.0,
+                            "iv_rank_min": 0},
+                     exit={"hold_to_expiry": True})
+        trades, _ = replay(spec, ["AAA"], dates, FakeSource(data))
+        self.assertTrue(trades)
+
+    def test_no_conditions_leaves_behaviour_unchanged(self):
+        dates = self._dates(20)
+        data = {("AAA", d): self._chain(0.20) for d in dates}
+        plain, _ = replay(_spec(exit={"hold_to_expiry": True}), ["AAA"], dates,
+                          FakeSource(data))
+        self.assertTrue(plain)
+
+    def test_early_dates_are_blocked_while_history_is_too_short(self):
+        """iv_rank needs history; before it exists the condition must FAIL,
+        not silently pass and make the strategy unconditional."""
+        dates = self._dates(6)
+        data = {("AAA", d): self._chain(0.20) for d in dates}
+        spec = _spec(entry={"dte": [20, 90], "short_delta": 0.25, "width": 5.0,
+                            "iv_rank_min": 0})
+        trades, stats = replay(spec, ["AAA"], dates, FakeSource(data))
+        self.assertEqual(trades, [])
+        self.assertGreater(stats["skipped_signal"], 0)

@@ -161,6 +161,62 @@ liquid and broad strata.
 in this dataset, selling put spreads pays for its own friction and no more. The
 bear call and iron condor stay clearly negative even there.
 
+## 4d. Signals on top of the breakeven baseline
+
+Signals are computed strictly causally from the chain itself — spot by put-call
+parity, ATM IV from the strike nearest spot, ranked within a trailing 52-week
+window. A condition whose feature cannot be computed **fails**, so an
+insufficient-history day is never silently treated as unconditional.
+
+Universe: mega-cap + index ETFs. Structure: bull put, 25-delta, held to expiry.
+
+| condition | n | win | RoC/trade | t | DSR (34 trials) |
+|---|---:|---:|---:|---:|---:|
+| **BASELINE — no signal** | 1,442 | 80.5% | **-0.64%** | -0.58 | 0.003 |
+| IV rank <= 30 | 600 | 80.2% | -0.97% | -0.59 | 0.003 |
+| IV rank >= 50 | 691 | 82.3% | **+2.02%** | 1.27 | 0.208 |
+| **IV rank >= 70** | 440 | 82.3% | **+3.00%** | 1.51 | **0.282** |
+| uptrend (spot > avg) | 919 | 81.5% | +0.33% | 0.25 | 0.031 |
+| **downtrend (spot < avg)** | 504 | 75.8% | **-4.65%** | **-2.30** | 0.000 |
+| after 4w drop > 5% | 391 | 78.3% | -2.38% | -1.03 | 0.001 |
+| after 4w rally > 5% | 496 | 79.8% | -1.19% | -0.59 | 0.003 |
+| IVR>=50 AND uptrend | 405 | 82.5% | +2.06% | 0.98 | 0.138 |
+
+### The shape is the evidence, not any single number
+
+**IV rank is monotone**: -0.97% at IVR<=30, -0.64% unconditional, +2.02% at
+IVR>=50, +3.00% at IVR>=70. Ordered across a graded parameter, in the direction
+theory predicts — sell premium when premium is rich. Monotonicity across a range
+is much harder to produce by chance than one good cell, and it is exactly what
+the earlier width series (non-monotone) lacked.
+
+**Selling puts into a downtrend is the clearest single effect**: -4.65% against
+a -0.64% baseline, the largest deviation in the table. Also the most intuitive —
+a put you sold is a bet the fall stops.
+
+**The "sell fear after a drop" hypothesis is contradicted.** Selling after a 4-week
+drop of more than 5% returned -2.38%, worse than baseline. The IV is higher
+because the risk is higher, and here the compensation did not cover it.
+
+### None of it is established
+
+| condition | t (naive) | t (clustered by entry day) |
+|---|---:|---:|
+| BASELINE | -0.58 | -1.06 |
+| IV rank >= 50 | 1.27 | 0.55 |
+| IV rank >= 70 | 1.51 | 0.83 |
+| downtrend | -2.30 | -1.42 |
+
+Positions opened on the same day share that day's market move, so the naive
+t-stat treats correlated trades as independent. Clustering by entry day roughly
+**halves every t-statistic**. The best result, IVR>=70, falls to **t=0.83** —
+against Harvey's hurdle of 3.0 — and its deflated Sharpe is 0.282 against a 0.5
+line.
+
+**Verdict: suggestive, coherent, and not established.** The monotone IV-rank
+pattern and the downtrend penalty are the two things worth carrying forward;
+neither is yet evidence a real-money gate should act on.
+
 ## 5. What this does NOT yet say
 
 - **No statistics.** CPCV, Deflated Sharpe and PBO are not built. No number here

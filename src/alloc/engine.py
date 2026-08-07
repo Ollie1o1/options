@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 from src.alloc.fills import (Leg, SKIP_CROSSED, SKIP_MISSING, _key as _fkey,
                              fill_with_reason, quotes_from_chain, reverse)
 from src.alloc.settle import implied_spot_any, settle
+from src.alloc.signals import SignalHistory, passes, snapshot
 from src.strategies.spec import StrategySpec
 
 # Structures whose net fill should be a credit. Everything else is a debit.
@@ -300,13 +301,17 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
     stops existing is closed rather than lost.
     """
     rng = random.Random(seed)
+    signals = SignalHistory()
+    conditions = {k: v for k, v in spec.entry.items()
+                  if k.endswith(('_min', '_max'))
+                  and k != 'max_friction_pct_of_credit'}
     terminal = terminal or {}
     stratum_of = stratum_of or {}
     trades: List[Trade] = []
     open_by_symbol: Dict[str, List[Trade]] = {}
     stats = {"opened": 0, "closed": 0, "skipped_missing": 0,
              "skipped_crossed": 0, "skipped_no_legs": 0,
-             "skipped_capital": 0, "skipped_friction": 0,
+             "skipped_capital": 0, "skipped_friction": 0, "skipped_signal": 0,
              "ticker_ended": 0}
 
     cap = float(spec.sizing.get("max_capital_at_risk", 4000))
@@ -353,6 +358,13 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
 
             if not chain:
                 continue                             # no data: skip, do not score
+
+            # Record today BEFORE deciding, so the signal may use today's own
+            # close but nothing later. History only ever moves forward.
+            signals.update(sym, snapshot(chain, date))
+            if conditions and not passes(signals.features(sym), conditions):
+                stats["skipped_signal"] += 1
+                continue
             if len(live) >= max_open:
                 continue
             if entry_days == "random" and rng.random() > 0.5:
