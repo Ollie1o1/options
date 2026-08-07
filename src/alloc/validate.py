@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy import stats
@@ -62,7 +62,7 @@ def purge_embargo(train_idx: Sequence[int], test_idx: Sequence[int],
     return [i for i in train_idx if not (purge_from <= i <= embargo_to)]
 
 
-def sharpe(returns: Sequence[float]) -> float:
+def sharpe(returns: Union[Sequence[float], Any]) -> float:
     """Per-observation Sharpe.
 
     The zero-variance guard is relative, not `sd > 0`: a constant series has a
@@ -95,7 +95,7 @@ def expected_max_sharpe(n_trials: int, trial_variance: float = 1.0) -> float:
     return float(v * ((1.0 - _EULER) * z1 + _EULER * z2))
 
 
-def deflated_sharpe(returns: Sequence[float], n_trials: int,
+def deflated_sharpe(returns: Union[Sequence[float], Any], n_trials: int,
                     trial_variance: Optional[float] = None) -> float:
     """P(true Sharpe > 0) given the size of the search, plus skew and kurtosis.
 

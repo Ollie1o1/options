@@ -405,6 +405,8 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
             if reason == SKIP_CROSSED:
                 stats["skipped_crossed"] += 1
                 continue
+            if price is None:            # narrows for the type checker; the
+                continue                   # skip branches above already caught it
             if spec.structure in CREDIT_STRUCTURES and price <= 0:
                 stats["skipped_missing"] += 1
                 continue
