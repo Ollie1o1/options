@@ -2251,7 +2251,16 @@ def enrich_and_score(
     vrp_data: Optional[dict] = None,
     news_data=None,
     dividend_yield: float = 0.0,
+    squeeze_out: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> pd.DataFrame:
+    """Score a chain and apply the mode's filters.
+
+    ``squeeze_out``: opt-in side channel. When Squeeze Hunt passes a dict, the
+    scored calls are written to ``squeeze_out["calls"]`` before the delta band
+    drops them. It is a parameter rather than a ``df.attrs`` entry because
+    pandas' ``__finalize__`` compares ``attrs`` dicts across the frames being
+    concatenated, and a DataFrame there raises on ``==``.
+    """
     # Use richer multi-source news sentiment when available
     if news_data is not None and hasattr(news_data, "aggregate_sentiment"):
         sentiment_score = news_data.aggregate_sentiment
@@ -2441,6 +2450,25 @@ def enrich_and_score(
         df["recommended_strategy"] = np.select(_conditions, _choices, default="Monitor")
     else:
         df["recommended_strategy"] = ""
+
+    # Squeeze Hunt: stash the long side before the delta band removes it.
+    #
+    # A squeeze is expressed near the money, at |delta| ~0.5, and the generic
+    # band below is 0.15-0.35 — so the calls this mode exists to find are
+    # filtered out by construction, while puts on a name that just ran +20%
+    # sit comfortably inside it. The 2026-08-07 run graded four SETUP names
+    # and offered nine puts and no calls for exactly this reason.
+    #
+    # Stashed AFTER the liquidity and IV-outlier filters, so this relaxes
+    # delta only: a 200%-spread contract is not a tradeable long side. Display
+    # consumes this via board.call_board; it never re-enters `picks`, so
+    # scoring, ranking and auto-log are untouched.
+    if mode == "Squeeze Hunt" and squeeze_out is not None:
+        _sq_calls = df[df["type"] == "call"].copy()
+        if not _sq_calls.empty:
+            if "quality_score" in _sq_calls.columns:
+                _sq_calls = _sq_calls.sort_values("quality_score", ascending=False)
+            squeeze_out["calls"] = _sq_calls
 
     # Final Filters
     if mode == "Long Gamma":
@@ -3535,8 +3563,10 @@ def _score_fetched_data(
         result["context_log"] = context_log
         result["news_data"] = news_data
 
+        _sq_out: Dict[str, pd.DataFrame] = {}
         df_scored = enrich_and_score(
             df_chain,
+            squeeze_out=_sq_out,
             min_dte=min_dte,
             max_dte=max_dte,
             risk_free_rate=rfr,
@@ -3564,6 +3594,13 @@ def _score_fetched_data(
 
         if bool(df_scored.attrs.get("stale_quotes_active")):
             result["stale_quote_ratio"] = float(df_scored.attrs.get("stale_quote_ratio", 0.0))
+
+        # Squeeze long side, captured before the delta band (see enrich_and_score).
+        # Set before the `df_scored.empty` return below on purpose: a ticker
+        # whose picks the band emptied is exactly one whose calls we still want.
+        _sq_stash = _sq_out.get("calls")
+        if isinstance(_sq_stash, pd.DataFrame) and not _sq_stash.empty:
+            result["squeeze_calls"] = _sq_stash
 
         if df_scored.empty:
             result["error"] = "No contracts passed filters"
@@ -3996,7 +4033,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     # Aggregate buffered results — also collect news_data per ticker
     news_map: Dict[str, Any] = {}
+    squeeze_calls_map: Dict[str, pd.DataFrame] = {}
     for symbol, result in results_buffer.items():
+        # Collected outside the success branch on purpose: a ticker whose picks
+        # were emptied by the delta band reports success=False, and those are
+        # precisely the squeeze names whose long side we still want to show.
+        _sq_stash = result.get('squeeze_calls')
+        if isinstance(_sq_stash, pd.DataFrame) and not _sq_stash.empty:
+            squeeze_calls_map[str(symbol)] = _sq_stash
         if result.get('success'):
             if result.get('history') is not None:
                 ticker_histories[symbol] = result['history']
@@ -4241,9 +4285,21 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                     continue
                 print("\n" + _sq_text)
                 if _sq_setup.grade == _SQ_SETUP:
-                    _sq_cb = _sq_call_board(_sq_rows, _sq_sym, width=WIDTH)
+                    # The stash, not _sq_rows: the ranked picks have already
+                    # lost every near-ATM call to the delta band, which is
+                    # where a squeeze is expressed.
+                    _sq_src = squeeze_calls_map.get(_sq_sym)
+                    _sq_from_stash = _sq_src is not None and not _sq_src.empty
+                    if not _sq_from_stash:
+                        _sq_src = _sq_rows
+                    _sq_cb = _sq_call_board(_sq_src, _sq_sym, width=WIDTH)
                     if _sq_cb:
                         print(_sq_cb)
+                        if _sq_from_stash:
+                            print(ui.kv_line("Note", fmt.style(
+                                "shown because the squeeze thesis is long — these sit outside the "
+                                "scan's delta band and the scorer did not rank them",
+                                "muted")))
                     else:
                         print(ui.kv_line("Note", fmt.style(
                             "no calls passed the scan filters — the squeeze long side needs a manual chain look",
@@ -4319,6 +4375,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         spreads=pd.DataFrame(),
         credit_spreads=credit_spreads_df,
         iron_condors=iron_condors_df,
+        squeeze_calls=squeeze_calls_map,
         top_pick=top_pick,
         underlying_price=underlying_price,
         rfr=rfr,
@@ -5392,10 +5449,16 @@ def main():
                     try:
                         from src.squeeze.board import squeeze_scan_board as _sq_scan_board
                         from src.squeeze.detector import assess_squeeze_row as _sq_assess_row
+                        _sq_stash_map = getattr(scan_results, "squeeze_calls", {}) or {}
                         _sq_per = []
                         for _sq_sym, _sq_grp in picks.groupby(picks["symbol"].astype(str)):
                             _sq_s = _sq_assess_row(_sq_grp.iloc[0].to_dict())
-                            _sq_calls = _sq_grp[_sq_grp["type"] == "call"]
+                            # Prefer the stash: every "Best call: —" on the
+                            # 2026-08-07 board came from reading _sq_grp, which
+                            # the delta band had already emptied of calls.
+                            _sq_calls = _sq_stash_map.get(_sq_sym)
+                            if _sq_calls is None or _sq_calls.empty:
+                                _sq_calls = _sq_grp[_sq_grp["type"] == "call"]
                             _sq_best = None
                             if not _sq_calls.empty and "quality_score" in _sq_calls.columns:
                                 _sq_r = _sq_calls.sort_values("quality_score", ascending=False).iloc[0]

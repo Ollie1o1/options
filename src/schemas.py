@@ -25,6 +25,10 @@ class ScanResult:
     spreads: pd.DataFrame = field(default_factory=pd.DataFrame)
     credit_spreads: pd.DataFrame = field(default_factory=pd.DataFrame)
     iron_condors: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # Squeeze Hunt only: per-symbol scored calls that the generic |delta|
+    # 0.15-0.35 band removes from `picks`. Display-only — the squeeze long
+    # side is near-ATM by nature, so it never survives into the ranked picks.
+    squeeze_calls: Dict[str, pd.DataFrame] = field(default_factory=dict)
     ticker_contexts: Dict[str, dict] = field(default_factory=dict)
     market_context: Dict[str, Any] = field(default_factory=dict)
     top_pick: Optional[Any] = None

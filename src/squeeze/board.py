@@ -112,7 +112,9 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
             _fmt_num(r.get("dte"), ".0f"),
             _fmt_num(r.get("delta"), "+.2f"),
             f"${_fmt_num(r.get('premium'), '.2f')}",
-            _fmt_num(pd.to_numeric(r.get("spread_pct"), errors="coerce"), ".1f"),
+            # spread_pct is a fraction pipeline-wide ((ask-bid)/mid); the
+            # column header is a percent, as in cli_display.
+            _fmt_num(pd.to_numeric(r.get("spread_pct"), errors="coerce") * 100, ".1f"),
             f"${_fmt_num(r.get('ev_per_contract'), '+.0f')}",
             _fmt_num(r.get("quality_score"), ".2f"),
         ])

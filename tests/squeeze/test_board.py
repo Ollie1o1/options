@@ -106,6 +106,35 @@ class TestScanBoard(unittest.TestCase):
         self.assertIn("$185C 08/14", text)
 
 
+class TestCallBoardSpreadUnits(unittest.TestCase):
+    """`spread_pct` is a FRACTION everywhere in the pipeline.
+
+    enrich_and_score sets (ask-bid)/mid, the filter compares it to 0.40 for
+    40%, and cli_display multiplies by 100 before printing. call_board printed
+    it raw under a "Sprd%" header, so a 10% spread read as 0.1 — a 100×
+    understatement that makes the widest contract look like the tightest. It
+    went unnoticed because the board rendered no rows until the delta-band
+    stash was wired up.
+    """
+
+    def setUp(self):
+        self._saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = self._saved
+
+    def test_a_ten_percent_spread_renders_as_ten(self):
+        df = pd.DataFrame([{
+            "type": "call", "strike": 9.0, "expiration": "2026-08-21", "dte": 13,
+            "delta": 0.45, "premium": 0.71, "spread_pct": 0.10,
+            "ev_per_contract": -14.0, "quality_score": 0.55,
+        }])
+        text = B.call_board(df, "ONDS")
+        self.assertIn("10.0", text)
+        self.assertNotIn(" 0.1 ", text)
+
+
 class TestSourcingLines(unittest.TestCase):
     def setUp(self):
         self._saved = fmt._COLOR_ENABLED
