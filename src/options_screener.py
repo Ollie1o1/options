@@ -1620,11 +1620,15 @@ def _score_adjustment_flags(df: pd.DataFrame) -> pd.Series:
     # risk_flag_count is the multiplier stage, and every one of the five flags
     # it counts ALSO fired as an additive penalty above — the double-count.
     # Recorded as a level so the two stages can be separated in analysis.
+    #
+    # `row` rather than reusing `pos`: that name is bound above from
+    # np.nonzero, which yields a numpy signedinteger, and rebinding it to a
+    # plain int here is the assignment mypy rejects.
     rfc = _num("risk_flag_count").fillna(0).astype(int).to_numpy()
-    for pos in range(n):
-        if rfc[pos] >= 3:
-            parts[pos].append(f"risk_mult_{rfc[pos]}")
-        out.iloc[pos] = ",".join(parts[pos])
+    for row in range(n):
+        if rfc[row] >= 3:
+            parts[row].append(f"risk_mult_{int(rfc[row])}")
+        out.iloc[row] = ",".join(parts[row])
     return out
 
 
