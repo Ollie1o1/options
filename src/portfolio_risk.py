@@ -35,6 +35,19 @@ import time as _time
 _IV_CACHE: dict = {}          # {key: (iv_value, timestamp)}
 _IV_CACHE_TTL = 900           # 15 minutes
 
+# The contract-level cache above dedupes repeat lookups of the SAME strike, but
+# the network work is per chain: `tkr.options`, then `tkr.option_chain(exp)`.
+# A book with many strikes on one expiry misses the contract cache once per
+# strike and refetches one chain every time. Measured 2026-08-07: 94 open
+# positions over 38 distinct (ticker, expiry) chains and 23 tickers — 2.5x
+# duplication on the chain call, 4x on the expiry list, and 33.4s of a 34.4s
+# squeeze scan. These two caches sit under _get_current_iv and change no value
+# it returns.
+_CHAIN_CACHE: dict = {}       # {(ticker, expiry): ((calls_df, puts_df), timestamp)}
+_CHAIN_CACHE_TTL = 900        # matches _IV_CACHE_TTL — same data, same staleness
+_EXPIRY_CACHE: dict = {}      # {ticker: (expirations, timestamp)}
+_EXPIRY_CACHE_TTL = 900       # the listed expiry set does not move intraday
+
 # Spot prices are shared across every open position: a 60-position book with 29
 # unique tickers used to fire 60 sequential yfinance calls, and the whole book
 # is priced twice per session (startup update_positions + the in-scan GEX gate).
@@ -57,6 +70,13 @@ def reset_spot_cache() -> None:
     """Drop every cached spot AND the priced-positions memo. Tests + forced refresh."""
     _SPOT_CACHE.clear()
     _POSITIONS_CACHE.clear()
+
+
+def reset_iv_cache() -> None:
+    """Drop cached IVs, option chains and expiry lists. Tests + forced refresh."""
+    _IV_CACHE.clear()
+    _CHAIN_CACHE.clear()
+    _EXPIRY_CACHE.clear()
 
 
 def risk_off_filters_picks(config: Optional[Dict] = None) -> bool:
@@ -138,6 +158,143 @@ class RiskAggregator:
 
     _FALLBACK_IV = 0.30
 
+    def _expirations(self, tkr, ticker: str):
+        """Listed expirations for a ticker, fetched once per TTL.
+
+        A miss is not cached: an empty list from a transient outage must not
+        pin the ticker to "no expiries" for the whole TTL.
+        """
+        cached = _EXPIRY_CACHE.get(ticker)
+        if cached is not None:
+            exps, ts = cached
+            if _time.monotonic() - ts < _EXPIRY_CACHE_TTL:
+                return exps
+        exps = tuple(tkr.options or ())
+        if exps:
+            _EXPIRY_CACHE[ticker] = (exps, _time.monotonic())
+        return exps
+
+    def _chain(self, tkr, ticker: str, expiry: str):
+        """``(calls, puts)`` for one expiry, fetched once per TTL.
+
+        This is the dedup that matters: every strike on an expiry, and both
+        sides of it, come from this single fetch. An empty result is not
+        cached, for the same reason as above.
+        """
+        key = (ticker, expiry)
+        cached = _CHAIN_CACHE.get(key)
+        if cached is not None:
+            frames, ts = cached
+            if _time.monotonic() - ts < _CHAIN_CACHE_TTL:
+                return frames
+        chain = tkr.option_chain(expiry)
+        frames = (getattr(chain, "calls", None), getattr(chain, "puts", None))
+        if any(f is not None and not f.empty for f in frames):
+            _CHAIN_CACHE[key] = (frames, _time.monotonic())
+        return frames
+
+    _PREFETCH_WORKERS = 8
+
+    def prefetch_chains(self, trades) -> Dict[str, Optional[float]]:
+        """Warm the expiry/chain/spot caches for a book, concurrently.
+
+        The pricing loop below is serial, and after the per-chain dedup its
+        remaining cost was one network round trip per distinct chain and per
+        distinct ticker: on the 2026-08-07 book, 38 chains, 23 expiry lists and
+        23 spots. Those are independent, so they are warmed here and the loop
+        then runs out of cache — 13.6s to 7.0s for the chains alone.
+
+        Returns the spots it resolved, including ``None`` for tickers that
+        failed, so the caller can seed its per-call dedup and a dead ticker
+        costs one attempt rather than one here plus one in the loop.
+
+        Expired positions are excluded: the loop checks expiry locally before
+        fetching anything, and warming for them would re-introduce exactly the
+        waste that check exists to avoid.
+
+        Purely an optimisation. Every failure is swallowed and anything not
+        warmed is fetched by the normal path; this never raises.
+        """
+        spots: Dict[str, Optional[float]] = {}
+        try:
+            pairs = sorted({
+                (str(t.get("ticker")), str(t.get("expiration") or ""))
+                for t in (trades or [])
+                if t.get("ticker") and t.get("expiration")
+                and self._dte(str(t.get("expiration"))) > 0
+            })
+            if not pairs:
+                return spots
+            # Expiry lists first: the closest-expiry snap needs them, and they
+            # are what makes the chain keys match what pricing will ask for.
+            tickers = sorted({tk for tk, _ in pairs})
+            self._run_concurrently(
+                self._warm_ticker, [t for t in tickers if t not in _EXPIRY_CACHE])
+            self._run_concurrently(self._warm_chain, pairs)
+            for ticker, spot in zip(
+                    tickers, self._map_concurrently(self._warm_spot, tickers)):
+                spots[ticker] = spot
+        except Exception as exc:
+            logger.debug("Chain prefetch skipped: %s", exc)
+        return spots
+
+    def _map_concurrently(self, fn, items) -> list:
+        """Map fn over items in a small pool; serial for 0 or 1 item."""
+        if not items:
+            return []
+        if len(items) == 1:
+            return [fn(items[0])]
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(
+                max_workers=min(self._PREFETCH_WORKERS, len(items))) as pool:
+            return list(pool.map(fn, items))
+
+    def _run_concurrently(self, fn, items) -> None:
+        """_map_concurrently where the results are not needed."""
+        self._map_concurrently(fn, items)
+
+    def _warm_ticker(self, ticker: str) -> None:
+        """Populate the expiry cache for one ticker; failures are non-fatal."""
+        try:
+            self._expirations(_get_yf().Ticker(ticker), ticker)
+        except Exception as exc:
+            logger.debug("Prefetch failed for %s: %s", ticker, exc)
+
+    def _warm_chain(self, pair) -> None:
+        """Populate the chain cache for one (ticker, expiration).
+
+        Snaps to the closest listed expiry exactly as `_get_current_iv` does —
+        warming the book's raw expiration string would cache a key nothing
+        goes on to read.
+        """
+        ticker, expiration = pair
+        try:
+            tkr = _get_yf().Ticker(ticker)
+            exps = self._expirations(tkr, ticker)
+            closest = self._closest_expiry(exps, expiration)
+            if closest is not None and (ticker, closest) not in _CHAIN_CACHE:
+                self._chain(tkr, ticker, closest)
+        except Exception as exc:
+            logger.debug("Chain prefetch failed for %s %s: %s", ticker, expiration, exc)
+
+    def _warm_spot(self, ticker: str) -> Optional[float]:
+        """Spot for one ticker, cached; None on failure, which is non-fatal."""
+        try:
+            return self._fetch_spot(ticker)
+        except Exception as exc:
+            logger.debug("Spot prefetch failed for %s: %s", ticker, exc)
+            return None
+
+    @staticmethod
+    def _closest_expiry(exps, expiration) -> Optional[str]:
+        """The listed expiry nearest the requested one, as yyyy-mm-dd."""
+        if not exps:
+            return None
+        target = pd.Timestamp(expiration)
+        closest = min((pd.Timestamp(e) for e in exps),
+                      key=lambda e: abs((e - target).days))
+        return closest.strftime("%Y-%m-%d")
+
     def _get_current_iv(
         self,
         ticker: str,
@@ -161,15 +318,16 @@ class RiskAggregator:
                 return iv_val, "cache"
         try:
             tkr = _get_yf().Ticker(ticker)
-            exps = tkr.options
+            exps = self._expirations(tkr, ticker)
             if not exps:
                 return self._FALLBACK_IV, "fallback"
-            # Pick the closest available expiration
-            target = pd.Timestamp(expiration)
-            exp_ts = [pd.Timestamp(e) for e in exps]
-            closest = min(exp_ts, key=lambda e: abs((e - target).days))
-            chain = tkr.option_chain(closest.strftime("%Y-%m-%d"))
-            tbl = chain.calls if opt_type.lower() == "call" else chain.puts
+            # Pick the closest available expiration (same snap the prefetch
+            # uses, so its warmed keys are the ones read here).
+            closest = self._closest_expiry(exps, expiration)
+            if closest is None:
+                return self._FALLBACK_IV, "fallback"
+            calls, puts = self._chain(tkr, ticker, closest)
+            tbl = calls if opt_type.lower() == "call" else puts
             if tbl is None or tbl.empty:
                 return self._FALLBACK_IV, "fallback"
             row = tbl.iloc[(tbl["strike"] - strike).abs().argsort()[:1]]
@@ -235,8 +393,9 @@ class RiskAggregator:
 
         # One spot per ticker per call: resolves duplicates even when a ticker
         # fails (None is not written to the cross-call TTL cache, so without this
-        # a dead ticker held in N positions would be retried N times).
-        call_spots: Dict[str, Optional[float]] = {}
+        # a dead ticker held in N positions would be retried N times). Seeded by
+        # the concurrent warm-up, which resolves the same spots in parallel.
+        call_spots: Dict[str, Optional[float]] = self.prefetch_chains(trades)
 
         rows = []
         for t in trades:

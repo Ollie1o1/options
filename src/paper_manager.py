@@ -35,6 +35,26 @@ from .utils import is_short_position as _is_short_position
 from .utils import bs_delta as _bs_delta
 from .capital_risk import capital_at_risk, within_budget
 
+# ── Chain-quote memo ─────────────────────────────────────────────────────────
+# _fetch_chain_quotes already serves every leg on a (ticker, expiration) from
+# one request, but marking a book calls it from several places — position
+# marks, shadow marks, the risk gate — so the same pair is refetched once per
+# call site. Measured 2026-08-07: 113 calls against 38 distinct pairs, 17.0s of
+# a 22.8s squeeze scan.
+#
+# The TTL is short on purpose. These are live bid/ask that mark open positions,
+# and a stale mark is a worse failure than a slow one
+# (docs/MARK_TRUSTWORTHINESS_SPEC.md). 60s dedupes within one run without
+# carrying quotes across runs — the same reasoning as portfolio_risk._SPOT_CACHE.
+import time as _pm_time
+_CHAIN_QUOTE_CACHE: dict = {}   # {(ticker, expiration): (quotes, timestamp)}
+_CHAIN_QUOTE_TTL = 60
+
+
+def reset_chain_quote_cache() -> None:
+    """Drop memoized chain quotes. Tests + forced refresh."""
+    _CHAIN_QUOTE_CACHE.clear()
+
 
 # ── Mark provenance ──────────────────────────────────────────────────────────
 # Every mark carries where it came from, because "what is this contract worth"
@@ -1515,6 +1535,12 @@ class PaperManager:
         failure; the caller then falls through to the traded-price rungs.
         """
         quotes: Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]] = {}
+        memo_key = (ticker, str(expiration)[:10])
+        cached = _CHAIN_QUOTE_CACHE.get(memo_key)
+        if cached is not None:
+            memo_quotes, ts = cached
+            if _pm_time.monotonic() - ts < _CHAIN_QUOTE_TTL:
+                return dict(memo_quotes)
         try:
             yf, session = _get_yf_and_session()
             tkr = yf.Ticker(ticker, session=session)
@@ -1538,6 +1564,10 @@ class PaperManager:
                     quotes[(round(float(k), 4), opt_t)] = (b, a)
                 except (TypeError, ValueError):
                     continue
+        # An empty result is not cached: a transient outage must not pin this
+        # pair to "no quotes" and silently degrade every mark for the TTL.
+        if quotes:
+            _CHAIN_QUOTE_CACHE[memo_key] = (dict(quotes), _pm_time.monotonic())
         return quotes
 
     def _fetch_traded_mark(self, symbol: str) -> Tuple[Optional[float], Optional[str]]:
