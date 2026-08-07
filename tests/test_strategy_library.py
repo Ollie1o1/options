@@ -4,6 +4,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 
+from src.strategies import friction as fr
 from src.strategies.record import STATUSES
 from src.strategies.seed import LIBRARY, seed_library
 
@@ -110,6 +111,45 @@ class ControlTierTest(unittest.TestCase):
                if r.provenance.get("role") == "known_negative"]
         self.assertTrue(neg)
         self.assertEqual(neg[0].status, "dead")
+
+
+class WiderIndexSpreadTest(unittest.TestCase):
+    """The replacement for the killed single-name bull puts: attack the toll by
+    widening the structure and tightening the universe, not by finding a signal."""
+
+    def setUp(self):
+        self.rec = [r for r in LIBRARY if r.spec.id == "index_put_spread_w25"][0]
+
+    def test_it_is_a_25_wide_bull_put_on_the_index_only(self):
+        self.assertEqual(self.rec.spec.structure, "bull_put")
+        self.assertEqual(self.rec.spec.entry["width"], 25.0)
+        self.assertEqual(self.rec.spec.universe["symbols"], ["SPY"])
+
+    def test_width_is_the_only_difference_from_the_surviving_index_probe(self):
+        """One variable moves, or the comparison means nothing."""
+        other = [r for r in LIBRARY if r.spec.id == "csp_index_only"][0]
+        a = dict(self.rec.spec.entry)
+        b = dict(other.spec.entry)
+        self.assertNotEqual(a.pop("width"), b.pop("width"))
+        self.assertEqual(a, b)
+        self.assertEqual(self.rec.spec.universe, other.spec.universe)
+        self.assertEqual(self.rec.spec.exit, other.spec.exit)
+
+    def test_the_account_caps_it_at_one_position(self):
+        """~$2,250 of risk against a $4,000 book. Arithmetic, not preference."""
+        self.assertEqual(self.rec.spec.sizing["max_concurrent"], 1)
+        self.assertIn("56%", self.rec.capital_note)
+
+    def test_the_hypothesis_carries_the_deflation_caveat(self):
+        """The $25 row read DSR 0.921 alone and 0.432 deflated. Both belong."""
+        self.assertIn("0.432", self.rec.hypothesis)
+
+    def test_it_is_a_hypothesis_not_a_validated_setup(self):
+        self.assertNotIn(self.rec.status, ("validated", "promoted", "live"))
+
+    def test_its_friction_is_unmeasured_not_borrowed_from_single_names(self):
+        p = fr.profile_for(self.rec, table=fr.RECORDED)
+        self.assertFalse(p.measured)
 
 
 class SeedTest(unittest.TestCase):

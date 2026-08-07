@@ -35,11 +35,12 @@ _NAKED_CAPITAL = ("Margin-secured. Taxable account only; registered accounts "
 
 
 def _s(sid: str, structure: str, entry: Dict[str, Any], exit_: Dict[str, Any],
-       universe: Optional[Dict[str, Any]] = None) -> StrategySpec:
+       universe: Optional[Dict[str, Any]] = None,
+       sizing: Optional[Dict[str, Any]] = None) -> StrategySpec:
     return StrategySpec(id=sid, version=1, structure=structure,
                         universe=universe or {"strata": ["liquid"],
                                               "max_price": 40},
-                        entry=entry, exit=exit_, sizing=CAP,
+                        entry=entry, exit=exit_, sizing=sizing or CAP,
                         created=CREATED, trial_count=0)
 
 
@@ -175,6 +176,31 @@ LIBRARY = [
        "as a testable setup rather than folklore.",
        {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "index_probe",
        links=["docs/DOLT_NEXT_STEPS.md"]),
+    _r(_s("index_put_spread_w25", "bull_put",
+          {"dte": [30, 45], "short_delta": 0.25, "width": 25.0,
+           "iv_rank_min": 50}, _MANAGED,
+          universe={"symbols": ["SPY"], "strata": ["legacy"]},
+          sizing={"max_capital_at_risk": 4000, "max_concurrent": 1}),
+       "Index put spread, $25 wide, IV rank > 50",
+       "The replacement for the retired single-name bull puts, and it attacks "
+       "the toll rather than looking for a better signal. Friction is roughly "
+       "fixed per leg while credit scales with width, so a $25-wide collects "
+       "about five times the credit for the same two crossings — on the one "
+       "universe whose spreads are 3.6% of mid rather than 16-21%. "
+       "HONEST CAVEAT, and it is the reason this is a hypothesis and not a "
+       "recommendation: the $25 width read 84.9% wins and +1.76% RoC in "
+       "isolation (DSR 0.921), but deflated by the 18 configurations actually "
+       "tried it reads DSR 0.432 — below the 0.5 line, t=1.65 against a "
+       "hurdle of 3.0, skew -2.80. The width series is also non-monotone, "
+       "which is the shape of an artifact. This setup exists to be tested "
+       "against benchmark_unselected on data the search has not already seen, "
+       "and it counts as one more trial against every future deflation.",
+       {"iv_rank_min": 50}, ["tfsa", "taxable"],
+       "$25 wide on SPY: about $2,250 at risk after credit, which is 56% of a "
+       "$4,000 book. max_concurrent is therefore 1 — this is the position-size "
+       "ceiling of the account, not a preference. A second concurrent position "
+       "at this width is not affordable.",
+       "index_probe", links=["docs/ALLOCATION_BACKTEST_FINDINGS.md"]),
     _r(_s("csp_single_names", "bull_put",
           {"dte": [30, 45], "short_delta": 0.25, "width": 5.0,
            "iv_rank_min": 50}, _MANAGED,
@@ -279,8 +305,11 @@ def _retire(rec: StrategyRecord) -> StrategyRecord:
     return rec.amend("status", "dead", reason=reason, date="2026-08-06")
 
 
+_INDEX_SETUPS = ("csp_index_only", "index_put_spread_w25")
+
+
 def _annotate(rec: StrategyRecord) -> StrategyRecord:
-    if rec.spec.id != "csp_index_only":
+    if rec.spec.id not in _INDEX_SETUPS:
         return rec
     return rec.amend("cost_profile", _INDEX_FRICTION_NOTE,
                      reason="the structure-wide toll does not apply to the index",
