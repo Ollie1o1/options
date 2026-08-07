@@ -197,6 +197,13 @@ def profile_for(record: Any,
     round_trip = not bool(spec.exit.get("hold_to_expiry"))
 
     own: Dict[str, Any] = getattr(record, "cost_profile", None) or {}
+    if own.get("unmeasured"):
+        # An explicit refusal to quote the structure-wide figure at this setup.
+        # A bull put on SPY does not pay what a bull put on a $30 single name
+        # pays, and printing the single-name number here would be a wrong
+        # answer wearing the authority of a measurement.
+        return FrictionProfile(structure, None, None, round_trip, 0,
+                               str(own.get("why") or "unmeasured"))
     cell: Optional[Dict[str, Any]] = (
         own if own.get("per_share") is not None else None)
     if cell is None:
@@ -239,6 +246,8 @@ def describe(profile: FrictionProfile) -> str:
     """One line for the detail view, including where the number came from."""
     cost, credit = profile.cost_usd, profile.credit_usd
     if not profile.measured or cost is None or credit is None:
+        if profile.source and profile.source != "unmeasured":
+            return f"unmeasured — {profile.source}"
         return f"unmeasured — no matched quotes for {profile.structure}"
     trip = "round trip" if profile.round_trip else "one side (held to expiry)"
     verdict = " — OVER the ceiling" if profile.over_ceiling() else ""

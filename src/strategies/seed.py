@@ -224,6 +224,72 @@ LIBRARY = [
 ]
 
 
+# ── Retired 2026-08-06 on measured cost, not on opinion ─────────────────────
+#
+# The single-name, $5-wide bull put deployments are dead. Two independent
+# measurements condemn them and they agree: the round trip costs 68% of the
+# credit (30 ledger fills, docs/SCORER_IMPROVEMENTS.md §5), and the same
+# structure returned -6.76% per trade over 10,363 replayed trades on the wide
+# universe (docs/ALLOCATION_BACKTEST_FINDINGS.md §4c). No win rate available to
+# a 25-delta short strike survives that toll.
+#
+# What is NOT killed, and why, because this is the part that would be easy to
+# get wrong:
+#
+#   * the CONTROL tier (benchmark_unselected, null_random_days,
+#     null_random_strikes) is measurement infrastructure. A control is never
+#     placed as a trade, so its cost of execution is not a reason to retire it.
+#     Kill the benchmark and every future "does this signal beat doing nothing"
+#     question loses its answer.
+#   * csp_index_only survives because the 68% was measured on single names.
+#     Index and mega-cap spreads quote 3.6% of mid against 16-21% on the liquid
+#     and broad strata, and that universe is the only one in the study that was
+#     not decisively negative (-0.64%, t=-0.58). Its friction is UNMEASURED
+#     here rather than assumed, so the board shows a dash.
+_RETIRED = {
+    "put_spread_ivr50":
+        "round-trip friction is 68% of credit (30 ledger fills) against a 25% "
+        "ceiling; the wide-universe replay returned -6.76%/trade over 10,363 "
+        "trades",
+    "put_spread_ivr50_hold":
+        "holding halves the toll to 34% of credit and that is still over the "
+        "25% ceiling — the cost experiment answered, and the answer is no",
+    "bullish_trend_put_spread":
+        "same 68%-of-credit friction; a bullish view cannot be expressed here "
+        "at a price worth paying, so the expression question moves to the "
+        "index and to wider structures",
+    "csp_single_names":
+        "the single-name probe is ANSWERED: -6.76% RoC over 10,363 trades at "
+        "68% friction, replicating the earlier finding that single-name equity "
+        "VRP is absent. Kept as a dead record, not deleted",
+}
+
+_INDEX_FRICTION_NOTE = {
+    "unmeasured": True,
+    "why": ("the 68% figure was measured on single name ledger fills; index "
+            "and mega-cap spreads quote 3.6% of mid against 16-21%, and this "
+            "desk has no index fills to measure"),
+}
+
+
+def _retire(rec: StrategyRecord) -> StrategyRecord:
+    reason = _RETIRED.get(rec.spec.id)
+    if reason is None:
+        return rec
+    return rec.amend("status", "dead", reason=reason, date="2026-08-06")
+
+
+def _annotate(rec: StrategyRecord) -> StrategyRecord:
+    if rec.spec.id != "csp_index_only":
+        return rec
+    return rec.amend("cost_profile", _INDEX_FRICTION_NOTE,
+                     reason="the structure-wide toll does not apply to the index",
+                     date="2026-08-06")
+
+
+LIBRARY = [_annotate(_retire(r)) for r in LIBRARY]
+
+
 def seed_library(root: str) -> List[StrategyRecord]:
     """Write every setup into a registry. Idempotent."""
     from .registry import Registry
