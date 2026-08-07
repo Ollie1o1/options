@@ -182,7 +182,11 @@ def breakeven_vol(row, rfr: float = 0.045,
     strike = _num(get("strike"))
     premium = _num(get("premium"))
     dte = _num(get("dte"))
-    if None in (spot, strike, premium, dte) or premium <= 0 or dte <= 0:
+    # Checked one by one rather than `None in (...)`: a membership test does
+    # not narrow Optional, so mypy still sees None on every use below.
+    if spot is None or strike is None or premium is None or dte is None:
+        return None
+    if premium <= 0 or dte <= 0:
         return None
 
     spread = _num(get("spread_pct")) or 0.0
