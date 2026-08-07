@@ -107,8 +107,13 @@ backups/
 longterm_plan.json
 data/longterm.db
 
+# Both of these are single files the app writes at the repo root, so both are
+# anchored with a leading slash. Unanchored, a bare filename matches at EVERY
+# depth — `settings.json` was silently claiming any nested settings.json,
+# including a .claude/settings.json had one ever been added. Keep the slashes.
+
 # personal ticker watchlist (auto-created by ADD command)
-watchlist.json
+/watchlist.json
 
 # personal preferences (theme, etc. — auto-created by SETTINGS menu)
-settings.json
+/settings.json
