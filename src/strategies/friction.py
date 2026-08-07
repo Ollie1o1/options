@@ -123,7 +123,7 @@ def ceiling(config_path: str = DEFAULT_CONFIG) -> float:
         value = (cfg.get("auto_log") or {}).get("max_friction_to_credit")
     except (OSError, ValueError, AttributeError):
         return _DEFAULT_CEILING
-    if value in (None, "", 0, False):
+    if value is None or value in ("", 0, False):
         return _DEFAULT_CEILING
     try:
         return float(value)
