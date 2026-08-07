@@ -260,17 +260,93 @@ class TestDteFloor(unittest.TestCase):
         # inside the scan's DTE window (ONDS 2026-08-07: 42d then 133d).
         self.assertIn("scan's DTE window", text)
 
-    def test_footnote_says_the_multiple_is_a_floor_for_long_dated(self):
-        # Intrinsic-at-expiry understates a 132-DTE call that catches the move
-        # in month one and still holds three months of extrinsic. Without this,
-        # comparing 0.9x (132d) against 3.6x (13d) reads as "short-dated wins".
-        text = B.call_board(_mixed_dte(), "ONDS", top_n=2)
-        self.assertIn("floor", text.lower())
+    # The "multiple is a conservative floor" caveat that lived here is gone:
+    # repricing at the window's close removed the limitation it warned about.
+    # Cross-DTE comparability is covered by TestRepricingAtTheWindow.
 
     def test_rows_without_a_dte_are_not_silently_dropped(self):
         df = _mixed_dte().drop(columns=["dte"])
         text = B.call_board(df, "ONDS", top_n=3)
         self.assertIsNotNone(text)
+
+
+class TestRepricingAtTheWindow(unittest.TestCase):
+    """Value the contract when the measured window closes, not at expiry.
+
+    Intrinsic-at-expiry is a floor that loosens with DTE: a 132-day call that
+    catches the move still holds ~73 days of extrinsic the floor throws away,
+    so 0.9x at 132d and 3.6x at 13d were not comparable numbers. Repricing at
+    a fixed horizon — the window's close — with the contract's own IV held
+    constant makes multiples comparable across DTE without inventing a vol
+    assumption.
+    """
+
+    def setUp(self):
+        self._saved = fmt._COLOR_ENABLED
+        fmt._COLOR_ENABLED = False
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = self._saved
+
+    def _row(self, dte, strike=9.0, premium=1.10, iv=0.90, spot=8.69):
+        return {"strike": strike, "premium": premium, "underlying": spot,
+                "dte": dte, "impliedVolatility": iv}
+
+    def test_expiring_at_the_window_close_is_worth_intrinsic(self):
+        # No time left: repricing must collapse to the old floor exactly.
+        row = self._row(dte=B.SQUEEZE_WINDOW_DAYS, strike=9.0, premium=1.10)
+        intrinsic = max(0.0, 8.69 * 1.20 - 9.0) / 1.10
+        self.assertAlmostEqual(B.convexity_multiple(row), intrinsic, places=6)
+
+    def test_a_longer_contract_keeps_the_extrinsic_the_floor_threw_away(self):
+        near = B.convexity_multiple(self._row(dte=B.SQUEEZE_WINDOW_DAYS))
+        far = B.convexity_multiple(self._row(dte=132))
+        self.assertGreater(far, near,
+                           "extra time added no value — repricing is not happening")
+
+    def test_a_strike_the_move_misses_is_not_worthless_with_time_left(self):
+        # Intrinsic said 0.0. With 73 days to run it plainly is not zero.
+        row = self._row(dte=132, strike=13.0, premium=0.10)
+        got = B.convexity_multiple(row)
+        self.assertIsNotNone(got)
+        self.assertGreater(got, 0.0)
+
+    def test_no_iv_falls_back_to_the_intrinsic_floor(self):
+        row = self._row(dte=132)
+        row.pop("impliedVolatility")
+        intrinsic = max(0.0, 8.69 * 1.20 - 9.0) / 1.10
+        self.assertAlmostEqual(B.convexity_multiple(row), intrinsic, places=6)
+
+    def test_still_none_when_it_cannot_be_computed(self):
+        self.assertIsNone(B.convexity_multiple(
+            {"strike": 9.0, "premium": 0.0, "underlying": 10.0}))
+
+    def test_ranking_no_longer_punishes_the_long_dated_by_construction(self):
+        # Same strike and IV, priced so both cost what that tenor is worth.
+        df = pd.DataFrame([
+            {"type": "call", "strike": 9.0, "expiration": "2026-10-16", "dte": 69,
+             "delta": 0.55, "premium": 1.10, "spread_pct": 0.09,
+             "impliedVolatility": 0.90, "ev_per_contract": -9.0,
+             "quality_score": 0.40, "underlying": 8.69},
+            {"type": "call", "strike": 9.0, "expiration": "2026-12-18", "dte": 132,
+             "delta": 0.61, "premium": 1.45, "spread_pct": 0.08,
+             "impliedVolatility": 0.90, "ev_per_contract": -5.0,
+             "quality_score": 0.45, "underlying": 8.69},
+        ])
+        near, far = (B.convexity_multiple(r) for _, r in df.iterrows())
+        # Under intrinsic-at-expiry the far leg scored 1.43/1.45 = 0.99x
+        # against the near leg's 1.30x, purely because it cost more.
+        self.assertGreater(far, 0.99)
+
+    def test_footnote_states_the_repricing_convention(self):
+        df = pd.DataFrame([{
+            "type": "call", "strike": 9.0, "expiration": "2026-12-18", "dte": 132,
+            "delta": 0.61, "premium": 1.45, "spread_pct": 0.08,
+            "impliedVolatility": 0.90, "ev_per_contract": -5.0,
+            "quality_score": 0.45, "underlying": 8.69,
+        }])
+        text = B.call_board(df, "ONDS", top_n=1)
+        self.assertIn("IV held constant", text)
 
 
 class TestCallBoardSpreadUnits(unittest.TestCase):

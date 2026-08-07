@@ -4307,7 +4307,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                     _sq_from_stash = _sq_src is not None and not _sq_src.empty
                     if not _sq_from_stash:
                         _sq_src = _sq_rows
-                    _sq_cb = _sq_call_board(_sq_src, _sq_sym, width=WIDTH)
+                    _sq_cb = _sq_call_board(_sq_src, _sq_sym, width=WIDTH, rfr=rfr)
                     if _sq_cb:
                         print(_sq_cb)
                         if _sq_from_stash:
@@ -5490,8 +5490,11 @@ def main():
                             _sq_calls = _sq_stash_map.get(_sq_sym)
                             if _sq_calls is None or _sq_calls.empty:
                                 _sq_calls = _sq_grp
-                            _sq_per.append({"ticker": _sq_sym, "setup": _sq_s,
-                                            "best_call": _sq_best_call(_sq_calls)})
+                            _sq_per.append({
+                                "ticker": _sq_sym, "setup": _sq_s,
+                                "best_call": _sq_best_call(
+                                    _sq_calls, rfr=getattr(scan_results, "rfr", 0.045)),
+                            })
                         if _sq_per:
                             print("\n" + _sq_scan_board(_sq_per, width=WIDTH))
                     except Exception as _sqb_exc:

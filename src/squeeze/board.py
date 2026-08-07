@@ -82,6 +82,10 @@ def _fmt_num(value, spec: str, na: str = "—") -> str:
 # (top-5% SI and 5d return >= +10%) was +20.5% over 42 trading days.
 SQUEEZE_TARGET_MOVE = 0.20
 
+# The horizon the multiple is valued at: the close of the measured window,
+# 42 trading days out, in the calendar days `dte` carries.
+SQUEEZE_WINDOW_DAYS = 59
+
 # The window that move was measured over, in the units `dte` uses.
 # `dte` is calendar days (T_years * 365), and 42 trading days is 42 * 7/5 =
 # 58.8 of them before holidays — so a "30-day" floor would cover barely half
@@ -92,18 +96,23 @@ SQUEEZE_TARGET_MOVE = 0.20
 SQUEEZE_MIN_DTE = 60
 
 
-def convexity_multiple(row, target_move: float = SQUEEZE_TARGET_MOVE) -> Optional[float]:
-    """What one contract pays if the underlying makes the measured move.
+def convexity_multiple(row, target_move: float = SQUEEZE_TARGET_MOVE,
+                       rfr: float = 0.045) -> Optional[float]:
+    """What one contract is worth if the underlying makes the measured move.
 
-    Intrinsic at expiry over premium paid. That assumes nothing about vol and
-    ignores extrinsic the contract would still hold if the move came early, so
-    it is conservative — and conservative in a stated direction, which a
-    repriced number with a guessed IV would not be.
+    Valued at a fixed horizon — the close of the measured window — rather than
+    at expiry, with the contract's own IV held constant. That is what makes
+    multiples comparable across DTE: intrinsic-at-expiry is a floor that
+    loosens the longer the contract, so a 132-day call that catches the move
+    and still holds ~73 days of extrinsic scored below a 13-day one purely for
+    costing more. Holding IV constant is the neutral assumption — squeezes
+    usually bid vol on the way up and crush it after, and neither is assumed.
 
-    The shape is what earns it: deep ITM scores low (all premium, little
-    leverage), a strike the move never reaches scores zero, and the ranking
-    peaks just out of the money. Returns None when it cannot be computed, so
-    "unknown" never sorts as "pays nothing".
+    Falls back to intrinsic when there is no usable IV or no time left at the
+    horizon, which is the same conservative floor as before. The shape is
+    unchanged: deep ITM scores low on leverage and the ranking peaks just out
+    of the money. Returns None when it cannot be computed at all, so "unknown"
+    never sorts as "pays nothing".
     """
     get = row.get if hasattr(row, "get") else lambda k, d=None: d
     spot = _num(get("underlying", get("spot")))
@@ -113,7 +122,32 @@ def convexity_multiple(row, target_move: float = SQUEEZE_TARGET_MOVE) -> Optiona
         return None
     if spot <= 0 or premium <= 0:
         return None
-    return max(0.0, spot * (1.0 + target_move) - strike) / premium
+
+    target = spot * (1.0 + target_move)
+    intrinsic = max(0.0, target - strike)
+
+    dte = _num(get("dte"))
+    iv = _num(get("impliedVolatility"))
+    if iv is None:
+        iv = _num(get("iv_solved"))
+    if dte is None or iv is None or iv <= 0:
+        return intrinsic / premium
+
+    years_left = (dte - SQUEEZE_WINDOW_DAYS) / 365.0
+    if years_left <= 0:
+        return intrinsic / premium
+
+    try:
+        from src.utils import bs_call
+        q = _num(get("dividend_yield")) or 0.0
+        value = bs_call(target, strike, years_left, rfr, iv, q)
+    except Exception:
+        return intrinsic / premium
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return intrinsic / premium
+    # Never below the floor: a repricing that undercuts intrinsic is a bad
+    # number, not a discovery.
+    return max(float(value), intrinsic) / premium
 
 
 def _num(value) -> Optional[float]:
@@ -142,7 +176,7 @@ def _apply_dte_floor(calls: pd.DataFrame):
     return long_enough, True
 
 
-def _rank_calls(df: pd.DataFrame) -> pd.DataFrame:
+def _rank_calls(df: pd.DataFrame, rfr: float = 0.045) -> pd.DataFrame:
     """Calls from an enriched chain, best convexity first.
 
     Falls back to quality_score when no row carries a spot, so a chain without
@@ -152,7 +186,7 @@ def _rank_calls(df: pd.DataFrame) -> pd.DataFrame:
     if calls.empty:
         return calls
     calls, _ = _apply_dte_floor(calls)
-    mult = calls.apply(convexity_multiple, axis=1)
+    mult = calls.apply(convexity_multiple, axis=1, rfr=rfr)
     if mult.notna().any():
         calls["_convexity"] = mult
         return calls.sort_values("_convexity", ascending=False, na_position="last")
@@ -162,7 +196,7 @@ def _rank_calls(df: pd.DataFrame) -> pd.DataFrame:
     return calls
 
 
-def best_call_label(df: pd.DataFrame) -> Optional[str]:
+def best_call_label(df: pd.DataFrame, rfr: float = 0.045) -> Optional[str]:
     """The one contract the scan board names — same ranking as call_board.
 
     Shared so the summary board's "Best call" column and the per-ticker board's
@@ -170,7 +204,7 @@ def best_call_label(df: pd.DataFrame) -> Optional[str]:
     """
     if df is None or len(df) == 0 or "type" not in df.columns:
         return None
-    ranked = _rank_calls(df)
+    ranked = _rank_calls(df, rfr=rfr)
     if ranked.empty:
         return None
     row = ranked.iloc[0]
@@ -181,7 +215,7 @@ def best_call_label(df: pd.DataFrame) -> Optional[str]:
 
 
 def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
-               width: int = WIDTH) -> Optional[str]:
+               width: int = WIDTH, rfr: float = 0.045) -> Optional[str]:
     """Calls-only slice of an enriched chain, ranked for convexity.
 
     The squeeze thesis is long the underlying, so surface the best calls even
@@ -195,7 +229,7 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
     """
     if df is None or len(df) == 0 or "type" not in df.columns:
         return None
-    calls = _rank_calls(df)
+    calls = _rank_calls(df, rfr=rfr)
     if calls.empty:
         return None
     _, _floored = _apply_dte_floor(df[df["type"] == "call"])
@@ -232,12 +266,12 @@ def call_board(df: pd.DataFrame, ticker: str, top_n: int = 3,
     body = ui.table(cols, rows).splitlines()
     body.append(fmt.style(
         f"{fmt.GLYPHS.get('bullet', '*')} +20% = contract value if the underlying makes the "
-        "cohort's median move, at expiry, over premium paid — ranked on this, not on PoP",
-        "muted"))
+        f"cohort's median move, priced at day {SQUEEZE_WINDOW_DAYS} with IV held constant, "
+        "over premium paid — ranked on this, not on PoP", "muted"))
     body.append(fmt.style(
-        f"{fmt.GLYPHS.get('bullet', '*')} it is a FLOOR, and a looser one the longer the "
-        "contract: a 132d call that catches the move in month one still holds months of "
-        "extrinsic this ignores. Compare multiples across similar DTE, not across the board",
+        f"{fmt.GLYPHS.get('bullet', '*')} valuing at the window's close, not at expiry, is "
+        "what makes these comparable across DTE — a longer contract keeps the extrinsic it "
+        "has left. Constant IV assumes neither the squeeze bid nor the crush after",
         "muted"))
     if _floored:
         body.append(fmt.style(
