@@ -3,6 +3,21 @@ name: CI
 on:
   push:
     branches: [main]
+    # Skipped ONLY when every changed file matches — a commit touching both
+    # src/ and docs/ still runs the full suite, which is the case that matters
+    # here since findings usually ship beside the code they justify. Verified
+    # 2026-08-07 that no test reads these: every `docs/*.md` in tests/ is a
+    # docstring citation, and the only .md files opened are generated
+    # GATE_STATUS.md outputs written to reports/ or a temp dir.
+    #
+    # If a run seems to be missing, check this list BEFORE assuming the
+    # webhook throttling described below — both produce "no run appeared".
+    paths-ignore:
+      - '.gitignore'
+      - 'docs/**'
+      - '**.md'
+  # Deliberately NOT filtered: a pull request always gets a full run, so the
+  # check can never be absent when someone is deciding whether to merge.
   pull_request:
   # Manual trigger. During the 2026-08-06 Actions outage GitHub throttled
   # webhooks to ~15%, so a push to main registered as an event but never
