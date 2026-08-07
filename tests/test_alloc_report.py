@@ -28,12 +28,41 @@ def _t(entry, pnl, car=400.0, stratum="broad", exit_="2024-03-15",
                  exit_reason=reason, stratum=stratum)
 
 
-def _res(dsr=0.9, tc=3.5, broad_pnl=50.0, pbo=0.2):
-    return {"dsr": dsr, "pbo": pbo, "tstat_clustered": tc,
+def _res(dsr=0.9, tc=3.5, broad_pnl=50.0, pbo=0.2, n=200):
+    return {"n": n, "dsr": dsr, "pbo": pbo, "tstat_clustered": tc,
             "by_stratum": {"legacy": {"pnl": 100.0},
                            "liquid": {"pnl": 80.0},
                            "broad": {"pnl": broad_pnl}},
             "insufficient": False}
+
+
+class SampleFloorTest(unittest.TestCase):
+    """A handful of trades cannot earn a verdict, however good they look.
+
+    Measured the hard way: a starved run of index_put_spread_w25 closed 3 trades
+    at 100% wins, reported DSR 0.996 and t=12.56, and was graded `liquid_only`.
+    Every number was arithmetically correct and the conclusion was worthless.
+    """
+
+    def test_a_tiny_sample_cannot_be_promoted(self):
+        self.assertEqual(promotion_verdict(_res(n=3)), "insufficient")
+
+    def test_a_tiny_sample_that_looks_brilliant_still_cannot(self):
+        self.assertEqual(
+            promotion_verdict(_res(n=3, dsr=0.996, tc=12.56)), "insufficient")
+
+    def test_insufficient_is_not_reject(self):
+        """'Not measured' and 'measured and failed' are different claims."""
+        self.assertNotEqual(promotion_verdict(_res(n=3)), "reject")
+
+    def test_the_floor_lets_a_real_sample_through(self):
+        self.assertEqual(promotion_verdict(_res(n=200)), "promote")
+
+    def test_a_result_without_an_n_is_judged_on_its_statistics(self):
+        """Callers that pass no sample size keep the old behaviour."""
+        r = _res()
+        r.pop("n")
+        self.assertEqual(promotion_verdict(r), "promote")
 
 
 class VerdictTest(unittest.TestCase):

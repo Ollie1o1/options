@@ -116,30 +116,35 @@ class ControlTierTest(unittest.TestCase):
 class DteWindowTest(unittest.TestCase):
     """A window narrower than the data's expiration ladder measures nothing.
 
-    The DoltHub backfill carries ~3.1 expirations per symbol-day, so a 15-day
-    window out at a month contains NO listed expiration on most dates: measured
-    on SPY, `dte [30,45]` reached only 41.7% of days against 99.8% for
-    `[25,45]`. The first backtest of index_put_spread_w25 returned n=3 for
-    exactly this reason — 78 of 96 eligible dates could not assemble legs.
+    The DoltHub backfill carries a MEDIAN of 2.2 expirations per symbol-day, so
+    a narrow window contains no listed expiration on most dates. Measured over
+    25 randomly sampled symbols (share of symbol-days with any expiry in range):
 
-    Near-dated windows are exempt: the front of the ladder is dense, and
-    `[7,21]` reached 100% of SPY days.
+        [30,45]  52.4%      [7,21]   55.4%
+        [25,45]  69.6%      [7,35]   95.3%
+        [25,60]  99.8%      [7,45]  100.0%
+
+    Span is what drives it, not where the window sits: every window spanning 35
+    days or more cleared 99%, and every window under 30 days failed. The first
+    backtest of index_put_spread_w25 returned n=3 for exactly this reason.
+
+    SPY alone is denser (3.2 expirations/day) than the universe, so a window
+    validated on SPY is NOT validated for the library. That mistake was made
+    once here already.
     """
 
-    MIN_SPAN = 20
-    NEAR_DATED = 25
+    MIN_SPAN = 35
 
-    def test_every_window_is_wide_enough_for_the_expiration_ladder(self):
+    def test_every_window_spans_the_expiration_ladder(self):
         for r in LIBRARY:
             dte = r.spec.entry.get("dte")
             if not dte:
                 continue
             lo, hi = int(dte[0]), int(dte[1])
-            if hi <= self.NEAR_DATED:
-                continue
             self.assertGreaterEqual(
                 hi - lo, self.MIN_SPAN,
-                f"{r.spec.id}: dte {dte} is narrower than the listed ladder")
+                f"{r.spec.id}: dte {dte} spans {hi - lo}d; under 30 days the "
+                f"ladder is empty on ~30-45% of symbol-days")
 
 
 class WiderIndexSpreadTest(unittest.TestCase):

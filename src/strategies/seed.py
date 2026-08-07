@@ -62,7 +62,7 @@ _HELD = {"hold_to_expiry": True}
 LIBRARY = [
     # ── SIGNAL: the open question — does timing help? ──
     _r(_s("wheel_csp_ivr50", "short_put",
-          {"dte": [25, 45], "short_delta": 0.25, "iv_rank_min": 50}, _MANAGED),
+          {"dte": [25, 60], "short_delta": 0.25, "iv_rank_min": 50}, _MANAGED),
        "Wheel entry: cash-secured put, IV rank > 50",
        "Implied vol rich against its own history means the variance premium is "
        "unusually fat. Sell puts on a name you would be content to own; if "
@@ -70,7 +70,7 @@ LIBRARY = [
        {"iv_rank_min": 50, "no_earnings_before_expiry": True},
        ["tfsa", "taxable"], _CSP_CAPITAL, "candidate", status="idea"),
     _r(_s("csp_post_drop", "short_put",
-          {"dte": [25, 45], "short_delta": 0.25, "drop_pct_min": 7,
+          {"dte": [25, 60], "short_delta": 0.25, "drop_pct_min": 7,
            "rsi_max": 35}, _MANAGED),
        "Cash-secured put after a sharp drop",
        "Implied vol spikes when price falls, so a post-drop put sells fear at "
@@ -79,7 +79,7 @@ LIBRARY = [
        {"drop_pct_min": 7, "rsi_max": 35, "iv_rank_min": 40},
        ["tfsa", "taxable"], _CSP_CAPITAL, "candidate", status="idea"),
     _r(_s("csp_earnings_crush", "short_put",
-          {"dte": [7, 21], "short_delta": 0.20, "earnings_within": 5},
+          {"dte": [7, 45], "short_delta": 0.20, "earnings_within": 5},
           {"close_after_earnings": True, "hold_to_expiry": False}),
        "Cash-secured put into earnings, closed after the crush",
        "Implied vol is systematically bid before earnings and collapses after. "
@@ -89,7 +89,7 @@ LIBRARY = [
        {"earnings_within": 5, "iv_rank_min": 60},
        ["tfsa", "taxable"], _CSP_CAPITAL, "candidate", status="idea"),
     _r(_s("covered_call_holdings", "covered_call",
-          {"dte": [25, 45], "short_delta": 0.25, "above_cost_basis": True},
+          {"dte": [25, 60], "short_delta": 0.25, "above_cost_basis": True},
           _MANAGED, universe={"strata": ["liquid"]}),
        "Covered call against long-term holdings",
        "The most capital-efficient premium available: shares already owned, so "
@@ -98,7 +98,7 @@ LIBRARY = [
        {"iv_rank_min": 40, "above_cost_basis": True},
        ["tfsa", "taxable"], _COVERED_CAPITAL, "candidate", status="idea"),
     _r(_s("naked_call_extended", "naked_call",
-          {"dte": [25, 45], "short_delta": 0.20, "rsi_min": 70}, _MANAGED),
+          {"dte": [25, 60], "short_delta": 0.20, "rsi_min": 70}, _MANAGED),
        "Naked call on an extended name  [TAXABLE ONLY]",
        "Selling calls into an overbought, over-extended move. Uncapped loss if "
        "the move continues, which is why it is taxable-only and capped hard.",
@@ -107,7 +107,7 @@ LIBRARY = [
 
     # ── DIRECTIONAL: a view on where the stock goes, expressed as short premium ──
     _r(_s("bullish_trend_put_spread", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "above_sma50": True, "rsi_min": 50}, _MANAGED,
           universe={"strata": ["liquid"]}),
        "Bullish trend: sell put spread below an uptrend",
@@ -118,7 +118,7 @@ LIBRARY = [
        {"above_sma50": True, "rsi_min": 50},
        ["tfsa", "taxable"], _SPREAD_CAPITAL, "directional"),
     _r(_s("bearish_trend_call_spread", "bear_call",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "below_sma50": True, "rsi_max": 50}, _MANAGED,
           universe={"strata": ["liquid"]}),
        "Bearish trend: sell call spread above a downtrend",
@@ -127,7 +127,7 @@ LIBRARY = [
        {"below_sma50": True, "rsi_max": 50},
        ["tfsa", "taxable"], _SPREAD_CAPITAL, "directional"),
     _r(_s("directional_long_call_control", "long_call",
-          {"dte": [25, 45], "target_delta": 0.40, "above_sma50": True,
+          {"dte": [25, 60], "target_delta": 0.40, "above_sma50": True,
            "rsi_min": 50}, _MANAGED, universe={"strata": ["liquid"]}),
        "Same bullish view, bought as a call  [EXPRESSION CONTROL]",
        "Identical entry signal to bullish_trend_put_spread, expressed as a long "
@@ -141,7 +141,7 @@ LIBRARY = [
 
     # ── ACCESS: same premium, different capital ──
     _r(_s("put_spread_ivr50", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "iv_rank_min": 50}, _MANAGED,
           universe={"strata": ["liquid"]}),
        "Put credit spread, IV rank > 50",
@@ -150,7 +150,7 @@ LIBRARY = [
        "affordability cap costs in edge.",
        {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "candidate"),
     _r(_s("put_spread_ivr50_hold", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "iv_rank_min": 50}, _HELD, universe={"strata": ["liquid"]}),
        "Put credit spread, IV rank > 50, held to expiry",
        "Holding pays only the opening legs and roughly halves the toll — 68% of "
@@ -158,7 +158,7 @@ LIBRARY = [
        "version, this IS the cost experiment.",
        {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "candidate"),
     _r(_s("call_spread_extended", "bear_call",
-          {"dte": [25, 45], "short_delta": 0.20, "width": 5.0, "rsi_min": 70},
+          {"dte": [25, 60], "short_delta": 0.20, "width": 5.0, "rsi_min": 70},
           _MANAGED, universe={"strata": ["liquid"]}),
        "Call credit spread on an extended name",
        "The defined-risk form of naked_call_extended, and the cheapest measured "
@@ -168,7 +168,7 @@ LIBRARY = [
 
     # ── PROBE: index versus single name ──
     _r(_s("csp_index_only", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "iv_rank_min": 50}, _MANAGED,
           universe={"symbols": ["SPY"], "strata": ["legacy"]}),
        "Put spread on the index only",
@@ -177,7 +177,7 @@ LIBRARY = [
        {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "index_probe",
        links=["docs/DOLT_NEXT_STEPS.md"]),
     _r(_s("index_put_spread_w25", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 25.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 25.0,
            "iv_rank_min": 50}, _MANAGED,
           universe={"symbols": ["SPY"], "strata": ["legacy"]},
           sizing={"max_capital_at_risk": 4000, "max_concurrent": 1}),
@@ -202,7 +202,7 @@ LIBRARY = [
        "at this width is not affordable.",
        "index_probe", links=["docs/ALLOCATION_BACKTEST_FINDINGS.md"]),
     _r(_s("csp_single_names", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "iv_rank_min": 50}, _MANAGED,
           universe={"strata": ["broad"], "exclude_etfs": True}),
        "Put spread on single names only",
@@ -214,7 +214,7 @@ LIBRARY = [
 
     # ── CONTROL: what makes any of the above believable ──
     _r(_s("benchmark_unselected", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0}, _MANAGED,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0}, _MANAGED,
           universe={"strata": ["liquid"]}),
        "Unselected put spread, every eligible day  [BENCHMARK]",
        "No signal at all. Unselected short premium was the single positive cell "
@@ -223,7 +223,7 @@ LIBRARY = [
        "is decoration.",
        {}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "benchmark"),
     _r(_s("null_random_days", "bull_put",
-          {"dte": [25, 45], "short_delta": 0.25, "width": 5.0,
+          {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "entry_days": "random"}, _MANAGED, universe={"strata": ["liquid"]}),
        "Put spread on random entry days  [NULL CONTROL]",
        "Entry days chosen at random. Separates 'the premium exists' from 'our "
@@ -231,14 +231,14 @@ LIBRARY = [
        "family, expect this to be uncomfortably competitive.",
        {}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "null_control"),
     _r(_s("null_random_strikes", "bull_put",
-          {"dte": [25, 45], "strike_selection": "random", "width": 5.0},
+          {"dte": [25, 60], "strike_selection": "random", "width": 5.0},
           _MANAGED, universe={"strata": ["liquid"]}),
        "Put spread with random strikes  [NULL CONTROL]",
        "Strike chosen at random within the window. If a delta-targeted setup "
        "cannot beat this, strike selection carries no information.",
        {}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "null_control"),
     _r(_s("known_negative_long_call", "long_call",
-          {"dte": [25, 45], "target_delta": 0.40}, _MANAGED,
+          {"dte": [25, 60], "target_delta": 0.40}, _MANAGED,
           universe={"strata": ["liquid"]}),
        "Long call 40-delta  [KNOWN-NEGATIVE TRIPWIRE]",
        "98 live paper trades produced -$17,620 at a scorer IC of -0.020. If the "

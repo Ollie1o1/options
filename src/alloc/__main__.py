@@ -98,7 +98,7 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"(deflating by {args.trials} configurations)\n")
 
     def run(label: str, structure: str, **entry):
-        e = {"dte": [25, 45], "short_delta": 0.25, "width": 5.0}
+        e = {"dte": [25, 60], "short_delta": 0.25, "width": 5.0}
         e.update(entry)
         trades, _ = replay(_spec(label, structure, e, args.trials), syms,
                            dates, src, terminal=term, stratum_of=strat)

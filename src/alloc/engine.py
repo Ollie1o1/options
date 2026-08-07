@@ -143,7 +143,7 @@ def select_legs(spec: StrategySpec, chain, date: str,
     wing is a skipped trade, never a substituted strike.
     """
     entry = spec.entry
-    lo, hi = entry.get("dte", [25, 45])
+    lo, hi = entry.get("dte", [25, 60])
     expiry = _pick_expiry(chain, date, int(lo), int(hi))
     if expiry is None:
         return None
@@ -423,7 +423,7 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
                 stats["skipped_capital"] += 1
                 continue
 
-            exp = _pick_expiry(chain, date, *spec.entry.get("dte", [25, 45]))
+            exp = _pick_expiry(chain, date, *spec.entry.get("dte", [25, 60]))
             t = Trade(symbol=sym, entry_date=date, entry_price=float(price),
                       capital_at_risk=car, legs=legs, expiration=exp or date,
                       stratum=stratum_of.get(sym))

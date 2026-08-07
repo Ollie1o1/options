@@ -28,6 +28,13 @@ MIN_DSR = 0.5
 MAX_PBO = 0.5
 MIN_TSTAT = 3.0
 
+# Below this many closed trades a verdict is refused outright, whatever the
+# statistics say. Learned from a starved run that closed 3 trades, reported
+# DSR 0.996 and t=12.56, and was graded `liquid_only` — every number correct,
+# the conclusion worthless. A deflated Sharpe is a distributional claim, and 3
+# observations do not carry one.
+MIN_N = 20
+
 
 def _returns(trades: Sequence[Any]) -> np.ndarray:
     return np.array([float(t.pnl or 0.0) / float(t.capital_at_risk)
@@ -95,14 +102,21 @@ def summarise(trades: Sequence[Any], n_trials: int,
 
 
 def promotion_verdict(result: Dict[str, Any]) -> str:
-    """`promote`, `liquid_only`, or `reject`.
+    """`promote`, `liquid_only`, `reject`, or `insufficient`.
 
     A strategy clearing everything except BROAD is recorded as `liquid_only`
     and never silently promoted: "works on the names we already knew about" is
     a materially weaker claim than "works".
+
+    `insufficient` is deliberately NOT `reject`: "we could not measure this" and
+    "we measured this and it failed" are different claims, and collapsing them
+    loses the one that tells you to go and get more data.
     """
     if result.get("insufficient"):
         return "reject"
+    n = result.get("n")
+    if n is not None and int(n) < MIN_N:
+        return "insufficient"
     if (result.get("dsr", 0.0) < MIN_DSR
             or result.get("pbo", 0.0) >= MAX_PBO
             or abs(result.get("tstat_clustered", 0.0)) < MIN_TSTAT

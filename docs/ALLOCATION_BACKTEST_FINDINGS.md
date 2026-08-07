@@ -247,25 +247,57 @@ confirm it.
 ### The instrument bug: a DTE window narrower than the expiration ladder
 
 The first run of this setup returned **n=3**. The cause was not the strategy:
+78 of 96 otherwise-eligible SPY dates could assemble no legs, because the window
+`dte [30,45]` contained no listed expiration at all.
 
-| dte window | share of SPY days with any listed expiration in it |
-|---|---:|
-| `[30, 45]` | **41.7%** |
-| `[25, 45]` | 99.8% |
-| `[7, 21]` | 100% |
+Audited across **25 randomly sampled symbols** — share of symbol-days carrying
+any expiry inside the window:
 
-The DoltHub backfill carries **~3.1 expirations per symbol-day**. A 15-day
-window a month out therefore contains no listed expiration on most dates — 78 of
-96 otherwise-eligible SPY dates could assemble no legs. Every setup in the
-STRATEGIES library was written with `dte [30,45]` and was, in consequence,
-**unmeasurable on this dataset**; the study's own runs used `[25,45]` and did not
-hit it.
+| dte window | median | worst | symbols below 95% |
+|---|---:|---:|---:|
+| `[30, 45]` (was in the library) | **52.4%** | 34.4% | 25/25 |
+| `[7, 21]` (was the earnings setup) | **55.4%** | 53.4% | 25/25 |
+| `[25, 45]` (the alloc CLI default) | **69.6%** | 69.0% | 25/25 |
+| `[7, 35]` | 95.3% | 94.5% | 4/25 |
+| `[25, 60]` | **99.8%** | 99.3% | 0/25 |
+| `[7, 45]` / `[5, 45]` | **100%** | 99.8% | 0/25 |
+| `[30, 70]` (dolt_vol, dolt_earnings_sell) | **100%** | 99.6% | 0/25 |
 
-All windows widened to `[25,45]`, which contains the old one and only adds dates
-the ladder actually offers. A test now refuses any window narrower than 20 days
-beyond 25 DTE. This is worth stating plainly: **the backtest was silently
-measuring 3 trades and reporting DSR 0.996 on them** — a starved sample is not a
-loud failure, it is a confident wrong answer.
+The backfill carries a **median of 2.2 expirations per symbol-day**. What
+matters is span, not placement: every window spanning 35 days or more cleared
+99%, every window under 30 days failed. Windows are now `[25,60]` for the
+monthly setups and `[7,45]` for the earnings setup, and the engine picks the
+NEAREST expiry inside the window, so widening only adds dates on which nothing
+closer was listed — it does not change which expiry is chosen when one exists.
+
+**A window validated on SPY is not validated for the universe.** SPY carries 3.2
+expirations/day against the universe median of 2.2, so `[25,45]` reaches 99.8%
+on SPY and only 69.6% universe-wide. That error was made once in this very
+section before the audit was run.
+
+#### What this does to the earlier results
+
+- **§4c mega/index rows are unaffected.** Measured per symbol, `[25,45]` reaches
+  99.8% on SPY, 99.5% on AAPL, 99.6% on NVDA, 99.4% on XLV.
+- **§2, §3 and the ALL-115-names row of §4c are subject to a coverage caveat.**
+  Those runs used `[25,45]` over the wide universe, which reaches only ~70% of
+  symbol-days. The samples were large (10,363 trades), so this is not a starved
+  n — but entries were confined to the ~70% of dates where the monthly ladder
+  happened to fall in range, which is a calendar-structured subsample rather than
+  a random one. Direction of bias unknown; magnitude presumed small.
+- **The Dolt VRP and earnings research is unaffected.** `src/dolt_vol.py` and
+  `src/dolt_earnings_sell.py` use `[30,70]` (100%), and every other Dolt module
+  picks the nearest expiry past a floor (`>= min_dte`) rather than bounding a
+  window, which cannot starve.
+
+The general lesson is the one worth keeping: **the starved run did not fail
+loudly. It reported DSR 0.996 and a verdict of `liquid_only` on three trades.**
+`promotion_verdict` now refuses any verdict under 20 closed trades and returns
+`insufficient` — deliberately NOT `reject`, because "could not measure" and
+"measured and failed" are different claims and only one of them tells you to go
+and get more data. Re-graded under that floor, the starved run reads
+`insufficient`. The deeper guard is still to check coverage before believing a
+result rather than after.
 
 ## 5. What this does NOT yet say
 
