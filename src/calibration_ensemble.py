@@ -378,7 +378,11 @@ def _print_report(res: Dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("--db", default="paper_trades.db")
-    ap.add_argument("--config", default="config.json")
+    # Anchored: this is the one --config that can be WRITTEN (--apply goes to
+    # apply_to_config). Left CWD-relative, running --apply from another
+    # directory would back up and rewrite a config.json that is not the repo's.
+    ap.add_argument("--config",
+                    default=str(Path(__file__).resolve().parent.parent / "config.json"))
     ap.add_argument(
         "--structure",
         default="long_call",

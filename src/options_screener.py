@@ -22,6 +22,7 @@ import uuid
 import time
 import threading as _threading
 from datetime import datetime, timezone, timedelta
+from pathlib import Path as _Path
 from typing import Optional, Tuple, List, Dict, Union, Any
 from .schemas import ScanResult
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -426,6 +427,28 @@ def _trade_dte(trade: dict):
     return None
 
 
+# Same idiom as api.py / backtester.py / ai_cache.py.
+_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
+
+
+def _repo_path(path: str) -> str:
+    """Resolve a bare/relative path against the repo root, not the CWD.
+
+    A relative path resolves against wherever the process happens to have been
+    started. The launcher starts from the repo root so it works, but a run from
+    anywhere else silently reads NOTHING and falls back to defaults — every
+    reader here swallows the error, so no message says the real config was
+    missed. That is not cosmetic: `auto_log_budget_cap` returning None drops
+    the per-position budget, and `apply_auto_log_allowlist` seeing an empty
+    config drops the Phase 1 cohort quarantine. Both fail open.
+
+    Absolute paths pass through untouched, so every caller that injects its own
+    config (the doctor's temp fixtures, `--config`, the calibration harnesses)
+    keeps working exactly as before.
+    """
+    return path if os.path.isabs(path) else str(_PROJECT_ROOT / path)
+
+
 def auto_log_budget_cap(cfg_path: str = "config.json"):
     """The per-position budget the auto-log feeder must respect, or None.
 
@@ -438,7 +461,7 @@ def auto_log_budget_cap(cfg_path: str = "config.json"):
     """
     import json
     try:
-        with open(cfg_path) as f:
+        with open(_repo_path(cfg_path)) as f:
             cfg = json.load(f)
         cap = (cfg.get("auto_log") or {}).get("max_capital_at_risk")
         return float(cap) if cap is not None and cap not in ("", 0) else None
@@ -464,7 +487,7 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
     """
     import json, logging
     try:
-        with open(cfg_path) as f:
+        with open(_repo_path(cfg_path)) as f:
             cfg = json.load(f)
     except Exception:
         cfg = {}
@@ -531,7 +554,10 @@ def rank_by_verdict(df, win_rates: Optional[Dict[str, float]] = None):
 
 
 def load_config(config_path: str = "config.json") -> Dict:
-    """Load configuration from JSON file with fallback defaults."""
+    """Load configuration from JSON file with fallback defaults.
+
+    Relative paths resolve against the repo root — see `_repo_path`.
+    """
     default_config = {
         # Composite quality score weights (can be overridden in config.json)
         "composite_weights": {
@@ -557,7 +583,7 @@ def load_config(config_path: str = "config.json") -> Dict:
     }
     
     try:
-        with open(config_path, 'r') as f:
+        with open(_repo_path(config_path), 'r') as f:
             config = json.load(f)
             # Merge with defaults
             for key in default_config:
