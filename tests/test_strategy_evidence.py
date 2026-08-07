@@ -46,6 +46,33 @@ class ApplyResultTest(unittest.TestCase):
         r = apply_result(LIBRARY[0], _result(), date="2026-09-01")
         self.assertIn("cagr_on_deployed", r.evidence["capacity"])
 
+    def test_the_sample_size_survives(self):
+        """A Sharpe with no n beside it cannot be argued with."""
+        result = _result()
+        result.update({"n": 28, "win_rate": 85.71, "skew": -2.486})
+        r = apply_result(LIBRARY[0], result, date="2026-09-01")
+        self.assertEqual(r.evidence["n"], 28)
+        self.assertEqual(r.evidence["skew"], -2.486)
+
+    def test_the_undeflated_sharpe_travels_with_the_deflated_one(self):
+        """Storing only the flattering number is how it gets quoted alone."""
+        result = _result()
+        result["dsr_undeflated"] = 0.83
+        r = apply_result(LIBRARY[0], result, date="2026-09-01")
+        self.assertEqual(r.evidence["dsr_undeflated"], 0.83)
+
+    def test_an_in_sample_run_says_so_on_the_record(self):
+        result = _result()
+        result["sample"] = "SPY only, 225 Fridays, IN-SAMPLE"
+        r = apply_result(LIBRARY[0], result, date="2026-09-01")
+        self.assertIn("IN-SAMPLE", r.evidence["sample"])
+
+    def test_absent_optional_fields_do_not_appear_as_none(self):
+        """The no-extras call is the one most backtests will make."""
+        r = apply_result(LIBRARY[0], _result(), date="2026-09-01")
+        for key in ("n", "sample", "dsr_undeflated", "comparison"):
+            self.assertNotIn(key, r.evidence)
+
     def test_a_measured_cost_profile_lands_on_the_setup(self):
         """Friction measured during the backtest replaces the table estimate."""
         result = _result()

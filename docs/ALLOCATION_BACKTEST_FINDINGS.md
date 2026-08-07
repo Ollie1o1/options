@@ -218,6 +218,55 @@ line.
 pattern and the downtrend penalty are the two things worth carrying forward;
 neither is yet evidence a real-money gate should act on.
 
+## 4d. The wider index spread, run 2026-08-07 — and the instrument bug it found
+
+`index_put_spread_w25` (§ the STRATEGIES desk) was replayed against its own
+controlled comparison: identical universe, entry, delta and exit, with **width
+the only difference**.
+
+| arm | n | win | RoC/trade | t (clustered) | skew | DSR (35 trials) | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| **$25 wide, SPY** | 28 | 85.7% | **+5.00%** | 1.26 | -2.49 | **0.255** | reject |
+| $5 wide, SPY | 52 | 84.6% | +3.20% | 0.65 | -2.23 | 0.090 | reject |
+
+**The mechanism is visible and the verdict is still reject.** Width lifted
+return on capital by 1.8 points on the same 225 Fridays, in the direction the
+friction argument predicts — credit scales with width while the two crossings
+do not. It did not lift it far enough: DSR 0.255 against the 0.5 line, t=1.26
+against Harvey's hurdle of 3.0, and **skew -2.49**, which is the short-premium
+signature of losses that have not arrived. Capacity is 6.6 trades/year at one
+concurrent position, because $2,682 of peak deployed capital is 67% of the book.
+
+Undeflated it reads DSR 0.829. That gap — 0.829 alone, 0.255 after 35
+configurations — is the same lesson as §4b, arriving for the second time.
+
+**This is IN-SAMPLE.** The window is the one the 18-configuration friction
+search already ran on, so the result can falsify the hypothesis but cannot
+confirm it.
+
+### The instrument bug: a DTE window narrower than the expiration ladder
+
+The first run of this setup returned **n=3**. The cause was not the strategy:
+
+| dte window | share of SPY days with any listed expiration in it |
+|---|---:|
+| `[30, 45]` | **41.7%** |
+| `[25, 45]` | 99.8% |
+| `[7, 21]` | 100% |
+
+The DoltHub backfill carries **~3.1 expirations per symbol-day**. A 15-day
+window a month out therefore contains no listed expiration on most dates — 78 of
+96 otherwise-eligible SPY dates could assemble no legs. Every setup in the
+STRATEGIES library was written with `dte [30,45]` and was, in consequence,
+**unmeasurable on this dataset**; the study's own runs used `[25,45]` and did not
+hit it.
+
+All windows widened to `[25,45]`, which contains the old one and only adds dates
+the ladder actually offers. A test now refuses any window narrower than 20 days
+beyond 25 DTE. This is worth stating plainly: **the backtest was silently
+measuring 3 trades and reporting DSR 0.996 on them** — a starved sample is not a
+loud failure, it is a confident wrong answer.
+
 ## 5. What this does NOT yet say
 
 - **No statistics.** CPCV, Deflated Sharpe and PBO are not built. No number here

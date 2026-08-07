@@ -21,6 +21,14 @@ _VERDICT_STATUS = {"promote": "validated",
                    "liquid_only": "backtesting",
                    "reject": "dead"}
 
+# Carried through only when the backtest supplied them. `n` and `sample` matter
+# most: a Sharpe with no sample size beside it cannot be argued with, and a
+# result measured on the same window the search ran on is not the same claim as
+# one measured out of sample. `dsr_undeflated` travels with `dsr` for the same
+# reason the trial count does — storing only the flattering number is precisely
+# how it later gets quoted alone.
+_OPTIONAL = ("n", "win_rate", "skew", "dsr_undeflated", "sample", "comparison")
+
 
 def apply_result(record: StrategyRecord, result: Dict[str, Any],
                  date: str) -> StrategyRecord:
@@ -32,6 +40,9 @@ def apply_result(record: StrategyRecord, result: Dict[str, Any],
         "n_trials": result.get("n_trials"), "window": result.get("window"),
         "evaluated": date,
     }
+    for key in _OPTIONAL:
+        if result.get(key) is not None:
+            evidence[key] = result[key]
     verdict = result.get("verdict", "reject")
     out = record.amend("evidence", evidence, reason=f"backtest {date}", date=date)
     out = out.amend("verdict", verdict, reason=f"backtest {date}", date=date)

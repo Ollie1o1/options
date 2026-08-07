@@ -113,6 +113,35 @@ class ControlTierTest(unittest.TestCase):
         self.assertEqual(neg[0].status, "dead")
 
 
+class DteWindowTest(unittest.TestCase):
+    """A window narrower than the data's expiration ladder measures nothing.
+
+    The DoltHub backfill carries ~3.1 expirations per symbol-day, so a 15-day
+    window out at a month contains NO listed expiration on most dates: measured
+    on SPY, `dte [30,45]` reached only 41.7% of days against 99.8% for
+    `[25,45]`. The first backtest of index_put_spread_w25 returned n=3 for
+    exactly this reason — 78 of 96 eligible dates could not assemble legs.
+
+    Near-dated windows are exempt: the front of the ladder is dense, and
+    `[7,21]` reached 100% of SPY days.
+    """
+
+    MIN_SPAN = 20
+    NEAR_DATED = 25
+
+    def test_every_window_is_wide_enough_for_the_expiration_ladder(self):
+        for r in LIBRARY:
+            dte = r.spec.entry.get("dte")
+            if not dte:
+                continue
+            lo, hi = int(dte[0]), int(dte[1])
+            if hi <= self.NEAR_DATED:
+                continue
+            self.assertGreaterEqual(
+                hi - lo, self.MIN_SPAN,
+                f"{r.spec.id}: dte {dte} is narrower than the listed ladder")
+
+
 class WiderIndexSpreadTest(unittest.TestCase):
     """The replacement for the killed single-name bull puts: attack the toll by
     widening the structure and tightening the universe, not by finding a signal."""
@@ -146,6 +175,25 @@ class WiderIndexSpreadTest(unittest.TestCase):
 
     def test_it_is_a_hypothesis_not_a_validated_setup(self):
         self.assertNotIn(self.rec.status, ("validated", "promoted", "live"))
+
+    def test_the_replay_result_is_recorded_on_it(self):
+        """A run that happened and was not written down gets quoted later
+        without its caveats."""
+        self.assertEqual(self.rec.evidence["n"], 28)
+        self.assertEqual(self.rec.verdict, "reject")
+        self.assertEqual(self.rec.status, "dead")
+
+    def test_the_evidence_keeps_the_trial_count_and_the_capacity(self):
+        self.assertEqual(self.rec.evidence["n_trials"], 35)
+        self.assertIn("cagr_on_deployed", self.rec.evidence["capacity"])
+
+    def test_the_evidence_says_it_was_in_sample(self):
+        self.assertIn("IN-SAMPLE", self.rec.evidence["sample"])
+
+    def test_the_undeflated_number_is_kept_beside_the_deflated_one(self):
+        """0.83 alone and 0.25 deflated. Storing only one invites the wrong quote."""
+        self.assertGreater(self.rec.evidence["dsr_undeflated"],
+                           self.rec.evidence["dsr"])
 
     def test_its_friction_is_unmeasured_not_borrowed_from_single_names(self):
         p = fr.profile_for(self.rec, table=fr.RECORDED)
