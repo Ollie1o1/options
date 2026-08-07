@@ -89,6 +89,41 @@ three were caught by comparing against what the structure must mechanically do.
    structure cannot physically sustain. Expiry now settles at intrinsic value,
    with the underlying recovered by put-call parity.
 
+## 4b. Nothing survives deflation — including the result that looked like a find
+
+Attacking friction three ways (a crossing-cost filter, wider spreads, and the
+two combined) produced **two positive configurations out of eighteen tried**.
+Deflated by the search that produced them:
+
+| configuration | n | win | avg RoC | Sharpe | t | skew | DSR alone | **DSR deflated** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| width $5 (baseline) | 206 | 70.9% | -17.15% | -0.389 | -5.58 | -1.14 | 0.000 | **0.000** |
+| width $10 | 237 | 75.5% | -12.72% | -0.320 | -4.93 | -1.48 | 0.000 | **0.000** |
+| width $20 | 243 | 71.6% | -7.69% | -0.290 | -4.52 | -1.96 | 0.000 | **0.000** |
+| **width $25** | 199 | **84.9%** | **+1.76%** | 0.117 | 1.65 | -2.80 | **0.921** | **0.432** |
+| width $25 + friction<=15% | 76 | 78.9% | +0.51% | 0.025 | 0.22 | -1.92 | 0.583 | **0.056** |
+
+The `width $25` row is the whole lesson. In isolation it reads **DSR 0.921** —
+85% wins, positive expectancy, a discovery. Deflated by the **18 configurations
+actually tried**, it reads **0.432**: below the 0.5 line, with t=1.65 against
+Harvey's hurdle of 3.0, and a skew of **-2.80**.
+
+It is what an 18-way search produces from noise. The width series is also
+non-monotone ($10 worse than $5, $20 worse than $10, then $25 positive), which
+is the shape of an artifact rather than an effect.
+
+**Verdict: no configuration tested so far has an edge.** That is a real result,
+not a failure to find one.
+
+### Why the skew matters
+
+Every configuration shows skew between **-1.1 and -2.8**. That is the
+short-premium signature — many small wins, rare large losses — and it is why a
+high win rate here means very little on its own. An 84.9% win rate with skew
+-2.80 is not a good strategy; it is a strategy whose losses have not arrived
+yet. The same caveat the short-premium gate already carries about its
+unobserved tail applies with equal force to everything in this table.
+
 ## 5. What this does NOT yet say
 
 - **No statistics.** CPCV, Deflated Sharpe and PBO are not built. No number here
