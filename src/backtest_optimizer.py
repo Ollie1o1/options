@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import differential_evolution, minimize
 from scipy.stats import pearsonr
+from src.paths import repo_path
 
 logger = logging.getLogger(__name__)
 
@@ -907,7 +908,7 @@ def print_comparison(current: Dict[str, float], optimised: Dict[str, float]) -> 
 def _load_current_from_config(config_path: Path) -> Dict[str, float]:
     """Load actual current weights from config.json (subset of WEIGHT_KEYS)."""
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             cfg = json.load(f)
         cw = cfg.get("composite_weights", {})
         sub = {k: float(cw.get(k, 0.0)) for k in WEIGHT_KEYS}
@@ -926,8 +927,8 @@ def save_to_config(weights: Dict[str, float], config_path: Path) -> None:
     vega_risk, term_structure, spread, etc.). Writes a timestamped backup first.
     """
     from datetime import datetime
-    config_path = Path(config_path)
-    with open(config_path) as f:
+    config_path = Path(repo_path(config_path))
+    with open(repo_path(config_path)) as f:
         cfg = json.load(f)
     cw = dict(cfg.get("composite_weights", {}))
 

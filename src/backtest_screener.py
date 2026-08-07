@@ -12,6 +12,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import glob
+from src.paths import repo_path
 
 # Lazy-load yfinance to avoid startup hang
 _yf = None
@@ -34,7 +35,7 @@ def load_config() -> Dict:
     """Load configuration from config.json"""
     config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
     try:
-        with open(config_path, 'r') as f:
+        with open(repo_path(config_path), 'r') as f:
             return json.load(f)
     except FileNotFoundError:
         print(f"Warning: config.json not found at {config_path}, using defaults")

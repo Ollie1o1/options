@@ -30,6 +30,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
+from src.paths import repo_path
 
 RUN_COMMAND = "python run.py"
 
@@ -265,6 +266,12 @@ def _expected_schema_version() -> Optional[int]:
 # ── config.json ───────────────────────────────────────────────────────────────
 
 def check_config(config_path: str = "config.json") -> CheckResult:
+    # Resolved once, up front: the existence guard and the open below must be
+    # talking about the same file. They were not — the guard tested the raw
+    # relative path while the read resolved it, so from any other directory the
+    # doctor reported the repo's config missing and never opened the one it
+    # would actually have read.
+    config_path = repo_path(config_path)
     if not os.path.exists(config_path):
         return CheckResult("config.json", "FAIL", f"{config_path} not found",
                             "restore config.json from git (`git checkout config.json`) or copy a known-good one")

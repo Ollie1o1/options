@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from src.paths import repo_path
 
 
 def is_live(ticker: str, period: str = "5d") -> bool:
@@ -65,7 +66,7 @@ def clean_watchlists(config_path: str = "config.json", dry_run: bool = True,
     """Validate every watchlist ticker; drop the dead ones. dry_run=True only
     reports. Returns {dead, removed_by_list, audited}. Writes config only when
     dry_run is False AND dead tickers were found (never rewrites needlessly)."""
-    with open(config_path) as f:
+    with open(repo_path(config_path)) as f:
         config = json.load(f)
     all_tk = watchlist_tickers(config)
     audit = audit_tickers(all_tk, live_fn=live_fn)
@@ -78,7 +79,7 @@ def clean_watchlists(config_path: str = "config.json", dry_run: bool = True,
             if dropped:
                 removed[name] = dropped
                 config["watchlists"][name] = kept
-        with open(config_path, "w") as f:
+        with open(repo_path(config_path), "w") as f:
             json.dump(config, f, indent=2)
     return {"audited": len(all_tk), "live": audit["live"], "dead": audit["dead"],
             "removed_by_list": removed, "dry_run": dry_run}
@@ -92,7 +93,7 @@ def _cli():
     ap.add_argument("--extra", default="", help="Comma-separated extra tickers to audit (e.g. open positions)")
     args = ap.parse_args()
 
-    with open(args.config) as f:
+    with open(repo_path(args.config)) as f:
         config = json.load(f)
     tickers = watchlist_tickers(config)
     if args.extra:

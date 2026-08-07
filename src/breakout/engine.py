@@ -11,6 +11,7 @@ from src.breakout import features as F
 from src.breakout.distribution import baseline_distribution, parametric_distribution, make_distribution
 from src.breakout import backtest as B
 from src.breakout import report as R
+from src.paths import repo_path
 
 UP, DOWN = 0.10, -0.10
 FALLBACK_UNIVERSE = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "SPY"]
@@ -18,7 +19,7 @@ FALLBACK_UNIVERSE = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "S
 
 def load_universe(config_path: str = "config.json") -> List[str]:
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             u = ((json.load(f) or {}).get("breakout") or {}).get("universe")
         return u or FALLBACK_UNIVERSE
     except Exception:

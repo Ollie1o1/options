@@ -30,6 +30,7 @@ import sqlite3
 from dataclasses import dataclass
 from statistics import median
 from typing import Any, Dict, Optional
+from src.paths import repo_path
 
 DEFAULT_LEDGER = "paper_trades.db"
 DEFAULT_CONFIG = "config.json"
@@ -125,7 +126,7 @@ class FrictionProfile:
 def ceiling(config_path: str = DEFAULT_CONFIG) -> float:
     """`auto_log.max_friction_to_credit` — the same ceiling that refuses trades."""
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             cfg = json.load(f)
         value = (cfg.get("auto_log") or {}).get("max_friction_to_credit")
     except (OSError, ValueError, AttributeError):

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 from typing import Any, Dict, List, Optional
+from src.paths import repo_path
 
 
 DEFAULT_LOTTERY_CONFIG: Dict[str, Any] = {
@@ -63,7 +64,7 @@ def load_lottery_config(config_path: str = "config.json") -> Dict[str, Any]:
     """Merge a config.json 'lottery' block over the defaults (shallow per key)."""
     cfg = json.loads(json.dumps(DEFAULT_LOTTERY_CONFIG))  # deep copy
     try:
-        with open(config_path) as fh:
+        with open(repo_path(config_path)) as fh:
             user = (json.load(fh) or {}).get("lottery") or {}
     except Exception:
         user = {}

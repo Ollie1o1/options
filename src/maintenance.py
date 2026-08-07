@@ -28,6 +28,7 @@ except ImportError:       # pragma: no cover - not exercised on macOS/Linux
     fcntl = None
 
 from src import phase1_checkpoint
+from src.paths import repo_path
 
 VENV_PY = os.path.expanduser("~/.venvs/options/bin/python")
 DEFAULT_STATE_PATH = os.path.join("logs", ".maintenance_state.json")
@@ -334,7 +335,7 @@ def _max_capital_at_risk(config_path: str = "config.json") -> Optional[float]:
     silently substituting a number nobody chose.
     """
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             cap = (json.load(f).get("auto_log") or {}).get("max_capital_at_risk")
         return float(cap) if cap else None
     except (OSError, ValueError, TypeError):
@@ -383,7 +384,7 @@ def _default_enforce_exits(db_path: str, config_path: str = "config.json") -> No
 def _cohort_min_dte(config_path: str = "config.json", default: int = 30) -> int:
     """The gate cohort's DTE floor from config (auto_log.cohort_min_dte)."""
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             return int((json.load(f).get("auto_log") or {}).get("cohort_min_dte")
                        or default)
     except (OSError, ValueError, TypeError):
@@ -576,7 +577,7 @@ def run_headless(db_path: str = "paper_trades.db",
     pass on auto-log days is harmless.
     """
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             phase1_start = (json.load(f).get("auto_log") or {}).get("phase1_start_date")
     except (OSError, ValueError):
         phase1_start = None

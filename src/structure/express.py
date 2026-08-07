@@ -11,6 +11,7 @@ from .types import (BEARISH_STRUCTURES, BULLISH_STRUCTURES, CREDIT_STRUCTURES,
                     Expression, Rejection, View)
 from .view import implied_hit
 from ..execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
+from src.paths import repo_path
 
 DEFAULT_COMMISSION = FALLBACK_COMMISSION_PER_CONTRACT
 DEFAULT_SLIPPAGE = 0.05
@@ -19,7 +20,7 @@ DEFAULT_SLIPPAGE = 0.05
 def load_costs(config_path: str = "config.json") -> Tuple[float, float]:
     """Read the ONE source of truth for execution costs."""
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             pt = (json.load(f).get("paper_trading") or {})
     except (OSError, ValueError):
         return DEFAULT_COMMISSION, DEFAULT_SLIPPAGE

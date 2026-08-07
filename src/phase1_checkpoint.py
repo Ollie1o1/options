@@ -50,6 +50,7 @@ from src import gate_extensions
 # the project shares one answer to "is this row evidence". Importers here keep
 # working.
 from src.ledger_filters import exclude_ruled_duplicates  # noqa: E402,F401
+from src.paths import repo_path
 
 
 def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[float] = None):
@@ -757,7 +758,7 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="Compute and print only; do not write")
     args = ap.parse_args()
 
-    with open(args.config) as f:
+    with open(repo_path(args.config)) as f:
         cfg = json.load(f)
     phase1_start = (cfg.get("auto_log") or {}).get("phase1_start_date")
     if not phase1_start:

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 # execution use (TP, deep-ITM delta TP, time exit, SL — researched, config-driven).
 from src.paper_manager import _evaluate_long_single_leg_exit, _normalize_exit_rules
 from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
+from src.paths import repo_path
 
 _RFR = 0.045
 
@@ -29,7 +30,7 @@ def exit_rules(config_path: str = "config.json") -> Dict[str, Any]:
     """Normalized exit rules — delegates to the canonical paper_manager normalizer
     so the backtest uses the EXACT researched long-option rules (incl. tp_delta)."""
     try:
-        cfg = json.load(open(config_path))
+        cfg = json.load(open(repo_path(config_path)))
     except Exception:
         cfg = {}
     return _normalize_exit_rules(cfg)
@@ -131,7 +132,7 @@ def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
     rules = exit_rules(config_path)
     # Real commission from config (paper_trading.commission_per_contract).
     try:
-        commission = float(json.load(open(config_path)).get("paper_trading", {})
+        commission = float(json.load(open(repo_path(config_path))).get("paper_trading", {})
                            .get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     except Exception:
         commission = FALLBACK_COMMISSION_PER_CONTRACT

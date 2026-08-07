@@ -35,6 +35,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
+from src.paths import repo_path
 
 SCORE_TO_KEY: Dict[str, str] = {
     "vrp_score": "vrp",
@@ -275,7 +276,7 @@ def build_ensemble(
     wf = _walkforward_ic(df, train_min, test_size)
     ridge = _ridge_with_bootstrap(df)
 
-    with open(config_path) as f:
+    with open(repo_path(config_path)) as f:
         cfg = json.load(f)
     cw = dict(cfg.get("composite_weights", {}))
 
@@ -326,7 +327,7 @@ def build_ensemble(
 
 
 def apply_to_config(recommended: Dict[str, float], config_path: str) -> Path:
-    p = Path(config_path)
+    p = Path(repo_path(config_path))
     with open(p) as f:
         cfg = json.load(f)
     cw = dict(cfg.get("composite_weights", {}))
@@ -378,11 +379,9 @@ def _print_report(res: Dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("--db", default="paper_trades.db")
-    # Anchored: this is the one --config that can be WRITTEN (--apply goes to
-    # apply_to_config). Left CWD-relative, running --apply from another
-    # directory would back up and rewrite a config.json that is not the repo's.
-    ap.add_argument("--config",
-                    default=str(Path(__file__).resolve().parent.parent / "config.json"))
+    # Stays a bare name so --help reads cleanly; apply_to_config resolves it
+    # against the repo root. This is the one --config that can be WRITTEN.
+    ap.add_argument("--config", default="config.json")
     ap.add_argument(
         "--structure",
         default="long_call",

@@ -59,6 +59,7 @@ from src.phase1_checkpoint import (GATE_V2_MAX_EXTENSIONS,
                                    decide_v2, design_effect,
                                    exclude_ruled_duplicates)
 from src.overshoot import SCHEDULER_RECOVERED, fetch_stop_exits, summarize
+from src.paths import repo_path
 
 SHORT_PREMIUM_STRATEGIES: Tuple[str, ...] = ("Bull Put", "Bear Call", "Short Put")
 
@@ -543,7 +544,7 @@ def main() -> None:
     ap.add_argument("--config", default="config.json")
     args = ap.parse_args()
 
-    with open(args.config) as f:
+    with open(repo_path(args.config)) as f:
         cfg = _json.load(f)
     start = (cfg.get("auto_log") or {}).get("phase1_start_date")
     cap = (cfg.get("auto_log") or {}).get("max_capital_at_risk")

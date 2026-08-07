@@ -7,6 +7,7 @@ import json
 from typing import Dict, Optional, Tuple
 
 from .candidates import build_candidates
+from src.paths import repo_path
 
 DEFAULT_MIN_DTE = 30
 DEFAULT_MAX_DTE = 60
@@ -14,7 +15,7 @@ DEFAULT_MAX_DTE = 60
 
 def _exit_rules(config_path: str = "config.json") -> dict:
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             return json.load(f).get("exit_rules") or {}
     except (OSError, ValueError):
         return {}

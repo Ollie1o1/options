@@ -24,6 +24,7 @@ import sqlite3
 from contextlib import closing
 from statistics import median
 from typing import Any, Dict, List, Optional
+from src.paths import repo_path
 
 SLEEVE_PREFIX = "Lottery "
 
@@ -35,7 +36,7 @@ def _load_sleeve_cfg(config_path: str = "config.json") -> Dict[str, Any]:
         "hit_multiple": 3.0,           # a "hit" = closed ticket returned >= 3x debit
     }
     try:
-        with open(config_path) as fh:
+        with open(repo_path(config_path)) as fh:
             user = (json.load(fh) or {}).get("lottery_sleeve") or {}
         for k in defaults:
             if k in user:

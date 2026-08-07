@@ -106,5 +106,61 @@ class TestAutoLogGuardsAreCwdIndependent(unittest.TestCase):
         self.assertEqual(here, there)
 
 
+class TestEveryConfigReaderIsCwdIndependent(unittest.TestCase):
+    """The sweep across the remaining ~20 modules.
+
+    Each reader is called from the repo root and again from a temp directory;
+    the two answers must match. Every one of these swallowed its error and
+    returned a fallback, so a mismatch is a silently different answer rather
+    than a crash — which is why none of them was noticed.
+    """
+
+    def _both_cwds(self, fn):
+        here = fn()
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                there = fn()
+            finally:
+                os.chdir(cwd)
+        return here, there
+
+    def test_readers_agree_across_directories(self):
+        from src.doctor import check_config
+        from src.lottery.selector import load_lottery_config
+        from src.maintenance import _cohort_min_dte, _max_capital_at_risk
+        from src.structure.express import load_costs
+
+        cases = {
+            "maintenance._max_capital_at_risk": _max_capital_at_risk,
+            "maintenance._cohort_min_dte": _cohort_min_dte,
+            "structure.express.load_costs": load_costs,
+            "lottery.selector.load_lottery_config": load_lottery_config,
+            "doctor.check_config": lambda: check_config().status,
+        }
+        for name, fn in cases.items():
+            with self.subTest(reader=name):
+                here, there = self._both_cwds(fn)
+                self.assertEqual(here, there,
+                                 f"{name} gave a different answer from another "
+                                 f"directory: {here!r} vs {there!r}")
+
+    def test_doctor_guard_and_read_agree_on_the_same_file(self):
+        """check_config tested the RAW path for existence and opened the
+        RESOLVED one, so from elsewhere it reported the config missing without
+        ever opening the file it would have read."""
+        from src.doctor import check_config
+        _, there = self._both_cwds(lambda: check_config().status)
+        self.assertEqual(there, "PASS")
+
+    def test_a_missing_injected_config_still_fails_the_doctor(self):
+        """The guard must not be softened into always finding the repo's."""
+        from src.doctor import check_config
+        with tempfile.TemporaryDirectory() as tmp:
+            result = check_config(os.path.join(tmp, "config.json"))
+        self.assertEqual(result.status, "FAIL")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
+from src.paths import repo_path
 
 
 @dataclass
@@ -149,7 +150,7 @@ def run_preflight(db_path: str = "paper_trades.db",
     from src import health
     from src.execution import pipeline
 
-    with open(config_path) as f:
+    with open(repo_path(config_path)) as f:
         cfg = json.load(f)
     phase1_start = (cfg.get("auto_log") or {}).get("phase1_start_date")
 

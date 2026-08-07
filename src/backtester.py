@@ -37,6 +37,7 @@ DEFAULT_DB_PATH = str(_PROJECT_ROOT / "paper_trades.db")
 # Dependency-free by design — see src/ledger_filters. pandas/numpy are optional
 # here, so the cohort filter must not arrive through a module that requires them.
 from src.ledger_filters import exclude_ruled_duplicates  # noqa: E402
+from src.paths import repo_path
 
 try:
     import numpy as np
@@ -1401,7 +1402,7 @@ def recommend_weights_for_structure(
     component_ic = ic_data.get("component_ic", {}) or {}
 
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             cfg = json.load(f)
     except Exception as exc:
         return {"error": f"could not read {config_path}: {exc}", "n_trades": n, "ready": False}
@@ -1469,7 +1470,7 @@ def recommend_weights_from_paper_trades(
     component_n = ic_data.get("component_n", {}) or {}
 
     try:
-        with open(config_path) as f:
+        with open(repo_path(config_path)) as f:
             cfg = json.load(f)
     except Exception as exc:
         return {"error": f"could not read {config_path}: {exc}", "n_trades": n, "ready": False}
@@ -1536,7 +1537,7 @@ def apply_recommended_weights(
     Write recommended composite_weights to config.json after a timestamped backup.
     Returns backup path on success, None on failure.
     """
-    cfg_path = pathlib.Path(config_path)
+    cfg_path = pathlib.Path(repo_path(config_path))
     try:
         with open(cfg_path) as f:
             cfg = json.load(f)

@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from src.dolt_cohort import _stats
 from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
+from src.paths import repo_path
 
 
 _SPLIT_GUARD = 0.40   # a >40% one-day move in RAW prices is a split, not a market move
@@ -136,7 +137,7 @@ def run_vol_backtest(symbols, dates, db_path=None, config_path="config.json") ->
     from src import dolt_options as _do
     from src.dolt_stocks import close_history
     try:
-        commission = float(json.load(open(config_path)).get("paper_trading", {})
+        commission = float(json.load(open(repo_path(config_path))).get("paper_trading", {})
                            .get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     except Exception:
         commission = FALLBACK_COMMISSION_PER_CONTRACT

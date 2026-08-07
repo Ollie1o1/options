@@ -21,6 +21,7 @@ from src import phase1_checkpoint
 from src.execution import exits as exits_mod
 from src.execution import sizing as sizing_mod
 from src.execution import ticket as ticket_mod
+from src.paths import repo_path
 
 # The gates that can authorise execution. Names match config.gate.authorising_gate.
 LONG_CALL = "long_call"
@@ -134,7 +135,7 @@ def main() -> None:
     ap.add_argument("--db", default="paper_trades.db")
     ap.add_argument("--config", default="config.json")
     args = ap.parse_args()
-    with open(args.config) as f:
+    with open(repo_path(args.config)) as f:
         cfg = json.load(f)
     p1 = (cfg.get("auto_log") or {}).get("phase1_start_date")
     st = arm_status(args.db, cfg, p1)

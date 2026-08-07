@@ -427,26 +427,8 @@ def _trade_dte(trade: dict):
     return None
 
 
-# Same idiom as api.py / backtester.py / ai_cache.py.
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
-
-
-def _repo_path(path: str) -> str:
-    """Resolve a bare/relative path against the repo root, not the CWD.
-
-    A relative path resolves against wherever the process happens to have been
-    started. The launcher starts from the repo root so it works, but a run from
-    anywhere else silently reads NOTHING and falls back to defaults — every
-    reader here swallows the error, so no message says the real config was
-    missed. That is not cosmetic: `auto_log_budget_cap` returning None drops
-    the per-position budget, and `apply_auto_log_allowlist` seeing an empty
-    config drops the Phase 1 cohort quarantine. Both fail open.
-
-    Absolute paths pass through untouched, so every caller that injects its own
-    config (the doctor's temp fixtures, `--config`, the calibration harnesses)
-    keeps working exactly as before.
-    """
-    return path if os.path.isabs(path) else str(_PROJECT_ROOT / path)
+from .paths import PROJECT_ROOT as _PROJECT_ROOT
+from .paths import repo_path as _repo_path
 
 
 def auto_log_budget_cap(cfg_path: str = "config.json"):

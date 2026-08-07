@@ -409,6 +409,7 @@ def _evaluate_long_single_leg_exit(
 # Sourced from src.execution_costs so there is ONE number to change when the
 # broker changes; see the note there for why the fallback is not 0.0.
 from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
+from src.paths import repo_path
 
 COMMISSION_PER_CONTRACT = FALLBACK_COMMISSION_PER_CONTRACT  # $ per contract per leg
 SLIPPAGE_PER_SHARE = 0.05        # $ per share (1 typical options tick, ~half spread)
@@ -727,7 +728,7 @@ class PaperManager:
         self.config_path = config_path
         # Load friction costs from config (fall back to module-level constants)
         try:
-            with open(config_path, 'r') as f:
+            with open(repo_path(config_path), 'r') as f:
                 _cfg = json.load(f)
             _pt = _cfg.get("paper_trading", {})
             self._commission_per_contract = float(_pt.get("commission_per_contract", COMMISSION_PER_CONTRACT))
@@ -987,7 +988,7 @@ class PaperManager:
             }
         }
         try:
-            with open(self.config_path, 'r') as f:
+            with open(repo_path(self.config_path), 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
             logger.debug("Config file not found at %s — using defaults", self.config_path)
