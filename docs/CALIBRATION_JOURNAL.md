@@ -7,6 +7,53 @@ evolved over time.
 
 ---
 
+## 2026-08-07 — IC blend denominator: BUG FIX, weights move without a re-fit
+
+**Context:** score/EV audit, `docs/SCORE_AUDIT_20260807.md` item 1. No
+`--calibrate --apply` was run; `config.json` `composite_weights` are untouched.
+What changed is how `load_ic_adjusted_weights` combines them with the cached
+component ICs, so the *effective* weights move and this belongs in the journal.
+
+**Defect:** the blend divided each surviving component's IC by the sum of IC
+over survivors. With one survivor that ratio is 1.0 by construction, so the
+component took the whole 0.30 reallocation regardless of its IC's size. Live on
+2026-08-07 only `theta` cleared p < 0.10 (IC +0.082, p 0.021), so:
+
+- `theta` ran at **0.3138** against a base weight of 0.0197 — **24.3%** of the
+  composite, 16× its configured share.
+- Doubling theta's measured IC moved its weight by **+0.0000**.
+- An unrelated component crossing p = 0.10 stripped **26%** of it.
+
+**Change:** denominator now spans all candidate components, not just eligible
+ones. The p-gate decides eligibility; IC magnitudes decide the split.
+
+**Effective weight change (config unchanged):**
+
+| | before | after |
+|---|---|---|
+| theta share of composite | 24.3% | 13.3% |
+| top three | theta 24.3%, vrp 13.6%, iv_velocity 10.6% | vrp 15.6%, theta 13.3%, iv_velocity 12.2% |
+
+**OOS read:** expanding-window walk-forward over the closed ledger, 5 folds.
+Mean OOS IC **+0.0383 (old) vs +0.0343 (new)**, difference −0.0040 — inside
+noise on nested test sets of 173–564 trades. In-sample the old rule scores
+higher (+0.094 vs +0.081), which is circular: those weights were fitted to
+maximise IC on that ledger. Rank correlation old vs new: **0.933**.
+
+**Decision: SHIP.** Not on a return claim — the OOS evidence cannot separate the
+two rules, and that is stated. It ships because the old weight was an artifact
+of the survivor count rather than of the evidence, and could swing by a quarter
+of its size when an unrelated factor crossed a p-value. Returns unchanged as far
+as this ledger can measure; semantics now defensible.
+
+**Standing caveat, unchanged by this:** the ICs being blended come from a sample
+whose own composite verdict is "NO SIGNIFICANT EDGE (IC −0.03, p 0.433)" and
+whose top score quintile is the worst performer (avg −5.2%, win rate 41.2%).
+Fitting weights on that sample is fitting noise under either denominator. Rank
+by net-of-cost EV; `quality_score` breaks ties.
+
+---
+
 ## 2026-05-29 — Long-Call v1 candidate calibration: EVALUATED, NOT ACTIVATED
 
 **Context:** Phase 1 real-money-readiness work (see

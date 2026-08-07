@@ -650,9 +650,28 @@ def _maybe_trigger_recalib(cache_path: str) -> None:
 def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.json") -> Dict:
     """Blend config composite weights with IC-derived weights from paper trade analysis.
 
-    Blending formula: final_weight = 0.7 * config_weight + 0.3 * ic_weight
-    where ic_weight is the raw IC value (floored at 0) normalized to sum to 1.
-    Returns plain config weights on any failure.
+    Blending formula: final_weight = 0.7 * config_weight + 0.3 * ic_weight,
+    where ic_weight is the component's IC (floored at 0) as a share of the IC
+    measured across **every candidate component**, not just the ones that clear
+    the p-gate.
+
+    The denominator is the whole fix. It used to be the sum over survivors,
+    which made the reallocation a function of how many components happened to
+    be significant rather than of the evidence:
+
+    * With one survivor the ratio is 1.0 by construction, so that component took
+      the entire 0.30 budget however weak its IC was. Measured live 2026-08-07,
+      `theta` held **24.3%** of the composite off IC=+0.082 against a base
+      weight of 0.0197 — a 16x lift the calibration never intended.
+    * Doubling that component's IC moved its weight by exactly 0.0000, while an
+      unrelated component crossing p=0.10 stripped 26% of it. A weight that does
+      not respond to its own evidence and does respond to someone else's is not
+      carrying evidence at all.
+
+    Normalising over all candidates keeps the p-gate deciding *eligibility* and
+    lets the IC magnitudes decide *the split*, so both properties hold: more
+    measured IC means more weight, and a neighbour's significance changes
+    nothing. Returns plain config weights on any failure.
     """
     global _IC_WEIGHTS_CACHE
     if _IC_WEIGHTS_CACHE is not None:
@@ -674,15 +693,23 @@ def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.j
         }
         component_pvalues = cache.get("component_pvalues", {})
         ic_vals = {}
+        # Denominator spans every candidate, eligible or not — see docstring.
+        # Components with a negative IC contribute 0 here exactly as they do to
+        # the numerator, so a factor that points the wrong way cannot inflate
+        # the share of one that points the right way.
+        ic_scale = 0.0
         for ic_key, w_key in key_map.items():
             ic_raw = component_ic.get(ic_key)
-            p_val = component_pvalues.get(ic_key, 1.0)
-            if ic_raw is not None and isinstance(ic_raw, (int, float)) and p_val < 0.10:
-                ic_vals[w_key] = max(0.0, float(ic_raw))
-        if not ic_vals:
+            if ic_raw is None or not isinstance(ic_raw, (int, float)):
+                continue
+            ic_pos = max(0.0, float(ic_raw))
+            ic_scale += ic_pos
+            if component_pvalues.get(ic_key, 1.0) < 0.10:
+                ic_vals[w_key] = ic_pos
+        if not ic_vals or ic_scale <= 0.0:
             _IC_WEIGHTS_CACHE = base_weights
             return _IC_WEIGHTS_CACHE
-        ic_total = sum(ic_vals.values()) or 1.0
+        ic_total = ic_scale
         blended = dict(base_weights)
         for w_key, ic_raw in ic_vals.items():
             if w_key in blended:
@@ -1474,14 +1501,58 @@ def _cross_section_normalize(df: pd.DataFrame) -> pd.DataFrame:
     base = ((raw - 0.28) / 0.54).clip(0, 1)
     normalized = base ** 0.65
 
-    # EV tiebreaker: contracts with the same raw quality rank by expected value.
-    # Centered at 0 (median EV gets no bonus/penalty). Max effect: ±0.015.
-    if "ev" in df.columns:
-        ev_rank = df["ev"].rank(pct=True).fillna(0.5)
-        normalized = (normalized + (ev_rank - 0.5) * 0.03).clip(0, 1)
+    # There was an "EV tiebreaker" here, reading `df["ev"]`. No path in the repo
+    # ever creates a bare `ev` column — the scan carries `ev_per_contract`,
+    # `ev_score` and `ev_gross_per_contract` — so the branch never once ran and
+    # the docstring above described a ±0.015 tilt that was not being applied.
+    # Removed rather than repointed: `ev_per_contract` already enters the raw
+    # score through `ev_score`, and wiring a second, unmeasured EV tilt into the
+    # display scale would be a new signal, not a bug fix. The mapping is now
+    # exactly what the docstring says — a pure function of the raw score.
 
     df["quality_score"] = normalized.round(4)
     return df
+
+
+SI_HEAVY_FRACTION = 0.20      # short interest as a share of float
+SI_HEAVY_BONUS = 0.05
+
+
+def _short_interest_bonus(df: pd.DataFrame, mode: str) -> pd.Series:
+    """The heavy-short-interest bonus, pointed the way it was measured.
+
+    This used to add ``+0.05`` to every contract on a name with SI > 20% —
+    calls, puts and short premium alike. The squeeze study measures the effect
+    of heavy short interest on the *shape* of the forward distribution, and the
+    shape is one-sided. Over the 810,266-row panel at 42 trading days, float
+    assumed at 80% of shares outstanding:
+
+    ================================  ==========  ============
+    cohort                            P(+2 sigma)  P(-2 sigma)
+    ================================  ==========  ============
+    SI > 20% (the bonus fired)          10.26%        3.77%
+    SI <= 20%                            6.87%        5.05%
+    ================================  ==========  ============
+
+    The up-tail lifts **+3.39pp** and the down-tail *falls* **1.28pp**, 95% CI
+    [-2.07, -0.51] on a moving-block bootstrap over 200 settlement dates. So a
+    long call is paid for the effect and a long put is charged for it: the put's
+    own tail is measurably thinner than the base rate on exactly the names that
+    were collecting the bonus. Short premium is on the other side of the fatter
+    tail again, and gets nothing.
+
+    (The raw P(-20%) rate *is* higher on these names, +18.67pp — they are simply
+    more volatile. That is already in the premium via IV, which is why the
+    sigma-normalised tail is the one that decides the sign here.)
+    """
+    zero = pd.Series(0.0, index=df.index)
+    if "short_interest" not in df.columns or "type" not in df.columns:
+        return zero
+    if mode in ("Premium Selling", "Credit Spreads", "Iron Condor"):
+        return zero
+    si = pd.to_numeric(df["short_interest"], errors="coerce").fillna(0.0)
+    is_call = df["type"].astype(str).str.lower() == "call"
+    return zero.mask((si > SI_HEAVY_FRACTION) & is_call, SI_HEAVY_BONUS)
 
 
 def calculate_scores(
@@ -1932,9 +2003,8 @@ def calculate_scores(
     df.loc[df["squeeze_play"] & ~_squeeze_confirmed, "quality_score"] += 0.04
     df.loc[df["macro_warning"].str.contains("MACRO RISK", na=False), "quality_score"] -= 0.10
 
-    # Short interest squeeze potential
-    if "short_interest" in df.columns:
-        df.loc[pd.to_numeric(df["short_interest"], errors="coerce").fillna(0) > 0.20, "quality_score"] += 0.05
+    # Short interest squeeze potential — long calls only. See _short_interest_bonus.
+    df["quality_score"] += _short_interest_bonus(df, mode)
 
     # Dividend early exercise warning
     if "div_warning" in df.columns:

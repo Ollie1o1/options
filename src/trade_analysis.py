@@ -87,7 +87,14 @@ def generate_trade_thesis(row: pd.Series) -> str:
         reasons.append("Unusual flow detected [WHALE]")
 
     if row.get('squeeze_play', False):
-        reasons.append("Gamma squeeze setup [SQUEEZE]")
+        # `squeeze_play` is `is_squeezing AND Unusual_Whale`: a TTM squeeze
+        # (Bollinger bands inside Keltner channels — volatility *compression*)
+        # on a contract whose volume/OI is over 1.5. That is a coiled-vol read
+        # with heavy option flow. It is not a gamma squeeze, which is a dealer
+        # hedging feedback loop, and it is not a short squeeze, which is
+        # `src/squeeze` and keys off short interest. Naming it "gamma squeeze"
+        # invited all three to be read as the same signal.
+        reasons.append("Vol compressed + heavy flow [COILED]")
 
     if row.get('Trend_Aligned', False):
         reasons.append("Trend aligned")
@@ -554,13 +561,117 @@ def format_trade_plan(row: pd.Series, config: Dict, include_sizing: bool = False
     return "\n".join(lines)
 
 
-def explain_quality_score(row: pd.Series) -> str:
+# (column, short label, weight key in the composite) — the weight key is what
+# ties a displayed driver to its real share of the score. A label with no key
+# has no entry in the composite and therefore cannot be a driver of it.
+_SCORE_DRIVER_COLUMNS = [
+    ('prob_profit',          'PoP',      'pop'),
+    ('ev_score',             'EV',       'ev'),
+    ('rr_ratio',             'RR',       'rr'),      # raw ratio, normalized below
+    ('liquidity_score',      'Liquidity', 'liquidity'),
+    ('momentum_score',       'Momentum', 'momentum'),
+    ('iv_rank_score',        'IV Rank',  'iv_rank'),
+    ('em_realism_score',     'EM Real',  'em_realism'),
+    ('theta_score',          'Theta',    'theta'),
+    ('spread_score',         'Spread',   'spread'),
+    ('catalyst_score',       'Catalyst', 'catalyst'),
+    ('iv_advantage_score',   'IV Edge',  'iv_edge'),
+    ('vrp_score',            'VRP',      'vrp'),
+    ('iv_velocity_score',    'IV Vel',   'iv_velocity'),
+    ('term_structure_score', 'Term',     'term_structure'),
+    ('vega_risk_score',      'Vega',     'vega_risk'),
+    ('skew_align_score',     'Skew',     'skew_align'),
+    ('iv_mispricing_score',  'SVI',      'iv_mispricing'),
+    ('gamma_magnitude_score', 'Gamma',   'gamma_magnitude'),
+]
+
+# Multi-leg structures are NOT scored by the composite. `spread_scoring` throws
+# the single-leg score away and recomputes `quality_score` from
+# `credit_spread_weights` / `iron_condor_weights` over its own features, so
+# explaining a spread with composite weights describes a scorer that did not
+# produce its number. Mirrors the two `feature_to_col` maps in that module.
+# `prob_profit` is listed beside `pop_score` because the two spread row shapes
+# disagree: `enrich_credit_spreads` writes `pop_score`, while
+# `normalize_spreads_for_ranking` (which injects spreads into `picks`) writes
+# only `prob_profit`.
+_SPREAD_DRIVER_COLUMNS = [
+    ('pop_score',              'PoP',      'pop'),
+    ('prob_profit',            'PoP',      'pop'),
+    ('credit_to_width_score',  'Credit/W', 'credit_to_width'),
+    ('iv_rank_score',          'IV Rank',  'iv_rank'),
+    ('return_on_risk_score',   'RoR',      'return_on_risk'),
+    ('liquidity_score',        'Liquidity', 'liquidity'),
+    ('theta_score',            'Theta',    'theta'),
+    ('spread_score',           'Spread',   'spread'),
+    ('momentum_score',         'Momentum', 'momentum'),
+    ('catalyst_score',         'Catalyst', 'catalyst'),
+    ('delta_neutral_score',    'DeltaN',   'delta_neutral'),
+]
+
+
+_LIVE_WEIGHTS_CACHE: Dict[str, Dict] = {}
+
+
+def _is_spread_row(row) -> bool:
+    """True for a multi-leg structure, whichever shape it arrived in."""
+    if bool(row.get("_is_spread", False)):
+        return True
+    if str(row.get("type", "")).upper().endswith("SPREAD"):
+        return True
+    return any(row.get(c) is not None
+               for c in ("credit_to_width_score", "delta_neutral_score"))
+
+
+def _live_weights(kind: str) -> Dict:
+    """The weight set that actually produced this row's `quality_score`.
+
+    `explain_quality_score` runs once per displayed pick and `load_config`
+    re-reads config.json on every call, so each set is read once and memoised.
+    `load_ic_adjusted_weights` keeps its own cache of the blend; this only
+    avoids the file read.
+    """
+    if kind not in _LIVE_WEIGHTS_CACHE:
+        try:
+            from .options_screener import load_config, load_ic_adjusted_weights
+            config = load_config()
+            if kind == "composite":
+                got = dict(load_ic_adjusted_weights(config))
+            elif kind == "iron_condor":
+                from .spread_scoring import DEFAULT_IRON_WEIGHTS
+                got = dict(config.get("iron_condor_weights") or DEFAULT_IRON_WEIGHTS)
+            else:
+                from .spread_scoring import DEFAULT_SPREAD_WEIGHTS
+                got = dict(config.get("credit_spread_weights") or DEFAULT_SPREAD_WEIGHTS)
+        except Exception:
+            got = {}
+        _LIVE_WEIGHTS_CACHE[kind] = got
+    return _LIVE_WEIGHTS_CACHE[kind]
+
+
+def explain_quality_score(row: pd.Series, weights: Optional[Dict] = None) -> str:
     """
     Generate a one-line explanation of top quality score drivers.
     Shows top 3 positive (green) and top 2 negative (red) contributors.
 
+    Drivers are ranked by ``weight x value`` using the weights **actually in
+    force**, loaded from the same place `calculate_scores` loads them. They used
+    to be ranked by a hardcoded table (PoP 1.0, EV 1.0, RR 0.8, ...) invented
+    here and unrelated to the composite, which made this line describe a scorer
+    that does not exist. Measured against the live weights on 2026-08-07:
+    `Catalyst` was listed at 0.5 while carrying 0.4% of the score, `EM Real` at
+    0.6 while carrying 2.1%, `EV` at the top of the table while carrying 0.5% —
+    and `iv_velocity`, the third-largest live weight at 10.6%, had no row at all
+    and could never be named.
+
+    A multi-leg row is explained with the spread weights that scored it, not
+    the composite — `spread_scoring` discards the single-leg score and
+    recomputes `quality_score` from `credit_spread_weights` /
+    `iron_condor_weights`, so the composite never touched that number.
+
     Args:
         row: DataFrame row with score component columns
+        weights: weight map to explain against; defaults to whichever set
+            actually produced this row's score.
 
     Returns:
         Formatted string like '+ PoP · EV · Trend     - Spread · Theta'
@@ -572,25 +683,37 @@ def explain_quality_score(row: pd.Series) -> str:
         HAS_FMT = False
         fmt = None
 
-    # (column, short label, weight) — only columns saved on the DataFrame
-    score_labels = [
-        ('prob_profit',        'PoP',      1.0),
-        ('ev_score',           'EV',       1.0),
-        ('rr_ratio',           'RR',       0.8),   # raw ratio, normalized below
-        ('liquidity_score',    'Liquidity', 0.7),
-        ('momentum_score',     'Momentum', 0.6),
-        ('iv_rank_score',      'IV Rank',  0.7),
-        ('em_realism_score',   'EM Real',  0.6),
-        ('theta_score',        'Theta',    0.5),
-        ('spread_score',       'Spread',   0.4),
-        ('catalyst_score',     'Catalyst', 0.5),
-        ('iv_advantage_score', 'IV Edge',  0.4),
-    ]
+    if _is_spread_row(row):
+        columns = _SPREAD_DRIVER_COLUMNS
+        if weights is None:
+            kind = ("iron_condor"
+                    if "CONDOR" in str(row.get("strategy_name", "")).upper()
+                    or row.get("delta_neutral_score") is not None
+                    else "credit_spread")
+            weights = _live_weights(kind)
+    else:
+        columns = _SCORE_DRIVER_COLUMNS
+        if weights is None:
+            weights = _live_weights("composite")
+
+    # A component absent from the weight map contributes nothing to the score,
+    # so it is not a driver of it and is dropped rather than defaulted to some
+    # invented weight.
+    score_labels = [(col, label, float(weights.get(key, 0.0) or 0.0))
+                    for col, label, key in columns]
+    score_labels = [t for t in score_labels if t[2] > 0.0]
 
     positives = []
     negatives = []
+    # One weight key can be reachable from two columns (the spread map lists
+    # both `pop_score` and `prob_profit` because the two spread row shapes
+    # disagree). First column carrying a usable value wins, so the label is
+    # never printed twice.
+    seen: set = set()
 
     for col, label, weight in score_labels:
+        if label in seen:
+            continue
         val = row.get(col, None)
         if val is None:
             continue
@@ -600,18 +723,23 @@ def explain_quality_score(row: pd.Series) -> str:
             continue
         if math.isnan(val):
             continue
+        seen.add(label)
         # Normalize rr_ratio (raw 0-5+ range) to 0-1
         if col == 'rr_ratio':
             val = float(np.clip((val - 0.5) / 3.5, 0.0, 1.0))
 
-        weighted = val * weight
         if val >= 0.60:
-            positives.append((weighted, label))
+            # What this component contributes to the score.
+            positives.append((val * weight, label))
         elif val < 0.40:
-            negatives.append((weighted, label))
+            # What a weak component *costs*, which is the weight times the
+            # shortfall — not `val * weight`, which ranked a near-zero-weight
+            # component as the worst offender precisely because it could not
+            # matter.
+            negatives.append((weight * (1.0 - val), label))
 
     positives.sort(reverse=True)
-    negatives.sort()  # lowest weighted first = most negative drivers
+    negatives.sort(reverse=True)  # biggest score cost first
 
     pos_labels = [lbl for _, lbl in positives[:3]]
     neg_labels = [lbl for _, lbl in negatives[:2]]

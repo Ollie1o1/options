@@ -293,10 +293,23 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     config = config or {}
 
     # --- VERDICT: net EV (sign-colored) + cheap/rich vs surface + VRP ---
-    ev = float(row.get("ev_per_contract", 0) or 0)
-    sign_word = "POSITIVE" if ev > 0 else ("NEGATIVE" if ev < 0 else "FLAT")
-    ev_text = f"{sign_word} EV {ev:+.0f}/ct"
-    ev_cell = fmt.style_sign(ev_text, ev) if HAS_ENHANCED_CLI else ev_text
+    # `ev_per_contract` is NaN by design when the EV was refused — HV missing,
+    # or a realized/implied vol gap too wide for both to describe one market.
+    # That is an absent basis, not a zero edge, and rendering it through the
+    # sign test printed "FLAT EV +nan/ct": the same row `_verdict_for_row`
+    # calls INDETERMINATE was reading on screen as a neutral verdict.
+    ev_raw = row.get("ev_per_contract", None)
+    try:
+        ev = float(ev_raw)
+    except (TypeError, ValueError):
+        ev = float("nan")
+    if math.isnan(ev):
+        ev_text = "EV UNAVAILABLE (no trustworthy vol basis)"
+        ev_cell = fmt.style(ev_text, "muted") if HAS_ENHANCED_CLI else ev_text
+    else:
+        sign_word = "POSITIVE" if ev > 0 else ("NEGATIVE" if ev < 0 else "FLAT")
+        ev_text = f"{sign_word} EV {ev:+.0f}/ct"
+        ev_cell = fmt.style_sign(ev_text, ev) if HAS_ENHANCED_CLI else ev_text
 
     extras = []
     surf = row.get("iv_surface_residual", None)
