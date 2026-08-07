@@ -136,31 +136,31 @@ class TestSettingsMenu(unittest.TestCase):
             sys.argv = orig_argv
         return buf.getvalue()
 
-    def test_choice_6_opens_settings_menu(self):
-        out = self._route_to_settings(["6", "B", "Q"])
+    def test_choice_7_opens_settings_menu(self):
+        out = self._route_to_settings(["7", "B", "Q"])
         self.assertIn("SETTINGS", out)
 
     def test_theme_picker_lists_all_four_themes(self):
-        out = self._route_to_settings(["6", "1", "B", "B", "Q"])
+        out = self._route_to_settings(["7", "1", "B", "B", "Q"])
         self.assertIn("Quant Desk", out)
         self.assertIn("Cyberpunk Neon", out)
         self.assertIn("Matrix Terminal", out)
         self.assertIn("Amber CRT", out)
 
     def test_picking_a_theme_persists_it(self):
-        self._route_to_settings(["6", "1", "3", "B", "B", "Q"])  # 3 = matrix_terminal
+        self._route_to_settings(["7", "1", "3", "B", "B", "Q"])  # 3 = matrix_terminal
         self.assertEqual(settings_mod.get_theme(), "matrix_terminal")
 
-    def test_unknown_top_level_choice_mentions_6(self):
+    def test_unknown_top_level_choice_mentions_7(self):
         out = self._route_to_settings(["9", "Q"])
-        self.assertIn("6", out)
+        self.assertIn("7", out)
 
     def test_empty_choice_at_settings_menu_goes_back_not_into_theme(self):
         # Regression: the settings menu's blank-Enter default must be BACK,
         # not THEME — otherwise Enter re-opens the theme picker every time,
         # trapping the user in a loop between SETTINGS and THEME with no way
         # back to the main menu via a bare Enter.
-        out = self._route_to_settings(["6", "", "Q"])
+        out = self._route_to_settings(["7", "", "Q"])
         self.assertNotIn("Cyberpunk Neon", out)  # only the theme picker prints theme labels
 
 

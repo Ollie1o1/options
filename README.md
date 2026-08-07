@@ -179,7 +179,7 @@ work the same way. Nothing else needs activating first.
 If something misbehaves, ask the install to describe itself:
 
 ```bash
-python run.py            # then: [6] SETTINGS → [2] DOCTOR
+python run.py            # then: [7] SETTINGS → [2] DOCTOR
 python -m src.doctor     # or run the same checks directly
 ```
 
@@ -273,7 +273,8 @@ Running `python3 run.py` or `python3 -m src` **with no arguments** doesn't drop 
 [3]  LEVERAGE   BTC/ETH perp futures strategy              [no edge yet]
 [4]  RESEARCH   breakout · vol-intelligence · equity-VRP    [read-only]
 [5]  HOLDINGS   long-term stock accumulation — buy zones · tranches · TFSA book
-[6]  SETTINGS   theme · preferences
+[6]  STRATEGIES your setups — signal · account · friction · evidence · verdict [display-only]
+[7]  SETTINGS   theme · preferences
 [Q]  QUIT
 ```
 
@@ -282,7 +283,20 @@ Running `python3 run.py` or `python3 -m src` **with no arguments** doesn't drop 
 - **`[3] LEVERAGE`** is the [Leverage Module](#leverage-module-btceth-perp-futures) — explicitly pre-validation, tagged `no edge yet` in the menu itself.
 - **`[4] RESEARCH`** opens the [Research Tools](#research-tools) submenu (breakout / vol-intelligence / equity-VRP), all read-only, no scores or trades.
 - **`[5] HOLDINGS`** is the [Long-Term Holdings Desk](#long-term-holdings-desk).
-- **`[6] SETTINGS`** picks a color theme (Quant Desk / Cyberpunk Neon / Matrix Terminal / Amber CRT) — persisted to `settings.json` and applied on every future run, interactive or scripted.
+- **`[6] STRATEGIES`** is the setup library: rules of the form *"when these
+  conditions hold, sell this option"*, each marked with its hypothesis, signal
+  conditions, capital requirement, which account it can legally be traded in,
+  its evidence and its verdict. Every row carries a **FRICTION** column — the
+  round-trip crossing cost as a share of the credit, measured from the ledger's
+  own mid-vs-crossed fills and checked against `auto_log.max_friction_to_credit`
+  — because the cost wall, not the signal, is what has killed most of this
+  book's edge. Registered accounts cannot sell naked options, so every setup
+  declares its accounts and a test refuses to file a naked setup under TFSA. The
+  library includes deliberate controls — an unselected benchmark, two null
+  controls and a known-negative tripwire — because selectivity made this book
+  *worse* monotonically, so a signal has to beat doing nothing clever before it
+  is believed. Display-only. Dead setups are kept, not deleted.
+- **`[7] SETTINGS`** picks a color theme (Quant Desk / Cyberpunk Neon / Matrix Terminal / Amber CRT) — persisted to `settings.json` and applied on every future run, interactive or scripted.
 
 **If you pass any CLI flag** (`--ticker AAPL`, `--mode discover`, `--default-scoring`, `--enforce-exits`, etc.), the launcher is bypassed entirely and the flag is forwarded straight to the equity screener — this is what keeps cron jobs and every historical command in this README working unchanged. The menu is purely an opt-in front door for interactive sessions; the `python -m src.options_screener [OPTIONS]` and `python3 run.py [OPTIONS]` forms shown throughout this doc always go directly to the equity screener, with or without the launcher.
 
@@ -1258,7 +1272,7 @@ options/
     │   ├── regime.py         # Crypto regime classifier (BEAR / NEUTRAL / BULL based on rvol30d + spot vs 200dMA)
     │   ├── cache.py          # Disk-backed cache for Deribit responses
     │   └── check_pnl.py      # Standalone portfolio viewer (entry / live mark / P&L / reason)
-    ├── launcher.py           # Top-level [1-6] menu: STOCKS / CRYPTO / LEVERAGE / RESEARCH / HOLDINGS / SETTINGS
+    ├── launcher.py           # Top-level [1-7] menu: STOCKS / CRYPTO / LEVERAGE / RESEARCH / HOLDINGS / STRATEGIES / SETTINGS
     ├── longterm/             # Long-term holdings desk — buy zones, tranches, DISCOVER entry verdict (see § Long-Term Holdings Desk)
     ├── leverage/              # BTC/ETH perp futures strategy — pre-validation, no edge yet
     ├── breakout/, vol_intel/, equity_vol/  # Research tools (read-only) — see § Research Tools
@@ -1356,7 +1370,7 @@ docs/
 - [x] Lottery Ticket board (`[9] LOTTERY` mode) — far-OTM long-shot ranking with BS-repriced hit-probability; built around a documented negative-EV base rate, see [docs/LOTTERY_BACKTEST_FINDINGS.md](docs/LOTTERY_BACKTEST_FINDINGS.md)
 - [x] Leverage module (`src/leverage`, BTC/ETH perp futures) — pre-validation signal/backtest/paper harness, explicitly no edge yet
 - [x] Long-term holdings desk (`src/longterm`) — buy-zone/tranche accumulation tracking, DISCOVER sector scan with BUY NOW / WAIT entry verdict, CDR ticker markers, guided ACTIONS menu, HTML report
-- [x] Quant-desk launcher (`python3 run.py` / `python3 -m src` with no args) — top-level `[1-6]` menu across STOCKS / CRYPTO / LEVERAGE / RESEARCH / HOLDINGS / SETTINGS
+- [x] Quant-desk launcher (`python3 run.py` / `python3 -m src` with no args) — top-level `[1-7]` menu across STOCKS / CRYPTO / LEVERAGE / RESEARCH / HOLDINGS / STRATEGIES / SETTINGS
 - [ ] Spread-bucket calibration (`recommend_weights_for_structure('spread')` — gated by Bear Call ≥ 30)
 - [ ] Iron-condor-bucket calibration (gated by IC ≥ 30)
 - [ ] Fix crypto auto-log / exit-enforcer same-cycle time-exit race (puts opened and time-exited within the same 5-minute interval)

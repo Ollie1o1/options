@@ -88,22 +88,24 @@ class FrictionProfile:
     @property
     def cost_usd(self) -> Optional[float]:
         """Friction per contract, in dollars."""
-        if self.per_share is None:
+        per_share = self.per_share
+        if per_share is None:
             return None
-        return self.sides * float(self.per_share) * 100.0
+        return self.sides * float(per_share) * 100.0
 
     @property
     def credit_usd(self) -> Optional[float]:
-        if self.credit is None:
+        credit = self.credit
+        if credit is None:
             return None
-        return abs(float(self.credit)) * 100.0
+        return abs(float(credit)) * 100.0
 
     @property
     def pct_of_credit(self) -> Optional[float]:
-        if not self.measured:
+        cost, credit = self.cost_usd, self.credit_usd
+        if cost is None or credit is None or credit <= 0 or self.n <= 0:
             return None
-        assert self.cost_usd is not None and self.credit_usd is not None
-        return self.cost_usd / self.credit_usd
+        return cost / credit
 
     def over_ceiling(self, limit: Optional[float] = None) -> bool:
         """True when the round trip eats more of the credit than config allows."""
@@ -187,8 +189,9 @@ def profile_for(record: Any,
     structure = _key(spec.structure)
     round_trip = not bool(spec.exit.get("hold_to_expiry"))
 
-    own = getattr(record, "cost_profile", None) or {}
-    cell = own if own.get("per_share") is not None else None
+    own: Dict[str, Any] = getattr(record, "cost_profile", None) or {}
+    cell: Optional[Dict[str, Any]] = (
+        own if own.get("per_share") is not None else None)
     if cell is None:
         cell = (load_table() if table is None else table).get(structure)
     if not cell:
@@ -227,11 +230,11 @@ def style_for(profile: FrictionProfile) -> str:
 
 def describe(profile: FrictionProfile) -> str:
     """One line for the detail view, including where the number came from."""
-    if not profile.measured:
+    cost, credit = profile.cost_usd, profile.credit_usd
+    if not profile.measured or cost is None or credit is None:
         return f"unmeasured — no matched quotes for {profile.structure}"
-    assert profile.cost_usd is not None and profile.credit_usd is not None
     trip = "round trip" if profile.round_trip else "one side (held to expiry)"
     verdict = " — OVER the ceiling" if profile.over_ceiling() else ""
-    return (f"${profile.cost_usd:.2f} {trip} against ${profile.credit_usd:.0f} "
+    return (f"${cost:.2f} {trip} against ${credit:.0f} "
             f"credit = {format_cell(profile)} of credit "
             f"(ceiling {ceiling():.0%}){verdict}  ·  {profile.source}")
