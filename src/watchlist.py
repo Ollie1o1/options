@@ -1,6 +1,7 @@
 """Watchlist persistence — load/save ticker watchlist to/from JSON."""
 
 import json
+from pathlib import Path
 
 try:
     from . import formatting as fmt
@@ -8,7 +9,16 @@ try:
 except ImportError:
     HAS_ENHANCED_CLI = False
 
-_WATCHLIST_PATH = "watchlist.json"
+# Anchored to the repo root, the same way api/backtester/ai_cache do it. It was
+# the bare string "watchlist.json", which resolves against the process CWD: the
+# launcher happens to start from the repo root so it worked, but a scan started
+# from anywhere else silently read an empty watchlist and then SAVED over that
+# emptiness on the next add — `save_watchlist` writes the whole list, so one
+# add from the wrong directory would have replaced the file with a single
+# ticker. Same failure the unanchored .gitignore rules had: a bare name means
+# "wherever you happen to be", not "the file I mean".
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_WATCHLIST_PATH = str(_PROJECT_ROOT / "watchlist.json")
 
 
 def load_watchlist() -> list:
