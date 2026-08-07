@@ -48,6 +48,27 @@ def implied_spot(chain: Sequence[Dict[str, Any]],
     return float(statistics.median(est))
 
 
+def implied_spot_any(chain: Sequence[Dict[str, Any]],
+                     preferred: Optional[str] = None) -> Optional[float]:
+    """Underlying price from the preferred expiry, else from any expiry present.
+
+    The underlying is the same whatever expiry you read it from, and on the
+    expiry date itself the expiring contracts have usually already left the
+    chain. Without this fallback a position could never be settled on the day
+    it expired: it stayed open until the end of the sample and was then closed
+    as `ticker_ended`, which discarded almost every mega-cap trade.
+    """
+    if preferred:
+        spot = implied_spot(chain, preferred)
+        if spot is not None:
+            return spot
+    for exp in sorted({str(c.get("expiration"))[:10] for c in chain}):
+        spot = implied_spot(chain, exp)
+        if spot is not None:
+            return spot
+    return None
+
+
 def intrinsic(leg: Leg, spot: float) -> float:
     """What one contract is worth at expiry, per share. Never negative."""
     strike = float(leg.strike)

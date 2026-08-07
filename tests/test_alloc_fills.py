@@ -160,3 +160,44 @@ class ReverseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TransactedSideTest(unittest.TestCase):
+    """Only the side you actually transact on has to be a real price.
+
+    Requiring both a bid and an ask on every leg rejected every far-OTM
+    protective wing — those legitimately quote bid=0 and are BOUGHT at the ask —
+    which silently excluded the mega-caps, the tightest-spread names available.
+    """
+
+    def test_buying_a_wing_with_no_bid_is_allowed(self):
+        legs = [Leg("2024-03-15", 95.0, "put", "buy")]
+        self.assertAlmostEqual(
+            fill_price(legs, {("2024-03-15", 95.0, "put"): (0.0, 0.10)}), -0.10)
+
+    def test_selling_with_no_bid_is_still_refused(self):
+        legs = [Leg("2024-03-15", 95.0, "put", "sell")]
+        self.assertEqual(
+            fill_with_reason(legs, {("2024-03-15", 95.0, "put"): (0.0, 0.10)}),
+            (None, SKIP_MISSING))
+
+    def test_buying_with_no_ask_is_refused(self):
+        """No ask means nothing to buy. (bid must be 0 too, or it is crossed.)"""
+        legs = [Leg("2024-03-15", 95.0, "put", "buy")]
+        self.assertEqual(
+            fill_with_reason(legs, {("2024-03-15", 95.0, "put"): (0.0, 0.0)}),
+            (None, SKIP_MISSING))
+
+    def test_bid_above_ask_is_crossed_not_missing(self):
+        """A crossed quote is diagnosed as crossed, whichever side we transact."""
+        legs = [Leg("2024-03-15", 95.0, "put", "buy")]
+        self.assertEqual(
+            fill_with_reason(legs, {("2024-03-15", 95.0, "put"): (0.05, 0.0)}),
+            (None, SKIP_CROSSED))
+
+    def test_spread_with_a_zero_bid_wing_fills(self):
+        legs = [Leg("2024-03-15", 100.0, "put", "sell"),
+                Leg("2024-03-15", 95.0, "put", "buy")]
+        quotes = {("2024-03-15", 100.0, "put"): (2.00, 2.30),
+                  ("2024-03-15", 95.0, "put"): (0.0, 0.10)}
+        self.assertAlmostEqual(fill_price(legs, quotes), 1.90)

@@ -29,8 +29,9 @@ class FakeSource:
 
 
 def _c(strike, typ, bid, ask, expiration="2024-03-15", delta=-0.25):
+    mid = (bid + ask) / 2 if (bid is not None and ask is not None) else None
     return {"expiration": expiration, "strike": float(strike), "type": typ,
-            "bid": bid, "ask": ask, "mid": (bid + ask) / 2, "iv": 0.2,
+            "bid": bid, "ask": ask, "mid": mid, "iv": 0.2,
             "delta": delta, "gamma": 0.01, "theta": -0.05,
             "vega": 0.1, "rho": 0.01}
 
@@ -125,7 +126,23 @@ class FillDisciplineTest(unittest.TestCase):
         self.assertNotAlmostEqual(trades[0].entry_price, 1.25)  # the mid
 
     def test_missing_wing_is_skipped_and_counted(self):
-        chain = [_c(100.0, "put", 2.0, 2.3, delta=-0.25)]   # no 95 leg
+        """No protective strike exists at all, so the structure is unbuildable.
+
+        Counted under skipped_no_legs rather than skipped_missing: the chain
+        does not offer a wing, which is a different failure from a wing that
+        exists but has no usable quote.
+        """
+        chain = [_c(100.0, "put", 2.0, 2.3, delta=-0.25)]   # no lower strike
+        trades, stats = replay(_spec(), ["AAA"], ["2024-01-05"],
+                               FakeSource({("AAA", "2024-01-05"): chain}))
+        self.assertEqual(trades, [])
+        self.assertGreaterEqual(
+            stats["skipped_no_legs"] + stats["skipped_missing"], 1)
+
+    def test_a_wing_with_no_quote_is_counted_as_missing(self):
+        """The wing is listed but unquotable — that IS skipped_missing."""
+        chain = [_c(100.0, "put", 2.0, 2.3, delta=-0.25),
+                 _c(95.0, "put", None, None, delta=-0.12)]
         trades, stats = replay(_spec(), ["AAA"], ["2024-01-05"],
                                FakeSource({("AAA", "2024-01-05"): chain}))
         self.assertEqual(trades, [])
@@ -254,3 +271,53 @@ class StratumTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NearestStrikeWingTest(unittest.TestCase):
+    """Wings snap to a listed strike, because the dataset is sparse.
+
+    Requiring an exact `short - width` silently excluded every high-priced
+    underlying — the dataset carries ~150-200 contracts per symbol-day, so on a
+    $500 name the strike five dollars away is often not listed. That biased the
+    whole study toward cheap, wide-spread names.
+    """
+
+    def test_wing_snaps_to_the_nearest_listed_strike(self):
+        chain = [_c(100.0, "put", 2.0, 2.3, delta=-0.25),
+                 _c(97.5, "put", 0.8, 1.0, delta=-0.12)]     # no 95 strike
+        legs = select_legs(_spec(), chain, "2024-01-05")
+        self.assertIsNotNone(legs)
+        self.assertEqual(legs[1].strike, 97.5)
+
+    def test_wing_beyond_tolerance_is_refused(self):
+        """Tolerance is 3x width, because strike spacing scales with price."""
+        chain = [_c(100.0, "put", 2.0, 2.3, delta=-0.25),
+                 _c(50.0, "put", 0.1, 0.2, delta=-0.02)]     # 50 away, width 5
+        self.assertIsNone(select_legs(_spec(), chain, "2024-01-05"))
+
+    def test_wing_within_three_times_width_is_accepted(self):
+        chain = [_c(100.0, "put", 2.0, 2.3, delta=-0.25),
+                 _c(88.0, "put", 0.4, 0.6, delta=-0.06)]     # 12 away, width 5
+        legs = select_legs(_spec(), chain, "2024-01-05")
+        self.assertIsNotNone(legs)
+        self.assertEqual(legs[1].strike, 88.0)
+
+    def test_capital_uses_the_width_actually_obtained(self):
+        from src.alloc.engine import actual_width
+        legs = [Leg("2024-03-15", 100.0, "put", "sell"),
+                Leg("2024-03-15", 97.5, "put", "buy")]
+        self.assertEqual(actual_width(legs), 2.5)
+        self.assertAlmostEqual(capital_at_risk(_spec(), legs, 0.50), 200.0)
+
+    def test_iron_condor_width_is_the_wider_side_not_the_sum(self):
+        from src.alloc.engine import actual_width
+        legs = [Leg("2024-03-15", 90.0, "put", "sell"),
+                Leg("2024-03-15", 85.0, "put", "buy"),
+                Leg("2024-03-15", 110.0, "call", "sell"),
+                Leg("2024-03-15", 120.0, "call", "buy")]
+        self.assertEqual(actual_width(legs), 10.0)
+
+    def test_single_leg_structure_has_no_width(self):
+        from src.alloc.engine import actual_width
+        self.assertEqual(actual_width([Leg("2024-03-15", 100.0, "call", "buy")]),
+                         0.0)

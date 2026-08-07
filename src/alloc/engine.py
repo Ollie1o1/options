@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from src.alloc.fills import (Leg, SKIP_CROSSED, SKIP_MISSING, _key as _fkey,
                              fill_with_reason, quotes_from_chain, reverse)
-from src.alloc.settle import implied_spot, settle
+from src.alloc.settle import implied_spot_any, settle
 from src.strategies.spec import StrategySpec
 
 # Structures whose net fill should be a credit. Everything else is a debit.
@@ -97,6 +97,43 @@ def _nearest_delta(rows, target: float):
     return min(scored, key=lambda r: abs(abs(float(r["delta"])) - target))
 
 
+def _nearest_wing(rows, short_strike: float, width: float, below: bool):
+    """The listed wing strike nearest `short_strike -/+ width`.
+
+    Must lie strictly beyond the short strike on the protective side. Without
+    that constraint the nearest listed strike can be the short strike itself,
+    producing a zero-width "spread" that has no risk and collects no credit.
+    """
+    side = [r for r in rows
+            if (float(r["strike"]) < short_strike if below
+                else float(r["strike"]) > short_strike)]
+    target = short_strike - width if below else short_strike + width
+    # Tolerance is generous because strike spacing scales with price: SPY's
+    # listed strikes gap by up to $15 and NVDA's by $30, so a $5 tolerance
+    # excluded exactly the tightest-spread names in the universe. Risk is
+    # priced off actual_width(), so taking a wider wing than requested is
+    # measured honestly rather than assumed away.
+    return _nearest_strike(side, target, max(width * 3.0, width + 1.0))
+
+
+def _nearest_strike(rows, target: float, tolerance: float):
+    """The listed strike closest to `target`, within `tolerance`.
+
+    Requiring an exact `short_strike - width` silently excluded every
+    high-priced underlying: this dataset carries roughly 150-200 contracts per
+    symbol-day, so on a $500 name the exact strike five dollars away is often
+    simply not listed. That biased the study toward cheap, wide-spread names —
+    the opposite of what a real book would trade.
+
+    A trader buys the wing that exists, so the engine does too, and the actual
+    width is recomputed from the strike it got rather than the one it wanted.
+    """
+    if not rows:
+        return None
+    best = min(rows, key=lambda r: abs(float(r["strike"]) - target))
+    return best if abs(float(best["strike"]) - target) <= tolerance else None
+
+
 def select_legs(spec: StrategySpec, chain, date: str,
                 rng: Optional[random.Random] = None) -> Optional[List[Leg]]:
     """Choose this structure's legs from the day's chain.
@@ -127,25 +164,35 @@ def select_legs(spec: StrategySpec, chain, date: str,
             return None
         legs = [Leg(expiry, float(s["strike"]), "put", "sell")]
         if struct == "bull_put":
-            legs.append(Leg(expiry, float(s["strike"]) - width, "put", "buy"))
+            wing = _nearest_wing(puts, float(s["strike"]), width, below=True)
+            if wing is None:
+                return None
+            legs.append(Leg(expiry, float(wing["strike"]), "put", "buy"))
         return legs
 
     if struct == "bear_call":
         s = _short(calls, float(entry.get("short_delta", 0.25)))
         if s is None:
             return None
+        wing = _nearest_wing(calls, float(s["strike"]), width, below=False)
+        if wing is None:
+            return None
         return [Leg(expiry, float(s["strike"]), "call", "sell"),
-                Leg(expiry, float(s["strike"]) + width, "call", "buy")]
+                Leg(expiry, float(wing["strike"]), "call", "buy")]
 
     if struct == "iron_condor":
         d = float(entry.get("short_delta", 0.16))
         sp, sc = _short(puts, d), _short(calls, d)
         if sp is None or sc is None:
             return None
+        pw = _nearest_wing(puts, float(sp["strike"]), width, below=True)
+        cw = _nearest_wing(calls, float(sc["strike"]), width, below=False)
+        if pw is None or cw is None:
+            return None
         return [Leg(expiry, float(sp["strike"]), "put", "sell"),
-                Leg(expiry, float(sp["strike"]) - width, "put", "buy"),
+                Leg(expiry, float(pw["strike"]), "put", "buy"),
                 Leg(expiry, float(sc["strike"]), "call", "sell"),
-                Leg(expiry, float(sc["strike"]) + width, "call", "buy")]
+                Leg(expiry, float(cw["strike"]), "call", "buy")]
 
     if struct in ("long_call", "long_put"):
         typ = "call" if struct == "long_call" else "put"
@@ -176,6 +223,20 @@ def crossing_cost(legs: List[Leg], quotes) -> Optional[float]:
     return round(total, 4)
 
 
+def actual_width(legs: List[Leg]) -> float:
+    """Widest same-type strike gap in the structure.
+
+    An iron condor's risk is the wider of its two sides, not their sum: only one
+    side can be breached at expiry.
+    """
+    widths = []
+    for typ in ("put", "call"):
+        strikes = [float(l.strike) for l in legs if str(l.type).lower() == typ]
+        if len(strikes) >= 2:
+            widths.append(max(strikes) - min(strikes))
+    return max(widths) if widths else 0.0
+
+
 def capital_at_risk(spec: StrategySpec, legs: List[Leg], price: float) -> float:
     """Cash actually tied up, per contract.
 
@@ -185,7 +246,12 @@ def capital_at_risk(spec: StrategySpec, legs: List[Leg], price: float) -> float:
     """
     struct = spec.structure
     if struct in ("bull_put", "bear_call", "iron_condor"):
-        width = float(spec.entry.get("width", 5.0))
+        # The width ACTUALLY obtained, not the one requested. Wings snap to the
+        # nearest listed strike, so a $5 request can fill $2.50 or $10 wide, and
+        # using the requested width would misstate risk in both directions.
+        width = actual_width(legs)
+        if width <= 0:
+            return 0.0
         return max(0.0, width * 100 - price * 100)
     if struct == "short_put":
         return float(legs[0].strike) * 100 - price * 100
@@ -262,7 +328,7 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
                         # spread to cross — ITM contracts are assigned, OTM ones
                         # expire — and pricing off stale quotes let a defined-
                         # risk spread post a loss larger than its own width.
-                        spot = implied_spot(chain, t.expiration)
+                        spot = implied_spot_any(chain, t.expiration)
                         price = settle(t.legs, spot) if spot is not None else None
                     else:
                         price, _reason = fill_with_reason(reverse(t.legs),

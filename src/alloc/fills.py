@@ -61,14 +61,18 @@ def fill_with_reason(legs: List[Leg], quotes: Quotes,
         if quote is None:
             return None, SKIP_MISSING
         bid, ask = quote
-        if bid is None or ask is None:
-            return None, SKIP_MISSING
-        if not allow_worthless and (bid <= 0 or ask <= 0):
-            return None, SKIP_MISSING
-        if bid < 0 or ask < 0:
+        if bid is None or ask is None or bid < 0 or ask < 0:
             return None, SKIP_MISSING
         if bid > ask:
             return None, SKIP_CROSSED
+        # Only the side actually transacted has to be a real price. Selling
+        # needs a bid; buying needs an ask. Requiring BOTH rejected every
+        # far-OTM protective wing — those legitimately quote bid=0 and are
+        # bought at the ask — which silently excluded the mega-caps, i.e.
+        # exactly the tightest-spread names in the universe.
+        needed = bid if leg.action == "sell" else ask
+        if not allow_worthless and needed <= 0:
+            return None, SKIP_MISSING
         # Cross the spread, always against us.
         net += bid if leg.action == "sell" else -ask
     return round(net, 4), None

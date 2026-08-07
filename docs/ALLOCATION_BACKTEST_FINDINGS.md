@@ -124,6 +124,43 @@ high win rate here means very little on its own. An 84.9% win rate with skew
 yet. The same caveat the short-premium gate already carries about its
 unobserved tail applies with equal force to everything in this table.
 
+## 4c. Index/mega-cap universe — friction confirmed as the driver
+
+Three further bugs had to be fixed before this test was even possible, and each
+had silently excluded the high-priced names — i.e. **every result above §4c was
+measured on a biased subset that omitted the tightest-spread underlyings**:
+
+1. **Wings required an exact `short - width` strike.** The dataset lists ~150-200
+   contracts per symbol-day, so on a $500 name the strike five dollars away is
+   often not listed. Wings now snap to the nearest listed strike on the
+   protective side, and risk is priced off the width actually obtained.
+2. **Fills required both a bid and an ask on every leg.** You only need a bid to
+   sell and an ask to buy; far-OTM protective wings legitimately quote bid=0 and
+   are bought at the ask. This alone rejected ~1,000 entries.
+3. **Settlement could not find the underlying on expiry day**, because the
+   expiring contracts have usually already left the chain. Positions therefore
+   never closed — they accumulated to the end of the sample and were written off
+   as `ticker_ended`, discarding almost every mega-cap trade.
+
+With those fixed the sample went from 276 trades to **10,363**:
+
+| universe | n | win | RoC/trade | t | skew | DSR (26 trials) |
+|---|---:|---:|---:|---:|---:|---:|
+| ALL 115 names, bull put | 10,363 | 76.8% | **-6.76%** | -17.84 | -1.66 | 0.000 |
+| **MEGA/index, bull put** | 1,442 | **80.5%** | **-0.64%** | **-0.58** | -1.71 | 0.004 |
+| MEGA/index, bear call | 1,424 | 71.8% | -10.66% | -8.40 | -1.17 | 0.000 |
+| MEGA/index, iron condor | 1,276 | 71.3% | -6.44% | -5.09 | -1.28 | 0.000 |
+
+**The friction hypothesis is confirmed.** The identical strategy moves from
+decisively negative (-6.76%, t=-17.84) to statistically indistinguishable from
+zero (-0.64%, t=-0.58) purely by restricting the universe to names whose spreads
+are tighter — 3.6% of mid on the mega-caps and ETFs, against 16-21% on the
+liquid and broad strata.
+
+**But breakeven is not an edge.** DSR = 0.004. At the tightest spreads available
+in this dataset, selling put spreads pays for its own friction and no more. The
+bear call and iron condor stay clearly negative even there.
+
 ## 5. What this does NOT yet say
 
 - **No statistics.** CPCV, Deflated Sharpe and PBO are not built. No number here

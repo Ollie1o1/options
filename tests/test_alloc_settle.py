@@ -117,3 +117,35 @@ class SettleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImpliedSpotFallbackTest(unittest.TestCase):
+    """On the expiry date the expiring contracts have often already gone.
+
+    Without a fallback the position could never settle: it stayed open to the
+    end of the sample and was closed as `ticker_ended`, discarding almost every
+    mega-cap trade.
+    """
+
+    def test_falls_back_to_another_expiry(self):
+        from src.alloc.settle import implied_spot_any
+        chain = [_row(100, "call", 9.9, 10.1, "2024-06-21"),
+                 _row(100, "put", 9.9, 10.1, "2024-06-21")]
+        self.assertIsNone(implied_spot(chain, EXP))        # asked expiry absent
+        self.assertAlmostEqual(implied_spot_any(chain, EXP), 100.0, places=2)
+
+    def test_prefers_the_requested_expiry_when_present(self):
+        from src.alloc.settle import implied_spot_any
+        chain = [_row(100, "call", 2.9, 3.1), _row(100, "put", 2.9, 3.1),
+                 _row(200, "call", 9.9, 10.1, "2024-06-21"),
+                 _row(200, "put", 9.9, 10.1, "2024-06-21")]
+        self.assertAlmostEqual(implied_spot_any(chain, EXP), 100.0, places=2)
+
+    def test_empty_chain_still_returns_none(self):
+        from src.alloc.settle import implied_spot_any
+        self.assertIsNone(implied_spot_any([], EXP))
+
+    def test_no_preferred_expiry_given(self):
+        from src.alloc.settle import implied_spot_any
+        chain = [_row(100, "call", 2.9, 3.1), _row(100, "put", 2.9, 3.1)]
+        self.assertAlmostEqual(implied_spot_any(chain), 100.0, places=2)
