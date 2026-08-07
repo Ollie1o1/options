@@ -448,7 +448,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 19
+_SCHEMA_VERSION = 20
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -634,6 +634,30 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN post_exit_last_price REAL",
         "ALTER TABLE trades ADD COLUMN post_exit_last_date TEXT",
         "CREATE INDEX IF NOT EXISTS idx_shadow_until ON trades(shadow_until)",
+    ],
+    20: [
+        # Which post-composite adjustments fired at entry.
+        #
+        # quality_score is a 27-component weighted average and then ~20 hand-set
+        # additions and multipliers. Measured 2026-08-07: those adjustments can
+        # subtract 1.28 and add 0.47, against a composite whose whole documented
+        # range spans 0.54 and whose observed spread on a clean chain was 0.29.
+        # One `decay_warning` at -0.20 outweighs any single component; two
+        # penalties outweigh all 27 together. Not one of the constants has ever
+        # been measured.
+        #
+        # It could not be measured, either: the ledger stored every component
+        # score and no record of which flags fired, so `flag -> outcome` had no
+        # data behind it. This column is that data. It is written at entry and
+        # never updated, holds a comma-separated list of flag names (empty when
+        # none fired), and is READ-ONLY to every existing consumer — no score,
+        # cohort or verdict reads it.
+        #
+        # Rows logged before this migration carry NULL, which is not "no flags
+        # fired" but "not recorded". Any analysis must exclude NULL rather than
+        # treat it as empty, or it will read the entire pre-2026-08-07 book as
+        # having had a clean bill of health.
+        "ALTER TABLE trades ADD COLUMN score_adjustments TEXT",
     ],
 }
 
@@ -1187,6 +1211,7 @@ class PaperManager:
             catalyst_score, em_realism_score, gamma_theta_score, gex_score, gamma_magnitude_score,
             gamma_pin_score, iv_velocity_score, max_pain_score, oi_change_score, option_rvol_score,
             pcr_score, sentiment_score_norm, spread_score, trader_pref_score,
+            score_adjustments,
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
@@ -1195,7 +1220,7 @@ class PaperManager:
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?,
+            ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?
@@ -1260,6 +1285,7 @@ class PaperManager:
             _float_or_none("sentiment_score_norm"),
             _float_or_none("spread_score"),
             _float_or_none("trader_pref_score"),
+            (trade_dict.get("score_adjustments") or None),
             trade_dict.get("weight_profile"),
             _float_or_none("long_strike"),
             _float_or_none("spread_width"),

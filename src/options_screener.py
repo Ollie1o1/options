@@ -1497,9 +1497,15 @@ def _cross_section_normalize(df: pd.DataFrame) -> pd.DataFrame:
         raw 0.60 → 0.70  (4-star threshold)
         raw 0.70 → 0.85  (5-star threshold)
         raw 0.82 → 1.00  (near-maximum: all signals strong + bonuses)
+
+    Now that the rank-based EV tiebreaker is gone (see below), this is a PURE
+    per-row function: one raw score always maps to one display score. The
+    ``n <= 1`` early return that used to sit here was a leftover from when the
+    mapping was batch-relative, and it made a single-contract scan skip
+    normalisation entirely — the same contract displaying on two scales
+    depending on how many others were fetched alongside it.
     """
-    n = len(df)
-    if n <= 1:
+    if "quality_score" not in getattr(df, "columns", []) or len(df) == 0:
         return df
 
     raw = df["quality_score"].copy()
@@ -1524,6 +1530,102 @@ def _cross_section_normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 SI_HEAVY_FRACTION = 0.20      # short interest as a share of float
 SI_HEAVY_BONUS = 0.05
+
+
+def _score_adjustment_flags(df: pd.DataFrame) -> pd.Series:
+    """Which of the post-composite adjustments fired, per row, as a flat string.
+
+    `quality_score` is a 27-component weighted average and then roughly twenty
+    hand-set additions and multipliers. Measured 2026-08-07: those adjustments
+    can subtract 1.28 and add 0.47, against a composite whose entire documented
+    range spans 0.54 and whose observed spread on a clean chain was 0.29. A
+    single `decay_warning` at -0.20 outweighs any component; two penalties
+    outweigh all 27 together.
+
+    Not one of those constants has ever been measured, and the ledger could not
+    measure them: it stores the component scores but no record of which flags
+    fired, so `flag -> outcome` was unanswerable. This records them at entry so
+    it becomes answerable — the honest alternative to re-tuning twenty numbers
+    by taste. It changes no score; it only writes down what happened.
+
+    Deliberately the CONDITIONS rather than the deltas. The conditions are what
+    a calibration needs to regress against, they are stable if a constant is
+    later retuned, and they can be reconstructed here from columns that already
+    exist without touching the 24 mutation sites.
+
+    Format is a comma-separated sorted list of the flags that fired, empty
+    string when none did — compact enough for a TEXT column, and greppable.
+    """
+    idx = df.index
+    n = len(df)
+
+    def _bool(col) -> pd.Series:
+        s = df.get(col)
+        if s is None:
+            return pd.Series(False, index=idx)
+        return s.fillna(False).astype(bool)
+
+    def _nonempty(col) -> pd.Series:
+        s = df.get(col)
+        if s is None:
+            return pd.Series(False, index=idx)
+        return s.fillna("").astype(str).str.strip().ne("")
+
+    def _num(col, default=float("nan")) -> pd.Series:
+        return pd.to_numeric(df.get(col, pd.Series(default, index=idx)),
+                             errors="coerce")
+
+    earn_play = df.get("Earnings Play", pd.Series("", index=idx)).astype(str).eq("YES")
+    seasonal = _num("seasonal_win_rate")
+    spread_pct = _num("spread_pct").fillna(0.0)
+    squeeze = _bool("squeeze_play")
+
+    flags = {
+        # Penalties
+        "decay_warning": _bool("decay_warning"),
+        "gamma_ramp": _bool("gamma_ramp"),
+        "sr_warning": _nonempty("sr_warning"),
+        "oi_wall_warning": _nonempty("oi_wall_warning"),
+        "div_warning": _nonempty("div_warning"),
+        "macro_risk": df.get("macro_warning", pd.Series("", index=idx))
+                        .astype(str).str.contains("MACRO RISK", na=False),
+        "stale_quote": df.get("quote_freshness", pd.Series("", index=idx))
+                         .astype(str).eq("stale"),
+        "low_pop": _num("prob_profit").lt(0.25).fillna(False),
+        "spread_gt_10pct": spread_pct.gt(0.10) & spread_pct.le(0.15),
+        "spread_gt_15pct": spread_pct.gt(0.15),
+        "seasonal_weak": seasonal.le(0.2).fillna(False),
+        # Bonuses
+        "trend_aligned": _bool("Trend_Aligned"),
+        "seasonal_strong": seasonal.ge(0.8).fillna(False),
+        "squeeze_play": squeeze,
+        "squeeze_confirmed": squeeze & _bool("Trend_Aligned"),
+        "si_heavy": _num("short_interest").fillna(0.0).gt(SI_HEAVY_FRACTION),
+        # Earnings — reached the score from up to five places at once, which is
+        # the single biggest reason this record exists.
+        "earnings_nearby": df.get("event_flag", pd.Series("", index=idx))
+                             .astype(str).eq("EARNINGS_NEARBY"),
+        "earnings_play": earn_play,
+        "earnings_underpriced": earn_play & _bool("is_underpriced"),
+        "earnings_iv_cheap": earn_play & _bool("earnings_iv_cheap"),
+    }
+
+    out = pd.Series([""] * n, index=idx, dtype=object)
+    parts: list = [[] for _ in range(n)]
+    for name in sorted(flags):
+        mask = flags[name].reindex(idx).fillna(False).astype(bool).to_numpy()
+        for pos in np.nonzero(mask)[0]:
+            parts[pos].append(name)
+
+    # risk_flag_count is the multiplier stage, and every one of the five flags
+    # it counts ALSO fired as an additive penalty above — the double-count.
+    # Recorded as a level so the two stages can be separated in analysis.
+    rfc = _num("risk_flag_count").fillna(0).astype(int).to_numpy()
+    for pos in range(n):
+        if rfc[pos] >= 3:
+            parts[pos].append(f"risk_mult_{rfc[pos]}")
+        out.iloc[pos] = ",".join(parts[pos])
+    return out
 
 
 def _short_interest_bonus(df: pd.DataFrame, mode: str) -> pd.Series:
@@ -2300,6 +2402,21 @@ def calculate_scores(
     else:
         df["lottery_ticket_score"] = pd.NA
 
+    df["score_adjustments"] = _score_adjustment_flags(df)
+
+    # Final clamp — the LAST thing that touches the score.
+    #
+    # There is a clip(0, 1) partway through the adjustment stack, but three
+    # mutations follow it and none restores a floor: the residual crush penalty
+    # SUBTRACTS, and the risk-flag clip is `upper=` only. So the score could go
+    # negative, and then the risk multiplier inverted — at -0.030, three flags
+    # gave -0.026 while five gave -0.015, i.e. MORE structural risk scoring
+    # HIGHER. Masked on the logged path (the display normaliser clips at zero,
+    # which is why no negative appears in 947 ledger rows) but not on surfaces
+    # that read the raw score, such as the squeeze board and the filter sorts.
+    df["quality_score"] = pd.to_numeric(
+        df["quality_score"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+
     return df
 
 
@@ -2567,6 +2684,15 @@ def enrich_and_score(
     if mode == "Squeeze Hunt" and squeeze_out is not None:
         _sq_calls = df[df["type"] == "call"].copy()
         if not _sq_calls.empty:
+            # Normalised here, to the SAME display scale the main table uses.
+            # The stash is taken inside enrich_and_score; _cross_section_normalize
+            # runs later, on `picks` only — so the squeeze board's "Score" column
+            # was showing the RAW composite while the top-N table showed the
+            # normalised one, under the same header. Raw 0.55 and display 0.64
+            # are the same contract; nothing on either surface said so.
+            # The mapping is a pure per-row function, so applying it to this
+            # frame gives exactly what `picks` would have given.
+            _sq_calls = _cross_section_normalize(_sq_calls)
             if "quality_score" in _sq_calls.columns:
                 _sq_calls = _sq_calls.sort_values("quality_score", ascending=False)
             squeeze_out["calls"] = _sq_calls
@@ -5941,6 +6067,7 @@ def main():
                                 "sentiment_score_norm": row.get("sentiment_score_norm"),
                                 "spread_score": row.get("spread_score"),
                                 "trader_pref_score": row.get("trader_pref_score"),
+                                "score_adjustments": row.get("score_adjustments"),
                                 "weight_profile": _weight_profile_id,
                                 "paper_only": _paper_only_flag,
                             }
@@ -6075,6 +6202,7 @@ def main():
                                 "sentiment_score_norm": top_pick_row.get("sentiment_score_norm"),
                                 "spread_score": top_pick_row.get("spread_score"),
                                 "trader_pref_score": top_pick_row.get("trader_pref_score"),
+                                "score_adjustments": top_pick_row.get("score_adjustments"),
                                 "weight_profile": _weight_profile_id,
                             }
                             # AI-score lookup via stable key (see auto-log path comment).
@@ -6246,6 +6374,7 @@ def main():
                                                 "sentiment_score_norm": row.get("sentiment_score_norm"),
                                                 "spread_score": row.get("spread_score"),
                                                 "trader_pref_score": row.get("trader_pref_score"),
+                                                "score_adjustments": row.get("score_adjustments"),
                                                 "weight_profile": _weight_profile_id,
                                             }
                                             _row_key_l = (
