@@ -15,6 +15,7 @@ import pandas as pd
 from scipy import stats
 
 import src.options_screener as S
+from src import absolute_scores
 
 CUTS = ["2026-05-27", "2026-06-10", "2026-06-18", "2026-07-07", "2026-07-16"]
 DISPLAY_LO, DISPLAY_SPAN, DISPLAY_POW = 0.28, 0.54, 0.65
@@ -68,9 +69,22 @@ def apply_logistic(vals: pd.Series, centre: float, scale: float) -> pd.Series:
     return pd.Series(1.0 / (1.0 + np.exp(-scale * (lg - centre))), index=vals.index)
 
 
+# The shipped constants, calibrated on 293,343 archived chain snapshots at
+# DTE 7-180 (data/chain_archive.db).  Calibrating on the ledger instead would
+# fit the SELECTED picks, whose log10 IQR is 0.265 against the chain
+# population's 0.915 -- 3.5x narrower, which saturates most of a real chain.
+# Imported rather than copied so --frozen cannot drift from what ships.
+FROZEN = dict(theta_centre=absolute_scores.THETA_LOG_CENTRE,
+              theta_scale=absolute_scores.THETA_LOG_SCALE,
+              vega_centre=absolute_scores.VEGA_LOG_CENTRE,
+              vega_scale=absolute_scores.VEGA_LOG_SCALE)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="paper_trades.db")
+    ap.add_argument("--frozen", action="store_true",
+                    help="use the shipped constants instead of per-fold fitting")
     args = ap.parse_args()
 
     df = load(args.db)
@@ -95,8 +109,12 @@ def main() -> None:
             print(f"  (skipped {cut}: n_tr={int(tr.sum())} n_te={int(te.sum())})")
             continue
 
-        t_c, t_s = fit_logistic(tp[tr])
-        v_c, v_s = fit_logistic(vd[tr])
+        if args.frozen:
+            t_c, t_s = FROZEN["theta_centre"], FROZEN["theta_scale"]
+            v_c, v_s = FROZEN["vega_centre"], FROZEN["vega_scale"]
+        else:
+            t_c, t_s = fit_logistic(tp[tr])
+            v_c, v_s = fit_logistic(vd[tr])
         last_const = (t_c, t_s, v_c, v_s)
 
         # Buyers: fast decay is bad, so the score is 1 - pressure, matching
