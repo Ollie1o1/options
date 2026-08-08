@@ -74,9 +74,9 @@ _START = Chapter(
             "take in one command.",
             "Read the VERDICT column before anything else. It answers one "
             "question: does this trade still make money after you pay to get "
-            "into it and out of it? Chapter [3] explains it in full.",
+            "into it and out of it? THE VERDICT explains it in full.",
             "Ignore the score when ranking. It is hygiene, not an ordering — "
-            "chapter [7] gives the measurements behind that sentence.",
+            "WHAT IS AND IS NOT TRUSTED gives the measurements behind it.",
         )),
 
         ("h", "Where things are written down"),
@@ -119,7 +119,7 @@ _PICKING = Chapter(
               "of trades it exceeds the entire credit. The ceiling here is "
               "25% of reward, round trip. Above that the trade is refused."),
         ("p", "This single step removes more candidates than every filter in "
-              "the config combined. Chapter [4] has the measurements."),
+              "the config combined. FRICTION AND COST has the measurements."),
 
         ("h", "3 · Does the breakeven beat your book?"),
         ("p", "For any credit spread, the win rate you must clear is pure "
@@ -165,16 +165,155 @@ _PICKING = Chapter(
               "quote, a strike nobody trades. Do not use it to choose between "
               "two reasonable candidates. It has no measured ability to do "
               "that, and on the long-premium book it has measured ability to "
-              "do the opposite. Chapter [7], with numbers."),
+              "do the opposite. WHAT IS AND IS NOT TRUSTED, with numbers."),
         ("gap",),
         ("callout", "warn",
          "If you remember one thing: rank by what survives its costs, and "
          "let the score break ties. Never the other way round."),
+        ("gap",),
+        ("p", "A WORKED EXAMPLE runs two real trades from this ledger down "
+              "this exact ladder, and the ladder disagrees with the score on "
+              "both of them."),
     ),
 )
 
 
-# ── [3] THE VERDICT ───────────────────────────────────────────────────────────
+# ── [3] A WORKED EXAMPLE ──────────────────────────────────────────────────────
+#
+# Both trades are real rows from paper_trades.db, frozen here as literals:
+# entry_id 488 (META, the trap) and 479 (AMZN, the one that worked). They were
+# chosen because the score ranked them in exactly the wrong order and the
+# quotes said so before either was opened. Every derived figure below was
+# computed once from the stored columns:
+#   488: mid 2.45, cross 1.40, width 5.00, q 0.6358, stopped -257.50
+#   479: mid 1.85, cross 1.65, width 5.00, q 0.6053, took profit +66.90
+# If these are ever restated, recompute from those columns — do not patch a
+# single number and leave the rest.
+
+_EXAMPLE = Chapter(
+    key="example",
+    title="A WORKED EXAMPLE",
+    blurb="two real trades, start to finish",
+    body=(
+        ("h", "Two real trades from this ledger"),
+        ("p", "Both are bull put spreads: sell a put, buy a cheaper one below "
+              "it, collect the difference, and win if the stock stays above "
+              "the short strike. Both are $5 wide. Both were opened a day "
+              "apart. The screener scored them almost identically. One lost "
+              "everything it had at risk in a single day; the other took "
+              "profit. The difference was visible before either was opened, "
+              "and the score could not see it."),
+
+        ("h", "Step 1 · What the scan row showed"),
+        ("table",
+         ({"h": "", "w": 20}, {"h": "META 545/540", "w": 17, "align": "right"},
+          {"h": "AMZN 235/230", "w": 17, "align": "right"}),
+         (("opened", "2026-06-25", "2026-06-24"),
+          ("days to expiry", "29", "23"),
+          ("width", "$5.00", "$5.00"),
+          ("credit at mid", "$2.45", "$1.85"),
+          ("credit / width", "0.49", "0.37"),
+          ("delta of short leg", "-0.40", "-0.38"),
+          ("quality_score", "0.636", "0.605"))),
+        ("p", "Both had two-sided quotes on both legs, so both are real "
+              "candidates and step 1 passes. On those numbers META is the "
+              "better trade and it is not close. It collects 49% of the width "
+              "against AMZN's 37%, it has the higher score, and a screener "
+              "that ranks by score puts it on top. That is exactly the "
+              "mistake this program was rebuilt to stop making."),
+
+        ("h", "Step 2 · What crossing does to them"),
+        ("p", "The mid is not a price you can trade. Here is what each spread "
+              "was actually worth once you cross to get filled:"),
+        ("table",
+         ({"h": "", "w": 20}, {"h": "META", "w": 17, "align": "right"},
+          {"h": "AMZN", "w": 17, "align": "right"}),
+         (("credit at mid", "$2.45", "$1.85"),
+          ("credit crossed", "$1.40", "$1.65"),
+          ("lost to the spread", "$1.05  (42.9%)", "$0.20  (10.8%)"),
+          ("round trip", "85.7%", "21.6%"),
+          ("verdict", "REFUSE", "PASS"))),
+        ("p", "META gives up 42.9% of its credit on the way in, and the round "
+              "trip costs 85.7% of everything the trade could ever pay. It is "
+              "refused on the spot. AMZN's round trip is 21.6%, inside the "
+              "25% ceiling, so it passes. Nothing about either company was "
+              "considered to reach that."),
+
+        ("h", "Step 3 · What it does to the breakeven"),
+        ("p", "The credit sets the win rate you have to clear. Crossing "
+              "changes the credit, so crossing changes the bar:"),
+        ("table",
+         ({"h": "p* = 1 - credit/width", "w": 22},
+          {"h": "META", "w": 16, "align": "right"},
+          {"h": "AMZN", "w": 16, "align": "right"}),
+         (("at the mid", "51%", "63%"),
+          ("as actually filled", "72%", "67%"))),
+        ("p", "At the mid META needs a coin flip and AMZN needs 63%, which is "
+              "why META looked better. Priced honestly, META needs 72% and "
+              "AMZN needs 67% — the ranking has flipped, and it flipped "
+              "purely on the cost of trading. The book's own bull put win "
+              "rate is 70.4%, which clears AMZN's bar and misses META's."),
+        ("callout", "warn",
+         "This is the whole argument in one line: the mid ranked META first, "
+         "the fill ranked it last, and only the second ranking was real."),
+
+        ("h", "Step 4 · Does the structure fit?"),
+        ("p", "Both are bull puts, so both express the same view: this stock "
+              "stays above a level I choose. That was a reasonable view on "
+              "either name. Step 4 does not separate them — and it is worth "
+              "saying that plainly, because a checklist where every step "
+              "always fires is a checklist nobody reads."),
+
+        ("h", "Step 5 · Sizing"),
+        ("p", "Max loss on a credit spread is width minus credit. One META "
+              "contract puts $257.50 at risk to make $242.50; one AMZN "
+              "contract risks $322.50 to make $177.50. Both were sized at one "
+              "contract, so neither could hurt the book — which is the only "
+              "reason the META result is a lesson rather than a disaster."),
+
+        ("h", "What actually happened"),
+        ("table",
+         ({"h": "", "w": 20}, {"h": "META", "w": 17, "align": "right"},
+          {"h": "AMZN", "w": 17, "align": "right"}),
+         (("closed", "2026-06-26", "2026-07-07"),
+          ("held", "1 day", "13 days"),
+          ("why", "stop loss", "take profit"),
+          ("result", "-$257.50", "+$66.90"))),
+        ("p", "META breached its short strike the next morning and the stop "
+              "rule closed it for the full amount at risk. AMZN drifted, "
+              "decayed, and hit the 50%-of-credit take-profit thirteen days "
+              "later. The exit rules did their job in both cases; the "
+              "difference was made at entry."),
+
+        ("h", "The takeaways"),
+        ("num", (
+            "The score ranked the loser ABOVE the winner — 0.636 against "
+            "0.605. It is not a ranking tool, and this is what that failure "
+            "looks like on a single pair of trades.",
+            "The credit you see is not the credit you get. META's headline "
+            "credit was 32% larger than AMZN's and its real credit was 15% "
+            "SMALLER.",
+            "Friction is not a rounding error. It moved META's required win "
+            "rate by 21 points, from a coin flip to something the book has "
+            "never sustained.",
+            "The verdict caught it before entry, from the quote alone, with "
+            "no view on META at all.",
+            "Position size is what turns a bad trade into a survivable one. "
+            "One contract is why this is a paragraph and not a crater.",
+        )),
+        ("callout", "bad",
+         "Two trades are an anecdote, not evidence. They are here because "
+         "they show the mechanism cleanly. The evidence that the mechanism "
+         "is general is in WHAT IS AND IS NOT TRUSTED, over 405 trades."),
+        ("gap",),
+        ("p", "Source: paper_trades.db entry_id 488 and 479, columns "
+              "entry_price_mid, entry_price_cross, spread_width, net_credit, "
+              "quality_score, capital_at_risk, pnl_usd, exit_reason."),
+    ),
+)
+
+
+# ── [4] THE VERDICT ───────────────────────────────────────────────────────────
 
 _VERDICT = Chapter(
     key="verdict",
@@ -300,7 +439,7 @@ _FRICTION = Chapter(
         ("callout", "warn",
          "Iron condors are the only multi-leg structure with a positive "
          "median return net of crossing — and the composite ranks them "
-         "worst. See chapter [7]."),
+         "worst. See WHAT IS AND IS NOT TRUSTED."),
 
         ("h", "What your broker charges"),
         ("p", "Wealthsimple, Ontario, USD account. Verified against the "
@@ -422,7 +561,7 @@ _GLOSSARY = Chapter(
         ("kv", "p*", "breakeven win rate, 1 - credit/width. Beat it or the "
                      "structure loses regardless of how good it looked."),
         ("kv", "POP", "probability of profit, model-estimated. Treat with "
-                      "suspicion — see chapter [7] on the condor weighting."),
+                      "suspicion — see WHAT IS AND IS NOT TRUSTED."),
         ("kv", "RoC", "return on capital: profit divided by what the trade "
                       "actually tied up."),
         ("kv", "DTE", "days to expiry. Positions are time-exited at 21 DTE."),
@@ -438,7 +577,7 @@ _GLOSSARY = Chapter(
                                   "is 0.68% of the quality score."),
         ("kv", "quality_score", "a 35-metric composite. Hygiene only — it has "
                                 "no measured ability to rank outcomes. "
-                                "Chapter [7]."),
+                                "See WHAT IS AND IS NOT TRUSTED."),
         ("kv", "capital at risk", "the real maximum loss of a position. The "
                                   "only correct basis for sizing."),
         ("kv", "GEX", "dealer gamma exposure. Positive suppresses moves, "
@@ -560,5 +699,5 @@ _TRUST = Chapter(
 
 
 CHAPTERS: Tuple[Chapter, ...] = (
-    _START, _PICKING, _VERDICT, _FRICTION, _MODES, _GLOSSARY, _TRUST,
+    _START, _PICKING, _EXAMPLE, _VERDICT, _FRICTION, _MODES, _GLOSSARY, _TRUST,
 )

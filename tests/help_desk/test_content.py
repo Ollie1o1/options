@@ -34,14 +34,37 @@ class ContentTest(unittest.TestCase):
             walk(block[1:])
         return " ".join(parts)
 
-    def test_seven_chapters_with_unique_keys(self):
+    def test_chapters_are_in_order_with_unique_keys(self):
         keys = [c.key for c in content.CHAPTERS]
-        self.assertEqual(len(keys), 7)
-        self.assertEqual(len(set(keys)), 7)
+        self.assertEqual(len(set(keys)), len(keys))
         self.assertEqual(
             keys,
-            ["start", "picking", "verdict", "friction", "modes", "glossary",
-             "trust"])
+            ["start", "picking", "example", "verdict", "friction", "modes",
+             "glossary", "trust"])
+
+    def test_chapters_cross_reference_by_name_never_by_number(self):
+        """Chapter numbers are positions and they move. A reference like
+        "Chapter [7]" silently points at the wrong chapter the moment one is
+        inserted — which is exactly what happened when A WORKED EXAMPLE was
+        added at position 3. Names cannot rot that way."""
+        for c in content.CHAPTERS:
+            self.assertNotRegex(
+                self._text(c), r"[Cc]hapter \[\d+\]",
+                f"{c.key} references a chapter by number")
+
+    def test_every_cross_referenced_chapter_title_exists(self):
+        titles = {c.title for c in content.CHAPTERS}
+        # The titles other chapters actually point at, spelled as they appear.
+        referenced = {
+            "THE VERDICT", "FRICTION AND COST", "WHAT IS AND IS NOT TRUSTED",
+            "A WORKED EXAMPLE",
+        }
+        self.assertTrue(referenced <= titles, referenced - titles)
+        for c in content.CHAPTERS:
+            text = self._text(c)
+            for title in referenced:
+                if title in text:
+                    self.assertIn(title, titles)
 
     def test_every_chapter_has_title_blurb_and_body(self):
         for c in content.CHAPTERS:
