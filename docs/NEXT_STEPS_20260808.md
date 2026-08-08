@@ -138,9 +138,15 @@ four times.
   by quartile, and selecting on credit just means selling closer to the money.
 - **Do not try to fill the 2022-2024 alternate-day gaps.** That cadence is
   upstream's own — verified, `SPY 2024-03-05/07/12` return 0 rows from the API.
-- **Do not try to clone the Dolt repo.** Disk sits at 97% (~6 GiB free) and the
-  repo covers 2,098 symbols. Range queries (`date BETWEEN`) hit the API's 30s
-  deadline, so it is one call per symbol-day regardless.
+- **Do not clone the Dolt repo — MEASURED 2026-08-08, it is ~40 GB.** Attempted
+  after the disk cleanup and aborted. The transfer reports **5,780,276 chunks**;
+  chunk size grows as it proceeds (3.3 KB/chunk at 11k chunks, 7.0 KB/chunk at
+  35k), extrapolating past 40 GB against 30 GiB free. It would have filled the
+  disk and taken the running backfill with it. If ever retried, watch
+  `du -sh` against the chunk count rather than trusting an early estimate —
+  the first extrapolation said 19 GB and was wrong by half.
+  Range queries (`date BETWEEN`) also hit the API's 30s deadline, so the
+  per-symbol-day API path remains the only route.
 - **Do not tune `DELTA_TOLERANCE` against returns.** It is set at 0.10 as the
   conventional reading of "a 40-delta option". Tuning it would convert a
   correctness guard into an overfit parameter.
