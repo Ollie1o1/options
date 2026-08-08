@@ -89,6 +89,10 @@ achieving it.
 
 ## 4. The signs are stable everywhere they were checked
 
+(This section runs on all 139 condors and stands. A separate stability check on
+the 38-row execution-truth subset, added later, turned out to be vacuous — see
+§7.)
+
 Expanding walk-forward, condors, rank IC by test window:
 
 | component | ≥05-15 | ≥06-01 | ≥06-15 | ≥07-01 | mean |
@@ -139,7 +143,78 @@ Two things are worth separating:
   should not borrow `spread_score`'s inflated +0.55 as justification.
 - **Nothing here licenses a `spread_score` re-weight.** See §5.
 
-The cheapest honest change is not a re-weight at all: the top-PoP condor
-quartile — $1.25 of credit against a $4 width — is exactly what the
-`candidate_verdict` friction gate already refuses on cost grounds. The ordering
-shipped in `c3667ea` demotes those trades without anyone tuning a constant.
+The cheapest honest change is not a re-weight at all — but not for the reason
+first given here. See §7.
+
+---
+
+## 7. Correction: the gate refuses nothing, the *ordering* is what helps
+
+§6 originally claimed the top-PoP condors are "exactly what the
+`candidate_verdict` friction gate already refuses on cost grounds". **That was
+an assertion, and testing it showed it is false.**
+
+Applying the real gate (`DEFAULT_MAX_FRICTION = 0.25`, plus the credit-vanishes
+check) to the 38 condors that carry `entry_price_mid` and `entry_price_cross`:
+
+```
+refused: 0 of 38
+```
+
+None of them trips it. The claim was wrong.
+
+**What is true is better, and is the actual reason the shipped ordering helps.**
+Condor rows carry no `ev_per_contract` — `find_iron_condors` never emits one and
+`enrich_iron_condors` copies only `ev_score`. So in `candidate_verdict.rank`,
+`_ev` returns `-inf` for every condor, they all tie on EV, and the sort falls
+through to its next key: **`-round_trip_pct`, cheapest-to-trade first.**
+
+That key is a far better predictor of a condor's outcome than the composite:
+
+| ranked by | vs net return | vs mid return |
+|---|---|---|
+| `quality_score` (old ordering) | −0.1752 (p 0.29) | −0.1877 (p 0.26) |
+| **`-round_trip`** (shipped ordering) | +0.6503 (p 0.00001) | **+0.5779 (p 0.00015)** |
+
+And `spearman(pop_score, round_trip) = +0.5991, p = 0.0001` — the high-PoP
+trades are the high-friction trades, which is the bridge between §3 and this.
+
+Selecting the top K, on the **mid** return so no slip is subtracted:
+
+| K | by `quality_score` | by `-round_trip` |
+|---|---|---|
+| 5 | +29.4% median, 80% win | +32.3% median, **100%** win |
+| 10 | **−7.7%** median, 40% win | +24.5% median, **100%** win |
+| 15 | **−6.9%** median, 47% win | +32.0% median, **100%** win |
+
+(Whole cohort: +12.3% median, 63% win.)
+
+### Why this is reported on the mid return
+
+`pnl_net` subtracts the same slip that `round_trip` measures, so ranking one
+against the other is partly circular — the identical objection raised against
+`spread_score` in §5, and it applies here just as much. The effect survives on
+the mid return, which subtracts no slip, so it is not that circularity.
+
+**One confound does remain and cannot be removed with this data:** a wide
+market's quoted mid is not achievable, so the recorded entry credit is inflated
+and the recorded mid return is depressed. Wide-spread condors look worse partly
+by construction on *both* bases. That is arguably the real effect rather than an
+artifact — an unfillable mid is a worse trade — but it cannot be separated here.
+
+### Also correcting: the earlier stability check was vacuous
+
+The walk-forward table in §4 of an earlier draft showed `-round_trip` stable
+across windows. The 38 execution-truth condors span **2026-06-10 to 2026-07-21,
+12 distinct dates** — every "window" contained essentially the same rows
+(n = 38, 38, 34). That check demonstrated nothing and should not be cited. The
+§4 *component* walk-forward, which runs on all 139 condors, is unaffected.
+
+### The consequence for future work
+
+**Do not add `ev_per_contract` to condor rows without measuring it first.** EV
+sorts *before* `-round_trip` in `rank`. Supplying an unvalidated EV would
+override a key measuring +0.58 with one that has never been checked for this
+structure — and repo-wide, `ev_per_contract` prices fair value on trailing
+`hv_252d` and carries 0.68% of the single-leg composite. Adding it here would
+look like an improvement and could quietly undo the one that works.
