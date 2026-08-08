@@ -106,9 +106,29 @@ def feature_ic(trades: Sequence[Any], feature: str,
     keep, xs, ys = paired(trades, feature)
     out: Dict[str, Any] = {"feature": feature, "n": len(xs), "ic": None,
                            "p": None, "t": 0.0, "t_clustered": 0.0,
+                           "q_top": None, "q_bot": None, "q_spread": None,
                            "n_trials": n_trials}
     if len(xs) < MIN_TRADES or _sps is None:
         return out
+    # Mean outcome in the top vs bottom quintile of the feature.
+    #
+    # This exists because the IC alone is BLIND to the effect this book cares
+    # about most. On 2026-08-08 `iv_rank` scored a Spearman IC of -0.029 and
+    # was written up as flat, while the same data measured as a conditional
+    # mean was monotone and strong (DSR 0.797). Both were right: a rank
+    # correlation asks whether a feature orders EVERY trade, and short-premium
+    # returns have skew -1.7 to -2.0, so a feature whose value is avoiding the
+    # rare total loss barely moves the median ordering while moving the mean a
+    # long way. Any tail-avoidance signal looks flat to an IC. Read them
+    # together, never the IC alone.
+    if len(xs) >= 5 * MIN_TRADES // 2:
+        order = np.argsort(np.asarray(xs, dtype=float), kind="stable")
+        k = max(1, len(order) // 5)
+        bot = np.asarray([ys[i] for i in order[:k]], dtype=float)
+        top = np.asarray([ys[i] for i in order[-k:]], dtype=float)
+        out["q_bot"] = round(float(bot.mean()), 4)
+        out["q_top"] = round(float(top.mean()), 4)
+        out["q_spread"] = round(float(top.mean() - bot.mean()), 4)
     if len(set(xs)) < 2 or len(set(ys)) < 2:
         return out                      # constant: no ranking to correlate
     ic, p = _sps.spearmanr(xs, ys)
@@ -174,8 +194,14 @@ def split_by_time(trades: Sequence[Any], frac: float = 0.7
 
 def rank_features(trades: Sequence[Any],
                   features: Optional[Sequence[str]] = None,
+                  by: str = "ic",
                   ) -> List[Dict[str, Any]]:
-    """Every feature's IC, strongest |IC| first, each carrying the trial count.
+    """Every feature's IC and quantile spread, each carrying the trial count.
+
+    `by` selects the sort: `"ic"` finds features that rank-order every trade,
+    `"q_spread"` finds threshold and tail-avoidance effects that an IC cannot
+    see. Run both — they answer different questions and the second is what
+    caught the IV-rank effect after the first missed it.
 
     `n_trials` is the number of features examined, because that is exactly the
     size of the search that produced the winner.
@@ -189,7 +215,7 @@ def rank_features(trades: Sequence[Any],
         features = seen
     k = len(features)
     rows = [feature_ic(trades, f, n_trials=k) for f in features]
-    rows.sort(key=lambda r: abs(r["ic"]) if r["ic"] is not None else -1.0,
+    rows.sort(key=lambda r: abs(r.get(by)) if r.get(by) is not None else -1.0,
               reverse=True)
     return rows
 
@@ -200,12 +226,15 @@ def format_ranking(rows: Sequence[Dict[str, Any]], title: str = "") -> str:
     if title:
         out.append(title)
     out.append(f"  {'feature':<22} {'n':>5} {'IC':>8} {'t':>7} {'t_clust':>8} "
-               f"{'p':>8}")
+               f"{'p':>8} {'q_bot':>8} {'q_top':>8} {'q_spread':>9}")
     for r in rows:
         if r["ic"] is None:
             out.append(f"  {r['feature']:<22} {r['n']:>5}   "
                        f"(not measurable — no variation or too few trades)")
             continue
+        q = ("" if r.get("q_spread") is None else
+             f" {r['q_bot']:>8.4f} {r['q_top']:>8.4f} {r['q_spread']:>9.4f}")
         out.append(f"  {r['feature']:<22} {r['n']:>5} {r['ic']:>8.4f} "
-                   f"{r['t']:>7.2f} {r['t_clustered']:>8.2f} {r['p']:>8.4f}")
+                   f"{r['t']:>7.2f} {r['t_clustered']:>8.2f} "
+                   f"{r['p']:>8.4f}{q}")
     return "\n".join(out)

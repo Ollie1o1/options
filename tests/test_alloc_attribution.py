@@ -138,5 +138,69 @@ class RankFeaturesTest(unittest.TestCase):
         self.assertEqual(by["absent"]["n"], 0)
 
 
+class ThresholdEffectTest(unittest.TestCase):
+    """A feature whose value is TAIL AVOIDANCE must not read as "no signal".
+
+    This is the blind spot that produced a wrong conclusion on 2026-08-08.
+    `iv_rank` scored a Spearman IC of -0.029 and was written up as flat, while
+    the same data as a conditional mean was monotone and strong (-2.85% /
+    -1.15% / +2.51% / +3.86% across IVR<=30 / baseline / >=50 / >=70, DSR
+    0.797). Both numbers were right. A rank correlation asks whether the
+    feature orders EVERY trade; this is a threshold effect on a variable with
+    skew -1.7 to -2.0, where the gain is fewer catastrophic trades. That moves
+    the MEAN a long way and the median ordering barely at all.
+    """
+
+    def _threshold_trades(self, n=400):
+        """Disasters concentrated at low feature values; everything else is
+        noise unrelated to the feature. Rank IC stays modest because 85% of
+        trades carry no information, while the mean gap is enormous because a
+        -100% trade dwarfs a +5% one."""
+        import random
+        rng = random.Random(7)
+        out = []
+        for i in range(n):
+            f = i / n
+            rate = 0.30 if f < 0.4 else 0.06     # disaster probability
+            roc = -1.0 if rng.random() < rate else rng.uniform(0.0, 0.10)
+            out.append(_T(f"2024-{1 + i % 12:02d}-{1 + i % 28:02d}",
+                          roc=roc, feat=f))
+        return out
+
+    def test_the_rank_ic_understates_a_tail_avoidance_effect(self):
+        # The whole reason the extra screen exists: an IC that reads as weak
+        # sitting alongside a difference in outcome that is enormous. The two
+        # are not comparable as numbers — an IC is a dimensionless correlation
+        # and q_spread is in units of return on capital — so they are asserted
+        # separately against what each one means.
+        r = feature_ic(self._threshold_trades(), "feat")
+        self.assertLess(abs(r["ic"]), 0.30)            # "weak" by IC convention
+        self.assertGreater(r["q_spread"], 0.25)        # 25+ points of RoC
+
+    def test_the_quantile_spread_catches_what_the_ic_misses(self):
+        r = feature_ic(self._threshold_trades(), "feat")
+        self.assertGreater(r["q_spread"], 0.15)
+        self.assertGreater(r["q_top"], r["q_bot"])
+
+    def test_quantile_spread_is_none_when_unmeasurable(self):
+        self.assertIsNone(feature_ic(_monotone(n=4), "iv_rank")["q_spread"])
+
+    def test_a_genuinely_flat_feature_shows_no_spread(self):
+        import random
+        rng = random.Random(3)
+        trades = [_T(f"2024-01-{1 + i % 28:02d}", roc=rng.uniform(0, 0.1),
+                     junk=rng.random()) for i in range(300)]
+        self.assertLess(abs(feature_ic(trades, "junk")["q_spread"]), 0.05)
+
+    def test_ranking_can_surface_a_threshold_feature_over_a_noisy_one(self):
+        import random
+        rng = random.Random(11)
+        trades = self._threshold_trades()
+        for t in trades:
+            t.features["junk"] = rng.random()
+        ranked = rank_features(trades, ["feat", "junk"], by="q_spread")
+        self.assertEqual(ranked[0]["feature"], "feat")
+
+
 if __name__ == "__main__":
     unittest.main()
