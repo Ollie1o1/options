@@ -73,6 +73,8 @@ def _menu_rows() -> list:
                      "your setups — signal · account · friction · evidence · verdict",
                      tag="display-only"))
     rows.append(_row("7", "SETTINGS", "theme · preferences · doctor"))
+    rows.append(_row("8", "HELP",
+                     "how this desk works · how to pick · what is proven"))
     rows.append(_row("Q", "QUIT", "", muted_key=True))
     return rows
 
@@ -108,7 +110,7 @@ def _show_menu() -> str:
     after.append("")
     # The canonical entry point, stated where a first-time user is already
     # looking. Six things start this project; only one of them needs learning.
-    _front_door = "  You are in the front door: python run.py  ·  new here? try [1] STOCKS"
+    _front_door = "  Front door: python run.py  ·  new here? [8] HELP, then [1] STOCKS"
     after.append(fmt.style(_front_door, "muted") if HAS_UI else _front_door)
     after.append("")
     after.append(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
@@ -312,10 +314,22 @@ def main() -> None:
         if choice in ("7", "SETTINGS"):
             _settings_menu()
             continue
+        # No "H" alias here — HOLDINGS owns it above, and silently stealing a
+        # binding a user already has in their fingers is worse than one fewer
+        # shortcut. "?" is the universal one.
+        if choice in ("8", "HELP", "?"):
+            # Crash-isolated for the same reason the doctor is: a manual that
+            # can take the desk down with it is worse than no manual.
+            try:
+                from src.help_desk import run_menu as _help_menu
+                _help_menu()
+            except Exception as exc:  # noqa: BLE001 — help never breaks the menu
+                print(f"  Help unavailable: {exc}")
+            continue
         if choice in ("Q", "QUIT", "EXIT", ""):
             print("  Goodbye.")
             return
-        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, 6, 7, or Q")
+        print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, 6, 7, 8, or Q")
 
 
 if __name__ == "__main__":
