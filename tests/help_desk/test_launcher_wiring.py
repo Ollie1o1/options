@@ -1,4 +1,5 @@
 """[8] HELP on the launcher's first menu, and its crash isolation."""
+import io
 import unittest
 from unittest import mock
 
@@ -10,9 +11,15 @@ class LauncherWiringTest(unittest.TestCase):
     def setUp(self):
         self._color = fmt._COLOR_ENABLED
         fmt.set_color_enabled(False)
+        # launcher.main() calls settings.apply_saved_theme(), which mutates the
+        # PROCESS-WIDE theme to whatever this operator has saved and never puts
+        # it back. Every later test that asserts on a default-theme RGB then
+        # fails — tests/test_desk_visuals.py did exactly that. Restore it.
+        self._theme = fmt.get_theme()
 
     def tearDown(self):
         fmt._COLOR_ENABLED = self._color
+        fmt.set_theme(self._theme)
 
     def test_help_row_is_present_at_eight(self):
         rows = launcher._menu_rows()
@@ -89,6 +96,38 @@ class LauncherWiringTest(unittest.TestCase):
                             " ".join(str(x) for x in a))):
             launcher._show_menu()
         self.assertTrue(any("[8] HELP" in p for p in printed), printed)
+
+
+class ThemeLeakTest(unittest.TestCase):
+    """The launcher tests drive `launcher.main()`, which applies the operator's
+    saved theme process-wide. Asserting the restore from inside those tests is
+    impossible — tearDown has not run yet — so run the whole class and check the
+    theme afterwards. Without the tearDown restore, this fails and so does
+    tests/test_desk_visuals.py, which asserts on default-theme RGB values.
+    """
+
+    def test_running_the_launcher_tests_leaves_the_theme_untouched(self):
+        from src import settings
+
+        original = fmt.get_theme()
+        self.addCleanup(fmt.set_theme, original)
+
+        # Pin a sentinel that is definitely NOT the theme main() would apply,
+        # so a leak always flips it. Reading the current theme instead would
+        # silently pass: unittest runs LauncherWiringTest first (class names
+        # sort L before T), so by now a leak has already happened and the
+        # "before" value would be the leaked one.
+        settings.apply_saved_theme()
+        saved = fmt.get_theme()
+        sentinel = next(k for k, _ in fmt.list_themes() if k != saved)
+        fmt.set_theme(sentinel)
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+            LauncherWiringTest)
+        result = unittest.TextTestRunner(
+            stream=io.StringIO(), verbosity=0).run(suite)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual(fmt.get_theme(), sentinel)
 
 
 if __name__ == "__main__":
