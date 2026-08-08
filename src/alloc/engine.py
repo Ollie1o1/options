@@ -372,14 +372,15 @@ def _entry_features(sig: Dict[str, Any], legs: Sequence[Leg],
 
     deltas = {_fkey(c["expiration"], c["strike"], c["type"]): c.get("delta")
               for c in chain}
-    sold = [deltas.get(_fkey(l.expiration, l.strike, l.type)) for l in legs
-            if str(l.action).lower() == "sell"]
-    sold = [abs(float(d)) for d in sold if d is not None]
-    out["short_delta"] = max(sold) if sold else None
 
-    bought = [deltas.get(_fkey(l.expiration, l.strike, l.type)) for l in legs
-              if str(l.action).lower() == "buy"]
-    bought = [abs(float(d)) for d in bought if d is not None]
+    def _abs_deltas(action: str) -> List[float]:
+        vals = [deltas.get(_fkey(l.expiration, l.strike, l.type)) for l in legs
+                if str(l.action).lower() == action]
+        return [abs(float(d)) for d in vals if d is not None]
+
+    sold = _abs_deltas("sell")
+    out["short_delta"] = max(sold) if sold else None
+    bought = _abs_deltas("buy")
     out["long_delta"] = max(bought) if bought else None
 
     spot = sig.get("spot")

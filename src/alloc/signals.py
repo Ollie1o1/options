@@ -26,7 +26,7 @@ import datetime as _dt
 import math
 import statistics
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.alloc.settle import implied_spot_any
 
@@ -83,18 +83,23 @@ def _realized_vol(window: Sequence[Snapshot]) -> Optional[float]:
               one return fabricates a vol explosion, so steps longer than
               MAX_STEP_DAYS are dropped rather than scaled.
     """
-    pts = [s for s in window if s.spot is not None and s.spot > 0]
+    # Carry (date, spot) as concrete floats rather than filtering Snapshots:
+    # a comprehension filter does not narrow the element type, so the division
+    # below would still be operating on Optional[float].
+    pts: List[Tuple[str, float]] = [
+        (s.date, float(s.spot)) for s in window
+        if s.spot is not None and s.spot > 0]
     scaled: List[float] = []
-    for prev, cur in zip(pts, pts[1:]):
+    for (prev_date, prev_spot), (cur_date, cur_spot) in zip(pts, pts[1:]):
         try:
-            gap = (_dt.date.fromisoformat(cur.date)
-                   - _dt.date.fromisoformat(prev.date)).days
+            gap = (_dt.date.fromisoformat(cur_date)
+                   - _dt.date.fromisoformat(prev_date)).days
         except (TypeError, ValueError):
             continue
         if gap <= 0 or gap > MAX_STEP_DAYS:
             continue
         steps = max(gap * _CAL_TO_TRADING, 0.5)
-        scaled.append(math.log(cur.spot / prev.spot) / math.sqrt(steps))
+        scaled.append(math.log(cur_spot / prev_spot) / math.sqrt(steps))
     if len(scaled) < MIN_RV_STEPS:
         return None
     return float(statistics.stdev(scaled) * math.sqrt(TRADING_DAYS))
