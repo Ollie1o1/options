@@ -71,6 +71,29 @@ class ContentTest(unittest.TestCase):
                 for row in rows:
                     self.assertEqual(len(row), len(cols), f"{c.key}: {row!r}")
 
+    def test_every_table_cell_fits_its_column(self):
+        """The renderer clips as a safety net, but a clipped cell is lost
+        content. An over-wide cell also mis-aligns the NEXT column without
+        ever making the line too wide, which no width assertion can see."""
+        for c in content.CHAPTERS:
+            for block in c.body:
+                if block[0] != "table":
+                    continue
+                cols, rows = block[1], block[2]
+                for row in rows:
+                    for cell, col in zip(row, cols):
+                        self.assertLessEqual(len(cell), col["w"],
+                                             f"{c.key}: {cell!r}")
+
+    def test_every_table_fits_the_page(self):
+        for c in content.CHAPTERS:
+            for block in c.body:
+                if block[0] != "table":
+                    continue
+                cols = block[1]
+                total = 2 + sum(col["w"] for col in cols) + len(cols) - 1
+                self.assertLessEqual(total, render.WIDTH, c.key)
+
     def test_every_kv_label_fits_the_gutter(self):
         """The renderer survives an over-long label by giving it its own line,
         but a glossary that silently un-aligns itself is a regression."""

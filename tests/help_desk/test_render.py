@@ -62,6 +62,30 @@ class RenderBlocksTest(unittest.TestCase):
         for ln in lines:
             self.assertLessEqual(len(ln), render.WIDTH)
 
+    def test_consecutive_paragraphs_are_separated(self):
+        """Two paragraphs must not render as one wall of text."""
+        lines = render.render_blocks([("p", "first"), ("p", "second")])
+        self.assertEqual([ln.strip() for ln in lines], ["first", "", "second"])
+
+    def test_consecutive_bullets_stay_tight(self):
+        lines = render.render_blocks([("bullet", "one"), ("bullet", "two")])
+        self.assertNotIn("", [ln.strip() for ln in lines])
+
+    def test_consecutive_kv_rows_stay_tight(self):
+        lines = render.render_blocks([("kv", "a", "one"), ("kv", "b", "two")])
+        self.assertEqual(len(lines), 2)
+
+    def test_heading_does_not_get_a_doubled_blank(self):
+        lines = render.render_blocks([("p", "text"), ("h", "Next")])
+        self.assertEqual([ln.strip() for ln in lines], ["text", "", "NEXT"])
+
+    def test_over_wide_table_cell_is_clipped_not_overflowed(self):
+        cols = [{"h": "a", "w": 8}, {"h": "b", "w": 8}]
+        lines = render.render_blocks(
+            [("table", cols, [["x" * 40, "y"]])])
+        for ln in lines:
+            self.assertLessEqual(len(ln), 2 + 8 + 1 + 8)
+
     def test_unknown_block_tag_raises(self):
         with self.assertRaises(ValueError):
             render.render_blocks([("nope", "x")])

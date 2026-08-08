@@ -5601,6 +5601,19 @@ def main():
         elif symbol_input in ("PROB LAB", "PROB", "PROBABILITY LAB", "RND"):
             symbol_input = "PROBLAB"
 
+        # ── The manual, one keystroke from the mode menu ──────────────────────
+        # Chapter 5 is exactly the list of modes printed above, so this is where
+        # the question gets asked. Crash-isolated: help never breaks a scan.
+        if symbol_input in ("?", "HELP"):
+            try:
+                from .help_desk import run_menu as _help_menu
+                _help_menu()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  Help unavailable: {exc}")
+            if _interactive:
+                continue
+            return
+
         # ── STRUCTURE mode: view → structure expression, sized to the account ─────
         if symbol_input == "STRUCTURE":
             _run_structure_menu()

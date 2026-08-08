@@ -75,6 +75,26 @@ def _kv(label, value) -> List[str]:
     return [first] + [pad + fmt.style(c, "value") for c in chunks[1:]]
 
 
+# Tags that read as a list: consecutive siblings stay tight, and only the
+# group gets a blank line before it.
+_TIGHT = ("bullet", "kv")
+
+
+def _needs_gap(prev: Optional[str], tag: str) -> bool:
+    """Whether a blank line goes between two blocks.
+
+    Without this, consecutive paragraphs render as one wall of text — visible
+    the moment you look at a real chapter, and invisible to a width test.
+    """
+    if prev is None or tag in ("gap", "rule", "h"):
+        return False
+    if prev in ("h", "gap", "rule"):
+        return False
+    if tag == prev and tag in _TIGHT:
+        return False
+    return True
+
+
 def render_blocks(blocks: Sequence[tuple]) -> List[str]:
     """Render a chapter body to display lines.
 
@@ -83,6 +103,7 @@ def render_blocks(blocks: Sequence[tuple]) -> List[str]:
     paragraph that quietly stops being in the manual.
     """
     lines: List[str] = []
+    prev: Optional[str] = None
     for block in blocks:
         if not block or block[0] not in BLOCK_ARITY:
             raise ValueError(f"unknown help block: {block!r}")
@@ -90,6 +111,10 @@ def render_blocks(blocks: Sequence[tuple]) -> List[str]:
         if len(block) != BLOCK_ARITY[tag]:
             raise ValueError(
                 f"block {tag!r} takes {BLOCK_ARITY[tag]} elements: {block!r}")
+
+        if _needs_gap(prev, tag):
+            lines.append("")
+        prev = tag
 
         if tag == "gap":
             lines.append("")
@@ -112,7 +137,14 @@ def render_blocks(blocks: Sequence[tuple]) -> List[str]:
         elif tag == "kv":
             lines.extend(_kv(block[1], block[2]))
         elif tag == "table":
-            lines.extend(ui.table(block[1], block[2]).splitlines())
+            # ui.pad does not clip, so an over-long cell pushes the next column
+            # out of true without ever making the LINE too wide — a defect a
+            # width assertion cannot see. Clip here; the content tests assert
+            # cells fit, so this only ever fires on a future edit.
+            cols = block[1]
+            rows = [[ui.clip(cell, c["w"]) for cell, c in zip(row, cols)]
+                    for row in block[2]]
+            lines.extend(ui.table(cols, rows).splitlines())
         elif tag == "callout":
             tone = block[1] if block[1] in _CALLOUT_TITLE else "warn"
             body = [fmt.style(w, tone) for w in _wrap(block[2], WIDTH - 6)]

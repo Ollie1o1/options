@@ -54,7 +54,7 @@ _START = Chapter(
         ("p", "The first menu splits the work by asset and by purpose. Most "
               "people only ever need the first one."),
         ("table",
-         ({"h": "desk", "w": 12}, {"h": "what it is for", "w": 58}),
+         ({"h": "desk", "w": 13}, {"h": "what it is for", "w": 57}),
          (("1 STOCKS", "equity options — the main screener, 13 modes"),
           ("2 CRYPTO", "BTC/ETH options on Deribit, perp funding and basis"),
           ("3 LEVERAGE", "perp futures — research only, no edge found yet"),
@@ -143,7 +143,7 @@ _PICKING = Chapter(
           ("it goes up, or just not down", "bull put spread, short put"),
           ("it goes nowhere for a month", "iron condor"),
           ("it stops going up", "bear call spread"),
-          ("something breaks, direction unknown", "long straddle — rarely worth it"),
+          ("a big move, direction unknown", "long straddle — rarely worth it"),
           ("vol is too expensive", "sell premium; check IV rank first"))),
         ("p", "If two structures both express the view, take the cheaper one "
               "to trade. That is almost always the one with fewer legs, "
@@ -272,7 +272,7 @@ _FRICTION = Chapter(
               "You pay the spread on every leg, but you are paid on the "
               "difference between them."),
         ("table",
-         ({"h": "structure", "w": 22}, {"h": "crossings", "w": 11, "align": "right"},
+         ({"h": "structure", "w": 22}, {"h": "crossings", "w": 11},
           {"h": "measured toll", "w": 35}),
          (("single leg", "2", "0.7-1.7% of premium per crossing"),
           ("two-leg vertical", "4", "27-33% of credit per crossing"),
