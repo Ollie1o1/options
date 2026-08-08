@@ -4,11 +4,18 @@ The question: across the real-marks backtest, which entry-time features
 separated the winners from the losers, and can anything be changed on the back
 of it?
 
-**The answer is a negative result, and it is the important kind.** No feature
-knowable at entry predicts outcome once accounting identities are removed. The
-strongest correlations in the table are arithmetic. Nothing predicts the
-disasters at all. One genuine specification defect was found and fixed, and it
-moves no verdict.
+**Mostly a negative result, with one real exception.** No entry feature
+*rank-orders* outcomes once accounting identities are removed, the strongest
+correlations in the table are arithmetic, and nothing predicts the disasters.
+One specification defect was found and fixed; it moves no verdict.
+
+**The exception is IV rank, and it is the strongest result this system has
+produced.** Measured as a conditional mean rather than a rank correlation, it
+is monotone across the graded parameter — **-2.85% / -1.15% / +2.51% / +3.86%**
+for IVR<=30 / baseline / >=50 / >=70 — and IVR>=70 reads **DSR 0.797 after
+deflating by 44 configurations**, the only thing in this repo that has ever
+cleared the 0.5 line. It still rejects, on clustered t = 2.26 against Harvey's
+hurdle of 3.0, and it is in-sample. See §4e.
 
 Reproduce with:
 
@@ -116,12 +123,75 @@ is *not* an accounting identity is flat:
 the single most theory-motivated feature available — the reason anyone buys or
 sells options — and it is indistinguishable from zero in all three structures.
 
-**IV rank is flat here, which contradicts §4d.** That section reported a
-monotone IV-rank effect (-0.97% at IVR<=30 rising to +3.00% at IVR>=70) and
-called it one of two things worth carrying forward. It was measured on a
-different window (2022-2026), **with splits unhandled**, and as a conditional
-mean rather than an IC. It does not reproduce as a rank correlation on
-2020-2024 with splits wired. Treat §4d's IV-rank result as unconfirmed.
+**IV rank is flat as a rank IC — but that is NOT the same as saying it does
+not work, and an earlier draft of this file got that wrong.** See §4e: measured
+the way §4d measured it, as a conditional mean, the IV-rank effect reproduces
+and gets *stronger* at 3-8x the sample size. The two results are both correct
+and they answer different questions:
+
+* A **Spearman IC** asks whether `iv_rank` rank-orders outcomes across *every*
+  trade, continuously. It does not — IC -0.029.
+* A **conditional mean** asks whether the high-IV-rank *subset* does better on
+  average. It does, monotonically.
+
+Those are reconcilable, and the reconciliation is the finding: this is a
+**threshold effect on a heavily skewed variable** (skew -1.7 to -2.0). What
+high IV rank buys is not a better typical trade — it is fewer catastrophic
+ones, which moves the mean a long way and the median rank ordering barely at
+all. Any feature whose value lies in tail avoidance will look flat to a rank
+correlation. That is a limitation of the IC screen in this module, not a
+finding about IV rank, and it is worth remembering before dismissing anything
+else here on a low IC alone.
+
+## 4e. §4d's signal table, re-run properly — the IV-rank effect IS real
+
+Re-run with splits wired, uncapped (n is 3-8x §4d's), 2022-2024, MEGA, held to
+expiry, deflating by 44 configurations:
+
+| condition | n | win | RoC/trade | t | **t clustered** | skew | **DSR** | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| IV rank <= 30 | 1,401 | 78.8% | **-2.85%** | -2.56 | -1.77 | -1.63 | 0.000 | reject |
+| **BASELINE** | 3,808 | 79.8% | **-1.15%** | -1.69 | -1.57 | -1.68 | 0.000 | reject |
+| IV rank >= 50 | 1,682 | 82.2% | **+2.51%** | 2.54 | -0.64 | -1.88 | 0.614 | reject |
+| **IV rank >= 70** | 1,061 | 83.3% | **+3.86%** | 3.14 | **+2.26** | -1.96 | **0.797** | reject |
+| uptrend | 2,238 | 79.9% | -1.25% | -1.41 | -1.36 | -1.68 | 0.000 | reject |
+| downtrend | 1,486 | 80.3% | -0.34% | -0.31 | -1.36 | -1.72 | 0.005 | reject |
+| after 4w drop | 514 | 78.8% | -0.99% | -0.49 | -0.18 | -1.54 | 0.003 | reject |
+
+**The monotone pattern reproduces and widens.** §4d read -0.97 / -0.64 / +2.02
+/ +3.00 across IVR<=30 / baseline / >=50 / >=70. This reads **-2.85 / -1.15 /
++2.51 / +3.86** — same ordering, a wider spread, on 3-8x the trades, with
+splits wired and the concurrency cap lifted. Ordered across a graded parameter
+in the direction theory predicts, which is the shape that is hard to fake.
+
+**And it is the only thing in this repo that has ever cleared the DSR bar.**
+IVR>=70 reads **DSR 0.797 after deflating by 44 configurations**, against a 0.5
+line. §4d's own best was 0.282. Every other result in every document here is
+0.000-0.4.
+
+### It still rejects, and on one number
+
+`promotion_verdict` requires `DSR >= 0.5` **and** `|t_clustered| >= 3.0`
+(Harvey's hurdle) **and** `t_clustered > 0`. IVR>=70 passes the first and
+third. It fails on **t_clustered = 2.26 against 3.0** — and clustering matters
+here, because the naive t is 3.14 and would have passed. Positions opened on
+the same day share that day's move, and correcting for that is what pulls it
+under the bar.
+
+So: the strongest result this system has produced, and still not promotable.
+
+### What would settle it
+
+1. **It is IN-SAMPLE.** 2022-2024 is the window the earlier 18-configuration
+   friction search already ran on, so this can falsify but not confirm.
+   The COVID window (2020-21) is the natural holdout and the backfill for the
+   remaining 107 symbols is what makes it usable.
+2. **The skew is -1.96.** A high win rate with that skew is the short-premium
+   signature — losses that have not arrived. IVR>=70 selects *high* implied
+   vol, which is precisely when the tail is fattest, so this arm carries more
+   tail risk than the baseline, not less.
+3. **Trials are undercounted.** 44 is what this run declares; the true search
+   across this whole effort is larger, and DSR falls as that grows.
 
 ## 5. Nothing predicts the disaster
 

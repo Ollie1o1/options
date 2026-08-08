@@ -203,14 +203,21 @@ Universe: mega-cap + index ETFs. Structure: bull put, 25-delta, held to expiry.
 | after 4w rally > 5% | 496 | 79.8% | -1.19% | -0.59 | 0.003 |
 | IVR>=50 AND uptrend | 405 | 82.5% | +2.06% | 0.98 | 0.138 |
 
-> **DOES NOT REPRODUCE (2026-08-08).** Measured as a rank IC on 2020-2024 with
-> splits wired, `iv_rank` is flat for every structure: **-0.010** (long_call),
-> **-0.029** (bull_put), **+0.006** (bear_call), all p > 0.69. The monotone
-> pattern above was computed on a different window, with splits unhandled, and
-> as a conditional mean rather than a correlation. Treat it as unconfirmed and
-> do NOT build an IV-rank entry filter on it. Separately, nothing tested
-> predicts the max-loss trades at all (best AUC 0.636 over an 11-way search).
-> See `docs/ATTRIBUTION_20260808.md` §4-5.
+> **REPRODUCES, AND STRENGTHENS (2026-08-08).** Re-run with splits wired and
+> the concurrency cap lifted (n is 3-8x the rows above), 2022-2024: the
+> monotone pattern holds and widens to **-2.85% / -1.15% / +2.51% / +3.86%**
+> across IVR<=30 / baseline / >=50 / >=70. IVR>=70 reads **DSR 0.797 after
+> deflating by 44 configurations** — the only result anywhere in this repo that
+> has cleared the 0.5 line. It still rejects on **clustered t = 2.26** against
+> the 3.0 hurdle (the naive t of 3.14 would have passed), it is IN-SAMPLE, and
+> its skew is **-1.96** — selecting high IV rank selects for a fatter tail.
+>
+> Note it is flat as a *rank IC* (-0.029), which an earlier draft wrongly read
+> as "does not reproduce". Both are right: this is a threshold effect on a
+> heavily skewed variable, where the gain is fewer catastrophic trades, which
+> moves the mean and not the median ordering. Separately, nothing tested
+> predicts the max-loss trades (best AUC 0.636 over an 11-way search).
+> See `docs/ATTRIBUTION_20260808.md` §4d-4e.
 
 ### The shape is the evidence, not any single number
 
