@@ -536,6 +536,43 @@ def rank_by_verdict(df, win_rates: Optional[Dict[str, float]] = None):
         return df
 
 
+def rank_single_legs_by_verdict(df, mode: str):
+    """Order single-leg candidates for the auto-logger by what survives costs.
+
+    `rank_by_verdict` replaced `sort_values("quality_score")` on the *display*
+    paths, but the auto-log path kept sorting by the composite — so the score
+    decided both which leg per symbol survived the per-symbol dedup and which
+    symbols reached the top-N. Every row in the ledger was selected by it.
+
+    That score is measured at rank IC **-0.10** against friction-adjusted
+    return on the 335-row long-premium cohort, negative in 5 of 5 walk-forward
+    windows, while the 27-component composite it is built from is flat
+    (+0.004) — the post-composite adjustment stack carries the whole negative.
+    See `docs/ADJUSTMENT_STACK_20260807.md`.
+
+    Labelling comes first and is not incidental. `candidate_verdict._legs_of`
+    reads the buy/sell side off `strategy_name`, and these rows carry only
+    `type` at this point, so a Premium Selling short put would be priced as a
+    debit *buy*. That flips `is_credit`, which in turn skips both the
+    "credit disappears once the spread is crossed" check and the breakeven
+    check — the two gates that matter most for short premium.
+
+    Ordering only: every input row is returned. The allowlist and budget
+    filters downstream do the dropping, and removing candidates here would
+    starve the forward cohort.
+    """
+    if df is None or len(df) == 0 or "type" not in getattr(df, "columns", []):
+        return df
+    out = df.copy()
+    try:
+        out["strategy_name"] = [
+            _strategy_label_for_mode(mode, t) for t in out["type"]
+        ]
+    except Exception:
+        logging.getLogger(__name__).debug("strategy labelling failed", exc_info=True)
+    return rank_by_verdict(out)
+
+
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults.
 
@@ -4459,7 +4496,12 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     elif mode == "Premium Selling":
         if not picks.empty:
-            final_df = rank_by_verdict(picks)
+            # Labelled first: _legs_of reads the side off strategy_name, and
+            # these rows carry only `type`, so a short put was priced as a
+            # debit BUY here — flipping is_credit and skipping both the
+            # "credit disappears" and breakeven gates, the two that matter
+            # most for short premium.
+            final_df = rank_single_legs_by_verdict(picks, mode)
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
@@ -5947,8 +5989,11 @@ def main():
                     # ── Single-leg path (original) ──────────────────────────────
                     elif isinstance(_log_src, pd.DataFrame) and not _log_src.empty and "symbol" in _log_src.columns:
                         _single_legs = _log_src.copy()
-                        if not _single_legs.empty and "quality_score" in _single_legs.columns:
-                            _single_legs = _single_legs.sort_values("quality_score", ascending=False)
+                        # Order by what survives its costs, not by the composite.
+                        # This decides BOTH which leg per symbol survives the dedup
+                        # below and which symbols reach the top-N, so it selected
+                        # every row in the ledger. See rank_single_legs_by_verdict.
+                        _single_legs = rank_single_legs_by_verdict(_single_legs, mode)
                         # One row per ticker — keep the highest-scored leg per symbol to avoid
                         # concentration (e.g. ORCL×6 from a single scan).
                         if "symbol" in _single_legs.columns:
@@ -6166,7 +6211,10 @@ def main():
                                 except (KeyError, ValueError, TypeError):
                                     top_pick_row = None
                             if top_pick_row is None:
-                                top_pick_row = picks.sort_values("quality_score", ascending=False).iloc[0]
+                                # Same ordering as the bulk auto-log path: the
+                                # composite selected every ledger row until now.
+                                _ranked_one = rank_single_legs_by_verdict(picks, mode)
+                                top_pick_row = _ranked_one.iloc[0]
                             today_str = datetime.now().strftime("%Y-%m-%d")
                             trade_dict = {
                                 "date": today_str,

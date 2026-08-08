@@ -181,3 +181,56 @@ rather than a question of what a constant should be:
    risk multiplier. Whichever is right, both is not.
 2. Spread charged twice, once in the composite and once additively.
 3. The dead `×0.60` low-PoP multiplier.
+
+---
+
+## 7. What was changed as a result
+
+The execution-truth work replaced `sort_values("quality_score")` with
+`rank_by_verdict` on the **display** paths. It was never applied to the
+**auto-log** path — so the composite still chose which leg per symbol survived
+the per-symbol dedup, and which symbols reached the top-N. **Every row in the
+ledger was selected by the score this document measures at −0.10.** The cohort
+that shows the negative was picked by the thing that shows it.
+
+`rank_single_legs_by_verdict(df, mode)` now orders the single-leg auto-log
+path, the single-pick auto-log fallback, and the Premium Selling display path.
+Ordering only — every input row is returned, because the allowlist and budget
+filters downstream do the dropping and removing candidates here would starve
+the forward cohort. Pinned by `tests/test_autolog_ordering.py`.
+
+**A second bug, found on the way.** `candidate_verdict._legs_of` reads the
+buy/sell side off `strategy_name`, and scan rows carry only `type` at these
+call sites. A Premium Selling short put was therefore priced as a debit **buy**,
+which flips `is_credit` and skips *both* the "credit disappears once the spread
+is crossed" check and the breakeven-vs-history check — the two gates that matter
+most for short premium. The helper labels before ranking. The buyer-mode display
+paths (Budget scan, Discovery) were unaffected: `_legs_of` already defaults to
+`buy`, which is correct there.
+
+### Deliberately not changed: the spreads and condors auto-log path
+
+It still sorts by `quality_score`. Two reasons, both blocking:
+
+- **Iron condor rows carry no per-leg quotes** — `find_iron_condors` emits
+  strikes, credits and `return_on_risk`, and nothing else. `_legs_of` cannot
+  price them, so they would be refused wholesale, sink to the bottom, and stop
+  being logged. That would starve a 121-row cohort to fix an ordering.
+  `_TWO_LEG` covers Bull Put and Bear Call only; a condor is four legs.
+- **The measurement in this document does not cover them.** Multi-leg rows
+  score through `spread_scoring` and `credit_spread_weights`, an entirely
+  different composite that has not been measured against outcomes.
+
+Doing it properly means carrying the four legs' quotes through
+`find_iron_condors` and teaching `_legs_of` a four-leg structure — a data
+change, not an ordering change.
+
+### What this is not
+
+**It is not measured.** The change alters *selection*, and the existing ledger
+was selected by the rule being replaced, so it cannot be evaluated on it — and
+the inputs the new ordering needs (`bid`, `ask`, `ev_per_contract`) are not
+stored per trade anyway. Its justification is that `quality_score` is measured
+anti-predictive here, and that `rank_by_verdict` is the ordering this repo
+already adopted everywhere it had looked. Whether it helps will be visible only
+in trades logged from now on.
