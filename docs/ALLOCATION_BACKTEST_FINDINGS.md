@@ -6,6 +6,16 @@ chains (bid/ask/IV/Greeks), 2022-01-07 to 2026-06-12.
 **Status:** engine mechanically validated; statistics layer (CPCV/DSR/PBO) not
 yet built, so nothing here is deflated for multiple testing.
 
+> **CORRECTION 2026-08-08 — every number below was computed with splits
+> unhandled.** `replay()` accepts `splits=` and the CLI never passed it, so the
+> split guard was dead code and `split_closed` was structurally always 0 —
+> against this repo's own warning (`src/alloc/splits.py`) that leaving splits
+> unhandled makes a short put book a catastrophic loss that never happened and
+> makes trend signals read a split as a 95% crash for a year afterwards. Six of
+> the fourteen tight-spread names split inside the sample. Fixed and wired; the
+> §4d signal results in particular should be re-run before being relied on.
+> See `docs/TAIL_OBSERVED_20260808.md` §4.
+
 ---
 
 ## 1. The engine is mechanically credible
@@ -182,6 +192,15 @@ Universe: mega-cap + index ETFs. Structure: bull put, 25-delta, held to expiry.
 | after 4w drop > 5% | 391 | 78.3% | -2.38% | -1.03 | 0.001 |
 | after 4w rally > 5% | 496 | 79.8% | -1.19% | -0.59 | 0.003 |
 | IVR>=50 AND uptrend | 405 | 82.5% | +2.06% | 0.98 | 0.138 |
+
+> **DOES NOT REPRODUCE (2026-08-08).** Measured as a rank IC on 2020-2024 with
+> splits wired, `iv_rank` is flat for every structure: **-0.010** (long_call),
+> **-0.029** (bull_put), **+0.006** (bear_call), all p > 0.69. The monotone
+> pattern above was computed on a different window, with splits unhandled, and
+> as a conditional mean rather than a correlation. Treat it as unconfirmed and
+> do NOT build an IV-rank entry filter on it. Separately, nothing tested
+> predicts the max-loss trades at all (best AUC 0.636 over an 11-way search).
+> See `docs/ATTRIBUTION_20260808.md` §4-5.
 
 ### The shape is the evidence, not any single number
 
