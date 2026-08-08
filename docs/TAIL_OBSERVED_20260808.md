@@ -163,7 +163,9 @@ Three things worth keeping:
   obtained was **$6**, mean **$7.35**, max **$17.50**. NVDA's -$790 is a
   correct max loss on a $10-wide spread, not an engine fault. Risk per trade
   in this window is systematically larger than the spec asks.
-- **n=3 on the way down.** The crash is observed, not sampled.
+- **n=3 on the way down — SUPERSEDED, see the UPDATE above.** The 107-symbol
+  backfill took this to n=527 the same day, and the anecdote held: median
+  outcome -100%, 65.7% total losses.
 
 ## 4. Two live defects found on the way
 
