@@ -19,6 +19,11 @@ WIDTH = 74
 INDENT = "  "
 BODY_W = WIDTH - 4
 
+# Definition-list gutter. Wider than ui.LABEL_W because the glossary defines
+# field names, not metrics: `entry_price_fill` is 16 characters.
+LABEL_W = 17
+LABEL_GUTTER = len(INDENT) + LABEL_W + 1
+
 # Tag -> number of elements in the block tuple. The content module is data, so
 # this table is the only schema it has; the tests validate every chapter
 # against it.
@@ -46,6 +51,28 @@ def _hanging(marker: str, text, width: int) -> List[str]:
     wrapped = _wrap(text, width - len(marker))
     return ([INDENT + marker + wrapped[0]]
             + [INDENT + pad + w for w in wrapped[1:]])
+
+
+def _kv(label, value) -> List[str]:
+    """A definition row: dim label in a fixed gutter, wrapped value beside it.
+
+    Deliberately not ui.kv_line. That gutter is 11, sized for data rows like
+    "delta" and "spread"; a glossary also has to hold `ev_per_contract` and
+    `entry_price_fill`, and it does not wrap at all. A label wider than the
+    gutter takes its own line rather than pushing the column out of true.
+    """
+    label, value = str(label), str(value)
+    body_w = WIDTH - LABEL_GUTTER
+    styled_label = fmt.style(label, "label")
+    chunks = _wrap(value, body_w)
+    pad = " " * LABEL_GUTTER
+
+    if len(label) > LABEL_W:
+        return ([INDENT + styled_label]
+                + [pad + fmt.style(c, "value") for c in chunks])
+    first = (INDENT + fmt.style(ui.pad(label, LABEL_W), "label")
+             + " " + fmt.style(chunks[0], "value"))
+    return [first] + [pad + fmt.style(c, "value") for c in chunks[1:]]
 
 
 def render_blocks(blocks: Sequence[tuple]) -> List[str]:
@@ -83,8 +110,7 @@ def render_blocks(blocks: Sequence[tuple]) -> List[str]:
                 lines.extend(fmt.style(ln, "muted")
                              for ln in _hanging(f"{i}. ", item, BODY_W))
         elif tag == "kv":
-            lines.append(ui.kv_line(str(block[1]),
-                                    fmt.style(str(block[2]), "value")))
+            lines.extend(_kv(block[1], block[2]))
         elif tag == "table":
             lines.extend(ui.table(block[1], block[2]).splitlines())
         elif tag == "callout":
