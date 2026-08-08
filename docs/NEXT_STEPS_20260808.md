@@ -100,19 +100,24 @@ EOD from 2023-06 (quotes from 2023-12), 30 req/min, whole US universe. Its EOD
 endpoint returns `volume, count, bid, ask, bid_size, ask_size`. Tiles
 2023-12 → 2026 where optionsDX stops. No OI at the free tier.
 
-### 4. Re-derive §4c's friction comparison at proper n
+### 4. ~~Re-derive §4c's friction comparison~~ DONE 2026-08-08
 
-The mega-vs-all comparison cannot currently be reproduced: `max_concurrent = 3`
-caps open positions **portfolio-wide**, so a 117-symbol universe still yields
-~36 trades/year and n=105 rather than §4c's 10,363. The cap is correct for an
-account-level return figure and wrong for measuring a per-trade effect. Needs a
-run with concurrency lifted, reported as per-trade statistics only.
+`--max-concurrent` added. Uncapped, ALL-names bull put replicates §4c
+(-6.40% vs -6.76%, n=6,917) but the bear call is WORSE on the tight-spread
+universe (-12.54% vs -7.92%), so friction drives the PUT side only and the MEGA
+restriction is a bullish tilt. `ATTRIBUTION_20260808.md` §7b.
 
-### 5. Re-run §4d's signal table
+### 5. ~~Re-run §4d's signal table~~ DONE 2026-08-08 — IT REPRODUCES
 
-It is flagged in-file as unconfirmed. Every number in it was computed with
-splits unhandled, and its headline IV-rank result does not reproduce as a rank
-IC on 2020-2024. Either re-run it with splits wired or delete the claim.
+Uncapped with splits wired: **-2.85% / -1.15% / +2.51% / +3.86%** across
+IVR<=30 / baseline / >=50 / >=70, and IVR>=70 reads **DSR 0.797** — the only
+result in this repo ever to clear the 0.5 line. Still rejects on clustered
+t 2.26 vs the 3.0 hurdle. `ATTRIBUTION_20260808.md` §4e.
+
+**The open question is now the holdout.** 2020-21 is a window no search has
+touched and it contains the crash, so it is the natural out-of-sample test of
+IVR>=70 — and of whether the effect survives the exact regime it claims to
+protect against. That is what backfill (A) unlocks.
 
 ### 6. Re-run the news sentiment test when the archive has power
 
@@ -131,8 +136,15 @@ four times.
 
 ## Do NOT do these
 
-- **Do not add an IV-rank or VRP entry filter.** Both measure flat
-  (|IC| < 0.05) across all three structures on 2020-2024 with splits wired.
+- **Do not add an IV-rank or VRP entry filter YET — but NOT because they are
+  flat.** That was the reason given in the first draft of this file and it was
+  wrong. At proper n, `iv_rank` reads IC **+0.154** (clustered t 7.92) and its
+  IVR>=70 arm carries **DSR 0.797**; `iv_minus_rv` separates its extreme
+  quintiles by **11.2 points of RoC**. The reasons to wait are that both are
+  **in-sample** on a window an 18-configuration search already ran on, IVR>=70
+  fails the clustered-t hurdle (2.26 vs 3.0), and its skew of **-1.96** means
+  selecting high IV rank selects for a FATTER tail. Test on the 2020-21 holdout
+  first.
 - **Do not select on `credit_pct_width` or `friction_pct_credit`.** They are
   accounting identities for a held-to-expiry structure, they are non-monotone
   by quartile, and selecting on credit just means selling closer to the money.
@@ -154,8 +166,11 @@ four times.
   horizon, and a large effect is already powered out. Adding it would inject a
   term scored by a general-English lexicon into a score whose hand-set
   constants already carry IC -0.096.
-- **Do not download FNSPID.** 29.6 GB against ~5 GiB free, and CC BY-NC-4.0
-  forbids commercial use — disqualifying for a real-money system.
+- **Do not download FNSPID.** CC BY-NC-4.0 forbids commercial use, which is
+  the binding objection now that disk is free. Its value also fell sharply once
+  news TONE measured at zero with a large effect powered out
+  (`NEWS_SENTIMENT_20260808.md`) — a longer history of a signal that is not
+  there buys little.
 
 ## Disk — RESOLVED 2026-08-08, was 99%, now 84%
 
