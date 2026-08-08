@@ -22,6 +22,8 @@ needed and the signal cannot disagree with the chain it is traded against.
 """
 from __future__ import annotations
 
+import datetime as _dt
+import math
 import statistics
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
@@ -58,6 +60,44 @@ def snapshot(chain: Sequence[Dict[str, Any]], date: str) -> Snapshot:
     spot = implied_spot_any(chain)
     return Snapshot(date=date, spot=spot,
                     atm_iv=atm_iv(chain, spot) if spot is not None else None)
+
+
+MAX_STEP_DAYS = 10      # beyond this the two observations straddle a data hole
+MIN_RV_STEPS = 10
+TRADING_DAYS = 252.0
+_CAL_TO_TRADING = 5.0 / 7.0
+
+
+def _realized_vol(window: Sequence[Snapshot]) -> Optional[float]:
+    """Annualised realized vol of the observed spot path, or None.
+
+    Two properties this data forces, both tested:
+
+    SPACING   The cache samples every other trading day before 2025 and daily
+              after. A raw stdev of consecutive returns would read the denser
+              era as lower vol purely because each step spans less time, so the
+              backfill itself would look like a regime change. Each return is
+              scaled by the square root of its own elapsed time.
+
+    HOLES     Consecutive rows can straddle a 21-month gap. Annualising that as
+              one return fabricates a vol explosion, so steps longer than
+              MAX_STEP_DAYS are dropped rather than scaled.
+    """
+    pts = [s for s in window if s.spot is not None and s.spot > 0]
+    scaled: List[float] = []
+    for prev, cur in zip(pts, pts[1:]):
+        try:
+            gap = (_dt.date.fromisoformat(cur.date)
+                   - _dt.date.fromisoformat(prev.date)).days
+        except (TypeError, ValueError):
+            continue
+        if gap <= 0 or gap > MAX_STEP_DAYS:
+            continue
+        steps = max(gap * _CAL_TO_TRADING, 0.5)
+        scaled.append(math.log(cur.spot / prev.spot) / math.sqrt(steps))
+    if len(scaled) < MIN_RV_STEPS:
+        return None
+    return float(statistics.stdev(scaled) * math.sqrt(TRADING_DAYS))
 
 
 class SignalHistory:
@@ -99,6 +139,7 @@ class SignalHistory:
         out: Dict[str, Optional[float]] = {
             "spot": now.spot, "atm_iv": now.atm_iv,
             "iv_rank": None, "trend": None, "ret_4w": None,
+            "rv": None, "iv_minus_rv": None,
         }
 
         ivs = [s.atm_iv for s in window if s.atm_iv is not None]
@@ -115,6 +156,15 @@ class SignalHistory:
             past = prior[-4].spot
             if past:
                 out["ret_4w"] = 100.0 * (now.spot / past - 1.0)
+
+        rv = _realized_vol(window)
+        out["rv"] = rv
+        if rv is not None and now.atm_iv is not None:
+            # The variance risk premium as it could be seen on the day: today's
+            # implied against what this name has actually been doing. Positive
+            # means options are pricing more movement than has been delivered —
+            # the case for selling. Negative is the case for buying.
+            out["iv_minus_rv"] = float(now.atm_iv) - rv
         return out
 
 

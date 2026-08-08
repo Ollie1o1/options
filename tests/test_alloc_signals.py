@@ -118,6 +118,71 @@ class IvRankTest(unittest.TestCase):
         self.assertIsNone(h.features("AAA")["iv_rank"])
 
 
+class RealizedVolTest(unittest.TestCase):
+    """Trailing realized vol, and the variance premium it implies.
+
+    This is the feature that decides whether BUYING premium can work: you are
+    paid for owning an option when implied underprices what the underlying
+    actually does. It must be computed from the spot path already observed.
+    """
+
+    def _feed(self, h, spots, iv=0.20, step=1):
+        import datetime as dt
+        d = dt.date(2024, 1, 1)
+        for s in spots:
+            h.update("AAA", Snapshot(d.isoformat(), s, iv))
+            d += dt.timedelta(days=step)
+
+    def test_a_flat_price_path_has_almost_no_realized_vol(self):
+        h = SignalHistory()
+        self._feed(h, [100.0] * 20)
+        self.assertLess(h.features("AAA")["rv"], 0.01)
+
+    def test_a_choppy_path_realizes_more_than_a_calm_one(self):
+        calm, wild = SignalHistory(), SignalHistory()
+        self._feed(calm, [100.0 + (i % 2) * 0.5 for i in range(20)])
+        self._feed(wild, [100.0 + (i % 2) * 8.0 for i in range(20)])
+        self.assertGreater(wild.features("AAA")["rv"],
+                           calm.features("AAA")["rv"])
+
+    def test_too_little_history_gives_no_realized_vol(self):
+        h = SignalHistory()
+        self._feed(h, [100.0, 101.0, 102.0])
+        self.assertIsNone(h.features("AAA")["rv"])
+
+    def test_variance_premium_is_implied_minus_realized(self):
+        h = SignalHistory()
+        self._feed(h, [100.0] * 20, iv=0.30)
+        f = h.features("AAA")
+        self.assertAlmostEqual(f["iv_minus_rv"], 0.30 - f["rv"], places=6)
+
+    def test_variance_premium_is_none_when_either_side_is_unknown(self):
+        h = SignalHistory()
+        self._feed(h, [100.0, 101.0])
+        self.assertIsNone(h.features("AAA")["iv_minus_rv"])
+
+    def test_sampling_gaps_do_not_inflate_realized_vol(self):
+        # The cache is every-other-day in 2022-24 and daily in 2025. A return
+        # measured over a 2-day gap is sqrt(2) larger than a 1-day return, so
+        # scaling by elapsed time is what keeps the two eras comparable —
+        # otherwise the backfill itself would look like a vol regime change.
+        daily, every_other = SignalHistory(), SignalHistory()
+        path = [100.0 * (1.01 ** i) for i in range(20)]
+        self._feed(daily, path, step=1)
+        self._feed(every_other, path, step=2)
+        a = daily.features("AAA")["rv"]
+        b = every_other.features("AAA")["rv"]
+        self.assertLess(abs(a - b) / max(a, b, 1e-9), 0.35)
+
+    def test_a_long_data_hole_is_skipped_not_annualised(self):
+        # 2020-03-20 -> 2022-01-03 is a 21-month hole in this cache. Treating
+        # it as one return would report a fabricated vol explosion.
+        h = SignalHistory()
+        self._feed(h, [100.0] * 20)
+        h.update("AAA", Snapshot("2026-01-01", 250.0, 0.20))
+        self.assertLess(h.features("AAA")["rv"], 0.05)
+
+
 class TrendTest(unittest.TestCase):
     def test_price_above_its_average_is_a_positive_trend(self):
         h = SignalHistory()
