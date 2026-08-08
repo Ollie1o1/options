@@ -6,25 +6,70 @@ Written so a later session does not have to re-derive any of this. Companion to
 
 ---
 
-## In flight when this was written
+## RESUMING A BACKFILL — read this first if you have an hour
 
-**2025-2026 daily backfill.** 32,867 symbol-days across 121 symbols, ~2.7h at
-`--workers 6`, adding ~740 MB. Resumable and interrupt-safe — if it died, just
-re-run the same command and it picks up:
+**Nothing is ever lost by stopping one.** Every completed symbol-day is
+committed as it lands, and a pair whose fetch FAILED is deliberately left
+unmarked so a later run retries it. Kill it, reboot, come back next week — just
+re-run the same command and it picks up where it stopped. Jobs do survive a
+closed terminal (`nohup`) and a sleeping laptop, but not a reboot.
+
+**Always check the gap first. It is offline, instant, and free:**
 
 ```bash
-PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.dolt_options --backfill \
-    --symbols "$(...all cached symbols...)" --workers 6 \
-    --start 2025-01-01 --end 2026-06-12
-# check what is left first, offline:
-PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.dolt_options --gaps \
-    --start 2025-01-01 --end 2026-06-12
+cd ~/Projects/options
+export PYTHONPATH=$PWD OPTIONS_MAINTENANCE_CHILD=1
+PY=~/.venvs/options/bin/python
+
+# all symbols currently in the cache, as a comma list
+SYMS=$($PY -c "
+import sqlite3
+c=sqlite3.connect('data/dolt_options.db', timeout=300)
+print(','.join(sorted(r[0] for r in c.execute('SELECT DISTINCT symbol FROM dolt_chain'))))")
+
+$PY -m src.dolt_options --gaps --symbols "$SYMS" --start 2020-01-27 --end 2026-06-12
 ```
 
-It does **not** change any conclusion in the two companion documents — those
-are measured on 2020-2024, and the MEGA cohort already had 2025 daily coverage
-for 8 of its 14 names. What it unlocks is `--all-names` work on the recent
-window.
+`--gaps` prints the unfetched grid by year plus a runtime estimate. If it says
+0 unfetched, that window is done.
+
+**Then run whichever window you want.** ~3.3 pairs/s at `--workers 6`; the
+pacing lock is the ceiling, so more workers buy nothing:
+
+```bash
+# (A) the COVID window for symbols that lack it — the highest-value one
+$PY -m src.dolt_options --backfill --symbols "$SYMS" --workers 6 \
+    --start 2020-01-27 --end 2021-12-31
+
+# (B) 2025-2026 daily
+$PY -m src.dolt_options --backfill --symbols "$SYMS" --workers 6 \
+    --start 2025-01-01 --end 2026-06-12
+
+# (C) just the 14 tight-spread names, any window — ~35 min, good for a quick pass
+$PY -m src.dolt_options --backfill --mega --workers 6 \
+    --start 2020-01-27 --end 2021-12-31
+```
+
+**Run only ONE at a time.** Two API-heavy jobs compete and get 403'd — observed
+again on 2026-08-08 when a probe run during a backfill returned empty.
+
+### Why (A) is the one that matters
+
+The tail result in `TAIL_OBSERVED_20260808.md` — every spread open into the
+COVID crash lost 100% of its capital at risk — rests on **3 trades**, because
+only the 14 tight-spread names had 2020-21 data. 107 symbols still lack it.
+Filling them should turn 3 crash trades into 30-50, which is the difference
+between witnessing the tail and being able to characterise it. ~54,000
+symbol-days, ~5h, ~630 MB.
+
+### Status at the end of the 2026-08-08 pass
+
+| window | state |
+|---|---|
+| 2020-01-27..2021-12-31, MEGA 14 | DONE (6,909 symbol-days) |
+| 2020-01-27..2021-12-31, other 107 | **the open one — see (A)** |
+| 2022-2024 | complete, and upstream's own cadence is every-other-day |
+| 2025-01..2026-06, 121 symbols | was running at 32,867 pairs; re-check with `--gaps` |
 
 ## Ranked, with reasons
 
