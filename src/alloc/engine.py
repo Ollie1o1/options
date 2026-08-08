@@ -47,6 +47,11 @@ class Trade:
     pnl: Optional[float] = None
     exit_reason: Optional[str] = None
     stratum: Optional[str] = None
+    # What was knowable on the entry date, captured so an outcome can be
+    # attributed to it afterwards. Populated by replay() from SignalHistory
+    # plus the geometry of the legs actually obtained. Never written later —
+    # anything added after entry would be hindsight.
+    features: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_open(self) -> bool:
@@ -64,16 +69,38 @@ class SqliteChainSource:
     but the repo root would silently read an empty database.
     """
 
+    _COLS = ("symbol", "date", "expiration", "strike", "type", "bid", "ask",
+             "mid", "iv", "delta", "gamma", "theta", "vega", "rho")
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._conn: Optional[Any] = None
+
+    def _connection(self):
+        # One connection for the whole replay. A full window is ~10,000 chain
+        # reads, and opening a database per read is both slow and needlessly
+        # contended when a backfill happens to be writing at the same time.
+        if self._conn is None:
+            import sqlite3
+            from src.dolt_options import READ_TIMEOUT_S
+            self._conn = sqlite3.connect(self.db_path, timeout=READ_TIMEOUT_S)
+        return self._conn
 
     def chain(self, symbol: str, date: str) -> List[Dict[str, Any]]:
         key = (symbol, date)
         if key not in self._cache:
-            from src.dolt_options import _cache_read
-            self._cache[key] = _cache_read(self.db_path, symbol, date) or []
+            cur = self._connection().execute(
+                "SELECT symbol,date,expiration,strike,type,bid,ask,mid,iv,"
+                "delta,gamma,theta,vega,rho FROM dolt_chain "
+                "WHERE symbol=? AND date=?", (symbol, date))
+            self._cache[key] = [dict(zip(self._COLS, r)) for r in cur.fetchall()]
         return self._cache[key]
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
 
 def _dte(date: str, expiration: str) -> int:
@@ -91,11 +118,33 @@ def _pick_expiry(chain, date: str, lo: int, hi: int) -> Optional[str]:
     return min(ok, key=lambda e: _dte(date, e)) if ok else None
 
 
-def _nearest_delta(rows, target: float):
+# How far the delta actually listed may sit from the delta asked for. Without
+# a bound, "nearest" means "whatever exists": asked for a 40-delta call against
+# a chain whose closest listed call is 2-delta, the engine bought the 2-delta
+# lottery ticket and recorded it as a 40-delta trade. Over 2020-2024 the
+# bottom delta quartile of the long-call arm (0.00-0.37) lost 57% of capital
+# per trade against a +8% mean for the rest, and the win rate rose monotonically
+# across all four quartiles — the sample was a mixture of instruments, not one
+# strategy. 0.10 is the conventional reading of "a 40-delta option" (0.30-0.50)
+# and is deliberately NOT tuned against returns.
+DELTA_TOLERANCE = 0.10
+
+
+def _nearest_delta(rows, target: float,
+                   tolerance: float = DELTA_TOLERANCE):
+    """The listed contract closest to `target` delta, or None if none is close.
+
+    Returning None is the point: a substituted strike is a different trade, and
+    silently accepting it makes the backtest measure something other than the
+    strategy it names.
+    """
     scored = [r for r in rows if r.get("delta") is not None]
     if not scored:
         return None
-    return min(scored, key=lambda r: abs(abs(float(r["delta"])) - target))
+    best = min(scored, key=lambda r: abs(abs(float(r["delta"])) - target))
+    if abs(abs(float(best["delta"])) - target) > tolerance:
+        return None
+    return best
 
 
 def _nearest_wing(rows, short_strike: float, width: float, below: bool):
@@ -153,11 +202,15 @@ def select_legs(spec: StrategySpec, chain, date: str,
     width = float(entry.get("width", 5.0))
     struct = spec.structure
 
+    tol = float(entry.get("delta_tolerance", DELTA_TOLERANCE))
+
     def _short(rows, target):
         if entry.get("strike_selection") == "random":
+            # A deliberate control arm — constraining it to a delta band would
+            # make it something other than random.
             pool = [r for r in rows if r.get("delta") is not None]
             return (rng or random).choice(pool) if pool else None
-        return _nearest_delta(rows, target)
+        return _nearest_delta(rows, target, tol)
 
     if struct in ("bull_put", "short_put"):
         s = _short(puts, float(entry.get("short_delta", 0.25)))
@@ -198,7 +251,7 @@ def select_legs(spec: StrategySpec, chain, date: str,
     if struct in ("long_call", "long_put"):
         typ = "call" if struct == "long_call" else "put"
         rows = calls if typ == "call" else puts
-        s = _nearest_delta(rows, float(entry.get("target_delta", 0.40)))
+        s = _nearest_delta(rows, float(entry.get("target_delta", 0.40)), tol)
         return [Leg(expiry, float(s["strike"]), typ, "buy")] if s is not None else None
 
     return None
@@ -288,6 +341,61 @@ def _should_exit(spec: StrategySpec, trade: Trade, close_price: float,
     if ex.get("time_exit_dte") and dte <= int(ex["time_exit_dte"]):
         return "time_exit"
     return None
+
+
+_SIGNAL_FEATURES = ("spot", "atm_iv", "iv_rank", "trend", "ret_4w",
+                    "rv", "iv_minus_rv")
+
+
+def _entry_features(sig: Dict[str, Any], legs: Sequence[Leg],
+                    chain: Sequence[Dict[str, Any]], quotes: Dict[Any, Any],
+                    price: float, car: float, date: str,
+                    expiration: str) -> Dict[str, Any]:
+    """Everything knowable at entry, for attributing the outcome afterwards.
+
+    Market state comes from SignalHistory; the rest is the geometry of the legs
+    ACTUALLY obtained, which is not the geometry requested — strikes are sparse,
+    so a $5 width routinely fills as $10 or more, and the risk that matters is
+    the one that was taken.
+    """
+    out: Dict[str, Any] = {k: sig.get(k) for k in _SIGNAL_FEATURES}
+    out["dte"] = _dte(date, expiration)
+    out["capital_at_risk"] = car
+    out["credit"] = price
+
+    strikes = sorted(float(l.strike) for l in legs)
+    out["width"] = (strikes[-1] - strikes[0]) if len(strikes) > 1 else None
+    if out["width"]:
+        # Credit as a share of the width obtained is the honest "how rich was
+        # this", comparable across the widths this dataset actually hands you.
+        out["credit_pct_width"] = abs(price) / out["width"]
+
+    deltas = {_fkey(c["expiration"], c["strike"], c["type"]): c.get("delta")
+              for c in chain}
+    sold = [deltas.get(_fkey(l.expiration, l.strike, l.type)) for l in legs
+            if str(l.action).lower() == "sell"]
+    sold = [abs(float(d)) for d in sold if d is not None]
+    out["short_delta"] = max(sold) if sold else None
+
+    bought = [deltas.get(_fkey(l.expiration, l.strike, l.type)) for l in legs
+              if str(l.action).lower() == "buy"]
+    bought = [abs(float(d)) for d in bought if d is not None]
+    out["long_delta"] = max(bought) if bought else None
+
+    spot = sig.get("spot")
+    if spot:
+        # Distance from the money of the strike that carries the risk: the one
+        # sold on a credit structure, the one bought on a debit structure.
+        risk_leg = next((l for l in legs if str(l.action).lower() == "sell"),
+                        legs[0] if legs else None)
+        if risk_leg is not None:
+            out["moneyness"] = float(risk_leg.strike) / float(spot)
+
+    fric = crossing_cost(legs, quotes)
+    out["friction"] = fric
+    if fric is not None and price:
+        out["friction_pct_credit"] = abs(fric) / abs(price)
+    return out
 
 
 def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
@@ -426,7 +534,10 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
             exp = _pick_expiry(chain, date, *spec.entry.get("dte", [25, 60]))
             t = Trade(symbol=sym, entry_date=date, entry_price=float(price),
                       capital_at_risk=car, legs=legs, expiration=exp or date,
-                      stratum=stratum_of.get(sym))
+                      stratum=stratum_of.get(sym),
+                      features=_entry_features(signals.features(sym), legs,
+                                               chain, quotes, float(price),
+                                               car, date, exp or date))
             trades.append(t)
             live.append(t)
             stats["opened"] += 1
