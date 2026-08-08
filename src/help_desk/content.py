@@ -36,7 +36,7 @@ class Chapter:
 _START = Chapter(
     key="start",
     title="START HERE",
-    blurb="what this is, and your first ten minutes",
+    blurb="what this is · your first ten minutes",
     body=(
         ("h", "What this program is"),
         ("p", "A research desk for equity options that measures its own "
@@ -97,7 +97,7 @@ _START = Chapter(
 _PICKING = Chapter(
     key="picking",
     title="PICKING A TRADE",
-    blurb="the decision ladder, in the order that matters",
+    blurb="the decision ladder, in order",
     body=(
         ("h", "The order is the content"),
         ("p", "Most option screeners hand you a ranked list and let you take "
@@ -179,7 +179,7 @@ _PICKING = Chapter(
 _VERDICT = Chapter(
     key="verdict",
     title="THE VERDICT",
-    blurb="PASS, REFUSE, unpriced — and why it outranks the score",
+    blurb="PASS, REFUSE, and why it outranks",
     body=(
         ("h", "What the verdict answers"),
         ("p", "One question, and only one: is there anything left of this "
@@ -246,7 +246,7 @@ _VERDICT = Chapter(
 _FRICTION = Chapter(
     key="friction",
     title="FRICTION AND COST",
-    blurb="what crossing the spread actually takes from you",
+    blurb="what crossing the spread costs you",
     body=(
         ("h", "The largest single fact in this book"),
         ("p", "For most of this program's life, entries were priced at the "
@@ -386,7 +386,7 @@ _MODES = Chapter(
 _GLOSSARY = Chapter(
     key="glossary",
     title="GLOSSARY",
-    blurb="every term that appears on a scan row",
+    blurb="every term on a scan row",
     body=(
         ("h", "The greeks"),
         ("kv", "delta", "how much the option moves per $1 of stock. Also a "
@@ -465,7 +465,7 @@ _GLOSSARY = Chapter(
 _TRUST = Chapter(
     key="trust",
     title="WHAT IS AND IS NOT TRUSTED",
-    blurb="the measurements, including the unflattering ones",
+    blurb="the measurements, including bad ones",
     body=(
         ("h", "Why this chapter exists"),
         ("p", "This program grades itself, and some of the grades are bad. "

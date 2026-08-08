@@ -80,6 +80,12 @@ class ContentTest(unittest.TestCase):
                     self.assertLessEqual(len(block[1]), render.LABEL_W,
                                          f"{c.key}: {block[1]!r}")
 
+    def test_titles_and_blurbs_fit_the_index_columns(self):
+        from src.help_desk import menu
+        for c in content.CHAPTERS:
+            self.assertLessEqual(len(c.title), menu.TITLE_W, c.key)
+            self.assertLessEqual(len(c.blurb), menu.BLURB_W, c.key)
+
     def test_real_money_off_is_stated_in_start_and_trust(self):
         by_key = {c.key: c for c in content.CHAPTERS}
         self.assertIn("Real money is OFF", self._text(by_key["start"]))
