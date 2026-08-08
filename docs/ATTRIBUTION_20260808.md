@@ -119,9 +119,11 @@ is *not* an accounting identity is flat:
 | **ret_4w** | -0.071 | +0.112 | -0.087 |
 | **dte** | -0.005 | -0.010 | -0.062 |
 
-**The variance risk premium at entry does not predict the outcome.** That is
-the single most theory-motivated feature available — the reason anyone buys or
-sells options — and it is indistinguishable from zero in all three structures.
+> **WITHDRAWN — see §4d-bis.** These ICs were measured at **n=187**, starved by
+> a concurrency cap, and with the wrong screen. Uncapped at n=3,808 `iv_rank`
+> reads IC **+0.154** (clustered t 7.92), and `iv_minus_rv` separates its
+> extreme quintiles by **11.2 points of RoC** while still reading IC 0.015.
+> The table below records what was measured, not what is true.
 
 **IV rank is flat as a rank IC — but that is NOT the same as saying it does
 not work, and an earlier draft of this file got that wrong.** See §4e: measured
@@ -142,6 +144,52 @@ all. Any feature whose value lies in tail avoidance will look flat to a rank
 correlation. That is a limitation of the IC screen in this module, not a
 finding about IV rank, and it is worth remembering before dismissing anything
 else here on a low IC alone.
+
+## 4d-bis. What the IC was hiding — CORRECTS §4 above
+
+§4 declared `iv_minus_rv`, `iv_rank`, `trend`, `ret_4w` and `dte` flat, on
+their ICs, at n=187. Both halves of that were wrong: the sample was starved by
+the concurrency cap, and the IC was the wrong screen. Re-run uncapped
+(n=3,808) with the quantile screen added — mean RoC in the bottom and top
+quintile of each feature:
+
+| feature | n | IC | t clust | p | q_bot | q_top | **q_spread** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **width** | 3808 | 0.0089 | -0.70 | **0.58** | **-16.70%** | +4.05% | **+20.75%** |
+| **iv_minus_rv** | 3713 | 0.0148 | 1.30 | **0.37** | **-6.75%** | +4.46% | **+11.21%** |
+| iv_rank | 3724 | **0.1541** | **7.92** | 0.0000 | -2.44% | +5.44% | +7.88% |
+| credit_pct_width | 3808 | 0.5711 | 29.17 | 0.0000 | -4.72% | +2.69% | +7.41% |
+| long_delta | 3808 | 0.3403 | 16.62 | 0.0000 | -0.27% | -5.13% | -4.86% |
+| atm_iv | 3808 | 0.3243 | 19.76 | 0.0000 | -2.44% | -3.09% | -0.66% |
+
+Three corrections fall out of this.
+
+**1. `width` is the largest effect in the table and reads as pure noise by IC.**
+IC 0.0089 at p=0.58 — indistinguishable from nothing — yet the narrowest
+spreads lose **16.7% of capital** and the widest make +4.1%. A 20.7-point gap
+invisible to the screen that was supposed to find it. It also corroborates
+§4b's width series ($5 -> $10 -> $20 -> $25), which was dismissed there as
+non-monotone noise, and it is exactly what the friction thesis predicts:
+credit scales with width while the two crossings do not.
+
+**2. `iv_minus_rv` is not flat — it is flat *in the middle*.** IC 0.0148 at
+p=0.37, but the bottom quintile loses 6.75% and the top makes 4.46%. And the
+direction is the one theory predicts: you are paid for selling premium when
+implied is rich against what the name has actually been doing. §4's claim that
+"the variance risk premium at entry does not predict the outcome" is withdrawn.
+
+**3. `iv_rank`'s IC is +0.1541 with clustered t 7.92 at proper n.** The
+-0.029 reported in §4 came from a 187-trade capped sample. That figure was a
+small-sample artifact, not a measurement.
+
+### What this does NOT establish
+
+`q_spread` is a **descriptive statistic with no significance test attached**.
+It has no p-value, no deflation, and picking the largest of 14 is a 14-way
+search. Everything above is also IN-SAMPLE on 2022-2024. Read this as "the IC
+screen was hiding real structure and here is where to look", not as three new
+findings. The out-of-sample test is 2020-21, which is what the 107-symbol
+backfill exists to enable.
 
 ## 4e. §4d's signal table, re-run properly — the IV-rank effect IS real
 
