@@ -128,10 +128,13 @@ def run_menu(input_fn: Callable = input, output_fn: Callable = print) -> None:
                     break
             continue
 
-        chapter = _resolve(choice)
-        if chapter is None:
+        # Deliberately not `chapter` — the READ ALL loop above binds that name
+        # to a Chapter, and rebinding it to an Optional[Chapter] here is a type
+        # error even though it runs fine.
+        picked = _resolve(choice)
+        if picked is None:
             output_fn(fmt.style(
                 f"  Unknown choice: {choice!r} — pick 1-{len(CHAPTERS)}, A, or B",
                 "warn"))
             continue
-        _show(chapter, output_fn, input_fn)
+        _show(picked, output_fn, input_fn)

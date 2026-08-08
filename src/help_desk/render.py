@@ -10,7 +10,7 @@ Every colour goes through ``fmt.style`` with a semantic name, never a raw
 from __future__ import annotations
 
 import textwrap
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from .. import formatting as fmt
 from .. import ui
