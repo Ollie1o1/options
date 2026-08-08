@@ -148,3 +148,58 @@ class CoverageAuditTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnreadableCacheTest(unittest.TestCase):
+    """An audit that cannot READ the cache must not report it as EMPTY.
+
+    Observed live: while a backfill held the write lock, `audit_coverage`
+    swallowed `database is locked` and returned every symbol as ABSENT with
+    `viable=False`. The CLI then printed "Universe is not viable — refusing to
+    backtest on it", which reads as "your data is gone" when it means "the
+    database is busy". Same class as the dead split guard — a degradation path
+    that produces a plausible wrong answer.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.uni = {"legacy": ["SPY"], "liquid": ["ABT"], "broad": ["AWK"]}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _audit_over_unreadable_db(self):
+        import sqlite3
+        from unittest import mock
+        with mock.patch("src.alloc.universe.sqlite3.connect",
+                        side_effect=sqlite3.OperationalError("database is locked")):
+            return U.audit_coverage(os.path.join(self._tmp.name, "x.db"),
+                                    self.uni)
+
+    def test_a_read_failure_is_reported_not_silently_absent(self):
+        a = self._audit_over_unreadable_db()
+        self.assertIsNotNone(a.get("read_error"))
+        self.assertIn("locked", a["read_error"])
+
+    def test_a_read_failure_does_not_claim_symbols_are_absent(self):
+        a = self._audit_over_unreadable_db()
+        states = {d["state"] for d in a["detail"]}
+        self.assertEqual(states, {"UNKNOWN"})
+        self.assertTrue(all(v["absent"] == 0 for v in a["summary"].values()))
+
+    def test_a_read_failure_still_refuses_to_backtest(self):
+        # Not viable is the right call; only the REASON was wrong.
+        self.assertFalse(self._audit_over_unreadable_db()["viable"])
+
+    def test_a_genuinely_empty_cache_still_reports_absent(self):
+        # The counterpart: a readable database with no rows is a real answer.
+        import sqlite3
+        db = os.path.join(self._tmp.name, "empty.db")
+        c = sqlite3.connect(db)
+        c.execute("CREATE TABLE dolt_fetched (symbol TEXT, date TEXT, "
+                  "n_rows INTEGER, fetched_at TEXT)")
+        c.commit(); c.close()
+        a = U.audit_coverage(db, self.uni)
+        self.assertIsNone(a.get("read_error"))
+        self.assertEqual({d["state"] for d in a["detail"]}, {"ABSENT"})
+        self.assertFalse(a["viable"])

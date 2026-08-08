@@ -94,6 +94,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     universe = load_universe(UNIVERSE)
     audit = audit_coverage(DB, universe)
 
+    if audit.get("read_error"):
+        # "could not read" and "read it, and it is empty" are different claims,
+        # and only one of them means your data is gone.
+        print(f"COULD NOT READ THE CACHE: {audit['read_error']}")
+        print(f"  {DB}")
+        print("  Coverage is UNKNOWN, not absent — this is not a verdict on "
+              "the data.\n  A backfill holding the write lock is the usual "
+              "cause; re-run when it finishes.")
+        return 1
+
     if args.audit or not (args.signals or args.structures or args.attribute):
         print("COVERAGE AUDIT")
         for stratum, v in audit["summary"].items():

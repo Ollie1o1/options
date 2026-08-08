@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.dolt_options import READ_TIMEOUT_S
 
@@ -47,9 +47,19 @@ def audit_coverage(db_path: str, universe: Dict[str, List[str]],
 
     Never raises on a missing symbol or a missing database — an audit that
     crashes tells you nothing, and its whole job is to report bad news.
+
+    But it must not INVENT bad news either. A cache it cannot READ is a
+    different fact from a cache that is empty, and conflating them was observed
+    live: while a backfill held the write lock this returned every symbol as
+    ABSENT, and the CLI printed "Universe is not viable — refusing to backtest
+    on it", which reads as "your data is gone" rather than "the database is
+    busy". On a read failure the states are `UNKNOWN`, `read_error` carries the
+    reason, and `viable` is still False — declining to backtest is right; only
+    the reason was wrong.
     """
     in_universe = symbol_stratum(universe)
     rows: List[tuple] = []
+    read_error: Optional[str] = None
     try:
         conn = sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)
         try:
@@ -57,8 +67,20 @@ def audit_coverage(db_path: str, universe: Dict[str, List[str]],
                 "SELECT symbol, date, n_rows FROM dolt_fetched").fetchall()
         finally:
             conn.close()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
         rows = []
+        read_error = str(exc)
+
+    if read_error is not None:
+        detail = [{"stratum": stratum, "symbol": sym, "fetched_days": 0,
+                   "nonempty_days": 0, "contracts": 0, "first": None,
+                   "last": None, "state": "UNKNOWN"}
+                  for stratum, syms in universe.items() for sym in sorted(syms)]
+        summary = {stratum: {"total": len(syms), "usable": 0, "sparse": 0,
+                             "absent": 0, "unknown": len(syms)}
+                   for stratum, syms in universe.items()}
+        return {"summary": summary, "detail": detail, "dead_dates": [],
+                "thin_dates": [], "viable": False, "read_error": read_error}
 
     per_sym: Dict[str, List[tuple]] = defaultdict(list)
     date_total: Dict[str, int] = defaultdict(int)
@@ -108,7 +130,7 @@ def audit_coverage(db_path: str, universe: Dict[str, List[str]],
     viable = bool(summary) and all(v["usable"] >= 1 for v in summary.values())
 
     return {"summary": summary, "detail": detail, "dead_dates": dead,
-            "thin_dates": thin, "viable": viable}
+            "thin_dates": thin, "viable": viable, "read_error": None}
 
 
 def usable_symbols(audit: Dict[str, Any]) -> List[str]:
