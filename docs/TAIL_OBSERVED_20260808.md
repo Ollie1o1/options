@@ -70,6 +70,67 @@ more were opened at the bottom.
 That is the shape the skew of -2.8 was pointing at, now measured rather than
 inferred.
 
+### UPDATE, same day: n=3 becomes n=527
+
+The 107 symbols that lacked 2020-21 data were backfilled. The crash window is
+now complete — 121 symbols, 64 trading days, 253,135 rows — and the anecdote
+above is confirmed as representative, not a fluke.
+
+**Everything opened into the crash (2020-02-01 .. 03-20), 120 symbols:**
+
+```
+n = 527
+mean RoC      -68.97%
+median RoC   -100.00%      <- the MEDIAN trade lost everything
+win rate        22.6%
+TOTAL LOSSES  346 of 527 = 65.7%   (lost >=99% of capital at risk)
+best           +33.33%
+```
+
+Across the whole crash-and-recovery window (2020-01-27 .. 06-30):
+`n=1,772, win 65.3%, RoC -23.08%, t -19.66, clustered t -2.75, DSR 0.000`.
+
+A 65% win rate and a median outcome of total loss, in the same sample. That is
+the short-premium signature stated as plainly as this data can state it.
+
+### Does a high IV-rank filter protect against this? NO — it selects INTO it
+
+The IVR>=70 arm carries DSR 0.797 in-sample on 2022-2024 (`ATTRIBUTION` §4e),
+and 2020-21 is a genuine holdout no configuration search has touched. So this
+is the test that matters, and the answer has two halves.
+
+**It does not avoid the crash.** Median IV rank of crash-window entries was
+**93**, and **220 of 280 (79%)** carried IV rank >= 70. The filter would have
+selected four out of five of these trades.
+
+**But within the crash it was much less bad:**
+
+| cohort | n | mean RoC | win | total-loss rate |
+|---|---:|---:|---:|---:|
+| IV rank <= 30 | 24 | -91.80% | 4.2% | 91.7% |
+| IV rank 30-70 | 51 | -99.90% | 0.0% | 98.0% |
+| **IV rank >= 70** | 205 | **-46.94%** | **42.9%** | **46.8%** |
+
+Mechanically sensible: entering when IV is already elevated puts a 25-delta
+strike much further from spot in dollar terms and collects far more credit.
+
+**And the confound is unresolved.** High-IVR entries came a median of **9 days
+later** (2020-03-02 vs 02-21), i.e. after ~8% of the drawdown had already
+happened, so part of that gap is simply less remaining downside. Two attempts
+to separate it both failed:
+
+* Restricting to pre-crash entries (2020-02-01..02-19) yields **zero** trades
+  with an IV rank — the signal needs 10 prior snapshots and the data begins
+  2020-01-27, so February is excluded by construction.
+* A within-day comparison (same entry date, so timing is fixed) finds only
+  **3 days** with >=3 trades in both cohorts: mean advantage +15.68%, high IVR
+  won 2 of 3, **paired t = 1.56**. Suggestive, and nowhere near conclusive.
+
+**The reading that survives all of this:** IVR>=70 is a *return* filter with a
+fat tail, **not a risk filter**. "Better" here means losing 47% instead of 92%.
+Anything that sizes positions on the assumption that high IV rank is protective
+would be sized on a misreading.
+
 ### The window as a whole
 
 ```
