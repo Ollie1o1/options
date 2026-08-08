@@ -21,6 +21,8 @@ import sqlite3
 from collections import defaultdict
 from typing import Any, Dict, List
 
+from src.dolt_options import READ_TIMEOUT_S
+
 MIN_USABLE_DAYS = 100
 
 
@@ -49,7 +51,7 @@ def audit_coverage(db_path: str, universe: Dict[str, List[str]],
     in_universe = symbol_stratum(universe)
     rows: List[tuple] = []
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)
         try:
             rows = conn.execute(
                 "SELECT symbol, date, n_rows FROM dolt_fetched").fetchall()
