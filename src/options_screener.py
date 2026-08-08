@@ -2139,20 +2139,21 @@ def calculate_scores(
                 "Vega": w["vega_risk"]*vega_risk_score,
                 "TSpr": w["term_structure"]*term_structure_score,
             }, index=df.index)
-            _neg_cdf = pd.DataFrame({
-                "spread": pd.Series(0.0, index=df.index),
-                "earnings": pd.Series(0.0, index=df.index),
-            }, index=df.index)
-            def _fmt_drivers(row, neg_row):
+            # There was a `_neg_cdf` frame here whose two columns were both
+            # hardcoded to 0.0, filtered on `v < 0` — so the negative half of
+            # score_drivers could never render, and never once did. Removed
+            # rather than wired up, on the same reasoning as the EV tiebreaker
+            # in _cross_section_normalize: the real negatives are appended
+            # further down the stack as they fire (" -spread(...)",
+            # " -stale_quote(-0.05)", " earnings(...)"), so nothing is lost,
+            # and inventing a second negative-driver path under cover of a
+            # dead-code fix would be adding display behaviour, not removing a
+            # defect. See docs/SCORE_AUDIT_20260807.md item 7.
+            def _fmt_drivers(row):
                 top3 = row.nlargest(3)
-                pos_parts = [f"+{k}({v:.2f})" for k, v in top3.items() if v > 0]
-                neg_parts = [f"-{k}({v:.2f})" for k, v in neg_row.items() if v < 0]
-                parts = pos_parts
-                if neg_parts:
-                    parts = pos_parts + ["|"] + neg_parts[:2]
-                return " ".join(parts)
+                return " ".join(f"+{k}({v:.2f})" for k, v in top3.items() if v > 0)
             df["score_drivers"] = [
-                _fmt_drivers(_cdf.iloc[i], _neg_cdf.iloc[i]) for i in range(len(_cdf))
+                _fmt_drivers(_cdf.iloc[i]) for i in range(len(_cdf))
             ]
         except Exception:
             df["score_drivers"] = ""
