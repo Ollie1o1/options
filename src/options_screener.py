@@ -573,6 +573,45 @@ def rank_single_legs_by_verdict(df, mode: str):
     return rank_by_verdict(out)
 
 
+def structure_strategy_name(row) -> str:
+    """Structure label for a spread-scan row.
+
+    Condors carry a `total_credit`; verticals are named by their short leg's
+    type. `candidate_verdict._legs_of` reads the leg layout off this name, so
+    it has to be set before a structure can be priced.
+    """
+    _keys = row.index if hasattr(row, "index") else row.keys()
+    if ("total_credit" in _keys) and not pd.isna(row.get("total_credit")):
+        return "Iron Condor"
+    return "Bear Call" if str(row.get("type", "")).strip().lower() == "call" else "Bull Put"
+
+
+def rank_structures_by_verdict(df):
+    """Order spreads and condors for the auto-logger by what survives costs.
+
+    The single-leg path moved off `quality_score` first; this path stayed on it
+    because a condor could not be priced at all — `find_iron_condors` emitted
+    no per-leg quotes, so `_legs_of` refused every one of them and routing them
+    through the gate would have starved the cohort rather than ranked it. The
+    quotes are now carried, so the ordering can apply here too.
+
+    Friction is the point: four crossings against one credit runs roughly twice
+    the two-leg burden, which already measured ~33% of the credit on the logged
+    Bull Puts against 1-4% for a single leg.
+
+    Ordering only — every input row is returned. See
+    `rank_single_legs_by_verdict` for why nothing is dropped here.
+    """
+    if df is None or len(df) == 0:
+        return df
+    out = df.copy()
+    try:
+        out["strategy_name"] = [structure_strategy_name(r) for _, r in out.iterrows()]
+    except Exception:
+        logging.getLogger(__name__).debug("structure labelling failed", exc_info=True)
+    return rank_by_verdict(out)
+
+
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults.
 
@@ -3151,6 +3190,21 @@ def find_iron_condors(df: pd.DataFrame, config: Optional[dict] = None) -> pd.Dat
             best_call_spread['long_call']['quality_score']
         ) / 4
         
+        # Per-leg quotes, so the structure can be priced at what it would
+        # actually fill for. Without these `candidate_verdict._legs_of` refuses
+        # every condor — four crossings against one credit is the whole reason
+        # the structure is marginal, and it was invisible.
+        _legs = {
+            'short_put': best_put_spread['short_put'],
+            'long_put': best_put_spread['long_put'],
+            'short_call': best_call_spread['short_call'],
+            'long_call': best_call_spread['long_call'],
+        }
+        _quotes = {}
+        for _name, _leg in _legs.items():
+            _quotes[f'{_name}_bid'] = _leg.get('bid')
+            _quotes[f'{_name}_ask'] = _leg.get('ask')
+
         condors.append({
             'symbol': symbol,
             'expiration': exp,
@@ -3158,6 +3212,12 @@ def find_iron_condors(df: pd.DataFrame, config: Optional[dict] = None) -> pd.Dat
             'long_put_strike': best_put_spread['long_put']['strike'],
             'short_call_strike': best_call_spread['short_call']['strike'],
             'long_call_strike': best_call_spread['long_call']['strike'],
+            **_quotes,
+            # The wider wing is what is actually at risk (max_risk = width -
+            # credit), so it is the width the breakeven win rate is computed
+            # against. Named spread_width to match the vertical rows and the
+            # ledger column.
+            'spread_width': max_width,
             'put_credit': best_put_spread['put_credit'],
             'call_credit': best_call_spread['call_credit'],
             'total_credit': total_credit,
@@ -5852,20 +5912,15 @@ def main():
                     if _is_spread_src:
                         # ── Spreads / iron condors path ─────────────────────────
                         _spreads = _log_src.copy()
-                        if "quality_score" in _spreads.columns:
-                            _spreads = _spreads.sort_values("quality_score", ascending=False)
+                        # Order by what survives its costs, not by the composite.
+                        # Condors carry per-leg quotes now, so they can be priced
+                        # rather than refused wholesale. See
+                        # rank_structures_by_verdict.
+                        _spreads = rank_structures_by_verdict(_spreads)
                         # One row per ticker — keep highest-scored structure per symbol
                         if "symbol" in _spreads.columns:
                             _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
                         _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
-
-                        def _spread_strategy_name(row):
-                            """Structure label for a spread-scan row: condors carry a
-                            total_credit, verticals are named by their short leg's type."""
-                            if ("total_credit" in row.index) and not pd.isna(row.get("total_credit")):
-                                return "Iron Condor"
-                            _t = str(row.get("type", "")).strip().lower()
-                            return "Bear Call" if _t == "call" else "Bull Put"
 
                         # Budget pre-filter — see the single-leg path for why this must run
                         # BEFORE the top-N cut rather than at the ledger door.
@@ -5874,7 +5929,7 @@ def main():
                         if _budget_cap and not _spreads.empty:
                             _afford_mask = _spreads.apply(
                                 lambda r: pick_within_budget(
-                                    r, _spread_strategy_name(r), _budget_cap
+                                    r, structure_strategy_name(r), _budget_cap
                                 ),
                                 axis=1,
                             )
@@ -5910,7 +5965,7 @@ def main():
                             _sym = str(row.get("symbol", "")).upper()
                             try:
                                 # Derive strategy name to feed the allowlist helper.
-                                _strat_name = _spread_strategy_name(row)
+                                _strat_name = structure_strategy_name(row)
                                 _is_condor = _strat_name == "Iron Condor"
                                 _decision, _paper_only_flag = apply_auto_log_allowlist(
                                     {"strategy_name": _strat_name}, cfg_path="config.json"

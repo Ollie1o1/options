@@ -208,22 +208,41 @@ most for short premium. The helper labels before ranking. The buyer-mode display
 paths (Budget scan, Discovery) were unaffected: `_legs_of` already defaults to
 `buy`, which is correct there.
 
-### Deliberately not changed: the spreads and condors auto-log path
+### The spreads and condors auto-log path — now ranked too
 
-It still sorts by `quality_score`. Two reasons, both blocking:
+Initially left alone, because **iron condor rows carried no per-leg quotes at
+all**: `find_iron_condors` emitted strikes, credits and `return_on_risk` and
+nothing else, so `_legs_of` refused every condor. Routing them through the gate
+would have sunk the whole cohort rather than ranked it. That was a data gap, so
+it was closed rather than worked around.
 
-- **Iron condor rows carry no per-leg quotes** — `find_iron_condors` emits
-  strikes, credits and `return_on_risk`, and nothing else. `_legs_of` cannot
-  price them, so they would be refused wholesale, sink to the bottom, and stop
-  being logged. That would starve a 121-row cohort to fix an ordering.
-  `_TWO_LEG` covers Bull Put and Bear Call only; a condor is four legs.
-- **The measurement in this document does not cover them.** Multi-leg rows
-  score through `spread_scoring` and `credit_spread_weights`, an entirely
-  different composite that has not been measured against outcomes.
+- `find_iron_condors` now carries all four legs' `bid`/`ask` as
+  `short_put_*`, `long_put_*`, `short_call_*`, `long_call_*`, plus
+  `spread_width` — the wider wing, which is what `max_risk = width − credit` is
+  actually measured against and therefore what the breakeven win rate needs.
+- `candidate_verdict._FOUR_LEG` / `_legs_of` price a condor as two sells and
+  two buys, refusing the whole structure if any one leg lacks a two-sided
+  quote — the same rule the two-leg path already used, and for the same reason:
+  a structure priced from three real quotes and one guess is not a price.
+- `rank_structures_by_verdict` labels each row (`structure_strategy_name`,
+  hoisted out of the auto-log block so it is testable) and orders the path.
 
-Doing it properly means carrying the four legs' quotes through
-`find_iron_condors` and teaching `_legs_of` a four-leg structure — a data
-change, not an ordering change.
+**Friction is the whole point here.** Four crossings against one credit runs
+roughly twice the two-leg burden, which already measured ~33% of the credit on
+the logged Bull Puts against 1–4% for a single leg. On the test fixture, a
+condor whose friction is **92.3% of its credit** — refused — was being logged
+*ahead* of one at **6.2%**, purely because its `quality_score` was higher.
+
+Sizing is unaffected: `capital_at_risk_for_pick` already resolved condors
+through the stored `max_loss` path, and returns the identical figure with and
+without `spread_width` (checked: 740.0 both ways, matching the row's own
+`max_risk`).
+
+**The caveat that remains.** Multi-leg rows score through `spread_scoring` and
+`credit_spread_weights` — a different composite that has *not* been measured
+against outcomes. So the case for this ordering rests on the cost argument,
+which is measured and large, not on the composite being bad here, which is
+untested.
 
 ### What this is not
 

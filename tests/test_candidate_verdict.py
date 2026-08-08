@@ -61,6 +61,54 @@ class SpreadVerdictTest(unittest.TestCase):
         self.assertFalse(v.passed)
 
 
+class CondorVerdictTest(unittest.TestCase):
+    """A four-leg iron condor. Until 2026-08-07 `find_iron_condors` emitted no
+    per-leg quotes at all, so a condor could not be priced and was refused
+    wholesale -- which is why the condor cohort was never verdict-ranked."""
+
+    LEGS = {"strategy_name": "Iron Condor", "total_credit": 1.00,
+            "spread_width": 2.50,
+            "short_put_bid": 0.90, "short_put_ask": 1.10,
+            "long_put_bid": 0.40, "long_put_ask": 0.60,
+            "short_call_bid": 0.90, "short_call_ask": 1.10,
+            "long_call_bid": 0.40, "long_call_ask": 0.60}
+
+    def test_a_condor_can_be_priced_at_all(self):
+        v = cv.verdict_for(self.LEGS)
+        self.assertTrue(v.priced, v.reason)
+
+    def test_friction_sums_all_four_half_spreads_over_the_credit(self):
+        """Four legs at 0.20 wide: each crossing costs 0.10, so 0.40 against a
+        1.00 net credit. The two-leg case charges half that."""
+        v = cv.verdict_for(self.LEGS)
+        self.assertAlmostEqual(v.friction_pct, 0.40, places=3)
+        self.assertAlmostEqual(v.round_trip_pct, 0.80, places=3)
+
+    def test_the_net_credit_is_both_wings_not_one(self):
+        """short_put + short_call collected, long_put + long_call paid."""
+        legs = cv._legs_of(self.LEGS)
+        self.assertEqual(len(legs), 4)
+        self.assertEqual(sum(1 for l in legs if l["side"] == "sell"), 2)
+        self.assertEqual(sum(1 for l in legs if l["side"] == "buy"), 2)
+
+    def test_a_condor_missing_one_leg_quote_is_refused_not_guessed(self):
+        broken = dict(self.LEGS)
+        broken.pop("long_call_bid")
+        v = cv.verdict_for(broken)
+        self.assertFalse(v.priced)
+        self.assertFalse(v.passed)
+
+    def test_the_breakeven_win_rate_is_reported_for_a_condor(self):
+        v = cv.verdict_for(self.LEGS)
+        self.assertIsNotNone(v.breakeven)
+
+    def test_a_condor_whose_credit_vanishes_when_crossed_is_refused(self):
+        v = cv.verdict_for({**self.LEGS,
+                            "short_put_bid": 0.10, "short_put_ask": 1.10,
+                            "short_call_bid": 0.10, "short_call_ask": 1.10})
+        self.assertFalse(v.passed)
+
+
 class GateTest(unittest.TestCase):
     # A spread tight enough to clear the friction ceiling, so the win-rate
     # gate is what is actually under test. Note how tight it has to be: the

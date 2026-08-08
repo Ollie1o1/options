@@ -26,6 +26,7 @@ from . import execution_truth as et
 
 # Legs per structure, for reading quotes off a candidate row.
 _TWO_LEG = {"Bull Put": ("put", "put"), "Bear Call": ("call", "call")}
+_FOUR_LEG = {"Iron Condor"}
 _SINGLE = {"Long Call", "Long Put", "Short Put", "Short Call"}
 
 # A candidate paying more than this share of its own reward to trade is refused.
@@ -69,6 +70,20 @@ def _q(row: Dict[str, Any], bid_key: str, ask_key: str) -> Optional[tuple]:
 def _legs_of(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """Quoted legs for a candidate row, or None if it cannot be priced."""
     strategy = row.get("strategy_name") or row.get("type") or ""
+
+    if strategy in _FOUR_LEG:
+        # Both wings, or nothing. A condor priced from three real quotes and
+        # one guess is not a price, and the friction it under-reports is the
+        # whole reason the structure is marginal: four crossings against one
+        # credit, twice the two-leg burden.
+        legs = []
+        for prefix, side in (("short_put", "sell"), ("long_put", "buy"),
+                             ("short_call", "sell"), ("long_call", "buy")):
+            q = _q(row, f"{prefix}_bid", f"{prefix}_ask")
+            if q is None:
+                return None
+            legs.append({"bid": q[0], "ask": q[1], "side": side})
+        return legs
 
     if strategy in _TWO_LEG:
         s = _q(row, "short_bid", "short_ask")
