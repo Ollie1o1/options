@@ -51,12 +51,12 @@ def _trading_dates(start: str, end: str, weekly: bool) -> List[str]:
 
 
 def _spec(name: str, structure: str, entry: Dict, n_trials: int,
-          hold: bool = True) -> StrategySpec:
+          hold: bool = True, max_concurrent: int = 3) -> StrategySpec:
     return StrategySpec(
         id=name, version=1, structure=structure, universe={}, entry=entry,
         exit={"hold_to_expiry": True} if hold else
              {"profit_target": 0.5, "stop": 2.0, "hold_to_expiry": False},
-        sizing={"max_capital_at_risk": 4000, "max_concurrent": 3},
+        sizing={"max_capital_at_risk": 4000, "max_concurrent": max_concurrent},
         created=dt.date.today().isoformat(), trial_count=n_trials)
 
 
@@ -79,6 +79,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="sample Fridays only rather than every weekday")
     ap.add_argument("--trials", type=int, default=34,
                     help="configurations tried, for deflation")
+    ap.add_argument("--max-concurrent", type=int, default=3,
+                    help="positions the ENGINE may hold open at once. The "
+                         "default 3 is an account-level constraint and it "
+                         "starves the per-trade sample: across 117 symbols it "
+                         "yields ~36 trades/yr no matter how wide the "
+                         "universe. Raise it to measure a per-trade effect "
+                         "(the account-level line stays honest — report.py "
+                         "applies its own capacity cap independently).")
     ap.add_argument("--start", default="2022-01-07")
     ap.add_argument("--end", default="2026-06-12")
     args = ap.parse_args(argv)
@@ -120,7 +128,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     def run(label: str, structure: str, **entry):
         e = {"dte": [25, 60], "short_delta": 0.25, "width": 5.0}
         e.update(entry)
-        trades, _ = replay(_spec(label, structure, e, args.trials), syms,
+        trades, _ = replay(_spec(label, structure, e, args.trials,
+                                max_concurrent=args.max_concurrent), syms,
                            dates, src, terminal=term, splits=splits,
                            stratum_of=strat)
         print(format_summary(label, summarise(trades, args.trials)))
@@ -137,7 +146,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                              ("long_call", {"target_delta": 0.40})):
             e = {"dte": [25, 60], "short_delta": 0.25, "width": 5.0}
             e.update(extra)
-            trades, _ = replay(_spec(label, label, e, args.trials), syms,
+            trades, _ = replay(_spec(label, label, e, args.trials,
+                                    max_concurrent=args.max_concurrent), syms,
                                dates, src, terminal=term, splits=splits,
                                stratum_of=strat)
             closed = [t for t in trades if t.exit_date and t.capital_at_risk]

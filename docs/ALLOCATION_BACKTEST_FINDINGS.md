@@ -168,6 +168,16 @@ zero (-0.64%, t=-0.58) purely by restricting the universe to names whose spreads
 are tighter — 3.6% of mid on the mega-caps and ETFs, against 16-21% on the
 liquid and broad strata.
 
+> **PARTIALLY REPLICATED, and narrower than stated (2026-08-08).** Re-derived
+> uncapped with splits wired over 2022-2024: the ALL-names bull put row
+> reproduces closely (-6.40% vs -6.76%, n=6,917), and the mega restriction does
+> move bull puts to indistinguishable-from-zero (-1.15%, clustered t -1.57).
+> **But the bear call is WORSE on the tight-spread universe** (-12.54% vs
+> -7.92% broad), and tighter spreads cannot make a strategy worse. The MEGA
+> cohort is SPY plus mega-cap tech over a rally, so the call side is dominated
+> by a bullish tilt, not by friction. Friction is the driver for the PUT side
+> only. See `docs/ATTRIBUTION_20260808.md` 7b.
+
 **But breakeven is not an edge.** DSR = 0.004. At the tightest spreads available
 in this dataset, selling put spreads pays for its own friction and no more. The
 bear call and iron condor stay clearly negative even there.

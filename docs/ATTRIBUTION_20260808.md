@@ -209,28 +209,56 @@ money more often (win rate rose monotonically 20.0% -> 26.7% -> 33.3% ->
 | `SqliteChainSource` holds one connection | a window is ~10,000 chain reads, each opening a database | faster, and no longer locks out of a concurrent backfill |
 | `READ_TIMEOUT_S = 120` on every cache reader | the standing workaround was "snapshot the DB first" | readers wait instead of erroring |
 
-## 7b. The wide universe, re-run with splits wired
+## 7b. §4c's friction result, re-derived with splits wired — it half holds
 
-117 symbols, 2022-01-07 to 2024-12-31, 18 split events across 15 symbols:
+§4c's mega-vs-all comparison could not be reproduced at first: `max_concurrent`
+caps open positions **portfolio-wide**, so across 117 names the engine opens
+~36 trades/year regardless of universe width and the sample came out at n=105
+rather than §4c's 10,363. That cap is right for an account-level return figure
+and wrong for measuring a per-trade effect, so it is now a CLI argument
+(`--max-concurrent`); `report.summarise` still applies its own capacity cap
+independently, so the account-level line stays honest either way.
 
-```
-bull_put             n=105  win=77.1%  RoC= -4.69%  tc=-0.74  DSR=0.000 [reject]
-bear_call            n=105  win=72.4%  RoC= -9.88%  tc=-1.65  DSR=0.000 [reject]
-iron_condor          n=105  win=83.8%  RoC= -0.54%  tc= 0.31  DSR=0.009 [reject]
-long_call [CONTROL]  n=105  win=25.7%  RoC=-25.98%  tc=-1.71  DSR=0.001 [reject]
-```
+Re-run uncapped, 2022-01-07 to 2024-12-31, splits wired, deflating by 37:
 
-Everything still rejects, which is the same conclusion §4c reached.
+| universe | structure | n | win | RoC/trade | t | t clustered | skew |
+|---|---|---:|---:|---:|---:|---:|---:|
+| ALL 117 | bull_put | 6,917 | 76.5% | **-6.40%** | -13.86 | -4.55 | -1.67 |
+| **MEGA 14** | **bull_put** | 3,808 | 79.8% | **-1.15%** | -1.69 | **-1.57** | -1.68 |
+| ALL 117 | bear_call | 6,911 | 76.5% | -7.92% | -16.98 | -5.42 | -1.66 |
+| **MEGA 14** | **bear_call** | 3,746 | 70.4% | **-12.54%** | -15.94 | -8.25 | -1.10 |
+| ALL 117 | iron_condor | 6,751 | 73.0% | -8.37% | -18.04 | -7.17 | -1.53 |
+| MEGA 14 | iron_condor | 3,404 | 70.4% | -7.87% | -10.09 | -6.13 | -1.21 |
+| ALL 117 | long_call | 6,953 | 28.1% | -2.92% | -1.34 | -0.37 | 2.63 |
+| MEGA 14 | long_call | 5,736 | 28.0% | -0.30% | -0.12 | 0.14 | 2.61 |
 
-**But this is NOT a like-for-like replication of §4c's table and must not be
-read as one.** §4c reports n=10,363; this run reports n=105 per structure,
-because `sizing.max_concurrent = 3` now caps open positions **portfolio-wide**
-rather than per symbol. Across 117 names that is ~36 trades/year no matter how
-many symbols are in the universe. §4c's per-symbol counts predate that cap, so
-the two are different experiments and only the direction is comparable.
+**The ALL-names bull put row replicates §4c almost exactly** (-6.40% vs -6.76%,
+76.5% vs 76.8% win, skew -1.67 vs -1.66), which is a good sign the engine did
+not drift under the splits fix.
 
-Re-deriving §4c's mega-vs-all friction comparison properly needs a run with the
-concurrency cap lifted, which has not been done.
+**And the friction claim holds for bull puts:** restricting to tight-spread
+names moves it from decisively negative (-6.40%, t=-13.86) to indistinguishable
+from zero (-1.15%, clustered t=-1.57). Same conclusion §4c reached.
+
+### But it does not generalise, and §4c implied that it did
+
+§4c reported the bear call and condor as staying "clearly negative even there",
+which reads as friction helping everywhere and merely not being enough. That is
+not what a controlled comparison shows:
+
+**The bear call is markedly WORSE on the tight-spread universe** — -12.54%
+against -7.92% on the broad one. Tighter spreads cannot make a strategy worse,
+so something else dominates: the MEGA cohort is SPY plus mega-cap tech over
+2022-2024, and selling calls into that rally is a directional loss that swamps
+any friction saving. The condor, which contains a short call, sits between the
+two as expected.
+
+So the honest statement is narrower than §4c's: **friction is the driver for
+the put side; for the call side, the beta of the tight-spread universe is.**
+Restricting to mega-caps is not a general improvement — it is a bullish tilt
+that happens to help puts and hurt calls over this window.
+
+Everything still rejects.
 
 ## 8. What would actually change the answer
 
