@@ -106,14 +106,31 @@ four times.
 - **Do not download FNSPID.** 29.6 GB against ~5 GiB free, and CC BY-NC-4.0
   forbids commercial use — disqualifying for a real-money system.
 
-## Watch the disk
+## Disk — RESOLVED 2026-08-08, was 99%, now 84%
 
-It sat at **98% / ~5 GiB free** at the end of this pass, and the 2025-2026
-backfill was still writing. `data/` is 3+ GB of research data that
-`project_trust_and_polish_pass` says explicitly not to "clean". Free space
-elsewhere before the next large fetch — this is now the binding constraint on
-every data option in this file, and it is what ruled out cloning the Dolt repo
-and downloading FNSPID.
+It hit **99% / 3.3 GiB free** mid-pass and was the binding constraint on every
+data option here. Reclaimed **~28 GiB** without touching `data/` (3.4 GB of
+research data that `project_trust_and_polish_pass` says explicitly not to
+"clean") and without touching the operator's wallpapers:
+
+| freed | item |
+|---:|---|
+| 8.8 GB | UTM `Ubuntu.utm` VM, untouched since 2025-09-29 |
+| 6.4 GB | npm cache (`npm cache clean --force`) |
+| 5.6 GB | Parallels Windows 11 install ISO |
+| 3.5 GB | 19 stale VS Code extension dirs across 13 extensions |
+| 245 MB | `brew cleanup --prune=all` |
+
+**Now at 31 GiB free**, which unblocks **optionsDX** (item 2 above).
+
+Still blocked, and NOT on size: **FNSPID remains disqualified by its
+CC BY-NC-4.0 licence** — commercial use is explicitly prohibited, which rules
+it out for a system whose stated destination is real money. Do not re-litigate
+that one on the grounds that the disk now has room.
+
+Left on the table if more is ever needed: Fotor 4.4 GB, Downloads 4.1 GB,
+Docker 3.2 GB (`docker system prune -a`), CoreSimulator 2.0 GB (needs full
+Xcode for `simctl`), codex/puppeteer caches ~3.4 GB.
 
 ## Standing hazards this pass discovered
 
