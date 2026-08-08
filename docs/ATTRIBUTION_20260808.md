@@ -241,6 +241,52 @@ So: the strongest result this system has produced, and still not promotable.
 3. **Trials are undercounted.** 44 is what this run declares; the true search
    across this whole effort is larger, and DSR falls as that grows.
 
+## 4f. THE HOLDOUT: only `width` survives
+
+2020-21 is untouched by any configuration search in this repo. Same setup,
+bull_put, all usable symbols, uncapped, splits wired, n=5,110:
+
+| feature | in-sample q_spread (2022-24) | **holdout q_spread (2020-21)** | verdict |
+|---|---:|---:|---|
+| **width** | +20.75% | **+13.88%** | **HOLDS** |
+| iv_rank | +7.88% | **-12.50%** | **FLIPS** |
+| iv_minus_rv | +11.21% | **-3.44%** | **FLIPS** |
+| credit_pct_width | +7.41% | +10.44% | holds, but an identity |
+| friction_pct_credit | -4.81% | -4.31% | holds, but an identity |
+
+**IV rank does not survive.** The sign inverts. That is consistent with the
+crash test in `TAIL_OBSERVED_20260808.md`, where 79% of the trades that lost
+everything carried IVR>=70 — high IV rank selects into a crash, it does not
+avoid one. **The DSR of 0.797 was an in-sample artifact of a 44-configuration
+search.** It was the most promising number this repo had produced and it is
+now withdrawn as a scoring input.
+
+**The variance premium does not survive either.** +11.21% to -3.44%.
+
+**`width` is the only non-identity feature standing.** Its IC even improves
+across the split — insignificant in-sample (clustered t -0.70, p=0.58) and
+**clustered t +5.41, p=0.0002** on the holdout — while the quantile spread
+keeps both its sign and its rough size. It has a mechanism, and it is the same
+one that is independently best-supported everywhere else here: **credit scales
+with width while the two crossings do not.**
+
+This re-opens §4b of `ALLOCATION_BACKTEST_FINDINGS.md`, which tried widths
+$5/$10/$20/$25, found $25 the only positive configuration, and dismissed it as
+non-monotone noise. On this evidence the width series was signal that the
+deflation test was too blunt to keep.
+
+### What this does and does not license
+
+`width` is **not** a `quality_score` input. That score ranks contracts within
+one chain; width is a property of a constructed spread. The right home is the
+structure builder and `config.json`, not the scorer.
+
+It is also still bounded by the thing nobody has measured. The entire width
+argument is an argument about **crossing cost**, and whether real fills land at
+mid or at the touch has never been tested. Widening spreads on the strength of
+a friction model, without having measured friction, is acting on the
+assumption rather than the evidence.
+
 ## 5. Nothing predicts the disaster
 
 For a short-premium book this is the question that matters, and it is not the
