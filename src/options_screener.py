@@ -4497,8 +4497,13 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # pool, where one liquid chain can contribute 40+ rows and trip a
     # meaningless "41 picks from MU" warning.
     if verbose and not picks.empty and len(picks) >= 5:
-        _top = (picks.sort_values("quality_score", ascending=False).head(15)
-                if "quality_score" in picks.columns else picks.head(15))
+        # Ranked the way the report is ranked. This used to take the top 15 by
+        # quality_score, which stopped being the displayed order when the scan
+        # moved to rank_by_verdict — so the warning was measuring a list nobody
+        # sees, and a scan whose whole visible top-5 came from one ticker could
+        # pass it silently. Concentration is a risk control; it has to watch the
+        # contracts actually being offered.
+        _top = rank_single_legs_by_verdict(picks, mode).head(15)
         call_count = (_top["type"].str.lower() == "call").sum()
         put_count = (_top["type"].str.lower() == "put").sum()
         total = len(_top)
@@ -4823,7 +4828,8 @@ def _check_market_hours() -> tuple:
 
 
 def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: bool = True,
-                     sector_ctx=None, ticker_contexts: "Optional[dict]" = None) -> "Optional[pd.DataFrame]":
+                     sector_ctx=None, ticker_contexts: "Optional[dict]" = None,
+                     mode: str = "Scan") -> "Optional[pd.DataFrame]":
     """Thin wrapper: delegates to ai_rank pipeline so CLI and ai_rank.py share one code path.
 
     `ticker_contexts` is the per-symbol context the scan already computed
@@ -4865,7 +4871,10 @@ def _run_ai_pipeline(picks: "pd.DataFrame", volatility_regime: str, verbose: boo
         vix_map = {"Low": "low", "Normal": "normal", "High": "high"}
         vix_regime = vix_map.get(str(volatility_regime), "normal")
 
-        candidates = picks.sort_values("quality_score", ascending=False).head(20).copy()
+        # Same ordering as the report, for the same reason as the concentration
+        # warning above: ranking these by quality_score spent tokens scoring a
+        # different 20 contracts than the ones on screen.
+        candidates = rank_single_legs_by_verdict(picks, mode).head(20).copy()
 
         # Only the symbols that actually produced candidates: context for a
         # ticker with no picks is tokens spent on a row the model never ranks.
@@ -4963,7 +4972,11 @@ def run_top_scan(
     max_expiries: int = 4,
     tearsheet_pick: Optional[int] = None,
 ) -> Optional[pd.DataFrame]:
-    """Fetch and score contracts across all tickers, return top_n sorted by quality_score.
+    """Fetch and score contracts across all tickers, return the top_n by verdict.
+
+    Ordered by `rank_by_verdict` — what survives its own costs — not by
+    `quality_score`, which this docstring claimed until 2026-08-07 and which
+    measures -0.10 against friction-adjusted return on the long-premium book.
 
     Groups results into DTE buckets: Short (7-14), Standard (15-30), Swing (31-45).
     Prints a ranked table and optionally saves a CSV. With `tearsheet_pick` set,
@@ -5012,7 +5025,10 @@ def run_top_scan(
         return None
 
     combined = pd.concat(all_rows, ignore_index=True)
-    combined = rank_by_verdict(combined)
+    # Labelled first so _legs_of reads the right side: this path defaults to a
+    # buyer mode, where `buy` happens to be correct, but a short-premium mode
+    # would have been priced as a debit. See rank_single_legs_by_verdict.
+    combined = rank_single_legs_by_verdict(combined, mode)
     top = combined.head(top_n).copy()
 
     print_top_n_table(top, top_n)
@@ -5831,7 +5847,7 @@ def main():
                 # ── AI Analysis ────────────────────────────────────────────────
                 _ai_ranked = None
                 if not picks.empty and not getattr(args, 'no_ai', False):
-                    _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True,
+                    _ai_ranked = _run_ai_pipeline(picks, volatility_regime, verbose=True, mode=mode,
                                                    sector_ctx=scan_results.market_context.get("sector_ctx"),
                                                    ticker_contexts=scan_results.ticker_contexts)
 
