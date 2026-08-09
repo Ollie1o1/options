@@ -6,6 +6,16 @@ chains (bid/ask/IV/Greeks), 2022-01-07 to 2026-06-12.
 **Status:** engine mechanically validated; statistics layer (CPCV/DSR/PBO) not
 yet built, so nothing here is deflated for multiple testing.
 
+> **CORRECTION 2026-08-08 — every number below was computed with splits
+> unhandled.** `replay()` accepts `splits=` and the CLI never passed it, so the
+> split guard was dead code and `split_closed` was structurally always 0 —
+> against this repo's own warning (`src/alloc/splits.py`) that leaving splits
+> unhandled makes a short put book a catastrophic loss that never happened and
+> makes trend signals read a split as a 95% crash for a year afterwards. Six of
+> the fourteen tight-spread names split inside the sample. Fixed and wired; the
+> §4d signal results in particular should be re-run before being relied on.
+> See `docs/TAIL_OBSERVED_20260808.md` §4.
+
 ---
 
 ## 1. The engine is mechanically credible
@@ -158,6 +168,16 @@ zero (-0.64%, t=-0.58) purely by restricting the universe to names whose spreads
 are tighter — 3.6% of mid on the mega-caps and ETFs, against 16-21% on the
 liquid and broad strata.
 
+> **PARTIALLY REPLICATED, and narrower than stated (2026-08-08).** Re-derived
+> uncapped with splits wired over 2022-2024: the ALL-names bull put row
+> reproduces closely (-6.40% vs -6.76%, n=6,917), and the mega restriction does
+> move bull puts to indistinguishable-from-zero (-1.15%, clustered t -1.57).
+> **But the bear call is WORSE on the tight-spread universe** (-12.54% vs
+> -7.92% broad), and tighter spreads cannot make a strategy worse. The MEGA
+> cohort is SPY plus mega-cap tech over a rally, so the call side is dominated
+> by a bullish tilt, not by friction. Friction is the driver for the PUT side
+> only. See `docs/ATTRIBUTION_20260808.md` 7b.
+
 **But breakeven is not an edge.** DSR = 0.004. At the tightest spreads available
 in this dataset, selling put spreads pays for its own friction and no more. The
 bear call and iron condor stay clearly negative even there.
@@ -182,6 +202,22 @@ Universe: mega-cap + index ETFs. Structure: bull put, 25-delta, held to expiry.
 | after 4w drop > 5% | 391 | 78.3% | -2.38% | -1.03 | 0.001 |
 | after 4w rally > 5% | 496 | 79.8% | -1.19% | -0.59 | 0.003 |
 | IVR>=50 AND uptrend | 405 | 82.5% | +2.06% | 0.98 | 0.138 |
+
+> **REPRODUCES, AND STRENGTHENS (2026-08-08).** Re-run with splits wired and
+> the concurrency cap lifted (n is 3-8x the rows above), 2022-2024: the
+> monotone pattern holds and widens to **-2.85% / -1.15% / +2.51% / +3.86%**
+> across IVR<=30 / baseline / >=50 / >=70. IVR>=70 reads **DSR 0.797 after
+> deflating by 44 configurations** — the only result anywhere in this repo that
+> has cleared the 0.5 line. It still rejects on **clustered t = 2.26** against
+> the 3.0 hurdle (the naive t of 3.14 would have passed), it is IN-SAMPLE, and
+> its skew is **-1.96** — selecting high IV rank selects for a fatter tail.
+>
+> Note it is flat as a *rank IC* (-0.029), which an earlier draft wrongly read
+> as "does not reproduce". Both are right: this is a threshold effect on a
+> heavily skewed variable, where the gain is fewer catastrophic trades, which
+> moves the mean and not the median ordering. Separately, nothing tested
+> predicts the max-loss trades (best AUC 0.636 over an 11-way search).
+> See `docs/ATTRIBUTION_20260808.md` §4d-4e.
 
 ### The shape is the evidence, not any single number
 

@@ -144,10 +144,17 @@ class DateRangeTest(unittest.TestCase):
             import datetime as _dt
             self.assertEqual(_dt.date.fromisoformat(d).weekday(), 4)
 
-    def test_daily_range_inclusive(self):
+    def test_daily_range_skips_weekends(self):
+        # 2024-03-02/03 are Sat/Sun. The options market never quotes then, so
+        # fetching them burns a rate-limited API call to cache a guaranteed
+        # miss. Range is inclusive of the weekday endpoints.
         dates = do._date_range("2024-03-01", "2024-03-05", weekly=False)
-        self.assertEqual(dates, ["2024-03-01", "2024-03-02", "2024-03-03",
-                                 "2024-03-04", "2024-03-05"])
+        self.assertEqual(dates, ["2024-03-01", "2024-03-04", "2024-03-05"])
+
+    def test_daily_range_never_yields_a_weekend(self):
+        for d in do._date_range("2020-01-27", "2020-03-31", weekly=False):
+            import datetime as _dt
+            self.assertLess(_dt.date.fromisoformat(d).weekday(), 5, d)
 
 
 class BackfillTest(unittest.TestCase):
@@ -169,6 +176,122 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(n1, 1)
         self.assertEqual(n2, 0)
         self.assertEqual(q.call_count, 1)
+
+
+def _row(symbol="AAPL", date="2024-03-15", strike="170.00"):
+    return {"date": date, "act_symbol": symbol, "expiration": "2024-04-19",
+            "strike": strike, "call_put": "Call", "bid": "5", "ask": "5.4",
+            "vol": "0.3", "delta": "0.5", "gamma": "0", "theta": "0",
+            "vega": "0", "rho": "0"}
+
+
+class MissingPairsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "d.db")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_reports_every_pair_when_cache_is_empty(self):
+        pairs = do.missing_pairs(["AAPL", "SPY"], ["2024-03-14", "2024-03-15"],
+                                 db_path=self.db)
+        self.assertEqual(len(pairs), 4)
+
+    def test_excludes_pairs_already_fetched_including_cached_misses(self):
+        with mock.patch("src.dolt_options._query", return_value=[]):
+            do.backfill(["AAPL"], ["2024-03-14"], db_path=self.db)
+        pairs = do.missing_pairs(["AAPL", "SPY"], ["2024-03-14", "2024-03-15"],
+                                 db_path=self.db)
+        # A cached MISS is still "fetched" — re-fetching it would burn the call
+        # budget re-confirming a hole the dataset genuinely has.
+        self.assertNotIn(("AAPL", "2024-03-14"), pairs)
+        self.assertEqual(len(pairs), 3)
+
+    def test_weekends_are_never_proposed(self):
+        pairs = do.missing_pairs(["AAPL"], do._date_range("2024-03-01", "2024-03-31"),
+                                 db_path=self.db)
+        for _, d in pairs:
+            import datetime as _dt
+            self.assertLess(_dt.date.fromisoformat(d).weekday(), 5, d)
+
+
+class ParallelBackfillTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "d.db")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fetches_all_missing_pairs_and_is_resumable(self):
+        dates = ["2024-03-14", "2024-03-15"]
+        with mock.patch("src.dolt_options._query",
+                        side_effect=lambda sql, **kw: [_row()]) as q:
+            r1 = do.backfill_parallel(["AAPL", "SPY"], dates, db_path=self.db,
+                                      workers=4, throttle=0.0)
+            r2 = do.backfill_parallel(["AAPL", "SPY"], dates, db_path=self.db,
+                                      workers=4, throttle=0.0)
+        self.assertEqual(r1["fetched"], 4)
+        self.assertEqual(r1["failed"], 0)
+        self.assertEqual(r2["fetched"], 0)
+        self.assertEqual(q.call_count, 4)
+
+    def test_rows_land_in_the_cache_and_read_back(self):
+        with mock.patch("src.dolt_options._query",
+                        side_effect=lambda sql, **kw: [_row()]):
+            do.backfill_parallel(["AAPL"], ["2024-03-15"], db_path=self.db,
+                                 workers=2, throttle=0.0)
+        chain = do.get_chain("AAPL", "2024-03-15", db_path=self.db)
+        self.assertEqual(len(chain), 1)
+        self.assertAlmostEqual(chain[0]["strike"], 170.0)
+
+    def test_a_failed_fetch_is_never_cached_as_an_empty_day(self):
+        # THE correctness property. Caching a network failure as "0 rows" would
+        # mark a day the dataset really has as permanently absent, and every
+        # later run would skip it. A failure must be reported and left missing.
+        def flaky(sql, **kw):
+            if "SPY" in sql:
+                raise do.DoltQueryError("boom")
+            return [_row()]
+
+        with mock.patch("src.dolt_options._query", side_effect=flaky):
+            res = do.backfill_parallel(["AAPL", "SPY"], ["2024-03-15"],
+                                       db_path=self.db, workers=2, throttle=0.0)
+        self.assertEqual(res["fetched"], 1)
+        self.assertEqual(res["failed"], 1)
+        with sqlite3.connect(self.db) as conn:
+            marked = conn.execute(
+                "SELECT 1 FROM dolt_fetched WHERE symbol='SPY'").fetchone()
+        self.assertIsNone(marked)
+        # ...and the pair is still offered on the next run.
+        self.assertIn(("SPY", "2024-03-15"),
+                      do.missing_pairs(["SPY"], ["2024-03-15"], db_path=self.db))
+
+    def test_a_genuinely_empty_day_IS_cached_as_a_miss(self):
+        # The counterpart: the API succeeding with zero rows is a real answer.
+        with mock.patch("src.dolt_options._query", return_value=[]):
+            res = do.backfill_parallel(["AAPL"], ["2024-03-15"], db_path=self.db,
+                                       workers=2, throttle=0.0)
+        self.assertEqual(res["fetched"], 1)
+        self.assertEqual(res["failed"], 0)
+        self.assertNotIn(("AAPL", "2024-03-15"),
+                         do.missing_pairs(["AAPL"], ["2024-03-15"], db_path=self.db))
+
+    def test_rate_limiting_stops_the_run_rather_than_burning_the_queue(self):
+        # Hammering a rate-limited endpoint gets the IP blocked. Once DoltHub
+        # says stop, the run must abort with work left, not grind every pair
+        # into a failure.
+        with mock.patch("src.dolt_options._query",
+                        side_effect=do.DoltRateLimited("429")):
+            res = do.backfill_parallel(["AAPL", "SPY", "MSFT"],
+                                       ["2024-03-14", "2024-03-15"],
+                                       db_path=self.db, workers=2, throttle=0.0)
+        self.assertTrue(res["rate_limited"])
+        self.assertEqual(res["fetched"], 0)
+        self.assertGreater(res["remaining"], 0)
 
 
 if __name__ == "__main__":

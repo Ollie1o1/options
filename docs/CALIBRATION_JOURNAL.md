@@ -7,6 +7,85 @@ evolved over time.
 
 ---
 
+## 2026-08-09 — three measured-negative components DELETED (not re-fitted)
+
+**Context:** `docs/LEADING_INDICATORS_20260809.md` §1. No `--calibrate --apply`
+was run; these are three hand edits to `config.json`, backed by measurements
+already published in this repo. Backup:
+`scratchpad/config.bak.20260809.json`.
+
+**What changed:**
+
+| table | component | was | now |
+|---|---|---:|---:|
+| `credit_spread_weights` | `iv_rank` | 0.15 | **0.00** |
+| `iron_condor_weights` | `iv_rank` | 0.12 | **0.00** |
+| `iron_condor_weights` | `pop` | 0.30 | **0.00** |
+
+`src/spread_scoring.py`'s `DEFAULT_*_WEIGHTS` fallbacks were moved in step, so
+a fresh install scores the same as this one.
+
+**Why `iv_rank`:** component rank IC **-0.1187** on the ledger's verticals and
+**-0.1079** on its condors (`CONDOR_COMPOSITE_20260807.md` §2) — same sign,
+both structures. Independently, the same quantity in the allocation backtest
+**inverts out of sample**: q_spread +7.88% in-sample on 2022-24 against
+**-12.50%** on the 2020-21 holdout (`ATTRIBUTION_20260808.md` §4f), and **79%
+of the trades that lost 100% of capital at risk carried IVR >= 70**
+(`TAIL_OBSERVED_20260808.md`). It selects into the crash it is supposed to be
+paid for. §4f withdrew it as a scoring input on 2026-08-08; it was still
+weighted the next morning, because a document said so and nothing enforced it.
+
+**Why condor `pop`:** rank IC **-0.3115 (p 0.001)** while carrying the largest
+single weight in the table. The mechanism is identified rather than inferred:
+`spearman(pop_score, net_credit) = -0.7197`, so a high PoP IS a tiny credit —
+the top-PoP quartile collects $1.25 against a $4 width and loses 37.8% at the
+median on a 26.7% win rate. Stable in **4 of 4** walk-forward windows with no
+sign flips, it gets **worse** (-0.3437) restated at the crossed credit, and it
+clears Bonferroni at 7 comparisons. `CONDOR_COMPOSITE_20260807.md` called it
+"the best-evidenced defect found in this entire scoring review".
+
+**What was deliberately NOT changed:**
+
+- **`pop` on the verticals stays at 0.25.** The same component measures -0.0594
+  at **p = 0.354** there. Acting on that would be the small-sample tuning this
+  repo keeps getting burned by. The evidence is structure-specific and so is
+  the change.
+- **`spread_score` was not re-weighted.** §5 of the condor document shows its
+  +0.55 is substantially mechanical — a wide market's mid credit is fictitious,
+  so wide-spread condors record worse returns partly by construction.
+- **Nothing was added.** No weight went up, no component was introduced. Every
+  edit is a deletion of a term whose measured contribution was negative.
+- **The single-leg `composite_weights` / `premium_selling_weights` are
+  untouched.** The measurements above are on the two spread tables. Extending
+  the change to single legs would be inference, not evidence.
+
+**Why deletion rather than re-fitting.** `SCORE_AUDIT_20260807.md` §1
+established that re-fitting weights on this ledger is fitting to noise — its
+own headline verdict is "NO SIGNIFICANT EDGE (IC=-0.03, p=0.433)" and its top
+score quintile is the worst cell in it. Zeroing a term measured negative in
+multiple independent windows does not require a sample where the composite
+ranks; fitting a new value would.
+
+**Expected effect.** `quality_score` is a tiebreak, not the sort key —
+`candidate_verdict.rank` orders by gate, then net-of-cost EV, then
+cheapest-to-trade — so the live ordering moves only where those three tie. The
+change is larger for condors, whose rows carry no `ev_per_contract` and so fall
+through to the cheapest-to-trade key. Ordering is pinned by
+`tests/test_weight_deletions_20260809.py`.
+
+**Not yet measured, found while writing the test:** the condor
+`credit_to_width_score` normalisation is `clip((c2w - 0.10) / 0.20)`, which
+**saturates at c/w >= 0.30**. Every pop quartile in `CONDOR_COMPOSITE` §3 sits
+at 0.337-0.374, i.e. all four are pinned at 1.0. If that holds on live rows,
+the component carries 0.20 of the weight while discriminating nothing — which
+would be part of why `pop` was free to dominate. Not acted on; it needs the
+same measurement everything else here got.
+
+**Revert:** `cp scratchpad/config.bak.20260809.json config.json`, and restore
+0.15 / 0.12 / 0.30 in `src/spread_scoring.py`.
+
+---
+
 ## 2026-08-07 — IC blend denominator: BUG FIX, weights move without a re-fit
 
 **Context:** score/EV audit, `docs/SCORE_AUDIT_20260807.md` item 1. No

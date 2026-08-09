@@ -11,9 +11,65 @@ from __future__ import annotations
 
 import unittest
 
-from src.alloc.engine import (Trade, capital_at_risk, replay, select_legs)
+from src.alloc.engine import (SqliteChainSource, Trade, capital_at_risk,
+                              replay, select_legs)
 from src.alloc.fills import Leg
 from src.strategies.spec import StrategySpec
+
+
+class SqliteChainSourceTest(unittest.TestCase):
+    """Reads the cache over ONE connection: a window is ~10,000 chain reads."""
+
+    def setUp(self):
+        import os
+        import sqlite3
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "c.db")
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE dolt_chain (symbol TEXT, date TEXT, "
+                     "expiration TEXT, strike REAL, type TEXT, bid REAL, "
+                     "ask REAL, mid REAL, iv REAL, delta REAL, gamma REAL, "
+                     "theta REAL, vega REAL, rho REAL)")
+        conn.execute("INSERT INTO dolt_chain VALUES "
+                     "('AAA','2024-01-05','2024-02-16',100.0,'put',"
+                     "1.0,1.2,1.1,0.3,-0.25,0.0,0.0,0.0,0.0)")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_reads_a_row_with_every_column_named(self):
+        src = SqliteChainSource(self.db)
+        chain = src.chain("AAA", "2024-01-05")
+        self.assertEqual(len(chain), 1)
+        self.assertEqual(chain[0]["type"], "put")
+        self.assertAlmostEqual(chain[0]["strike"], 100.0)
+        self.assertAlmostEqual(chain[0]["delta"], -0.25)
+        self.assertAlmostEqual(chain[0]["iv"], 0.3)
+        src.close()
+
+    def test_an_unfetched_day_reads_as_empty_not_an_error(self):
+        src = SqliteChainSource(self.db)
+        self.assertEqual(src.chain("AAA", "2024-01-06"), [])
+        self.assertEqual(src.chain("ZZZ", "2024-01-05"), [])
+        src.close()
+
+    def test_the_same_day_is_only_queried_once(self):
+        # Memoised in-process: a replay asks for the same chain repeatedly
+        # while managing open positions.
+        src = SqliteChainSource(self.db)
+        first = src.chain("AAA", "2024-01-05")
+        src._conn.close()          # any further query would now raise
+        self.assertIs(src.chain("AAA", "2024-01-05"), first)
+
+    def test_close_is_idempotent(self):
+        src = SqliteChainSource(self.db)
+        src.chain("AAA", "2024-01-05")
+        src.close()
+        src.close()
 
 
 class FakeSource:
@@ -106,6 +162,70 @@ class LegSelectionTest(unittest.TestCase):
                                  entry={"dte": [20, 90], "target_delta": 0.40}),
                            chain, "2024-01-05")
         self.assertEqual([(l.action) for l in legs], ["buy"])
+
+    def test_a_delta_far_from_the_target_is_refused_not_substituted(self):
+        # THE instrument-integrity test. select_legs promises "a missing wing
+        # is a skipped trade, never a substituted strike", but the delta target
+        # had no tolerance at all: asked for a 40-delta call against a chain
+        # whose nearest listed call is 2-delta, it bought the 2-delta lottery
+        # ticket and reported it as a 40-delta trade. Measured over 2020-2024
+        # that bottom quartile (delta 0.00-0.37) lost 57% of capital per trade.
+        chain = [_c(200.0, "call", 0.05, 0.10, delta=0.02)]
+        self.assertIsNone(select_legs(
+            _spec(structure="long_call",
+                  entry={"dte": [20, 90], "target_delta": 0.40}),
+            chain, "2024-01-05"))
+
+    def test_a_delta_inside_the_tolerance_is_accepted(self):
+        chain = [_c(100.0, "call", 2.0, 2.3, delta=0.34)]
+        legs = select_legs(
+            _spec(structure="long_call",
+                  entry={"dte": [20, 90], "target_delta": 0.40}),
+            chain, "2024-01-05")
+        self.assertEqual([l.strike for l in legs], [100.0])
+
+    def test_the_tolerance_is_configurable(self):
+        chain = [_c(200.0, "call", 0.05, 0.10, delta=0.02)]
+        entry = {"dte": [20, 90], "target_delta": 0.40, "delta_tolerance": 0.5}
+        legs = select_legs(_spec(structure="long_call", entry=entry),
+                           chain, "2024-01-05")
+        self.assertEqual([l.strike for l in legs], [200.0])
+
+    def test_the_short_leg_of_a_credit_spread_is_held_to_the_same_standard(self):
+        # A "25-delta bull put" whose short leg is really 2-delta collects
+        # almost no credit and is a different trade.
+        chain = [_c(50.0, "put", 0.05, 0.10, delta=-0.02),
+                 _c(45.0, "put", 0.01, 0.05, delta=-0.01)]
+        self.assertIsNone(select_legs(
+            _spec(entry={"dte": [20, 90], "short_delta": 0.25, "width": 5.0}),
+            chain, "2024-01-05"))
+
+    def test_random_strike_selection_still_bypasses_the_tolerance(self):
+        # `strike_selection: random` is a deliberate control arm; constraining
+        # it to a delta band would make it not random. Every listed delta here
+        # is far outside the tolerance, so the non-random path returns None.
+        chain = [_c(200.0, "put", 0.05, 0.10, delta=-0.02),
+                 _c(195.0, "put", 0.01, 0.05, delta=-0.01)]
+        entry = {"dte": [20, 90], "short_delta": 0.25, "width": 5.0}
+
+        class _FirstChoice:              # deterministic stand-in for Random
+            def choice(self, pool):
+                return pool[0]
+
+        self.assertIsNone(select_legs(_spec(entry=entry), chain, "2024-01-05"))
+        legs = select_legs(_spec(entry={**entry, "strike_selection": "random"}),
+                           chain, "2024-01-05", _FirstChoice())
+        self.assertEqual([l.strike for l in legs], [200.0, 195.0])
+
+    def test_a_refused_delta_counts_as_no_legs_not_as_a_silent_pass(self):
+        dates = ["2024-01-05"]
+        data = {("AAA", "2024-01-05"): [_c(200.0, "call", 0.05, 0.1, delta=0.02)]}
+        trades, stats = replay(
+            _spec(structure="long_call",
+                  entry={"dte": [20, 90], "target_delta": 0.40}),
+            ["AAA"], dates, FakeSource(data))
+        self.assertEqual(trades, [])
+        self.assertEqual(stats["skipped_no_legs"], 1)
 
     def test_expiry_outside_the_dte_window_is_rejected(self):
         chain = _bull_put_chain()          # expires 2024-03-15

@@ -196,3 +196,93 @@ class TestLedgerRecordsTheFlags(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBonusSuppression(unittest.TestCase):
+    """The stack's BONUSES rank backwards; its penalties do not.
+
+    Measured 2026-08-08 with `scripts/measure_adjustment_stack.py` on closed
+    ledger rows, rank IC against friction-adjusted return:
+
+                              Long Call/Put   Short Put   negative windows
+      as shipped                  -0.0995      -0.0970      5/5 , 4/5
+      stack OFF                   +0.0038      +0.0330      4/5 , 2/5
+      penalties only              -0.0291      +0.0429      5/5 , 2/5
+      BONUSES only                -0.1029      -0.1546      5/5 , 5/5
+
+    Bonuses are negative in five windows of five in BOTH families, and rows the
+    stack net-bonuses underperform rows it net-penalises (-0.195 vs -0.153 on
+    long premium, -0.192 vs -0.058 on short puts). Penalties are mixed and are
+    the single best variant for Short Put, so they are kept.
+
+    Unlike the IV-rank result that failed its holdout the same day, these
+    constants were hand-set and never fitted to this ledger, so measuring them
+    negative on it is already out-of-sample evidence.
+
+    The gate is on the NET per-row adjustment, which is exactly how the
+    measurement builds its "penalties only" column (`composite +
+    stack.clip(upper=0)`). So the shipped default IS that column: -0.0291 on
+    long premium and +0.0429 on short puts, against -0.0995 / -0.0970 as
+    shipped.
+
+    Note stack-OFF scores slightly better than penalties-only on long premium
+    (+0.0038 vs -0.0291) and slightly worse on short puts (+0.0330 vs
+    +0.0429). That gap is not what is being optimised here: choosing between
+    them on ~0.03 of IC at n=335 and n=109 would be the same small-sample
+    tuning this repo keeps getting burned by. The penalties are kept because
+    they encode risk — decay, gamma ramp, stale quotes, macro — and dropping
+    risk guards to chase a third of a point of IC is a bad trade.
+    """
+
+    def _scored(self, scales=None):
+        cfg = {}
+        if scales is not None:
+            cfg["scoring"] = {"adjustment_scales": scales}
+        return _fx._run(_fx._make_chain(n=40), _fx._config(**cfg))
+
+    def test_default_suppresses_bonuses_and_keeps_penalties(self):
+        from src import options_screener as osc
+        d = osc.DEFAULT_ADJUSTMENT_SCALES
+        self.assertEqual(d["bonus"], 0.0)
+        self.assertEqual(d["penalty"], 1.0)
+
+    def test_a_bonus_scale_of_zero_never_scores_above_the_composite(self):
+        out = self._scored()
+        pre = out["quality_score_pre_adjust"]
+        self.assertTrue((out["quality_score"] <= pre + 1e-9).all(),
+                        "a row scored ABOVE its composite with bonuses off")
+
+    def test_penalties_still_bite_at_the_default(self):
+        out = self._scored()
+        delta = out["quality_score"] - out["quality_score_pre_adjust"]
+        self.assertLess(delta.min(), 0.0,
+                        "no row was penalised — the stack is fully inert")
+
+    def test_scales_of_one_restore_upward_adjustments(self):
+        # Compared against the default rather than the raw composite, because
+        # multiplicative RISK adjustments run after this stack and are not
+        # gated by it.
+        on = self._scored({"bonus": 1.0, "penalty": 1.0})
+        off = self._scored({"bonus": 0.0, "penalty": 1.0})
+        self.assertGreater(on["quality_score"].max(),
+                           off["quality_score"].max(),
+                           "bonus_scale=1.0 must lift at least one row")
+
+    def test_both_scales_zero_removes_every_additive_adjustment(self):
+        off = self._scored({"bonus": 0.0, "penalty": 0.0})
+        pre = off["quality_score_pre_adjust"].clip(0, 1)
+        # <= not ==: the post-stack risk MULTIPLIERS still apply, and they can
+        # only reduce. Anything above the composite would mean an additive
+        # adjustment survived the gate.
+        self.assertTrue((off["quality_score"] <= pre + 1e-9).all())
+
+    def test_the_pre_adjustment_composite_is_recorded_for_audit(self):
+        # Without this column the stack's effect cannot be measured after the
+        # fact, which is how it went unexamined for as long as it did.
+        self.assertIn("quality_score_pre_adjust", self._scored().columns)
+
+    def test_scores_stay_in_range(self):
+        for scales in (None, {"bonus": 1.0, "penalty": 1.0}):
+            out = self._scored(scales)
+            self.assertGreaterEqual(out["quality_score"].min(), 0.0)
+            self.assertLessEqual(out["quality_score"].max(), 1.0)

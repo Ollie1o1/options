@@ -44,10 +44,23 @@ _GREEK_COL_MAP = {
     "theta": "entry_theta",
 }
 
+# `_weighted_score` renormalises over the features that carry a weight, so a
+# component set to 0.0 is genuinely removed from the composite rather than
+# quietly shrinking every other term. Two are set to zero here, both on
+# measurement rather than taste, and both are DELETIONS of components that
+# measured negative — not a re-fit. See docs/LEADING_INDICATORS_20260809.md §1
+# and docs/CALIBRATION_JOURNAL.md 2026-08-09.
+
 DEFAULT_SPREAD_WEIGHTS: Dict[str, float] = {
     "pop":            0.25,
     "credit_to_width": 0.20,
-    "iv_rank":        0.15,
+    # iv_rank: was 0.15. Component rank IC -0.1187 on the ledger's verticals,
+    # and the same quantity in the allocation backtest inverts out of sample
+    # (q_spread +7.88% in-sample 2022-24 -> -12.50% on the 2020-21 holdout,
+    # ATTRIBUTION_20260808 §4f). 79% of the trades that lost 100% of capital
+    # at risk carried IVR >= 70 — it selects INTO the crash it is supposed to
+    # be paid for.
+    "iv_rank":        0.00,
     "return_on_risk": 0.10,
     "liquidity":      0.10,
     "theta":          0.08,
@@ -57,10 +70,21 @@ DEFAULT_SPREAD_WEIGHTS: Dict[str, float] = {
 }
 
 DEFAULT_IRON_WEIGHTS: Dict[str, float] = {
-    "pop":             0.30,
+    # pop: was 0.30, the largest single weight, at component rank IC -0.3115
+    # (p 0.001). The mechanism is identified rather than inferred —
+    # spearman(pop_score, net_credit) = -0.7197, so a high PoP IS a tiny
+    # credit, and the top-PoP quartile collects $1.25 against a $4 width and
+    # loses 37.8% at the median on a 26.7% win rate. Stable in 4/4 walk-forward
+    # windows, and it gets WORSE (-0.3437) restated at the crossed credit.
+    # CONDOR_COMPOSITE_20260807 §2-§4.
+    #
+    # Kept at 0.25 for the verticals above, where the same component measures
+    # -0.0594 at p = 0.354. Deleting on that would be the small-sample tuning
+    # this repo keeps getting burned by.
+    "pop":             0.00,
     "credit_to_width": 0.20,
     "delta_neutral":   0.15,
-    "iv_rank":         0.12,
+    "iv_rank":         0.00,          # as above; -0.1079 on the ledger's condors
     "liquidity":       0.10,
     "theta":           0.08,
     "spread":          0.05,

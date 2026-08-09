@@ -1709,6 +1709,30 @@ def _score_adjustment_flags(df: pd.DataFrame) -> pd.Series:
     return out
 
 
+# Scales applied to the post-composite adjustment stack, split by sign.
+#
+# Measured 2026-08-08 (scripts/measure_adjustment_stack.py) on closed ledger
+# rows, rank IC vs friction-adjusted return:
+#
+#                         Long Call/Put   Short Put   negative windows
+#   as shipped                -0.0995      -0.0970      5/5 , 4/5
+#   stack OFF                 +0.0038      +0.0330      4/5 , 2/5
+#   penalties only            -0.0291      +0.0429      5/5 , 2/5
+#   BONUSES only              -0.1029      -0.1546      5/5 , 5/5
+#
+# The bonuses rank backwards in five windows of five in BOTH families, and rows
+# the stack net-bonuses underperform the ones it net-penalises. The penalties
+# are mixed and are the best single variant for Short Put, so they stay.
+#
+# These constants were hand-set and never fitted to this ledger, so measuring
+# them negative on it is already out-of-sample evidence — unlike the IV-rank
+# result that failed its holdout the same day.
+#
+# Set {"bonus": 1.0, "penalty": 1.0} in config.scoring.adjustment_scales to
+# restore the old behaviour.
+DEFAULT_ADJUSTMENT_SCALES = {"bonus": 0.0, "penalty": 1.0}
+
+
 def _short_interest_bonus(df: pd.DataFrame, mode: str) -> pd.Series:
     """The heavy-short-interest bonus, pointed the way it was measured.
 
@@ -2158,6 +2182,10 @@ def calculate_scores(
         except Exception:
             df["score_drivers"] = ""
 
+    # Snapshot the composite before the hand-set adjustments, so their net
+    # effect can be rescaled by sign below — and so it stays measurable.
+    df["quality_score_pre_adjust"] = df["quality_score"].astype(float)
+
     # Adjustments — earnings penalty scaled by historical IV crush magnitude
     _earn_nearby_mask = df["event_flag"] == "EARNINGS_NEARBY"
     if _earn_nearby_mask.any():
@@ -2272,6 +2300,22 @@ def calculate_scores(
                 for _idx in df.index[_stale_mask]:
                     df.at[_idx, "score_drivers"] = str(df.at[_idx, "score_drivers"]) + " -stale_quote(-0.05)"
 
+    # Rescale the stack's NET per-row effect by sign. bonus=0.0 suppresses the
+    # upward adjustments, which measured anti-predictive in every window of
+    # both strategy families; penalty=1.0 keeps the downward ones, which did
+    # not. The default is EXACTLY the measured "composite + penalties only"
+    # variant — that variant is `composite + stack.clip(upper=0)`, the same
+    # net-per-row gate computed here, so the shipped numbers are the measured
+    # ones and not an approximation of them.
+    _adj_scales = dict(DEFAULT_ADJUSTMENT_SCALES)
+    _adj_scales.update((config.get("scoring") or {}).get("adjustment_scales") or {})
+    _pre = pd.to_numeric(df["quality_score_pre_adjust"], errors="coerce").fillna(0.0)
+    _delta = pd.to_numeric(df["quality_score"], errors="coerce").fillna(0.0) - _pre
+    df["quality_score"] = (
+        _pre
+        + float(_adj_scales.get("bonus", 0.0)) * _delta.clip(lower=0.0)
+        + float(_adj_scales.get("penalty", 1.0)) * _delta.clip(upper=0.0)
+    )
     df["quality_score"] = df["quality_score"].fillna(0.0).clip(0, 1)
 
     # PoP soft floor for buyer modes: dampen very low probability trades.
