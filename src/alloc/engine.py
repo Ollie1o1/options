@@ -344,7 +344,8 @@ def _should_exit(spec: StrategySpec, trade: Trade, close_price: float,
 
 
 _SIGNAL_FEATURES = ("spot", "atm_iv", "iv_rank", "trend", "ret_4w",
-                    "rv", "iv_minus_rv")
+                    "rv", "iv_minus_rv",
+                    "term_slope", "skew_25d", "iv_velocity", "vol_of_vol")
 
 
 def _entry_features(sig: Dict[str, Any], legs: Sequence[Leg],

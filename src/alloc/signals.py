@@ -33,10 +33,18 @@ from src.alloc.settle import implied_spot_any
 
 @dataclass(frozen=True)
 class Snapshot:
-    """What one symbol looked like on one date."""
+    """What one symbol looked like on one date.
+
+    The last two are SHAPE features — they describe the surface across
+    expirations and across strikes on that one day, so they are computed here
+    from the chain rather than accumulated from history. They default to None
+    so a caller that only has a level can still build a Snapshot.
+    """
     date: str
     spot: Optional[float]
     atm_iv: Optional[float]
+    term_slope: Optional[float] = None
+    skew_25d: Optional[float] = None
 
 
 def atm_iv(chain: Sequence[Dict[str, Any]], spot: float) -> Optional[float]:
@@ -56,16 +64,162 @@ def atm_iv(chain: Sequence[Dict[str, Any]], spot: float) -> Optional[float]:
     return float(statistics.mean(vals)) if vals else None
 
 
+MIN_TERM_GAP_DAYS = 7   # closer than this is one point on the surface, not a slope
+SKEW_DELTA = 0.25
+SKEW_DELTA_TOL = 0.07   # a 45-delta contract does not price a 25-delta wing
+
+
+def _by_expiration(chain: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for c in chain:
+        exp = c.get("expiration")
+        if exp:
+            out.setdefault(str(exp), []).append(c)
+    return out
+
+
+def term_slope(chain: Sequence[Dict[str, Any]],
+               spot: Optional[float]) -> Optional[float]:
+    """Near-dated ATM IV minus far-dated, in the same units as ``atm_iv``.
+
+    Positive is backwardation: the market is charging more for the next few
+    weeks than for the next few months, which is what it does when stress is
+    arriving. Negative is the ordinary contango of a calm surface.
+
+    This is the reason to bother, given every LEVEL feature tested in
+    ``docs/ATTRIBUTION_20260808.md`` came back flat or failed its holdout:
+    ``iv_rank`` is a level against a name's own history and is coincident with
+    stress, whereas the shape inverts as stress arrives.
+
+    Bounded by the cache: DTE runs 10-67, so this is a short-dated slope
+    (roughly 10d against 60d) and NOT the 1M/3M slope the literature usually
+    means. That segment does invert first, but the constraint has to travel
+    with any result measured on it.
+    """
+    if spot is None:
+        return None
+    # Bound to a concrete float rather than relying on the narrowing above to
+    # survive the loop: `atm_iv` takes a float, and this module is inside the
+    # blocking half of the mypy ratchet.
+    s = float(spot)
+    ivs: List[Tuple[str, float]] = []
+    for exp, rows in _by_expiration(chain).items():
+        iv = atm_iv(rows, s)
+        if iv is not None:
+            ivs.append((exp, iv))
+    if len(ivs) < 2:
+        return None
+    ivs.sort(key=lambda p: p[0])
+    (near_exp, near_iv), (far_exp, far_iv) = ivs[0], ivs[-1]
+    try:
+        gap = (_dt.date.fromisoformat(far_exp)
+               - _dt.date.fromisoformat(near_exp)).days
+    except (TypeError, ValueError):
+        return None
+    if gap < MIN_TERM_GAP_DAYS:
+        return None
+    return float(near_iv - far_iv)
+
+
+def skew_25d(chain: Sequence[Dict[str, Any]]) -> Optional[float]:
+    """25-delta put IV minus 25-delta call IV, on the nearest expiration.
+
+    Selling a bull put IS selling the put wing, and how rich that wing is
+    relative to the call side is the price of the thing being sold. Nothing
+    measured so far captures it: ``atm_iv`` is taken at the money and
+    ``iv_rank`` is a time-series rank of that same at-the-money number.
+
+    A wing is only priced off a contract genuinely near 25 delta. Taking the
+    nearest listed contract however far away it is would be the defect
+    ``_nearest_delta`` had before ``DELTA_TOLERANCE`` — the quantity measured
+    would not be the quantity named.
+    """
+    by_exp = _by_expiration(chain)
+    if not by_exp:
+        return None
+    rows = by_exp[min(by_exp)]
+
+    def _wing(opt_type: str) -> Optional[float]:
+        best: Optional[Tuple[float, float]] = None
+        for c in rows:
+            if str(c.get("type", "")).lower() != opt_type:
+                continue
+            d, iv = c.get("delta"), c.get("iv")
+            if d is None or iv is None or float(iv) <= 0:
+                continue
+            miss = abs(abs(float(d)) - SKEW_DELTA)
+            if best is None or miss < best[0]:
+                best = (miss, float(iv))
+        if best is None or best[0] > SKEW_DELTA_TOL:
+            return None
+        return best[1]
+
+    put_iv, call_iv = _wing("put"), _wing("call")
+    if put_iv is None or call_iv is None:
+        return None
+    return float(put_iv - call_iv)
+
+
 def snapshot(chain: Sequence[Dict[str, Any]], date: str) -> Snapshot:
     spot = implied_spot_any(chain)
     return Snapshot(date=date, spot=spot,
-                    atm_iv=atm_iv(chain, spot) if spot is not None else None)
+                    atm_iv=atm_iv(chain, spot) if spot is not None else None,
+                    term_slope=term_slope(chain, spot),
+                    skew_25d=skew_25d(chain))
 
 
 MAX_STEP_DAYS = 10      # beyond this the two observations straddle a data hole
 MIN_RV_STEPS = 10
 TRADING_DAYS = 252.0
 _CAL_TO_TRADING = 5.0 / 7.0
+
+# IV velocity is measured against the most recent snapshot at least
+# IV_VEL_MIN_DAYS back — wide enough that the every-other-day cadence before
+# 2025 and the daily cadence after both clear it — and refused entirely beyond
+# IV_VEL_MAX_DAYS, because a comparison spanning a hole fabricates an event.
+IV_VEL_MIN_DAYS = 5
+IV_VEL_MAX_DAYS = 21
+MIN_VOV_POINTS = 10
+
+
+def _iv_velocity(series: Sequence[Snapshot]) -> Optional[float]:
+    """Change in ATM implied vol, in IV units per week.
+
+    A LEVEL cannot distinguish "premium is rich and calming down" — the
+    textbook short-premium entry — from "premium is rich because a crash is
+    underway". ``docs/ATTRIBUTION_20260808.md`` §4f found high IV rank selects
+    INTO a crash, which is exactly the failure a direction term addresses.
+
+    Expressed per week rather than per observation so the cache's change of
+    cadence in 2025 cannot register as a change in the signal. That is the same
+    trap ``_realized_vol`` scales for.
+    """
+    if len(series) < 2:
+        return None
+    now = series[-1]
+    if now.atm_iv is None:
+        return None
+    # Concrete floats, not narrowed attributes: the arithmetic below sits
+    # behind a loop and a try/except, and this module blocks the mypy gate.
+    now_iv = float(now.atm_iv)
+    try:
+        now_date = _dt.date.fromisoformat(now.date)
+    except (TypeError, ValueError):
+        return None
+    for prior in reversed(list(series[:-1])):
+        if prior.atm_iv is None:
+            continue
+        prior_iv = float(prior.atm_iv)
+        try:
+            gap = (now_date - _dt.date.fromisoformat(prior.date)).days
+        except (TypeError, ValueError):
+            continue
+        if gap < IV_VEL_MIN_DAYS:
+            continue
+        if gap > IV_VEL_MAX_DAYS:
+            return None            # the nearest usable observation is across a hole
+        return float((now_iv - prior_iv) / gap * 7.0)
+    return None
 
 
 def _realized_vol(window: Sequence[Snapshot]) -> Optional[float]:
@@ -145,9 +299,19 @@ class SignalHistory:
             "spot": now.spot, "atm_iv": now.atm_iv,
             "iv_rank": None, "trend": None, "ret_4w": None,
             "rv": None, "iv_minus_rv": None,
+            # Shape of the surface on the day, carried straight off the
+            # snapshot: both are point-in-time, not accumulated.
+            "term_slope": now.term_slope, "skew_25d": now.skew_25d,
+            "iv_velocity": None, "vol_of_vol": None,
         }
 
         ivs = [s.atm_iv for s in window if s.atm_iv is not None]
+        if len(ivs) >= MIN_VOV_POINTS:
+            # Dispersion of the level itself. Unlike `rv` this needs no
+            # time-scaling: it is the spread of a level, not of a return.
+            out["vol_of_vol"] = float(statistics.stdev(ivs))
+        out["iv_velocity"] = _iv_velocity(series)
+
         if now.atm_iv is not None and len(ivs) >= 10:
             below = sum(1 for v in ivs if v < now.atm_iv)
             out["iv_rank"] = 100.0 * below / (len(ivs) - 1)
@@ -188,6 +352,12 @@ def passes(features: Dict[str, Optional[float]],
         ("trend_max", "trend", lambda v, t: v <= t),
         ("ret_4w_min", "ret_4w", lambda v, t: v >= t),
         ("ret_4w_max", "ret_4w", lambda v, t: v <= t),
+        ("term_slope_min", "term_slope", lambda v, t: v >= t),
+        ("term_slope_max", "term_slope", lambda v, t: v <= t),
+        ("skew_25d_min", "skew_25d", lambda v, t: v >= t),
+        ("skew_25d_max", "skew_25d", lambda v, t: v <= t),
+        ("iv_velocity_min", "iv_velocity", lambda v, t: v >= t),
+        ("iv_velocity_max", "iv_velocity", lambda v, t: v <= t),
     )
     for key, feature, test in checks:
         if key not in conditions:

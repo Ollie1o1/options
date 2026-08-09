@@ -32,7 +32,14 @@ UNIVERSE = os.path.join(ROOT, "data", "backtest_universe.json")
 ATTRIBUTION_FEATURES = ["iv_rank", "atm_iv", "rv", "iv_minus_rv", "trend",
                         "ret_4w", "dte", "width", "credit_pct_width",
                         "short_delta", "long_delta", "moneyness",
-                        "friction_pct_credit", "capital_at_risk"]
+                        "friction_pct_credit", "capital_at_risk",
+                        # Shape and rate-of-change. Every feature above them is
+                        # a level of one name at one moment, and every one was
+                        # tested and either came back flat or failed its
+                        # holdout — see docs/LEADING_INDICATORS_20260809.md §3.
+                        # Adding them widens the search to 18, and the
+                        # deflation below picks that up automatically.
+                        "term_slope", "skew_25d", "iv_velocity", "vol_of_vol"]
 
 # Tight-spread names: 3.6% median bid-ask against 16-21% elsewhere. The largest
 # single driver of results found anywhere in this study. Defined in

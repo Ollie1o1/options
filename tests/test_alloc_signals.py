@@ -13,7 +13,7 @@ from __future__ import annotations
 import unittest
 
 from src.alloc.signals import (Snapshot, SignalHistory, atm_iv, passes,
-                               snapshot)
+                               skew_25d, snapshot, term_slope)
 
 EXP = "2024-03-15"
 
@@ -264,3 +264,245 @@ class SplitForgetTest(unittest.TestCase):
 
     def test_forgetting_an_unknown_symbol_is_harmless(self):
         SignalHistory().forget("NOPE")
+
+
+# --------------------------------------------------------------------------
+# Shape and rate-of-change features (docs/LEADING_INDICATORS_20260809.md §3)
+#
+# Every feature measured before these was a LEVEL of one name at one moment,
+# and every one of them was tested and killed. These are the shape of the
+# surface across expirations and across strikes, and the rate at which the
+# level is moving — which is what distinguishes "premium is rich and calming
+# down" from "premium is rich because a crash is underway".
+# --------------------------------------------------------------------------
+
+def _drow(strike, typ, iv, delta, expiration=EXP):
+    """A chain row carrying a delta, which `_row` deliberately does not."""
+    r = _row(strike, typ, 1.0, 1.2, iv, expiration)
+    r["delta"] = delta
+    return r
+
+
+class TermStructureTest(unittest.TestCase):
+    """Near-dated ATM IV against far-dated.
+
+    IV rank is a level against a name's own history and is COINCIDENT with
+    stress. This is a shape, and it inverts as stress arrives — which is why
+    it is worth testing after the levels came back empty.
+    """
+
+    def test_backwardation_is_positive(self):
+        # near expiry richer than far: the market is pricing near-term stress
+        chain = [_row(100, "call", 2.9, 3.1, 0.40, "2024-02-01"),
+                 _row(100, "put", 2.9, 3.1, 0.40, "2024-02-01"),
+                 _row(100, "call", 5.0, 5.2, 0.25, "2024-04-01"),
+                 _row(100, "put", 5.0, 5.2, 0.25, "2024-04-01")]
+        self.assertAlmostEqual(term_slope(chain, 100.0), 0.15, places=6)
+
+    def test_contango_is_negative(self):
+        chain = [_row(100, "call", 2.9, 3.1, 0.20, "2024-02-01"),
+                 _row(100, "put", 2.9, 3.1, 0.20, "2024-02-01"),
+                 _row(100, "call", 5.0, 5.2, 0.30, "2024-04-01"),
+                 _row(100, "put", 5.0, 5.2, 0.30, "2024-04-01")]
+        self.assertAlmostEqual(term_slope(chain, 100.0), -0.10, places=6)
+
+    def test_one_expiration_has_no_slope(self):
+        chain = [_row(100, "call", 2.9, 3.1, 0.20),
+                 _row(100, "put", 2.9, 3.1, 0.20)]
+        self.assertIsNone(term_slope(chain, 100.0))
+
+    def test_expirations_too_close_together_are_one_point_not_a_slope(self):
+        # A 2-day separation is noise in the surface, not term structure.
+        chain = [_row(100, "call", 2.9, 3.1, 0.40, "2024-02-01"),
+                 _row(100, "put", 2.9, 3.1, 0.40, "2024-02-01"),
+                 _row(100, "call", 3.0, 3.2, 0.25, "2024-02-03"),
+                 _row(100, "put", 3.0, 3.2, 0.25, "2024-02-03")]
+        self.assertIsNone(term_slope(chain, 100.0))
+
+    def test_an_unusable_iv_on_one_leg_gives_no_slope(self):
+        chain = [_row(100, "call", 2.9, 3.1, None, "2024-02-01"),
+                 _row(100, "put", 2.9, 3.1, None, "2024-02-01"),
+                 _row(100, "call", 5.0, 5.2, 0.25, "2024-04-01"),
+                 _row(100, "put", 5.0, 5.2, 0.25, "2024-04-01")]
+        self.assertIsNone(term_slope(chain, 100.0))
+
+    def test_no_spot_gives_no_slope(self):
+        self.assertIsNone(term_slope([_row(100, "call", 1, 2, 0.2)], None))
+
+
+class SkewTest(unittest.TestCase):
+    """25-delta put IV against 25-delta call IV.
+
+    Selling a bull put IS selling the put wing, and how rich that wing is
+    relative to the call side is the price of the thing being sold. No level
+    feature captures it: `atm_iv` is measured at the money and `iv_rank` is a
+    time-series rank of that same at-the-money number.
+    """
+
+    def _chain(self, put_iv, call_iv, expiration=EXP):
+        return [_drow(90, "put", put_iv, -0.25, expiration),
+                _drow(100, "put", 0.20, -0.50, expiration),
+                _drow(100, "call", 0.20, 0.50, expiration),
+                _drow(110, "call", call_iv, 0.25, expiration)]
+
+    def test_a_rich_put_wing_is_positive_skew(self):
+        self.assertAlmostEqual(skew_25d(self._chain(0.35, 0.22)),
+                               0.13, places=6)
+
+    def test_a_symmetric_smile_has_no_skew(self):
+        self.assertAlmostEqual(skew_25d(self._chain(0.25, 0.25)),
+                               0.0, places=6)
+
+    def test_a_chain_without_deltas_gives_no_skew(self):
+        chain = [_row(90, "put", 1, 2, 0.35), _row(110, "call", 1, 2, 0.22)]
+        self.assertIsNone(skew_25d(chain))
+
+    def test_no_strike_near_25_delta_gives_no_skew(self):
+        # A ladder that stops at 45-delta cannot price a 25-delta wing, and
+        # substituting the nearest listed contract however far away it is
+        # is the same defect `_nearest_delta` had before DELTA_TOLERANCE.
+        chain = [_drow(95, "put", 0.35, -0.45), _drow(105, "call", 0.22, 0.45)]
+        self.assertIsNone(skew_25d(chain))
+
+    def test_one_wing_missing_gives_no_skew(self):
+        chain = [_drow(90, "put", 0.35, -0.25)]
+        self.assertIsNone(skew_25d(chain))
+
+    def test_skew_is_read_off_the_nearest_expiration(self):
+        # Two expirations with opposite skews: the near one must win, so the
+        # feature has one consistent horizon rather than a blend of two.
+        chain = (self._chain(0.35, 0.20, "2024-02-01")
+                 + self._chain(0.20, 0.35, "2024-06-01"))
+        self.assertAlmostEqual(skew_25d(chain), 0.15, places=6)
+
+
+class IvVelocityTest(unittest.TestCase):
+    """The rate the level is moving, which the level itself cannot say.
+
+    §4f of ATTRIBUTION_20260808 found high IV rank selects INTO a crash. That
+    is what a level does. "Rich and falling" is the textbook short-premium
+    entry; "rich and rising" is a crash in progress; IV rank cannot tell them
+    apart and this can.
+    """
+
+    def _feed(self, h, ivs, step=1, start=(2024, 1, 1)):
+        import datetime as dt
+        d = dt.date(*start)
+        for iv in ivs:
+            h.update("AAA", Snapshot(d.isoformat(), 100.0, iv))
+            d += dt.timedelta(days=step)
+
+    def test_rising_implied_vol_is_positive_velocity(self):
+        h = SignalHistory()
+        self._feed(h, [0.20 + 0.01 * i for i in range(20)])
+        self.assertGreater(h.features("AAA")["iv_velocity"], 0)
+
+    def test_falling_implied_vol_is_negative_velocity(self):
+        h = SignalHistory()
+        self._feed(h, [0.40 - 0.01 * i for i in range(20)])
+        self.assertLess(h.features("AAA")["iv_velocity"], 0)
+
+    def test_a_flat_level_has_no_velocity(self):
+        h = SignalHistory()
+        self._feed(h, [0.25] * 20)
+        self.assertAlmostEqual(h.features("AAA")["iv_velocity"], 0.0, places=9)
+
+    def test_sampling_density_does_not_change_the_velocity(self):
+        # Same IV path in vol-points-per-calendar-day, sampled daily and every
+        # other day. The cache changes cadence in 2025, and a velocity that
+        # read the cadence would make the backfill itself look like a signal —
+        # the same trap `_realized_vol` scales for.
+        daily, sparse = SignalHistory(), SignalHistory()
+        self._feed(daily, [0.20 + 0.005 * i for i in range(24)], step=1)
+        self._feed(sparse, [0.20 + 0.010 * i for i in range(12)], step=2)
+        a = daily.features("AAA")["iv_velocity"]
+        b = sparse.features("AAA")["iv_velocity"]
+        self.assertAlmostEqual(a, b, places=6)
+
+    def test_too_little_history_gives_no_velocity(self):
+        h = SignalHistory()
+        self._feed(h, [0.20, 0.21])
+        self.assertIsNone(h.features("AAA")["iv_velocity"])
+
+    def test_a_long_data_hole_is_not_a_velocity(self):
+        # Comparing across a 21-month hole fabricates an event, which is the
+        # same failure that made split detection read gap-drift as a split.
+        h = SignalHistory()
+        h.update("AAA", Snapshot("2020-03-20", 100.0, 0.80))
+        h.update("AAA", Snapshot("2022-01-03", 100.0, 0.20))
+        self.assertIsNone(h.features("AAA")["iv_velocity"])
+
+
+class VolOfVolTest(unittest.TestCase):
+    def test_a_steady_level_has_almost_no_vol_of_vol(self):
+        h = SignalHistory()
+        for i in range(20):
+            h.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 100.0, 0.25))
+        self.assertAlmostEqual(h.features("AAA")["vol_of_vol"], 0.0, places=9)
+
+    def test_a_swinging_level_reads_higher_than_a_calm_one(self):
+        calm, wild = SignalHistory(), SignalHistory()
+        for i in range(20):
+            calm.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 100.0,
+                                        0.25 + (i % 2) * 0.01))
+            wild.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 100.0,
+                                        0.25 + (i % 2) * 0.20))
+        self.assertGreater(wild.features("AAA")["vol_of_vol"],
+                           calm.features("AAA")["vol_of_vol"])
+
+    def test_too_little_history_gives_no_vol_of_vol(self):
+        h = SignalHistory()
+        h.update("AAA", Snapshot("2024-01-01", 100.0, 0.25))
+        self.assertIsNone(h.features("AAA")["vol_of_vol"])
+
+
+class NewFeaturesAreCausalTest(unittest.TestCase):
+    """The whole module's contract: nothing may peek ahead."""
+
+    def test_velocity_ignores_a_snapshot_fed_out_of_order(self):
+        h = SignalHistory()
+        for i in range(20):
+            h.update("AAA", Snapshot(f"2024-02-{i+1:02d}", 100.0, 0.20))
+        before = h.features("AAA")["iv_velocity"]
+        h.update("AAA", Snapshot("2024-01-01", 100.0, 9.99))   # earlier date
+        self.assertEqual(h.features("AAA")["iv_velocity"], before)
+
+    def test_shape_features_survive_a_split_forget(self):
+        h = SignalHistory()
+        h.update("AAA", Snapshot("2024-01-01", 100.0, 0.2))
+        h.forget("AAA")
+        self.assertEqual(h.features("AAA"), {})
+
+
+class NewConditionsTest(unittest.TestCase):
+    """The new features must be usable as entry conditions, on the same terms.
+
+    Chiefly the standing one: an uncomputable feature FAILS. Most symbol-days
+    will have no `skew_25d` (85.4% of symbol-day-expiries carry both wings, so
+    ~15% do not), and an unknown that passed would silently turn a conditioned
+    arm back into the unconditional one.
+    """
+
+    def test_conditions_on_the_new_features_are_honoured(self):
+        f = {"term_slope": 0.05, "skew_25d": 0.10, "iv_velocity": -0.02}
+        self.assertTrue(passes(f, {"term_slope_min": 0.0}))
+        self.assertFalse(passes(f, {"term_slope_max": 0.0}))
+        self.assertTrue(passes(f, {"skew_25d_min": 0.05}))
+        self.assertTrue(passes(f, {"iv_velocity_max": 0.0}))
+        self.assertFalse(passes(f, {"iv_velocity_min": 0.0}))
+
+    def test_an_uncomputable_new_feature_still_FAILS(self):
+        f = {"term_slope": None, "skew_25d": None, "iv_velocity": None}
+        self.assertFalse(passes(f, {"term_slope_min": 0.0}))
+        self.assertFalse(passes(f, {"skew_25d_min": 0.0}))
+        self.assertFalse(passes(f, {"iv_velocity_max": 0.0}))
+
+    def test_the_rich_and_falling_arm_composes(self):
+        # The interaction docs/LEADING_INDICATORS_20260809.md §2b argues for:
+        # high IV rank AND falling is the textbook entry, high AND rising is a
+        # crash in progress. IV rank alone cannot separate them.
+        cond = {"iv_rank_min": 70.0, "iv_velocity_max": 0.0}
+        calming = {"iv_rank": 85.0, "iv_velocity": -0.03}
+        erupting = {"iv_rank": 85.0, "iv_velocity": +0.04}
+        self.assertTrue(passes(calming, cond))
+        self.assertFalse(passes(erupting, cond))
