@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import unittest
 
-from src.alloc.attribution import (feature_ic, bucket_table, rank_features,
-                                   split_by_time)
+from src.alloc.attribution import (disaster_auc, feature_ic, bucket_table,
+                                   format_ranking, monotonicity,
+                                   rank_features, split_by_time)
 
 
 class _T:
@@ -204,3 +205,108 @@ class ThresholdEffectTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# The two screens the IC and the quantile spread still cannot supply.
+# docs/LEADING_INDICATORS_20260809.md §2 lists four things a search should
+# report; IC and q_spread were already here, these are the other two.
+# --------------------------------------------------------------------------
+
+
+class MonotonicityTest(unittest.TestCase):
+    """The shape across buckets, as one number.
+
+    `bucket_table` has always produced the shape and nothing summarised it, so
+    judging it stayed a manual read of a table. It is the property that
+    separates a graded effect from one good cell: ATTRIBUTION_20260808 §3
+    threw out `credit_pct_width` on exactly this basis (Q1 -0.011, Q2 +0.019,
+    Q3 +0.090, Q4 -0.068 — up then down) despite an IC of 0.56.
+    """
+
+    def test_a_rising_relationship_is_fully_monotone(self):
+        self.assertGreater(monotonicity(_monotone(), "iv_rank"), 0.95)
+
+    def test_a_falling_relationship_is_monotone_the_other_way(self):
+        trades = _monotone()
+        for t in trades:
+            t.features["iv_rank"] = -t.features["iv_rank"]
+        self.assertLess(monotonicity(trades, "iv_rank"), -0.95)
+
+    def test_the_up_then_down_shape_that_fooled_credit_pct_width(self):
+        # Deliberately built to score a strong IC while being non-monotone,
+        # which is the artifact signature this screen exists to catch.
+        trades = []
+        for i in range(100):
+            x = float(i)
+            roc = (i / 100.0) if i < 75 else (0.75 - (i - 75) / 100.0)
+            trades.append(_T(f"2024-{1 + i % 12:02d}-{1 + i % 28:02d}",
+                             roc=roc, credit_pct_width=x))
+        self.assertLess(monotonicity(trades, "credit_pct_width"), 0.95)
+
+    def test_too_few_trades_cannot_be_shaped(self):
+        self.assertIsNone(monotonicity(_monotone(n=4), "iv_rank"))
+
+    def test_a_feature_nobody_has_is_unmeasurable(self):
+        self.assertIsNone(monotonicity(_monotone(), "does_not_exist"))
+
+
+class DisasterAucTest(unittest.TestCase):
+    """Does anything at entry flag the trades that lose most of the capital?
+
+    For a short-premium book this is THE question and it is not the same one
+    the IC answers: ATTRIBUTION_20260808 §5 found bull_put's 25 disasters were
+    13.4% of trades and 1,577% of total absolute RoC. The entire P&L is the
+    tail. §5 ran this by hand; it belongs in the harness.
+
+    AUC is P(a disaster scored higher on this feature than a survivor), so
+    0.5 is a coin flip and a value far from 0.5 in EITHER direction is a
+    warning light.
+    """
+
+    def _mixed(self, flag_the_disasters: bool):
+        trades = []
+        for i in range(60):
+            disaster = i % 5 == 0
+            roc = -0.9 if disaster else 0.05
+            x = (1.0 if (disaster and flag_the_disasters) else 0.0) + i * 1e-6
+            trades.append(_T(f"2024-{1 + i % 12:02d}-{1 + i % 28:02d}",
+                             roc=roc, warn=x))
+        return trades
+
+    def test_a_feature_that_marks_every_disaster_scores_near_one(self):
+        r = disaster_auc(self._mixed(True), "warn")
+        self.assertGreater(r["auc"], 0.95)
+        self.assertEqual(r["n_disasters"], 12)
+
+    def test_a_feature_unrelated_to_the_disasters_scores_near_a_coin_flip(self):
+        r = disaster_auc(self._mixed(False), "warn")
+        self.assertLess(abs(r["auc"] - 0.5), 0.15)
+
+    def test_no_disasters_means_nothing_to_separate(self):
+        trades = [_T(f"2024-01-{1 + i % 28:02d}", roc=0.05, warn=float(i))
+                  for i in range(40)]
+        self.assertIsNone(disaster_auc(trades, "warn")["auc"])
+
+    def test_all_disasters_means_nothing_to_separate(self):
+        trades = [_T(f"2024-01-{1 + i % 28:02d}", roc=-0.9, warn=float(i))
+                  for i in range(40)]
+        self.assertIsNone(disaster_auc(trades, "warn")["auc"])
+
+    def test_the_disaster_threshold_is_the_documented_one(self):
+        # "more than half their capital", ATTRIBUTION_20260808 §5.
+        trades = ([_T("2024-01-01", roc=-0.6, warn=1.0)] * 10
+                  + [_T("2024-01-02", roc=-0.4, warn=0.0)] * 30)
+        self.assertEqual(disaster_auc(trades, "warn")["n_disasters"], 10)
+
+
+class RankingCarriesTheNewScreensTest(unittest.TestCase):
+    def test_rank_features_reports_shape_and_tail_alongside_the_ic(self):
+        rows = rank_features(_monotone(), ["iv_rank"])
+        self.assertIn("mono", rows[0])
+        self.assertIn("tail_auc", rows[0])
+
+    def test_the_formatted_table_shows_them(self):
+        text = format_ranking(rank_features(_monotone(), ["iv_rank"]))
+        self.assertIn("mono", text)
+        self.assertIn("tailAUC", text)

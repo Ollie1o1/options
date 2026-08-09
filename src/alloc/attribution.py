@@ -107,9 +107,19 @@ def feature_ic(trades: Sequence[Any], feature: str,
     out: Dict[str, Any] = {"feature": feature, "n": len(xs), "ic": None,
                            "p": None, "t": 0.0, "t_clustered": 0.0,
                            "q_top": None, "q_bot": None, "q_spread": None,
-                           "n_trials": n_trials}
+                           "mono": None, "tail_auc": None, "tail_p": None,
+                           "n_disasters": 0, "n_trials": n_trials}
     if len(xs) < MIN_TRADES or _sps is None:
         return out
+    # The other two of the four screens. Neither is derivable from the IC:
+    # `mono` asks whether the effect is ORDERED across the parameter, and
+    # `tail_auc` asks whether it flags the rare total losses that are this
+    # book's entire P&L. See docs/LEADING_INDICATORS_20260809.md §2.
+    out["mono"] = monotonicity(trades, feature)
+    tail = disaster_auc(trades, feature)
+    out["tail_auc"] = tail["auc"]
+    out["tail_p"] = tail["p"]
+    out["n_disasters"] = tail["n_disasters"]
     # Mean outcome in the top vs bottom quintile of the feature.
     #
     # This exists because the IC alone is BLIND to the effect this book cares
@@ -142,6 +152,80 @@ def feature_ic(trades: Sequence[Any], feature: str,
         "t": round(float(ic * np.sqrt((n - 2) / denom)), 3),
         "t_clustered": round(_clustered_t(keep, xs, ys), 3),
     })
+    return out
+
+
+MONO_BUCKETS = 5        # quintiles, so the shape and `q_spread` describe one split
+DISASTER_ROC = -0.5     # "more than half the capital", ATTRIBUTION_20260808 §5
+
+
+def monotonicity(trades: Sequence[Any], feature: str,
+                 n_buckets: int = MONO_BUCKETS) -> Optional[float]:
+    """Rank correlation between bucket index and mean outcome: the SHAPE, as one number.
+
+    +1 is a cleanly graded effect, -1 the same inverted, and anything near 0 is
+    a feature whose good cell is somewhere in the middle — which is what an
+    artifact looks like.
+
+    `bucket_table` has produced this shape all along and nothing summarised it,
+    so judging it stayed a manual read. It is not a decoration on the IC: §3 of
+    `docs/ATTRIBUTION_20260808.md` discarded `credit_pct_width` on exactly this
+    basis (Q1 -0.011, Q2 +0.019, Q3 +0.090, Q4 -0.068 — up then down) in spite
+    of an IC of 0.56, and §4f kept `width` partly because its shape survived
+    the holdout when its IC never reached significance in-sample.
+
+    Coarse by construction: five buckets means this can only take a handful of
+    values. That is the point — it asks whether the effect is ordered, not how
+    large it is.
+    """
+    rows = bucket_table(trades, feature, n_buckets=n_buckets)
+    if len(rows) < 3 or _sps is None:
+        return None
+    means = [r["mean_roc"] for r in rows]
+    if len(set(means)) < 2:
+        return None
+    rho, _p = _sps.spearmanr(list(range(len(means))), means)
+    return None if rho != rho else round(float(rho), 3)
+
+
+def disaster_auc(trades: Sequence[Any], feature: str,
+                 threshold: float = DISASTER_ROC) -> Dict[str, Any]:
+    """Mann-Whitney AUC of the feature, trades that lost most of the capital vs the rest.
+
+    For a short-premium book this is THE question, and it is not the question
+    the IC answers. §5 of `docs/ATTRIBUTION_20260808.md`: bull_put's 25
+    disasters were 13.4% of trades and **1,577% of total absolute RoC**. The
+    entire P&L is the tail, so a feature that shifts the middle and misses the
+    tail is worth very little, and one that flags the tail is worth a lot even
+    with an IC of zero.
+
+    AUC is P(a disaster scored higher than a survivor). 0.5 is a coin flip;
+    far from 0.5 in EITHER direction is informative, since a feature that
+    reliably marks the safe trades is as useful as one that marks the doomed.
+
+    §5 ran this by hand once. Running it every time is the difference between
+    a screen and a one-off.
+    """
+    _keep, xs, ys = paired(trades, feature)
+    out: Dict[str, Any] = {"feature": feature, "n": len(xs),
+                           "n_disasters": 0, "auc": None, "p": None}
+    if not xs:
+        return out
+    arr_x = np.asarray(xs, dtype=float)
+    arr_y = np.asarray(ys, dtype=float)
+    hit = arr_y < threshold
+    out["n_disasters"] = int(hit.sum())
+    # Both groups must be non-empty: with no disasters there is nothing to
+    # separate, and with nothing BUT disasters the same is true. Reporting 0.5
+    # in either case would read as "measured, no warning" when the truth is
+    # "this window contained no tail to warn about".
+    if out["n_disasters"] == 0 or out["n_disasters"] == len(xs):
+        return out
+    if _sps is None or len(set(xs)) < 2:
+        return out
+    u, p = _sps.mannwhitneyu(arr_x[hit], arr_x[~hit], alternative="two-sided")
+    out["auc"] = round(float(u) / float(hit.sum() * (~hit).sum()), 4)
+    out["p"] = round(float(p), 4)
     return out
 
 
@@ -198,10 +282,20 @@ def rank_features(trades: Sequence[Any],
                   ) -> List[Dict[str, Any]]:
     """Every feature's IC and quantile spread, each carrying the trial count.
 
-    `by` selects the sort: `"ic"` finds features that rank-order every trade,
-    `"q_spread"` finds threshold and tail-avoidance effects that an IC cannot
-    see. Run both — they answer different questions and the second is what
-    caught the IV-rank effect after the first missed it.
+    `by` selects the sort, and the four answer different questions:
+
+      "ic"        features that rank-order EVERY trade
+      "q_spread"  threshold effects an IC cannot see — this is what caught the
+                  IV-rank effect after the IC missed it, and what found a
+                  20.7-point `width` effect sitting at p=0.58
+      "mono"      effects that are ORDERED across the parameter, which is the
+                  shape that is hard to produce by chance
+      "tail_auc"  features that flag the rare total losses, ranked by distance
+                  from a coin flip in either direction
+
+    Run more than one. A feature that leads on all four is a different animal
+    from one that leads on a single screen, and this repo has been burned
+    exactly once per screen it was missing.
 
     `n_trials` is the number of features examined, because that is exactly the
     size of the search that produced the winner.
@@ -215,8 +309,17 @@ def rank_features(trades: Sequence[Any],
         features = seen
     k = len(features)
     rows = [feature_ic(trades, f, n_trials=k) for f in features]
-    rows.sort(key=lambda r: abs(r.get(by)) if r.get(by) is not None else -1.0,
-              reverse=True)
+
+    def _strength(r: Dict[str, Any]) -> float:
+        v = r.get(by)
+        if v is None:
+            return -1.0
+        # An AUC is strong when it is FAR FROM 0.5 in either direction, not
+        # when it is large: 0.20 and 0.80 separate the tail equally well, and
+        # ranking them by magnitude would bury half the warnings.
+        return abs(float(v) - 0.5) if by == "tail_auc" else abs(float(v))
+
+    rows.sort(key=_strength, reverse=True)
     return rows
 
 
@@ -226,7 +329,8 @@ def format_ranking(rows: Sequence[Dict[str, Any]], title: str = "") -> str:
     if title:
         out.append(title)
     out.append(f"  {'feature':<22} {'n':>5} {'IC':>8} {'t':>7} {'t_clust':>8} "
-               f"{'p':>8} {'q_bot':>8} {'q_top':>8} {'q_spread':>9}")
+               f"{'p':>8} {'q_bot':>8} {'q_top':>8} {'q_spread':>9} "
+               f"{'mono':>6} {'tailAUC':>8}")
     for r in rows:
         if r["ic"] is None:
             out.append(f"  {r['feature']:<22} {r['n']:>5}   "
@@ -234,7 +338,11 @@ def format_ranking(rows: Sequence[Dict[str, Any]], title: str = "") -> str:
             continue
         q = ("" if r.get("q_spread") is None else
              f" {r['q_bot']:>8.4f} {r['q_top']:>8.4f} {r['q_spread']:>9.4f}")
+        # A dash is "could not be measured here", which is a different claim
+        # from a number — the same distinction the IC column already makes.
+        mono = "     -" if r.get("mono") is None else f"{r['mono']:>6.2f}"
+        auc = "       -" if r.get("tail_auc") is None else f"{r['tail_auc']:>8.3f}"
         out.append(f"  {r['feature']:<22} {r['n']:>5} {r['ic']:>8.4f} "
                    f"{r['t']:>7.2f} {r['t_clustered']:>8.2f} "
-                   f"{r['p']:>8.4f}{q}")
+                   f"{r['p']:>8.4f}{q} {mono} {auc}")
     return "\n".join(out)
