@@ -71,6 +71,11 @@ def audit_coverage(db_path: str, universe: Dict[str, List[str]],
         rows = []
         read_error = str(exc)
 
+    # Annotated at this first binding, not at the second one below: the two
+    # branches are alternatives, and re-annotating the same name is a redefinition.
+    detail: List[Dict[str, Any]]
+    summary: Dict[str, Dict[str, int]]
+
     if read_error is not None:
         detail = [{"stratum": stratum, "symbol": sym, "fetched_days": 0,
                    "nonempty_days": 0, "contracts": 0, "first": None,
@@ -93,8 +98,8 @@ def audit_coverage(db_path: str, universe: Dict[str, List[str]],
         if n > 0:
             date_nonempty[date] += 1
 
-    detail: List[Dict[str, Any]] = []
-    summary: Dict[str, Dict[str, int]] = {}
+    detail = []
+    summary = {}
     for stratum, syms in universe.items():
         usable = sparse = absent = 0
         for sym in sorted(syms):

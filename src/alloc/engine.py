@@ -257,7 +257,7 @@ def select_legs(spec: StrategySpec, chain, date: str,
     return None
 
 
-def crossing_cost(legs: List[Leg], quotes) -> Optional[float]:
+def crossing_cost(legs: Sequence[Leg], quotes) -> Optional[float]:
     """What crossing the spread costs, per share, versus trading at mid.
 
     Measured at 50% of the median credit across 115 symbols — the single
