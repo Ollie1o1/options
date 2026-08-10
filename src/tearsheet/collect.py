@@ -69,8 +69,14 @@ def _num(v):
     return f if math.isfinite(f) else None
 
 
-def _ev_noise(row) -> float:
+def ev_noise(row) -> float:
     """Half-width of the band inside which net EV's sign is not resolvable.
+
+    The one implementation. `cli_display` carried a second copy with the sigma
+    table and the cost fraction written out again as literals; the two agreed
+    by luck, and the verdict, the EV gate, the WORTH grade and the persisted
+    `entry_ev_noise` all read this number, so a drift between them would have
+    made a card disagree with the ledger row it produced.
 
     Net EV is Black-Scholes arithmetic over one uncertain input: the implied vol.
     `vega_dollar` is what one IV point is worth to this contract, so the error
@@ -85,6 +91,9 @@ def _ev_noise(row) -> float:
         return abs(vega_dollar) * sigma
     cost = _num(row.get("ev_cost_per_contract"))
     return abs(cost) * _COST_FRACTION_FALLBACK if cost else 0.0
+
+
+_ev_noise = ev_noise   # the private name this module used before it was shared
 
 
 def _assumed_fill(row):

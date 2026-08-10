@@ -123,23 +123,39 @@ def print_score_breakdown(score_drivers_str: str) -> str:
     return out or score_drivers_str
 
 
+def worth_text(row) -> str:
+    """The WORTH line for any candidate — single leg, spread or condor.
+
+    One implementation for every card. `worth.assess` grades the weakest of
+    three margins, so a structure with no EV basis still grades on friction and
+    on p* against your own record; both are arithmetic and need no model.
+
+    Returns "" when the row cannot be graded at all, so a caller can simply
+    skip the line rather than print an empty one.
+    """
+    try:
+        from .worth import assess
+        from .candidate_verdict import win_rates_from_ledger
+        r = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        w = assess(r, historical_win_rate=win_rates_from_ledger().get(
+            r.get("strategy_name")))
+        role = {"STRONG": "good", "CLEAR": "emph", "THIN": "warn"}.get(w.grade, "muted")
+        return fmt.style(w.line(), role) if HAS_ENHANCED_CLI else w.line()
+    except Exception:
+        return ""
+
+
 def _ev_noise_for_row(row) -> float:
-    """Vega-sized error bar on this row's net EV. Mirrors tearsheet.collect."""
-    sigma = {"high": 1.0, "medium": 1.5, "low": 2.5}.get(
-        str(row.get("iv_confidence") or "").strip().lower(), 2.5)
-    try:
-        vd = float(row.get("vega_dollar"))
-        if math.isfinite(vd) and vd:
-            return abs(vd) * sigma
-    except (TypeError, ValueError):
-        pass
-    try:
-        cost = float(row.get("ev_cost_per_contract"))
-        if math.isfinite(cost):
-            return abs(cost) * 0.25
-    except (TypeError, ValueError):
-        pass
-    return 0.0
+    """Vega-sized error bar on this row's net EV.
+
+    Delegates rather than mirrors. This function used to restate the sigma
+    table and the cost fraction as literals, so two copies of the same
+    constants could drift apart while the verdict, the EV gate in
+    `pick_ranking`, the WORTH grade and the persisted `entry_ev_noise` all
+    claim to be the same number.
+    """
+    from .tearsheet.collect import ev_noise
+    return ev_noise(row)
 
 
 from .tearsheet.render import decide_verdict  # the one verdict rule, shared
@@ -178,14 +194,17 @@ def _style_verdict(decision: str) -> str:
 
 
 def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
-    """Print a ranked cross-ticker table grouped by DTE bucket.
+    """Print a cross-ticker table grouped by DTE bucket. Not a ranking.
 
-    Rows arrive ordered by `options_screener.rank_by_verdict`: candidates that
-    clear the friction gate first, then by net-of-cost EV, with quality_score
-    only breaking ties. Both the Cost column and the Net EV column are part of
-    that key, so both are shown. `quality_score` correlates -0.132 with return
-    on the long-premium book; presenting it as the ranking, as this table used
-    to, pointed the reader at the one number that does not predict.
+    Rows arrive gated by `src.pick_ranking`: everything the ledger measures as
+    a loser has already been removed, and what is left is ordered by carry cost
+    because no ordering of the survivors beat `quality_score` at the top slot
+    out of sample — 23 of 48 paired (day, board) cells, Wilcoxon p=0.89.
+
+    So the leading row is not a recommendation and the column is numbered `#`
+    rather than `Rank`. `Score` is still shown because it remains useful
+    hygiene, but it decides nothing here: it measures -0.131 against return on
+    capital on long calls and its top quintile lost $10,173 across the book.
     """
     if contracts.empty:
         print("No contracts to display.")
@@ -194,8 +213,11 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     width = get_display_width()
     sep = "-" * width
 
+    note = "ordered by carry cost — an ordering, not a ranking; no row is a recommendation"
+    print("  " + (fmt.style(note, 'muted') if HAS_ENHANCED_CLI else note))
+
     header = (
-        f"{'Rank':<5} {'Ticker':<7} {'Type':<5} {'Strike':>7} {'Expiry':<12} "
+        f"{'#':<5} {'Ticker':<7} {'Type':<5} {'Strike':>7} {'Expiry':<12} "
         f"{'DTE':>4} {'Delta':>6} {'IV%ile':>6} {'PoP%':>6} {'Prem':>7} "
         f"{'Net EV':>7} {'Cost':>5} {'P2x':>5} {'Call':<5} {'Score':>6}  Drivers"
     )
@@ -284,11 +306,15 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
 
 
 def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
-    """Bright two-line decision zone: VERDICT (EV sign) + DO (action).
+    """Bright three-line decision zone: VERDICT (EV sign), WORTH, DO (action).
 
     Consolidates the EV-after-cost read and the entry/target/stop plan into the
-    two lines the eye should land on first. Every figure here also appears in
-    the supporting rows / order ticket, so nothing here is its sole source.
+    lines the eye should land on first. Every figure here also appears in the
+    supporting rows / order ticket, so nothing here is its sole source.
+
+    VERDICT gives the sign of the edge; WORTH gives its size relative to its own
+    uncertainty and its trading cost. The sign alone was never enough to answer
+    "is this worth buying" — `+$9/ct` and `+$880/ct` both read POSITIVE.
     """
     config = config or {}
 
@@ -343,6 +369,27 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
         verdict = "  VERDICT    " + "  ".join([ev_text] + extras)
 
     # --- DO: real entry/target/stop levels (reuse the Plan-block math) ---
+    #
+    # Withheld unless the card can actually justify an order. This line used to
+    # print unconditionally: a live scan on 2026-08-09 had seven of nine cards
+    # reading NEGATIVE EV and all nine printing "DO BUY 1 @ $x", so the card
+    # said "pass or restructure" on one row and handed over a limit price on
+    # the next. An absent EV basis is not a green light either — there is
+    # nothing to justify the order with.
+    # --- WORTH: how far the edge clears its own bar, and what limits it ---
+    _wt = worth_text(row)
+    worth_line = None
+    if _wt:
+        worth_line = (ui.kv_line("WORTH", [_wt]) if HAS_ENHANCED_CLI
+                      else "  WORTH      " + _wt)
+
+    if math.isnan(ev):
+        no_do = ("DO         no order — EV has no trustworthy vol basis on "
+                 "this contract")
+        do = ("  " + fmt.style(no_do, 'muted')
+              if HAS_ENHANCED_CLI else "  " + no_do)
+        return [x for x in (verdict, worth_line, do) if x]
+
     try:
         from .utils import is_short_position
     except ImportError:
@@ -369,7 +416,7 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     else:
         do_line = "  DO         " + do_text
 
-    return [verdict, do_line]
+    return [x for x in (verdict, worth_line, do_line) if x]
 
 
 def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> list:
@@ -423,15 +470,17 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
     quality = row.get('quality_score', 0.0)
     drivers = row.get("score_drivers", "")
     if HAS_ENHANCED_CLI:
-        # stars already carry the numeric score (format_quality_score appends
-        # it) — don't print the number twice.
-        stars, q_color = fmt.format_quality_score(quality)
-        q_str = f"Quality: {stars}"
+        # Was `Quality: ★★★☆☆`, a second star rating on the same card. Stars
+        # read as a verdict; this number is hygiene at best and anti-predictive
+        # at worst (-0.131 on long calls). Printed plainly, and lower case, so
+        # it stops competing with WORTH for the reader's eye. The drivers stay
+        # — knowing WHICH components fired is the useful part.
+        q_str = fmt.style(f"score {quality:.2f}", 'muted')
         if drivers:
             q_str += f"  {fmt.colorize(f'[{drivers}]', fmt.Colors.DIM)}"
         val.append(q_str)
     else:
-        val.append(f"Quality: {quality:.2f}" + (f"  [{drivers}]" if drivers else ""))
+        val.append(f"score {quality:.2f}" + (f"  [{drivers}]" if drivers else ""))
 
     if val:
         lines.append(ui.kv_line("Valuation", val) if HAS_ENHANCED_CLI
@@ -939,7 +988,13 @@ def _print_strategy_panel(df_picks: pd.DataFrame, width: int) -> None:
         quality = best.get('quality_score', 0)
         pop = best.get('prob_profit', 0)
         rr = best.get('rr_ratio', 0)
-        stars, _ = fmt.format_quality_score(quality)
+        # WORTH pips, not stars: this callout names a "best" per bucket and
+        # the composite has no standing to pick one.
+        try:
+            from .worth import assess as _wa
+            stars = _wa(dict(best)).pips
+        except Exception:
+            stars = fmt.style(f"score {quality:.2f}", 'muted')
         thesis = generate_trade_thesis(best) if HAS_ENHANCED_CLI else ""
         thesis_short = thesis.split('|')[0].strip() if thesis else ""
         thesis_short = ui.clip(thesis_short, 40)
@@ -1051,10 +1106,15 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     except Exception:
         pass
 
-    # Top 3 Opportunities
-    print("\n" + ui.rule(width, title="TOP 3 OPPORTUNITIES"))
+    # Three of what cleared the gates. Deliberately NOT "top 3": this block
+    # ranked by `quality_score`, which measures -0.131 against return on
+    # capital on long calls and whose top quintile lost $10,173 across the
+    # book. No ordering beat it out of sample either (23 of 48 paired cells,
+    # p=0.89), so the board no longer claims one. Rows arrive already gated
+    # and ordered by carry cost; these are simply the first three.
+    print("\n" + ui.rule(width, title="CLEARED THE GATES"))
 
-    top3 = df_picks.nlargest(3, 'quality_score')
+    top3 = df_picks.head(3)
 
     for i, (_, row) in enumerate(top3.iterrows(), 1):
         symbol = row.get('symbol', 'N/A')
@@ -1066,7 +1126,13 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
         ev = row.get('ev_per_contract', 0)
         quality = row.get('quality_score', 0)
 
-        stars, _ = fmt.format_quality_score(quality)
+        # The CLEARED THE GATES rows carry WORTH pips. Stars here ranked
+        # the block by a metric that no longer orders it.
+        try:
+            from .worth import assess as _wa
+            stars = _wa(row.to_dict() if hasattr(row, 'to_dict') else dict(row)).pips
+        except Exception:
+            stars = fmt.style(f'score {quality:.2f}', 'muted')
 
         # Row per pick
         _ml = float(row.get("max_loss", 0) or 0)
@@ -1136,52 +1202,25 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
 
 
 def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
-    """Print a prominent callout box for the single best pick by quality_score."""
-    if df_picks.empty or len(df_picks) < 3:
-        return
-    if not HAS_ENHANCED_CLI:
-        return
+    """Retired. This box highlighted the worst cell in the ledger.
 
-    top_df = df_picks.nlargest(1, "quality_score")
-    if top_df.empty:
-        return
-    top = top_df.iloc[0]
-    if top.get("quality_score", 0) < 0.75:
-        return
+    It fired only when `quality_score >= 0.75` and showed that pick in a
+    prominent frame as the best setup on the board. That threshold is almost
+    exactly the top quintile of the composite, which ran a 27% win rate,
+    -15.7% mean return on capital and -$10,173 across 68 closed trades, while
+    the three quintiles below it made +$17,739. The callout was therefore a
+    reliable pointer at the losing bucket, rendered more prominently than
+    anything else on the screen.
 
-    total = len(df_picks)
-    sym = top.get("symbol", "N/A")
-    opt_type = str(top.get("type", "CALL")).upper()
-    strike = top.get("strike", 0)
-    try:
-        exp = str(pd.to_datetime(top.get("expiration", "")).date())
-    except Exception:
-        exp = str(top.get("expiration", "N/A"))[:10]
-    pop = float(top.get("prob_profit", 0) or 0)
-    rr = float(top.get("rr_ratio", 0) or 0)
-    ev_raw = top.get("ev_per_contract", None)
-    ev = float(ev_raw) if (ev_raw is not None and pd.notna(ev_raw) and math.isfinite(float(ev_raw))) else 0.0
-    quality = float(top.get("quality_score", 0))
-    stars, _ = fmt.format_quality_score(quality)
-    thesis = generate_trade_thesis(top) if HAS_ENHANCED_CLI else ""
-    thesis_short = thesis.split("|")[0].strip()[:55] if thesis else ""
-    pop_str = fmt.format_pop(pop)
-    rr_str = fmt.format_rr(rr)
-    _ml = float(top.get("max_loss", 0) or 0)
-    ev_str = fmt.format_ev(ev, max_loss=_ml)
+    `src/pick_ranking.py` now refuses those candidates outright, so the frame
+    would be empty in the cases it used to fire. Kept as a no-op rather than
+    deleted so existing call sites and their tests stay valid.
 
-    line1 = (fmt.style(f"{sym} {opt_type} ${strike:.0f}", 'emph')
-             + f"  exp {exp}   " + fmt.style(f"#1/{total}", 'muted'))
-    # stars already carry the numeric score — no duplicate "Score X.XX"
-    line2 = f"PoP {pop_str}  RR {rr_str}  EV {ev_str}  {stars}"
-    line3 = fmt.style(f'"{thesis_short}"', 'muted') if thesis_short else ""
+    See scripts/validate_gates.py and docs/PICK_RANKING_20260809.md.
+    """
+    return
 
-    body = [line1, line2]
-    if line3:
-        body.append(line3)
 
-    print(ui.card("BEST SETUP", body, width, boxed=True, accent=True))
-    print()
 
 
 def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_by: str = "quality_score", account_size: float = 0.0) -> None:
@@ -1198,21 +1237,30 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         "d": "T_years", "dte": "T_years",
         "e": "ev_per_contract", "ev": "ev_per_contract",
     }
-    sort_col = _sort_map.get(sort_by.lower(), "quality_score")
+    # An explicit sort the reader asked for is honoured, including by score —
+    # "show me this sorted by score" is a legitimate request and the column is
+    # labelled. What changed is the DEFAULT: it was `quality_score`, so a table
+    # nobody had chosen a sort for still opened ranked by the metric whose top
+    # quintile lost $10,173. With no choice made, board order stands.
+    sort_col = _sort_map.get(sort_by.lower())
     ascending = sort_col == "spread_pct"  # lower spread is better
 
     # Select top 5 per DTE bucket
     df_top = df_top.copy()
     df_top["_dte"] = (df_top["T_years"] * 365.0).round(0) if "T_years" in df_top.columns else 0
 
-    if sort_col in df_top.columns:
+    if sort_col and sort_col in df_top.columns:
         rows = df_top.sort_values(sort_col, ascending=ascending).head(10)
     else:
-        rows = df_top.sort_values("quality_score", ascending=False).head(10)
+        rows = df_top.head(10)
     if rows.empty:
         return
 
-    _sort_label = {"quality_score": "Score", "iv_percentile_30": "IV%", "spread_pct": "Spread", "T_years": "DTE", "ev_per_contract": "EV"}.get(sort_col, "Score")
+    # Says "board order" when no sort was chosen, rather than claiming a sort
+    # that is not being applied.
+    _sort_label = {"quality_score": "Score", "iv_percentile_30": "IV%",
+                   "spread_pct": "Spread", "T_years": "DTE",
+                   "ev_per_contract": "EV"}.get(sort_col, "board order")
     print()
     print(ui.rule(width, title=f"QUICK COMPARISON — sorted: {_sort_label}"))
     sep_line = "  " + "\u2500" * (width - 4)
@@ -1601,9 +1649,12 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
             except (EOFError, KeyboardInterrupt):
                 break
 
-    # ── Order ticket for #1 pick ─────────────────────────────────────────────
+    # ── Order ticket for the first pick on the board ─────────────────────────
+    # Was `sort_values("quality_score").iloc[0]` — the ticket was written for
+    # whatever the composite liked most, which is the bucket that lost $10,173.
+    # Rows arrive gated and carry-ordered; take the first without re-sorting.
     if HAS_ENHANCED_CLI and not df_picks.empty:
-        top1 = df_picks.sort_values("quality_score", ascending=False).iloc[0]
+        top1 = df_picks.iloc[0]
         _acct_size = config.get("_account_size") if config else None
         print_order_ticket(top1, config, account_size=_acct_size)
 
@@ -1686,11 +1737,21 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                 print()
                 print(ui.heavy_rule(WIDTH, title=title))
 
-                stars, _ = fmt.format_quality_score(quality)
+                # The headline used to open with `quality_score` as a star
+                # rating — the brightest element on the card, carrying the
+                # metric whose top quintile lost $10,173 across the book. It
+                # now opens with the WORTH pips, which grade the weakest of
+                # three margins and claim only what they can support.
                 # IV cheap/rich is conveyed by the Valuation meter; keep the
                 # headline neutral so colour stays reserved for EV/warnings.
+                try:
+                    from .worth import assess as _wassess
+                    _hw = _wassess(r.to_dict() if hasattr(r, "to_dict") else dict(r))
+                    _head = f"{_hw.pips} {_hw.grade}"
+                except Exception:
+                    _head = ""
                 headline = [
-                    stars,
+                    _head or fmt.style(f"score {quality:.2f}", 'muted'),
                     f"Prem {fmt.style(f'${premium:.2f}', 'emph')}",
                     f"IV {format_pct(iv)}",
                     f"OI {fmt.colorize(f'{oi:,}', _oi_color(oi))}",
@@ -2065,11 +2126,17 @@ def _print_spread_detail_card(row, idx: int, total: int, width: int):
     )
     print(line1)
 
-    if HAS_ENHANCED_CLI:
-        stars, _ = fmt.format_quality_score(quality)
-        print(f"    Score {quality:.2f} {stars}  ·  Thesis: {_spread_thesis(row)}")
-    else:
-        print(f"    Score {quality:.2f}  ·  Thesis: {_spread_thesis(row)}")
+    # WORTH replaces the star rating here. Stars rendered `quality_score`, whose
+    # top quintile lost $10,173 across the book, as the most eye-catching thing
+    # on the card. The score stays as a muted hygiene figure; it decides nothing.
+    # On a credit structure the breakeven margin is the meaningful one and it is
+    # pure arithmetic: p* = 1 - credit/width against your own record.
+    _worth_txt = worth_text(row)
+    if _worth_txt:
+        print(f"    WORTH  {_worth_txt}")
+    _score_txt = (fmt.style(f"score {quality:.2f}", 'muted')
+                  if HAS_ENHANCED_CLI else f"score {quality:.2f}")
+    print(f"    {_score_txt}  ·  Thesis: {_spread_thesis(row)}")
 
     top_components = _top_contributing_components(
         row,
@@ -2122,11 +2189,10 @@ def print_credit_spreads_report(df_spreads: pd.DataFrame):
         credit_str = fmt.format_money(row['net_credit']) if HAS_ENHANCED_CLI else format_money(row['net_credit'])
         profit_str = fmt.format_money(row['max_profit']) if HAS_ENHANCED_CLI else format_money(row['max_profit'])
         loss_str = fmt.colorize(f"${row['max_loss']:.2f}", fmt.Colors.RED) if HAS_ENHANCED_CLI else format_money(row['max_loss'])
-        if HAS_ENHANCED_CLI:
-            stars, _ = fmt.format_quality_score(quality)
-            score_str = f"{quality:.2f} {stars}"
-        else:
-            score_str = f"{quality:.2f}"
+        # Plain number, no stars. A star rating reads as a verdict and this
+        # metric has not earned one on either spread table.
+        score_str = (fmt.style(f"{quality:.2f}", 'muted')
+                     if HAS_ENHANCED_CLI else f"{quality:.2f}")
         print(
             f"  {row['symbol']:<7} "
             f"{row['type']:<10} "
@@ -2205,11 +2271,15 @@ def _print_ic_detail_card(row, idx: int, total: int, width: int):
     )
     print(line1)
 
-    if HAS_ENHANCED_CLI:
-        stars, _ = fmt.format_quality_score(quality)
-        print(f"    Score {quality:.2f} {stars}  ·  Thesis: {_ic_thesis(row)}")
-    else:
-        print(f"    Score {quality:.2f}  ·  Thesis: {_ic_thesis(row)}")
+    # Stars retired here too: on condors the composite measures -0.078 and the
+    # board's old sort key `return_on_risk` -0.216. Neither belongs in the
+    # brightest position on the card.
+    _worth_txt = worth_text(row)
+    if _worth_txt:
+        print(f"    WORTH  {_worth_txt}")
+    _score_txt = (fmt.style(f"score {quality:.2f}", 'muted')
+                  if HAS_ENHANCED_CLI else f"score {quality:.2f}")
+    print(f"    {_score_txt}  ·  Thesis: {_ic_thesis(row)}")
 
     top_components = _top_contributing_components(
         row,
@@ -2272,11 +2342,10 @@ def print_iron_condor_report(df_condors: pd.DataFrame):
         ror_str = fmt.colorize(f"{row['return_on_risk']:.2f}x", fmt.Colors.GREEN if row['return_on_risk'] > 0.25 else fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"{row['return_on_risk']:.2f}x"
         delta_color = fmt.Colors.GREEN if abs(net_delta) < 0.05 else fmt.Colors.RED
         delta_str = fmt.colorize(f"{net_delta:+.3f}", delta_color) if HAS_ENHANCED_CLI else f"{net_delta:+.3f}"
-        if HAS_ENHANCED_CLI:
-            stars, _ = fmt.format_quality_score(quality)
-            score_str = f"{quality:.2f} {stars}"
-        else:
-            score_str = f"{quality:.2f}"
+        # Plain number, no stars. A star rating reads as a verdict and this
+        # metric has not earned one on either spread table.
+        score_str = (fmt.style(f"{quality:.2f}", 'muted')
+                     if HAS_ENHANCED_CLI else f"{quality:.2f}")
 
         cells = [row['symbol'], str(exp), put_wing, call_wing,
                  credit_str, risk_str, ror_str, delta_str]
