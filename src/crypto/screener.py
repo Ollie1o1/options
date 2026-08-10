@@ -382,7 +382,7 @@ def _log_long_premium(row: pd.Series, currency: str,
         return False
 
 
-def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
+def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> bool:
     """Log a calendar (time spread) to the crypto paper ledger.
 
     The current paper_trades schema doesn't have a back_expiration column,
@@ -395,7 +395,7 @@ def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_b
         pm = PaperManager(db_path=_CRYPTO_DB_PATH)
     except Exception as e:
         print(f"  Could not initialize PaperManager: {e}")
-        return
+        return False
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     strat_name = str(row["strategy_name"])
     back_exp = str(row["back_expiration"])
@@ -425,19 +425,21 @@ def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_b
             print(f"  ✓ Logged {strat_name} on {currency} ${strike:,.0f} "
                   f"front {front_exp} / back {back_exp} "
                   f"net debit ${net_debit:,.0f} (score {row['score']:.3f})")
-        else:
-            print("  Skipped — duplicate of an open paper trade today.")
+            return True
+        print("  Skipped — duplicate of an open paper trade today.")
+        return False
     except Exception as e:
         print(f"  Log failed: {type(e).__name__}: {e}")
+        return False
 
 
-def _log_iron_condor(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
+def _log_iron_condor(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> bool:
     try:
         from src.paper_manager import PaperManager
         pm = PaperManager(db_path=_CRYPTO_DB_PATH)
     except Exception as e:
         print(f"  Could not initialize PaperManager: {e}")
-        return
+        return False
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     condor = {
         "date": today,
@@ -463,19 +465,21 @@ def _log_iron_condor(row: pd.Series, currency: str, weight_profile: str = "crypt
                   f"{row['short_call_strike']:.0f}/{row['long_call_strike']:.0f} "
                   f"credit ${row['net_credit']:,.0f} "
                   f"(score {row['score']:.3f})")
-        else:
-            print("  Skipped — duplicate of an open paper trade today.")
+            return True
+        print("  Skipped — duplicate of an open paper trade today.")
+        return False
     except Exception as e:
         print(f"  Log failed: {type(e).__name__}: {e}")
+        return False
 
 
-def _log_credit_spread(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
+def _log_credit_spread(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> bool:
     try:
         from src.paper_manager import PaperManager
         pm = PaperManager(db_path=_CRYPTO_DB_PATH)
     except Exception as e:
         print(f"  Could not initialize PaperManager: {e}")
-        return
+        return False
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     strat_name = str(row["strategy_name"])
     # log_spread() takes the spread name in `type` per the equity convention
@@ -503,10 +507,12 @@ def _log_credit_spread(row: pd.Series, currency: str, weight_profile: str = "cry
                   f"${row['short_strike']:,.0f}/${row['long_strike']:,.0f} "
                   f"credit ${row['net_credit']:,.0f} "
                   f"(score {row['score']:.3f})")
-        else:
-            print("  Skipped — duplicate of an open paper trade today.")
+            return True
+        print("  Skipped — duplicate of an open paper trade today.")
+        return False
     except Exception as e:
         print(f"  Log failed: {type(e).__name__}: {e}")
+        return False
 
 
 def _interactive_log_prompt(scan_result: dict) -> None:

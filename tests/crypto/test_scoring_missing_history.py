@@ -144,3 +144,61 @@ class AutoLogReportsRealityTest(unittest.TestCase):
         # `from __future__ import annotations` makes these strings, so compare
         # against both forms rather than assuming which one this module uses.
         self.assertIn(sig.return_annotation, (bool, "bool"))
+
+
+class EveryHandlerReportsWriteStatusTest(unittest.TestCase):
+    """All four handlers, not just the one that was fixed first.
+
+    `_log_long_premium` was converted on 2026-08-10 and the other three were
+    left returning None, reported as "handler does not report write status".
+    Honest, but it left three strategies whose outcome the job could not state
+    — and the dedup guard, the budget gate and an illiquid quote all refuse
+    silently, so a run could announce a Bull Put it never wrote.
+    """
+
+    HANDLERS = ("_log_long_premium", "_log_calendar",
+                "_log_iron_condor", "_log_credit_spread")
+
+    def test_every_handler_declares_a_bool_return(self):
+        import inspect
+        from src.crypto import screener
+        for name in self.HANDLERS:
+            with self.subTest(handler=name):
+                fn = getattr(screener, name)
+                self.assertIn(inspect.signature(fn).return_annotation,
+                              (bool, "bool"), f"{name} does not report status")
+
+    def test_no_handler_has_a_bare_return(self):
+        """A bare `return` is an unreported refusal — it reads as None and
+        the job would call it indeterminate rather than failed."""
+        import ast
+        import inspect
+        from src.crypto import screener
+        for name in self.HANDLERS:
+            with self.subTest(handler=name):
+                tree = ast.parse(inspect.getsource(getattr(screener, name)))
+                bare = [n.lineno for n in ast.walk(tree)
+                        if isinstance(n, ast.Return) and n.value is None]
+                self.assertEqual(bare, [], f"{name} has a bare return")
+
+    def test_dispatch_returns_what_the_handler_reported(self):
+        from src.crypto import auto_logger
+        from src.crypto import screener
+        seen = {}
+        for name, strategy in (("_log_calendar", "Calendar Call"),
+                               ("_log_iron_condor", "Iron Condor"),
+                               ("_log_credit_spread", "Bull Put")):
+            original = getattr(screener, name)
+            setattr(screener, name, lambda *a, **k: False)
+            try:
+                seen[strategy] = auto_logger._dispatch_log(strategy, None, "BTC")
+            finally:
+                setattr(screener, name, original)
+        self.assertEqual(seen, {"Calendar Call": False, "Iron Condor": False,
+                                "Bull Put": False},
+                         "a handler's refusal did not reach the caller")
+
+    def test_an_unknown_strategy_still_raises(self):
+        from src.crypto import auto_logger
+        with self.assertRaises(ValueError):
+            auto_logger._dispatch_log("Nonexistent Strategy", None, "BTC")
