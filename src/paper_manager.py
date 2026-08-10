@@ -448,7 +448,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 20
+_SCHEMA_VERSION = 21
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -658,6 +658,33 @@ _MIGRATIONS = {
         # treat it as empty, or it will read the entire pre-2026-08-07 book as
         # having had a clean bill of health.
         "ALTER TABLE trades ADD COLUMN score_adjustments TEXT",
+    ],
+    21: [
+        # The EV numbers the board actually decides on, kept instead of discarded.
+        #
+        # `decide_verdict` reads net EV against the error bar this contract's own
+        # vega implies, and that comparison drives the TAKE / MARGINAL / SKIP
+        # call, the pick_ranking EV gate, and the WORTH grade on every card. None
+        # of the four inputs survived the scan: the ledger stored `ev_score`, a
+        # within-scan rank, and nothing else. So on 2026-08-09, asked whether a
+        # contract graded STRONG went on to beat one graded THIN, the book had no
+        # answer — 851 closed trades and not one raw EV among them.
+        #
+        # A rank is not a level. `ev_score` is `rank_norm` over one scan's
+        # candidates, so it cannot be compared across scans and carries no
+        # information about how large an edge was, only where it sat that day.
+        # These four are levels, in dollars per contract, and they make
+        # `net_ev / noise` reconstructable after the fact.
+        #
+        # Written at entry, never updated, and READ-ONLY to every existing
+        # consumer — no score, cohort, gate or verdict reads them back. Rows
+        # logged before this migration carry NULL, which means "not recorded",
+        # not "zero"; analysis must exclude NULL rather than read the pre-2026
+        # -08-10 book as a book of zero-edge trades.
+        "ALTER TABLE trades ADD COLUMN entry_ev_net REAL",
+        "ALTER TABLE trades ADD COLUMN entry_ev_gross REAL",
+        "ALTER TABLE trades ADD COLUMN entry_ev_cost REAL",
+        "ALTER TABLE trades ADD COLUMN entry_ev_noise REAL",
     ],
 }
 
@@ -1212,6 +1239,7 @@ class PaperManager:
             gamma_pin_score, iv_velocity_score, max_pain_score, oi_change_score, option_rvol_score,
             pcr_score, sentiment_score_norm, spread_score, trader_pref_score,
             score_adjustments,
+            entry_ev_net, entry_ev_gross, entry_ev_cost, entry_ev_noise,
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
@@ -1220,7 +1248,9 @@ class PaperManager:
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?,
+            ?,
+            ?, ?, ?, ?,
+            ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?
@@ -1286,6 +1316,13 @@ class PaperManager:
             _float_or_none("spread_score"),
             _float_or_none("trader_pref_score"),
             (trade_dict.get("score_adjustments") or None),
+            # The EV level the verdict was taken on, in dollars per contract.
+            # `ev_score` beside it is a within-scan rank and cannot answer
+            # "how big was the edge" — only these can.
+            _float_or_none("ev_per_contract"),
+            _float_or_none("ev_gross_per_contract"),
+            _float_or_none("ev_cost_per_contract"),
+            _float_or_none("ev_noise"),
             trade_dict.get("weight_profile"),
             _float_or_none("long_strike"),
             _float_or_none("spread_width"),

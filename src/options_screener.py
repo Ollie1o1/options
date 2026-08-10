@@ -612,6 +612,48 @@ def rank_structures_by_verdict(df):
     return rank_by_verdict(out)
 
 
+def gate_and_report(df, board: str, *, label_structures: bool = False,
+                    verbose: bool = True):
+    """Remove what the ledger measures as a loser, and say what was removed.
+
+    The counterpart to `rank_by_verdict`, which ordered boards. Ordering was
+    tested and failed — no key beat `quality_score` at the #1 slot out of
+    sample (23 of 48 paired cells, Wilcoxon p=0.89) — while removal held in
+    five folds out of five. So this refuses rather than ranks, and an empty
+    board is a real answer rather than a failure to find one.
+
+    Returns the surviving frame. Callers keep their existing "nothing found"
+    branch for a genuinely empty scan; this handles the case where candidates
+    were found and every one of them was refused.
+    """
+    from . import pick_ranking as _pr
+
+    result = _pr.gate_board(df, label_structures=label_structures)
+    if verbose and result.refused is not None and len(result.refused):
+        _print_refusals(result, board)
+    return result.kept
+
+
+def _print_refusals(result, board: str) -> None:
+    """What the board declined to show, and on what evidence."""
+    width = get_display_width()
+    kept, scanned = len(result.kept), result.scanned
+    if kept == 0:
+        print("\n" + ui.rule(width, title=f"{board} — NO QUALIFYING CONTRACT"))
+        print(f"  {scanned} scanned · {scanned} refused\n")
+    else:
+        print("\n" + ui.rule(width, title=f"{board} — {kept} of {scanned} shown"))
+        print(f"  {scanned - kept} refused\n")
+
+    for line in result.summary_lines():
+        print("  " + (fmt.style(line, 'muted') if HAS_ENHANCED_CLI else line))
+
+    if kept == 0:
+        msg = "Nothing here cleared the gates. That is the answer, not an error."
+        print("\n  " + (fmt.style(msg, 'emph') if HAS_ENHANCED_CLI else msg))
+    print()
+
+
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults.
 
@@ -1473,6 +1515,17 @@ def calculate_metrics(
         _bad_gap(_hv_raw.values, df["impliedVolatility"].values), index=df.index)
     df["ev_vol_gap_refused"] = _gap_mask
     df.loc[_gap_mask, "ev_per_contract"] = np.nan
+
+    # The error bar the EV is judged against, carried on the row rather than
+    # recomputed by each consumer. `decide_verdict`, the pick_ranking EV gate,
+    # the WORTH grade and the persisted `entry_ev_noise` must all be the same
+    # number; deriving it in four places is how they stop being.
+    try:
+        from .tearsheet.collect import ev_noise as _ev_noise
+        df["ev_noise"] = [_ev_noise(r) for _, r in df.iterrows()]
+    except Exception:
+        logging.getLogger(__name__).debug("ev_noise unavailable", exc_info=True)
+        df["ev_noise"] = np.nan
 
     # Earnings-adjusted EV for earnings plays
     df["ev_earnings"] = pd.NA
@@ -2828,8 +2881,13 @@ def enrich_and_score(
             # The mapping is a pure per-row function, so applying it to this
             # frame gives exactly what `picks` would have given.
             _sq_calls = _cross_section_normalize(_sq_calls)
-            if "quality_score" in _sq_calls.columns:
-                _sq_calls = _sq_calls.sort_values("quality_score", ascending=False)
+            # Was sorted by `quality_score`. The squeeze long side is a
+            # convexity play and the composite has no standing to order it —
+            # -0.131 against return on capital on long calls, and its top
+            # quintile is the losing bucket. `board.call_board` ranks these on
+            # convexity multiple, which is the thesis; leave the frame in the
+            # order the board will re-rank rather than stamping a discredited
+            # one on it first.
             squeeze_out["calls"] = _sq_calls
 
     # Final Filters
@@ -2858,7 +2916,25 @@ def enrich_and_score(
     if df.empty:
         return df
 
-    # Sorting
+    # Sorting.
+    #
+    # KNOWN REMAINING USE of `quality_score` as an ordering, and the only one
+    # left in the repo. It is deliberate, not an oversight.
+    #
+    # Everything downstream is re-ordered — `gate_and_report` refuses and then
+    # sorts by carry — so this does not decide what a board shows. It does
+    # decide which leg per symbol survives the per-symbol dedup and which
+    # symbols reach the top-N, i.e. it is SELECTION, not display, and no
+    # candidate the composite drops here is ever seen again.
+    #
+    # Replacing it is a behaviour change to what enters the funnel, and there
+    # is no measured alternative: the composite is -0.131 against outcome on
+    # long calls, but the replacement key tested on 2026-08-09 was a coin flip
+    # (23 of 48 paired cells, p=0.89). Swapping a bad key for an unmeasured one
+    # is not an improvement, it is a different unvalidated choice.
+    #
+    # To settle it: log both orderings' selections for a period and compare
+    # outcomes, the way scripts/validate_gates.py settled the removal question.
     df = df.sort_values(["Unusual_Whale", "quality_score", "volume", "openInterest"], ascending=[False, False, False, False]).reset_index(drop=True)
     return df
 
@@ -3036,7 +3112,12 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
                     "spread_width": strike_width,
                 })
 
-    return pd.DataFrame(spreads).sort_values(by="quality_score", ascending=False) if spreads else pd.DataFrame()
+    # Unsorted by design. A producer that stamps an order is claiming to rank,
+    # and `quality_score` cannot: -0.131 against return on capital on long
+    # calls, +0.163 on Bull Puts but at p=0.06. `gate_and_report` refuses and
+    # then orders by carry, so anything imposed here is either overwritten or,
+    # worse, survives into a consumer that does not re-order.
+    return pd.DataFrame(spreads) if spreads else pd.DataFrame()
 
 
 def normalize_spreads_for_ranking(spreads_df: pd.DataFrame, mode: str = "Credit Spreads") -> pd.DataFrame:
@@ -3274,7 +3355,10 @@ def find_iron_condors(df: pd.DataFrame, config: Optional[dict] = None) -> pd.Dat
             'quality_score': avg_quality
         })
     
-    return pd.DataFrame(condors).sort_values(by="return_on_risk", ascending=False) if condors else pd.DataFrame()
+    # Unsorted by design; see find_credit_spreads. `return_on_risk` in
+    # particular measures -0.216 against return on capital over 139 closed
+    # condors — sorting by it put the worst candidate first.
+    return pd.DataFrame(condors) if condors else pd.DataFrame()
 
 
 
@@ -4570,36 +4654,47 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Generate Final Reports
     if mode == "Budget scan":
         if not picks.empty:
-            final_df = rank_by_verdict(picks)
+            final_df = gate_and_report(picks, "BUDGET", verbose=verbose)
+        if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
-        elif verbose:
+        elif verbose and picks.empty:
+            # Only when the scan genuinely found nothing. A board that was
+            # found and then refused has already printed why, and telling the
+            # reader "none found" on top of that would misreport the reason.
             print("\nNo options found within budget.")
 
     elif mode in ("Discovery scan", "Squeeze Hunt"):
         if not picks.empty:
-            final_df = rank_by_verdict(picks)
+            final_df = gate_and_report(picks, mode.upper(), verbose=verbose)
+        if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
-        elif verbose:
+        elif verbose and picks.empty:
             print("\nNo discovery picks found.")
             
     elif mode == "Credit Spreads":
         if not credit_spreads_df.empty:
-            final_spreads = rank_by_verdict(credit_spreads_df)
-            if verbose:
+            final_spreads = gate_and_report(credit_spreads_df, "CREDIT SPREADS",
+                                            label_structures=True, verbose=verbose)
+            if verbose and not final_spreads.empty:
                 print_credit_spreads_report(final_spreads)
         elif verbose:
             print("\nNo credit spreads found.")
-    
+
     elif mode == "Iron Condor":
         if not iron_condors_df.empty:
-            final_condors = iron_condors_df.sort_values("return_on_risk", ascending=False)
-            if verbose:
+            # `return_on_risk` ordered this board and measures -0.216 against
+            # return on capital (n=139) — its top pick was systematically its
+            # worst. Condors off the broad index are now refused outright:
+            # +9.5% here against -11.8% elsewhere, p < 1e-5.
+            final_condors = gate_and_report(iron_condors_df, "IRON CONDOR",
+                                            label_structures=True, verbose=verbose)
+            if verbose and not final_condors.empty:
                 print_iron_condor_report(final_condors)
         elif verbose:
             print("\nNo iron condors found.")
@@ -4612,10 +4707,12 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             # "credit disappears" and breakeven gates, the two that matter
             # most for short premium.
             final_df = rank_single_legs_by_verdict(picks, mode)
+            final_df = gate_and_report(final_df, "PREMIUM SELLING", verbose=verbose)
+        if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
-        elif verbose:
+        elif verbose and picks.empty:
             print("\nNo premium selling candidates found.")
 
     elif mode == "Lottery Ticket":
@@ -4629,11 +4726,12 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     else:
         # Single stock mode
         if not picks.empty:
-            final_df = picks.copy()
+            final_df = gate_and_report(picks, "TICKER", verbose=verbose)
+        if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
             if verbose:
                 print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
-        elif verbose:
+        elif verbose and picks.empty:
             print("\nNo suitable options found.")
 
         # Vol analytics for single-ticker scans
@@ -4740,14 +4838,24 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _macro_focus = None
         _macro_scan_section(_macro_universe, focus_symbol=_macro_focus)
 
+    # The pick that feeds the tearsheet, the 3D surface and the visualizer.
+    # It used to be whatever `quality_score` (or `return_on_risk` on condors)
+    # liked most — both measured negative against outcome. Nothing ranks, so
+    # this is now the first surviving row on the already-gated board rather
+    # than a claim about which candidate is best.
     top_pick = None
-    if not picks.empty:
+    _gated = gate_and_report(picks, "TOP PICK", verbose=False) if not picks.empty else picks
+    if _gated is not None and not _gated.empty:
         picks["overall_score"] = picks["quality_score"]
-        top_pick = picks.sort_values("overall_score", ascending=False).iloc[0]
+        top_pick = _gated.iloc[0]
     elif not credit_spreads_df.empty:
-         top_pick = credit_spreads_df.sort_values("quality_score", ascending=False).iloc[0]
+        _gs = gate_and_report(credit_spreads_df, "TOP PICK",
+                              label_structures=True, verbose=False)
+        top_pick = _gs.iloc[0] if not _gs.empty else None
     elif not iron_condors_df.empty:
-         top_pick = iron_condors_df.sort_values("return_on_risk", ascending=False).iloc[0]
+        _gc = gate_and_report(iron_condors_df, "TOP PICK",
+                              label_structures=True, verbose=False)
+        top_pick = _gc.iloc[0] if not _gc.empty else None
 
     chain_iv_median = 0.0
     if not picks.empty and "impliedVolatility" in picks.columns:
@@ -4795,10 +4903,10 @@ def select_trades_to_log(df: pd.DataFrame) -> pd.DataFrame:
         print("No trades to select.")
         return pd.DataFrame()
 
-    if "quality_score" in df.columns:
-        df_sorted = df.sort_values("quality_score", ascending=False).reset_index(drop=True)
-    else:
-        df_sorted = df.reset_index(drop=True)
+    # Presented in board order. Sorting this menu by `quality_score` put the
+    # losing top quintile at positions 1-10, which is where a human picking
+    # from a list actually picks.
+    df_sorted = df.reset_index(drop=True)
 
     top_n = df_sorted.head(50)
 
@@ -5074,6 +5182,9 @@ def run_top_scan(
     # buyer mode, where `buy` happens to be correct, but a short-premium mode
     # would have been priced as a debit. See rank_single_legs_by_verdict.
     combined = rank_single_legs_by_verdict(combined, mode)
+    combined = gate_and_report(combined, f"TOP {top_n}")
+    if combined.empty:
+        return None
     top = combined.head(top_n).copy()
 
     print_top_n_table(top, top_n)
@@ -6230,6 +6341,12 @@ def main():
                                 "dividend_yield": row.get("dividend_yield"),
                                 "pop_score": row.get("pop_score"),
                                 "ev_score": row.get("ev_score"),
+                                # Levels, not the within-scan rank beside them:
+                                # schema 21 makes net_ev/noise reconstructable.
+                                "ev_per_contract": row.get("ev_per_contract"),
+                                "ev_gross_per_contract": row.get("ev_gross_per_contract"),
+                                "ev_cost_per_contract": row.get("ev_cost_per_contract"),
+                                "ev_noise": row.get("ev_noise"),
                                 "rr_score": row.get("rr_score"),
                                 "liquidity_score": row.get("liquidity_score"),
                                 "momentum_score": row.get("momentum_score"),
@@ -6540,6 +6657,10 @@ def main():
                                                 "entry_theta": row.get("theta"),
                                                 "pop_score": row.get("pop_score"),
                                                 "ev_score": row.get("ev_score"),
+                                                "ev_per_contract": row.get("ev_per_contract"),
+                                                "ev_gross_per_contract": row.get("ev_gross_per_contract"),
+                                                "ev_cost_per_contract": row.get("ev_cost_per_contract"),
+                                                "ev_noise": row.get("ev_noise"),
                                                 "rr_score": row.get("rr_score"),
                                                 "liquidity_score": row.get("liquidity_score"),
                                                 "momentum_score": row.get("momentum_score"),

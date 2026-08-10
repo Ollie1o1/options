@@ -33,6 +33,11 @@ _SHORT_LEG_SCORE_COLS = (
     "iv_velocity_score", "max_pain_score", "oi_change_score",
     "option_rvol_score", "pcr_score", "sentiment_score_norm",
     "spread_score", "trader_pref_score",
+    # The EV levels the verdict is taken on, in dollars per contract. Carried
+    # alongside `ev_score` because that one is a within-scan rank and cannot
+    # answer how large an edge was. Schema 21.
+    "ev_per_contract", "ev_gross_per_contract", "ev_cost_per_contract",
+    "ev_noise",
 )
 
 # yfinance column name → paper_trades schema column name

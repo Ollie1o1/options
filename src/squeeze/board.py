@@ -280,9 +280,12 @@ def _rank_calls(df: pd.DataFrame, rfr: float = 0.045) -> pd.DataFrame:
     if mult.notna().any():
         calls["_convexity"] = mult
         return calls.sort_values("_convexity", ascending=False, na_position="last")
+    # No convexity multiple available for any row. The board used to fall back
+    # to `quality_score` here, which is the metric whose top quintile lost
+    # $10,173 across the book — a fallback that quietly reintroduced the
+    # ordering the rest of the system removed. Left in the incoming order
+    # instead: unranked is honest, mis-ranked is not.
     calls["_convexity"] = None
-    if "quality_score" in calls.columns:
-        return calls.sort_values("quality_score", ascending=False)
     return calls
 
 
