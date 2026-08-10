@@ -97,13 +97,18 @@ def pick_winner(picks_by_strategy: dict) -> Optional[Tuple[str, pd.Series, float
     return best
 
 
-def _dispatch_log(strategy_name: str, row: pd.Series, currency: str):
-    """Whatever the handler reports. None means the handler does not say yet.
+def _dispatch_log(strategy_name: str, row: pd.Series, currency: str) -> bool:
+    """True only when a row reached the ledger.
 
-    The long-premium path returns True/False for "a row was written"; the
-    others still return None and are reported as indeterminate rather than as
-    success, because claiming a write that did not happen is the defect this
-    exists to remove.
+    Every handler now reports this. It used to be the long-premium path alone,
+    with the other three returning None and being reported as "handler does not
+    say" — honest, but it left three strategies whose outcome the job could not
+    state. The dedup guard, the budget gate and an illiquid quote all refuse
+    silently, so a run could announce a Bull Put it never wrote.
+
+    `run_currency` still handles a None return. That branch is unreachable
+    today and is kept as the safe answer for a handler added later that forgets
+    to report: unknown must degrade to "not claimed", never to "logged".
     """
     from . import screener  # heavy deps deferred to scan-time
 
@@ -111,11 +116,14 @@ def _dispatch_log(strategy_name: str, row: pd.Series, currency: str):
         return screener._log_long_premium(row, currency,
                                           weight_profile=AUTO_WEIGHT_PROFILE)
     elif strategy_name.startswith("Calendar"):
-        screener._log_calendar(row, currency, weight_profile=AUTO_WEIGHT_PROFILE)
+        return screener._log_calendar(row, currency,
+                                      weight_profile=AUTO_WEIGHT_PROFILE)
     elif strategy_name == "Iron Condor":
-        screener._log_iron_condor(row, currency, weight_profile=AUTO_WEIGHT_PROFILE)
+        return screener._log_iron_condor(row, currency,
+                                         weight_profile=AUTO_WEIGHT_PROFILE)
     elif strategy_name in {"Bull Put", "Bear Call"}:
-        screener._log_credit_spread(row, currency, weight_profile=AUTO_WEIGHT_PROFILE)
+        return screener._log_credit_spread(row, currency,
+                                           weight_profile=AUTO_WEIGHT_PROFILE)
     else:
         raise ValueError(f"No log handler for strategy {strategy_name!r}")
 
