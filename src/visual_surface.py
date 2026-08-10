@@ -631,7 +631,18 @@ def print_risk_surface(option_row, underlying_price, rfr, width=100,
     """
     opt = option_row if isinstance(option_row, dict) else option_row.to_dict()
 
-    option_type = "call" if opt.get("optionType", "call").lower() == "call" else "put"
+    # Scan rows carry `type`; `optionType` is a yfinance MultiIndex level name
+    # in data_fetching and never survives into a row. Reading only `optionType`
+    # meant the default "call" always won, so EVERY surface rendered as a call
+    # — title, P&L grid and greek grids alike. On a put that is not a mislabel,
+    # it is an inverted payoff: an AMD PUT $470 rendered as "AMD $470 CALL"
+    # with the profit slope running the wrong way (observed 2026-08-10).
+    #
+    # `type` first, `optionType` kept as a fallback for any caller that does
+    # pass the yfinance name, and anything unrecognised is a put only if it
+    # says so — an unknown value must not silently become a call again.
+    _raw = opt.get("type") or opt.get("optionType") or "call"
+    option_type = "put" if str(_raw).strip().lower().startswith("p") else "call"
     K = float(opt.get("strike", underlying_price))
     T = float(opt.get("T_years", opt.get("dte", 30) / 365.0))
     sigma = float(opt.get("impliedVolatility", 0.30))
