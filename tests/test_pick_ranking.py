@@ -65,6 +65,39 @@ class CondorUniverseGateTest(unittest.TestCase):
         self.assertEqual(len(r.kept), 1)
 
 
+class BoardRefusesButTheLedgerKeepsLearningTest(unittest.TestCase):
+    """The board/auto-log asymmetry is deliberate. Do not "fix" it.
+
+    G5 refuses off-index condors on the board. The auto-logger keeps writing
+    them as `paper_only=1` research rows, because gating there would freeze the
+    off-index sample at the n=139 that produced the rule — and a rule that can
+    only ever be confirmed by its own training set is not a finding.
+
+    Ruled 2026-08-10. If this ever needs revisiting, the question is whether
+    `scripts/validate_gates.py` still supports G5 on the grown sample.
+    """
+
+    def test_the_board_refuses_an_off_index_condor(self):
+        r = _board([_condor(symbol="AAPL")])
+        self.assertTrue(r.empty)
+
+    def test_the_auto_log_ordering_never_drops_a_row(self):
+        """`rank_structures_by_verdict` orders; it must not gate.
+
+        A behavioural guard, not a comment: adding a filter here would silently
+        stop the off-index condor sample from growing, which is exactly what
+        makes G5 falsifiable.
+        """
+        from src.options_screener import rank_structures_by_verdict
+        rows = pd.DataFrame([_condor(symbol=s) for s in
+                             ("SPY", "AAPL", "TLT", "QQQ", "NVDA")])
+        out = rank_structures_by_verdict(rows)
+        self.assertEqual(len(out), len(rows),
+                         "the auto-log path dropped a structure — that freezes "
+                         "the sample G5 is meant to stay testable against")
+        self.assertEqual(set(out["symbol"]), set(rows["symbol"]))
+
+
 class TopQuintileGateTest(unittest.TestCase):
     """G6. The top quintile of the composite ran -15.7% and -$10,173."""
 
