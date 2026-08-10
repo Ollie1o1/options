@@ -332,18 +332,26 @@ def _quantity_for(structure: str, entry_price: float,
     return capped_quantity(unit_risk=unit_risk, cap_usd=1000.0)
 
 
-def _log_long_premium(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:
+def _log_long_premium(row: pd.Series, currency: str,
+                      weight_profile: str = "crypto_baseline") -> bool:
+    """True only when a row was actually written.
+
+    Returned rather than discarded: the auto-logger reported
+    "[auto-log] ETH logged Long Put" on a run where the dedup guard had
+    refused the write two lines earlier and the ledger row count did not
+    move. A job that reports writes it did not make is not a log.
+    """
     try:
         from src.paper_manager import PaperManager
         pm = PaperManager(db_path=_CRYPTO_DB_PATH)
     except Exception as e:
         print(f"  Could not initialize PaperManager: {e}")
-        return
+        return False
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     entry_price = float(row.get("ask_price") or row.get("mark_price") or 0)
     if entry_price <= 0:
         print("  Skipped log — no valid entry price (illiquid contract).")
-        return
+        return False
     trade = {
         "date": today,
         "ticker": currency.upper(),
@@ -366,10 +374,12 @@ def _log_long_premium(row: pd.Series, currency: str, weight_profile: str = "cryp
             print(f"  ✓ Logged {trade['strategy_name']} on {currency} "
                   f"${trade['strike']:,.0f} @ ${entry_price:,.2f} "
                   f"(score {trade['quality_score']:.3f})")
-        else:
-            print("  Skipped — duplicate of an open paper trade today.")
+            return True
+        print("  Skipped — duplicate of an open paper trade today.")
+        return False
     except Exception as e:
         print(f"  Log failed: {type(e).__name__}: {e}")
+        return False
 
 
 def _log_calendar(row: pd.Series, currency: str, weight_profile: str = "crypto_baseline") -> None:

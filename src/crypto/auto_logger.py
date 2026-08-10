@@ -97,11 +97,19 @@ def pick_winner(picks_by_strategy: dict) -> Optional[Tuple[str, pd.Series, float
     return best
 
 
-def _dispatch_log(strategy_name: str, row: pd.Series, currency: str) -> None:
+def _dispatch_log(strategy_name: str, row: pd.Series, currency: str):
+    """Whatever the handler reports. None means the handler does not say yet.
+
+    The long-premium path returns True/False for "a row was written"; the
+    others still return None and are reported as indeterminate rather than as
+    success, because claiming a write that did not happen is the defect this
+    exists to remove.
+    """
     from . import screener  # heavy deps deferred to scan-time
 
     if strategy_name in _LONG_PREMIUM_STRATS:
-        screener._log_long_premium(row, currency, weight_profile=AUTO_WEIGHT_PROFILE)
+        return screener._log_long_premium(row, currency,
+                                          weight_profile=AUTO_WEIGHT_PROFILE)
     elif strategy_name.startswith("Calendar"):
         screener._log_calendar(row, currency, weight_profile=AUTO_WEIGHT_PROFILE)
     elif strategy_name == "Iron Condor":
@@ -173,7 +181,16 @@ def run_currency(
         return (f"[auto-log] {currency} DRY-RUN would log {strategy_name} "
                 f"score={score:.3f} (no DB write)")
 
-    _dispatch_log(strategy_name, row, currency)
+    wrote = _dispatch_log(strategy_name, row, currency)
+    if wrote is False:
+        # The dedup guard, the budget gate and an illiquid quote all refuse
+        # here. Reporting "logged" over the top of a refusal is how a job comes
+        # to claim writes the ledger never received.
+        return (f"[auto-log] {currency} NOT logged: {strategy_name} "
+                f"score={score:.3f} was refused at the ledger")
+    if wrote is None:
+        return (f"[auto-log] {currency} dispatched {strategy_name} "
+                f"score={score:.3f} (handler does not report write status)")
     return f"[auto-log] {currency} logged {strategy_name} score={score:.3f}"
 
 
