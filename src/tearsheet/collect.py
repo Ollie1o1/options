@@ -96,6 +96,30 @@ def ev_noise(row) -> float:
 _ev_noise = ev_noise   # the private name this module used before it was shared
 
 
+def _worth(row):
+    """The graded WORTH read, as plain JSON for the sidecar.
+
+    Same grader the CLI cards use, so a contract cannot read STRONG in the
+    terminal and CLEAR on its own tearsheet. Never raises: an ungradeable row
+    returns the UNGRADED shape rather than dropping the key, so the renderer
+    can rely on it being present.
+    """
+    try:
+        from src.worth import assess
+        from src.candidate_verdict import win_rates_from_ledger
+        r = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        w = assess(r, historical_win_rate=win_rates_from_ledger().get(
+            r.get("strategy_name")))
+        return {"grade": w.grade, "pips": w.pips, "line": w.line(),
+                "sigma": _jsonable(w.sigma), "friction": _jsonable(w.friction),
+                "breakeven_margin": _jsonable(w.breakeven_margin),
+                "limiting": w.limiting}
+    except Exception:
+        return {"grade": "UNGRADED", "pips": "○○○○", "line": "",
+                "sigma": None, "friction": None,
+                "breakeven_margin": None, "limiting": ""}
+
+
 def _assumed_fill(row):
     """The entry price the cost model charges you: mid plus a half-spread.
 
@@ -211,9 +235,16 @@ def _evidence():
 
 def _context(row):
     """Signals with no demonstrated out-of-sample edge. Each names its own failure."""
+    # The badge read "IC +0.03", which was the kindest number ever measured for
+    # this score and is no longer the relevant one. On 851 closed non-duplicate
+    # trades it is -0.131 against return on capital on long calls, and its top
+    # quintile is the worst cell in the book: n=68, 27% win, -15.7% mean,
+    # -$10,173, against +$17,739 for the three quintiles below it. A page that
+    # exists to name each signal's failure should name this one accurately.
     out = [{"label": "Quality score",
             "value": "{:.2f}".format(float(row.get("quality_score") or 0)),
-            "badge": "IC +0.03", "badge_kind": "bad"}]
+            "badge": "IC -0.13 · top quintile lost $10,173",
+            "badge_kind": "bad"}]
     if row.get("sentiment_tag"):
         out.append({"label": "Sentiment", "value": str(row["sentiment_tag"]),
                     "badge": "zero variance", "badge_kind": "bad"})
@@ -575,9 +606,14 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
                  "vix_regime": ctx.get("vix_regime", "unknown"),
                  "config_sha": ctx.get("config_sha", "unknown"),
                  "sidecar": base + ".json"},
+        # `worth` sits beside the verdict rather than inside it: the verdict
+        # gives the SIGN of the edge, this gives its size against its own error
+        # bar and its trading cost. `+$9/ct` and `+$880/ct` both read TAKE, and
+        # the page could not tell them apart.
         "verdict": {"decision": "", "reason": "", "net_ev": net,
                     "gross_ev": gross, "cost": cost,
-                    "noise": _ev_noise(row), "assumed_fill": _assumed_fill(row)},
+                    "noise": _ev_noise(row), "assumed_fill": _assumed_fill(row),
+                    "worth": _worth(row)},
         "stats": {"pop": _f(row, "prob_profit"), "max_loss": _f(row, "max_loss"),
                   "breakeven": _f(row, "breakeven")},
         "cost_waterfall": waterfall,

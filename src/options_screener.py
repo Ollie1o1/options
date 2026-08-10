@@ -6537,6 +6537,18 @@ def main():
                                 # Component scores — enable backtester IC analysis once 30+ trades close
                                 "pop_score": top_pick_row.get("pop_score"),
                                 "ev_score": top_pick_row.get("ev_score"),
+                                # Levels, not the within-scan rank beside them.
+                                # Schema 21 makes net_ev/noise reconstructable —
+                                # `ev_score` is a rank and cannot say how large
+                                # an edge was. This site was missed when the
+                                # columns shipped: it builds from `top_pick_row`
+                                # rather than `row`, so a patch written against
+                                # the other two dicts skipped it, and every trade
+                                # logged on 2026-08-10 stored NULL.
+                                "ev_per_contract": top_pick_row.get("ev_per_contract"),
+                                "ev_gross_per_contract": top_pick_row.get("ev_gross_per_contract"),
+                                "ev_cost_per_contract": top_pick_row.get("ev_cost_per_contract"),
+                                "ev_noise": top_pick_row.get("ev_noise"),
                                 "rr_score": top_pick_row.get("rr_score"),
                                 "liquidity_score": top_pick_row.get("liquidity_score"),
                                 "momentum_score": top_pick_row.get("momentum_score"),

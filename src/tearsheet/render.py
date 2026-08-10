@@ -259,14 +259,42 @@ def _hero(data) -> str:
         '<section class="hero" id="verdict">'
         '<div class="eye">{eye}</div>'
         "<h1>{tkr} {strike:g}{tl} &mdash; {exp}</h1>"
-        '<div style="margin-top:10px"><span class="verdict {c}">{d}</span></div>'
+        '<div style="margin-top:10px"><span class="verdict {c}">{d}</span>'
+        '{worth}</div>'
         '<p class="lede">{r}</p>{flip}{s}</section>'
     ).format(eye=eye, tkr=_esc(m.get("ticker")), strike=float(m.get("strike") or 0),
              tl=_esc((m.get("opt_type") or "c")[0].upper()),
              exp=_esc(m.get("expiration")),
              c=_VERDICT_CLASS.get(decision, "v-ind"), d=_esc(decision),
-             r=_esc(reason), flip=_flip_line(decision, v, data.get("quote") or {}),
+             worth=_worth_badge(v), r=_esc(reason),
+             flip=_flip_line(decision, v, data.get("quote") or {}),
              s=shell.strip(cells))
+
+
+def _worth_badge(verdict) -> str:
+    """The graded WORTH read, beside the verdict.
+
+    The verdict gives the SIGN of the edge; this gives its size against the
+    contract's own error bar and its trading cost. `+$9/ct` and `+$880/ct` both
+    render TAKE, and the hero could not tell them apart.
+
+    Degrades to empty on a sidecar written before the key existed, so older
+    pages still render rather than raising on a missing key.
+    """
+    w = (verdict or {}).get("worth") or {}
+    grade, line = w.get("grade"), w.get("line")
+    if not grade or grade == "UNGRADED" or not line:
+        return ""
+    return ('<span class="verdict {c}" style="margin-left:8px" title="{t}">'
+            '{p} {g}</span>').format(
+        c=_VERDICT_CLASS.get(decision_for_grade(grade), "v-ind"),
+        t=_esc(line), p=_esc(w.get("pips") or ""), g=_esc(grade))
+
+
+def decision_for_grade(grade: str) -> str:
+    """Reuse the verdict colour scale so one page has one visual vocabulary."""
+    return {"STRONG": "TAKE", "CLEAR": "MARGINAL", "THIN": "SKIP"}.get(
+        grade, "INDETERMINATE")
 
 
 def _rows(pairs) -> str:

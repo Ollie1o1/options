@@ -93,6 +93,58 @@ class WritePathTest(unittest.TestCase):
         self.assertAlmostEqual(net / noise, 3.52, places=2)
 
 
+class EveryLogPathCarriesTheEvLevelsTest(unittest.TestCase):
+    """Every dict that reaches `log_trade` must carry the four EV levels.
+
+    Written after the columns shipped storing NULL. Three sites build a trade
+    dict in `options_screener`; two build from a variable named `row` and one
+    from `top_pick_row`. The original patch was written against the text
+    `row.get("ev_score")`, so it silently skipped the third — which is the one
+    the auto-logger actually used. Every trade logged on 2026-08-10 stored NULL
+    in all four columns.
+
+    Parsed with `ast` and keyed on the ASSIGNED NAME rather than on the source
+    text, so a fourth site built from a differently-named variable still fails.
+    """
+
+    EV_KEYS = {"ev_per_contract", "ev_gross_per_contract",
+               "ev_cost_per_contract", "ev_noise"}
+
+    def _trade_dicts(self):
+        """(lineno, {keys}) for every `trade_dict = {...}` literal."""
+        import ast
+        import pathlib
+        tree = ast.parse(pathlib.Path("src/options_screener.py").read_text())
+        out = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+                continue
+            names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if "trade_dict" not in names:
+                continue
+            keys = {k.value for k in node.value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            out.append((node.lineno, keys))
+        return out
+
+    def test_at_least_the_known_sites_are_found(self):
+        """Guards the guard: a parser that finds nothing would pass vacuously."""
+        self.assertGreaterEqual(len(self._trade_dicts()), 2)
+
+    def test_every_trade_dict_carries_all_four_ev_levels(self):
+        for lineno, keys in self._trade_dicts():
+            missing = self.EV_KEYS - keys
+            self.assertEqual(
+                missing, set(),
+                f"trade_dict at options_screener.py:{lineno} is missing "
+                f"{sorted(missing)} — trades logged from it will store NULL")
+
+    def test_every_trade_dict_also_carries_the_rank_beside_the_levels(self):
+        """`ev_score` is not redundant with them; a rank and a level differ."""
+        for lineno, keys in self._trade_dicts():
+            self.assertIn("ev_score", keys, f"line {lineno}")
+
+
 class ScanRowCarriesNoiseTest(unittest.TestCase):
     """`ev_noise` has to be on the row before the logger can persist it."""
 
