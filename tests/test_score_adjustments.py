@@ -258,15 +258,45 @@ class TestBonusSuppression(unittest.TestCase):
         self.assertLess(delta.min(), 0.0,
                         "no row was penalised — the stack is fully inert")
 
-    def test_scales_of_one_restore_upward_adjustments(self):
-        # Compared against the default rather than the raw composite, because
-        # multiplicative RISK adjustments run after this stack and are not
-        # gated by it.
+    def test_bonus_scale_is_a_net_per_row_gate(self):
+        """`bonus_scale` credits a row only when its NET adjustment is positive.
+
+        Rewritten 2026-08-10. This was `test_scales_of_one_restore_upward_
+        adjustments`, asserting `on["quality_score"].max() > off[...].max()`
+        with the message "bonus_scale=1.0 must lift at least one row".
+
+        It never verified that. The scale is applied as
+        `bonus * delta.clip(lower=0)` where `delta` is the row's NET
+        adjustment, and on this fixture only two adjustments fire —
+        `trend_aligned` (bonus) and `oi_wall_warning` (penalty) — with the
+        penalty larger, so every row is net negative, `clip(lower=0)` is zero
+        everywhere, and `bonus_scale` provably changes nothing: the row-wise
+        difference is exactly 0.0000 on every row, on every repeat.
+
+        The two maxima it compared were therefore the same number plus float
+        noise, agreeing to eleven significant figures. It passed on 3.12 and
+        3.14 and failed on 3.11 (CI run 31413572815) because a comparison at
+        the noise floor is a coin toss, not a test.
+
+        What is asserted now is the designed behaviour: a row the penalties
+        already put underwater gets no bonus credit, whatever the scale.
+        """
         on = self._scored({"bonus": 1.0, "penalty": 1.0})
         off = self._scored({"bonus": 0.0, "penalty": 1.0})
-        self.assertGreater(on["quality_score"].max(),
-                           off["quality_score"].max(),
-                           "bonus_scale=1.0 must lift at least one row")
+
+        # Precondition, stated rather than assumed: if a future fixture ever
+        # produces a net-positive row this test is measuring the wrong thing
+        # and should fail loudly instead of passing vacuously.
+        net = off["quality_score"] - off["quality_score_pre_adjust"]
+        self.assertTrue((net <= 0).all(),
+                        "fixture now has a net-positive row — this test no "
+                        "longer covers the gate it was written for")
+
+        stack_on = on["quality_score"] - on["quality_score_pre_adjust"]
+        stack_off = off["quality_score"] - off["quality_score_pre_adjust"]
+        self.assertTrue(
+            ((stack_on - stack_off).abs() < 1e-9).all(),
+            "bonus_scale changed a row whose net adjustment is negative")
 
     def test_both_scales_zero_removes_every_additive_adjustment(self):
         off = self._scored({"bonus": 0.0, "penalty": 0.0})

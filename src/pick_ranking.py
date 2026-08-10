@@ -114,6 +114,22 @@ class BoardResult:
         return out
 
 
+def _num(value: Any) -> Optional[float]:
+    """A finite float, or None. Never raises.
+
+    `dict.get` is typed `Any | None`, so passing its result straight to `float`
+    is an error mypy blocks even when a `try` would catch it at runtime. A
+    None-returning helper says the same thing in the type system, and NaN --
+    which `float()` accepts happily -- is filtered here rather than by every
+    caller remembering to.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
 def _ticker_of(row: Any) -> str:
     for key in ("symbol", "ticker", "Symbol", "Ticker"):
         val = row.get(key)
@@ -193,12 +209,9 @@ def _refusal_for(row: Dict[str, Any], cutoff: float,
     # G6 — measured, and scoped to long single legs only. It says nothing about
     # spreads or condors and is not applied to them.
     if strategy in LONG_SINGLE:
-        try:
-            score = float(row.get("quality_score"))
-            if score >= cutoff:
-                failed.add("top_quintile")
-        except (TypeError, ValueError):
-            pass
+        score = _num(row.get("quality_score"))
+        if score is not None and score >= cutoff:
+            failed.add("top_quintile")
 
     # G4 — not a prediction and not claimed as one. If the system computes a
     # negative expected value it must not also print BUY; this gate exists so

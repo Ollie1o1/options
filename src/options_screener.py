@@ -18,6 +18,7 @@ import os
 import csv
 import json
 import logging
+import hashlib as _hashlib
 import uuid
 import time
 import threading as _threading
@@ -1369,14 +1370,28 @@ def calculate_metrics(
         n_sims = config.get("monte_carlo_simulations", 10000)
         _short_modes = {"Premium Selling", "Credit Spreads", "Iron Condor"}
         _is_short_mode = mode in _short_modes
-        # Deterministic seed for reproducible PoP across runs on the same date
-        _mc_seed_input = (
+        # Deterministic seed for reproducible PoP across runs on the same date.
+        #
+        # This used `hash()` on a tuple containing a string, and Python
+        # randomises string hashing per process unless PYTHONHASHSEED is set —
+        # so the seed, and therefore every PoP and every `quality_score` built
+        # on one, differed between processes on identical input. Measured
+        # 2026-08-10: up to 2.0e-02 of score movement on the same chain, which
+        # is 2% of the score's range, and enough to make CI disagree with
+        # itself across interpreter versions (run 31413572815, py3.11 red and
+        # py3.12 green on the same commit).
+        #
+        # blake2b over a canonical string is stable across processes,
+        # interpreters and platforms, which is what the line always claimed.
+        _mc_seed_input = "|".join(str(x) for x in (
             tuple(df["underlying"].to_numpy(dtype=float, na_value=0.0)[:5]),
             tuple(df["strike"].to_numpy(dtype=float, na_value=0.0)[:5]),
             len(df),
             datetime.now().strftime("%Y-%m-%d"),
-        )
-        _mc_seed = hash(_mc_seed_input) % (2**31)
+        ))
+        _mc_seed = int.from_bytes(
+            _hashlib.blake2b(_mc_seed_input.encode(), digest_size=4).digest(),
+            "big") % (2**31)
         pop_arr, pot_arr = batch_monte_carlo_pop(
             S_arr=df["underlying"].to_numpy(dtype=float, na_value=0.0),
             K_arr=df["strike"].to_numpy(dtype=float, na_value=0.0),
