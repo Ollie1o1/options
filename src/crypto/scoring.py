@@ -95,6 +95,11 @@ def score_iv_rank(chain: pd.DataFrame, history: pd.DataFrame) -> float:
     iv = _atm_iv(chain)
     if iv is None or history is None or history.empty:
         return 0.5
+    # A frame can carry rows and still lack `Close` if a provider changes its
+    # schema — `.empty` does not cover that, and it raises the same KeyError
+    # that killed the crypto-auto-log job through `score_vrp`.
+    if "Close" not in history.columns:
+        return 0.5
     log_r = np.log(history["Close"].astype(float)).diff().dropna()
     if len(log_r) < 60:
         return 0.5
@@ -113,7 +118,23 @@ def score_vrp(chain: pd.DataFrame, history: pd.DataFrame) -> float:
     Mapped to [0, 1] via tanh: VRP=0 → 0.5, VRP=+0.20 → ~0.95, VRP=-0.20 → ~0.05.
     """
     iv = _atm_iv(chain)
-    if iv is None:
+    # Same guard its two siblings already carry (`score_iv_rank`,
+    # `score_funding_z`): an absent history is neutral, not a crash.
+    #
+    # Without it a transient yfinance failure took down the whole job.
+    # `screener._scan_currency` prints "no spot history — VRP/IV-rank will fall
+    # back to neutral" and then carries on, so the contract was already
+    # written down; it just was not honoured here. On 2026-08-10 the 16:11 UTC
+    # run fetched 794 BTC contracts, lost the spot history to a rate limit, and
+    # died on `history["Close"]` with KeyError — the crypto-auto-log job had
+    # been failing this way on every fire.
+    #
+    # The column check is not redundant with `.empty`: a frame can carry rows
+    # and still lack `Close` if a provider changes its schema, and that would
+    # raise exactly the same KeyError.
+    if iv is None or history is None or history.empty:
+        return 0.5
+    if "Close" not in history.columns:
         return 0.5
     rv = _df.realized_vol(np.log(history["Close"].astype(float)).diff(), window=30)
     if not math.isfinite(rv):
