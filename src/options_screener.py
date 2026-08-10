@@ -6140,6 +6140,20 @@ def main():
                         # Condors carry per-leg quotes now, so they can be priced
                         # rather than refused wholesale. See
                         # rank_structures_by_verdict.
+                        #
+                        # DELIBERATELY NOT GATED, and this asymmetry is the point.
+                        # `pick_ranking` refuses off-index condors on the BOARD
+                        # (G5: +9.5% mean return on capital on broad index against
+                        # -11.8% elsewhere, n=139, p < 1e-5). The auto-logger keeps
+                        # writing them, as `paper_only=1` research rows that never
+                        # counted as book trades.
+                        #
+                        # Gating here would freeze the off-index sample at the
+                        # n=139 that produced the rule, and a rule that can only
+                        # ever be confirmed by its own training set is not a
+                        # finding. Logging continues so the sample grows and
+                        # `scripts/validate_gates.py` can overturn G5 if the edge
+                        # was a three-month artifact. Ruled 2026-08-10.
                         _spreads = rank_structures_by_verdict(_spreads)
                         # One row per ticker — keep highest-scored structure per symbol
                         if "symbol" in _spreads.columns:
