@@ -1015,8 +1015,15 @@ def calculate_metrics(
     earnings_move_data: Optional[dict] = None,
     mode: str = "Single-stock",
     dividend_yield: float = 0.0,
+    as_of: Optional[datetime] = None,
 ) -> pd.DataFrame:
-    """Calculates all objective mathematical metrics and merges external data."""
+    """Calculates all objective mathematical metrics and merges external data.
+
+    ``as_of`` is the instant the chain is priced at; None means wall-clock now.
+    It reaches here only to date the Monte Carlo seed. Without it, pinning the
+    instant makes a scan reproducible today and NOT tomorrow, because the seed
+    rolls at midnight — a guarantee that silently expires is worse than none.
+    """
     
     # --- Institutional Flow & Sentiment ---
     df["Vol_OI_Ratio"] = (df["volume"] / df["openInterest"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
@@ -1387,7 +1394,7 @@ def calculate_metrics(
             tuple(df["underlying"].to_numpy(dtype=float, na_value=0.0)[:5]),
             tuple(df["strike"].to_numpy(dtype=float, na_value=0.0)[:5]),
             len(df),
-            datetime.now().strftime("%Y-%m-%d"),
+            (as_of or datetime.now()).strftime("%Y-%m-%d"),
         ))
         _mc_seed = int.from_bytes(
             _hashlib.blake2b(_mc_seed_input.encode(), digest_size=4).digest(),
@@ -2673,6 +2680,7 @@ def enrich_and_score(
     news_data=None,
     dividend_yield: float = 0.0,
     squeeze_out: Optional[Dict[str, pd.DataFrame]] = None,
+    as_of: Optional[datetime] = None,
 ) -> pd.DataFrame:
     """Score a chain and apply the mode's filters.
 
@@ -2686,8 +2694,24 @@ def enrich_and_score(
     if news_data is not None and hasattr(news_data, "aggregate_sentiment"):
         sentiment_score = news_data.aggregate_sentiment
 
-    # Prepare
-    now = datetime.now(timezone.utc)
+    # Prepare.
+    #
+    # `as_of` is the instant this chain is priced at. Defaulting to None keeps
+    # a live scan exactly as it was — it prices at wall-clock now, which is
+    # correct: a contract really does have less time left a second later.
+    #
+    # It is injectable because that correctness makes the scorer irreproducible.
+    # `T_years` carries sub-second resolution, so two processes 1.371 seconds
+    # apart produced `T_years` 1.371 seconds apart, and that propagates through
+    # Black-Scholes into every Greek, `prob_profit`, `pop_score` and finally
+    # `quality_score` at ~7e-8 (measured 2026-08-10). Small, but it means you
+    # cannot re-run a scan and get the scan back, and it made two tests compare
+    # floats that were never going to be equal.
+    #
+    # Not to be confused with the seed bug fixed in 4bceef5, which was worth
+    # 2.0e-02 — 2% of the score's range — and was a genuine defect. This one is
+    # correct behaviour with an escape hatch for reproducing a result.
+    now = as_of or datetime.now(timezone.utc)
     df["exp_dt"] = pd.to_datetime(df["expiration"], errors="coerce", utc=True)
     df = df[df["exp_dt"].notna()].copy()
     df["T_years"] = (df["exp_dt"] - now).dt.total_seconds() / (365.0 * 24 * 3600)
@@ -2843,7 +2867,7 @@ def enrich_and_score(
         sentiment_score, macro_risk_active, sector_perf, tnx_change_pct,
         short_interest=short_interest, next_ex_div=next_ex_div,
         earnings_move_data=earnings_move_data, mode=mode,
-        dividend_yield=_div_yield,
+        dividend_yield=_div_yield, as_of=now,
     )
 
     # 2. Call Helper: Scores
