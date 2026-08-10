@@ -50,6 +50,39 @@ def _score_orderings(path: str):
     return out
 
 
+def _variable_key_orderings(path: str):
+    """`sort_values(some_variable)` inside a function that names a bad key.
+
+    The constant-argument check above misses
+    `sort_col = "quality_score" if ... else None; df.sort_values(sort_col)`,
+    because the discredited string never appears as an argument. That is not
+    hypothetical: `offer_tearsheet` re-ranked by `quality_score` exactly this
+    way, so `--tearsheet 1` indexed a different list from the one printed, and
+    an NVDA scan rendered a tearsheet for a contract at another strike and
+    expiry than anything on screen.
+
+    Flags any function that both mentions a discredited key as a string and
+    sorts by a non-constant. Deliberately blunt: a false positive costs a
+    comment, a false negative costs a wrong contract on a page.
+    """
+    bad = {"quality_score", "return_on_risk", "ev_score", "overall_score"}
+    out = []
+    for fn in ast.walk(ast.parse(_src(path))):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        strings = {n.value for n in ast.walk(fn)
+                   if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        if not (bad & strings):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", None) in ("sort_values", "nlargest")
+                    and node.args
+                    and not isinstance(node.args[0], (ast.Constant, ast.List))):
+                out.append((fn.name, node.lineno))
+    return out
+
+
 # Two places may still consult the composite, both documented inline:
 #   1. `filter_and_score`'s funnel sort — SELECTION, not display, and the
 #      replacement key tested on 2026-08-09 was a coin flip, so swapping it
@@ -74,6 +107,37 @@ class NoDiscreditedOrderingTest(unittest.TestCase):
         hits = _score_orderings("src/options_screener.py")
         self.assertLessEqual(
             len(hits), _ALLOWED_SELECTION_SORTS, f"undocumented orderings: {hits}")
+
+    # Functions allowed to sort by a variable key, with the reason. Adding to
+    # this list is a deliberate act; it is not a place to silence the guard.
+    #
+    # `print_comparison_table` honours a sort the READER explicitly asked for,
+    # including by score — "show me this sorted by score" is a legitimate
+    # request and the column is labelled. Its DEFAULT is board order, so a
+    # table nobody chose a sort for is never ranked by the composite.
+    ALLOWED_VARIABLE_SORTS = {("src/cli_display.py", "print_comparison_table")}
+
+    def test_no_module_sorts_by_a_discredited_key_held_in_a_variable(self):
+        """The hole the constant check left. See `_variable_key_orderings`."""
+        for path in ("src/options_screener.py", "src/cli_display.py",
+                     "src/squeeze/board.py"):
+            found = [(fn, ln) for fn, ln in _variable_key_orderings(path)
+                     if (path, fn) not in self.ALLOWED_VARIABLE_SORTS]
+            self.assertEqual(
+                found, [],
+                f"{path} sorts by a variable in a function that names a "
+                f"discredited key — the tearsheet bug of 2026-08-10")
+
+    def test_the_tearsheet_indexes_the_frame_the_cards_were_numbered_from(self):
+        """`--tearsheet N` must mean the N the user just read.
+
+        It was handed `picks` (pre-gate, pre-ordering) and then re-ranked, so
+        it could render a contract the board had refused.
+        """
+        src = _src("src/options_screener.py")
+        self.assertIn("offer_tearsheet(_display_df", src,
+                      "the tearsheet is not being given the displayed frame")
+        self.assertNotIn('sort_col = "quality_score" if "quality_score" in picks_df', src)
 
     def test_the_condor_board_no_longer_sorts_by_return_on_risk(self):
         """-0.216 against return on capital, n=139: its top pick was its worst."""
