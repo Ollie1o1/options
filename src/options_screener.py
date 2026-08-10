@@ -4275,8 +4275,13 @@ def offer_tearsheet(picks_df, ctx, interactive: bool, preselect=None):
         return None              # out-of-range is "no", not an error
 
     from src.tearsheet import build, write_tearsheet
-    sort_col = "quality_score" if "quality_score" in picks_df.columns else None
-    ranked = picks_df.sort_values(sort_col, ascending=False) if sort_col else picks_df
+    # Board order, NOT a re-sort. This re-ranked by `quality_score`, so the
+    # number the user typed indexed a different list from the one they had just
+    # read — and that score is -0.131 against outcome on long calls, with its
+    # top quintile the worst cell in the book. The caller passes the frame the
+    # cards were numbered from; indexing it directly is what makes "pick 1"
+    # mean pick 1.
+    ranked = picks_df
     row = ranked.iloc[int(choice) - 1].to_dict()
     # Sibling picks give the tearsheet a real IV term structure (>=2 expiries on
     # this name). A single row can only ever produce one point, which is not a curve.
@@ -4690,13 +4695,17 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                     msg = f"Concentration warning: {dominant_count}/{total} top picks from {dominant} \u2014 consider diversifying"
                     print(fmt.colorize(f"  \u26a0\ufe0f  {msg}", fmt.Colors.YELLOW) if HAS_ENHANCED_CLI else f"  \u26a0\ufe0f  {msg}")
 
-    # Generate Final Reports
+    # Generate Final Reports.
+    # `_display_df` is the exact frame print_report numbered on screen, so
+    # "pick N" means the same contract in the terminal and on a tearsheet.
+    _display_df = None
     if mode == "Budget scan":
         if not picks.empty:
             final_df = gate_and_report(picks, "BUDGET", verbose=verbose)
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
+            _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose and picks.empty:
@@ -4711,6 +4720,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
+            _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose and picks.empty:
@@ -4749,6 +4759,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = gate_and_report(final_df, "PREMIUM SELLING", verbose=verbose)
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
+            _display_df = final_df.head(10)
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose and picks.empty:
@@ -4768,6 +4779,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = gate_and_report(picks, "TICKER", verbose=verbose)
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
+            _display_df = final_df
             if verbose:
                 print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
         elif verbose and picks.empty:
@@ -4856,7 +4868,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _ts_ctx = {"mode": mode, "spot": underlying_price, "rfr": rfr,
                        "vix": get_vix_level(), "vix_regime": volatility_regime,
                        "config": config, "config_sha": _config_sha(config)}
-            offer_tearsheet(picks, _ts_ctx, interactive=interactive,
+            # The frame the CARDS were numbered from, not `picks`.
+            # `picks` is pre-gate and pre-ordering: a tearsheet built from it
+            # could show a contract the board had refused, at a different
+            # strike and expiry from anything on screen. Observed 2026-08-10 on
+            # an NVDA scan — terminal showed $222.5 08-19/08-21, the tearsheet
+            # rendered $225 08-28.
+            offer_tearsheet(_display_df if _display_df is not None else picks,
+                            _ts_ctx, interactive=interactive,
                             preselect=tearsheet_pick)
         except Exception as _ts_exc:
             logging.getLogger(__name__).debug("tearsheet skipped: %s", _ts_exc)
