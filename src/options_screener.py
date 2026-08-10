@@ -6306,6 +6306,16 @@ def main():
                         # below and which symbols reach the top-N, so it selected
                         # every row in the ledger. See rank_single_legs_by_verdict.
                         _single_legs = rank_single_legs_by_verdict(_single_legs, mode)
+                        # ...then refuse what the BOARD refused. Ordering alone
+                        # let the logger write single legs the reader was never
+                        # shown — these are `paper_only=0` book trades, unlike
+                        # the condor research rows, so board and book must agree.
+                        # Audited 2026-08-10: 0 of 5 top picks were board-refused
+                        # on a 78-contract sample, because this ordering is
+                        # EV-descending and the main gate is EV-based. It bites
+                        # when the top-EV pick is refused for another reason.
+                        _single_legs = gate_and_report(_single_legs, "AUTO-LOG",
+                                                       verbose=False)
                         # One row per ticker — keep the highest-scored leg per symbol to avoid
                         # concentration (e.g. ORCL×6 from a single scan).
                         if "symbol" in _single_legs.columns:
@@ -6532,98 +6542,112 @@ def main():
                                 # Same ordering as the bulk auto-log path: the
                                 # composite selected every ledger row until now.
                                 _ranked_one = rank_single_legs_by_verdict(picks, mode)
-                                top_pick_row = _ranked_one.iloc[0]
-                            today_str = datetime.now().strftime("%Y-%m-%d")
-                            trade_dict = {
-                                "date": today_str,
-                                "ticker": top_pick_row["symbol"],
-                                "expiration": top_pick_row["expiration"],
-                                "strike": top_pick_row["strike"],
-                                "type": str(top_pick_row["type"]).capitalize(),
-                                "entry_price": (
-                                    safe_float(top_pick_row.get("ask") or None)
-                                    or safe_float(top_pick_row.get("lastPrice"))
-                                    or safe_float(top_pick_row.get("premium"), 0.0)
-                                ),
-                                "quality_score": top_pick_row["quality_score"],
-                                "strategy_name": _strategy_label_for_mode(mode, top_pick_row['type']),
-                                "entry_iv": top_pick_row.get("impliedVolatility"),
-                                "entry_delta": top_pick_row.get("delta"),
-                                "entry_gamma": top_pick_row.get("gamma"),
-                                "entry_vega": top_pick_row.get("vega"),
-                                "entry_theta": top_pick_row.get("theta"),
-                                "dividend_yield": top_pick_row.get("dividend_yield"),
-                                # Component scores — enable backtester IC analysis once 30+ trades close
-                                "pop_score": top_pick_row.get("pop_score"),
-                                "ev_score": top_pick_row.get("ev_score"),
-                                # Levels, not the within-scan rank beside them.
-                                # Schema 21 makes net_ev/noise reconstructable —
-                                # `ev_score` is a rank and cannot say how large
-                                # an edge was. This site was missed when the
-                                # columns shipped: it builds from `top_pick_row`
-                                # rather than `row`, so a patch written against
-                                # the other two dicts skipped it, and every trade
-                                # logged on 2026-08-10 stored NULL.
-                                "ev_per_contract": top_pick_row.get("ev_per_contract"),
-                                "ev_gross_per_contract": top_pick_row.get("ev_gross_per_contract"),
-                                "ev_cost_per_contract": top_pick_row.get("ev_cost_per_contract"),
-                                "ev_noise": top_pick_row.get("ev_noise"),
-                                "rr_score": top_pick_row.get("rr_score"),
-                                "liquidity_score": top_pick_row.get("liquidity_score"),
-                                "momentum_score": top_pick_row.get("momentum_score"),
-                                "iv_rank_score": top_pick_row.get("iv_rank_score"),
-                                "theta_score": top_pick_row.get("theta_score"),
-                                "iv_edge_score": top_pick_row.get("iv_advantage_score"),
-                                "vrp_score": top_pick_row.get("vrp_score"),
-                                "iv_mispricing_score": top_pick_row.get("iv_mispricing_score"),
-                                "skew_align_score": top_pick_row.get("skew_align_score"),
-                                "vega_risk_score": top_pick_row.get("vega_risk_score"),
-                                "term_structure_score": top_pick_row.get("term_structure_score"),
-                                # v7: remaining 14 components — full IC coverage
-                                "catalyst_score": top_pick_row.get("catalyst_score"),
-                                "em_realism_score": top_pick_row.get("em_realism_score"),
-                                "gamma_theta_score": top_pick_row.get("gamma_theta_score"),
-                                "gex_score": top_pick_row.get("gex_score"),
-                                "gamma_magnitude_score": top_pick_row.get("gamma_magnitude_score"),
-                                "gamma_pin_score": top_pick_row.get("gamma_pin_score"),
-                                "iv_velocity_score": top_pick_row.get("iv_velocity_score"),
-                                "max_pain_score": top_pick_row.get("max_pain_score"),
-                                "oi_change_score": top_pick_row.get("oi_change_score"),
-                                "option_rvol_score": top_pick_row.get("option_rvol_score"),
-                                "pcr_score": top_pick_row.get("pcr_score"),
-                                "sentiment_score_norm": top_pick_row.get("sentiment_score_norm"),
-                                "spread_score": top_pick_row.get("spread_score"),
-                                "trader_pref_score": top_pick_row.get("trader_pref_score"),
-                                "score_adjustments": top_pick_row.get("score_adjustments"),
-                                "weight_profile": _weight_profile_id,
-                            }
-                            # AI-score lookup via stable key (see auto-log path comment).
-                            if _ai_ranked is not None and not _ai_ranked.empty:
-                                try:
-                                    _m = _ai_ranked[
-                                        (_ai_ranked["symbol"].astype(str).str.upper() == str(top_pick_row.get("symbol", "")).upper())
-                                        & (_ai_ranked["strike"].astype(float) == float(top_pick_row.get("strike", 0)))
-                                        & (_ai_ranked["expiration"].astype(str) == str(top_pick_row.get("expiration", "")))
-                                        & (_ai_ranked["type"].astype(str).str.lower() == str(top_pick_row.get("type", "")).lower())
-                                    ]
-                                    if not _m.empty:
-                                        if "ai_score" in _m.columns:
-                                            trade_dict["ai_score"] = _m["ai_score"].iloc[0]
-                                        if "ai_confidence" in _m.columns:
-                                            trade_dict["ai_confidence"] = _m["ai_confidence"].iloc[0]
-                                except (KeyError, ValueError, TypeError):
-                                    pass
-                            pm.log_trade(trade_dict)
-                            msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
-                            print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
-                            # Offer inline portfolio view
-                            _view = prompt_input("View portfolio? (y/n)", "n").strip().lower()
-                            if _view in ("y", "yes"):
-                                try:
-                                    from .check_pnl import view_portfolio
-                                    view_portfolio()
-                                except Exception as _pnl_exc:
-                                    print(f"  Could not load portfolio: {_pnl_exc}")
+                                # Gated: [P] "paper trade top pick" must mean
+                                # the pick the reader was shown, not the top of
+                                # an ungated list they never saw.
+                                _ranked_one = gate_and_report(_ranked_one,
+                                                              "PAPER TRADE",
+                                                              verbose=False)
+                                if _ranked_one is None or _ranked_one.empty:
+                                    print(fmt.format_warning(
+                                        "no candidate cleared the gates — nothing logged")
+                                        if HAS_ENHANCED_CLI else
+                                        "  no candidate cleared the gates — nothing logged")
+                                    top_pick_row = None
+                                else:
+                                    top_pick_row = _ranked_one.iloc[0]
+                            if top_pick_row is not None:
+                                today_str = datetime.now().strftime("%Y-%m-%d")
+                                trade_dict = {
+                                    "date": today_str,
+                                    "ticker": top_pick_row["symbol"],
+                                    "expiration": top_pick_row["expiration"],
+                                    "strike": top_pick_row["strike"],
+                                    "type": str(top_pick_row["type"]).capitalize(),
+                                    "entry_price": (
+                                        safe_float(top_pick_row.get("ask") or None)
+                                        or safe_float(top_pick_row.get("lastPrice"))
+                                        or safe_float(top_pick_row.get("premium"), 0.0)
+                                    ),
+                                    "quality_score": top_pick_row["quality_score"],
+                                    "strategy_name": _strategy_label_for_mode(mode, top_pick_row['type']),
+                                    "entry_iv": top_pick_row.get("impliedVolatility"),
+                                    "entry_delta": top_pick_row.get("delta"),
+                                    "entry_gamma": top_pick_row.get("gamma"),
+                                    "entry_vega": top_pick_row.get("vega"),
+                                    "entry_theta": top_pick_row.get("theta"),
+                                    "dividend_yield": top_pick_row.get("dividend_yield"),
+                                    # Component scores — enable backtester IC analysis once 30+ trades close
+                                    "pop_score": top_pick_row.get("pop_score"),
+                                    "ev_score": top_pick_row.get("ev_score"),
+                                    # Levels, not the within-scan rank beside them.
+                                    # Schema 21 makes net_ev/noise reconstructable —
+                                    # `ev_score` is a rank and cannot say how large
+                                    # an edge was. This site was missed when the
+                                    # columns shipped: it builds from `top_pick_row`
+                                    # rather than `row`, so a patch written against
+                                    # the other two dicts skipped it, and every trade
+                                    # logged on 2026-08-10 stored NULL.
+                                    "ev_per_contract": top_pick_row.get("ev_per_contract"),
+                                    "ev_gross_per_contract": top_pick_row.get("ev_gross_per_contract"),
+                                    "ev_cost_per_contract": top_pick_row.get("ev_cost_per_contract"),
+                                    "ev_noise": top_pick_row.get("ev_noise"),
+                                    "rr_score": top_pick_row.get("rr_score"),
+                                    "liquidity_score": top_pick_row.get("liquidity_score"),
+                                    "momentum_score": top_pick_row.get("momentum_score"),
+                                    "iv_rank_score": top_pick_row.get("iv_rank_score"),
+                                    "theta_score": top_pick_row.get("theta_score"),
+                                    "iv_edge_score": top_pick_row.get("iv_advantage_score"),
+                                    "vrp_score": top_pick_row.get("vrp_score"),
+                                    "iv_mispricing_score": top_pick_row.get("iv_mispricing_score"),
+                                    "skew_align_score": top_pick_row.get("skew_align_score"),
+                                    "vega_risk_score": top_pick_row.get("vega_risk_score"),
+                                    "term_structure_score": top_pick_row.get("term_structure_score"),
+                                    # v7: remaining 14 components — full IC coverage
+                                    "catalyst_score": top_pick_row.get("catalyst_score"),
+                                    "em_realism_score": top_pick_row.get("em_realism_score"),
+                                    "gamma_theta_score": top_pick_row.get("gamma_theta_score"),
+                                    "gex_score": top_pick_row.get("gex_score"),
+                                    "gamma_magnitude_score": top_pick_row.get("gamma_magnitude_score"),
+                                    "gamma_pin_score": top_pick_row.get("gamma_pin_score"),
+                                    "iv_velocity_score": top_pick_row.get("iv_velocity_score"),
+                                    "max_pain_score": top_pick_row.get("max_pain_score"),
+                                    "oi_change_score": top_pick_row.get("oi_change_score"),
+                                    "option_rvol_score": top_pick_row.get("option_rvol_score"),
+                                    "pcr_score": top_pick_row.get("pcr_score"),
+                                    "sentiment_score_norm": top_pick_row.get("sentiment_score_norm"),
+                                    "spread_score": top_pick_row.get("spread_score"),
+                                    "trader_pref_score": top_pick_row.get("trader_pref_score"),
+                                    "score_adjustments": top_pick_row.get("score_adjustments"),
+                                    "weight_profile": _weight_profile_id,
+                                }
+                                # AI-score lookup via stable key (see auto-log path comment).
+                                if _ai_ranked is not None and not _ai_ranked.empty:
+                                    try:
+                                        _m = _ai_ranked[
+                                            (_ai_ranked["symbol"].astype(str).str.upper() == str(top_pick_row.get("symbol", "")).upper())
+                                            & (_ai_ranked["strike"].astype(float) == float(top_pick_row.get("strike", 0)))
+                                            & (_ai_ranked["expiration"].astype(str) == str(top_pick_row.get("expiration", "")))
+                                            & (_ai_ranked["type"].astype(str).str.lower() == str(top_pick_row.get("type", "")).lower())
+                                        ]
+                                        if not _m.empty:
+                                            if "ai_score" in _m.columns:
+                                                trade_dict["ai_score"] = _m["ai_score"].iloc[0]
+                                            if "ai_confidence" in _m.columns:
+                                                trade_dict["ai_confidence"] = _m["ai_confidence"].iloc[0]
+                                    except (KeyError, ValueError, TypeError):
+                                        pass
+                                pm.log_trade(trade_dict)
+                                msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
+                                print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                                # Offer inline portfolio view
+                                _view = prompt_input("View portfolio? (y/n)", "n").strip().lower()
+                                if _view in ("y", "yes"):
+                                    try:
+                                        from .check_pnl import view_portfolio
+                                        view_portfolio()
+                                    except Exception as _pnl_exc:
+                                        print(f"  Could not load portfolio: {_pnl_exc}")
 
                     elif save_choice == "C":
                         # Export best available data: AI-ranked picks > raw picks > spreads > condors
