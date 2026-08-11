@@ -389,14 +389,39 @@ class ResidualIcTest(unittest.TestCase):
         self.assertIsNone(r["ic"])
         self.assertEqual(r["controls"], [])
 
-    def test_controls_absent_from_the_data_leave_the_ic_alone(self):
+    def test_controls_absent_from_the_data_cannot_be_measured(self):
+        # NOT the raw IC. Printing an uncontrolled number in a column labelled
+        # "IC|ctl" is a false statement about what was measured, and it reads
+        # as "the control made no difference" when it means "no control ran".
         trades = self._mixed()
         for t in trades:
             t.features.pop("credit_pct_width")
             t.features.pop("atm_iv")
         r = residual_ic(trades, "echo", controls=("credit_pct_width", "atm_iv"))
-        raw = feature_ic(trades, "echo")["ic"]
-        self.assertAlmostEqual(r["ic"], raw, places=3)
+        self.assertIsNone(r["ic"])
+        self.assertEqual(r["controls"], [])
+
+    def test_one_trade_missing_a_control_does_not_discard_the_control(self):
+        # Shipped broken and caught on real output: on the long_call tables a
+        # single absent value dropped the control for the whole 3,000-trade
+        # sample, and IC|ctl silently printed the raw IC instead. Dropping the
+        # affected TRADES keeps the control and keeps the column honest.
+        trades = self._mixed()
+        trades[0].features["atm_iv"] = None
+        r = residual_ic(trades, "echo", controls=("credit_pct_width", "atm_iv"))
+        self.assertEqual(r["controls"], ["credit_pct_width", "atm_iv"])
+        self.assertEqual(r["n"], len(trades) - 1)
+        self.assertLess(abs(r["ic"]), 0.15)
+
+    def test_a_control_missing_almost_everywhere_is_dropped_not_the_sample(self):
+        # The other direction: if keeping a control would cost most of the
+        # sample, the control goes rather than the evidence.
+        trades = self._mixed()
+        for t in trades[10:]:
+            t.features["atm_iv"] = None
+        r = residual_ic(trades, "echo", controls=("credit_pct_width", "atm_iv"))
+        self.assertEqual(r["controls"], ["credit_pct_width"])
+        self.assertEqual(r["n"], len(trades))
 
     def test_too_few_trades_is_none_not_zero(self):
         r = residual_ic(self._mixed(n=4), "echo")

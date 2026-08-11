@@ -115,10 +115,24 @@ applied once in `snapshot()`. It degrades rather than refuses, so a chain
 entirely inside the floor is still used.
 
 **Consequence: level-feature numbers measured before 2026-08-11 are not
-comparable with anything measured after it.** Results in
-`docs/HOLDOUT_20260809.md` and `docs/ATTRIBUTION_20260808.md` that turn on
-`iv_rank`, `vol_of_vol` or `iv_velocity` need re-running before they are cited
-again. That has NOT been done here.
+comparable with anything measured after it.**
+
+**Both affected documents have now been re-run (2026-08-11) and neither
+changes.** `HOLDOUT_20260809.md` §6 stands in full — `term_slope` still flips,
+`iv_rank`'s quantile spread still inverts — and `ATTRIBUTION_20260808.md`
+§4d-bis and §4f reproduce. Correction notes are at the top of both.
+
+The scale was overstated when first written here. "281 of 400 sampled
+symbol-days change" was conditioned on days *containing* a sub-10-DTE contract;
+across the whole cache the fix touches **19.8% of symbol-days and 6.3% of
+rows**, and the aggregate ICs move in the third or fourth decimal. The defect
+was real and worth fixing. Its effect on published results was not.
+
+What the re-run *did* overturn came from the new screen rather than the fix:
+`skew_25d`, the one feature `HOLDOUT_20260809.md` §6 kept, collapses to
+−0.0250 in-sample and **flips to +0.0262 in the holdout** once credit richness
+is removed. On the call side `long_delta` survives the control in both windows
+(+0.0333 / +0.0777) and is the only thing that does.
 
 **The fix broke zero of 3,843 tests** despite moving 281 of 400 sampled Dolt
 symbol-days. The level features were never pinned by any test against real
@@ -245,6 +259,17 @@ on capital *is* roughly credit over width. Once it is removed, nothing in the
 19-feature family predicts the outcome. That agrees with
 `docs/ATTRIBUTION_20260808.md`, which reached the same conclusion with weaker
 tools.
+
+**Defect in the first version of this screen, fixed same day (PR #29).**
+Controls were read all-or-nothing, so a single trade missing `atm_iv` discarded
+that control across the entire table — and the function then returned the RAW
+IC, printing an uncontrolled number under a heading that says `IC|ctl`. It was
+visible only because `IC|ctl` came back exactly equal to `IC` to four decimals
+on the `long_call` tables. Controls are now kept and the affected *trades*
+dropped, subject to an 80% coverage floor, and a column that could not be
+controlled prints `-`. Any `long_call` `IC|ctl` figure from before that fix
+should be discarded. The bull_put numbers above are unaffected and were
+re-verified to four decimals.
 
 Design notes worth keeping:
 

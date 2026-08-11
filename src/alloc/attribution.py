@@ -164,6 +164,9 @@ def feature_ic(trades: Sequence[Any], feature: str,
 # held-to-expiry credit spread, so a feature correlated with either inherits
 # their IC without carrying any information of its own.
 RESIDUAL_CONTROLS = ("credit_pct_width", "atm_iv")
+# A control has to be known for at least this share of the sample to be worth
+# honouring. Below it, the control is dropped rather than most of the evidence.
+MIN_CONTROL_COVERAGE = 0.80
 
 
 def residual_ic(trades: Sequence[Any], feature: str,
@@ -198,38 +201,47 @@ def residual_ic(trades: Sequence[Any], feature: str,
     if len(xs) < MIN_TRADES or _sps is None:
         return out
 
-    def _control_values(name: str) -> Optional[List[float]]:
-        """The control on every kept trade, or None if it is unusable there.
+    def _value(t: Any, name: str) -> Optional[float]:
+        v = (getattr(t, "features", None) or {}).get(name)
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if fv != fv else fv     # NaN is not a value
 
-        All-or-nothing on purpose: a control known for only some of the trades
-        would residualise part of the sample and leave the rest raw, which is
-        two different measurements reported as one.
-        """
-        vals: List[float] = []
-        for t in keep:
-            v = (getattr(t, "features", None) or {}).get(name)
-            if v is None:               # missing on at least one trade
-                return None
-            try:
-                fv = float(v)
-            except (TypeError, ValueError):
-                return None
-            if fv != fv:                # NaN
-                return None
-            vals.append(fv)
-        return vals
-
-    # Only controls that are present, usable and not the feature itself.
+    # A control is kept if it is known for MOST of the sample, and the trades
+    # where it is unknown are then dropped from the residual.
+    #
+    # The first version dropped the CONTROL whenever any single trade lacked it,
+    # which on real output meant one absent value silently disabled the control
+    # across a 3,000-trade table while the column went on printing a number.
+    # Dropping the affected trades instead keeps the control, and keeps the
+    # residualised and non-residualised trades from being mixed into one figure
+    # — which was the original worry and is still the right one.
     usable: List[str] = []
-    cols: List[List[float]] = []
     for name in controls:
         if name == feature:
             continue
-        got = _control_values(name)
-        if got is None or len(set(got)) < 2:
-            continue                    # unusable, or constant and so a no-op
+        have = [t for t in keep if _value(t, name) is not None]
+        # If honouring the control would cost most of the evidence, the control
+        # goes rather than the sample.
+        if len(have) < max(MIN_TRADES, MIN_CONTROL_COVERAGE * len(keep)):
+            continue
+        if len({_value(t, name) for t in have}) < 2:
+            continue                    # constant, so a no-op
         usable.append(name)
-        cols.append(got)
+
+    if usable:
+        rows_ok = [i for i, t in enumerate(keep)
+                   if all(_value(t, n) is not None for n in usable)]
+        keep = [keep[i] for i in rows_ok]
+        xs = [xs[i] for i in rows_ok]
+        ys = [ys[i] for i in rows_ok]
+        cols = [[float(_value(t, n)) for t in keep] for n in usable]  # type: ignore[arg-type]
+    else:
+        cols = []
     out["controls"] = usable
     out["n"] = len(xs)
 
@@ -237,16 +249,12 @@ def residual_ic(trades: Sequence[Any], feature: str,
         return out                      # constant: no ranking to correlate
     rx = _sps.rankdata(xs)
     if not usable:
-        # Nothing to remove. Reporting the raw IC is the honest answer: the
-        # control was unavailable, not satisfied.
-        if feature in controls:
-            # The feature IS the only control. `n` stays at the trades
-            # available and `ic` stays None, matching `feature_ic`: "could not
-            # measure" is a different claim from "measured, no effect".
-            return out
-        ic, p = _sps.spearmanr(rx, ys)
-        if ic == ic:
-            out["ic"], out["p"] = round(float(ic), 4), round(float(p), 4)
+        # No control could be applied, so there is no controlled IC. The first
+        # version returned the RAW one here, which puts an uncontrolled number
+        # under a heading that says otherwise — and it reads as "the control
+        # made no difference" when it means "no control ran". `n` stays at the
+        # trades available and `ic` stays None, matching `feature_ic`: "could
+        # not measure" is a different claim from "measured, no effect".
         return out
 
     design = np.column_stack([_sps.rankdata(c) for c in cols]
