@@ -146,6 +146,16 @@ def assess(row: Dict[str, Any],
     `candidate_verdict`, which prices the candidate at what it would fill for.
     """
     try:
+        # Before anything is graded: were these bands ever measured at this
+        # tenor? Past 250 DTE the median candidate's friction alone exceeds
+        # CLEAR_MAX_FRICTION, so STRONG and CLEAR become unreachable alone and
+        # every long-dated candidate reads THIN regardless of quality. THIN is
+        # a verdict; the honest answer out there is that there is no verdict.
+        from .cost_calibration import (OUT_OF_RANGE_REASON, entry_dte,
+                                       in_calibration)
+        if not in_calibration(entry_dte(row)):
+            return Worth("UNGRADED", limiting=OUT_OF_RANGE_REASON)
+
         net = _finite(row.get("ev_per_contract"))
         noise = _finite(row.get("ev_noise"))
         if noise is None:

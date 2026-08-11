@@ -6,6 +6,7 @@ state. This guard stops the feeder adding more, and its job is to do that
 WITHOUT touching debit structures, manual entries, or trades that are merely
 small.
 """
+import datetime as _dt
 import os
 import sys
 import tempfile
@@ -15,6 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.paper_manager import (DEFAULT_MAX_FRICTION_TO_CREDIT,  # noqa: E402
                                PaperManager)
+
+# 30 days out, relative to today. A hardcoded expiration drifts out of the cost
+# model's calibrated DTE range — and eventually into the past — neither of
+# which has anything to do with what these tests measure.
+_NEAR_EXP = (_dt.date.today() + _dt.timedelta(days=30)).isoformat()
 
 
 class _Mgr(unittest.TestCase):
@@ -68,7 +74,7 @@ class RatioTest(_Mgr):
 class GuardTest(_Mgr):
     def _log(self, **kw):
         trade = {"ticker": "TSTX", "strategy_name": "Bull Put", "type": "put",
-                 "strike": 100.0, "expiration": "2026-12-18", "entry_price": 1.00,
+                 "strike": 100.0, "expiration": _NEAR_EXP, "entry_price": 1.00,
                  "net_credit": 1.00, "max_loss_usd": 400.0, "quantity": 1.0,
                  "quality_score": 70.0}
         trade.update(kw)

@@ -408,6 +408,9 @@ def _evaluate_long_single_leg_exit(
 # Realistic execution cost constants (deprecated fallbacks — use config.json paper_trading section)
 # Sourced from src.execution_costs so there is ONE number to change when the
 # broker changes; see the note there for why the fallback is not 0.0.
+from src.cost_calibration import OUT_OF_RANGE_REASON as _OUT_OF_RANGE_REASON
+from src.cost_calibration import entry_dte as _entry_dte
+from src.cost_calibration import in_calibration as _in_calibration
 from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 from src.paths import repo_path
 
@@ -1236,6 +1239,21 @@ class PaperManager:
         # spreads with $57 of median capital at risk against ~$65 of spread. The
         # affordability gate refuses positions too LARGE for the account; this
         # one refuses positions too SMALL to survive their own market.
+        # The friction gate below was calibrated on DTE 10-67 and says nothing
+        # about tenors it never saw. Refusing FIRST, with the real reason,
+        # keeps "this candidate is too expensive" separate from "this threshold
+        # was never measured here" — past 250 DTE the gate refuses a quarter to
+        # a half of all candidates, and reporting that as a spread verdict
+        # would be inventing a judgement.
+        _dte = _entry_dte(trade_dict)
+        if not trade_dict.get("allow_untradeable") and not _in_calibration(_dte):
+            self.untradeable_rejected += 1
+            print(
+                f"Skipped {trade_dict['strategy_name']} on {trade_dict.get('ticker')}: "
+                f"{_dte} DTE — {_OUT_OF_RANGE_REASON}"
+            )
+            return False
+
         _fric_ratio = self._friction_to_credit_ratio(trade_dict)
         if (not trade_dict.get("allow_untradeable")
                 and self._max_friction_to_credit is not None
