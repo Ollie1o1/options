@@ -198,21 +198,38 @@ def residual_ic(trades: Sequence[Any], feature: str,
     if len(xs) < MIN_TRADES or _sps is None:
         return out
 
+    def _control_values(name: str) -> Optional[List[float]]:
+        """The control on every kept trade, or None if it is unusable there.
+
+        All-or-nothing on purpose: a control known for only some of the trades
+        would residualise part of the sample and leave the rest raw, which is
+        two different measurements reported as one.
+        """
+        vals: List[float] = []
+        for t in keep:
+            v = (getattr(t, "features", None) or {}).get(name)
+            if v is None:               # missing on at least one trade
+                return None
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return None
+            if fv != fv:                # NaN
+                return None
+            vals.append(fv)
+        return vals
+
     # Only controls that are present, usable and not the feature itself.
     usable: List[str] = []
     cols: List[List[float]] = []
     for name in controls:
         if name == feature:
             continue
-        vals = [(t.features or {}).get(name) for t in keep]
-        try:
-            fv = [float(v) for v in vals]
-        except (TypeError, ValueError):
-            continue                    # missing on at least one trade
-        if any(v != v for v in fv) or len(set(fv)) < 2:
-            continue                    # NaN, or constant and so no-op
+        got = _control_values(name)
+        if got is None or len(set(got)) < 2:
+            continue                    # unusable, or constant and so a no-op
         usable.append(name)
-        cols.append(fv)
+        cols.append(got)
     out["controls"] = usable
     out["n"] = len(xs)
 
