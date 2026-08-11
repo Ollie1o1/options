@@ -1,5 +1,39 @@
 # What Made the Profitable Trades Profitable — 2026-08-08
 
+> ## CORRECTION, 2026-08-11 — the ATM IV fix, and a screen this file did not have
+>
+> **1. The level features here were partly measured off expiring contracts.**
+> `signals.atm_iv` takes the strike nearest spot with no view on expiry, and
+> the cache holds 758,273 rows under 10 DTE, some with an expiration before
+> their own quote date. `iv_rank`, `iv_minus_rv`, `atm_iv` and anything derived
+> from them are affected. Fixed by `ATM_IV_MIN_DTE = 10`.
+>
+> Both windows were re-run. **§4d-bis and §4f reproduce.** `iv_rank` reads
+> +0.1558 (clustered t 7.98) against the published +0.1541 (7.92), `atm_iv`
+> +0.3297 against +0.3243, and the §4f quantile-spread inversion still
+> inverts. No verdict here changes on account of the fix. It touches 19.8% of
+> symbol-days and 6.3% of rows, and the aggregate ICs barely move.
+>
+> **2. The bigger correction is to the frame, not the numbers.** §3 argues the
+> big correlations are arithmetic and §4d-bis then treats `iv_rank`'s +0.1541
+> as "the strongest result this system has". There is now a standing screen
+> that settles it — `IC|ctl`, the IC with `credit_pct_width` and `atm_iv`
+> regressed out on ranks. On a held-to-expiry credit spread, RoC ≈ f(credit) ≈
+> f(IV), so any feature correlated with implied vol posts a large IC
+> mechanically.
+>
+> `iv_rank` goes **+0.1558 → +0.0554** in-sample and **+0.0741 → +0.0052**
+> (p=0.83) in the holdout. Measured independently on optionsDX SPY, n=1,598, it
+> goes **+0.1803 → −0.0053**. The IV-rank effect is credit richness. That is
+> the *mechanism* behind the second holdout failure recorded in
+> `HOLDOUT_20260809.md` §3, rather than another symptom of it, and it
+> retrospectively justifies zeroing the weight.
+>
+> §5 — "nothing predicts the disaster" — is unaffected and has since been
+> reproduced on 18 features across two windows and two structures.
+>
+> Full derivation in `docs/OPTIONSDX_RESULTS_20260811.md`.
+
 The question: across the real-marks backtest, which entry-time features
 separated the winners from the losers, and can anything be changed on the back
 of it?
