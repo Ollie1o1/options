@@ -38,6 +38,7 @@ import glob
 import os
 import re
 import sqlite3
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -319,6 +320,103 @@ def expiries_per_day(db_path: str = DEFAULT_CACHE,
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(sql.format(where), args).fetchone()
     return float(row[0]) if row and row[0] is not None else None
+
+
+# ── feeding the allocation engine ───────────────────────────────────────────
+class OdxChainSource:
+    """`odx_chain` behind the engine's `ChainSource` protocol.
+
+    Deliberately here rather than in `src/alloc/engine.py`. The engine asks
+    only for an object with `.chain(symbol, date)`, so putting the optionsDX
+    schema knowledge in the module that owns the schema means the engine gains
+    no import of, or opinion about, this source.
+
+    The reason to reuse the engine at all rather than write a fresh harness:
+    every earlier result in this repo came out of `replay`, and a second
+    harness would differ from it in ways nobody could see. A new hypothesis
+    measured a new way is not comparable to the record it is meant to correct.
+
+    Carries `volume`/`bid_size`/`ask_size` on top of the Dolt column set. Those
+    three exist in no other source here and H2 is built on them.
+    """
+
+    _COLS = ("symbol", "date", "expiration", "strike", "type", "bid", "ask",
+             "mid", "iv", "delta", "gamma", "theta", "vega", "rho",
+             "volume", "bid_size", "ask_size", "underlying", "dte")
+
+    def __init__(self, db_path: str = DEFAULT_CACHE, cache_dates: int = 8):
+        self.db_path = db_path
+        # BOUNDED, unlike the Dolt source's cache. That one holds every chain
+        # for the whole replay, which is affordable at 117 symbols x ~230
+        # dates. This source replays one symbol across 3,500 dates averaging
+        # 5,400 contracts each, so keeping them all would mean ~19M live dicts.
+        # The engine only ever reads the date it is standing on, so a handful
+        # is enough; `OrderedDict` gives the eviction order for free.
+        self._cache: "OrderedDict[Tuple[str, str], List[Dict[str, Any]]]" = OrderedDict()
+        self._cache_dates = max(1, int(cache_dates))
+        self._conn: Optional[Any] = None
+
+    def _connection(self) -> Any:
+        # One connection for the whole replay: a full window is thousands of
+        # chain reads and reopening per read is both slow and needlessly
+        # contended against a concurrent load.
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, timeout=30.0)
+        return self._conn
+
+    def chain(self, symbol: str, date: str) -> List[Dict[str, Any]]:
+        key = (symbol, date)
+        if key not in self._cache:
+            cur = self._connection().execute(
+                f"SELECT {','.join(self._COLS)} FROM odx_chain "
+                "WHERE symbol=? AND date=?", (symbol.upper(), date))
+            self._cache[key] = [dict(zip(self._COLS, r)) for r in cur.fetchall()]
+            while len(self._cache) > self._cache_dates:
+                self._cache.popitem(last=False)     # oldest out
+        else:
+            self._cache.move_to_end(key)
+        return self._cache[key]
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+
+def available_dates(db_path: str, symbol: str,
+                    start: Optional[str] = None,
+                    end: Optional[str] = None) -> List[str]:
+    """Every quote date this symbol actually has, ascending.
+
+    Read from the data rather than generated from a calendar. A date the
+    source does not cover is MISSING, and scoring it as "no opportunity that
+    day" is what quietly biases an always-on benchmark upward — the same trap
+    `universe.usable_dates` exists to avoid on the Dolt side.
+    """
+    ensure_cache(db_path)
+    sql = "SELECT DISTINCT date FROM odx_chain WHERE symbol=?"
+    args: List[Any] = [symbol.upper()]
+    if start:
+        sql += " AND date>=?"
+        args.append(start)
+    if end:
+        sql += " AND date<=?"
+        args.append(end)
+    with sqlite3.connect(db_path) as conn:
+        return [r[0] for r in conn.execute(sql + " ORDER BY date", args)]
+
+
+def terminal_date(db_path: str, symbol: str) -> Optional[str]:
+    """Last date with data, so the engine can close rather than drop.
+
+    A position still open past this point cannot be marked. Dropping it would
+    delete exactly the trades that ran into the end of the window.
+    """
+    ensure_cache(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT MAX(date) FROM odx_chain WHERE symbol=?",
+                           (symbol.upper(),)).fetchone()
+    return row[0] if row and row[0] else None
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
