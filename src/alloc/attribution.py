@@ -108,9 +108,14 @@ def feature_ic(trades: Sequence[Any], feature: str,
                            "p": None, "t": 0.0, "t_clustered": 0.0,
                            "q_top": None, "q_bot": None, "q_spread": None,
                            "mono": None, "tail_auc": None, "tail_p": None,
-                           "n_disasters": 0, "n_trials": n_trials}
+                           "n_disasters": 0, "n_trials": n_trials,
+                           "ic_resid": None, "p_resid": None}
     if len(xs) < MIN_TRADES or _sps is None:
         return out
+    # The fifth screen, and on this book the decisive one: an IC that does not
+    # survive removing credit richness is arithmetic. See `residual_ic`.
+    _res = residual_ic(trades, feature)
+    out["ic_resid"], out["p_resid"] = _res["ic"], _res["p"]
     # The other two of the four screens. Neither is derivable from the IC:
     # `mono` asks whether the effect is ORDERED across the parameter, and
     # `tail_auc` asks whether it flags the rare total losses that are this
@@ -152,6 +157,114 @@ def feature_ic(trades: Sequence[Any], feature: str,
         "t": round(float(ic * np.sqrt((n - 2) / denom)), 3),
         "t_clustered": round(_clustered_t(keep, xs, ys), 3),
     })
+    return out
+
+
+# The standing controls. Both are close to mechanical drivers of return on a
+# held-to-expiry credit spread, so a feature correlated with either inherits
+# their IC without carrying any information of its own.
+RESIDUAL_CONTROLS = ("credit_pct_width", "atm_iv")
+
+
+def residual_ic(trades: Sequence[Any], feature: str,
+                controls: Sequence[str] = RESIDUAL_CONTROLS) -> Dict[str, Any]:
+    """Spearman IC of the feature against RoC, with the controls regressed out.
+
+    THE screen this book was missing. For a held-to-expiry credit spread the
+    return on capital is close to a function of the credit received, and the
+    credit is close to a function of implied vol — so any entry feature
+    correlated with implied vol posts a large IC that is arithmetic rather than
+    a discovery. On optionsDX SPY 2010-2023 (n=1,598) `credit_pct_width` scores
+    +0.6991 and `atm_iv` +0.5455, and both hypotheses tested on 2026-08-11
+    collapsed once controlled:
+
+        term_slope_1m3m   raw +0.3654  ->  +0.0422  p=0.09
+        entry_depth       raw -0.1907  ->  -0.0099  p=0.69
+
+    Both had already passed sign-holds-out-of-sample AND
+    clustered-t-significant-in-both-windows. Neither survived this.
+
+    Done on RANKS, matching the rest of the module: the relationships here are
+    monotone but not linear, and a least-squares fit on raw values would leave
+    most of the control's influence in the residual.
+
+    A control is never used against itself — the residual would be identically
+    zero, which reads as "disproven" when it means "not asked". A feature whose
+    only control is itself reports None for the same reason.
+    """
+    out: Dict[str, Any] = {"feature": feature, "n": 0, "ic": None, "p": None,
+                           "controls": []}
+    keep, xs, ys = paired(trades, feature)
+    if len(xs) < MIN_TRADES or _sps is None:
+        return out
+
+    def _control_values(name: str) -> Optional[List[float]]:
+        """The control on every kept trade, or None if it is unusable there.
+
+        All-or-nothing on purpose: a control known for only some of the trades
+        would residualise part of the sample and leave the rest raw, which is
+        two different measurements reported as one.
+        """
+        vals: List[float] = []
+        for t in keep:
+            v = (getattr(t, "features", None) or {}).get(name)
+            if v is None:               # missing on at least one trade
+                return None
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return None
+            if fv != fv:                # NaN
+                return None
+            vals.append(fv)
+        return vals
+
+    # Only controls that are present, usable and not the feature itself.
+    usable: List[str] = []
+    cols: List[List[float]] = []
+    for name in controls:
+        if name == feature:
+            continue
+        got = _control_values(name)
+        if got is None or len(set(got)) < 2:
+            continue                    # unusable, or constant and so a no-op
+        usable.append(name)
+        cols.append(got)
+    out["controls"] = usable
+    out["n"] = len(xs)
+
+    if len(set(xs)) < 2 or len(set(ys)) < 2:
+        return out                      # constant: no ranking to correlate
+    rx = _sps.rankdata(xs)
+    if not usable:
+        # Nothing to remove. Reporting the raw IC is the honest answer: the
+        # control was unavailable, not satisfied.
+        if feature in controls:
+            # The feature IS the only control. `n` stays at the trades
+            # available and `ic` stays None, matching `feature_ic`: "could not
+            # measure" is a different claim from "measured, no effect".
+            return out
+        ic, p = _sps.spearmanr(rx, ys)
+        if ic == ic:
+            out["ic"], out["p"] = round(float(ic), 4), round(float(p), 4)
+        return out
+
+    design = np.column_stack([_sps.rankdata(c) for c in cols]
+                             + [np.ones(len(rx))])
+    beta, *_ = np.linalg.lstsq(design, rx, rcond=None)
+    resid = rx - design @ beta
+    # A feature that is a RENAMED control leaves a residual of pure
+    # floating-point noise, and ranking that noise yields a large spurious
+    # correlation — 0.97 in the test that caught this — because the arithmetic
+    # error pattern still follows the data. Anything this far below the
+    # feature's own scale is collinear, and the honest report is "not
+    # measurable", not a number.
+    if float(np.std(resid)) <= 1e-8 * (float(np.std(rx)) or 1.0):
+        return out                      # the feature IS the controls
+    ic, p = _sps.spearmanr(resid, ys)
+    if ic != ic:
+        return out
+    out["ic"], out["p"] = round(float(ic), 4), round(float(p), 4)
     return out
 
 
@@ -276,6 +389,68 @@ def split_by_time(trades: Sequence[Any], frac: float = 0.7
     return ordered[:cut], ordered[cut:]
 
 
+def benjamini_hochberg(pvalues: Sequence[Optional[float]]
+                       ) -> List[Optional[float]]:
+    """False-discovery-rate q-values for a family of tests, in input order.
+
+    `n_trials` has been carried on every ranking row since the module was
+    written and nothing ever divided by it, so every multi-feature sweep in
+    this repo has been read at raw p. That is the gap between "this feature is
+    significant" and "the best of eighteen features looks significant", and it
+    is the most likely remaining manufacturer of findings that then fail their
+    holdout.
+
+    Benjamini-Hochberg rather than Bonferroni deliberately. Bonferroni controls
+    the chance of ANY false positive and at k=18 is punishing enough that a real
+    but modest effect cannot clear it; BH controls the expected FRACTION of
+    claims that are false, which is the right question for a screen whose
+    output is "which of these deserve a holdout test".
+
+    Read a q-value as: if you accept everything down to this row, that is the
+    share of accepted rows you should expect to be noise.
+
+    None passes through as None and is excluded from the family size — a
+    feature that could not be measured was never a trial, and counting it would
+    penalise the survivors for a test that did not run.
+    """
+    idx = [i for i, p in enumerate(pvalues) if p is not None]
+    n = len(idx)
+    out: List[Optional[float]] = [None] * len(pvalues)
+    if n == 0:
+        return out
+    order = sorted(idx, key=lambda i: float(pvalues[i]))  # type: ignore[arg-type]
+    # Step UP: walk from the largest p down, carrying the running minimum. That
+    # enforced monotonicity is the whole procedure — without it a middling
+    # p-value can score a smaller q than one below it.
+    running = 1.0
+    for rank in range(n, 0, -1):
+        i = order[rank - 1]
+        running = min(running, float(pvalues[i]) * n / rank)  # type: ignore[arg-type]
+        out[i] = round(min(running, 1.0), 6)
+    return out
+
+
+def split_at_date(trades: Sequence[Any], boundary: str
+                  ) -> Tuple[List[Any], List[Any]]:
+    """Chronological split at a fixed DATE. The boundary day is holdout.
+
+    `split_by_time` cuts at a fraction of the trade COUNT, so its boundary
+    moves whenever the number of trades moves — widen the universe or loosen a
+    filter and the "same" 70/30 split lands in a different year. That is fine
+    for an exploratory read and useless for a pre-registered one.
+
+    `docs/PREREG_OPTIONSDX_20260811.md` fixes the optionsDX boundary at
+    2017-01-01 for a specific reason: it puts Volmageddon, Q4 2018, COVID and
+    the 2022 bear in the holdout, where the stress belongs. Only a date can
+    express that, and a boundary that drifts with the data was never
+    pre-registered at all.
+    """
+    closed = sorted(_closed(trades), key=lambda t: str(t.entry_date))
+    train = [t for t in closed if str(t.entry_date) < boundary]
+    test = [t for t in closed if str(t.entry_date) >= boundary]
+    return train, test
+
+
 def rank_features(trades: Sequence[Any],
                   features: Optional[Sequence[str]] = None,
                   by: str = "ic",
@@ -309,6 +484,10 @@ def rank_features(trades: Sequence[Any],
         features = seen
     k = len(features)
     rows = [feature_ic(trades, f, n_trials=k) for f in features]
+    # Deflate here rather than leaving it to the caller. `n_trials` sat on
+    # every row unused for exactly as long as this was somebody else's job.
+    for row, q in zip(rows, benjamini_hochberg([r["p"] for r in rows])):
+        row["q"] = q
 
     def _strength(r: Dict[str, Any]) -> float:
         v = r.get(by)
@@ -328,21 +507,29 @@ def format_ranking(rows: Sequence[Dict[str, Any]], title: str = "") -> str:
     out = []
     if title:
         out.append(title)
-    out.append(f"  {'feature':<22} {'n':>5} {'IC':>8} {'t':>7} {'t_clust':>8} "
-               f"{'p':>8} {'q_bot':>8} {'q_top':>8} {'q_spread':>9} "
-               f"{'mono':>6} {'tailAUC':>8}")
+    out.append(f"  {'feature':<22} {'n':>5} {'IC':>8} {'IC|ctl':>8} {'t':>7} "
+               f"{'t_clust':>8} {'p':>8} {'q(BH)':>8} {'q_bot':>8} "
+               f"{'q_top':>8} {'q_spread':>9} {'mono':>6} {'tailAUC':>8}")
     for r in rows:
         if r["ic"] is None:
             out.append(f"  {r['feature']:<22} {r['n']:>5}   "
                        f"(not measurable — no variation or too few trades)")
             continue
-        q = ("" if r.get("q_spread") is None else
-             f" {r['q_bot']:>8.4f} {r['q_top']:>8.4f} {r['q_spread']:>9.4f}")
+        quint = ("" if r.get("q_spread") is None else
+                 f" {r['q_bot']:>8.4f} {r['q_top']:>8.4f} {r['q_spread']:>9.4f}")
         # A dash is "could not be measured here", which is a different claim
         # from a number — the same distinction the IC column already makes.
         mono = "     -" if r.get("mono") is None else f"{r['mono']:>6.2f}"
         auc = "       -" if r.get("tail_auc") is None else f"{r['tail_auc']:>8.3f}"
-        out.append(f"  {r['feature']:<22} {r['n']:>5} {r['ic']:>8.4f} "
+        # Sits immediately after p because that is the comparison to make: a
+        # raw p that survives and a q that does not is a search artifact.
+        bh = "       -" if r.get("q") is None else f"{r['q']:>8.4f}"
+        # Sits immediately beside the raw IC because that is the comparison to
+        # make: a large IC next to a collapsed IC|ctl is credit richness under
+        # another name, which is how BOTH optionsDX hypotheses failed.
+        ctl = ("       -" if r.get("ic_resid") is None
+               else f"{r['ic_resid']:>8.4f}")
+        out.append(f"  {r['feature']:<22} {r['n']:>5} {r['ic']:>8.4f} {ctl} "
                    f"{r['t']:>7.2f} {r['t_clustered']:>8.2f} "
-                   f"{r['p']:>8.4f}{q} {mono} {auc}")
+                   f"{r['p']:>8.4f} {bh}{quint} {mono} {auc}")
     return "\n".join(out)

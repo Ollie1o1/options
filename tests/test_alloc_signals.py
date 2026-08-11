@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import unittest
 
+import datetime as _dt
+
 from src.alloc.signals import (Snapshot, SignalHistory, atm_iv, passes,
-                               skew_25d, snapshot, term_slope)
+                               skew_25d, snapshot, term_slope,
+                               term_slope_tenor)
 
 EXP = "2024-03-15"
 
@@ -96,6 +99,15 @@ class CausalityTest(unittest.TestCase):
         for i in range(15):
             h.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 100.0, 0.10))
         self.assertEqual(h.features("BBB"), {})
+
+    def test_the_pinned_tenor_slope_reaches_the_feature_dict(self):
+        # A signal the attribution harness cannot see is a signal that cannot
+        # be tested, and H1 is the reason the optionsDX data was loaded.
+        h = SignalHistory()
+        for i in range(15):
+            h.update("AAA", Snapshot(f"2024-01-{i+1:02d}", 100.0, 0.10,
+                                     term_slope_1m3m=0.04))
+        self.assertAlmostEqual(h.features("AAA")["term_slope_1m3m"], 0.04)
 
 
 class IvRankTest(unittest.TestCase):
@@ -328,6 +340,161 @@ class TermStructureTest(unittest.TestCase):
 
     def test_no_spot_gives_no_slope(self):
         self.assertIsNone(term_slope([_row(100, "call", 1, 2, 0.2)], None))
+
+
+class TermSlopeTenorTest(unittest.TestCase):
+    """The 1M/3M slope H1 actually specifies, not whatever the chain reaches.
+
+    `term_slope` takes the nearest and farthest expirations AVAILABLE. On the
+    Dolt cache that is 10d against 60d, which is the reason
+    `docs/HOLDOUT_20260809.md` could only record a slope that flipped sign
+    (+0.0431 in-sample, -0.0568 holdout) without being able to say whether the
+    quantity or the specification was at fault. On optionsDX the same function
+    is WORSE, not better: full chains reach 0 DTE and past 1,000, so it would
+    silently compare a same-day contract against a two-year LEAP.
+
+    A wider chain does not fix an unpinned tenor. This pins it.
+    """
+
+    AS_OF = "2024-01-01"
+
+    def _at(self, dte, iv):
+        """Both legs of an ATM pair at a given calendar distance."""
+        exp = (_dt.date.fromisoformat(self.AS_OF)
+               + _dt.timedelta(days=dte)).isoformat()
+        return [_row(100, "call", 2.9, 3.1, iv, exp),
+                _row(100, "put", 2.9, 3.1, iv, exp)]
+
+    def test_it_reads_the_targeted_tenors_not_the_extremes(self):
+        # The whole point. A chain reaching 7 DTE and 700 DTE must still be
+        # measured at 30 and 90 — `term_slope` would return 0.60-0.10 here.
+        chain = (self._at(7, 0.60) + self._at(30, 0.25)
+                 + self._at(90, 0.20) + self._at(700, 0.10))
+        self.assertAlmostEqual(term_slope_tenor(chain, 100.0, self.AS_OF),
+                               0.05, places=6)
+
+    def test_backwardation_is_positive(self):
+        chain = self._at(30, 0.35) + self._at(90, 0.20)
+        self.assertAlmostEqual(term_slope_tenor(chain, 100.0, self.AS_OF),
+                               0.15, places=6)
+
+    def test_contango_is_negative(self):
+        chain = self._at(30, 0.18) + self._at(90, 0.26)
+        self.assertAlmostEqual(term_slope_tenor(chain, 100.0, self.AS_OF),
+                               -0.08, places=6)
+
+    def test_a_flat_surface_interpolates_to_that_same_vol(self):
+        # Bracketing 90 with 60 and 120 at one vol must return that vol, or
+        # the variance weighting is wrong.
+        chain = self._at(30, 0.30) + self._at(60, 0.20) + self._at(120, 0.20)
+        self.assertAlmostEqual(term_slope_tenor(chain, 100.0, self.AS_OF),
+                               0.10, places=6)
+
+    def test_a_target_between_expiries_is_interpolated_in_total_variance(self):
+        # 60d at 10 vol and 120d at 30 vol, target 90. Nearest-neighbour would
+        # return 0.10 or 0.30; linear-in-variance returns 0.2517. Total
+        # variance is what is additive across time, not vol.
+        #   w=0.5 -> (0.5*0.01*60 + 0.5*0.09*120)/90 = 0.063333 -> sqrt
+        chain = self._at(30, 0.30) + self._at(60, 0.10) + self._at(120, 0.30)
+        got = term_slope_tenor(chain, 100.0, self.AS_OF)
+        self.assertAlmostEqual(got, 0.30 - 0.2516611478, places=6)
+
+    def test_it_will_not_extrapolate_past_the_end_of_the_chain(self):
+        # A chain stopping at 80 DTE does not price a 3-month tenor. Reaching
+        # for the last expiry is the substitution that made the original slope
+        # uninterpretable, and it is worse here because the miss is unbounded.
+        chain = self._at(30, 0.40) + self._at(80, 0.20)
+        self.assertIsNone(term_slope_tenor(chain, 100.0, self.AS_OF))
+
+    def test_it_will_not_extrapolate_below_the_start_of_the_chain(self):
+        chain = self._at(45, 0.40) + self._at(90, 0.20)
+        self.assertIsNone(term_slope_tenor(chain, 100.0, self.AS_OF))
+
+    def test_a_bracket_spanning_a_hole_is_refused(self):
+        # 20 and 90 do technically bracket 30, but interpolating across a
+        # 70-day gap is invention, not measurement. Same chain, both sides of
+        # the guard, so this pins the guard and not the chain.
+        chain = self._at(20, 0.40) + self._at(90, 0.20)
+        self.assertIsNotNone(term_slope_tenor(chain, 100.0, self.AS_OF,
+                                              max_bracket_days=90))
+        self.assertIsNone(term_slope_tenor(chain, 100.0, self.AS_OF,
+                                           max_bracket_days=30))
+
+    def test_an_exactly_listed_tenor_is_used_directly(self):
+        chain = self._at(30, 0.35) + self._at(90, 0.20) + self._at(120, 0.99)
+        self.assertAlmostEqual(term_slope_tenor(chain, 100.0, self.AS_OF),
+                               0.15, places=6)
+
+    def test_no_spot_gives_no_slope(self):
+        chain = self._at(30, 0.35) + self._at(90, 0.20)
+        self.assertIsNone(term_slope_tenor(chain, None, self.AS_OF))
+
+    def test_an_unreadable_as_of_date_gives_no_slope(self):
+        chain = self._at(30, 0.35) + self._at(90, 0.20)
+        self.assertIsNone(term_slope_tenor(chain, 100.0, "not-a-date"))
+
+    def test_an_expiry_before_the_quote_date_is_not_a_tenor(self):
+        # Guards the sign of the arithmetic: a -30 DTE stub is 60 days from
+        # the 30d target, not 0, and must never be selected as the near leg.
+        chain = self._at(-30, 0.90) + self._at(30, 0.35) + self._at(90, 0.20)
+        self.assertAlmostEqual(term_slope_tenor(chain, 100.0, self.AS_OF),
+                               0.15, places=6)
+
+    def test_the_snapshot_carries_it(self):
+        chain = self._at(30, 0.35) + self._at(90, 0.20)
+        snap = snapshot(chain, self.AS_OF)
+        self.assertAlmostEqual(snap.term_slope_1m3m, 0.15, places=6)
+
+
+class SnapshotAtmIvIgnoresExpiringContractsTest(unittest.TestCase):
+    """A contract expiring today does not price implied vol.
+
+    Found on the real optionsDX chains 2026-08-11: SPY on 2017-01-13 reported
+    an ATM IV of 1.7% because the chain carries a same-day expiry whose IV has
+    collapsed, while the 26-day expiry on the same chain read 8.7%. `atm_iv`
+    takes the strike nearest spot across the WHOLE chain with no view on
+    expiry, which was harmless on the Dolt cache because its floor is DTE 10
+    and stops being harmless the moment a source carries 0 DTE.
+
+    This matters beyond one number: `iv_rank`, `iv_velocity`, `vol_of_vol` and
+    `iv_minus_rv` are all built on the snapshot's `atm_iv`, so every level
+    feature would have been measured off expiring contracts on this source.
+
+    It was NOT confined to the new source. The Dolt cache was believed to be
+    DTE 10-67 and in fact holds 758,273 rows under 10 days, some with an
+    expiration BEFORE their own quote date. On 400 sampled symbol-days holding
+    such a contract, 281 move, the worst by -2.35 — a 235% "ATM IV". Every
+    level feature on record was partly measured off those.
+    """
+
+    AS_OF = "2024-01-01"
+
+    def _at(self, dte, iv):
+        exp = (_dt.date.fromisoformat(self.AS_OF)
+               + _dt.timedelta(days=dte)).isoformat()
+        return [_row(100, "call", 2.9, 3.1, iv, exp),
+                _row(100, "put", 2.9, 3.1, iv, exp)]
+
+    def test_a_zero_dte_expiry_does_not_set_atm_iv(self):
+        chain = self._at(0, 0.017) + self._at(26, 0.087)
+        self.assertAlmostEqual(snapshot(chain, self.AS_OF).atm_iv, 0.087,
+                               places=6)
+
+    def test_expiries_at_or_past_the_floor_are_used(self):
+        chain = self._at(10, 0.20) + self._at(60, 0.30)
+        self.assertIsNotNone(snapshot(chain, self.AS_OF).atm_iv)
+
+    def test_a_chain_entirely_inside_the_floor_still_reports(self):
+        # Refusing here would blank the feature for any short-dated source
+        # rather than degrade it. "Nothing past the floor" is a thin chain,
+        # not a corrupt one.
+        chain = self._at(3, 0.22)
+        self.assertAlmostEqual(snapshot(chain, self.AS_OF).atm_iv, 0.22,
+                               places=6)
+
+    def test_an_unreadable_date_does_not_lose_the_reading(self):
+        chain = self._at(30, 0.25)
+        self.assertIsNotNone(snapshot(chain, "not-a-date").atm_iv)
 
 
 class SkewTest(unittest.TestCase):

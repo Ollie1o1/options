@@ -345,7 +345,8 @@ def _should_exit(spec: StrategySpec, trade: Trade, close_price: float,
 
 _SIGNAL_FEATURES = ("spot", "atm_iv", "iv_rank", "trend", "ret_4w",
                     "rv", "iv_minus_rv",
-                    "term_slope", "skew_25d", "iv_velocity", "vol_of_vol")
+                    "term_slope", "term_slope_1m3m", "skew_25d",
+                    "iv_velocity", "vol_of_vol")
 
 
 def _entry_features(sig: Dict[str, Any], legs: Sequence[Leg],
@@ -397,6 +398,29 @@ def _entry_features(sig: Dict[str, Any], legs: Sequence[Leg],
     out["friction"] = fric
     if fric is not None and price:
         out["friction_pct_credit"] = abs(fric) / abs(price)
+
+    # Quoted depth on the side actually traded AGAINST: a sell hits the bid, a
+    # buy lifts the ask. The binding number is the smallest across legs — a
+    # spread is only as fillable as its worst leg.
+    #
+    # Present only on optionsDX (`C_SIZE`/`P_SIZE`); the Dolt cache has no size
+    # columns, so this is None there. None rather than 0, because 0 would read
+    # as "no depth was quoted", a claim about the market instead of about the
+    # data. H2 in docs/PREREG_OPTIONSDX_20260811.md is built on this.
+    sizes = {_fkey(c["expiration"], c["strike"], c["type"]):
+             (c.get("bid_size"), c.get("ask_size")) for c in chain}
+    depths: List[float] = []
+    for leg in legs:
+        pair = sizes.get(_fkey(leg.expiration, leg.strike, leg.type))
+        if pair is None:
+            depths = []
+            break
+        side = pair[0] if str(leg.action).lower() == "sell" else pair[1]
+        if side is None:
+            depths = []
+            break
+        depths.append(float(side))
+    out["entry_depth"] = min(depths) if depths else None
     return out
 
 

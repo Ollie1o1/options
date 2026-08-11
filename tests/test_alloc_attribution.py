@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import unittest
 
-from src.alloc.attribution import (disaster_auc, feature_ic, bucket_table,
+from src.alloc.attribution import (benjamini_hochberg, disaster_auc,
+                                   feature_ic, bucket_table,
                                    format_ranking, monotonicity,
-                                   rank_features, split_by_time)
+                                   rank_features, residual_ic, split_at_date,
+                                   split_by_time)
 
 
 class _T:
@@ -310,3 +312,194 @@ class RankingCarriesTheNewScreensTest(unittest.TestCase):
         text = format_ranking(rank_features(_monotone(), ["iv_rank"]))
         self.assertIn("mono", text)
         self.assertIn("tailAUC", text)
+
+
+class ResidualIcTest(unittest.TestCase):
+    """The IC that survives removing credit richness. The standing screen.
+
+    On a held-to-expiry credit spread, return on capital is close to a function
+    of the credit received and the credit is close to a function of implied
+    vol. So ANY entry feature correlated with implied vol posts a large IC on
+    this book and it means nothing. Measured 2026-08-11 on optionsDX SPY,
+    n=1,598: `credit_pct_width` scores +0.6991 and `atm_iv` +0.5455, and both
+    hypotheses tested that day collapsed under this control —
+
+        term_slope_1m3m   raw +0.3654  ->  +0.0422  p=0.09
+        entry_depth       raw -0.1907  ->  -0.0099  p=0.69
+
+    ...having each passed the sign-holds and both-windows-significant tests
+    first. This is the same class of screen as `mono` and `tail_auc`, and like
+    both of those it is being added because something got through without it.
+    """
+
+    def _mixed(self, n=200, copy_strength=0.85, seed=7):
+        """Outcome driven by TWO things: the control, and something else.
+
+        `echo` is a noisy copy of the control carrying nothing of its own — it
+        must lose its IC. `own` is independent of the control and genuinely
+        drives the outcome — it must KEEP its IC. A screen that only satisfies
+        the first is one that flattens everything.
+        """
+        import random
+        rng = random.Random(seed)
+        out = []
+        for i in range(n):
+            rich, own = rng.random(), rng.random()
+            echo = copy_strength * rich + (1 - copy_strength) * rng.random()
+            out.append(_T(f"2024-{1 + i % 12:02d}-{1 + i % 28:02d}",
+                          roc=(rich - 0.5) + 0.8 * (own - 0.5),
+                          credit_pct_width=rich, atm_iv=rich,
+                          echo=echo, own=own))
+        return out
+
+    def test_a_feature_that_is_the_control_keeps_no_ic(self):
+        r = residual_ic(self._mixed(), "echo", controls=("credit_pct_width",))
+        self.assertLess(abs(r["ic"]), 0.15)
+
+    def test_the_same_feature_has_a_large_raw_ic(self):
+        # Without this the test above would pass on a feature that never had
+        # an IC to lose.
+        self.assertGreater(feature_ic(self._mixed(), "echo")["ic"], 0.65)
+
+    def test_a_feature_independent_of_the_controls_keeps_its_own_ic(self):
+        # Guards over-correction, which is the way this screen would fail
+        # silently: everything reads as noise and a real effect is discarded.
+        r = residual_ic(self._mixed(), "own", controls=("credit_pct_width",))
+        self.assertGreater(abs(r["ic"]), 0.45)
+
+    def test_a_control_is_never_used_against_itself(self):
+        # Residualising a feature on itself would report exactly 0 for every
+        # control, which reads as "disproven" when it means "not asked".
+        r = residual_ic(self._mixed(), "credit_pct_width",
+                        controls=("credit_pct_width", "atm_iv"))
+        self.assertNotIn("credit_pct_width", r["controls"])
+
+    def test_a_renamed_control_is_not_measurable(self):
+        # An EXACT duplicate under another name leaves a residual of pure
+        # floating-point noise, and ranking that noise scored +0.97 before the
+        # collinearity guard existed — the worst possible failure here, since
+        # the screen would have endorsed the very thing it exists to catch.
+        trades = self._mixed(copy_strength=1.0)
+        r = residual_ic(trades, "echo", controls=("credit_pct_width",))
+        self.assertIsNone(r["ic"])
+
+    def test_a_feature_equal_to_every_control_cannot_be_measured(self):
+        r = residual_ic(self._mixed(), "credit_pct_width",
+                        controls=("credit_pct_width",))
+        self.assertIsNone(r["ic"])
+        self.assertEqual(r["controls"], [])
+
+    def test_controls_absent_from_the_data_leave_the_ic_alone(self):
+        trades = self._mixed()
+        for t in trades:
+            t.features.pop("credit_pct_width")
+            t.features.pop("atm_iv")
+        r = residual_ic(trades, "echo", controls=("credit_pct_width", "atm_iv"))
+        raw = feature_ic(trades, "echo")["ic"]
+        self.assertAlmostEqual(r["ic"], raw, places=3)
+
+    def test_too_few_trades_is_none_not_zero(self):
+        r = residual_ic(self._mixed(n=4), "echo")
+        self.assertIsNone(r["ic"])
+
+    def test_feature_ic_carries_the_residual(self):
+        row = feature_ic(self._mixed(), "echo")
+        self.assertIn("ic_resid", row)
+        self.assertLess(abs(row["ic_resid"]), 0.15)
+
+    def test_the_formatted_table_shows_it(self):
+        text = format_ranking(rank_features(self._mixed(), ["echo", "own"]))
+        self.assertIn("IC|ctl", text)
+
+
+class SplitAtDateTest(unittest.TestCase):
+    """A holdout boundary fixed as a DATE, not as a fraction of the trades.
+
+    `split_by_time(trades, 0.7)` puts the cut wherever 70% of the trade COUNT
+    falls, which moves when the trade count moves. The optionsDX
+    pre-registration fixes the boundary at 2017-01-01 specifically so that
+    Volmageddon, Q4 2018, COVID and the 2022 bear land in the holdout. A
+    fractional cut cannot express that, and a boundary that drifts with the
+    data is not a pre-registered boundary.
+    """
+
+    def test_the_boundary_date_belongs_to_the_holdout(self):
+        trades = [_T("2016-12-31", roc=0.1), _T("2017-01-01", roc=0.1)]
+        train, test = split_at_date(trades, "2017-01-01")
+        self.assertEqual(len(train), 1)
+        self.assertEqual(len(test), 1)
+        self.assertEqual(train[0].entry_date, "2016-12-31")
+
+    def test_it_splits_on_entry_date_not_on_position(self):
+        # Fed out of order, the split must still be chronological.
+        trades = [_T("2019-05-01", roc=0.1), _T("2011-05-01", roc=0.1),
+                  _T("2018-05-01", roc=0.1)]
+        train, test = split_at_date(trades, "2017-01-01")
+        self.assertEqual([t.entry_date for t in train], ["2011-05-01"])
+        self.assertEqual([t.entry_date for t in test],
+                         ["2018-05-01", "2019-05-01"])
+
+    def test_an_all_in_sample_window_yields_an_empty_holdout(self):
+        train, test = split_at_date([_T("2011-01-01", roc=0.1)], "2017-01-01")
+        self.assertEqual(len(train), 1)
+        self.assertEqual(test, [])
+
+    def test_only_closed_trades_are_split(self):
+        # An open trade has no outcome to attribute, and counting it in the
+        # window sizes would misreport how much evidence each half holds.
+        opened = _T("2011-01-01", roc=0.1)
+        opened.exit_date = None
+        train, test = split_at_date([opened, _T("2011-02-01", roc=0.1)],
+                                    "2017-01-01")
+        self.assertEqual(len(train), 1)
+        self.assertEqual(test, [])
+
+
+class BenjaminiHochbergTest(unittest.TestCase):
+    """The correction for the size of the search that produced the winner.
+
+    `n_trials` has been carried on every row since the ranking was written and
+    nothing ever divided by it, so an 18-way feature sweep has been reported at
+    raw p throughout. That is the difference between "this feature is
+    significant" and "the best of eighteen features looks significant", and on
+    a book whose findings keep failing their holdout it is the likeliest
+    remaining source of them.
+    """
+
+    def test_a_single_test_is_its_own_q_value(self):
+        # With a family of one there is no search to correct for.
+        self.assertEqual(benjamini_hochberg([0.03]), [0.03])
+
+    def test_the_best_of_a_large_family_is_deflated_by_the_family_size(self):
+        # p=0.001 found by looking at 18 features is not a p=0.001 finding.
+        qs = benjamini_hochberg([0.001] + [0.5] * 17)
+        self.assertAlmostEqual(qs[0], 0.018, places=6)
+
+    def test_q_never_falls_as_p_rises(self):
+        # BH is a step-UP procedure: the enforced monotonicity is what stops a
+        # middling p-value scoring better than a smaller one.
+        qs = benjamini_hochberg([0.01, 0.02, 0.03, 0.04, 0.05])
+        self.assertEqual(qs, sorted(qs))
+
+    def test_q_is_capped_at_one(self):
+        self.assertTrue(all(q <= 1.0 for q in benjamini_hochberg([0.9] * 10)))
+
+    def test_input_order_is_preserved(self):
+        qs = benjamini_hochberg([0.5, 0.001, 0.5])
+        self.assertLess(qs[1], qs[0])
+        self.assertEqual(qs[0], qs[2])
+
+    def test_an_unmeasurable_feature_does_not_inflate_the_family(self):
+        # A feature that could not be measured was not a trial. Counting it
+        # would penalise the survivors for a test that never ran.
+        self.assertEqual(benjamini_hochberg([0.02, None]), [0.02, None])
+
+    def test_rank_features_reports_a_q_value(self):
+        rows = rank_features(_monotone(noise=0.3), ["iv_rank", "other"])
+        self.assertIn("q", rows[0])
+
+    def test_the_formatted_table_shows_q(self):
+        # "q(BH)" specifically — "q" alone would pass on the pre-existing
+        # q_bot/q_top/q_spread columns without the correction being shown.
+        text = format_ranking(rank_features(_monotone(), ["iv_rank"]))
+        self.assertIn("q(BH)", text)

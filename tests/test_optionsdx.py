@@ -220,5 +220,90 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual(optionsdx.coverage(empty), [])
 
 
+class ChainSourceTest(unittest.TestCase):
+    """Feeding `odx_chain` to the allocation engine.
+
+    The engine takes any object with `.chain(symbol, date)`, so this reads the
+    optionsDX table without the engine importing anything about it. The point
+    of the class is that the four hypotheses in
+    `docs/PREREG_OPTIONSDX_20260811.md` run through the SAME replay and the
+    same attribution as every earlier result, rather than through a fresh
+    one-off harness whose disagreements with the old one would be invisible.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.dir.name, "odx.db")
+        optionsdx.load_file(
+            _write_csv(os.path.join(self.dir.name, "spy_eod_202301.txt")),
+            db_path=self.db)
+        self.src = optionsdx.OdxChainSource(self.db)
+
+    def tearDown(self):
+        self.src.close()
+        self.dir.cleanup()
+
+    def test_it_returns_the_contracts_for_that_symbol_and_date(self):
+        self.assertEqual(len(self.src.chain("SPY", "2023-01-05")), 4)
+
+    def test_it_carries_the_columns_the_engine_reads(self):
+        row = self.src.chain("SPY", "2023-01-05")[0]
+        for col in ("symbol", "date", "expiration", "strike", "type",
+                    "bid", "ask", "mid", "iv", "delta", "gamma", "theta",
+                    "vega", "rho"):
+            self.assertIn(col, row)
+
+    def test_it_carries_the_depth_columns_h2_needs(self):
+        # `bid_size`/`ask_size` exist in no other source this repo holds, and
+        # H2 is the only hypothesis that can use them. A source that dropped
+        # them would make H2 silently unanswerable.
+        row = self.src.chain("SPY", "2023-01-05")[0]
+        self.assertIn("bid_size", row)
+        self.assertIn("ask_size", row)
+        self.assertIn("volume", row)
+
+    def test_a_date_with_no_data_is_empty_not_an_error(self):
+        self.assertEqual(self.src.chain("SPY", "1999-01-04"), [])
+
+    def test_another_symbol_is_not_returned(self):
+        self.assertEqual(self.src.chain("QQQ", "2023-01-05"), [])
+
+    def test_available_dates_lists_what_can_be_replayed(self):
+        self.assertEqual(optionsdx.available_dates(self.db, "SPY"),
+                         ["2023-01-05"])
+
+    def test_available_dates_can_be_bounded(self):
+        self.assertEqual(
+            optionsdx.available_dates(self.db, "SPY", start="2023-02-01"), [])
+
+    def test_terminal_date_is_the_last_day_with_data(self):
+        # A position still open on that date has to be closed there. Dropping
+        # it instead is how a backtest quietly becomes survivorship-biased.
+        self.assertEqual(optionsdx.terminal_date(self.db, "SPY"), "2023-01-05")
+
+    def test_terminal_date_of_an_unknown_symbol_is_none(self):
+        self.assertIsNone(optionsdx.terminal_date(self.db, "NOPE"))
+
+    def test_the_chain_cache_is_bounded(self):
+        # The Dolt source caches every chain for the whole replay, which is
+        # fine at 117 symbols x ~230 dates. This source replays ONE symbol
+        # across 3,500 dates averaging 5,400 contracts, so an unbounded cache
+        # would hold ~19M dicts. The engine only ever looks at the date it is
+        # on, so a small window is all that is needed.
+        src = optionsdx.OdxChainSource(self.db, cache_dates=2)
+        for day in ("2023-01-05", "1999-01-01", "1999-01-02", "1999-01-03"):
+            src.chain("SPY", day)
+        self.assertLessEqual(len(src._cache), 2)
+        src.close()
+
+    def test_an_evicted_chain_is_still_returned_correctly(self):
+        # Bounding the cache must not turn into losing data.
+        src = optionsdx.OdxChainSource(self.db, cache_dates=1)
+        first = src.chain("SPY", "2023-01-05")
+        src.chain("SPY", "1999-01-01")
+        self.assertEqual(src.chain("SPY", "2023-01-05"), first)
+        src.close()
+
+
 if __name__ == "__main__":
     unittest.main()

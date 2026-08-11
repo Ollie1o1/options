@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import unittest
 
-from src.alloc.engine import (SqliteChainSource, Trade, capital_at_risk,
-                              replay, select_legs)
-from src.alloc.fills import Leg
+from src.alloc.engine import (SqliteChainSource, Trade, _entry_features,
+                              capital_at_risk, replay, select_legs)
+from src.alloc.fills import Leg, quotes_from_chain
 from src.strategies.spec import StrategySpec
 
 
@@ -493,3 +493,55 @@ class SignalGatingTest(unittest.TestCase):
         trades, stats = replay(spec, ["AAA"], dates, FakeSource(data))
         self.assertEqual(trades, [])
         self.assertGreater(stats["skipped_signal"], 0)
+
+
+class EntryDepthFeatureTest(unittest.TestCase):
+    """Quoted depth at entry — the feature H2 is built on.
+
+    `bid_size`/`ask_size` exist in no source this repo held before optionsDX,
+    and they arrive on 100% of its 18.9M rows. They were invisible to the
+    attribution harness because `_entry_features` never carried them, so H2
+    could not be asked at all.
+
+    Depth is taken on the side actually traded AGAINST — a sell hits the bid,
+    a buy lifts the ask — and the binding number is the smallest across the
+    legs, because the trade is only as fillable as its worst leg.
+    """
+
+    def _legs(self):
+        return [Leg("2024-03-15", 100.0, "put", "sell"),
+                Leg("2024-03-15", 95.0, "put", "buy")]
+
+    def _chain(self, short_bid_size, short_ask_size,
+               long_bid_size, long_ask_size):
+        c = _bull_put_chain()
+        c[0]["bid_size"], c[0]["ask_size"] = short_bid_size, short_ask_size
+        c[1]["bid_size"], c[1]["ask_size"] = long_bid_size, long_ask_size
+        return c
+
+    def _depth(self, chain):
+        return _entry_features({}, self._legs(), chain,
+                               quotes_from_chain(chain), price=1.5, car=350.0,
+                               date="2024-01-05",
+                               expiration="2024-03-15").get("entry_depth")
+
+    def test_the_sold_leg_contributes_its_bid_size(self):
+        # Selling hits the bid, so ask_size on that leg is irrelevant.
+        self.assertEqual(self._depth(self._chain(12, 999, 500, 500)), 12)
+
+    def test_the_bought_leg_contributes_its_ask_size(self):
+        self.assertEqual(self._depth(self._chain(500, 500, 999, 7)), 7)
+
+    def test_the_worst_leg_binds(self):
+        self.assertEqual(self._depth(self._chain(40, 999, 999, 25)), 25)
+
+    def test_a_source_without_depth_reports_none_not_zero(self):
+        # The Dolt cache has no size columns at all. Zero would read as "no
+        # depth quoted", which is a claim about the market rather than about
+        # the data.
+        self.assertIsNone(self._depth(_bull_put_chain()))
+
+    def test_one_leg_missing_depth_makes_the_trade_unmeasurable(self):
+        c = self._chain(40, 999, 999, 25)
+        del c[1]["ask_size"]
+        self.assertIsNone(self._depth(c))
