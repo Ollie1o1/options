@@ -37,6 +37,19 @@ from typing import Union
 # ai_cache.py, which anchored themselves individually before this existed.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Strings SQLite understands that are NOT filenames. Anchoring `:memory:`
+# created a real 36KB database at the repo root literally named `:memory:`,
+# committed in 54ec402 and rewritten by every test run — and the seven test
+# modules passing the literal for a private in-memory database were all
+# sharing that one file instead. An empty string is SQLite's anonymous
+# on-disk temporary database, and is left alone for the same reason.
+#
+# Handled here rather than at each call site because this function is the
+# thing that decides what counts as a path, and these never did. `file:` is
+# matched by prefix since a URI carries a query string; a plain name that
+# merely begins with the letters, like `filed_trades.db`, still resolves.
+_SQLITE_KEYWORDS = frozenset({":memory:", ""})
+
 
 def repo_path(path: Union[str, "os.PathLike[str]"]) -> str:
     """Resolve ``path`` against the repo root unless it is already absolute.
@@ -50,4 +63,6 @@ def repo_path(path: Union[str, "os.PathLike[str]"]) -> str:
     ``open()`` or stores it where other code compares it as text.
     """
     text = os.fspath(path)
+    if text in _SQLITE_KEYWORDS or text.startswith("file:"):
+        return text
     return text if os.path.isabs(text) else str(PROJECT_ROOT / text)
