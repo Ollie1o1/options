@@ -45,6 +45,11 @@ class Snapshot:
     atm_iv: Optional[float]
     term_slope: Optional[float] = None
     skew_25d: Optional[float] = None
+    # The pinned-tenor slope. Kept ALONGSIDE `term_slope` rather than replacing
+    # it, because the two answer different questions on a full chain and the
+    # published holdout result belongs to the unpinned one. Silently changing
+    # what `term_slope` means would rewrite that record.
+    term_slope_1m3m: Optional[float] = None
 
 
 def atm_iv(chain: Sequence[Dict[str, Any]], spot: float) -> Optional[float]:
@@ -121,6 +126,116 @@ def term_slope(chain: Sequence[Dict[str, Any]],
     return float(near_iv - far_iv)
 
 
+TENOR_NEAR_DTE = 30     # "1M" and "3M" as the term-structure literature means
+TENOR_FAR_DTE = 90
+# Widest gap the two bracketing expiries may straddle. Measured on the SPY
+# 2010-2023 chains: the mean bracket around 90 DTE is 27 days and the worst is
+# 84, so this admits every real bracket in the data while still refusing to
+# invent a tenor across a genuine hole.
+MAX_BRACKET_DAYS = 90
+
+
+def _interp_atm_iv(by_exp: Dict[str, List[Dict[str, Any]]],
+                   dated: Sequence[Tuple[int, str]], spot: float,
+                   target: int, max_bracket: int) -> Optional[float]:
+    """ATM implied vol AT `target` days, interpolated in total variance.
+
+    Nearest-listed-expiry was the first design and the data rejected it: on
+    these chains only 72.5% of days carry an expiry within 10 days of BOTH 30
+    and 90, and the missing 27.5% are not a random sample — which day fails is
+    determined by where the date sits in the expiry cycle. For a time-series
+    signal that is a periodic hole, not thinning. Bracketing and interpolating
+    covers 99.9% of days.
+
+    Interpolation is linear in TOTAL VARIANCE (sigma-squared times time)
+    against time, the standard construction and the one VIX uses, because
+    variance is what accumulates additively across a horizon. Interpolating vol
+    itself would bias every reading on a sloped surface.
+
+    The day count cancels between numerator and denominator, so raw days are
+    used and no year fraction is needed.
+    """
+    lo = max((d for d, _e in dated if d <= target), default=None)
+    hi = min((d for d, _e in dated if d >= target), default=None)
+    # Refuse to extrapolate. A chain that stops at 80 days does not price a
+    # three-month tenor, and reaching for its last expiry is precisely the
+    # silent substitution this function exists to eliminate.
+    if lo is None or hi is None or hi - lo > max_bracket:
+        return None
+
+    def _iv(dte: int) -> Optional[float]:
+        exp = next(e for d, e in dated if d == dte)
+        return atm_iv(by_exp[exp], spot)
+
+    if lo == hi:
+        return _iv(lo)
+    iv_lo, iv_hi = _iv(lo), _iv(hi)
+    if iv_lo is None or iv_hi is None:
+        return None
+    w = (hi - target) / float(hi - lo)
+    total_var = w * iv_lo * iv_lo * lo + (1.0 - w) * iv_hi * iv_hi * hi
+    if total_var <= 0 or target <= 0:
+        return None
+    return math.sqrt(total_var / target)
+
+
+def term_slope_tenor(chain: Sequence[Dict[str, Any]],
+                     spot: Optional[float],
+                     as_of: str,
+                     near_dte: int = TENOR_NEAR_DTE,
+                     far_dte: int = TENOR_FAR_DTE,
+                     max_bracket_days: int = MAX_BRACKET_DAYS
+                     ) -> Optional[float]:
+    """ATM IV at ~1 month minus ATM IV at ~3 months. Positive is backwardation.
+
+    Same quantity `term_slope` is named for, measured at PINNED tenors instead
+    of at whatever the chain happens to reach. That distinction is the reason
+    this exists.
+
+    `docs/HOLDOUT_20260809.md` recorded the slope going +0.0431 in-sample to
+    -0.0568 holdout and could not say why, because the Dolt cache is DTE 10-67
+    and the measurable slope there is 10d against 60d — not the 1M/3M the
+    result being replicated is about. optionsDX removes that wall, but a wider
+    chain makes the ORIGINAL function worse rather than better: it takes the
+    nearest and farthest expirations available, and a full chain reaches 0 DTE
+    and beyond 1,000, so it would compare a same-day contract against a
+    two-year LEAP and call the difference term structure.
+
+    Refuses rather than substitutes. Each leg must be BRACKETED by listed
+    expiries — the target interpolated between the ones either side of it, never
+    extrapolated past the end of the chain. A 3-day contract standing in for a
+    one-month tenor is exactly the silent substitution that made the first
+    result uninterpretable, and on a full chain the miss would be unbounded.
+    """
+    if spot is None:
+        return None
+    try:
+        quote = _dt.date.fromisoformat(str(as_of))
+    except (TypeError, ValueError):
+        return None
+    s = float(spot)
+    by_exp = _by_expiration(chain)
+
+    # (dte, expiration) for every expiry that is priced and still in the future.
+    dated: List[Tuple[int, str]] = []
+    for exp in by_exp:
+        try:
+            dte = (_dt.date.fromisoformat(exp) - quote).days
+        except (TypeError, ValueError):
+            continue
+        if dte >= 0:
+            dated.append((dte, exp))
+    if len(dated) < 2:
+        return None
+    dated.sort()
+
+    near = _interp_atm_iv(by_exp, dated, s, near_dte, max_bracket_days)
+    far = _interp_atm_iv(by_exp, dated, s, far_dte, max_bracket_days)
+    if near is None or far is None:
+        return None
+    return float(near - far)
+
+
 def skew_25d(chain: Sequence[Dict[str, Any]]) -> Optional[float]:
     """25-delta put IV minus 25-delta call IV, on the nearest expiration.
 
@@ -160,11 +275,61 @@ def skew_25d(chain: Sequence[Dict[str, Any]]) -> Optional[float]:
     return float(put_iv - call_iv)
 
 
+# Contracts closer to expiry than this do not price implied vol: on the real
+# optionsDX chains SPY 2017-01-13 read 1.7% off a same-day expiry while the
+# 26-day expiry on the same chain read 8.7%.
+#
+# This floor is NOT a no-op on the Dolt cache. That cache was believed to be
+# DTE 10-67; it actually holds 758,273 rows under 10 days and some with
+# NEGATIVE DTE, meaning an expiration before its own quote date. Across 400
+# sampled symbol-days that carry such a contract, 281 change: median -0.0387,
+# worst -2.3512, i.e. a reading of 235% "at-the-money implied vol" that was
+# feeding the level features.
+#
+# So every level feature on record — iv_rank, iv_velocity, vol_of_vol,
+# iv_minus_rv — was partly measured off expiring and in places corrupt
+# contracts. Applying the floor is a correction, not a redefinition, but it
+# does mean pre-2026-08-11 level-feature numbers are not comparable with
+# anything measured after it. See docs/OPTIONSDX_RESULTS_20260811.md.
+ATM_IV_MIN_DTE = 10
+
+
+def _past_the_floor(chain: Sequence[Dict[str, Any]], as_of: str,
+                    min_dte: int = ATM_IV_MIN_DTE
+                    ) -> Sequence[Dict[str, Any]]:
+    """The chain with near-expiry contracts dropped, or unchanged if that empties it.
+
+    Degrading rather than refusing: a source whose whole chain sits inside the
+    floor is thin, not corrupt, and blanking every level feature for it would
+    be a worse answer than a short-dated one.
+    """
+    try:
+        quote = _dt.date.fromisoformat(str(as_of))
+    except (TypeError, ValueError):
+        return chain
+    kept = []
+    for c in chain:
+        try:
+            dte = (_dt.date.fromisoformat(str(c.get("expiration"))[:10])
+                   - quote).days
+        except (TypeError, ValueError):
+            continue
+        if dte >= min_dte:
+            kept.append(c)
+    return kept or chain
+
+
 def snapshot(chain: Sequence[Dict[str, Any]], date: str) -> Snapshot:
     spot = implied_spot_any(chain)
+    # `atm_iv` picks the nearest strike with no view on expiry, so on a source
+    # carrying 0 DTE it will happily read an expiring contract. Everything
+    # downstream of the level — iv_rank, iv_velocity, vol_of_vol, iv_minus_rv
+    # — inherits that, so the floor is applied once, here.
+    level = _past_the_floor(chain, date)
     return Snapshot(date=date, spot=spot,
-                    atm_iv=atm_iv(chain, spot) if spot is not None else None,
+                    atm_iv=atm_iv(level, spot) if spot is not None else None,
                     term_slope=term_slope(chain, spot),
+                    term_slope_1m3m=term_slope_tenor(chain, spot, date),
                     skew_25d=skew_25d(chain))
 
 
@@ -301,7 +466,9 @@ class SignalHistory:
             "rv": None, "iv_minus_rv": None,
             # Shape of the surface on the day, carried straight off the
             # snapshot: both are point-in-time, not accumulated.
-            "term_slope": now.term_slope, "skew_25d": now.skew_25d,
+            "term_slope": now.term_slope,
+            "term_slope_1m3m": now.term_slope_1m3m,
+            "skew_25d": now.skew_25d,
             "iv_velocity": None, "vol_of_vol": None,
         }
 
