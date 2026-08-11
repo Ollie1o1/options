@@ -781,6 +781,9 @@ class PaperManager:
         # and log real trades into it, while check_pnl from the repo root kept
         # showing the old book. Absolute paths (every test fixture) pass through.
         self.db_path = repo_path(db_path)
+        # Held open only for `:memory:`, where closing the connection destroys
+        # the database. See `_get_connection`.
+        self._memory_conn: Optional[sqlite3.Connection] = None
         self.config_path = config_path
         # Load friction costs from config (fall back to module-level constants)
         try:
@@ -985,7 +988,41 @@ class PaperManager:
 
     @contextmanager
     def _get_connection(self):
-        """Yield a sqlite3 connection with WAL mode; commits on success, rollbacks on error, always closes."""
+        """Yield a sqlite3 connection; commits on success, rolls back on error.
+
+        On disk: a fresh connection per operation, WAL, always closed. That is
+        the right shape for a ledger several processes touch — the scheduler,
+        the launcher and a scan can all be live at once.
+
+        In memory: ONE connection for the manager's lifetime, never closed. An
+        in-memory database lives and dies with its connection, so the on-disk
+        pattern made `:memory:` a null database — `_init_db()` built the schema
+        on a connection that was immediately discarded and the next call saw
+        zero tables. Five test modules pass the literal and only pass because
+        they never query it; anything that did would raise "no such table".
+
+        Not `file::memory:?cache=shared`, which would make every `:memory:`
+        manager in the process share ONE database. That is the isolation bug
+        this keyword is chosen to avoid, and the one that existed until
+        `repo_path` stopped resolving it to a real file (PR #30).
+        """
+        if self.db_path == ":memory:":
+            if self._memory_conn is None:
+                # check_same_thread=False because the on-disk path connects per
+                # call and is therefore thread-safe by construction; a single
+                # shared handle must not become the reason a threaded caller
+                # breaks only under `:memory:`.
+                self._memory_conn = sqlite3.connect(
+                    ":memory:", timeout=30.0, check_same_thread=False)
+            conn = self._memory_conn
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return                      # deliberately NOT closed
+
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
