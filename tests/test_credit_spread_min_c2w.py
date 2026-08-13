@@ -8,22 +8,28 @@ function `find_iron_condors` had read the same quantity from
 written, so the number was already a tunable on one board and a magic literal
 on the other.
 
-The threshold is load-bearing rather than cosmetic. A bull put spread at
-credit-to-width `r` pays `r * width` and risks `(1 - r) * width`, so it needs
-a **`1 - r` win rate to break even** before costs: 70% at 0.30, 80% at 0.20,
-90% at 0.10.
+`1 - r` is the HOLD-TO-EXPIRY breakeven win rate for a spread at
+credit-to-width `r`. **It is not the number these trades should be judged by**,
+and this test file exists partly to stop that identity being reached for again.
 
-**Shipped value TIGHTENED 0.20 -> 0.30 on 2026-08-13** by operator decision.
-Measured over 17 sector ETFs that day, the surviving board demanded a 76-79%
-win rate at 0.20 and 65-66% at 0.30, against a realised Bull Put win rate of
-**66.4%** over 131 closed trades — so 0.20 was admitting structures this book
-has never won often enough to carry. The filter only ever REFUSES candidates,
-so tightening is the conservative direction.
+The value was tightened 0.20 -> 0.30 on 2026-08-13 and **reverted the same
+day**. The case for tightening was that the scan board demanded 76-79% while
+the book delivers 66.4%; measurement killed it twice over. It compared
+different populations — 76-79% described scan candidates at credit/width
+~0.21-0.34, while 66.4% came from logged trades at median credit/width
+**0.475**, so the filter was never what selected them. And at that
+credit/width the identity says 52.5% against a measured managed requirement of
+50.9%, a 1.6pp gap: the identity was fine, its application was not.
 
-Caveat kept attached to the number: breakeven-win-rate is a HOLD-TO-EXPIRY
-identity (binary max-profit vs max-loss), while these trades are managed with
-take-profits and stops; and 66.4% is book-wide Bull Put, not these ETF
-spreads specifically.
+Under the exits actually used (`config.exit_rules.spread`: TP 0.5, SL -1.0,
+both fractions of CREDIT) the required rate is set by the TP/SL ratio, not by
+width. Over 408 closed credit trades: **Bull Put requires 50.9% and delivers
+66.4%** (+15.6pp). The families that fail are **Bear Call** (66.7% needed,
+59.3% delivered) and **Iron Condor** (60.1% needed, 50.0% delivered).
+
+The knob still matters — it bounds the tail a stop can miss — but it is not
+the lever for breakeven, and no future change to it should be argued from
+`1 - r` alone.
 """
 from __future__ import annotations
 
@@ -111,7 +117,7 @@ class TestConfigCarriesTheValue(unittest.TestCase):
         with open(repo_path("config.json")) as fh:
             cfg = json.load(fh)
         block = cfg["filters"]["credit_spreads"]
-        self.assertEqual(block["min_credit_to_width"], 0.30)
+        self.assertEqual(block["min_credit_to_width"], 0.20)
 
     def test_the_code_fallback_matches_the_shipped_value(self):
         """A missing config must not silently loosen a tightened risk filter.
