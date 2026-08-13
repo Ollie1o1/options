@@ -268,42 +268,83 @@ class TestBonusSuppression(unittest.TestCase):
     def test_bonus_scale_is_a_net_per_row_gate(self):
         """`bonus_scale` credits a row only when its NET adjustment is positive.
 
-        Rewritten 2026-08-10. This was `test_scales_of_one_restore_upward_
-        adjustments`, asserting `on["quality_score"].max() > off[...].max()`
-        with the message "bonus_scale=1.0 must lift at least one row".
+        Rewritten 2026-08-10, then again 2026-08-13 for the reason below.
 
-        It never verified that. The scale is applied as
-        `bonus * delta.clip(lower=0)` where `delta` is the row's NET
-        adjustment, and on this fixture only two adjustments fire —
-        `trend_aligned` (bonus) and `oi_wall_warning` (penalty) — with the
-        penalty larger, so every row is net negative, `clip(lower=0)` is zero
-        everywhere, and `bonus_scale` provably changes nothing: the row-wise
-        difference is exactly 0.0000 on every row, on every repeat.
+        The 2026-08-10 version asserted that `bonus_scale` changed *no* row,
+        guarded by a precondition meant to fail loudly if the fixture ever grew
+        a net-positive row. The precondition could not fire, because it read
+        `net` off the bonus-OFF run — the one run where a positive net has
+        already been clipped away:
 
-        The two maxima it compared were therefore the same number plus float
-        noise, agreeing to eleven significant figures. It passed on 3.12 and
-        3.14 and failed on 3.11 (CI run 31413572815) because a comparison at
-        the noise floor is a coin toss, not a test.
+            off_delta = pre + 0.0*net.clip(lower=0) + 1.0*net.clip(upper=0) - pre
 
-        What is asserted now is the designed behaviour: a row the penalties
-        already put underwater gets no bonus credit, whatever the scale.
+        A row with net `+0.05` reports `0.0` there, `0.0 <= 0` is True, the
+        guard passes, and the real assertion then fails with the message
+        "changed a row whose net adjustment is NEGATIVE" about a row whose net
+        adjustment is positive. The fixture does have such a row and has had
+        one all along — the single ITM call, which takes `trend_aligned`
+        (+0.05) and no penalty, while the docstring above assumed every row
+        also took `oi_wall_warning`. Reproduced identically at `0cbbb3e`,
+        before any of the 2026-08-11 work, with `ic_weights_cache.json` moved
+        aside; it is not a code regression and not live state.
+
+        So the premise "no row is net-positive" is simply false, and a test
+        that depends on it is measuring the fixture rather than the gate. What
+        is asserted now is the gate itself, on both sides:
+
+          * a row the penalties put underwater is untouched by `bonus_scale`;
+          * a row that is net-positive is credited exactly `bonus * net`;
+          * both branches are actually exercised, so neither half can go
+            vacuous without the test saying so.
+
+        Deltas are compared WITHIN a run (`score - pre_adjust`), never across
+        runs: the scorer prices on wall-clock `T_years`, so two runs seconds
+        apart differ in the ~1e-8 of the composite while the stack's per-row
+        effect is bit-identical.
         """
-        on = self._scored({"bonus": 1.0, "penalty": 1.0})
+        unscaled = self._scored({"bonus": 1.0, "penalty": 1.0})
         off = self._scored({"bonus": 0.0, "penalty": 1.0})
+        half = self._scored({"bonus": 0.5, "penalty": 1.0})
+        # The output is RANK-ordered with a reset index, so row 5 of one run
+        # and row 5 of another are different contracts whenever the scales
+        # change the ranking — which is the whole point of the scales. The
+        # 2026-08-10 version subtracted these two frames positionally and was
+        # therefore differencing a put against a call. Key on the contract.
+        def _delta(out):
+            key = ["type", "strike", "expiration"]
+            d = out["quality_score"] - out["quality_score_pre_adjust"]
+            return d.groupby([out[c] for c in key]).first().sort_index()
 
-        # Precondition, stated rather than assumed: if a future fixture ever
-        # produces a net-positive row this test is measuring the wrong thing
-        # and should fail loudly instead of passing vacuously.
-        net = off["quality_score"] - off["quality_score_pre_adjust"]
-        self.assertTrue((net <= 0).all(),
-                        "fixture now has a net-positive row — this test no "
-                        "longer covers the gate it was written for")
+        for other in (off, half):
+            self.assertEqual(_delta(unscaled).index.tolist(),
+                             _delta(other).index.tolist(),
+                             "runs returned different contracts — the deltas "
+                             "are not comparable row for row")
 
-        stack_on = on["quality_score"] - on["quality_score_pre_adjust"]
-        stack_off = off["quality_score"] - off["quality_score_pre_adjust"]
-        self.assertTrue(
-            ((stack_on - stack_off).abs() < 1e-9).all(),
-            "bonus_scale changed a row whose net adjustment is negative")
+        # At scales 1/1 the rescale is the identity, so this IS the raw
+        # per-row stack effect.
+        net, d_off, d_half = _delta(unscaled), _delta(off), _delta(half)
+
+        self.assertTrue((net > 1e-9).any(),
+                        "fixture has no net-positive row — the credited half "
+                        "of the gate is not covered")
+        self.assertTrue((net < -1e-9).any(),
+                        "fixture has no net-negative row — the suppressed "
+                        "half of the gate is not covered")
+
+        neg = net <= 0
+        self.assertTrue(((d_off[neg] - net[neg]).abs() < 1e-9).all(),
+                        "bonus_scale changed a row whose net adjustment is "
+                        "negative")
+        self.assertTrue((d_off[~neg].abs() < 1e-9).all(),
+                        "a net-positive row kept credit at bonus_scale=0.0")
+
+        # The scale is a scale, not a switch: half the bonus, half the credit,
+        # penalties untouched.
+        expect_half = 0.5 * net.clip(lower=0.0) + net.clip(upper=0.0)
+        self.assertTrue(((d_half - expect_half).abs() < 1e-9).all(),
+                        "bonus_scale=0.5 did not credit exactly half the "
+                        "positive net adjustment")
 
     def test_both_scales_zero_removes_every_additive_adjustment(self):
         off = self._scored({"bonus": 0.0, "penalty": 0.0})

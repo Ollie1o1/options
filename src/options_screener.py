@@ -751,7 +751,7 @@ def _maybe_trigger_recalib(cache_path: str) -> None:
             try:
                 import sqlite3 as _sqlite3
                 from contextlib import closing as _closing
-                with _closing(_sqlite3.connect("paper_trades.db")) as _conn:
+                with _closing(_sqlite3.connect(_repo_path("paper_trades.db"))) as _conn:
                     n = _conn.execute(
                         "SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL"
                     ).fetchone()[0]
@@ -804,6 +804,13 @@ def load_ic_adjusted_weights(config: Dict, cache_path: str = "ic_weights_cache.j
     global _IC_WEIGHTS_CACHE
     if _IC_WEIGHTS_CACHE is not None:
         return _IC_WEIGHTS_CACHE
+    # Relative in -> repo root, absolute in -> unchanged. 54ec402 anchored the
+    # ledger and config readers and missed this pair: the bare cache filename
+    # and the `paper_trades.db` the recalib thread counts trades in. A scan
+    # launched from anywhere but the repo root blended its weights off a
+    # different (or absent) ledger and cache, and said nothing — every read
+    # here is wrapped in `except` and falls back to the plain config weights.
+    cache_path = _repo_path(cache_path)
     _maybe_trigger_recalib(cache_path)
     base_weights = config.get("composite_weights", {}) or {}
     try:
