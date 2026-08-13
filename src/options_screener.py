@@ -3037,10 +3037,25 @@ def find_vertical_spreads(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(spreads) if spreads else pd.DataFrame()
 
 
-def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
+def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.DataFrame:
     """
     Identifies high-probability Bull Put and Bear Call credit spreads.
+
+    Minimum credit-to-width is read from
+    ``config['filters']['credit_spreads']['min_credit_to_width']``, defaulting
+    to 0.20 — the value both branches carried as a literal, and the same knob
+    `find_iron_condors` has always read from its own block.
+
+    The threshold is not cosmetic. A credit spread at credit-to-width ``r``
+    pays ``r * width`` and risks ``(1 - r) * width``, so it needs a **1 - r
+    win rate to break even** before costs: 80% at 0.20, 90% at 0.10. Measured
+    on ^RUT 2026-08-13, halving the bar took the board from 1 candidate to 6
+    and admitted spreads needing 82-87%, against a realised Bull Put win rate
+    of 66.4% over 131 closed trades. It decides which losing structures
+    qualify, so it belongs where it can be seen.
     """
+    _cs_cfg = ((config or {}).get("filters", {}) or {}).get("credit_spreads") or {}
+    min_c2w = float(_cs_cfg.get("min_credit_to_width", 0.20))
     spreads = []
 
     # --- Bull Put Spreads (Sell a Put, Buy a lower Put) ---
@@ -3079,8 +3094,9 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
             strike_width = short_leg['strike'] - long_leg['strike']
             net_credit = short_leg['premium'] - long_leg['premium']
 
-            # Profitability Filter: Net Credit > 0.20 * Strike Width (Relaxed)
-            if net_credit > (0.20 * strike_width):
+            # Profitability Filter: net credit must clear `min_c2w` of the
+            # width. See the docstring for why this number decides the board.
+            if net_credit > (min_c2w * strike_width):
                 spreads.append({
                     "symbol": short_leg['symbol'],
                     "type": "Bull Put",
@@ -3136,8 +3152,9 @@ def find_credit_spreads(df: pd.DataFrame) -> pd.DataFrame:
             strike_width = long_leg['strike'] - short_leg['strike']
             net_credit = short_leg['premium'] - long_leg['premium']
 
-            # Profitability Filter: Net Credit > 0.20 * Strike Width (Relaxed)
-            if net_credit > (0.20 * strike_width):
+            # Profitability Filter: net credit must clear `min_c2w` of the
+            # width. See the docstring for why this number decides the board.
+            if net_credit > (min_c2w * strike_width):
                 spreads.append({
                     "symbol": short_leg['symbol'],
                     "type": "Bear Call",
@@ -4132,7 +4149,7 @@ def _score_fetched_data(
                 return result
 
         if mode == "Credit Spreads":
-            spreads = find_credit_spreads(df_scored)
+            spreads = find_credit_spreads(df_scored, config)
             if not spreads.empty:
                 spreads = enrich_credit_spreads(spreads, df_scored, config)
                 result["credit_spreads"].append(spreads)
