@@ -127,15 +127,11 @@
     "take_profit": 0.5,
     "stop_loss": -0.25
   },
-  "auto_log_skip_long_puts": true,
-  "auto_log_skip_bear_calls": true,
   "auto_log": {
     "allowed_strategies": [
       "Long Call"
     ],
-    "paper_only_strategies": [
-      "Iron Condor"
-    ],
+    "paper_only_strategies": [],
     "weight_profile": null,
     "phase1_start_date": "2026-05-27",
     "cohort_min_dte": 30,
@@ -146,7 +142,7 @@
     "dedup_window_days": 3,
     "_max_friction_to_credit_note": "Refuse to auto-log a CREDIT trade whose round-trip friction exceeds this fraction of the credit received. TIGHTENED 0.50 -> 0.25 on 2026-08-06: the allocation backtest measured the MEDIAN crossing cost at exactly 50% of credit ($90 at mid, $45 received, over 400 real trades), so a 0.50 ceiling admitted roughly half of all candidates - and those are the ones that lose. Restricting the universe to names whose spreads are 3.6% of mid rather than 16-21% moved the same strategy from -6.76% to -0.64% return on capital (t=-17.84, n=10,363), the largest single effect measured anywhere in this system. This filter only REFUSES trades, never adds them, and is the conservative direction. Revert via config.bak.20260806-224238-friction.json. Above 1.0 the trade cannot profit at any win rate. Measured 2026-07-31: 31 of 188 logged short-premium trades were above 1.0 — micro-spreads with $57 median capital at risk against ~$65 of spread — and excluding those above 0.50 moved the family's median return on risk from +12.6% to +28.1%. This is the mirror of max_capital_at_risk: that refuses positions too LARGE for the account, this refuses positions too SMALL to survive their own market. null disables it; allow_untradeable=True bypasses it for a deliberate manual entry.",
     "max_friction_to_credit": 0.25,
-    "_paper_only_strategies_note": "Strategies logged as paper_only=1, i.e. kept OUT of any validation cohort. 2026-08-01: Bull Put, Bear Call and Short Put were PROMOTED out of this list by operator decision so the short-premium gate's cohort can authorise capital; the 285 historical rows were flipped to paper_only=0 in the same change (backup: backups/paper_trades.db.bak.20260801-223429). Iron Condor stays quarantined — it is not part of the short-premium gate's family. NOTE paper_only means two different things in this ledger: strategy-selection quarantine (this list) and DTE-contamination marking on Long Call/Long Put rows. Only the first was promoted."
+    "_paper_only_strategies_note": "Strategies logged as paper_only=1, i.e. kept OUT of any validation cohort. NOW EMPTY. A strategy in NEITHER allowed_strategies NOR this list is DROPPED by apply_auto_log_allowlist and never auto-logged at all — emptying this is therefore how a strategy is switched off. 2026-08-13: Iron Condor removed, stopping its auto-log. It needs a 60.1% win rate under the exits actually used and has delivered 50.0% over 142 closed trades (-10.1pp); Bear Call is -7.4pp and had already stopped logging on 2026-07-31. 2026-08-01: Bull Put, Bear Call and Short Put were removed from this list by operator decision so the short-premium gate's cohort could authorise capital, and the 285 historical rows were flipped to paper_only=0 (backup: backups/paper_trades.db.bak.20260801-223429). NOTE the side effect, which was probably not intended: because none of the three was added to allowed_strategies, all three stopped being auto-logged entirely that day and have logged 0 new entries since. NOTE ALSO that paper_only means two different things in this ledger: strategy-selection quarantine (this list) and DTE-contamination marking on Long Call/Long Put rows."
   },
   "dolt_options": {
     "cache_path": "data/dolt_options.db",
