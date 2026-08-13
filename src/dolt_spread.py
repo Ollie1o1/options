@@ -263,23 +263,37 @@ def _load_cfg(path):
         return {}
 
 
-def _cli():
+def _build_parser():
+    """Split out from `_cli` so the flags can be asserted without a backtest.
+
+    `--weekly` used to reach `_date_range` as `args.weekly or True`, which is
+    `True` for every value the flag can hold — daily sampling was unreachable
+    and the flag documented a choice the code did not offer. It is a real
+    negatable flag now, and it stays defaulted to weekly: every Dolt result on
+    record was sampled weekly, so an unchanged command has to keep meaning
+    what it meant.
+    """
     import argparse
     ap = argparse.ArgumentParser(description="Put credit spread backtest on real marks")
     ap.add_argument("--symbols", default="SPY")
     ap.add_argument("--start", default="2022-01-01")
     ap.add_argument("--end", default="2024-12-31")
-    ap.add_argument("--weekly", action="store_true")
+    ap.add_argument("--weekly", action=argparse.BooleanOptionalAction, default=True,
+                    help="sample Fridays only (default); --no-weekly for every weekday")
     ap.add_argument("--short-delta", type=float, default=0.25)
     ap.add_argument("--long-delta", type=float, default=0.10)
     ap.add_argument("--side", choices=("put", "call"), default="put",
                     help="put = bull put spread, call = bear call spread")
     ap.add_argument("--db", default=None)
-    args = ap.parse_args()
+    return ap
+
+
+def _cli():
+    args = _build_parser().parse_args()
     from src import dolt_options as _do
     cfg = _load_cfg("config.json").get("dolt_options", {})
     syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    dates = _do._date_range(args.start, args.end, weekly=args.weekly or True)
+    dates = _do._date_range(args.start, args.end, weekly=args.weekly)
     db = args.db or cfg.get("cache_path")
     label = "Bear call" if args.side == "call" else "Bull put"
     print(f"{label} credit spread {args.short_delta}/{args.long_delta}d: {syms} (real marks, ret on max-risk)")
