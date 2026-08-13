@@ -14,11 +14,18 @@ constants answerable later.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import importlib.util
 import unittest
 
 import numpy as np
 import pandas as pd
+
+# 30 days out, relative to today. A hardcoded date drifts out of the
+# cost model's calibrated DTE range (and eventually into the past),
+# which has nothing to do with what these tests measure.
+_NEAR_EXP = (_dt.date.today() + _dt.timedelta(days=30)).isoformat()
+
 
 _spec = importlib.util.spec_from_file_location(
     "_scorer_fx", "tests/test_scorer_signal_recovery.py")
@@ -157,7 +164,7 @@ class TestLedgerRecordsTheFlags(unittest.TestCase):
             db = os.path.join(tmp, "t.db")
             pm = PaperManager(db_path=db)
             pm.log_trade({
-                "ticker": "TEST", "expiration": "2026-12-18", "strike": 100.0,
+                "ticker": "TEST", "expiration": _NEAR_EXP, "strike": 100.0,
                 "type": "call", "entry_price": 2.5, "quality_score": 0.61,
                 "strategy_name": "Long Call", "trader_pref_score": 0.77,
                 "score_adjustments": "decay_warning,risk_mult_3",
@@ -185,7 +192,7 @@ class TestLedgerRecordsTheFlags(unittest.TestCase):
             db = os.path.join(tmp, "t.db")
             pm = PaperManager(db_path=db)
             pm.log_trade({
-                "ticker": "TEST", "expiration": "2026-12-18", "strike": 100.0,
+                "ticker": "TEST", "expiration": _NEAR_EXP, "strike": 100.0,
                 "type": "call", "entry_price": 2.5, "quality_score": 0.61,
                 "strategy_name": "Long Call", "score_adjustments": "",
             })
