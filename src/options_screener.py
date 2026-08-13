@@ -3043,25 +3043,29 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
 
     Minimum credit-to-width is read from
     ``config['filters']['credit_spreads']['min_credit_to_width']``, shipped at
-    **0.30** since 2026-08-13 (it was 0.20, carried as a literal at both
-    branches).
+    **0.20** (it was carried as a literal at both branches until 2026-08-13).
 
-    The threshold is not cosmetic. A credit spread at credit-to-width ``r``
-    pays ``r * width`` and risks ``(1 - r) * width``, so it needs a **1 - r
-    win rate to break even** before costs: 70% at 0.30, 80% at 0.20, 90% at
-    0.10. Measured over 17 sector ETFs 2026-08-13, the surviving board demands
-    76-79% at 0.20 and 65-66% at 0.30, against a realised Bull Put win rate of
-    66.4% over 131 closed trades — so 0.20 was admitting structures this book
-    has never won often enough to carry. It decides which losing structures
-    qualify, so it belongs where it can be seen.
+    ``1 - r`` is the HOLD-TO-EXPIRY breakeven win rate, and it is **not** the
+    number to judge these trades by. Under the exits actually used
+    (``config.exit_rules.spread``: TP 0.5, SL -1.0, both fractions of CREDIT)
+    the required rate is set by the TP/SL ratio rather than by width. Measured
+    2026-08-13 over 408 closed credit trades: Bull Put requires **50.9%** and
+    delivers 66.4%, clearing its bar by 15.6pp. The families that fail their
+    own breakeven are Bear Call (needs 66.7%, delivers 59.3%) and Iron Condor
+    (needs 60.1%, delivers 50.0%).
 
-    The hardcoded fallback tracks the shipped value rather than the old one:
-    this filter only ever REFUSES candidates, so a missing or unreadable
-    config must not silently loosen it back to 0.20. `config.json` is still
-    the place to change it.
+    This value was tightened to 0.30 and reverted the same day: the case for
+    tightening compared scan candidates at credit/width ~0.21-0.34 against
+    logged trades at median credit/width 0.475 — different populations — and
+    did not survive the managed-exit measurement.
+
+    The hardcoded fallback tracks the shipped value. It is the branch that
+    runs when config is missing or unreadable, and a fallback out of step with
+    `config.json` silently changes which structures qualify; a test pins them
+    together.
     """
     _cs_cfg = ((config or {}).get("filters", {}) or {}).get("credit_spreads") or {}
-    min_c2w = float(_cs_cfg.get("min_credit_to_width", 0.30))
+    min_c2w = float(_cs_cfg.get("min_credit_to_width", 0.20))
     spreads = []
 
     # --- Bull Put Spreads (Sell a Put, Buy a lower Put) ---
