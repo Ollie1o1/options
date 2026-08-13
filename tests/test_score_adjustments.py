@@ -311,9 +311,12 @@ class TestBonusSuppression(unittest.TestCase):
         # 2026-08-10 version subtracted these two frames positionally and was
         # therefore differencing a put against a call. Key on the contract.
         def _delta(out):
-            key = ["type", "strike", "expiration"]
+            key = pd.MultiIndex.from_frame(out[["type", "strike", "expiration"]])
+            self.assertFalse(key.duplicated().any(),
+                             "the fixture has two rows with the same contract "
+                             "— they cannot be told apart across runs")
             d = out["quality_score"] - out["quality_score_pre_adjust"]
-            return d.groupby([out[c] for c in key]).first().sort_index()
+            return pd.Series(d.to_numpy(), index=key).sort_index()
 
         for other in (off, half):
             self.assertEqual(_delta(unscaled).index.tolist(),
