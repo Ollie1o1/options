@@ -174,21 +174,35 @@ def _load_cfg(path):
         return {}
 
 
-def _cli():
+def _build_parser():
+    """Split out from `_cli` so the flags can be asserted without a backtest.
+
+    `--weekly` used to reach `_date_range` as `args.weekly or True`, which is
+    `True` for every value the flag can hold — daily sampling was unreachable
+    and the flag documented a choice the code did not offer. It is a real
+    negatable flag now, and it stays defaulted to weekly: every Dolt result on
+    record was sampled weekly, so an unchanged command has to keep meaning
+    what it meant.
+    """
     import argparse
     ap = argparse.ArgumentParser(description="Short-premium backtest on real marks")
     ap.add_argument("--symbols", default="AAPL,SPY,QQQ,MSFT")
     ap.add_argument("--start", default="2022-01-01")
     ap.add_argument("--end", default="2024-12-31")
-    ap.add_argument("--weekly", action="store_true")
+    ap.add_argument("--weekly", action=argparse.BooleanOptionalAction, default=True,
+                    help="sample Fridays only (default); --no-weekly for every weekday")
     ap.add_argument("--type", choices=["put", "call"], default="put")
     ap.add_argument("--delta", type=float, default=0.25)
     ap.add_argument("--db", default=None)
-    args = ap.parse_args()
+    return ap
+
+
+def _cli():
+    args = _build_parser().parse_args()
     from src import dolt_options as _do
     cfg = _load_cfg("config.json").get("dolt_options", {})
     syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    dates = _do._date_range(args.start, args.end, weekly=args.weekly or True)
+    dates = _do._date_range(args.start, args.end, weekly=args.weekly)
     db = args.db or cfg.get("cache_path")
     print(f"Short {args.type} ~{args.delta}delta: {syms} {args.start}..{args.end} (real marks, all-in)")
     out = run_short_backtest(syms, dates, opt_type=args.type, target_delta=args.delta, db_path=db)
