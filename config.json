@@ -74,6 +74,10 @@
       "long_delta_max": 0.15,
       "min_credit_to_width": 0.2,
       "max_net_delta": 0.1
+    },
+    "credit_spreads": {
+      "_note": "Minimum net credit as a fraction of strike width. A spread at credit-to-width r needs a 1-r win rate to break even before costs: 0.20 -> 80%, 0.10 -> 90%. Measured on ^RUT 2026-08-13, halving it took the board from 1 candidate to 6 and admitted spreads needing 82-87%, against a realised Bull Put win rate of 66.4% over 131 closed trades. Was hardcoded at both find_credit_spreads branches until 2026-08-13; the value is unchanged. Mirrors filters.iron_condor.min_credit_to_width - keep the two in step.",
+      "min_credit_to_width": 0.2
     }
   },
   "moneyness_band": 0.15,
