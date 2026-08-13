@@ -103,10 +103,28 @@ def _config(**overrides) -> dict:
     return base
 
 
+def _pinned_ic_weights(config: dict, cache_path: str | None = None) -> dict:
+    """The config's own weights, unblended — the stand-in for the live cache.
+
+    `enrich_and_score` calls `load_ic_adjusted_weights`, which reads
+    `ic_weights_cache.json` at the repo root. That file is UNTRACKED and the
+    scheduler rewrites it from the live ledger, so without this every scorer
+    test below is scored on whatever the book last calibrated to and can change
+    verdict overnight with no commit in between.
+
+    Returning the plain config weights is the same thing the real function
+    returns whenever the cache is missing, unreadable, or has no significant
+    component — its own documented fallback, not a test-only branch.
+    """
+    return dict(config.get("composite_weights", {}) or {})
+
+
 def _run(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     from src.options_screener import enrich_and_score, _invalidate_ic_weights_cache
     _invalidate_ic_weights_cache()  # tests run in same process
-    with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)):
+    with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)), \
+            patch("src.options_screener.load_ic_adjusted_weights",
+                  side_effect=_pinned_ic_weights):
         out = enrich_and_score(
             df=df, min_dte=1, max_dte=120, risk_free_rate=0.05, config=config,
             vix_regime_weights=config.get("composite_weights", {}),

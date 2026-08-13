@@ -87,6 +87,95 @@ class TestLedgerDefaultsAreAnchored(unittest.TestCase):
                                 f"{name} points outside the repo: {value!r}")
 
 
+class TestICRecalibrationIsAnchored(unittest.TestCase):
+    """The two paths 54ec402 missed, both inside the IC weight blend.
+
+    `load_ic_adjusted_weights` defaulted to a bare ``"ic_weights_cache.json"``
+    and the recalibration thread beside it opened a bare ``"paper_trades.db"``.
+    Both are read-only, so the failure was silent in the way this repo keeps
+    getting caught by: every read there is wrapped in ``except`` and falls back
+    to the plain config weights. Measured 2026-08-13 from a directory outside
+    the repo, the blend returned the unmodified config — `theta` at its base
+    0.0197 instead of the calibrated 0.1575, an 8x difference in one of the
+    composite's larger weights, with nothing logged and nothing displayed.
+    """
+
+    def test_the_weight_cache_default_resolves_against_the_repo_root(self):
+        from unittest.mock import patch
+
+        import src.options_screener as S
+        S._invalidate_ic_weights_cache()
+        try:
+            # Spied on `_maybe_trigger_recalib`, which receives the resolved
+            # path — so the assertion sees the anchoring without opening the
+            # real cache, and without letting the recalibration thread start.
+            with patch.object(S, "_maybe_trigger_recalib") as recalib:
+                S.load_ic_adjusted_weights({"composite_weights": {"pop": 0.1}})
+            recalib.assert_called_once()
+            resolved = recalib.call_args.args[0]
+        finally:
+            S._invalidate_ic_weights_cache()
+        self.assertEqual(Path(resolved), REPO_ROOT / "ic_weights_cache.json")
+
+    def test_an_absolute_cache_path_is_still_passed_through(self):
+        from unittest.mock import patch
+
+        import src.options_screener as S
+        S._invalidate_ic_weights_cache()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                mine = os.path.join(tmp, "cache.json")
+                with patch.object(S, "_maybe_trigger_recalib") as recalib:
+                    S.load_ic_adjusted_weights({"composite_weights": {}},
+                                               cache_path=mine)
+                self.assertEqual(recalib.call_args.args[0], mine)
+        finally:
+            S._invalidate_ic_weights_cache()
+
+    def test_the_recalibration_counts_trades_in_the_repos_ledger(self):
+        """Runs the real thread against a temp DB — never the real book.
+
+        `_repo_path` is redirected so the ledger name resolves into a
+        TemporaryDirectory. The file has no `trades` table, so the COUNT raises
+        and the thread exits down its own `except` before `run_paper_trade_ic`
+        can be reached: the recalibration never runs and the cache is never
+        written. What is asserted is only that the ledger name went through
+        `_repo_path` at all.
+        """
+        import time
+        from unittest.mock import patch
+
+        import src.options_screener as S
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def _redirect(p):
+                return os.path.join(tmp, str(p)) if p == "paper_trades.db" \
+                    else S._repo_path(p)
+
+            missing = os.path.join(tmp, "absent.json")  # absent => stale
+            S._IC_RECALIB_RUNNING = False
+            saw = lambda: any(c.args[:1] == ("paper_trades.db",)
+                              for c in spy.call_args_list)
+            with patch.object(S, "_repo_path", side_effect=_redirect) as spy:
+                S._maybe_trigger_recalib(missing)
+                # Wait on the thread's own state, not on a sleep: first for the
+                # call, then for it to finish, so the TemporaryDirectory is not
+                # torn down underneath a connection it is still opening.
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and not saw():
+                    time.sleep(0.01)
+                while time.monotonic() < deadline and S._IC_RECALIB_RUNNING:
+                    time.sleep(0.01)
+                self.assertTrue(
+                    saw(),
+                    "the recalibration thread opened an unanchored ledger name")
+            self.assertFalse(S._IC_RECALIB_RUNNING,
+                             "the recalibration thread did not finish")
+            self.assertFalse(os.path.exists(missing),
+                             "the recalibration wrote a cache — it was "
+                             "supposed to stop at the empty ledger")
+
+
 class TestLeverageLedgerSandbox(unittest.TestCase):
     """Pins the regression that anchoring introduced.
 
