@@ -10,15 +10,20 @@ on the other.
 
 The threshold is load-bearing rather than cosmetic. A bull put spread at
 credit-to-width `r` pays `r * width` and risks `(1 - r) * width`, so it needs
-a **`1 - r` win rate to break even** before costs: 80% at the shipped 0.20,
-90% at 0.10. Measured on ^RUT 2026-08-13, dropping the bar to 0.10 took the
-board from 1 candidate to 6 and admitted spreads needing 82-87% — against a
-realised Bull Put win rate of 66.4% over 131 closed trades. So this is a knob
-that decides which losing structures qualify, and it belongs somewhere it can
-be seen and changed rather than buried at two call sites.
+a **`1 - r` win rate to break even** before costs: 70% at 0.30, 80% at 0.20,
+90% at 0.10.
 
-The DEFAULT does not move. 0.20 is what every result on record was produced
-under.
+**Shipped value TIGHTENED 0.20 -> 0.30 on 2026-08-13** by operator decision.
+Measured over 17 sector ETFs that day, the surviving board demanded a 76-79%
+win rate at 0.20 and 65-66% at 0.30, against a realised Bull Put win rate of
+**66.4%** over 131 closed trades — so 0.20 was admitting structures this book
+has never won often enough to carry. The filter only ever REFUSES candidates,
+so tightening is the conservative direction.
+
+Caveat kept attached to the number: breakeven-win-rate is a HOLD-TO-EXPIRY
+identity (binary max-profit vs max-loss), while these trades are managed with
+take-profits and stops; and 66.4% is book-wide Bull Put, not these ETF
+spreads specifically.
 """
 from __future__ import annotations
 
@@ -101,21 +106,53 @@ class TestMinCreditToWidthIsConfigurable(unittest.TestCase):
 
 class TestConfigCarriesTheValue(unittest.TestCase):
 
-    def test_config_json_declares_it_at_the_shipped_default(self):
+    def test_config_json_declares_the_shipped_value(self):
         """The point of the move: the number is visible in config.json."""
         with open(repo_path("config.json")) as fh:
             cfg = json.load(fh)
         block = cfg["filters"]["credit_spreads"]
-        self.assertEqual(block["min_credit_to_width"], 0.20)
+        self.assertEqual(block["min_credit_to_width"], 0.30)
 
-    def test_it_sits_beside_the_iron_condor_knob_it_mirrors(self):
+    def test_the_code_fallback_matches_the_shipped_value(self):
+        """A missing config must not silently loosen a tightened risk filter.
+
+        The fallback in `find_credit_spreads` is the branch that runs when
+        config is absent or unreadable — every reader in this codebase has one
+        and they are all `except`-wrapped. If it lagged at 0.20 while the file
+        said 0.30, losing the config would quietly re-admit the structures the
+        tightening was meant to refuse.
+        """
+        with open(repo_path("config.json")) as fh:
+            shipped = json.load(fh)["filters"]["credit_spreads"]["min_credit_to_width"]
+        # credit/width exactly between the two candidate fallbacks (0.20/0.30):
+        # refused under either only if the fallback is >= 0.25.
+        chain = _chain()
+        chain.loc[chain["strike"] == 100.0, "premium"] = 3.00
+        chain.loc[chain["strike"] == 95.0, "premium"] = 1.75   # c/w = 0.25
+        refused_by_fallback = find_credit_spreads(chain).empty
+        self.assertEqual(refused_by_fallback, shipped > 0.25,
+                         "the hardcoded fallback has drifted from config.json")
+
+    def test_the_divergence_from_the_condor_knob_is_deliberate(self):
+        """These two were equal until 2026-08-13 and no longer are.
+
+        Asserted as an inequality with a direction rather than deleted: the
+        credit-spread board may be stricter than the condor board (that is the
+        change that was made), but it must never be LOOSER, and the note has
+        to say so — otherwise the next reader sees a silent divergence and
+        cannot tell whether it was decided or dropped.
+        """
         with open(repo_path("config.json")) as fh:
             filters = json.load(fh)["filters"]
-        self.assertIn("iron_condor", filters)
-        self.assertIn("credit_spreads", filters)
-        self.assertEqual(filters["iron_condor"]["min_credit_to_width"],
-                         filters["credit_spreads"]["min_credit_to_width"],
-                         "the two boards' credit floors have silently diverged")
+        cs = filters["credit_spreads"]["min_credit_to_width"]
+        ic = filters["iron_condor"]["min_credit_to_width"]
+        self.assertGreaterEqual(cs, ic,
+                                "the credit-spread floor is LOOSER than the "
+                                "condor floor — that was never decided")
+        if cs != ic:
+            self.assertIn("iron_condor", filters["credit_spreads"]["_note"],
+                          "the two floors diverge and the note does not "
+                          "explain it")
 
 
 class TestBreakevenArithmetic(unittest.TestCase):

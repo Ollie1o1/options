@@ -3042,20 +3042,26 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
     Identifies high-probability Bull Put and Bear Call credit spreads.
 
     Minimum credit-to-width is read from
-    ``config['filters']['credit_spreads']['min_credit_to_width']``, defaulting
-    to 0.20 — the value both branches carried as a literal, and the same knob
-    `find_iron_condors` has always read from its own block.
+    ``config['filters']['credit_spreads']['min_credit_to_width']``, shipped at
+    **0.30** since 2026-08-13 (it was 0.20, carried as a literal at both
+    branches).
 
     The threshold is not cosmetic. A credit spread at credit-to-width ``r``
     pays ``r * width`` and risks ``(1 - r) * width``, so it needs a **1 - r
-    win rate to break even** before costs: 80% at 0.20, 90% at 0.10. Measured
-    on ^RUT 2026-08-13, halving the bar took the board from 1 candidate to 6
-    and admitted spreads needing 82-87%, against a realised Bull Put win rate
-    of 66.4% over 131 closed trades. It decides which losing structures
+    win rate to break even** before costs: 70% at 0.30, 80% at 0.20, 90% at
+    0.10. Measured over 17 sector ETFs 2026-08-13, the surviving board demands
+    76-79% at 0.20 and 65-66% at 0.30, against a realised Bull Put win rate of
+    66.4% over 131 closed trades — so 0.20 was admitting structures this book
+    has never won often enough to carry. It decides which losing structures
     qualify, so it belongs where it can be seen.
+
+    The hardcoded fallback tracks the shipped value rather than the old one:
+    this filter only ever REFUSES candidates, so a missing or unreadable
+    config must not silently loosen it back to 0.20. `config.json` is still
+    the place to change it.
     """
     _cs_cfg = ((config or {}).get("filters", {}) or {}).get("credit_spreads") or {}
-    min_c2w = float(_cs_cfg.get("min_credit_to_width", 0.20))
+    min_c2w = float(_cs_cfg.get("min_credit_to_width", 0.30))
     spreads = []
 
     # --- Bull Put Spreads (Sell a Put, Buy a lower Put) ---
