@@ -76,8 +76,8 @@
       "max_net_delta": 0.1
     },
     "credit_spreads": {
-      "_note": "Minimum net credit as a fraction of strike width. A spread at credit-to-width r needs a 1-r win rate to break even before costs: 0.20 -> 80%, 0.10 -> 90%. Measured on ^RUT 2026-08-13, halving it took the board from 1 candidate to 6 and admitted spreads needing 82-87%, against a realised Bull Put win rate of 66.4% over 131 closed trades. Was hardcoded at both find_credit_spreads branches until 2026-08-13; the value is unchanged. Mirrors filters.iron_condor.min_credit_to_width - keep the two in step.",
-      "min_credit_to_width": 0.2
+      "_note": "Minimum net credit as a fraction of strike width. A spread at credit-to-width r needs a 1-r win rate to break even before costs. TIGHTENED 0.20 -> 0.30 on 2026-08-13 by operator decision. At 0.20 the surviving sector-ETF board demanded a 76-79% win rate; the realised Bull Put win rate is 66.4% over 131 closed trades, so the shipped filter was admitting structures the strategy has never won often enough to carry. At 0.30 the board's requirement falls to 65-66%, matching realised. Measured 2026-08-13 over 17 sector ETFs: 0.30 keeps 4 spreads (GLD/SLV), 0.20 keeps 11, and 0.15 keeps the SAME 11 as 0.20 - the friction/EV gate already refuses everything between those two, so there is no free loosening. CAVEAT, stated because it qualifies the number above: the breakeven win rate is a HOLD-TO-EXPIRY identity (binary max-profit vs max-loss) and these trades are managed with take-profits and stops, which reshapes the distribution; and 66.4% is book-wide Bull Put across equities and mixed widths, not these ETF spreads. This filter only ever REFUSES candidates, so the change is the conservative direction. Revert by setting this back to 0.2. Deliberately NO LONGER equal to filters.iron_condor.min_credit_to_width (0.2) - the condor board was not part of this decision.",
+      "min_credit_to_width": 0.3
     }
   },
   "moneyness_band": 0.15,
