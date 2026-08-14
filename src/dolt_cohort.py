@@ -201,6 +201,12 @@ def _summarize(trades, rules, partial: bool) -> Dict[str, Any]:
     thru = [t["ret"] for t in trades if t.get("through_earnings") is True]
     out["clean_holds"] = _stats(clean)
     out["through_earnings"] = _stats(thru)
+    # The rows themselves, as `dolt_spread` and `dolt_short` have always
+    # returned them. Without these the long-call cohort — the strategy the
+    # Phase 1 gate is built around — is the one backtest here that cannot be
+    # attributed: no per-symbol split, no sector or regime conditioning, no
+    # "does it survive dropping the biggest contributor", no bootstrap.
+    out["trades"] = trades
     return out
 
 
