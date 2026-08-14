@@ -151,11 +151,13 @@ def simulate_short_trade(symbol, entry_date, spot, sdates, spots, rules,
         if should_close:
             return {"ret": pnl_raw - comm_frac, "gross_ret": pnl_raw,
                     "exit_reason": _bucket(reason), "reason_detail": reason,
-                    "days_held": days_held, "entry_date": ed_actual, "exit_date": d}
+                    "days_held": days_held, "entry_date": ed_actual, "exit_date": d,
+                    "entry_price": entry_price, "strike": strike, "spot": spot}
     if last_pnl is None:
         return None
     return {"ret": last_pnl - comm_frac, "gross_ret": last_pnl, "exit_reason": "expiry",
-            "days_held": len(sdates) - 1 - ei, "entry_date": ed_actual, "exit_date": sdates[-1]}
+            "days_held": len(sdates) - 1 - ei, "entry_date": ed_actual, "exit_date": sdates[-1],
+            "entry_price": entry_price, "strike": strike, "spot": spot}
 
 
 def _bucket(reason: str) -> str:
