@@ -1287,15 +1287,23 @@ class PaperManager:
             )
             return False
 
+        # The budget that governs THIS trade. Key presence is the signal:
+        # present-and-None means the operator explicitly chose no limit;
+        # absent means no prompt was ever reached (cron, --auto, a pipe) and
+        # the config value applies. A run that never saw the prompt must not
+        # be treated as having chosen "no limit".
+        _budget = (trade_dict["budget_at_entry"]
+                   if "budget_at_entry" in trade_dict
+                   else self._max_capital_at_risk)
         if not trade_dict.get("allow_unaffordable") and not within_budget(
-            risk, self._max_capital_at_risk
+            risk, _budget
         ):
             self.unaffordable_rejected += 1
             shown = f"${risk:,.0f}" if risk is not None else "unbounded"
             print(
                 f"Skipped {trade_dict['strategy_name']} on {trade_dict.get('ticker')}: "
                 f"capital at risk {shown} exceeds the "
-                f"${self._max_capital_at_risk:,.0f} budget"
+                f"${_budget:,.0f} budget"
             )
             return False
 
@@ -1318,7 +1326,7 @@ class PaperManager:
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
-            paper_only, era, lottery_edge, capital_at_risk
+            paper_only, era, lottery_edge, capital_at_risk, budget_at_entry
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1328,7 +1336,7 @@ class PaperManager:
             ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?
+            ?, ?, ?, ?, ?
         )
         """
 
@@ -1414,6 +1422,7 @@ class PaperManager:
             trade_dict.get("era", "finalized"),
             (int(bool(trade_dict["lottery_edge"])) if trade_dict.get("lottery_edge") is not None else None),
             risk,
+            _budget,   # budget_at_entry — NULL means no limit was in force
         )
 
         with self._get_connection() as conn:
