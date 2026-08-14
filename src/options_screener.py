@@ -4002,6 +4002,38 @@ def close_trades():
     print("=" * 80 + "\n")
 
 
+def prompt_for_budget() -> Optional[float]:
+    """Capital at risk a single position may tie up on this scan, or None.
+
+    None means NO LIMIT and is the default: pressing ENTER must not impose a
+    constraint the operator did not ask for.
+
+    The quantity is CAPITAL AT RISK, not premium paid. For a cash-secured put
+    the two differ by ~170x — AVGO pays ~$200 of credit and ties up $34,680 —
+    and using the same quantity the ledger gates on means the board can never
+    show a candidate that would then be refused at log time.
+
+    Never raises and never exits. Bad input costs one re-prompt and then
+    falls back to no limit: a scan dying because someone typed "5oo" is worse
+    than a missing constraint.
+    """
+    for _ in range(2):
+        raw = prompt_input(
+            "Budget per position (capital at risk) in USD, ENTER for none", "")
+        text = (raw or "").strip().lower().replace("$", "").replace(",", "")
+        if text in ("", "none", "no", "unlimited"):
+            return None
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            print("  Not a number. Enter an amount, or press ENTER for no limit.")
+            continue
+        if value <= 0:
+            return None
+        return value
+    return None
+
+
 def prompt_for_tickers() -> List[str]:
     """
     Prompts the user to select a ticker source and returns a list of tickers.
