@@ -168,3 +168,29 @@ treat them as if they had passed the gate.
 
 No hypothesis, split, mapping, cell minimum or promotion criterion in §§2-7 is
 changed by either deviation.
+
+**D3. The first grid was discarded entirely.** Verifying the SPY `bear_call`
+benchmark found that every backtest spot was dividend-adjusted against raw
+strikes (PR #43): understated 8.31% in 2020 decaying to 0% today, so the
+distortion differed between the train and holdout windows AND scaled with each
+symbol's dividend yield — the two axes this study compares along. Corrected,
+that benchmark went from PF 6.98 to PF 0.59, which voided all eleven
+`bear_call` cells that had been measured against it. The grid is re-run on
+corrected spots. No hypothesis, split, mapping, cell minimum or criterion
+changes; only the prices they are computed from.
+
+**D4. Eight symbols lost their spot history, and the bias has a direction.**
+Re-deriving spots through the fixed path, yfinance returns nothing for
+delisted, acquired or renamed tickers: AAWW, CDAY, HA, HBI, PBCT, PCH, SRC,
+WLTW. They contribute zero trades. The prior cache held them from an earlier
+fetch made while they were still listed; clearing it lost that.
+
+This is **survivorship bias and it flatters the results** — the names that
+disappear are the ones acquired or wound down. Affected cells keep >= 4
+symbols so none becomes ineligible under section 6: XLI 19->17, XLF 8->6,
+XLRE 8->6, XLK 21->20, XLY 19->18. Recorded rather than corrected because the
+fix is a different data source (DoltHub `post-no-preference/stocks` ohlcv
+covers delisted names) and is not in this module.
+
+Any result below is therefore measured on survivors only, and should be read
+as an upper bound on how well these sectors did.

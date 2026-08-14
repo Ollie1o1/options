@@ -115,12 +115,14 @@ def simulate_trade(symbol, entry_date, spot, sdates, rules,
             return {"ret": pnl_raw - comm_frac, "gross_ret": pnl_raw,
                     "exit_reason": _reason_bucket(reason),
                     "reason_detail": reason, "days_held": days_held,
-                    "entry_date": ed_actual, "exit_date": d}
+                    "entry_date": ed_actual, "exit_date": d,
+                    "entry_price": entry_cost, "strike": strike, "spot": spot}
     if last_ret is None:
         return None
     return {"ret": last_ret - comm_frac, "gross_ret": last_ret, "exit_reason": "expiry",
             "days_held": len(sdates) - 1 - ei,
-            "entry_date": ed_actual, "exit_date": sdates[-1]}
+            "entry_date": ed_actual, "exit_date": sdates[-1],
+            "entry_price": entry_cost, "strike": strike, "spot": spot}
 
 
 def run_cohort_backtest(symbols, dates, target_dte=35, db_path=None,
