@@ -24,6 +24,9 @@ from src.dolt_cohort import _stats
 from src.paper_manager import _evaluate_short_single_leg_exit, _normalize_exit_rules
 from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
+# Mirrors the live ledger's own ceiling; see `_friction_limit`.
+_DEFAULT_FRICTION_LIMIT = 0.25
+
 _RFR = 0.045
 
 
@@ -47,11 +50,58 @@ def _pick_short(chain, opt_type, target_delta, asof, min_dte):
     return best
 
 
+def _friction_limit(cfg: Dict[str, Any]) -> Optional[float]:
+    """Round-trip friction ceiling, as a fraction of the credit received.
+
+    Deliberately the SAME key the live ledger refuses on —
+    ``auto_log.max_friction_to_credit`` — so this backtest cannot count a
+    position the running system would decline to log. `config.json` records
+    that key being tightened 0.50 -> 0.25 on 2026-08-06 as "the largest single
+    effect measured anywhere in this system"; measuring against a looser bar
+    here would make every short-premium number optimistic by construction.
+    """
+    try:
+        v = (cfg.get("auto_log") or {}).get("max_friction_to_credit",
+                                            _DEFAULT_FRICTION_LIMIT)
+    except AttributeError:
+        return _DEFAULT_FRICTION_LIMIT
+    return None if v is None else float(v)
+
+
+def _entry_is_tradeable(bid, ask, limit: Optional[float]) -> bool:
+    """Is the quote a market you could actually sell into and buy back out of?
+
+    A short leg is opened at the bid and closed at the ask, so the whole
+    bid-ask is the round trip and the credit is the bid. Measured on the Dolt
+    cache, entries this admitted included a $0.05 bid against a $4.60 ask — a
+    spread 91x the credit, which closes at -90x and is not a trade. Five such
+    rows moved XLB's mean short-put return from a trimmed -1.97 to -5.75.
+
+    `limit=None` disables the gate, matching the live `null` semantics, so a
+    deliberate wide-quote study is still possible.
+    """
+    if limit is None:
+        return True
+    try:
+        b, a = float(bid), float(ask)
+    except (TypeError, ValueError):
+        return False
+    if b <= 0 or a < b:
+        return False
+    return (a - b) <= limit * b
+
+
 def simulate_short_trade(symbol, entry_date, spot, sdates, spots, rules,
                          opt_type="put", target_delta=0.25, target_dte=35,
                          db_path=None, commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT,
-                         contract_multiplier=100, entry_filter=None) -> Optional[Dict[str, Any]]:
-    """Sell one ~target_delta OTM option, manage with the canonical short exits."""
+                         contract_multiplier=100, entry_filter=None,
+                         friction_limit: Optional[float] = _DEFAULT_FRICTION_LIMIT
+                         ) -> Optional[Dict[str, Any]]:
+    """Sell one ~target_delta OTM option, manage with the canonical short exits.
+
+    ``friction_limit`` is the round-trip bid-ask ceiling as a fraction of the
+    credit; see `_entry_is_tradeable`. Pass ``None`` to disable it.
+    """
     from src import dolt_options as _do
     kw = {"db_path": db_path} if db_path else {}
     ed_actual, chain = _do.get_chain_near(symbol, entry_date, **kw)
@@ -62,6 +112,10 @@ def simulate_short_trade(symbol, entry_date, spot, sdates, spots, rules,
     if not c or c.get("bid") is None or c["bid"] <= 0:
         return None
     if abs(c["strike"] / spot - 1.0) > 0.5:   # split-mismatch guard (puts are further OTM)
+        return None
+    # Tradeability: refuse a quote that is not a market. Sold at the bid and
+    # bought back at the ask, so the whole spread is the round trip.
+    if not _entry_is_tradeable(c.get("bid"), c.get("ask"), friction_limit):
         return None
     if entry_filter is not None:
         ctx = {"symbol": symbol, "date": ed_actual, "spot": spot, "entry_iv": c.get("iv"),
@@ -116,11 +170,19 @@ def _bucket(reason: str) -> str:
 
 
 def run_short_backtest(symbols, dates, opt_type="put", target_delta=0.25,
-                       db_path=None, config_path="config.json", entry_filter=None) -> Dict[str, Any]:
-    """Short-premium backtest over (symbols x dates) on real marks."""
+                       db_path=None, config_path="config.json", entry_filter=None,
+                       friction_limit: Any = "config") -> Dict[str, Any]:
+    """Short-premium backtest over (symbols x dates) on real marks.
+
+    ``friction_limit`` defaults to the live ledger's own
+    ``auto_log.max_friction_to_credit``, so this cannot count a position the
+    running system would refuse to log. Pass ``None`` to disable the gate.
+    """
     from src import dolt_options as _do
     from src.dolt_stocks import close_history
     rules = _normalize_exit_rules(_load_cfg(config_path))
+    if friction_limit == "config":
+        friction_limit = _friction_limit(_load_cfg(config_path))
     try:
         commission = float(_load_cfg(config_path).get("paper_trading", {})
                            .get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
@@ -146,7 +208,8 @@ def run_short_backtest(symbols, dates, opt_type="put", target_delta=0.25,
                 t = simulate_short_trade(symbol, entry_date, spot, sdates, spots, rules,
                                          opt_type=opt_type, target_delta=target_delta,
                                          db_path=db_path, commission_per_contract=commission,
-                                         entry_filter=entry_filter)
+                                         entry_filter=entry_filter,
+                                         friction_limit=friction_limit)
             except _do.DoltRateLimited:
                 return _summarize(trades, partial=True)
             except _do.DoltQueryError:
