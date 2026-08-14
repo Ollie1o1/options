@@ -451,7 +451,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 21
+_SCHEMA_VERSION = 22
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -688,6 +688,26 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN entry_ev_gross REAL",
         "ALTER TABLE trades ADD COLUMN entry_ev_cost REAL",
         "ALTER TABLE trades ADD COLUMN entry_ev_noise REAL",
+    ],
+    22: [
+        # The budget in force when the trade was logged.
+        #
+        # Until 2026-08-14 one global number (auto_log.max_capital_at_risk =
+        # 4000) governed every log site. It is now the SCHEDULER's budget only;
+        # interactive scans choose their own per scan, defaulting to no limit.
+        # Recording it is what keeps the book readable: the analysis that
+        # matters is "inside the budget +$3,283 (n=247) vs above it -$19,741
+        # (n=160)", and once the budget varies per scan you cannot recover it
+        # from capital_at_risk alone.
+        #
+        # NULL means NO LIMIT WAS IN FORCE — not "unknown". The backfill below
+        # makes that truthful: the cap shipped 2026-07-29, so rows from that
+        # date really had a $4,000 budget, and earlier rows really had none.
+        # That is the unbounded-feeder era whose $27k and $83k positions are
+        # correctly marked unbudgeted.
+        "ALTER TABLE trades ADD COLUMN budget_at_entry REAL",
+        "UPDATE trades SET budget_at_entry = 4000.0 "
+        "WHERE date >= '2026-07-29' AND budget_at_entry IS NULL",
     ],
 }
 
