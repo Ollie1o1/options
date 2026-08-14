@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import pandas as pd
+
 from .capital_risk import capital_at_risk_for_pick, within_budget
 
 
@@ -49,9 +51,15 @@ def annotate(df, strategy_name: str):
         risks.append(risk)
         rewards.append(per_risk(row.get("max_profit"), risk))
         evs.append(per_risk(row.get("ev_per_contract"), risk))
-    out["capital_at_risk"] = risks
-    out["reward_per_risk"] = rewards
-    out["net_ev_per_risk"] = evs
+    # Assign as object-dtype Series, not plain lists: when a list mixes
+    # ``None`` with real floats, pandas upcasts the column to float64 and
+    # silently turns ``None`` into ``NaN``. That is a THIRD, undocumented
+    # state on top of the module's None-vs-0 contract, and callers checking
+    # ``is None`` to decide whether to print a blank cell would instead
+    # render a literal "nan". Object dtype keeps ``None`` as ``None``.
+    out["capital_at_risk"] = pd.Series(risks, index=out.index, dtype=object)
+    out["reward_per_risk"] = pd.Series(rewards, index=out.index, dtype=object)
+    out["net_ev_per_risk"] = pd.Series(evs, index=out.index, dtype=object)
     return out
 
 

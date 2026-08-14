@@ -74,6 +74,24 @@ class TestAnnotate(unittest.TestCase):
         out = bv.annotate(pd.DataFrame(), "Bull Put")
         self.assertTrue(out.empty)
 
+    def test_a_mixed_frame_keeps_none_rather_than_coercing_to_nan(self):
+        """A single-row all-None frame stays object-dtype by accident, which
+        masked this: pandas silently upcasts a column to float64 and turns
+        None into NaN the moment the list backing it contains BOTH a None
+        and a real float, and NaN is a third, undocumented state on top of
+        the module's None-vs-0 contract."""
+        df = pd.DataFrame([
+            {"symbol": "GOOD", "max_profit": 73.0, "max_loss": 127.0,
+             "ev_per_contract": 5.0},
+            {"symbol": "GAPPY", "max_profit": 50.0, "ev_per_contract": 3.0},
+        ])
+        out = bv.annotate(df, "Bull Put")
+        for col in ("capital_at_risk", "reward_per_risk", "net_ev_per_risk"):
+            self.assertIsNone(out[col].iloc[1], msg=f"{col} on GAPPY")
+        self.assertAlmostEqual(out["capital_at_risk"].iloc[0], 127.0)
+        self.assertAlmostEqual(out["reward_per_risk"].iloc[0], 73.0 / 127.0)
+        self.assertAlmostEqual(out["net_ev_per_risk"].iloc[0], 5.0 / 127.0)
+
 
 class TestAffordable(unittest.TestCase):
 
