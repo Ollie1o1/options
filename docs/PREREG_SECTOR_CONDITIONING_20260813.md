@@ -139,3 +139,32 @@ built to refuse.
 Nothing automatic. A surviving sector effect becomes a **display-only** verdict
 line first, as `dolt_verdict` already does per segment, and would need a second
 independent window before it could gate anything.
+
+---
+
+## ADDENDUM — deviations, recorded when they happened
+
+Two harness defects surfaced after the run started and before any
+sector-conditioned **outcome** (return, PF, IC, win rate) was read. Cell
+counts and managed-fractions had been seen; nothing else. Both are recorded
+here rather than silently corrected.
+
+**D1. `run_cohort_backtest` returned no per-trade rows.** Every `long_call`
+cell came back `n=0`. The data existed; the runner reported summary statistics
+only, unlike its two siblings. Fixed in the repo (PR #40) rather than worked
+around, because the same gap blocks attribution of the Phase 1 gate cohort.
+The grid is re-run from scratch against the fixed runner.
+
+**D2. The §6 managed-fraction gate applies to SPREADS ONLY.** `marks_seen` is
+recorded by `dolt_spread` and by neither `dolt_short` nor `dolt_cohort`, so the
+harness was reading a missing key as 0% and would have marked every
+single-leg cell INSUFFICIENT for a reason that was an artefact of my own code.
+
+The gate therefore stands as written for `bull_put` and `bear_call`, and is
+**not evaluable** for `short_put` and `long_call`. Those two are reported with
+`managed = n/a`, and their exit-observability is **unverified** — a real
+weakness in the evidence for them, not a clean pass. It is not a licence to
+treat them as if they had passed the gate.
+
+No hypothesis, split, mapping, cell minimum or promotion criterion in §§2-7 is
+changed by either deviation.
