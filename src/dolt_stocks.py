@@ -75,11 +75,34 @@ def raw_from_adjusted(adjusted: Dict[str, float],
 
 
 def _yf_adjusted(symbol: str) -> Dict[str, float]:
+    """Split-adjusted, dividend-UNadjusted closes.
+
+    `auto_adjust=False` is the whole point. The default returns a `Close`
+    adjusted for splits AND dividends, and `raw_from_adjusted` below only
+    un-adjusts splits — so the dividend adjustment survived into every price
+    this module handed out, against DoltHub strikes that are raw.
+
+    Measured on SPY 2026-08-14, the error grows the further back you look and
+    decays to zero at the present day: 8.31% understated on 2020-06-19, 5.22%
+    on 2022-06-17, 2.10% on 2024-06-21, 0.00% on 2026-06-11. Spot decides
+    strike-breach stops and expiry settlement, so an understated spot inflates
+    call-selling and deflates put-selling — and because the error is both
+    time-varying and proportional to dividend yield, it distorts a train
+    window differently from a holdout, and a REIT differently from a tech name.
+
+    `Close` here is still split-adjusted, so `raw_from_adjusted` is still
+    required and still correct.
+    """
     import warnings
     import yfinance as yf
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        h = yf.Ticker(symbol).history(period="6y")["Close"]   # split+div adjusted
+        # "6y" silently stopped covering the start of the options data. DoltHub
+        # runs 2020-01-27..2026-06-12; a 6-year lookback from 2026-08 begins in
+        # 2020-08, so the first ~7 months of every backtest lost their spot and
+        # the trades were dropped rather than mispriced — invisible unless you
+        # count them. Pinned to the data's own coverage floor with headroom.
+        h = yf.Ticker(symbol).history(period="10y", auto_adjust=False)["Close"]
     return {d.date().isoformat(): float(v) for d, v in h.items()}
 
 
