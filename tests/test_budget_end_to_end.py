@@ -365,23 +365,49 @@ class TestTheAutoLogPathsStayOnConfig(unittest.TestCase):
     """The scheduler must never inherit an operator's "no limit".
 
     `log_trade` reads `budget_at_entry` by KEY PRESENCE: absent means fall back
-    to config. The two `--auto-log` trade dicts in `options_screener` therefore
+    to config. The three `--auto-log` payloads in `options_screener` therefore
     must not carry the key at all. This is a source-level assertion because the
     property being protected is the ABSENCE of a line, which no runtime test of
     the happy path can observe.
+
+    This is not merely defensive. `prompt_for_budget()` is gated on the MODE,
+    not on `_interactive`, and it never raises: an unattended `--auto-log`
+    DISCOVER run reaches the prompt, reads nothing, and returns None with
+    `budget_was_chosen = True` — a full "the operator chose NO LIMIT". Key
+    absence in this block is the only thing standing between that and the
+    unbounded feeder that logged $27k and $83k positions.
     """
 
-    def test_no_auto_log_trade_dict_sets_budget_at_entry(self):
+    def _auto_log_block(self):
         with open(repo_path("src/options_screener.py")) as fh:
             src = fh.read()
-        auto_log_start = src.index("Auto-log mode: bypass interactive save menu")
-        auto_log_end = src.index("Collapsed post-scan prompt", auto_log_start)
-        auto_log_block = src[auto_log_start:auto_log_end]
+        start = src.index("Auto-log mode: bypass interactive save menu")
+        return src[start:src.index("Collapsed post-scan prompt", start)]
+
+    def test_no_auto_log_trade_dict_sets_budget_at_entry(self):
         self.assertNotIn(
-            "budget_at_entry", auto_log_block,
+            "budget_at_entry", self._auto_log_block(),
             "an --auto-log trade dict sets budget_at_entry: an unattended "
             "scheduler run would inherit an operator's chosen budget instead "
             "of falling back to config")
+
+    def test_no_auto_log_payload_is_routed_through_the_helper(self):
+        """The key can also arrive without its own name being written.
+
+        `_with_session_budget(_trade, budget_was_chosen, session_budget)` sets
+        `budget_at_entry` without the literal ever appearing at the call site,
+        so wrapping an auto-log payload passes the assertion above while
+        handing cron the session value. Both doors have to be shut: the helper
+        is the only writer of the key (pinned by
+        `test_nothing_sets_the_key_by_hand_any_more`), so barring it from this
+        block makes the key unreachable here by any route.
+        """
+        self.assertNotIn(
+            "_with_session_budget", self._auto_log_block(),
+            "an --auto-log payload is wrapped in _with_session_budget: the "
+            "key never appears by name, but the scheduler still inherits the "
+            "session budget — and in a cron run that value is an explicit "
+            "'no limit'")
 
 
 if __name__ == "__main__":
