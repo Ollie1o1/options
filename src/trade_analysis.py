@@ -57,6 +57,57 @@ def net_ev_per_contract(gross_edge_per_share, premium, spread_pct,
     return gross - spread_cost - commission
 
 
+def ev_vol_basis(df):
+    """The realized-vol series the EV should price on, one row per contract.
+
+    An even blend of the 252-day window and the horizon-matched 30-day blend,
+    degrading to whichever exists when the other does not, and staying NaN when
+    neither does — `calculate_metrics` nulls the EV on that rather than
+    substituting a number nobody measured.
+
+    NOT a judgement call. `scripts/vol_forecast_study.py` measured it,
+    pre-registered, over 20 symbols and six years — 1,180 NON-OVERLAPPING
+    21-trading-day windows, every estimator computed from this repo's own
+    functions with no lookahead:
+
+        estimator          RMSE      MAE  spearman     bias  P(fc>1.5x real)
+        50/50 252d+30d   0.1012   0.0695    0.7318  -0.0059           0.108
+        hv_30d blend     0.1072   0.0714    0.7265  -0.0188           0.071
+        hv_252d (was)    0.1110   0.0808    0.6560  +0.0069           0.184
+
+    The blend wins on ALL FIVE pre-registered metrics and ranks first in BOTH
+    halves of a period split it was not chosen on (early 0.1009, late 0.1015),
+    while every other challenger moves four or more ranks. There is no
+    trade-off against the status quo to adjudicate.
+
+    The last column matters most, because it refutes the reason the long window
+    was adopted. `hv_252d` replaced EWMA-20 on 2026-08-04 after a stale
+    earnings gap read 51.8% and turned a $5 edge into a reported +$4,664 — the
+    fear being that short windows blow up. Measured, the LONG window overstates
+    vol more often than any candidate tested: 18.4% of windows above 1.5x
+    realized, against 10.8% for this blend. A year-long window carries a stale
+    high-vol regime for months after vol normalises, and overstating vol is
+    exactly what manufactures phantom edge. It was more prone to the failure it
+    was introduced to prevent.
+
+    Re-run the study before changing this. It takes about two minutes.
+    """
+    import numpy as _np
+    import pandas as _pd
+
+    def _col(name):
+        if name not in df.columns:
+            return _pd.Series(_np.nan, index=df.index, dtype="float64")
+        s = _pd.to_numeric(df[name], errors="coerce")
+        # A non-positive vol is not a measurement.
+        return s.where(s > 0)
+
+    long_w = _col("hv_252d")
+    short_w = _col("hv_30d").fillna(_col("hv_ewma"))
+    blended = 0.5 * long_w + 0.5 * short_w          # NaN if either is missing
+    return blended.fillna(long_w).fillna(short_w)
+
+
 def position_ev_per_contract(gross_instrument_per_contract, cost_per_contract,
                              is_short: bool):
     """(gross, net) for the POSITION, from the INSTRUMENT's buyer-side edge.

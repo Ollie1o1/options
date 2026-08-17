@@ -1630,11 +1630,13 @@ def calculate_metrics(
     #
     # If HV is unavailable, flag as unreliable instead of silently using IV
     # (which defeats the purpose of the EV).
-    _hv_cols = [c for c in ("hv_252d", "hv_ewma", "hv_30d") if c in df.columns]
-    hv_for_ev = df[_hv_cols[0]] if _hv_cols else df["hv_30d"]
-    for _c in _hv_cols[1:]:
-        hv_for_ev = hv_for_ev.fillna(df[_c])
-    _hv_raw = hv_for_ev.fillna(df["hv_30d"])
+    # The vol basis is MEASURED, not chosen — see trade_analysis.ev_vol_basis
+    # and scripts/vol_forecast_study.py. This used to take hv_252d first and
+    # fall back; the 252-day window ranked 6th of 9 for predicting the horizon
+    # these contracts are actually priced for, and overstated vol more often
+    # than any other candidate.
+    from .trade_analysis import ev_vol_basis as _ev_vol_basis
+    _hv_raw = _ev_vol_basis(df)
     _hv_fallback_mask = _hv_raw.isna()
     hv_arr = np.maximum(_hv_raw.fillna(df["impliedVolatility"]).values, 1e-9)
 
