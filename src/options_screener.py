@@ -741,6 +741,14 @@ def _budget_board(df, label_fn, budget: Optional[float], *, verbose: bool = True
     kept.sort()  # back into the order the board arrived in
 
     out = df.iloc[kept].copy()
+    # Label the rows if they arrived without one. `label_fn` is the same
+    # `_strategy_label_for_mode` that `rank_single_legs_by_verdict` applies —
+    # but only Premium Selling routes through that function. Discovery, Budget
+    # and Single-stock call `gate_and_report` directly and reached the board
+    # unlabelled, so `required_win_rates_from_ledger().get(None)` was always
+    # None and Breakeven read `n/a` on every one of their rows.
+    if "strategy_name" not in out.columns:
+        out["strategy_name"] = [labels[p] for p in kept]
     for slot, col in enumerate(("capital_at_risk", "reward_per_risk",
                                 "net_ev_per_risk")):
         # An object-dtype ndarray, assigned positionally: a plain list of mixed

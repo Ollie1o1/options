@@ -138,7 +138,8 @@ def _grade_breakeven(margin: Optional[float]) -> Optional[str]:
 
 def assess(row: Dict[str, Any],
            *,
-           historical_win_rate: Optional[float] = None) -> Worth:
+           historical_win_rate: Optional[float] = None,
+           required_win_rate: Optional[float] = None) -> Worth:
     """Grade one candidate. Never raises — an ungradeable row says so.
 
     `row` is a scan row or a ledger row; it needs `ev_per_contract` and enough
@@ -175,8 +176,23 @@ def assess(row: Dict[str, Any],
             from . import candidate_verdict as cv
             v = cv.verdict_for(row, historical_win_rate=historical_win_rate)
             friction = v.round_trip_pct
-            if v.breakeven is not None and historical_win_rate is not None:
-                beh = historical_win_rate - v.breakeven
+            # The MANAGED required rate, not `1 - credit/width`. The latter is
+            # the hold-to-expiry figure, ruled against 2026-08-13, and it is
+            # only defined for rows carrying a spread_width — which is why
+            # every single-leg board rendered `n/a` here. Falls back to the
+            # per-contract number when no managed rate exists for the
+            # strategy (fewer than 20 closed trades, or no losers to measure).
+            req = required_win_rate
+            if req is None:
+                try:
+                    req = cv.required_win_rates_from_ledger().get(
+                        row.get("strategy_name"))
+                except Exception:
+                    req = None
+            if req is None:
+                req = v.breakeven
+            if req is not None and historical_win_rate is not None:
+                beh = historical_win_rate - req
         except Exception:
             pass
 
