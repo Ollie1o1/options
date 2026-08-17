@@ -184,11 +184,14 @@ def assess(row: Dict[str, Any],
             # strategy (fewer than 20 closed trades, or no losers to measure).
             req = required_win_rate
             if req is None:
-                try:
-                    req = cv.required_win_rates_from_ledger().get(
-                        row.get("strategy_name"))
-                except Exception:
-                    req = None
+                # `row` is untyped, so the strategy name arrives as Any|None;
+                # a dict keyed by str will not accept that.
+                _name = row.get("strategy_name")
+                if isinstance(_name, str) and _name:
+                    try:
+                        req = cv.required_win_rates_from_ledger().get(_name)
+                    except Exception:
+                        req = None
             if req is None:
                 req = v.breakeven
             if req is not None and historical_win_rate is not None:

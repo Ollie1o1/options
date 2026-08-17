@@ -110,14 +110,21 @@ class TestTheMarginReachesTheCard(unittest.TestCase):
     """`Worth.breakeven_margin` is the number the board renders."""
 
     def test_a_single_leg_now_has_a_margin(self):
-        """The n/a this whole change exists to remove."""
+        """The n/a this whole change exists to remove.
+
+        The rate is passed in rather than looked up: `paper_trades.db` is
+        gitignored, so a test that reads it passes locally and fails on CI —
+        which is exactly what this one did on its first run. The lookup path
+        is covered above against tempfile ledgers.
+        """
         from src.worth import assess
         row = {"ev_per_contract": 40.0, "vega_dollar": 20.0,
                "hv_252d": 0.25, "hv_30d": 0.25, "strategy_name": "Short Put",
                "expiration": "2026-09-18", "date": "2026-08-17"}
-        w = assess(row, historical_win_rate=0.495)
+        w = assess(row, historical_win_rate=0.495, required_win_rate=0.519)
         self.assertIsNotNone(w.breakeven_margin,
                              "single-leg breakeven margin is still absent")
+        self.assertAlmostEqual(w.breakeven_margin, 0.495 - 0.519, places=6)
 
     def test_the_margin_is_history_minus_the_managed_rate(self):
         from src.worth import assess

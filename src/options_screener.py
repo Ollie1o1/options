@@ -209,7 +209,7 @@ def _build_report_bounded(label, fn, timeout_s=None, **kwargs):
 _EXIT_ENFORCE_JOIN_TIMEOUT = 0.0
 
 
-def _exit_log_path(pm) -> str:
+def _exit_log_path(pm) -> Optional[str]:
     """Where to record that exits were enforced: beside the ledger they acted on.
 
     `health.py` reads `logs/enforce_exits.log` and treats its MTIME as proof
