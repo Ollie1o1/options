@@ -722,9 +722,15 @@ def _budget_board(df, label_fn, budget: Optional[float], *, verbose: bool = True
     work = df.reset_index(drop=True)
     kept: List[int] = []
     cells: Dict[int, tuple] = {}
+    cheapest: Optional[float] = None
     for label in dict.fromkeys(labels):
         positions = [i for i, lab in enumerate(labels) if lab == label]
         sub = budget_view.annotate(work.iloc[positions], label)
+        # Cheapest across everything PRICEABLE, before the budget narrows it —
+        # when nothing survives, this is the number the operator needs.
+        for _r in sub["capital_at_risk"].tolist():
+            if _r is not None and _r == _r and _r > 0:
+                cheapest = _r if cheapest is None else min(cheapest, float(_r))
         if budget is not None:
             sub = budget_view.affordable(sub, budget, label)
         for pos in sub.index:
@@ -745,6 +751,19 @@ def _budget_board(df, label_fn, budget: Optional[float], *, verbose: bool = True
         _line = (f"Budget ${budget:,.0f} per position: "
                  f"{len(out)} of {len(df)} surviving candidates fit.")
         print("  " + (fmt.style(_line, 'muted') if HAS_ENHANCED_CLI else _line))
+        # Nothing left means the board below is empty, and one bare count
+        # followed by silence reads as a broken scan. Say it, and name the
+        # number that would change the answer — the gates already do this
+        # ("Nothing here cleared the gates. That is the answer, not an error.")
+        if len(out) == 0:
+            if cheapest is not None:
+                _msg = (f"Nothing fits. The cheapest candidate ties up "
+                        f"${cheapest:,.0f} — raise the budget above that, or "
+                        f"scan somewhere the capital at risk is smaller.")
+            else:
+                _msg = ("Nothing fits, and none of these can be sized at all "
+                        "— an unbounded risk never passes a budget.")
+            print("  " + (fmt.style(_msg, 'warn') if HAS_ENHANCED_CLI else _msg))
     return out
 
 

@@ -546,3 +546,56 @@ class TestTheConfigNoteNamesTheModesItActuallyCovers(unittest.TestCase):
     def test_the_value_is_still_unchanged(self):
         with open(repo_path("config.json")) as fh:
             self.assertEqual(json.load(fh)["auto_log"]["max_capital_at_risk"], 4000)
+
+
+class TestABudgetThatRemovesEverythingSaysSo(unittest.TestCase):
+    """Silence reads as a broken app.
+
+    Found by running every mode after the 2026-08-17 merges: a $2,000 budget
+    against short puts that need $20k-$76k of collateral filtered the whole
+    board, and the operator saw one line — "0 of 61 surviving candidates fit"
+    — followed by nothing at all. No board, no summary, no indication of what
+    budget would have worked.
+
+    The refusal gates already handle this case properly ("Nothing here cleared
+    the gates. That is the answer, not an error."), so this matches them, and
+    names the cheapest candidate because that is the number the operator needs
+    to act on.
+    """
+
+    def _board(self, budget):
+        from src import options_screener as osx
+        df = pd.DataFrame([
+            {"symbol": "AVGO", "type": "put", "strike": 385.0, "ask": 2.00},
+            {"symbol": "NVDA", "type": "put", "strike": 220.0, "ask": 1.50},
+        ])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = osx._budget_board(
+                df, lambda r: osx._strategy_label_for_mode("Premium Selling",
+                                                           r.get("type")),
+                budget, verbose=True)
+        return out, buf.getvalue()
+
+    def test_it_says_nothing_fits_rather_than_going_silent(self):
+        out, text = self._board(2_000.0)
+        self.assertEqual(len(out), 0)
+        self.assertIn("0 of 2", text)
+        self.assertIn("budget", text.lower())
+        self.assertNotEqual(text.strip().count("\n"), 0,
+                            "only one line printed — the operator sees silence")
+
+    def test_it_names_the_cheapest_so_the_operator_can_act(self):
+        _out, text = self._board(2_000.0)
+        # NVDA is the cheaper collateral: (220 - 1.50) x 100 = $21,850
+        self.assertIn("21,850", text)
+
+    def test_it_does_not_fire_when_something_survives(self):
+        out, text = self._board(1_000_000.0)
+        self.assertEqual(len(out), 2)
+        self.assertNotIn("Nothing fits", text)
+
+    def test_it_does_not_fire_without_a_budget(self):
+        out, text = self._board(None)
+        self.assertEqual(len(out), 2)
+        self.assertNotIn("Nothing fits", text)
