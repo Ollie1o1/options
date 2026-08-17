@@ -210,6 +210,100 @@ class TestTheSpreadLedgerIsBudgetGatedToo(unittest.TestCase):
         self.assertIn("unbounded", out)
 
 
+class TestOnlyAnAnsweredPromptSetsTheKey(unittest.TestCase):
+    """"Never asked" and "asked, chose no limit" must stay different claims.
+
+    `log_trade` reads key PRESENCE. Setting the key unconditionally made every
+    non-prompting mode — ALL, LOTTERY, SQUEEZE, a bare ticker at the menu —
+    send `budget_at_entry=None`, i.e. an explicit "no limit", which silently
+    uncapped modes that config had been holding at $4,000. The flag exists
+    because `None` is a legitimate chosen value and cannot double as a
+    sentinel for "never asked".
+    """
+
+    def test_a_mode_that_never_prompted_sends_no_key_at_all(self):
+        from src.options_screener import _with_session_budget
+        out = _with_session_budget({"ticker": "SPY"}, False, None)
+        self.assertNotIn("budget_at_entry", out,
+                         "a mode that never saw the prompt would be treated "
+                         "as having chosen 'no limit'")
+
+    def test_a_prompt_answered_with_no_limit_still_sets_the_key(self):
+        from src.options_screener import _with_session_budget
+        out = _with_session_budget({"ticker": "SPY"}, True, None)
+        self.assertIn("budget_at_entry", out)
+        self.assertIsNone(out["budget_at_entry"])
+
+    def test_a_chosen_number_rides_through(self):
+        from src.options_screener import _with_session_budget
+        out = _with_session_budget({"ticker": "SPY"}, True, 400.0)
+        self.assertEqual(out["budget_at_entry"], 400.0)
+
+    def test_the_distinction_actually_changes_what_the_ledger_does(self):
+        """End-to-end on a tempfile ledger, not just dict shape.
+
+        Same $9,500 spread three ways: never asked (config's $4,000 binds and
+        refuses), asked and answered "no limit" (logs), asked and answered
+        $400 (refuses).
+        """
+        gate = TestTheSpreadLedgerIsBudgetGatedToo()
+        from src.options_screener import _with_session_budget
+
+        never_asked = _with_session_budget(gate._spread(), False, None)
+        inserted, refused, out = gate._log("log_spread", never_asked)
+        self.assertFalse(inserted, "config's cap must still bind")
+        self.assertEqual(refused, 1)
+        self.assertIn("$4,000", out)
+
+        chose_no_limit = _with_session_budget(gate._spread(), True, None)
+        inserted, refused, _ = gate._log("log_spread", chose_no_limit)
+        self.assertTrue(inserted, "an explicit no-limit must log")
+
+        chose_400 = _with_session_budget(gate._spread(), True, 400.0)
+        inserted, refused, out = gate._log("log_spread", chose_400)
+        self.assertFalse(inserted)
+        self.assertIn("$400", out)
+
+
+class TestEveryInteractiveLogSiteCarriesTheBudget(unittest.TestCase):
+    """The PRESENCE of the key on the interactive paths, not just its absence
+    on the auto-log ones.
+
+    Delete the wrapper from the `[L]` spread call and nothing else in the
+    suite notices, while the $4,000-vs-session divergence quietly returns.
+    Structural rather than runtime because these four call sites live inside
+    `main()`'s post-scan menu, and reaching them for real means driving
+    `main()` — which runs `update_positions()` against the live book.
+    """
+
+    def _interactive_block(self):
+        with open(repo_path("src/options_screener.py")) as fh:
+            src = fh.read()
+        start = src.index("Collapsed post-scan prompt")
+        return src[start:]
+
+    def test_all_four_interactive_log_sites_go_through_the_helper(self):
+        block = self._interactive_block()
+        self.assertEqual(
+            block.count("_with_session_budget"), 4,
+            "expected exactly 4 interactive log sites to attach the budget "
+            "([P] single leg, [L] spread, [L] condor, [L] single leg)")
+
+    def test_the_spread_and_condor_calls_are_among_them(self):
+        block = self._interactive_block()
+        self.assertIn("pm.log_spread(_with_session_budget(", block)
+        self.assertIn("pm.log_iron_condor_if_new(_with_session_budget(", block)
+
+    def test_nothing_sets_the_key_by_hand_any_more(self):
+        """One chokepoint: the literal key must appear only in the helper."""
+        with open(repo_path("src/options_screener.py")) as fh:
+            src = fh.read()
+        self.assertEqual(
+            src.count('"budget_at_entry"'), 1,
+            "budget_at_entry is set outside _with_session_budget, which can "
+            "bypass the was-it-actually-asked check")
+
+
 class TestEveryModeThatShouldPromptDoes(unittest.TestCase):
     """DISCOVER, MY LIST, TICKER, SELL, SPREADS and IRON all ask.
 

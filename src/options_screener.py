@@ -728,6 +728,30 @@ def _print_budget_use(df, budget: Optional[float]) -> None:
         print("    " + (fmt.style(line, 'muted') if HAS_ENHANCED_CLI else line))
 
 
+def _with_session_budget(trade_dict: dict, budget_was_chosen: bool,
+                         session_budget: Optional[float]) -> dict:
+    """Attach the session budget to a trade dict ONLY if a prompt happened.
+
+    `log_trade` reads KEY PRESENCE, not value: present-and-None means the
+    operator explicitly chose no limit, present-and-float means that ceiling,
+    and ABSENT means fall back to `auto_log.max_capital_at_risk`.
+
+    A mode that never reaches the prompt — ALL, LOTTERY, SQUEEZE, or a bare
+    ticker typed at the menu — is the same case as a cron run that never
+    reaches it. Neither chose anything, so neither may be handed an explicit
+    "no limit": doing so silently uncapped modes that config had been holding
+    at $4,000.
+
+    Takes a separate flag rather than sniffing `session_budget`, because
+    `None` is itself a legitimate answer to the prompt and must stay
+    distinguishable from "never asked". A sentinel in `session_budget` would
+    destroy that distinction.
+    """
+    if budget_was_chosen:
+        trade_dict["budget_at_entry"] = session_budget
+    return trade_dict
+
+
 def load_config(config_path: str = "config.json") -> Dict:
     """Load configuration from JSON file with fallback defaults.
 
@@ -6040,6 +6064,10 @@ def main():
         # one CONTRACT. Defined here so every mode has the name, including the
         # ones that never reach the prompt; None means no limit.
         session_budget: Optional[float] = None
+        # Whether the prompt was actually reached. Separate from the value
+        # because None means "chose no limit", which is not the same claim as
+        # "was never asked" — see _with_session_budget.
+        budget_was_chosen = False
         is_discovery_mode = (symbol_input in ("DISCOVER", "")) or is_my_list_mode
         is_ticker_mode = (symbol_input == "TICKER")  # user chose [1] — will prompt for symbol
         is_premium_selling_mode = (symbol_input == "SELL")
@@ -6146,6 +6174,7 @@ def main():
                 or is_premium_selling_mode or is_credit_spread_mode
                 or is_iron_condor_mode):
             session_budget = prompt_for_budget()
+            budget_was_chosen = True
             if session_budget is not None:
                 print(f"Budget: ${session_budget:,.0f} capital at risk per position")
 
@@ -6812,14 +6841,14 @@ def main():
                                     "trader_pref_score": top_pick_row.get("trader_pref_score"),
                                     "score_adjustments": top_pick_row.get("score_adjustments"),
                                     "weight_profile": _weight_profile_id,
-                                    # The budget this operator chose for this
-                                    # scan, None meaning they chose no limit.
-                                    # The key's PRESENCE is what tells log_trade
-                                    # a prompt was actually answered; the
-                                    # --auto-log paths above deliberately omit
-                                    # it so the scheduler falls back to config.
-                                    "budget_at_entry": session_budget,
                                 }
+                                # The budget key rides along only if this mode
+                                # actually reached the prompt; the --auto-log
+                                # paths above never call this, so they keep
+                                # falling back to config.
+                                _with_session_budget(trade_dict,
+                                                     budget_was_chosen,
+                                                     session_budget)
                                 # AI-score lookup via stable key (see auto-log path comment).
                                 if _ai_ranked is not None and not _ai_ranked.empty:
                                     try:
@@ -6911,7 +6940,13 @@ def main():
                                     try:
                                         if "short_strike" in row or "net_credit" in row:
                                             # It's a Credit Spread
-                                            pm.log_spread({
+                                            # log_spread routes through log_trade,
+                                            # so the budget gate already applies
+                                            # here — but without the key it
+                                            # applied at CONFIG's $4,000, so a
+                                            # spread the board hid at a smaller
+                                            # session budget was still logged.
+                                            pm.log_spread(_with_session_budget({
                                                 "date": today_str,
                                                 "ticker": row["symbol"],
                                                 "expiration": row["expiration"],
@@ -6922,21 +6957,14 @@ def main():
                                                 "max_profit": row.get("max_profit", 0),
                                                 "max_loss": row.get("max_loss", 0),
                                                 "quality_score": row.get("quality_score", 0.5),
-                                                # log_spread routes through
-                                                # log_trade, so the budget gate
-                                                # already applies here — but
-                                                # without this key it applied at
-                                                # CONFIG's $4,000, silently
-                                                # logging spreads the board hid
-                                                # at a smaller session budget.
-                                                "budget_at_entry": session_budget,
-                                            })
+                                            }, budget_was_chosen, session_budget))
                                         elif "total_credit" in row:
                                             # Iron Condor — persist all four legs so the
                                             # portfolio viewer can render strikes and mark
                                             # to market. log_iron_condor_if_new dedups on
                                             # the (ticker, exp, 4 strikes) tuple.
-                                            pm.log_iron_condor_if_new({
+                                            # Budget key: see the spread path above.
+                                            pm.log_iron_condor_if_new(_with_session_budget({
                                                 "date": today_str,
                                                 "ticker": row["symbol"],
                                                 "expiration": row["expiration"],
@@ -6949,9 +6977,7 @@ def main():
                                                 "max_risk":   row.get("max_risk", 0),
                                                 "net_delta":  row.get("net_delta"),
                                                 "quality_score": row.get("quality_score", 0.5),
-                                                # See the spread path above.
-                                                "budget_at_entry": session_budget,
-                                            })
+                                            }, budget_was_chosen, session_budget))
                                         else:
                                             # It's a single option
                                             trade_dict = {
@@ -7005,11 +7031,13 @@ def main():
                                                 "trader_pref_score": row.get("trader_pref_score"),
                                                 "score_adjustments": row.get("score_adjustments"),
                                                 "weight_profile": _weight_profile_id,
-                                                # See the [P] path: key presence
-                                                # is the signal, and --auto-log
-                                                # must never carry it.
-                                                "budget_at_entry": session_budget,
                                             }
+                                            # See the [P] path: key presence is
+                                            # the signal, and --auto-log must
+                                            # never carry it.
+                                            _with_session_budget(trade_dict,
+                                                                 budget_was_chosen,
+                                                                 session_budget)
                                             _row_key_l = (
                                                 str(row.get("symbol", "")).upper(),
                                                 float(row.get("strike", 0) or 0),
