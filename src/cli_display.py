@@ -348,7 +348,8 @@ def _per_risk_worth(row):
 
 
 def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
-                         max_rows: Optional[int] = None) -> None:
+                         max_rows: Optional[int] = None,
+                         match_board: bool = False) -> None:
     """Every candidate on ONE axis: reward per dollar of capital at risk.
 
     Raw premium and raw `ev_per_contract` are per contract, so a $34,680
@@ -376,12 +377,17 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
     so the Structure column can never name a different strategy than the one
     whose risk definition produced the Risk cell.
 
-    `max_rows` caps the table at what the board above it actually rendered:
-    every single-leg board goes through `print_comparison_table`, which stops
-    at 10, so an uncapped table would number candidates the reader never saw
-    and disagree with the board it claims to be reprinting. The spread and
-    condor reports print every row and pass no cap. When rows are dropped it
-    says so — at a budget, a silent truncation reads as "only 10 fit".
+    `match_board=True` selects through `comparison_rows` — the SAME function
+    the board itself renders from — so the two tables cannot disagree about
+    which candidates they are numbering. Taking the frame's first N instead
+    was wrong: the board sorts by `quality_score` before capping, so `#1` here
+    named a different contract than `#1` there, and past 10 survivors the two
+    tables listed different sets entirely.
+
+    Single-leg boards pass `match_board`; the spread and condor reports
+    iterate every row in frame order and pass nothing. `max_rows` remains for
+    a caller that wants a plain cap. When rows are dropped the table says so —
+    at a budget, a silent truncation reads as "only 10 fit".
 
     Prints nothing at all for a frame that was never annotated — a header over
     an empty table would imply the axis had been computed when it had not.
@@ -389,7 +395,9 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
     if df is None or len(df) == 0 or "capital_at_risk" not in getattr(df, "columns", []):
         return
     total = len(df)
-    if max_rows is not None and total > max_rows:
+    if match_board:
+        df = comparison_rows(df)
+    elif max_rows is not None and total > max_rows:
         df = df.head(max_rows)
     hidden = total - len(df)
 
@@ -1374,36 +1382,67 @@ def print_best_setup_callout(df_picks: pd.DataFrame, width: int) -> None:
 
 
 
-def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_by: str = "quality_score", account_size: float = 0.0) -> None:
+_sort_map = {
+    "c": "quality_score", "q": "quality_score", "quality_score": "quality_score",
+    "i": "iv_percentile_30", "iv": "iv_percentile_30",
+    "s": "spread_pct", "spread": "spread_pct",
+    "d": "T_years", "dte": "T_years",
+    "e": "ev_per_contract", "ev": "ev_per_contract",
+}
+
+# How many rows the comparison board renders. Named because a second table now
+# has to agree with it, and a bare `10` in two files is a divergence waiting to
+# happen.
+COMPARISON_ROWS = 10
+
+
+def comparison_rows(df_top: pd.DataFrame, sort_by: str = ""):
+    """The exact rows `print_comparison_table` will render, in render order.
+
+    Extracted so the per-dollar-of-risk table can reprint the same candidates
+    in the same order instead of re-deriving them. It previously took the
+    frame's first 10, which is NOT what the board shows: `sort_by` defaults to
+    "quality_score" and `_sort_map` resolves that key, so the board sorts by
+    score. The two tables numbered different contracts `#1`, and past 10
+    survivors they listed different SETS.
+
+    NOTE for whoever revisits the ranking question: the comment below this
+    function's caller says "with no choice made, board order stands", but the
+    DEFAULT argument is "quality_score" and it resolves, so no-choice does not
+    in fact stand pat. That contradiction predates the budget work and is left
+    alone here deliberately — changing it changes what every scan displays.
+    """
+    if df_top is None or df_top.empty:
+        return df_top
+    sort_col = _sort_map.get((sort_by or "").lower())
+    ascending = sort_col == "spread_pct"  # lower spread is better
+    out = df_top.copy()
+    out["_dte"] = (out["T_years"] * 365.0).round(0) if "T_years" in out.columns else 0
+    if sort_col and sort_col in out.columns:
+        return out.sort_values(sort_col, ascending=ascending).head(COMPARISON_ROWS)
+    return out.head(COMPARISON_ROWS)
+
+
+def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_by: str = "", account_size: float = 0.0) -> None:
     """Print a compact side-by-side comparison table of top picks per DTE bucket."""
     if df_top.empty or not HAS_ENHANCED_CLI:
         return
 
     width = get_display_width()
 
-    _sort_map = {
-        "c": "quality_score", "q": "quality_score", "quality_score": "quality_score",
-        "i": "iv_percentile_30", "iv": "iv_percentile_30",
-        "s": "spread_pct", "spread": "spread_pct",
-        "d": "T_years", "dte": "T_years",
-        "e": "ev_per_contract", "ev": "ev_per_contract",
-    }
     # An explicit sort the reader asked for is honoured, including by score —
     # "show me this sorted by score" is a legitimate request and the column is
-    # labelled. What changed is the DEFAULT: it was `quality_score`, so a table
-    # nobody had chosen a sort for still opened ranked by the metric whose top
-    # quintile lost $10,173. With no choice made, board order stands.
-    sort_col = _sort_map.get(sort_by.lower())
-    ascending = sort_col == "spread_pct"  # lower spread is better
-
-    # Select top 5 per DTE bucket
-    df_top = df_top.copy()
-    df_top["_dte"] = (df_top["T_years"] * 365.0).round(0) if "T_years" in df_top.columns else 0
-
-    if sort_col and sort_col in df_top.columns:
-        rows = df_top.sort_values(sort_col, ascending=ascending).head(10)
-    else:
-        rows = df_top.head(10)
+    # labelled. The DEFAULT is board order.
+    #
+    # It did not used to be, despite this comment and the ranking guard's
+    # allowlist both asserting it for months: `sort_by` defaulted to
+    # "quality_score" and `_sort_map` resolves that key, so every board nobody
+    # had chosen a sort for opened ranked by the metric whose top quintile
+    # lost $10,173 — the exact ordering PR #19 removed (Wilcoxon p=0.89).
+    # Found 2026-08-17 when a second table tried to reprint "the board's
+    # order" and disagreed with it.
+    rows = comparison_rows(df_top, sort_by)
+    sort_col = _sort_map.get((sort_by or "").lower())
     if rows.empty:
         return
 

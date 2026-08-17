@@ -62,6 +62,14 @@ def _render_capped(df, max_rows, budget=None, label_fn=_label):
     return buf.getvalue()
 
 
+def _render_matched(df, budget=None, label_fn=_label):
+    from src.cli_display import print_per_risk_table
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_per_risk_table(df, label_fn, budget, match_board=True)
+    return buf.getvalue()
+
+
 class TestTheAxisIsCommon(unittest.TestCase):
     """The reason the table exists at all."""
 
@@ -309,14 +317,81 @@ class TestItShowsWhatTheBoardShowed(unittest.TestCase):
         out = _render_capped(self._many(25), max_rows=None)
         self.assertEqual(len(self._numbered(out)), 25)
 
-    def test_the_single_leg_sites_pass_the_cap(self):
+    def test_the_single_leg_sites_ask_to_match_the_board(self):
         from src.paths import repo_path
         with open(repo_path("src/options_screener.py")) as fh:
             src = fh.read()
         self.assertEqual(
-            src.count("_print_per_risk_table(") - src.count("max_rows=10"), 3,
-            "expected 4 single-leg call sites capped at 10 and 2 structure "
-            "sites uncapped, plus the definition")
+            src.count("_print_per_risk_table(") - src.count("match_board=True"), 3,
+            "expected 4 single-leg call sites matched to the board and 2 "
+            "structure sites unmatched, plus the definition")
+
+
+class TestItAgreesWithTheBoardItReprints(unittest.TestCase):
+    """`#3` here is `#3` there — enforced against the real board, not assumed.
+
+    The first attempt at this took the first 10 rows of the frame, on the
+    premise that `print_comparison_table` did the same. It does not:
+    `sort_by` DEFAULTS to "quality_score" and `_sort_map` resolves that key,
+    so the board sorts by score and takes the top 10. A board arriving
+    AAA/BBB/CCC (0.20/0.90/0.55) renders BBB, CCC, AAA — so the two adjacent
+    tables numbered different contracts `#1`, and past 10 survivors they were
+    different SETS and the "N more not listed" note was false.
+
+    Both tables now select through `comparison_rows`, so they cannot drift.
+    """
+
+    def setUp(self):
+        fmt.set_color_enabled(False)
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = None
+
+    def _scored(self, n=14):
+        """Scores deliberately anti-correlated with frame order."""
+        return pd.DataFrame([
+            {"symbol": f"T{i:02d}", "type": "put", "strike": 10.0 + i,
+             "quality_score": (n - i) / 100.0, "T_years": 0.09,
+             "premium": 1.0, "prob_profit": 0.6, "delta": -0.2,
+             "spread_pct": 0.05, "ev_per_contract": 5.0,
+             "impliedVolatility": 0.3, "abs_delta": 0.2,
+             "expiration": "2026-09-18",
+             "capital_at_risk": 100.0 + i, "reward_per_risk": 0.10,
+             "net_ev_per_risk": 0.01}
+            for i in range(n)
+        ])
+
+    def _tickers(self, text, universe):
+        seen = []
+        for line in text.splitlines():
+            for t in universe:
+                if t in line and t not in seen:
+                    seen.append(t)
+        return seen
+
+    def test_the_two_tables_name_the_same_rows_in_the_same_order(self):
+        from src.cli_display import print_comparison_table
+        df = self._scored(14)
+        universe = list(df["symbol"])
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_comparison_table(df, "Premium Selling")
+        board = self._tickers(buf.getvalue(), universe)
+
+        mine = self._tickers(_render_matched(df), universe)
+        self.assertEqual(board, mine,
+                         "the per-risk table does not reprint the board")
+
+    def test_it_is_the_top_of_the_board_not_the_top_of_the_frame(self):
+        df = self._scored(14)
+        out = _render_matched(df)
+        # Highest score is T00 .. lowest is T13; the board keeps the top 10.
+        self.assertIn("T00", out)
+        self.assertNotIn("T13", out)
+
+    def test_the_hidden_count_is_still_right_after_reordering(self):
+        self.assertIn("4 more", _render_matched(self._scored(14)))
 
 
 class TestTheWorthColumnsAreReallyPopulated(unittest.TestCase):

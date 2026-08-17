@@ -412,3 +412,47 @@ class TestTheAutoLogPathsStayOnConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheSaveMenuReportsWhatTheLedgerDid(unittest.TestCase):
+    """"Logged" has to mean a row was written.
+
+    `log_trade` returns False and prints its own refusal when a candidate is
+    over budget, a duplicate, or untradeable. Both save-menu paths threw that
+    return away and announced success regardless, so a $500 session budget
+    produced this on screen, in this order:
+
+        Skipped Long Call on NVDA: capital at risk $2,400 exceeds the $500 budget
+        ✓ Paper trade logged: NVDA CALL $180
+
+    with nothing in the ledger. The budget work is what makes it routine —
+    refusal used to need a $4,000 position — so the contradiction is fixed
+    here rather than filed.
+
+    Structural, because reaching these lines means driving `main()`, which
+    runs `update_positions()` against the live book.
+    """
+
+    def _interactive_block(self):
+        with open(repo_path("src/options_screener.py")) as fh:
+            src = fh.read()
+        return src[src.index("Collapsed post-scan prompt"):]
+
+    def test_the_paper_trade_success_line_is_conditional_on_the_write(self):
+        block = self._interactive_block()
+        self.assertIn("if pm.log_trade(trade_dict):", block,
+                      "[P] announces success without checking log_trade")
+
+    def test_the_bulk_count_is_insertions_not_selections(self):
+        """`len(picks_to_log)` counts what the operator chose, not what landed."""
+        block = self._interactive_block()
+        self.assertNotIn("Logged {len(picks_to_log)} trades", block)
+
+    def test_every_bulk_log_call_feeds_the_counter(self):
+        block = self._interactive_block()
+        for call in ("pm.log_spread(", "pm.log_iron_condor_if_new(",
+                     "pm.log_trade("):
+            idx = block.index(call)
+            window = block[max(0, idx - 60):idx]
+            self.assertIn("if ", window,
+                          f"{call} in the bulk path does not feed the count")

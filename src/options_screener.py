@@ -720,17 +720,22 @@ def _budget_board(df, label_fn, budget: Optional[float], *, verbose: bool = True
 
 
 def _print_per_risk_table(df, label_fn, budget: Optional[float],
-                          max_rows: Optional[int] = None) -> None:
+                          match_board: bool = False) -> None:
     """Spec s4's common-axis table, printed after the board it describes.
 
     `label_fn` is the same one `_budget_board` sized with, so the Structure
     column cannot name a different strategy than the risk figure beside it.
-    Display only: `print_per_risk_table` reprints the board's order and never
-    re-sorts it.
+
+    `match_board` is set by the four single-leg boards, which render through
+    `print_comparison_table`; it makes this table select through that same
+    `comparison_rows`, so the two cannot disagree about which candidates they
+    are numbering. The spread and condor reports iterate every row in frame
+    order and leave it off. Display only: this table applies no ordering of
+    its own.
     """
     if budget is not None and budget <= 0:
         budget = None
-    print_per_risk_table(df, label_fn, budget, max_rows=max_rows)
+    print_per_risk_table(df, label_fn, budget, match_board=match_board)
 
 
 def _print_budget_use(df, budget: Optional[float]) -> None:
@@ -4897,7 +4902,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
                 _print_per_risk_table(top_picks, _leg_label, session_budget,
-                                      max_rows=10)
+                                      match_board=True)
                 _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             # Only when the scan genuinely found nothing. A board that was
@@ -4917,7 +4922,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
                 _print_per_risk_table(top_picks, _leg_label, session_budget,
-                                      max_rows=10)
+                                      match_board=True)
                 _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             print("\nNo discovery picks found.")
@@ -4973,7 +4978,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
                 _print_per_risk_table(final_df.head(10), _leg_label,
-                                      session_budget, max_rows=10)
+                                      session_budget, match_board=True)
                 _print_budget_use(final_df.head(10), session_budget)
         elif verbose and picks.empty:
             print("\nNo premium selling candidates found.")
@@ -4998,7 +5003,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             if verbose:
                 print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
                 _print_per_risk_table(final_df, _leg_label, session_budget,
-                                      max_rows=10)
+                                      match_board=True)
                 _print_budget_use(final_df, session_budget)
         elif verbose and picks.empty:
             print("\nNo suitable options found.")
@@ -6891,17 +6896,23 @@ def main():
                                                 trade_dict["ai_confidence"] = _m["ai_confidence"].iloc[0]
                                     except (KeyError, ValueError, TypeError):
                                         pass
-                                pm.log_trade(trade_dict)
-                                msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
-                                print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
-                                # Offer inline portfolio view
-                                _view = prompt_input("View portfolio? (y/n)", "n").strip().lower()
-                                if _view in ("y", "yes"):
-                                    try:
-                                        from .check_pnl import view_portfolio
-                                        view_portfolio()
-                                    except Exception as _pnl_exc:
-                                        print(f"  Could not load portfolio: {_pnl_exc}")
+                                # log_trade returns False and prints its own
+                                # reason when it refuses — over budget, a
+                                # duplicate, untradeable. Announcing success
+                                # regardless printed "Skipped ... exceeds the
+                                # $500 budget" and "\u2713 Paper trade logged"
+                                # one after the other, with nothing written.
+                                if pm.log_trade(trade_dict):
+                                    msg = f"Paper trade logged: {top_pick_row['symbol']} {str(top_pick_row['type']).upper()} ${top_pick_row['strike']:.0f}"
+                                    print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2713 {msg}")
+                                    # Offer inline portfolio view
+                                    _view = prompt_input("View portfolio? (y/n)", "n").strip().lower()
+                                    if _view in ("y", "yes"):
+                                        try:
+                                            from .check_pnl import view_portfolio
+                                            view_portfolio()
+                                        except Exception as _pnl_exc:
+                                            print(f"  Could not load portfolio: {_pnl_exc}")
 
                     elif save_choice == "C":
                         # Export best available data: AI-ranked picks > raw picks > spreads > condors
@@ -6962,6 +6973,10 @@ def main():
                                             except (TypeError, ValueError):
                                                 continue
                                             _ai_lookup_l[_key] = {c: _r_dict.get(c) for c in _ai_cols_l}
+                                # Counts INSERTIONS. `len(picks_to_log)` is
+                                # what the operator selected, and a budget
+                                # makes the two diverge routinely.
+                                _logged_n = 0
                                 for _idx_l, row in picks_to_log.iterrows():
                                     try:
                                         if "short_strike" in row or "net_credit" in row:
@@ -6972,7 +6987,7 @@ def main():
                                             # applied at CONFIG's $4,000, so a
                                             # spread the board hid at a smaller
                                             # session budget was still logged.
-                                            pm.log_spread(_with_session_budget({
+                                            if pm.log_spread(_with_session_budget({
                                                 "date": today_str,
                                                 "ticker": row["symbol"],
                                                 "expiration": row["expiration"],
@@ -6983,14 +6998,15 @@ def main():
                                                 "max_profit": row.get("max_profit", 0),
                                                 "max_loss": row.get("max_loss", 0),
                                                 "quality_score": row.get("quality_score", 0.5),
-                                            }, budget_was_chosen, session_budget))
+                                            }, budget_was_chosen, session_budget)):
+                                                _logged_n += 1
                                         elif "total_credit" in row:
                                             # Iron Condor — persist all four legs so the
                                             # portfolio viewer can render strikes and mark
                                             # to market. log_iron_condor_if_new dedups on
                                             # the (ticker, exp, 4 strikes) tuple.
                                             # Budget key: see the spread path above.
-                                            pm.log_iron_condor_if_new(_with_session_budget({
+                                            if pm.log_iron_condor_if_new(_with_session_budget({
                                                 "date": today_str,
                                                 "ticker": row["symbol"],
                                                 "expiration": row["expiration"],
@@ -7003,7 +7019,8 @@ def main():
                                                 "max_risk":   row.get("max_risk", 0),
                                                 "net_delta":  row.get("net_delta"),
                                                 "quality_score": row.get("quality_score", 0.5),
-                                            }, budget_was_chosen, session_budget))
+                                            }, budget_was_chosen, session_budget)):
+                                                _logged_n += 1
                                         else:
                                             # It's a single option
                                             trade_dict = {
@@ -7073,11 +7090,15 @@ def main():
                                             _row_ai_l = _ai_lookup_l.get(_row_key_l, {})
                                             trade_dict["ai_score"] = _row_ai_l.get("ai_score")
                                             trade_dict["ai_confidence"] = _row_ai_l.get("ai_confidence")
-                                            pm.log_trade(trade_dict)
+                                            if pm.log_trade(trade_dict):
+                                                _logged_n += 1
                                     except Exception as _log_exc:
                                         print(f"  Error logging to DB: {_log_exc}")
 
-                                msg = f"Logged {len(picks_to_log)} trades."
+                                _sel_n = len(picks_to_log)
+                                msg = (f"Logged {_logged_n} trades." if _logged_n == _sel_n
+                                       else f"Logged {_logged_n} of {_sel_n} selected "
+                                            f"— the rest were refused above.")
                                 print(fmt.format_success(msg) if HAS_ENHANCED_CLI else f"  \u2705 {msg}")
 
                     else:
