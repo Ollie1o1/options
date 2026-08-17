@@ -19,10 +19,10 @@ _SLOW_IDS = ("earnings", "insider", "news")
 # older sidecars simply render without the exit-odds block.
 SCHEMA = 3
 
-# How wrong a stored implied vol plausibly is, in IV points, by the confidence
-# data_fetching assigns it. "Low" means an HV proxy stood in for a real IV.
-_IV_SIGMA_POINTS = {"high": 1.0, "medium": 1.5, "low": 2.5}
-_DEFAULT_IV_SIGMA_POINTS = _IV_SIGMA_POINTS["low"]
+# `_IV_SIGMA_POINTS` used to live here: 1.0-2.5 IV points by `iv_confidence`.
+# Removed 2026-08-17 rather than left dangling — it described how wrong the
+# QUOTED IV might be, which is not what the EV's error bar depends on. See
+# `ev_noise`; the replacement is measured and lives in `trade_analysis`.
 
 # With no vega to scale, fall back to a quarter of the round-trip cost: the only
 # other number on the page that is denominated in the same dollars.
@@ -78,17 +78,38 @@ def ev_noise(row) -> float:
     `entry_ev_noise` all read this number, so a drift between them would have
     made a card disagree with the ledger row it produced.
 
-    Net EV is Black-Scholes arithmetic over one uncertain input: the implied vol.
-    `vega_dollar` is what one IV point is worth to this contract, so the error
-    bar on net EV is just vega times how wrong that vol plausibly is — and
-    `iv_confidence` already tells us how wrong. A screener that reports +$1 of
-    edge on a contract whose vega moves $30 per IV point is reporting noise.
+    Net EV is Black-Scholes arithmetic over one uncertain input, and the band is
+    `vega_dollar` — what one IV point is worth — times how wrong that vol
+    plausibly is. A screener that reports +$1 of edge on a contract whose vega
+    moves $30 per IV point is reporting noise.
+
+    WHICH vol, though. This used `iv_confidence` and a table of 1.0-2.5 IV
+    points, which describes how wrong the QUOTED IV field might be. That is a
+    data-quality question and not the one that governs net EV: the EV is
+    `BS(sigma_forecast) - market_price`, so the uncertain input is the
+    REALIZED-VOL FORECAST, not the quote.
+
+    Measured over 1,180 non-overlapping 21-day windows
+    (`scripts/vol_forecast_study.py`): the forecast's error std is 10.1 IV
+    points, four to ten times the old table, and it is PROPORTIONAL to the vol
+    level (ratio 0.33 / 0.28 / 0.28 / 0.30 from 13% to 46% realized vol) rather
+    than constant. So the band scales with the forecast.
+
+    This is deliberately sobering. On a live board it turns 36 THIN / 23 CLEAR
+    / 20 STRONG into 79 THIN — no single option trade's edge is distinguishable
+    from the uncertainty in the vol forecast behind it, which agrees with the
+    composite's ~0 IC and a gate that says STOP. Sigma then binds on every row
+    and masks the friction and breakeven margins; ruled acceptable 2026-08-17
+    in preference to an error bar that certified noise as STRONG.
     """
-    sigma = _IV_SIGMA_POINTS.get(
-        str(row.get("iv_confidence") or "").strip().lower(), _DEFAULT_IV_SIGMA_POINTS)
+    from ..trade_analysis import VOL_FORECAST_RELATIVE_ERROR, vol_basis_of
+
     vega_dollar = _num(row.get("vega_dollar"))
-    if vega_dollar:
-        return abs(vega_dollar) * sigma
+    vol = vol_basis_of(row.get("hv_252d"), row.get("hv_30d") or row.get("hv_ewma"))
+    if vega_dollar and vol:
+        # vega_dollar is per ONE IV point, so the band is the forecast's own
+        # relative error expressed in points: 0.30 * vol * 100.
+        return abs(vega_dollar) * VOL_FORECAST_RELATIVE_ERROR * float(vol) * 100.0
     cost = _num(row.get("ev_cost_per_contract"))
     return abs(cost) * _COST_FRACTION_FALLBACK if cost else 0.0
 
