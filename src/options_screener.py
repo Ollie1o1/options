@@ -1659,26 +1659,31 @@ def calculate_metrics(
     _hv_fallback_mask = _hv_raw.isna()
     hv_arr = np.maximum(_hv_raw.fillna(df["impliedVolatility"]).values, 1e-9)
 
-    # Forward-looking adjustment: IV term structure slope signals whether market
-    # expects vol to rise (contango) or fall (backwardation). Adjust HV used for
-    # EV by ±5% based on term structure direction.
-    try:
-        if "expiration" in df.columns and "impliedVolatility" in df.columns:
-            exp_iv_mean = df.groupby("expiration")["impliedVolatility"].transform("mean")
-            exp_dte = (df["T_years"] * 365).fillna(30)
-            # Per-row slope: compare this expiration's avg IV to the chain mean
-            chain_iv_mean = df["impliedVolatility"].mean()
-            ts_signal = np.where(
-                (exp_iv_mean > chain_iv_mean * 1.02) & (exp_dte > 20), 1.05,
-                np.where(
-                    (exp_iv_mean < chain_iv_mean * 0.98) & (exp_dte > 20), 0.95,
-                    1.0
-                )
-            )
-            hv_arr = hv_arr * ts_signal
-    except Exception as _ts_exc:
-        _SCAN_WARNINGS[0] += 1
-        logging.getLogger(__name__).debug("IV term structure adjustment failed: %s", _ts_exc)
+    # A +/-5% term-structure nudge used to be applied to `hv_arr` here, keyed on
+    # whether an expiration's MEAN IV sat above or below the whole frame's mean
+    # IV. Removed 2026-08-17 after measurement, not on taste:
+    #
+    #   scripts/term_structure_study.py, SPY optionsDX 2010-2023, 144
+    #   NON-OVERLAPPING 21-day windows, signal from the chain at t and forecast
+    #   from prices up to t.
+    #
+    #   * It fired "down" on 120 of 144 windows — very nearly a constant. Its
+    #     62.0% directional accuracy beat the 52% break-even, but a rule that
+    #     ALWAYS said "down" scores 63.9% here, so the apparent skill was a
+    #     base-rate artifact and the rule was WORSE than that trivial constant.
+    #   * RMSE 0.0904 -> 0.0902. A 0.02% effect on a basis whose own measured
+    #     error is ~30% relative.
+    #   * A properly specified ATM slope (far minus near) DOES carry signal —
+    #     Spearman -0.246 against forecast error, holding at -0.311 / -0.240
+    #     across a split it was not chosen on — but with the OPPOSITE sign.
+    #     Contango means realized vol lands BELOW the forecast, so the estimate
+    #     should be lowered; this raised it. Nudging in the shipped direction
+    #     costs 3.04% of RMSE.
+    #
+    # It also gave one contract an EV that depended on which OTHER expirations
+    # happened to be fetched beside it, which `tests/test_no_term_structure_fudge.py`
+    # now forbids. The slope result is a lead for a pre-registered follow-up,
+    # not a constant to re-tune here.
     hv_d1, hv_d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, hv_arr, q=_q)
     _q_disc = np.exp(-_q * T_vals)
     with np.errstate(divide='ignore', invalid='ignore'):
