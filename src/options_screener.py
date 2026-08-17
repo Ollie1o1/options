@@ -209,6 +209,45 @@ def _build_report_bounded(label, fn, timeout_s=None, **kwargs):
 _EXIT_ENFORCE_JOIN_TIMEOUT = 0.0
 
 
+def _exit_log_path(pm) -> str:
+    """Where to record that exits were enforced: beside the ledger they acted on.
+
+    `health.py` reads `logs/enforce_exits.log` and treats its MTIME as proof
+    the exit enforcer ran on the REAL book (4-day window, hint "open positions
+    may not be closing"). This used to be hardcoded, so the 16 suite tests that
+    drive `main()` stamped the production health signal on the way past — 180
+    entries on 2026-08-17 alone, in bursts of 16 that match suite runs exactly.
+    Their ledgers were properly sandboxed, so nothing was ever written to the
+    book; what was at risk was the SIGNAL, which a test run could keep looking
+    fresh for four days after the enforcer had actually stopped.
+
+    Deriving the path from `pm` fixes it without any test-awareness in
+    production code: a sandboxed ledger is already what distinguishes the two
+    cases, so nothing here checks for PYTEST or an env var.
+
+    Returns None — write nothing — for a manager with no `db_path`.
+    `PaperManager.__init__` always sets it (`self.db_path = repo_path(...)`,
+    absolute), so its absence means this is not a real manager but a test
+    double, and a stub cannot have enforced exits on the real book.
+
+    That fallback was the other way round on the first attempt, on the reasoning
+    that a spurious freshness stamp beats a missing one. Measured, it was
+    backwards: 17 of the 24 write-site calls in a suite run have no `db_path`
+    at all, so treating "unknown" as "real" left the production log stamped 16
+    times per run and fixed nothing.
+    """
+    from .paths import repo_path
+    real = os.path.abspath(repo_path("paper_trades.db"))
+    repo_log = repo_path(os.path.join("logs", "enforce_exits.log"))
+    db = getattr(pm, "db_path", None)
+    if not db:
+        return None
+    db_abs = os.path.abspath(repo_path(str(db)))
+    if db_abs == real:
+        return repo_log
+    return os.path.join(os.path.dirname(db_abs) or ".", "enforce_exits.log")
+
+
 def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None,
                                          cache_dir=None, ttl=None):
     """Render the market-regime dashboard to a string while paper-trade exits
@@ -239,10 +278,12 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None,
             try:
                 import os as _os
                 from datetime import datetime as _now_dt
-                _os.makedirs("logs", exist_ok=True)
-                with open("logs/enforce_exits.log", "a") as _elog:
-                    _elog.write(f"[{_now_dt.now():%Y-%m-%d %H:%M:%S}] "
-                                "exits enforced inline at screener startup\n")
+                _log = _exit_log_path(pm)
+                if _log:
+                    _os.makedirs(_os.path.dirname(_log) or ".", exist_ok=True)
+                    with open(_log, "a") as _elog:
+                        _elog.write(f"[{_now_dt.now():%Y-%m-%d %H:%M:%S}] "
+                                    "exits enforced inline at screener startup\n")
             except Exception:
                 pass
         except Exception:
