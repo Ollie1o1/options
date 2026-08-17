@@ -60,3 +60,68 @@ class TestPromptForBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOnlyAnAnswerableRunCountsAsChosen(unittest.TestCase):
+    """A prompt nobody could answer is not a choice.
+
+    `prompt_input` returns its default without asking under `--auto` or on a
+    non-TTY, so `prompt_for_budget()` yields None there. Recording that as
+    "the operator chose NO LIMIT" is exactly the claim the key-presence design
+    exists to prevent — it just arrives through the prompt instead of through
+    the trade dict.
+    """
+
+    def tearDown(self):
+        from src import options_screener as osc
+        osc.set_auto_mode(False)
+
+    def test_auto_mode_is_never_answerable(self):
+        from src import options_screener as osc
+        osc.set_auto_mode(True)
+        self.assertFalse(osc._prompt_is_answerable())
+
+    def test_a_non_tty_is_never_answerable(self):
+        import io
+        import sys
+        from src import options_screener as osc
+        osc.set_auto_mode(False)
+        real = sys.stdin
+        sys.stdin = io.StringIO("")          # a pipe: isatty() is False
+        try:
+            self.assertFalse(osc._prompt_is_answerable())
+        finally:
+            sys.stdin = real
+
+    def test_a_tty_is_answerable(self):
+        import sys
+        from src import options_screener as osc
+        osc.set_auto_mode(False)
+
+        class _Tty:
+            def isatty(self):
+                return True
+
+        real = sys.stdin
+        sys.stdin = _Tty()
+        try:
+            self.assertTrue(osc._prompt_is_answerable())
+        finally:
+            sys.stdin = real
+
+    def test_a_broken_stdin_is_not_answerable(self):
+        """Fail closed: an unknown stdin must not claim a human answered."""
+        import sys
+        from src import options_screener as osc
+        osc.set_auto_mode(False)
+
+        class _Broken:
+            def isatty(self):
+                raise OSError("no stdin")
+
+        real = sys.stdin
+        sys.stdin = _Broken()
+        try:
+            self.assertFalse(osc._prompt_is_answerable())
+        finally:
+            sys.stdin = real

@@ -4118,6 +4118,23 @@ def close_trades():
     print("=" * 80 + "\n")
 
 
+def _prompt_is_answerable() -> bool:
+    """True when a prompt can actually reach a human.
+
+    `prompt_input` returns the default WITHOUT asking under `--auto` or on a
+    non-TTY (pipe, CI, cron) — see its first two lines. So a budget prompt in
+    those runs is not a question anybody declined to limit; it is a question
+    nobody was asked. Mirrors that logic rather than restating a rule, because
+    two copies of "can we prompt?" would drift.
+    """
+    if _AUTO_MODE:
+        return False
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
+        return False
+
+
 def prompt_for_budget() -> Optional[float]:
     """Capital at risk a single position may tie up on this scan, or None.
 
@@ -4884,7 +4901,13 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # Generate Final Reports.
     # `_display_df` is the exact frame print_report numbered on screen, so
     # "pick N" means the same contract in the terminal and on a tearsheet.
+    # The two structure frames are the same idea for spreads and condors: what
+    # the reader saw, past the gate and past the budget. They ride out on
+    # ScanResult so the [P]/[L] menu can log from the board rather than from
+    # the raw scan. None means this mode never built one.
     _display_df = None
+    _board_spreads = None
+    _board_condors = None
 
     def _leg_label(row) -> str:
         """Strategy name of a single-leg scan row, for capital-at-risk sizing."""
@@ -4933,6 +4956,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                                             label_structures=True, verbose=verbose)
             final_spreads = _budget_board(final_spreads, structure_strategy_name,
                                           session_budget, verbose=verbose)
+            _board_spreads = final_spreads
             if verbose and not final_spreads.empty:
                 print_credit_spreads_report(final_spreads)
                 _print_per_risk_table(final_spreads, structure_strategy_name,
@@ -4951,6 +4975,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                                             label_structures=True, verbose=verbose)
             final_condors = _budget_board(final_condors, structure_strategy_name,
                                           session_budget, verbose=verbose)
+            _board_condors = final_condors
             if verbose and not final_condors.empty:
                 print_iron_condor_report(final_condors)
                 _print_per_risk_table(final_condors, structure_strategy_name,
@@ -5154,6 +5179,9 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     return ScanResult(
         picks=picks,
+        board_picks=_display_df,
+        board_credit_spreads=_board_spreads,
+        board_iron_condors=_board_condors,
         spreads=pd.DataFrame(),
         credit_spreads=credit_spreads_df,
         iron_condors=iron_condors_df,
@@ -6205,7 +6233,14 @@ def main():
                 or is_premium_selling_mode or is_credit_spread_mode
                 or is_iron_condor_mode):
             session_budget = prompt_for_budget()
-            budget_was_chosen = True
+            # "Chosen" has to mean a human answered. Under --auto or a non-TTY
+            # the prompt returns its default unasked, and marking that as a
+            # choice claims the operator explicitly said "no limit" — the same
+            # false claim `_with_session_budget` exists to prevent, arriving
+            # through the other door. Today the save menu is also unreachable
+            # without a TTY, so nothing acted on it; that is a coincidence of
+            # two guards, not a reason to keep the flag lying.
+            budget_was_chosen = _prompt_is_answerable()
             if session_budget is not None:
                 print(f"Budget: ${session_budget:,.0f} capital at risk per position")
 
@@ -6333,6 +6368,25 @@ def main():
                 # Pull spread/condor results for the save menu
                 _credit_spreads = scan_results.credit_spreads
                 _iron_condors   = scan_results.iron_condors
+
+                # What the [P]/[L] menu may log from: the BOARD, not the raw
+                # scan. With a session budget the two differ, and offering a
+                # row the board hid re-opens the divergence the budget closes.
+                # `is None` rather than `.empty`: a mode that built no board
+                # falls back to the raw frame, but a board that filtered down
+                # to nothing must offer nothing.
+                #
+                # Deliberately NOT rebound onto `picks`. The --auto-log block
+                # below reads `picks`, and it must keep applying CONFIG's cap
+                # rather than inheriting an operator's session budget.
+                _menu_picks = (picks if scan_results.board_picks is None
+                               else scan_results.board_picks)
+                _menu_spreads = (_credit_spreads
+                                 if scan_results.board_credit_spreads is None
+                                 else scan_results.board_credit_spreads)
+                _menu_condors = (_iron_condors
+                                 if scan_results.board_iron_condors is None
+                                 else scan_results.board_iron_condors)
                 _has_results = (
                     not picks.empty
                     or (isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty)
@@ -6772,7 +6826,7 @@ def main():
                         if mode in ("Credit Spreads", "Iron Condor"):
                             msg = "Paper trading for spreads/condors is not supported — use [L] Log trades instead."
                             print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  \u26a0  {msg}")
-                        elif not picks.empty:
+                        elif not _menu_picks.empty:
                             # Use AI-ranked top pick when available, otherwise fall back to quality_score.
                             # Match on (symbol, strike, expiration, type) — _ai_ranked indices are not
                             # aligned with picks indices after reset_index inside combine_scores.
@@ -6780,11 +6834,11 @@ def main():
                             if _ai_ranked is not None and not _ai_ranked.empty and "final_score" in _ai_ranked.columns:
                                 _best = _ai_ranked.sort_values("final_score", ascending=False).iloc[0]
                                 try:
-                                    _match = picks[
-                                        (picks["symbol"].astype(str).str.upper() == str(_best.get("symbol", "")).upper())
-                                        & (picks["strike"].astype(float) == float(_best.get("strike", 0)))
-                                        & (picks["expiration"].astype(str) == str(_best.get("expiration", "")))
-                                        & (picks["type"].astype(str).str.lower() == str(_best.get("type", "")).lower())
+                                    _match = _menu_picks[
+                                        (_menu_picks["symbol"].astype(str).str.upper() == str(_best.get("symbol", "")).upper())
+                                        & (_menu_picks["strike"].astype(float) == float(_best.get("strike", 0)))
+                                        & (_menu_picks["expiration"].astype(str) == str(_best.get("expiration", "")))
+                                        & (_menu_picks["type"].astype(str).str.lower() == str(_best.get("type", "")).lower())
                                     ]
                                     if not _match.empty:
                                         top_pick_row = _match.iloc[0]
@@ -6793,7 +6847,7 @@ def main():
                             if top_pick_row is None:
                                 # Same ordering as the bulk auto-log path: the
                                 # composite selected every ledger row until now.
-                                _ranked_one = rank_single_legs_by_verdict(picks, mode)
+                                _ranked_one = rank_single_legs_by_verdict(_menu_picks, mode)
                                 # Gated: [P] "paper trade top pick" must mean
                                 # the pick the reader was shown, not the top of
                                 # an ungated list they never saw.
@@ -6945,9 +6999,9 @@ def main():
                             print(fmt.format_warning(msg) if HAS_ENHANCED_CLI else f"  {msg}")
 
                     elif save_choice == "L":
-                        log_src = picks if not picks.empty else (
-                            _credit_spreads if isinstance(_credit_spreads, pd.DataFrame) and not _credit_spreads.empty
-                            else _iron_condors
+                        log_src = _menu_picks if not _menu_picks.empty else (
+                            _menu_spreads if isinstance(_menu_spreads, pd.DataFrame) and not _menu_spreads.empty
+                            else _menu_condors
                         )
                         if isinstance(log_src, pd.DataFrame) and not log_src.empty:
                             picks_to_log = select_trades_to_log(log_src)

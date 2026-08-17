@@ -456,3 +456,93 @@ class TestTheSaveMenuReportsWhatTheLedgerDid(unittest.TestCase):
             window = block[max(0, idx - 60):idx]
             self.assertIn("if ", window,
                           f"{call} in the bulk path does not feed the count")
+
+
+class TestTheMenuOffersOnlyWhatTheBoardShowed(unittest.TestCase):
+    """`[P]`/`[L]` must not offer a candidate the budget hid.
+
+    The board is narrowed by `_budget_board`, but `ScanResult.picks` is the
+    RAW scan, and the save menu read that — so a $2,000 budget could show
+    three affordable puts and then hand `[P]` the $34,680 cash-secured put it
+    had just removed. The ledger refuses it, so nothing bad is written; the
+    operator is simply offered a trade they were never shown, which is the
+    board-vs-ledger divergence the budget exists to close.
+
+    Same lesson the tearsheet already learned: `--tearsheet N` must mean the N
+    the reader just read.
+    """
+
+    def test_scan_result_carries_the_board_frames(self):
+        from src.schemas import ScanResult
+        r = ScanResult()
+        for f in ("board_picks", "board_credit_spreads", "board_iron_condors"):
+            self.assertIsNone(getattr(r, f),
+                              f"{f} must default to None — 'no board built'")
+
+    def test_the_menu_reads_the_board_not_the_raw_scan(self):
+        with open(repo_path("src/options_screener.py")) as fh:
+            src = fh.read()
+        block = src[src.index("Collapsed post-scan prompt"):]
+        self.assertIn("elif not _menu_picks.empty:", block)
+        self.assertIn("rank_single_legs_by_verdict(_menu_picks, mode)", block)
+        self.assertIn("log_src = _menu_picks if not _menu_picks.empty", block)
+
+    def test_an_empty_board_is_not_the_same_as_no_board(self):
+        """`is None` chooses the fallback; `.empty` would defeat the filter.
+
+        If the budget removes every candidate, `board_picks` is an EMPTY
+        frame. Falling back to the raw scan on emptiness would offer the whole
+        unfiltered board precisely when the budget had rejected all of it.
+        """
+        with open(repo_path("src/options_screener.py")) as fh:
+            src = fh.read()
+        self.assertIn(
+            "_menu_picks = (picks if scan_results.board_picks is None", src,
+            "the menu falls back on emptiness rather than on absence")
+
+    def test_the_auto_log_path_still_reads_the_raw_scan(self):
+        """The invariant this must not break.
+
+        --auto-log has to keep applying CONFIG's cap. If the menu's rebinding
+        had been done on `picks` itself, the unattended scheduler would have
+        inherited the operator's session budget — the unbounded feeder again,
+        through a different door.
+        """
+        with open(repo_path("src/options_screener.py")) as fh:
+            src = fh.read()
+        auto = src[src.index("Auto-log mode: bypass interactive save menu"):
+                   src.index("Collapsed post-scan prompt")]
+        self.assertNotIn("_menu_picks", auto)
+        self.assertNotIn("_menu_spreads", auto)
+        self.assertNotIn("_menu_condors", auto)
+        self.assertIn("_log_src = picks if not picks.empty", auto)
+
+
+class TestTheConfigNoteNamesTheModesItActuallyCovers(unittest.TestCase):
+    """The note claimed more than the prompt delivers.
+
+    "interactive scans ask for their own budget" reads as ALL of them. Six
+    modes ask; ALL/Budget, LOTTERY, SQUEEZE and a bare ticker typed at the
+    menu are interactive too and remain bound by this value through key
+    absence. An operator reading the old note would believe a bare-ticker scan
+    was uncapped when it was not.
+    """
+
+    def _note(self):
+        with open(repo_path("config.json")) as fh:
+            return json.load(fh)["auto_log"]["_max_capital_at_risk_note"]
+
+    def test_it_names_the_modes_that_ask(self):
+        note = self._note()
+        for mode in ("DISCOVER", "MY LIST", "TICKER", "SELL", "SPREADS", "IRON"):
+            self.assertIn(mode, note)
+
+    def test_it_says_the_other_interactive_paths_are_still_capped(self):
+        note = self._note().lower()
+        self.assertIn("lottery", note)
+        self.assertIn("squeeze", note)
+        self.assertIn("bare ticker", note)
+
+    def test_the_value_is_still_unchanged(self):
+        with open(repo_path("config.json")) as fh:
+            self.assertEqual(json.load(fh)["auto_log"]["max_capital_at_risk"], 4000)
