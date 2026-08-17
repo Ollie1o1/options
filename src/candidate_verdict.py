@@ -107,7 +107,12 @@ def verdict_for(row: Dict[str, Any],
 
     An unquotable candidate is refused rather than assumed tradeable: the scan
     path's `lastPrice +/- 5%` fallback is how a mid-price fill entered the
-    ledger in the first place."""
+    ledger in the first place.
+
+    `historical_win_rate` no longer gates anything — see the note beside the
+    removed breakeven refusal below. It is kept in the signature because
+    `worth.assess` passes it and because a caller may want it recorded, not
+    because it changes a verdict."""
     legs = _legs_of(row)
     if legs is None:
         return Verdict(priced=False, passed=False,
@@ -149,12 +154,34 @@ def verdict_for(row: Dict[str, Any],
                        f"{max_friction_pct:.0%} ceiling",
                        friction, round_trip, breakeven, net_reward)
 
-    if (breakeven is not None and historical_win_rate is not None
-            and breakeven > historical_win_rate):
-        return Verdict(True, False,
-                       f"needs a {breakeven:.0%} win rate; your history on this "
-                       f"structure is {historical_win_rate:.0%}",
-                       friction, round_trip, breakeven, net_reward)
+    # A breakeven REFUSAL used to sit here: reject when `1 - credit/width`
+    # exceeded the historical win rate. Removed 2026-08-17 for three reasons,
+    # measured before acting.
+    #
+    # It never fired. Instrumented across four scan modes: 482 verdict calls,
+    # `historical_win_rate` supplied on ZERO of them, because
+    # `rank_by_verdict(df, win_rates=None)` defaults it and neither caller
+    # passes one. Single legs could not reach it regardless — no
+    # `spread_width`, so no breakeven.
+    #
+    # Wiring it up would have been worse than leaving it dead. The comparison
+    # is a category error: `1 - credit/width` is what you would need HELD TO
+    # EXPIRY, while the win rate it is judged against was achieved WITH
+    # management. It points the wrong way, too — the NVDA Bull Put 215/205
+    # needs 77.2% held to expiry against a 66.4% history and would have been
+    # refused, while the MANAGED requirement for that family is 50.9% against
+    # the same 66.4%: a +15.5pp margin on the one structure family this ledger
+    # says works.
+    #
+    # And a per-CONTRACT breakeven gate cannot be right under managed exits at
+    # all. If a winner takes tp x credit and a loser gives up sl x credit, then
+    # p* = sl / (sl + tp), independent of that contract's credit/width. The
+    # requirement is a property of the STRATEGY. That is why the measured
+    # managed rate is per-strategy, and why the comparison now lives in the
+    # Breakeven column and in `allowed_strategies` rather than here.
+    #
+    # `breakeven` is still computed and still reported below. It is a real
+    # number and worth seeing; it simply no longer refuses anything.
 
     detail = f"friction {round_trip:.0%} of reward"
     if breakeven is not None:
