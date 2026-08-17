@@ -54,6 +54,14 @@ def _render(df, budget=None, label_fn=_label):
     return buf.getvalue()
 
 
+def _render_capped(df, max_rows, budget=None, label_fn=_label):
+    from src.cli_display import print_per_risk_table
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_per_risk_table(df, label_fn, budget, max_rows=max_rows)
+    return buf.getvalue()
+
+
 class TestTheAxisIsCommon(unittest.TestCase):
     """The reason the table exists at all."""
 
@@ -252,6 +260,63 @@ class TestTheBudgetHeader(unittest.TestCase):
         out = _render(_legs(), budget=None)
         self.assertIn("CHEAP", out)
         self.assertIn("RICH", out)
+
+
+class TestItShowsWhatTheBoardShowed(unittest.TestCase):
+    """`#3` here has to be `#3` up there.
+
+    Every single-leg board renders through `print_comparison_table`, which
+    caps at 10 rows. A per-risk table listing all 40 survivors would number
+    candidates the reader never saw and quietly disagree with the board it
+    claims to be reprinting. Spread and condor reports DO print every row, so
+    the cap is passed in per call site rather than baked into the renderer.
+    """
+
+    def setUp(self):
+        fmt.set_color_enabled(False)
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = None
+
+    def _many(self, n=25):
+        return pd.DataFrame([
+            {"symbol": f"T{i:02d}", "type": "put", "strike": 10.0 + i,
+             "capital_at_risk": 100.0 + i, "reward_per_risk": 0.10,
+             "net_ev_per_risk": 0.01}
+            for i in range(n)
+        ])
+
+    def _numbered(self, out):
+        return [l for l in out.splitlines() if l.strip()[:1].isdigit()]
+
+    def test_it_stops_at_the_cap(self):
+        out = _render_capped(self._many(25), max_rows=10)
+        self.assertEqual(len(self._numbered(out)), 10)
+        self.assertIn("T09", out)
+        self.assertNotIn("T10", out)
+
+    def test_it_says_how_many_it_left_out(self):
+        """Silently truncating at a budget would read as "only 10 fit"."""
+        out = _render_capped(self._many(25), max_rows=10)
+        self.assertIn("15 more", out)
+
+    def test_no_note_when_nothing_was_truncated(self):
+        out = _render_capped(self._many(4), max_rows=10)
+        self.assertNotIn("more", out.split("WORTH")[-1])
+
+    def test_no_cap_means_every_row(self):
+        """Spread and condor boards print all their rows and so must this."""
+        out = _render_capped(self._many(25), max_rows=None)
+        self.assertEqual(len(self._numbered(out)), 25)
+
+    def test_the_single_leg_sites_pass_the_cap(self):
+        from src.paths import repo_path
+        with open(repo_path("src/options_screener.py")) as fh:
+            src = fh.read()
+        self.assertEqual(
+            src.count("_print_per_risk_table(") - src.count("max_rows=10"), 3,
+            "expected 4 single-leg call sites capped at 10 and 2 structure "
+            "sites uncapped, plus the definition")
 
 
 class TestTheWorthColumnsAreReallyPopulated(unittest.TestCase):

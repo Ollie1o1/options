@@ -347,7 +347,8 @@ def _per_risk_worth(row):
         return None, None, ""
 
 
-def print_per_risk_table(df, label_fn, budget: Optional[float] = None) -> None:
+def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
+                         max_rows: Optional[int] = None) -> None:
     """Every candidate on ONE axis: reward per dollar of capital at risk.
 
     Raw premium and raw `ev_per_contract` are per contract, so a $34,680
@@ -375,11 +376,22 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None) -> None:
     so the Structure column can never name a different strategy than the one
     whose risk definition produced the Risk cell.
 
+    `max_rows` caps the table at what the board above it actually rendered:
+    every single-leg board goes through `print_comparison_table`, which stops
+    at 10, so an uncapped table would number candidates the reader never saw
+    and disagree with the board it claims to be reprinting. The spread and
+    condor reports print every row and pass no cap. When rows are dropped it
+    says so — at a budget, a silent truncation reads as "only 10 fit".
+
     Prints nothing at all for a frame that was never annotated — a header over
     an empty table would imply the axis had been computed when it had not.
     """
     if df is None or len(df) == 0 or "capital_at_risk" not in getattr(df, "columns", []):
         return
+    total = len(df)
+    if max_rows is not None and total > max_rows:
+        df = df.head(max_rows)
+    hidden = total - len(df)
 
     width = get_display_width()
     title = "PER DOLLAR OF CAPITAL AT RISK"
@@ -437,6 +449,11 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None) -> None:
                 f"{ev_cell if HAS_ENHANCED_CLI and ev_txt != 'n/a' else f'{ev_txt:>9}'} "
                 f"{cost_txt:>6} {be_txt:>10}  {grade}")
         print(line)
+
+    if hidden:
+        tail = (f"… {hidden} more candidate{'s' if hidden != 1 else ''} fit "
+                f"but are not listed — the board shows {len(df)}.")
+        print("  " + (fmt.style(tail, 'muted') if HAS_ENHANCED_CLI else tail))
 
 
 def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:

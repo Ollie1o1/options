@@ -719,7 +719,8 @@ def _budget_board(df, label_fn, budget: Optional[float], *, verbose: bool = True
     return out
 
 
-def _print_per_risk_table(df, label_fn, budget: Optional[float]) -> None:
+def _print_per_risk_table(df, label_fn, budget: Optional[float],
+                          max_rows: Optional[int] = None) -> None:
     """Spec s4's common-axis table, printed after the board it describes.
 
     `label_fn` is the same one `_budget_board` sized with, so the Structure
@@ -729,7 +730,7 @@ def _print_per_risk_table(df, label_fn, budget: Optional[float]) -> None:
     """
     if budget is not None and budget <= 0:
         budget = None
-    print_per_risk_table(df, label_fn, budget)
+    print_per_risk_table(df, label_fn, budget, max_rows=max_rows)
 
 
 def _print_budget_use(df, budget: Optional[float]) -> None:
@@ -4895,7 +4896,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
-                _print_per_risk_table(top_picks, _leg_label, session_budget)
+                _print_per_risk_table(top_picks, _leg_label, session_budget,
+                                      max_rows=10)
                 _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             # Only when the scan genuinely found nothing. A board that was
@@ -4914,7 +4916,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
-                _print_per_risk_table(top_picks, _leg_label, session_budget)
+                _print_per_risk_table(top_picks, _leg_label, session_budget,
+                                      max_rows=10)
                 _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             print("\nNo discovery picks found.")
@@ -4970,7 +4973,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
                 _print_per_risk_table(final_df.head(10), _leg_label,
-                                      session_budget)
+                                      session_budget, max_rows=10)
                 _print_budget_use(final_df.head(10), session_budget)
         elif verbose and picks.empty:
             print("\nNo premium selling candidates found.")
@@ -4994,7 +4997,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _display_df = final_df
             if verbose:
                 print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
-                _print_per_risk_table(final_df, _leg_label, session_budget)
+                _print_per_risk_table(final_df, _leg_label, session_budget,
+                                      max_rows=10)
                 _print_budget_use(final_df, session_budget)
         elif verbose and picks.empty:
             print("\nNo suitable options found.")
