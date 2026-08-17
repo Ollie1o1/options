@@ -607,22 +607,36 @@ class TestCollect(unittest.TestCase):
 
 
 class TestNoiseBand(unittest.TestCase):
-    """Net EV is a Black-Scholes point estimate. Its error bar is vega-sized."""
+    """Net EV is a Black-Scholes point estimate. Its error bar is vega-sized,
+    and scaled by how wrong the VOL FORECAST is — measured, not assumed.
 
-    def test_band_is_vega_dollars_times_the_iv_uncertainty(self):
-        # $31 per IV point, high-confidence IV -> a one-point band.
-        self.assertAlmostEqual(collect._ev_noise(_row()), 31.0, places=6)
+    These pinned a 1.0-2.5 IV-point band keyed off `iv_confidence` until
+    2026-08-17. That constant described how wrong the QUOTED IV might be, which
+    is not what net EV depends on: the EV is `BS(sigma_forecast) - price`, so
+    the uncertain input is the realized-vol forecast. Measured over 1,180
+    non-overlapping windows its error std is 10.1 IV points and PROPORTIONAL to
+    the vol level (~30% of it). See `scripts/vol_forecast_study.py`.
+    """
 
-    def test_a_less_trusted_iv_widens_the_band(self):
+    def test_band_is_vega_dollars_times_the_measured_forecast_error(self):
+        # $31 per IV point at 38% vol -> 31 * 0.30 * 38 = $353.40.
+        self.assertAlmostEqual(collect._ev_noise(_row()), 353.4, places=6)
+
+    def test_a_higher_vol_contract_widens_the_band(self):
+        calm = collect._ev_noise(dict(_row(), hv_30d=0.20))
+        wild = collect._ev_noise(dict(_row(), hv_30d=0.60))
+        self.assertAlmostEqual(wild, 3 * calm)
+
+    def test_quote_confidence_no_longer_moves_the_band(self):
+        """It describes the quote, not the forecast."""
         high = collect._ev_noise(dict(_row(), iv_confidence="High"))
         low = collect._ev_noise(dict(_row(), iv_confidence="Low"))
-        self.assertGreater(low, high)
+        self.assertAlmostEqual(low, high)
 
-    def test_missing_iv_confidence_assumes_the_worst(self):
+    def test_missing_iv_confidence_changes_nothing(self):
         r = _row()
         r.pop("iv_confidence")
-        self.assertEqual(collect._ev_noise(r),
-                         collect._ev_noise(dict(_row(), iv_confidence="Low")))
+        self.assertAlmostEqual(collect._ev_noise(r), collect._ev_noise(_row()))
 
     def test_band_falls_back_to_a_fraction_of_cost_without_vega(self):
         r = _row()
@@ -634,12 +648,12 @@ class TestNoiseBand(unittest.TestCase):
 
     def test_build_carries_the_band_and_the_assumed_fill(self):
         v = collect.build(_row(), _ctx(), slow=False)["verdict"]
-        self.assertAlmostEqual(v["noise"], 31.0, places=6)
+        self.assertAlmostEqual(v["noise"], 353.4, places=6)
         # The cost model charges a half-spread on entry: it assumes you pay the ask.
         self.assertAlmostEqual(v["assumed_fill"], 4.20 * (1 + 0.021 / 2), places=6)
 
     def test_a_thinly_traded_contract_lands_marginal_not_take(self):
-        # +$8 of net EV against a $31 band is a coin flip, not a trade.
+        # +$8 of net EV against a $353 band is a coin flip, not a trade.
         r = dict(_row(), ev_per_contract=8.0, ev_gross_per_contract=26.0)
         out = R.render(collect.build(r, _ctx(), slow=False))
         self.assertIn("MARGINAL", out)

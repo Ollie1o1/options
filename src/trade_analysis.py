@@ -57,6 +57,34 @@ def net_ev_per_contract(gross_edge_per_share, premium, spread_pct,
     return gross - spread_cost - commission
 
 
+# Relative error of the vol basis, MEASURED by scripts/vol_forecast_study.py
+# over 1,180 non-overlapping 21-day windows. The error is proportional to the
+# vol level, not fixed — ratio 0.33 / 0.28 / 0.28 / 0.30 across four regimes
+# from 13% to 46% realized vol — so the band scales with the forecast rather
+# than sitting at a constant number of IV points.
+VOL_FORECAST_RELATIVE_ERROR = 0.30
+
+
+def vol_basis_of(long_window, short_window):
+    """The EV's vol basis for ONE contract. The scalar core of `ev_vol_basis`.
+
+    Shared so the frame path and the error-bar path cannot drift: two copies of
+    a rule is how this codebase produced a board that ranked by one number and
+    a table that ranked by another.
+    """
+    def _pos(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f and f > 0 else None      # rejects NaN and <= 0
+
+    lw, sw = _pos(long_window), _pos(short_window)
+    if lw is not None and sw is not None:
+        return 0.5 * lw + 0.5 * sw
+    return lw if lw is not None else sw
+
+
 def ev_vol_basis(df):
     """The realized-vol series the EV should price on, one row per contract.
 
