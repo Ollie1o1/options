@@ -219,7 +219,7 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     header = (
         f"{'#':<5} {'Ticker':<7} {'Type':<5} {'Strike':>7} {'Expiry':<12} "
         f"{'DTE':>4} {'Delta':>6} {'IV%ile':>6} {'PoP%':>6} {'Prem':>7} "
-        f"{'Net EV':>7} {'Cost':>5} {'P2x':>5} {'Call':<5} {'Score':>6}  Drivers"
+        f"{'Net EV':>7} {'Cost':>5} {'P2x':>5} {'Call':<5}  Drivers"
     )
 
     # Must cover every bucket `format_dte_bucket` can return. It stopped at
@@ -418,7 +418,10 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
           else "  " + title)
     note = ("the board's own order, reprinted on a common axis — "
             "not a ranking, and no row is a recommendation")
+    caveat = ("no single trade's edge clears its own vol-forecast uncertainty "
+              "— compare Edge/err between rows, do not read it as a verdict")
     print("  " + (fmt.style(note, 'muted') if HAS_ENHANCED_CLI else note))
+    print("  " + (fmt.style(caveat, 'muted') if HAS_ENHANCED_CLI else caveat))
     header = (f"  {'#':<4} {'Ticker':<7} {'Structure':<22} {'Risk':>9} "
               f"{'Rwd/$risk':>10} {'EV/$risk':>9} {'Edge/err':>9} "
               f"{'Cost%':>6} {'Breakeven':>10}  WORTH")
@@ -1485,8 +1488,10 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         pass
 
     # Table header
+    # No Score column: `quality_score` measures OOS IC -0.12, "not
+    # distinguishable from zero", and a column called Score reads as a verdict.
     col_hdr = (
-        f"  {'#':>3}  {'Ticker':<6} {'Strike':<8} {'Exp':>8} {'Score':>6}"
+        f"  {'#':>3}  {'Ticker':<6} {'Strike':<8} {'Exp':>8}"
     )
     if _has_conf:
         col_hdr += f" {'':>4}"
