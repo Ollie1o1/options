@@ -110,21 +110,36 @@ class CondorVerdictTest(unittest.TestCase):
 
 
 class GateTest(unittest.TestCase):
-    # A spread tight enough to clear the friction ceiling, so the win-rate
-    # gate is what is actually under test. Note how tight it has to be: the
-    # realistic fixture above (a $0.10 half-spread on each $2.50-wide leg)
-    # carries 40% round-trip friction and never reaches this gate at all.
+    # A spread tight enough to clear the friction ceiling. Note how tight it
+    # has to be: the realistic fixture above (a $0.10 half-spread on each
+    # $2.50-wide leg) carries 40% round-trip friction and never reaches the
+    # later checks at all.
     TIGHT = {"strategy_name": "Bull Put", "net_credit": 1.00, "spread_width": 2.50,
              "short_bid": 1.48, "short_ask": 1.52, "long_bid": 0.48, "long_ask": 0.52}
 
-    def test_a_candidate_needing_a_higher_win_rate_than_history_is_refused(self):
-        v = cv.verdict_for(self.TIGHT, historical_win_rate=0.50)
-        self.assertFalse(v.passed)
-        self.assertIn("win rate", v.reason)
+    def test_the_win_rate_no_longer_refuses_a_candidate(self):
+        """These two cases pinned a breakeven REFUSAL until 2026-08-17.
 
-    def test_the_same_candidate_passes_against_a_high_enough_history(self):
-        v = cv.verdict_for(self.TIGHT, historical_win_rate=0.95)
-        self.assertTrue(v.passed)
+        It was removed after measurement: instrumented across four scan modes,
+        482 verdict calls carried `historical_win_rate` on ZERO of them, so it
+        had never fired. And wiring it up would have been worse — the
+        comparison pits `1 - credit/width`, a HOLD-TO-EXPIRY requirement,
+        against a win rate achieved WITH management. See
+        `tests/test_breakeven_gate_removed.py`.
+
+        A verdict must now be identical whether or not a win rate is supplied.
+        """
+        low = cv.verdict_for(self.TIGHT, historical_win_rate=0.50)
+        high = cv.verdict_for(self.TIGHT, historical_win_rate=0.95)
+        none = cv.verdict_for(self.TIGHT)
+        self.assertTrue(low.passed)
+        self.assertEqual((low.passed, low.reason), (high.passed, high.reason))
+        self.assertEqual((low.passed, low.reason), (none.passed, none.reason))
+
+    def test_the_breakeven_number_is_still_reported(self):
+        v = cv.verdict_for(self.TIGHT, historical_win_rate=0.50)
+        self.assertIsNotNone(v.breakeven)
+        self.assertIn("breakeven", v.reason)
 
     def test_a_realistic_spread_is_refused_on_friction_before_anything_else(self):
         """The measured case. Both gates would refuse it; friction gets there
