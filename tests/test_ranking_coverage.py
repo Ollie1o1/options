@@ -111,11 +111,19 @@ class NoDiscreditedOrderingTest(unittest.TestCase):
     # Functions allowed to sort by a variable key, with the reason. Adding to
     # this list is a deliberate act; it is not a place to silence the guard.
     #
-    # `print_comparison_table` honours a sort the READER explicitly asked for,
+    # `comparison_rows` honours a sort the READER explicitly asked for,
     # including by score — "show me this sorted by score" is a legitimate
     # request and the column is labelled. Its DEFAULT is board order, so a
     # table nobody chose a sort for is never ranked by the composite.
-    ALLOWED_VARIABLE_SORTS = {("src/cli_display.py", "print_comparison_table")}
+    #
+    # That last sentence was FALSE from the day it was written until
+    # 2026-08-17: this entry named `print_comparison_table`, whose `sort_by`
+    # defaulted to "quality_score" — a key `_sort_map` resolves — so every
+    # unchosen board opened ranked by the composite while this comment
+    # asserted it could not. An allowlist entry is a claim about behaviour;
+    # `test_an_unchosen_board_is_not_ranked_by_the_composite` below now holds
+    # it to that claim instead of trusting the prose.
+    ALLOWED_VARIABLE_SORTS = {("src/cli_display.py", "comparison_rows")}
 
     def test_no_module_sorts_by_a_discredited_key_held_in_a_variable(self):
         """The hole the constant check left. See `_variable_key_orderings`."""
@@ -127,6 +135,54 @@ class NoDiscreditedOrderingTest(unittest.TestCase):
                 found, [],
                 f"{path} sorts by a variable in a function that names a "
                 f"discredited key — the tearsheet bug of 2026-08-10")
+
+    def test_an_unchosen_board_is_not_ranked_by_the_composite(self):
+        """The behaviour the allowlist above only claimed until 2026-08-17.
+
+        Structural checks cannot see this: the sort is legitimate code
+        reached through a default ARGUMENT, so every AST guard passed while
+        the board ranked by a key measured at -0.131 against return on
+        capital. Only running it shows the order.
+        """
+        import io
+        import contextlib
+        import pandas as pd
+        from src import formatting as fmt
+        from src.cli_display import print_comparison_table
+
+        rows = [{"symbol": s, "type": "put", "strike": 10.0 + i,
+                 "quality_score": q, "T_years": 0.09, "premium": 1.0,
+                 "prob_profit": 0.6, "delta": -0.2, "ev_per_contract": 5.0,
+                 "spread_pct": 0.05}
+                for i, (s, q) in enumerate([("AAA", 0.20), ("BBB", 0.90),
+                                            ("CCC", 0.55)])]
+        df = pd.DataFrame(rows)
+
+        def order(**kw):
+            fmt.set_color_enabled(False)
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    print_comparison_table(df, "Premium Selling", **kw)
+                text = buf.getvalue()
+                seen = []
+                for line in text.splitlines():
+                    for sym in ("AAA", "BBB", "CCC"):
+                        if sym in line and sym not in seen:
+                            seen.append(sym)
+                return seen, text
+            finally:
+                fmt._COLOR_ENABLED = None
+
+        seen, text = order()
+        self.assertEqual(seen, ["AAA", "BBB", "CCC"],
+                         "an unchosen board is ranked by quality_score")
+        self.assertIn("board order", text)
+
+        # A sort the reader explicitly asks for is still honoured and labelled.
+        seen, text = order(sort_by="quality_score")
+        self.assertEqual(seen, ["BBB", "CCC", "AAA"])
+        self.assertIn("Score", text)
 
     def test_the_tearsheet_indexes_the_frame_the_cards_were_numbered_from(self):
         """`--tearsheet N` must mean the N the user just read.

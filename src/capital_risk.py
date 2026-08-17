@@ -206,6 +206,52 @@ def capital_at_risk_for_pick(pick, strategy_name: str) -> Optional[float]:
     )
 
 
+def max_profit_for_pick(pick, strategy_name: str) -> Optional[float]:
+    """Most a *scanner result* row can make, in dollars, or None if unbounded.
+
+    The reward side of `capital_at_risk_for_pick`, and deliberately its
+    neighbour: both read the premium through `_pick_premium`, so the two cells
+    of one `Reward/$risk` figure can never come from different quotes.
+
+    Only credit structures and short single legs have an answer:
+
+    * a credit structure keeps its credit — the stored `max_profit` when the
+      spread builder set one, else the credit itself;
+    * a short leg keeps its credit, which is the entire upside;
+    * a LONG leg returns None. For a call that is simply true. For a put it is
+      a judgement: (strike - premium) x 100 is arithmetically real but is only
+      collected if the underlying goes to ZERO, and on a per-dollar-of-risk
+      axis it would print ~44x and outrank every credit structure on the
+      board on an outcome that has not happened to a listed name in this
+      universe. A blank cell says "not answerable"; the alternative is a
+      column that silently recommends long puts.
+
+    None never means zero — see `budget_view.per_risk`.
+    """
+    name = (strategy_name or "").strip().lower()
+    mult = _multiplier(_pick_get(pick, "symbol"))
+    price = _finite(_pick_premium(pick))
+
+    if any(key in name for key in _CREDIT_STRUCTURE_KEYS):
+        stored = _finite(_pick_get(pick, "max_profit"))
+        if stored is not None and stored > 0:
+            return stored
+        credit = _finite(_pick_get(pick, "net_credit"))
+        if credit is None:
+            credit = _finite(_pick_get(pick, "total_credit"))
+        if credit is None:
+            credit = price
+        return credit * mult if credit is not None and credit > 0 else None
+
+    if any(key in name for key in _SHORT_PUT_KEYS + _SHORT_CALL_KEYS):
+        return price * mult if price is not None and price > 0 else None
+
+    if is_short_position(name):
+        return price * mult if price is not None and price > 0 else None
+
+    return None
+
+
 def pick_within_budget(pick, strategy_name: str, cap: Optional[float]) -> bool:
     """True if a scanner candidate fits the budget, so it is worth a top-N slot.
 

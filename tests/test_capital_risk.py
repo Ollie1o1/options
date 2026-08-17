@@ -7,6 +7,7 @@ up", so it lives in one place and is tested here.
 """
 import unittest
 
+from src import capital_risk as cr
 from src.capital_risk import capital_at_risk
 
 
@@ -180,3 +181,72 @@ def is_affordable(strategy, entry_price, strike, cap, **kw):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMaxProfitForPick(unittest.TestCase):
+    """The reward side of the common axis.
+
+    `Reward/$risk` divides max profit by capital at risk. Single-leg scan rows
+    carry no `max_profit` — only the spread and condor builders set one — so
+    without this the column is blank on the Premium Selling board, which is the
+    board that motivated the per-scan budget in the first place: a cash-secured
+    put risks strike x 100, so AVGO ties up $34,680 and its credit is the whole
+    of what it can make.
+
+    Reward is read through the SAME premium ladder as risk, so the two cells
+    on one line can never come from different quotes.
+    """
+
+    def test_a_short_put_makes_its_credit(self):
+        got = cr.max_profit_for_pick(
+            {"symbol": "AVGO", "strike": 350.0, "premium": 2.00}, "Short Put")
+        self.assertAlmostEqual(got, 200.0)
+
+    def test_a_short_put_reward_over_risk_is_the_return_on_collateral(self):
+        pick = {"symbol": "AVGO", "strike": 350.0, "premium": 2.00}
+        risk = cr.capital_at_risk_for_pick(pick, "Short Put")
+        reward = cr.max_profit_for_pick(pick, "Short Put")
+        self.assertAlmostEqual(risk, 34800.0)
+        self.assertAlmostEqual(reward / risk, 200.0 / 34800.0)
+
+    def test_a_credit_spread_uses_its_stored_max_profit(self):
+        got = cr.max_profit_for_pick(
+            {"symbol": "GLD", "max_profit": 60.0, "net_credit": 0.60,
+             "spread_width": 5.0}, "Bull Put")
+        self.assertAlmostEqual(got, 60.0)
+
+    def test_a_credit_spread_without_one_falls_back_to_the_credit(self):
+        got = cr.max_profit_for_pick(
+            {"symbol": "GLD", "net_credit": 0.60, "spread_width": 5.0},
+            "Bull Put")
+        self.assertAlmostEqual(got, 60.0)
+
+    def test_a_long_call_is_unbounded_and_reported_as_unknown(self):
+        self.assertIsNone(cr.max_profit_for_pick(
+            {"symbol": "NVDA", "strike": 190.0, "premium": 4.24}, "Long Call"))
+
+    def test_a_long_put_is_unknown_even_though_it_is_arithmetically_bounded(self):
+        """A long put maxes out only if the stock goes to ZERO.
+
+        (strike - premium) x 100 is a real number, and on a per-dollar-of-risk
+        axis it would print about 44x for this row and dominate every credit
+        structure on the board — on an outcome that has never happened to a
+        listed name in this universe. A blank cell is the honest answer; the
+        alternative is a column that recommends long puts.
+        """
+        self.assertIsNone(cr.max_profit_for_pick(
+            {"symbol": "NVDA", "strike": 190.0, "premium": 4.24}, "Long Put"))
+
+    def test_a_missing_quote_is_unknown_not_zero(self):
+        self.assertIsNone(cr.max_profit_for_pick(
+            {"symbol": "AVGO", "strike": 350.0}, "Short Put"))
+
+    def test_crypto_uses_a_multiplier_of_one(self):
+        got = cr.max_profit_for_pick(
+            {"symbol": "BTC", "strike": 60000.0, "premium": 1200.0},
+            "Short Put")
+        self.assertAlmostEqual(got, 1200.0)
+
+    def test_it_never_raises_on_a_garbage_row(self):
+        self.assertIsNone(cr.max_profit_for_pick({"premium": "abc"}, "Short Put"))
+        self.assertIsNone(cr.max_profit_for_pick(None, "Short Put"))

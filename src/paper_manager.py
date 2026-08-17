@@ -451,7 +451,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 21
+_SCHEMA_VERSION = 22
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -688,6 +688,26 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN entry_ev_gross REAL",
         "ALTER TABLE trades ADD COLUMN entry_ev_cost REAL",
         "ALTER TABLE trades ADD COLUMN entry_ev_noise REAL",
+    ],
+    22: [
+        # The budget in force when the trade was logged.
+        #
+        # Until 2026-08-14 one global number (auto_log.max_capital_at_risk =
+        # 4000) governed every log site. It is now the SCHEDULER's budget only;
+        # interactive scans choose their own per scan, defaulting to no limit.
+        # Recording it is what keeps the book readable: the analysis that
+        # matters is "inside the budget +$3,283 (n=247) vs above it -$19,741
+        # (n=160)", and once the budget varies per scan you cannot recover it
+        # from capital_at_risk alone.
+        #
+        # NULL means NO LIMIT WAS IN FORCE — not "unknown". The backfill below
+        # makes that truthful: the cap shipped 2026-07-29, so rows from that
+        # date really had a $4,000 budget, and earlier rows really had none.
+        # That is the unbounded-feeder era whose $27k and $83k positions are
+        # correctly marked unbudgeted.
+        "ALTER TABLE trades ADD COLUMN budget_at_entry REAL",
+        "UPDATE trades SET budget_at_entry = 4000.0 "
+        "WHERE date >= '2026-07-29' AND budget_at_entry IS NULL",
     ],
 }
 
@@ -1267,15 +1287,23 @@ class PaperManager:
             )
             return False
 
+        # The budget that governs THIS trade. Key presence is the signal:
+        # present-and-None means the operator explicitly chose no limit;
+        # absent means no prompt was ever reached (cron, --auto, a pipe) and
+        # the config value applies. A run that never saw the prompt must not
+        # be treated as having chosen "no limit".
+        _budget = (trade_dict["budget_at_entry"]
+                   if "budget_at_entry" in trade_dict
+                   else self._max_capital_at_risk)
         if not trade_dict.get("allow_unaffordable") and not within_budget(
-            risk, self._max_capital_at_risk
+            risk, _budget
         ):
             self.unaffordable_rejected += 1
             shown = f"${risk:,.0f}" if risk is not None else "unbounded"
             print(
                 f"Skipped {trade_dict['strategy_name']} on {trade_dict.get('ticker')}: "
                 f"capital at risk {shown} exceeds the "
-                f"${self._max_capital_at_risk:,.0f} budget"
+                f"${_budget:,.0f} budget"
             )
             return False
 
@@ -1298,7 +1326,7 @@ class PaperManager:
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
-            paper_only, era, lottery_edge, capital_at_risk
+            paper_only, era, lottery_edge, capital_at_risk, budget_at_entry
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1308,7 +1336,7 @@ class PaperManager:
             ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?
+            ?, ?, ?, ?, ?
         )
         """
 
@@ -1394,6 +1422,7 @@ class PaperManager:
             trade_dict.get("era", "finalized"),
             (int(bool(trade_dict["lottery_edge"])) if trade_dict.get("lottery_edge") is not None else None),
             risk,
+            _budget,   # budget_at_entry — NULL means no limit was in force
         )
 
         with self._get_connection() as conn:
