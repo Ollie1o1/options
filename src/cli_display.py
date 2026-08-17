@@ -331,10 +331,18 @@ def _per_risk_structure_cell(row, label: str) -> str:
 
 
 def _per_risk_worth(row):
-    """(cost fraction, breakeven margin, grade) for one candidate.
+    """(cost fraction, breakeven margin, grade, sigma) for one candidate.
 
     Delegates to `worth.assess` — the same grader behind every card — so this
     table cannot report a different verdict than the card above it.
+
+    `sigma` is net EV in error bars, and it is returned because the GRADE is
+    too coarse to carry it. Once the error bar was measured, every
+    short-premium row graded THIN — correctly, since no single trade's edge
+    clears its own vol-forecast uncertainty — while the ratio behind it still
+    ranged -0.71 to +0.95 across 65 live rows. Collapsing that into one label
+    left the operator nothing to compare, which is lost information rather
+    than honesty.
     """
     try:
         from .worth import assess
@@ -342,9 +350,9 @@ def _per_risk_worth(row):
         r = row.to_dict() if hasattr(row, "to_dict") else dict(row)
         w = assess(r, historical_win_rate=win_rates_from_ledger().get(
             r.get("strategy_name")))
-        return w.friction, w.breakeven_margin, w.grade
+        return w.friction, w.breakeven_margin, w.grade, w.sigma
     except Exception:
-        return None, None, ""
+        return None, None, "", None
 
 
 def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
@@ -412,8 +420,8 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
             "not a ranking, and no row is a recommendation")
     print("  " + (fmt.style(note, 'muted') if HAS_ENHANCED_CLI else note))
     header = (f"  {'#':<4} {'Ticker':<7} {'Structure':<22} {'Risk':>9} "
-              f"{'Rwd/$risk':>10} {'EV/$risk':>9} {'Cost%':>6} "
-              f"{'Breakeven':>10}  WORTH")
+              f"{'Rwd/$risk':>10} {'EV/$risk':>9} {'Edge/err':>9} "
+              f"{'Cost%':>6} {'Breakeven':>10}  WORTH")
     print(fmt.style(header, 'label', bold=True) if HAS_ENHANCED_CLI else header)
     print("  " + (fmt.draw_separator(width - 2) if HAS_ENHANCED_CLI
                   else "-" * (width - 2)))
@@ -439,7 +447,7 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
         except Exception:
             label = ""
         struct = _per_risk_structure_cell(row, label)[:22]
-        friction, be_margin, grade = _per_risk_worth(row)
+        friction, be_margin, grade, sigma = _per_risk_worth(row)
         risk_txt = cell(row.get("capital_at_risk"), lambda v: f"${v:,.0f}")
         # Three decimals, not two. A credit spread returns ~0.60 on risk but a
         # cash-secured put returns ~0.006, and at two decimals every short put
@@ -447,6 +455,9 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
         # axis exists to show. One format has to serve both regimes.
         rwd_txt = cell(row.get("reward_per_risk"), lambda v: f"{v:.3f}")
         ev_txt = cell(row.get("net_ev_per_risk"), lambda v: f"{v:+.3f}")
+        # Net EV in error bars. Shown as a NUMBER because the grade beside it
+        # is THIN on almost everything now; this is what still discriminates.
+        sig_txt = cell(sigma, lambda v: f"{v:+.2f}")
         cost_txt = cell(friction, lambda v: f"{v*100:.0f}%")
         be_txt = cell(be_margin, lambda v: f"{v*100:+.0f}%")
         ev_cell = ev_txt
@@ -455,7 +466,7 @@ def print_per_risk_table(df, label_fn, budget: Optional[float] = None,
         line = (f"  {i + 1:<4} {str(row.get('symbol') or ''):<7} {struct:<22} "
                 f"{risk_txt:>9} {rwd_txt:>10} "
                 f"{ev_cell if HAS_ENHANCED_CLI and ev_txt != 'n/a' else f'{ev_txt:>9}'} "
-                f"{cost_txt:>6} {be_txt:>10}  {grade}")
+                f"{sig_txt:>9} {cost_txt:>6} {be_txt:>10}  {grade}")
         print(line)
 
     if hidden:
