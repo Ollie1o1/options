@@ -199,8 +199,20 @@ def assess(row: Dict[str, Any],
         except Exception:
             pass
 
+        # Sigma is REPORTED, not graded. Taking the weakest of three margins
+        # means a degenerate one pins the badge, and once the error bar was
+        # measured (2026-08-17) "edge vs its error bar" became degenerate by
+        # nature: no single option trade's edge clears the uncertainty in the
+        # vol forecast behind it. That is a fact about the asset class, not
+        # about any contract, and grading on it dragged every row of every
+        # single-leg board to THIN — leaving the two columns an operator reads
+        # first, Score and WORTH, saying nothing at all.
+        #
+        # The number still varies (-0.71 to +0.95 across 65 live rows) and is
+        # rendered as `Edge/err`, which is where the per-candidate comparison
+        # now happens. The universal truth is stated once at board level rather
+        # than repeated as a constant on every row.
         candidates = {
-            "edge vs its error bar": _grade_sigma(sigma),
             "trading cost": _grade_friction(friction),
             "breakeven margin": _grade_breakeven(beh),
         }
@@ -214,7 +226,20 @@ def assess(row: Dict[str, Any],
         # constraint that is not there — a STRONG contract read as "STRONG,
         # limited by edge vs its error bar", which is a contradiction.
         held_back = [k for k, g in live.items() if g == worst]
-        limiting = held_back[0] if len(held_back) < len(live) else ""
+        # Name the constraint when one margin is genuinely holding the grade
+        # down — and also when only ONE margin is live, where it is trivially
+        # the constraint. Before sigma was dropped from the grade there were
+        # always two or three, so "all agree" could not coincide with "there is
+        # only one"; now it can, and staying silent there loses the explanation
+        # for no reason.
+        #
+        # Never on the top grade, though: "STRONG, limited by trading cost" is
+        # the contradiction this whole branch exists to avoid, and a lone live
+        # margin does not stop being unconstraining just because it is alone.
+        limiting = (held_back[0]
+                    if (worst != GRADES[-1]
+                        and (len(held_back) < len(live) or len(live) == 1))
+                    else "")
         return Worth(worst, sigma, friction, beh, limiting)
     except Exception:
         return Worth("UNGRADED")

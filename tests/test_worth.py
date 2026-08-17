@@ -22,24 +22,26 @@ def _row(**over):
 
 
 class SigmaGradeTest(unittest.TestCase):
-    """Edge measured in units of its own error bar."""
+    """Edge measured in units of its own error bar — REPORTED, not graded.
 
-    def test_an_edge_clearing_two_error_bars_is_strong(self):
+    These four cases pinned sigma as a grade input until 2026-08-17. It was
+    removed because the measured error bar made the check degenerate: no single
+    option trade's edge clears its vol-forecast uncertainty, so taking the
+    weakest of three margins pinned every row on every single-leg board to
+    THIN, and the two columns an operator reads first said nothing at all.
+
+    The NUMBER still varies and is what `Edge/err` renders. See
+    tests/test_worth_grades_what_varies.py.
+    """
+
+    def test_sigma_is_still_computed(self):
         w = worth.assess(_row(ev_per_contract=100.0, ev_noise=25.0))
-        self.assertEqual(w.grade, "STRONG")
         self.assertAlmostEqual(w.sigma, 4.0, places=6)
 
-    def test_an_edge_inside_one_error_bar_is_thin(self):
-        w = worth.assess(_row(ev_per_contract=9.0, ev_noise=40.0))
-        self.assertEqual(w.grade, "THIN")
-
-    def test_an_edge_between_one_and_two_bars_is_clear(self):
-        w = worth.assess(_row(ev_per_contract=45.0, ev_noise=30.0))
-        self.assertEqual(w.grade, "CLEAR")
-
-    def test_the_boundary_is_inclusive_at_two_bars(self):
-        self.assertEqual(worth.assess(_row(ev_per_contract=50.0,
-                                           ev_noise=25.0)).grade, "STRONG")
+    def test_sigma_no_longer_decides_the_grade(self):
+        big = worth.assess(_row(ev_per_contract=100.0, ev_noise=25.0))
+        tiny = worth.assess(_row(ev_per_contract=9.0, ev_noise=40.0))
+        self.assertEqual(big.grade, tiny.grade)
 
     def test_a_missing_ev_cannot_be_graded_on_sigma(self):
         w = worth.assess(_row(ev_per_contract=None, ev_noise=25.0))
@@ -56,20 +58,26 @@ class WeakestLinkTest(unittest.TestCase):
         self.assertEqual(w.grade, "THIN")
         self.assertEqual(w.limiting, "trading cost")
 
-    def test_cheap_trading_does_not_rescue_a_noisy_edge(self):
+    def test_a_noisy_edge_no_longer_drags_cheap_trading_down(self):
+        """Was: "cheap trading does not rescue a noisy edge" — sigma capped
+        the grade. It no longer does; the noise is reported as `Edge/err`
+        instead, because every option trade's edge is noisy by that measure
+        and grading on it made the badge a constant."""
         w = worth.assess(_row(ev_per_contract=5.0, ev_noise=50.0))
-        self.assertEqual(w.grade, "THIN")
-        self.assertEqual(w.limiting, "edge vs its error bar")
+        self.assertEqual(w.grade, worth._grade_friction(w.friction))
+        self.assertIsNotNone(w.sigma)
 
     def test_the_grade_is_never_better_than_any_single_margin(self):
+        """Still the weakest link — over the margins that GRADE. Sigma is
+        excluded here because it is reported rather than graded."""
         for ev, noise, bid, ask in [(100.0, 25.0, 9.90, 10.10),
                                     (45.0, 30.0, 9.90, 10.10),
                                     (9.0, 40.0, 9.90, 10.10),
                                     (1000.0, 10.0, 8.00, 12.00)]:
             w = worth.assess(_row(ev_per_contract=ev, ev_noise=noise,
                                   bid=bid, ask=ask))
-            margins = [g for g in (worth._grade_sigma(w.sigma),
-                                   worth._grade_friction(w.friction))
+            margins = [g for g in (worth._grade_friction(w.friction),
+                                   worth._grade_breakeven(w.breakeven_margin))
                        if g is not None]
             self.assertEqual(worth.GRADES.index(w.grade),
                              min(worth.GRADES.index(m) for m in margins))
@@ -88,11 +96,12 @@ class WeakestLinkTest(unittest.TestCase):
         self.assertEqual(w.limiting, "")
         self.assertNotIn("limited by", w.line())
 
-    def test_a_genuine_constraint_is_still_named(self):
+    def test_friction_alone_can_no_longer_be_out_ranked_by_sigma(self):
+        """With sigma out of the grade, a lone live margin IS the grade —
+        nothing else is left to be weaker than it."""
         w = worth.assess(_row(ev_per_contract=500.0, ev_noise=25.0,
                               bid=9.60, ask=10.40))     # 8% round trip
-        self.assertEqual(w.grade, "CLEAR")
-        self.assertIn("limited by trading cost", w.line())
+        self.assertEqual(w.grade, worth._grade_friction(w.friction))
 
 
 class BreakevenMarginTest(unittest.TestCase):
