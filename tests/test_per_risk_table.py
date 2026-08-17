@@ -420,7 +420,7 @@ class TestTheWorthColumnsAreReallyPopulated(unittest.TestCase):
         from ui_preview import df as preview_df
         from src.cli_display import _per_risk_worth
         row = preview_df().iloc[0]
-        friction, _breakeven, grade = _per_risk_worth(row)
+        friction, _breakeven, grade, _sigma = _per_risk_worth(row)
         self.assertIn(grade, ("STRONG", "CLEAR", "THIN", "UNGRADED"))
         self.assertNotEqual(grade, "", "the grader raised and was swallowed")
         self.assertIsNotNone(friction, "no round-trip cost came back")
@@ -430,7 +430,7 @@ class TestTheWorthColumnsAreReallyPopulated(unittest.TestCase):
         from ui_preview import df as preview_df
         from src.cli_display import _per_risk_worth, worth_text
         row = preview_df().iloc[0]
-        _f, _b, grade = _per_risk_worth(row)
+        _f, _b, grade, _s = _per_risk_worth(row)
         self.assertIn(grade, worth_text(row))
 
 
@@ -462,3 +462,87 @@ class TestItIsWiredToEveryAnnotatedBoard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheEdgeToErrorColumn(unittest.TestCase):
+    """A grade is too coarse to carry a continuous quantity.
+
+    Once the error bar was measured (30% of the vol level, ~7x the old
+    hand-set band) every short-premium row graded THIN — correctly, since no
+    single trade's edge clears its own vol-forecast uncertainty. But the
+    underlying ratio still ranged -0.71 to +0.95 across 65 live rows and
+    ordered them sensibly. Collapsing that into one label destroyed the only
+    per-candidate signal the operator had left, which is not honesty, it is
+    lost information. The NUMBER goes on the board beside the grade.
+
+    Display-only and deliberately NOT a sort key — ranking was disproven out
+    of sample at Wilcoxon p=0.89.
+    """
+
+    def setUp(self):
+        fmt.set_color_enabled(False)
+
+    def tearDown(self):
+        fmt._COLOR_ENABLED = None
+
+    def _row(self, **kw):
+        # Values chosen so no OTHER column renders a "0.00" substring — the
+        # n/a assertion below must test the Edge/err cell, not its neighbours.
+        r = {"symbol": "SPY", "type": "put", "strike": 700.0,
+             "capital_at_risk": 70000.0, "reward_per_risk": 0.5,
+             "net_ev_per_risk": 0.2}
+        r.update(kw)
+        return pd.DataFrame([r])
+
+    def test_the_column_exists(self):
+        self.assertIn("Edge/err", _render(self._row()))
+
+    def test_a_positive_ratio_is_shown_signed(self):
+        from src import cli_display
+        orig = cli_display._per_risk_worth
+        cli_display._per_risk_worth = lambda row: (0.01, None, "THIN", 0.95)
+        try:
+            self.assertIn("+0.95", _render(self._row()))
+        finally:
+            cli_display._per_risk_worth = orig
+
+    def test_a_negative_ratio_is_shown_too(self):
+        """An edge pointing the wrong way is the most useful thing on the row."""
+        from src import cli_display
+        orig = cli_display._per_risk_worth
+        cli_display._per_risk_worth = lambda row: (0.01, None, "THIN", -0.71)
+        try:
+            self.assertIn("-0.71", _render(self._row()))
+        finally:
+            cli_display._per_risk_worth = orig
+
+    def test_an_ungradeable_row_says_na_not_zero(self):
+        from src import cli_display
+        orig = cli_display._per_risk_worth
+        cli_display._per_risk_worth = lambda row: (None, None, "UNGRADED", None)
+        try:
+            out = _render(self._row())
+            line = [l for l in out.splitlines() if "SPY" in l][0]
+            self.assertIn("n/a", line)
+            self.assertNotIn("0.00", line)
+        finally:
+            cli_display._per_risk_worth = orig
+
+    def test_it_is_not_used_as_a_sort_key(self):
+        """The board's order is the board's. See comparison_rows."""
+        from src import cli_display
+        orig = cli_display._per_risk_worth
+        seq = iter([(0.01, None, "THIN", -0.5), (0.01, None, "THIN", 0.9)])
+        cli_display._per_risk_worth = lambda row: next(seq)
+        try:
+            df = pd.DataFrame([
+                {"symbol": "LOW", "type": "put", "strike": 1.0,
+                 "capital_at_risk": 100.0, "reward_per_risk": 0.1,
+                 "net_ev_per_risk": 0.01},
+                {"symbol": "HIGH", "type": "put", "strike": 2.0,
+                 "capital_at_risk": 100.0, "reward_per_risk": 0.1,
+                 "net_ev_per_risk": 0.01}])
+            out = _render(df)
+            self.assertLess(out.index("LOW"), out.index("HIGH"))
+        finally:
+            cli_display._per_risk_worth = orig
