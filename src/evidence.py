@@ -62,6 +62,10 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
         "wf_as_of": None,
         "cohort_ic_pearson": None,
         "cohort_ic_spearman": None,
+        "fold_ic_mean": None,
+        "fold_ic_ci_95": None,
+        "folds_ic_positive": None,
+        "n_folds": None,
     }
 
     # --- walk-forward report -------------------------------------------------
@@ -79,6 +83,15 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
             if wf.get("generated_at"):
                 ev["as_of"] = str(wf["generated_at"])
                 ev["wf_as_of"] = str(wf["generated_at"])
+            # The interval, not just the point estimate. The pooled IC and the
+            # fold mean can disagree in SIGN (-0.119 vs +0.067 on 2026-08-17),
+            # and the fold CI can straddle zero, so a banner showing only the
+            # pooled number reads as a verdict the data does not support.
+            for _k in ("fold_ic_mean", "folds_ic_positive", "n_folds"):
+                if wf.get(_k) is not None:
+                    ev[_k] = wf[_k]
+            if isinstance(wf.get("fold_ic_ci_95"), (list, tuple)):
+                ev["fold_ic_ci_95"] = list(wf["fold_ic_ci_95"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             pass
 
@@ -174,7 +187,7 @@ def format_evidence_banner(ev: Optional[Dict[str, Any]] = None,
     gate = ev.get("gate_decision", "UNKNOWN") or "UNKNOWN"
     cohort_n = ev.get("cohort_n") or 0
     line1 = (
-        f"Ranking model: EXPERIMENTAL — {oos} | "
+        f"Ranking model: EXPERIMENTAL — {oos}{_fold_interval_segment(ev)} | "
         f"gate: {gate} (n={cohort_n}/{GATE_TARGET_N})"
     )
 
@@ -185,6 +198,37 @@ def format_evidence_banner(ev: Optional[Dict[str, Any]] = None,
     if not line2_parts:
         return line1
     return line1 + "\n" + " | ".join(line2_parts)
+
+
+def _fold_interval_segment(ev: Dict[str, Any]) -> str:
+    """The fold-level estimate and its 95% interval, and whether that interval
+    contains zero.
+
+    The pooled IC is one number and reads as a verdict. On 2026-08-17 it was
+    -0.119 while the fold mean was +0.067 with a 95% CI of [-0.099, +0.239] and
+    11 of 18 folds positive — i.e. the two estimators disagreed on SIGN and the
+    interval straddled zero. Showing only the pooled figure told the operator
+    the ranking model was mildly anti-predictive when the honest statement is
+    that it is not distinguishable from zero.
+
+    "Not distinguishable" is read off the interval containing zero, not from a
+    threshold anybody picked. Absent or malformed intervals render nothing, so
+    artifacts written before these fields existed still produce a banner.
+    """
+    ci = ev.get("fold_ic_ci_95")
+    mean = _num(ev.get("fold_ic_mean"))
+    if mean is None or not isinstance(ci, (list, tuple)) or len(ci) != 2:
+        return ""
+    lo, hi = _num(ci[0]), _num(ci[1])
+    if lo is None or hi is None:
+        return ""
+    seg = f", folds {mean:+.2f} [95% CI {lo:+.2f}..{hi:+.2f}]"
+    pos, n_f = ev.get("folds_ic_positive"), ev.get("n_folds")
+    if pos is not None and n_f:
+        seg += f", {pos}/{n_f} positive"
+    if lo <= 0.0 <= hi:
+        seg += " — NOT distinguishable from zero"
+    return seg
 
 
 def _walk_forward_age_days(wf_as_of: Optional[str], today: Optional[date] = None) -> Optional[int]:
