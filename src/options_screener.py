@@ -1671,13 +1671,32 @@ def calculate_metrics(
     _commission = float(config.get("paper_trading", {}).get("commission_per_contract", FALLBACK_COMMISSION_PER_CONTRACT))
     _spread_arr = df["spread_pct"].fillna(0.0).values
     _gross_edge = hv_payoff - prem_vals
-    df["ev_gross_per_contract"] = 100.0 * _gross_edge
+    # The INSTRUMENT's edge: fair value minus what the market charges, which is
+    # the edge to a BUYER. Kept under its own name because multi-leg netting
+    # (`spread_scoring._apply_structure_ev`) applies the side itself and must
+    # never be handed a number that has already been signed.
+    df["ev_gross_instrument_per_contract"] = 100.0 * _gross_edge
     df["ev_cost_per_contract"] = (100.0 * prem_vals * _spread_arr) + (2.0 * _commission)
-    df["ev_per_contract"] = _net_ev(_gross_edge, prem_vals, _spread_arr,
-                                    commission_per_contract=_commission)
+
+    # ...and the POSITION's. A short-premium scan SELLS these contracts, so it
+    # earns the opposite edge while paying the same cost — costs never flip.
+    # Until 2026-08-17 the level below was the instrument's on every board, so
+    # a Premium Selling scan reported positive EV for selling options that were
+    # cheap against realized vol, and the `negative_ev` gate refused the rich
+    # ones actually worth selling. `calculate_scores` had negated the value for
+    # the composite RANK since it was written; the level never got the memo.
+    from .trade_analysis import strategy_label_for_mode as _strat_label
+    from .utils import is_short_position as _is_short_pos
+    _short_mask = np.array(
+        [bool(_is_short_pos(_strat_label(mode, t)))
+         for t in df["type"].fillna("").tolist()], dtype=bool)
+    _pos_gross = np.where(_short_mask, -1.0, 1.0) * (100.0 * _gross_edge)
+    df["ev_gross_per_contract"] = _pos_gross
+    df["ev_per_contract"] = _pos_gross - df["ev_cost_per_contract"].values
     # Null out EV where HV was missing (IV fallback produces meaningless ~0 values)
     df["ev_hv_fallback"] = _hv_fallback_mask
     df.loc[_hv_fallback_mask, "ev_per_contract"] = np.nan
+    df.loc[_hv_fallback_mask, "ev_gross_instrument_per_contract"] = np.nan
 
     # ...and where realized and implied vol are too far apart to both describe
     # one market. A stale earnings gap leaves realized far above implied and
@@ -1689,6 +1708,7 @@ def calculate_metrics(
         _bad_gap(_hv_raw.values, df["impliedVolatility"].values), index=df.index)
     df["ev_vol_gap_refused"] = _gap_mask
     df.loc[_gap_mask, "ev_per_contract"] = np.nan
+    df.loc[_gap_mask, "ev_gross_instrument_per_contract"] = np.nan
 
     # The error bar the EV is judged against, carried on the row rather than
     # recomputed by each consumer. `decide_verdict`, the pick_ranking EV gate,
@@ -2045,9 +2065,13 @@ def calculate_scores(
     rr_raw = pd.to_numeric(df["rr_ratio"], errors='coerce').fillna(0.0)
     # Smooth linear mapping [0.5 → 0, 4.0 → 1] instead of hard step thresholds
     rr_score = np.clip((rr_raw - 0.5) / 3.5, 0.0, 1.0)
+    # `ev_per_contract` is ALREADY the position's EV — see
+    # `trade_analysis.position_ev_per_contract`. This used to negate it for
+    # Premium Selling because the level was the instrument's, and that negation
+    # flipped the COST along with the edge, crediting the seller the spread
+    # they actually pay. Ranking the signed level directly is correct and
+    # leaves one fewer place for the two to disagree.
     _ev_for_rank = df["ev_per_contract"].copy()
-    if mode == "Premium Selling":
-        _ev_for_rank = -_ev_for_rank  # seller's edge = prem_vals - hv_payoff
     ev_score = rank_norm(_ev_for_rank.fillna(_ev_for_rank.median()))
     # Blend ev_score with ev_earnings_score for earnings plays (Improvement 6)
     if "ev_earnings" in df.columns and "Earnings Play" in df.columns:
