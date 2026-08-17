@@ -111,9 +111,22 @@ class RiskAggregator:
     # ------------------------------------------------------------------
 
     def _load_open_trades(self) -> List[Dict]:
-        """Load all OPEN trades from the paper trades database."""
+        """Load all OPEN trades from the paper trades database.
+
+        READ-ONLY, and the URI matters. A plain `sqlite3.connect` opens the
+        file writable, and SQLite rewrites the header on a writable open even
+        when nothing changes — so a scan, which only ever reads here, altered
+        `paper_trades.db`'s checksum while leaving every row and status
+        identical. Traced 2026-08-17: one writable open per scan against three
+        read-only ones elsewhere on the same path.
+
+        A read-only URI also fails loudly on a missing file instead of
+        CREATING an empty one, which is the same reason `phase1_checkpoint`
+        and `candidate_verdict` use it.
+        """
         try:
-            with closing(sqlite3.connect(self.db_path)) as conn:
+            with closing(sqlite3.connect(f"file:{self.db_path}?mode=ro",
+                                         uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT * FROM trades WHERE status='OPEN'"

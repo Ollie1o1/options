@@ -102,3 +102,45 @@ class TestItIsWiredIn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAScanNeverOpensTheLedgerWritable(unittest.TestCase):
+    """A scan reads the book; it must not hold a write handle on it.
+
+    `RiskAggregator._load_open_trades` ran `sqlite3.connect(self.db_path)` — a
+    READ-WRITE open — to run a single SELECT. SQLite rewrites the file header
+    on a read-write open even when nothing changes, so a plain `run_scan`
+    altered `paper_trades.db`'s checksum while leaving all 999 rows and every
+    status identical. Traced 2026-08-17: one read-write open per scan against
+    three read-only ones.
+
+    Harmless in itself, and it defeats the property the whole session leaned
+    on — that a scan cannot touch the book — and leaves a write handle open on
+    production data during an operation that has no business holding one.
+    """
+
+    def test_the_open_trades_reader_is_read_only(self):
+        with open(repo_path("src/portfolio_risk.py")) as fh:
+            src = fh.read()
+        i = src.index("def _load_open_trades(")
+        body = src[i:src.index("\n    def ", i + 10)]
+        self.assertIn("mode=ro", body,
+                      "the scan path holds a WRITE handle on the real ledger")
+
+    def test_it_still_reads_open_trades(self):
+        import os
+        import sqlite3
+        import tempfile
+        from src.portfolio_risk import RiskAggregator
+        path = os.path.join(tempfile.mkdtemp(), "t.db")
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE trades (ticker TEXT, status TEXT)")
+        conn.executemany("INSERT INTO trades VALUES (?,?)",
+                         [("SPY", "OPEN"), ("QQQ", "CLOSED"), ("F", "OPEN")])
+        conn.commit(); conn.close()
+        rows = RiskAggregator(db_path=path)._load_open_trades()
+        self.assertEqual(sorted(r["ticker"] for r in rows), ["F", "SPY"])
+
+    def test_a_missing_ledger_is_survivable(self):
+        from src.portfolio_risk import RiskAggregator
+        self.assertEqual(RiskAggregator(db_path="/nonexistent/none.db")._load_open_trades(), [])
