@@ -581,11 +581,40 @@ def structure_strategy_name(row) -> str:
     Condors carry a `total_credit`; verticals are named by their short leg's
     type. `candidate_verdict._legs_of` reads the leg layout off this name, so
     it has to be set before a structure can be priced.
+
+    This tested `type == "call"` and therefore returned "Bull Put" for
+    EVERYTHING: `find_credit_spreads` writes `type` as the strategy name
+    itself — literally "Bull Put" (:3228) and "Bear Call" (:3286) — so the
+    comparison never matched. Bear calls were priced with the legs on the
+    wrong side, and the auto-log allowlist was asked about "Bull Put" when the
+    candidate was a bear call, which is the family measured at -7.4pp against
+    its own managed breakeven. The ledger was never affected: `log_spread`
+    derives the stored `strategy_name` from `type` directly and never calls
+    this.
+
+    Substring rather than equality, so both the strategy names the scanner
+    writes today and the bare "call"/"put" the old comparison expected keep
+    working — a fix that trades one blind spot for another is not a fix.
     """
     _keys = row.index if hasattr(row, "index") else row.keys()
     if ("total_credit" in _keys) and not pd.isna(row.get("total_credit")):
         return "Iron Condor"
-    return "Bear Call" if str(row.get("type", "")).strip().lower() == "call" else "Bull Put"
+    _type = str(row.get("type", "")).strip().lower()
+    if "put" in _type:
+        return "Bull Put"
+    if "call" in _type:
+        return "Bear Call"
+    # Unlabelled: the geometry is unambiguous for a CREDIT vertical. The short
+    # leg of a call spread sits BELOW its long leg; the short leg of a put
+    # spread sits above it.
+    try:
+        _short = float(row.get("short_strike"))
+        _long = float(row.get("long_strike"))
+        if _short == _short and _long == _long:  # not NaN
+            return "Bear Call" if _short < _long else "Bull Put"
+    except (TypeError, ValueError):
+        pass
+    return "Bull Put"
 
 
 def rank_structures_by_verdict(df):
