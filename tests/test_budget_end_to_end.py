@@ -7,7 +7,11 @@ edit: the refusal block must stay visible, and the board must not be re-sorted.
 """
 from __future__ import annotations
 
+import io
 import json
+import os
+import contextlib
+import tempfile
 import unittest
 
 import pandas as pd
@@ -102,6 +106,146 @@ class TestTheBoardIsNarrowedNeverReordered(unittest.TestCase):
                                                           r.get("type")),
             1_000_000.0, verbose=False)
         self.assertEqual(len(out), 0)
+
+
+class TestTheSpreadLedgerIsBudgetGatedToo(unittest.TestCase):
+    """A multi-leg entry must obey the session budget, not just a single leg.
+
+    `within_budget` appears exactly once in `paper_manager`, inside
+    `log_trade` — which reads as though spreads and condors were never gated.
+    They are: `log_spread` and `log_iron_condor` both end in
+    `return self.log_trade(trade_dict)`, and both set `max_loss_usd`, so the
+    gate sees a real worst case. These tests pin that routing, because a
+    future refactor that stopped funnelling through `log_trade` would remove
+    the gate silently and the board would be the only thing still filtering.
+
+    Never touches the real book — every ledger here is a tempfile.
+    """
+
+    def _pm(self, tmpdir):
+        from src.paper_manager import PaperManager
+        return PaperManager(os.path.join(tmpdir, "ledger.db"))
+
+    def _spread(self, **kw):
+        d = {"date": "2026-08-16", "ticker": "SPY", "expiration": "2026-09-18",
+             "short_strike": 600.0, "long_strike": 500.0, "type": "Bull Put",
+             "net_credit": 5.0, "max_profit": 500.0, "max_loss": 9500.0}
+        d.update(kw)
+        return d
+
+    def _condor(self, **kw):
+        d = {"date": "2026-08-16", "ticker": "SPY", "expiration": "2026-09-18",
+             "short_put_strike": 600.0, "long_put_strike": 500.0,
+             "short_call_strike": 700.0, "long_call_strike": 800.0,
+             "total_credit": 5.0, "max_profit": 500.0, "max_risk": 9500.0}
+        d.update(kw)
+        return d
+
+    def _log(self, method_name, payload):
+        """Returns (inserted, refusals, printed output)."""
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pm = self._pm(tmpdir)
+            with contextlib.redirect_stdout(buf):
+                inserted = getattr(pm, method_name)(payload)
+            return inserted, pm.unaffordable_rejected, buf.getvalue()
+
+    def test_a_spread_over_the_session_budget_is_refused_out_loud(self):
+        inserted, refused, out = self._log(
+            "log_spread", self._spread(budget_at_entry=400.0))
+        self.assertFalse(inserted)
+        self.assertEqual(refused, 1)
+        self.assertIn("$400", out)
+        self.assertIn("capital at risk", out)
+
+    def test_a_spread_under_the_session_budget_is_accepted(self):
+        inserted, refused, _ = self._log(
+            "log_spread", self._spread(budget_at_entry=10_000.0))
+        self.assertTrue(inserted)
+        self.assertEqual(refused, 0)
+
+    def test_a_condor_over_the_session_budget_is_refused_out_loud(self):
+        inserted, refused, out = self._log(
+            "log_iron_condor", self._condor(budget_at_entry=400.0))
+        self.assertFalse(inserted)
+        self.assertEqual(refused, 1)
+        self.assertIn("$400", out)
+
+    def test_a_condor_under_the_session_budget_is_accepted(self):
+        inserted, refused, _ = self._log(
+            "log_iron_condor", self._condor(budget_at_entry=10_000.0))
+        self.assertTrue(inserted)
+        self.assertEqual(refused, 0)
+
+    def test_an_absent_key_falls_back_to_the_config_cap(self):
+        """No key = no prompt was ever answered = the scheduler's number."""
+        from src.paper_manager import PaperManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cap = PaperManager(os.path.join(tmpdir, "probe.db"))._max_capital_at_risk
+        self.assertEqual(cap, 4000.0, "config cap moved; this test's premise did")
+        # $9,500 of risk is over the $4,000 config cap, and no key is present.
+        inserted, refused, out = self._log("log_spread", self._spread())
+        self.assertFalse(inserted)
+        self.assertEqual(refused, 1)
+        self.assertIn("$4,000", out)
+        # ...and the same payload under an explicit "no limit" goes in.
+        inserted, refused, _ = self._log(
+            "log_spread", self._spread(budget_at_entry=None))
+        self.assertTrue(inserted)
+        self.assertEqual(refused, 0)
+
+    def test_allow_unaffordable_is_still_an_escape_hatch(self):
+        inserted, refused, _ = self._log(
+            "log_spread",
+            self._spread(budget_at_entry=400.0, allow_unaffordable=True))
+        self.assertTrue(inserted)
+        self.assertEqual(refused, 0)
+
+    def test_a_spread_with_no_bounded_loss_never_passes_a_budget(self):
+        payload = self._spread(budget_at_entry=400.0)
+        payload.pop("max_loss")
+        inserted, refused, out = self._log("log_spread", payload)
+        self.assertFalse(inserted)
+        self.assertEqual(refused, 1)
+        self.assertIn("unbounded", out)
+
+
+class TestEveryModeThatShouldPromptDoes(unittest.TestCase):
+    """DISCOVER, MY LIST, TICKER, SELL, SPREADS and IRON all ask.
+
+    MY LIST and TICKER were missed the first time: `elif is_my_list_mode`
+    catches MY LIST before the branch that asked, and `elif is_ticker_mode`
+    sits after it. The prompt is now a single call keyed off the mode flags,
+    so this pins both the coverage and the fact that there is only ONE call
+    site — two would let a mode be asked twice in one scan.
+    """
+
+    def _source(self):
+        with open(repo_path("src/options_screener.py")) as fh:
+            return fh.read()
+
+    def test_the_prompt_has_exactly_one_call_site(self):
+        src = self._source()
+        self.assertEqual(
+            src.count("session_budget = prompt_for_budget()"), 1,
+            "more than one prompt call site — a mode could be asked twice")
+
+    def test_the_gate_names_every_mode_the_spec_requires(self):
+        src = self._source()
+        start = src.index("session_budget = prompt_for_budget()")
+        # The `if` guarding the single call site, immediately above it.
+        guard = src[src.rindex("if (", 0, start):start]
+        for flag in ("is_discovery_mode", "is_my_list_mode", "is_ticker_mode",
+                     "is_premium_selling_mode", "is_credit_spread_mode",
+                     "is_iron_condor_mode"):
+            self.assertIn(flag, guard, f"{flag} cannot reach the budget prompt")
+
+    def test_the_budget_scan_mode_is_not_swept_in(self):
+        """`ALL` already asks a per-CONTRACT budget — a different quantity."""
+        src = self._source()
+        start = src.index("session_budget = prompt_for_budget()")
+        guard = src[src.rindex("if (", 0, start):start]
+        self.assertNotIn("is_budget_mode", guard)
 
 
 class TestConfigNoteIsNarrowed(unittest.TestCase):

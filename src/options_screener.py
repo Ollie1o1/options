@@ -6102,9 +6102,6 @@ def main():
         elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
             tickers = prompt_for_tickers()
             print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
-            session_budget = prompt_for_budget()
-            if session_budget is not None:
-                print(f"Budget: ${session_budget:,.0f} capital at risk per position")
         elif is_budget_mode:
             try:
                 budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
@@ -6132,7 +6129,26 @@ def main():
                 print("Please enter a valid alphanumeric ticker.")
                 sys.exit(1)
             tickers = [symbol_input]
-    
+
+        # ── Per-scan budget ──────────────────────────────────────────────────
+        # ONE call, after the ticker source is settled, keyed off the MODE
+        # rather than off whichever branch above happened to resolve the
+        # tickers. Asking inside those branches is what left MY LIST and
+        # TICKER without a prompt: `elif is_my_list_mode` catches MY LIST
+        # before the discovery branch, and `elif is_ticker_mode` sits after
+        # it. Because there is exactly one call site, no mode can be prompted
+        # twice however the branches are later rearranged.
+        #
+        # Excluded on purpose: the Budget scan (ALL) already asked for a
+        # per-CONTRACT budget, which is a different quantity; the Lottery and
+        # Squeeze sleeves are display/tracking boards, not sized entries.
+        if (is_discovery_mode or is_my_list_mode or is_ticker_mode
+                or is_premium_selling_mode or is_credit_spread_mode
+                or is_iron_condor_mode):
+            session_budget = prompt_for_budget()
+            if session_budget is not None:
+                print(f"Budget: ${session_budget:,.0f} capital at risk per position")
+
         logger = setup_logging()
         print("\nFetching market context (SPY/VIX)...")
         market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
@@ -6905,7 +6921,15 @@ def main():
                                                 "net_credit": row["net_credit"],
                                                 "max_profit": row.get("max_profit", 0),
                                                 "max_loss": row.get("max_loss", 0),
-                                                "quality_score": row.get("quality_score", 0.5)
+                                                "quality_score": row.get("quality_score", 0.5),
+                                                # log_spread routes through
+                                                # log_trade, so the budget gate
+                                                # already applies here — but
+                                                # without this key it applied at
+                                                # CONFIG's $4,000, silently
+                                                # logging spreads the board hid
+                                                # at a smaller session budget.
+                                                "budget_at_entry": session_budget,
                                             })
                                         elif "total_credit" in row:
                                             # Iron Condor — persist all four legs so the
@@ -6925,6 +6949,8 @@ def main():
                                                 "max_risk":   row.get("max_risk", 0),
                                                 "net_delta":  row.get("net_delta"),
                                                 "quality_score": row.get("quality_score", 0.5),
+                                                # See the spread path above.
+                                                "budget_at_entry": session_budget,
                                             })
                                         else:
                                             # It's a single option
