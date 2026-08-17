@@ -209,6 +209,77 @@ def rank(rows: Sequence[Dict[str, Any]],
 
 
 @lru_cache(maxsize=8)
+def required_win_rates_from_ledger(db_path: str = "paper_trades.db",
+                                   min_n: int = 20) -> Dict[str, float]:
+    """The win rate each structure MUST clear, given how it actually closes.
+
+        p* = mean_loss / (mean_loss + mean_win)
+
+    over CLOSED trades, both legs in percent of capital at risk. This is the
+    MANAGED rate: the trades it is measured on were themselves managed by the
+    configured exits (take_profit 0.5, stop_loss -0.25, time exit 21 DTE), so
+    the number already carries whatever those rules do to the tails.
+
+    It replaces `1 - credit/width` as the benchmark the WORTH margin is judged
+    against. That formula is the HOLD-TO-EXPIRY rate, which this repo ruled
+    against on 2026-08-13, and it is only computable for rows carrying a
+    `spread_width` — which is why every single-leg board showed `n/a`.
+
+    Extending the hold-to-expiry formula to single legs instead is the obvious
+    move and is wrong: a cash-secured put's risk is its collateral and its
+    reward is its credit, giving p* = 98.7-99.0%. Arithmetically correct, and
+    the right answer to the wrong question, because it assumes the put is
+    ridden to total loss.
+
+    Reproduces the recorded figures exactly: Bull Put 50.9% needed against
+    66.4% delivered (+15.6pp), Bear Call -7.4pp, Iron Condor -10.4pp.
+
+    Structures with fewer than `min_n` closed trades are omitted, and so are
+    those with no losers or no winners — the ratio is undefined there and a
+    number driven by one side is worse than an absent one. Same discipline as
+    `win_rates_from_ledger`.
+
+    NOT for the refusal gate. This is per-STRATEGY, so gating on it refuses
+    whole families rather than individual candidates.
+    """
+    import sqlite3
+    out: Dict[str, float] = {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return out
+    try:
+        rows = conn.execute(
+            "SELECT strategy_name, pnl_pct FROM trades "
+            "WHERE status='CLOSED' AND pnl_pct IS NOT NULL "
+            "AND strategy_name IS NOT NULL").fetchall()
+    except sqlite3.Error:
+        return out
+    finally:
+        conn.close()
+
+    buckets: Dict[str, list] = {}
+    for name, pnl in rows:
+        try:
+            buckets.setdefault(str(name), []).append(float(pnl))
+        except (TypeError, ValueError):
+            continue
+    for name, vals in buckets.items():
+        if len(vals) < min_n:
+            continue
+        wins = [v for v in vals if v > 0]
+        losses = [-v for v in vals if v <= 0]   # a scratch is not a win
+        if not wins or not losses:
+            continue
+        mean_win = sum(wins) / len(wins)
+        mean_loss = sum(losses) / len(losses)
+        if mean_win + mean_loss <= 0:
+            continue
+        out[name] = mean_loss / (mean_loss + mean_win)
+    return out
+
+
+@lru_cache(maxsize=8)
 def win_rates_from_ledger(db_path: str = "paper_trades.db",
                           since: Optional[str] = None,
                           min_n: int = 20) -> Dict[str, float]:
