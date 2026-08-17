@@ -194,8 +194,15 @@ def _apply_structure_ev(row_out: dict, sold: list, bought: list) -> None:
             row_out[col] = None
         return
 
-    gross_sold = [_finite(leg.get("ev_gross_per_contract")) for leg in sold]
-    gross_bought = [_finite(leg.get("ev_gross_per_contract")) for leg in bought]
+    # The INSTRUMENT's edge, never the position-signed one: this function
+    # applies the side itself. Falls back for frames written before the two
+    # were separated.
+    def _leg_gross(leg):
+        v = _finite(leg.get("ev_gross_instrument_per_contract"))
+        return v if v is not None else _finite(leg.get("ev_gross_per_contract"))
+
+    gross_sold = [_leg_gross(leg) for leg in sold]
+    gross_bought = [_leg_gross(leg) for leg in bought]
     costs = [_finite(leg.get("ev_cost_per_contract")) for leg in legs]
     if any(v is None for v in gross_sold + gross_bought + costs):
         for col in _EV_LEVEL_COLS:

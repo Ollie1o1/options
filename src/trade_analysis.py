@@ -57,6 +57,45 @@ def net_ev_per_contract(gross_edge_per_share, premium, spread_pct,
     return gross - spread_cost - commission
 
 
+def position_ev_per_contract(gross_instrument_per_contract, cost_per_contract,
+                             is_short: bool):
+    """(gross, net) for the POSITION, from the INSTRUMENT's buyer-side edge.
+
+    Every contract is priced here as `fair_value - market_price`, which is the
+    edge to a BUYER. A seller earns the opposite of that edge — and pays the
+    SAME cost, because you cross the spread whichever way you are facing:
+
+        buyer:  net =  gross - cost
+        seller: net = -gross - cost
+
+    Negating the buyer's NET instead (`-(gross - cost)`) is the tempting
+    one-liner and it is wrong: it flips the cost too, paying the seller the
+    spread they actually pay. Same principle as a multi-leg structure, where
+    the edges net and the costs add.
+
+    This mattered. On 2026-08-17 every short put on the Premium Selling board
+    had IV BELOW realized vol — cheap, good to buy, bad to sell — and the board
+    reported positive EV for selling, while the `negative_ev` gate refused the
+    RICH ones that were actually worth selling. `calculate_scores` had known
+    since it was written, flipping the sign for the composite RANK with the
+    comment "seller's edge = prem_vals - hv_payoff", but the level itself was
+    never flipped, so one frame carried two numbers describing opposite
+    positions.
+
+    Returns (None, None) when either input is absent or non-finite: an EV built
+    on a missing basis is absent, never zero.
+    """
+    try:
+        gross = float(gross_instrument_per_contract)
+        cost = float(cost_per_contract)
+    except (TypeError, ValueError):
+        return (None, None)
+    if gross != gross or cost != cost:      # NaN
+        return (None, None)
+    signed = -gross if is_short else gross
+    return (signed, signed - cost)
+
+
 def generate_trade_thesis(row: pd.Series) -> str:
     """
     Generate a concise trade thesis explaining why this option is recommended.
