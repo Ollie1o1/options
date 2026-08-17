@@ -49,7 +49,8 @@ from src import gate_extensions
 # Re-exported: the definition moved to `ledger_filters` so every cohort query in
 # the project shares one answer to "is this row evidence". Importers here keep
 # working.
-from src.ledger_filters import exclude_ruled_duplicates  # noqa: E402,F401
+from src.ledger_filters import (budget_ceiling_sql,  # noqa: E402,F401
+                                exclude_ruled_duplicates)
 
 
 def _ro_uri(db_path: str) -> str:
@@ -79,6 +80,12 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
     With ``max_capital_at_risk`` set, restricts to trades the account could
     actually have opened. Rows with NULL capital_at_risk are excluded from that
     subset rather than assumed affordable — unbounded risk is not small risk.
+
+    Each trade is measured against the budget that governed IT — see
+    ``budget_ceiling_sql``. ``max_capital_at_risk`` is the ceiling for rows
+    logged when no budget was in force, not a ceiling over the whole cohort,
+    so a trade taken under a chosen $10,000 budget stays inside its own budget
+    instead of dropping out against the caller's $4,000.
     """
     sql = (
         "SELECT quality_score, pnl_pct, date FROM trades "
@@ -88,9 +95,6 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
         "AND quality_score IS NOT NULL AND pnl_pct IS NOT NULL"
     )
     params: tuple = (phase1_start,)
-    if max_capital_at_risk is not None:
-        sql += " AND capital_at_risk IS NOT NULL AND capital_at_risk <= ?"
-        params = (phase1_start, float(max_capital_at_risk))
     scores, returns, dates = [], [], []
     # Read-only: a diagnostic must not create, migrate or write-lock the ledger
     # it reports on. Same idiom as short_premium_gate.
@@ -105,6 +109,10 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
     # missing ledger as a ledger with no evidence, which is the same conflation
     # the score_adjustments NULL convention exists to avoid.
     with sqlite3.connect(_ro_uri(db_path), uri=True) as conn:
+        if max_capital_at_risk is not None:
+            sql += (" AND capital_at_risk IS NOT NULL AND capital_at_risk <= "
+                    + budget_ceiling_sql(conn))
+            params = (phase1_start, float(max_capital_at_risk))
         sql += exclude_ruled_duplicates(conn)
         for q, p, d in conn.execute(sql, params).fetchall():
             try:
@@ -272,12 +280,14 @@ def _load_short_premium_cohort(db_path: str, phase1_start: str,
         "AND capital_at_risk IS NOT NULL AND capital_at_risk > 0"
     )
     params: list = [*SHORT_PREMIUM_STRATEGIES, phase1_start]
-    if max_capital_at_risk is not None:
-        sql += " AND capital_at_risk <= ?"
-        params.append(float(max_capital_at_risk))
     rows: list = []
     try:
         with sqlite3.connect(_ro_uri(db_path), uri=True) as conn:
+            # Same ceiling rule as `_load_cohort`. One ledger must not give
+            # two answers about what "inside the budget" means.
+            if max_capital_at_risk is not None:
+                sql += " AND capital_at_risk <= " + budget_ceiling_sql(conn)
+                params.append(float(max_capital_at_risk))
             fetched = conn.execute(sql, params).fetchall()
     except sqlite3.Error:
         return []

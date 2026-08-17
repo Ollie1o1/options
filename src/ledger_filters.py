@@ -37,3 +37,38 @@ def exclude_ruled_duplicates(conn: sqlite3.Connection) -> str:
     except sqlite3.Error:
         return ""
     return " AND duplicate_of IS NULL" if "duplicate_of" in cols else ""
+
+
+def budget_ceiling_sql(conn: sqlite3.Connection) -> str:
+    """SQL for the ceiling a trade's capital at risk must respect.
+
+    Returns a fragment ending in one `?` placeholder, to be bound with the
+    CALLER's ceiling:
+
+        "COALESCE(budget_at_entry, ?)"   on a v22+ ledger
+        "?"                              on anything older
+
+    `budget_at_entry` is the budget that governed a trade AT ENTRY, and until
+    this existed nothing read it — both cohorts compared against the caller's
+    single ceiling, so a trade logged under a chosen $10,000 budget dropped out
+    of the "inside budget" subset although it was inside its own.
+
+    COALESCE rather than a bare `budget_at_entry` comparison, and the
+    difference was measured on the live book before choosing. NULL means "no
+    limit was in force" — the pre-2026-07-29 unbounded-feeder era — so reading
+    NULL as "inside its budget" would admit the $27k and $83k positions the cap
+    exists to exclude wherever they were also small. Requiring the column to be
+    non-null instead cut the reported Long Call subset from 130 to 31, because
+    101 of the 132 cohort rows predate the cap. Falling back to the caller's
+    ceiling reproduces 130 exactly: nothing changes on today's data, and a
+    per-trade budget is honoured the moment one differs.
+
+    Probed rather than assumed, so hand-built fixtures and any ledger written
+    before schema v22 still read — the same idiom, and the same reason, as
+    `exclude_ruled_duplicates` and `duplicate_of`.
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+    except sqlite3.Error:
+        return "?"
+    return "COALESCE(budget_at_entry, ?)" if "budget_at_entry" in cols else "?"
