@@ -149,6 +149,79 @@ def _weighted_score(row: dict, feature_to_col: Dict[str, str], weights: Dict[str
     return float(np.clip(weighted_sum / weight_total, 0.0, 1.0))
 
 
+# EV levels that describe the STRUCTURE, not one of its legs.
+_EV_LEVEL_COLS = ("ev_gross_per_contract", "ev_cost_per_contract",
+                  "ev_per_contract", "ev_noise")
+
+
+def _finite(value) -> Optional[float]:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if np.isnan(f) or np.isinf(f) else f
+
+
+def _apply_structure_ev(row_out: dict, sold: list, bought: list) -> None:
+    """Overwrite the dollar EV levels with the multi-leg structure's own.
+
+    The per-leg `ev_gross_per_contract` is the edge to a BUYER of that leg
+    (Black-Scholes fair value on REALIZED vol, minus what the market charges,
+    x100). You are long every leg in `bought` and short every leg in `sold`, so
+
+        gross = sum(g for bought) - sum(g for sold)
+
+    Costs never net: every leg is crossed to open AND to close, so they add.
+
+    This exists because the caller copies `_SHORT_LEG_SCORE_COLS` off the short
+    leg (verticals) or averages it across four legs (condors). That is right
+    for the 0-1 component RANKS and wrong for dollars — a naked short option's
+    EV is a different instrument's number, and the average of four legs' edges
+    is nobody's. Observed live: QQQ 744/745 and 744/746, different widths and
+    different max profits, both reported ev_per_contract 126.53 because both
+    shared short strike 744; `EV/$risk` then printed +1.065 against a maximum
+    reward of 0.587, an expected value nearly double the best possible outcome.
+
+    Every level goes ABSENT if any leg is missing or non-finite. The single-leg
+    path nulls its EV when the HV basis is missing rather than substituting
+    zero, and a structure priced off a leg that refused to price is the same
+    claim. NULL means not answerable; 0 would mean "answered, and the edge is
+    nothing".
+    """
+    legs = list(sold) + list(bought)
+    if not legs or any(leg is None for leg in legs):
+        for col in _EV_LEVEL_COLS:
+            row_out[col] = None
+        return
+
+    gross_sold = [_finite(leg.get("ev_gross_per_contract")) for leg in sold]
+    gross_bought = [_finite(leg.get("ev_gross_per_contract")) for leg in bought]
+    costs = [_finite(leg.get("ev_cost_per_contract")) for leg in legs]
+    if any(v is None for v in gross_sold + gross_bought + costs):
+        for col in _EV_LEVEL_COLS:
+            row_out[col] = None
+        return
+
+    gross = float(sum(gross_bought) - sum(gross_sold))
+    cost = float(sum(costs))
+    row_out["ev_gross_per_contract"] = gross
+    row_out["ev_cost_per_contract"] = cost
+    row_out["ev_per_contract"] = gross - cost
+
+    # One implementation of the error bar, fed the STRUCTURE's numbers. The
+    # copied value was the short leg's, whose vega is larger than the spread's
+    # net vega, so it overstated the band and graded every structure harsher
+    # than its own arithmetic warranted.
+    try:
+        from .tearsheet.collect import ev_noise as _ev_noise
+        row_out["ev_noise"] = _ev_noise({
+            "ev_cost_per_contract": cost,
+            "iv_confidence": row_out.get("iv_confidence"),
+        })
+    except Exception:
+        row_out["ev_noise"] = None
+
+
 def enrich_credit_spreads(
     spreads_df: pd.DataFrame,
     df_scored: pd.DataFrame,
@@ -179,6 +252,9 @@ def enrich_credit_spreads(
         for src_col, dst_col in _GREEK_COL_MAP.items():
             if src_col in df_scored.columns:
                 row_out[dst_col] = short_leg.get(src_col)
+
+        # ...but the dollar EV levels are the SPREAD's, not the short leg's.
+        _apply_structure_ev(row_out, sold=[short_leg], bought=[long_leg])
 
         # Spread-specific structural features
         spread_width = abs(float(spread["short_strike"]) - float(spread["long_strike"]))
@@ -262,6 +338,10 @@ def enrich_iron_condors(
             vals = [_safe_score(leg.get(col)) for leg in legs]
             vals = [v for v in vals if v is not None]
             row_out[col] = float(np.mean(vals)) if vals else None
+
+        # ...except the dollar EV levels, where a MEAN of four legs' edges is
+        # nobody's edge. Netting gives the condor's own.
+        _apply_structure_ev(row_out, sold=[sp, sc], bought=[lp, lc])
 
         # Greeks taken from short-put leg (canonical entry leg).
         for src_col, dst_col in _GREEK_COL_MAP.items():
