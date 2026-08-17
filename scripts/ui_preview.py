@@ -131,6 +131,41 @@ def preview_tearsheet():
     print("  open with: open {}".format(out))
 
 
+def preview_per_risk():
+    """The per-dollar-of-risk table, on a board that spans two size regimes.
+
+    The point of the surface is that a $1,082 cash-secured put and a $34,800
+    one become comparable, so the preview deliberately mixes sizes rather than
+    reusing the uniform `df()` fixture.
+    """
+    from src import options_screener as osc
+
+    board = pd.DataFrame([
+        {"symbol": "AVGO", "type": "put", "strike": 350.0, "premium": 2.00,
+         "ask": 2.00, "bid": 1.90, "ev_per_contract": 60.0,
+         "expiration": "2026-09-18", "T_years": 0.088,
+         "impliedVolatility": 0.32, "delta": -0.25, "vega": 0.30},
+        {"symbol": "F", "type": "put", "strike": 11.0, "premium": 0.18,
+         "ask": 0.18, "bid": 0.16, "ev_per_contract": 4.0,
+         "expiration": "2026-09-18", "T_years": 0.088,
+         "impliedVolatility": 0.35, "delta": -0.24, "vega": 0.02},
+        {"symbol": "SPY", "type": "put", "strike": 600.0, "premium": 4.10,
+         "ask": 4.10, "bid": 3.95, "ev_per_contract": 95.0,
+         "expiration": "2026-09-18", "T_years": 0.088,
+         "impliedVolatility": 0.18, "delta": -0.25, "vega": 0.55},
+    ])
+
+    def label(row):
+        return osc._strategy_label_for_mode("Premium Selling", row.get("type"))
+
+    print("\n=== per dollar of risk (no budget) ===")
+    osc._print_per_risk_table(osc._budget_board(board, label, None), label, None)
+    print("\n=== per dollar of risk ($2,000 budget) ===")
+    sized = osc._budget_board(board, label, 2000.0)
+    osc._print_per_risk_table(sized, label, 2000.0)
+    osc._print_budget_use(sized, 2000.0)
+
+
 def main():
     surface = sys.argv[1] if len(sys.argv) > 1 else "all"
     from src.cli_display import (print_report, print_executive_summary,
@@ -147,6 +182,8 @@ def main():
         print_executive_summary(df(), {}, mode="Discovery",
                                 market_trend="Bullish",
                                 volatility_regime="Normal", num_tickers=2)
+    if surface in ("perrisk", "all"):
+        preview_per_risk()
     if surface in ("ticket", "all"):
         print_order_ticket(pd.Series(FIXTURE_PICK), {}, account_size=10000)
     if surface == "dashboard":

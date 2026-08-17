@@ -305,6 +305,140 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
     print(f"\nTop {n} contracts shown. Run with --export csv to save full results.")
 
 
+def _per_risk_structure_cell(row, label: str) -> str:
+    """`label` plus the strikes that identify the position, e.g. "Bull Put 395/390".
+
+    Reads whichever strike columns the row actually carries, so one renderer
+    serves single legs, credit spreads and iron condors.
+    """
+    def num(key):
+        try:
+            v = row.get(key)
+            return None if v is None or pd.isna(v) else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    short_s, long_s = num("short_strike"), num("long_strike")
+    if short_s is not None and long_s is not None:
+        return f"{label} {short_s:g}/{long_s:g}"
+    sp, sc = num("short_put_strike"), num("short_call_strike")
+    if sp is not None and sc is not None:
+        return f"{label} {sp:g}/{sc:g}"
+    k = num("strike")
+    if k is not None:
+        return f"{label} {k:g}"
+    return label
+
+
+def _per_risk_worth(row):
+    """(cost fraction, breakeven margin, grade) for one candidate.
+
+    Delegates to `worth.assess` — the same grader behind every card — so this
+    table cannot report a different verdict than the card above it.
+    """
+    try:
+        from .worth import assess
+        from .candidate_verdict import win_rates_from_ledger
+        r = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        w = assess(r, historical_win_rate=win_rates_from_ledger().get(
+            r.get("strategy_name")))
+        return w.friction, w.breakeven_margin, w.grade
+    except Exception:
+        return None, None, ""
+
+
+def print_per_risk_table(df, label_fn, budget: Optional[float] = None) -> None:
+    """Every candidate on ONE axis: reward per dollar of capital at risk.
+
+    Raw premium and raw `ev_per_contract` are per contract, so a $34,680
+    cash-secured put beats a $127 spread by construction and the two cannot be
+    compared at all. Dividing by each candidate's own capital at risk — the
+    same quantity the budget filter and the ledger gate on — is what makes a
+    small budget and a large one answerable by the same board.
+
+    Worth showing even with no budget set: the axis is what makes two
+    differently sized candidates comparable, and size did not buy better
+    outcomes in this book (877 closed trades, no monotonic relationship;
+    credit structures +16.0% at $250-500 against -0.3% above $15,000).
+
+    DISPLAY-ONLY, and deliberately a separate table rather than three more
+    columns on the board:
+
+    * the board keeps its cost-survival ordering and is not touched. This
+      table reprints that same order and numbers it `#`, never re-sorting by
+      `Net EV/$risk` — that would be a ranking claim, and ranking was
+      disproven out of sample at Wilcoxon p=0.89;
+    * the single-leg board header is already ~146 characters against a width
+      clamp of 60-120, so widening it further was not viable.
+
+    `label_fn` must be the SAME function `_budget_board` sized the rows with,
+    so the Structure column can never name a different strategy than the one
+    whose risk definition produced the Risk cell.
+
+    Prints nothing at all for a frame that was never annotated — a header over
+    an empty table would imply the axis had been computed when it had not.
+    """
+    if df is None or len(df) == 0 or "capital_at_risk" not in getattr(df, "columns", []):
+        return
+
+    width = get_display_width()
+    title = "PER DOLLAR OF CAPITAL AT RISK"
+    if budget is not None and budget > 0:
+        title += f"  —  budget ${budget:,.0f}"
+    print()
+    print(("  " + fmt.style(title, 'label', bold=True)) if HAS_ENHANCED_CLI
+          else "  " + title)
+    note = ("the board's own order, reprinted on a common axis — "
+            "not a ranking, and no row is a recommendation")
+    print("  " + (fmt.style(note, 'muted') if HAS_ENHANCED_CLI else note))
+    header = (f"  {'#':<4} {'Ticker':<7} {'Structure':<22} {'Risk':>9} "
+              f"{'Rwd/$risk':>10} {'EV/$risk':>9} {'Cost%':>6} "
+              f"{'Breakeven':>10}  WORTH")
+    print(fmt.style(header, 'label', bold=True) if HAS_ENHANCED_CLI else header)
+    print("  " + (fmt.draw_separator(width - 2) if HAS_ENHANCED_CLI
+                  else "-" * (width - 2)))
+
+    def cell(value, fn):
+        """Format, or "n/a". None means NOT ANSWERABLE and must never read as
+        a zero — `budget_view.per_risk` returns None precisely so a blank cell
+        stays distinguishable from an answer of zero."""
+        try:
+            if value is None:
+                return "n/a"
+            v = float(value)
+            if v != v:  # NaN — a pandas upcast, not an answer
+                return "n/a"
+            return fn(v)
+        except (TypeError, ValueError):
+            return "n/a"
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+        try:
+            label = str(label_fn(row))
+        except Exception:
+            label = ""
+        struct = _per_risk_structure_cell(row, label)[:22]
+        friction, be_margin, grade = _per_risk_worth(row)
+        risk_txt = cell(row.get("capital_at_risk"), lambda v: f"${v:,.0f}")
+        # Three decimals, not two. A credit spread returns ~0.60 on risk but a
+        # cash-secured put returns ~0.006, and at two decimals every short put
+        # on the board collapses to 0.01 — erasing the very difference the
+        # axis exists to show. One format has to serve both regimes.
+        rwd_txt = cell(row.get("reward_per_risk"), lambda v: f"{v:.3f}")
+        ev_txt = cell(row.get("net_ev_per_risk"), lambda v: f"{v:+.3f}")
+        cost_txt = cell(friction, lambda v: f"{v*100:.0f}%")
+        be_txt = cell(be_margin, lambda v: f"{v*100:+.0f}%")
+        ev_cell = ev_txt
+        if HAS_ENHANCED_CLI and ev_txt != "n/a":
+            ev_cell = fmt.style_sign(f"{ev_txt:>9}", float(row.get("net_ev_per_risk")))
+        line = (f"  {i + 1:<4} {str(row.get('symbol') or ''):<7} {struct:<22} "
+                f"{risk_txt:>9} {rwd_txt:>10} "
+                f"{ev_cell if HAS_ENHANCED_CLI and ev_txt != 'n/a' else f'{ev_txt:>9}'} "
+                f"{cost_txt:>6} {be_txt:>10}  {grade}")
+        print(line)
+
+
 def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     """Bright three-line decision zone: VERDICT (EV sign), WORTH, DO (action).
 

@@ -336,7 +336,7 @@ from .cli_display import (
     get_display_width, print_executive_summary,
     print_report, print_news_panel,
     print_credit_spreads_report, print_iron_condor_report,
-    print_lottery_ticket_report,
+    print_lottery_ticket_report, print_per_risk_table,
 )
 from .watchlist import (
     load_watchlist, add_to_watchlist, remove_from_watchlist,
@@ -717,6 +717,19 @@ def _budget_board(df, label_fn, budget: Optional[float], *, verbose: bool = True
                  f"{len(out)} of {len(df)} surviving candidates fit.")
         print("  " + (fmt.style(_line, 'muted') if HAS_ENHANCED_CLI else _line))
     return out
+
+
+def _print_per_risk_table(df, label_fn, budget: Optional[float]) -> None:
+    """Spec s4's common-axis table, printed after the board it describes.
+
+    `label_fn` is the same one `_budget_board` sized with, so the Structure
+    column cannot name a different strategy than the risk figure beside it.
+    Display only: `print_per_risk_table` reprints the board's order and never
+    re-sorts it.
+    """
+    if budget is not None and budget <= 0:
+        budget = None
+    print_per_risk_table(df, label_fn, budget)
 
 
 def _print_budget_use(df, budget: Optional[float]) -> None:
@@ -4882,6 +4895,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_per_risk_table(top_picks, _leg_label, session_budget)
                 _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             # Only when the scan genuinely found nothing. A board that was
@@ -4900,6 +4914,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_per_risk_table(top_picks, _leg_label, session_budget)
                 _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             print("\nNo discovery picks found.")
@@ -4912,6 +4927,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                                           session_budget, verbose=verbose)
             if verbose and not final_spreads.empty:
                 print_credit_spreads_report(final_spreads)
+                _print_per_risk_table(final_spreads, structure_strategy_name,
+                                      session_budget)
                 _print_budget_use(final_spreads, session_budget)
         elif verbose:
             print("\nNo credit spreads found.")
@@ -4928,6 +4945,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                                           session_budget, verbose=verbose)
             if verbose and not final_condors.empty:
                 print_iron_condor_report(final_condors)
+                _print_per_risk_table(final_condors, structure_strategy_name,
+                                      session_budget)
                 _print_budget_use(final_condors, session_budget)
         elif verbose:
             print("\nNo iron condors found.")
@@ -4950,6 +4969,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _display_df = final_df.head(10)
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_per_risk_table(final_df.head(10), _leg_label,
+                                      session_budget)
                 _print_budget_use(final_df.head(10), session_budget)
         elif verbose and picks.empty:
             print("\nNo premium selling candidates found.")
@@ -4973,6 +4994,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             _display_df = final_df
             if verbose:
                 print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_per_risk_table(final_df, _leg_label, session_budget)
                 _print_budget_use(final_df, session_budget)
         elif verbose and picks.empty:
             print("\nNo suitable options found.")

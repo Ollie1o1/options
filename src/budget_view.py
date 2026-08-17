@@ -21,7 +21,8 @@ from typing import Optional
 
 import pandas as pd
 
-from .capital_risk import capital_at_risk_for_pick, within_budget
+from .capital_risk import (capital_at_risk_for_pick, max_profit_for_pick,
+                           within_budget)
 
 
 def per_risk(value, risk) -> Optional[float]:
@@ -49,7 +50,12 @@ def annotate(df, strategy_name: str):
     for _, row in out.iterrows():
         risk = capital_at_risk_for_pick(row, strategy_name)
         risks.append(risk)
-        rewards.append(per_risk(row.get("max_profit"), risk))
+        # NOT `row.get("max_profit")`: only the spread and condor builders set
+        # that column, so reading it directly left Reward/$risk blank on every
+        # single-leg board — including Premium Selling, where a short put's
+        # credit over its collateral is exactly the return the budget exists
+        # to make visible.
+        rewards.append(per_risk(max_profit_for_pick(row, strategy_name), risk))
         evs.append(per_risk(row.get("ev_per_contract"), risk))
     # Assign as object-dtype Series, not plain lists: when a list mixes
     # ``None`` with real floats, pandas upcasts the column to float64 and

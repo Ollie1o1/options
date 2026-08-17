@@ -125,3 +125,42 @@ class TestBudgetUseLine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRewardOnSingleLegs(unittest.TestCase):
+    """`Reward/$risk` has to answer on the board that motivated the budget.
+
+    Only the spread and condor builders set a `max_profit` column, so reading
+    it off the row left the reward blank on all four single-leg boards. For a
+    long option that blank is correct — the upside is unbounded. For a SHORT
+    put it was a hole: the credit over the collateral is the entire return,
+    and the cash-secured put is the structure the $4,000 cap was flatlining.
+    """
+
+    def test_a_short_put_now_has_a_reward(self):
+        df = pd.DataFrame([{"symbol": "AVGO", "strike": 350.0,
+                            "premium": 2.00, "ev_per_contract": 60.0}])
+        out = bv.annotate(df, "Short Put")
+        self.assertAlmostEqual(out["capital_at_risk"].iloc[0], 34800.0)
+        self.assertAlmostEqual(out["reward_per_risk"].iloc[0], 200.0 / 34800.0)
+
+    def test_a_long_call_reward_stays_blank_not_zero(self):
+        df = pd.DataFrame([{"symbol": "NVDA", "strike": 190.0,
+                            "premium": 4.24, "ev_per_contract": 31.0}])
+        out = bv.annotate(df, "Long Call")
+        self.assertIsNone(out["reward_per_risk"].iloc[0],
+                          "unbounded upside must read as unanswerable, not 0")
+        self.assertIsNotNone(out["net_ev_per_risk"].iloc[0],
+                             "EV per risk is still answerable for a long leg")
+
+    def test_a_stale_max_profit_column_cannot_override_the_structure_rule(self):
+        """A single-leg row that happens to carry a max_profit is not evidence.
+
+        `max_loss` on a single-leg row is `entry_price * 100` and sizing a
+        cash-secured put off it gave $50 instead of $31,850. The reward side
+        must not repeat that: the strategy decides, not a stray column.
+        """
+        df = pd.DataFrame([{"symbol": "NVDA", "strike": 190.0, "premium": 4.24,
+                            "max_profit": 99999.0, "ev_per_contract": 31.0}])
+        out = bv.annotate(df, "Long Call")
+        self.assertIsNone(out["reward_per_risk"].iloc[0])
