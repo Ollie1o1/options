@@ -76,6 +76,7 @@ from .filters import (
 )
 from .paper_manager import PaperManager
 from .capital_risk import pick_within_budget
+from . import budget_view
 from src.execution_costs import FALLBACK_COMMISSION_PER_CONTRACT
 
 # Enhanced CLI modules
@@ -653,6 +654,78 @@ def _print_refusals(result, board: str) -> None:
         msg = "Nothing here cleared the gates. That is the answer, not an error."
         print("\n  " + (fmt.style(msg, 'emph') if HAS_ENHANCED_CLI else msg))
     print()
+
+
+def _budget_board(df, label_fn, budget: Optional[float], *, verbose: bool = True):
+    """Annotate a board per dollar of capital at risk, then keep what fits.
+
+    Call this AFTER `gate_and_report`. The refusal block is the
+    best-evidenced output this scan produces and a budget must never be able
+    to suppress it, so the gate speaks first and the budget narrows what is
+    left. Call it BEFORE the top-N bucket cut: filtering after the cut lets
+    unaffordable rows consume every slot and log nothing, which is exactly how
+    the short-put window starved on 2026-07-30.
+
+    `label_fn(row) -> str` names the strategy per ROW, not per frame.
+    `budget_view` takes one strategy name for a whole frame, but a Premium
+    Selling board mixes Short Put (collateral-backed, sizable) with Short Call
+    (unbounded, never sizable), and a spread board mixes Bull Put with Bear
+    Call. One label for the frame would cost the other kind its capital at
+    risk, and an unsizable row fails a set budget by design.
+
+    DISPLAY ONLY. Row order is preserved exactly — ranking was disproven out
+    of sample (Wilcoxon p=0.89), so nothing here may become a sort key.
+    """
+    if df is None or len(df) == 0:
+        return df
+    # `within_budget` reads a non-positive cap as no cap; say the same thing
+    # here so a 0 can never print "0 of 14 fit" beside an unfiltered board.
+    if budget is not None and budget <= 0:
+        budget = None
+    try:
+        labels = [label_fn(df.iloc[i]) for i in range(len(df))]
+    except Exception:
+        logging.getLogger(__name__).debug("budget labelling failed", exc_info=True)
+        return df
+
+    # Positional throughout: a scan frame concatenated across tickers can carry
+    # duplicate index labels, and grouping on those would scramble the board.
+    work = df.reset_index(drop=True)
+    kept: List[int] = []
+    cells: Dict[int, tuple] = {}
+    for label in dict.fromkeys(labels):
+        positions = [i for i, lab in enumerate(labels) if lab == label]
+        sub = budget_view.annotate(work.iloc[positions], label)
+        if budget is not None:
+            sub = budget_view.affordable(sub, budget, label)
+        for pos in sub.index:
+            kept.append(int(pos))
+            cells[int(pos)] = (sub.at[pos, "capital_at_risk"],
+                               sub.at[pos, "reward_per_risk"],
+                               sub.at[pos, "net_ev_per_risk"])
+    kept.sort()  # back into the order the board arrived in
+
+    out = df.iloc[kept].copy()
+    for slot, col in enumerate(("capital_at_risk", "reward_per_risk",
+                                "net_ev_per_risk")):
+        # An object-dtype ndarray, assigned positionally: a plain list of mixed
+        # None and float upcasts to float64 and turns None into NaN, which is a
+        # third state on top of budget_view's None-vs-0 contract.
+        out[col] = np.array([cells[p][slot] for p in kept], dtype=object)
+    if verbose and budget is not None and len(out) < len(df):
+        _line = (f"Budget ${budget:,.0f} per position: "
+                 f"{len(out)} of {len(df)} surviving candidates fit.")
+        print("  " + (fmt.style(_line, 'muted') if HAS_ENHANCED_CLI else _line))
+    return out
+
+
+def _print_budget_use(df, budget: Optional[float]) -> None:
+    """The "you could hold N of these" line, printed after the board."""
+    if budget is not None and budget <= 0:
+        return
+    line = budget_view.budget_use_line(df, budget)
+    if line:
+        print("    " + (fmt.style(line, 'muted') if HAS_ENHANCED_CLI else line))
 
 
 def load_config(config_path: str = "config.json") -> Dict:
@@ -4360,7 +4433,11 @@ def offer_tearsheet(picks_df, ctx, interactive: bool, preselect=None):
     return html_path
 
 
-def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, interactive: bool = False, tearsheet_pick: Optional[int] = None):
+def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, interactive: bool = False, tearsheet_pick: Optional[int] = None, session_budget: Optional[float] = None):
+    """`session_budget` is the capital at risk one position may tie up, or None
+    for no limit. Distinct from `budget`, which is the Budget-scan mode's cost
+    of a single CONTRACT — the two are different quantities and a cash-secured
+    put separates them by ~170x."""
     # Determine mode booleans for internal logic
 
     # === LOAD CONFIGURATION ===
@@ -4765,15 +4842,23 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # `_display_df` is the exact frame print_report numbered on screen, so
     # "pick N" means the same contract in the terminal and on a tearsheet.
     _display_df = None
+
+    def _leg_label(row) -> str:
+        """Strategy name of a single-leg scan row, for capital-at-risk sizing."""
+        return _strategy_label_for_mode(mode, row.get("type"))
+
     if mode == "Budget scan":
         if not picks.empty:
             final_df = gate_and_report(picks, "BUDGET", verbose=verbose)
+            final_df = _budget_board(final_df, _leg_label, session_budget,
+                                     verbose=verbose)
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=budget)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             # Only when the scan genuinely found nothing. A board that was
             # found and then refused has already printed why, and telling the
@@ -4783,12 +4868,15 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     elif mode in ("Discovery scan", "Squeeze Hunt"):
         if not picks.empty:
             final_df = gate_and_report(picks, mode.upper(), verbose=verbose)
+            final_df = _budget_board(final_df, _leg_label, session_budget,
+                                     verbose=verbose)
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             _display_df = top_picks
             if verbose:
                 print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_budget_use(top_picks, session_budget)
         elif verbose and picks.empty:
             print("\nNo discovery picks found.")
             
@@ -4796,8 +4884,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         if not credit_spreads_df.empty:
             final_spreads = gate_and_report(credit_spreads_df, "CREDIT SPREADS",
                                             label_structures=True, verbose=verbose)
+            final_spreads = _budget_board(final_spreads, structure_strategy_name,
+                                          session_budget, verbose=verbose)
             if verbose and not final_spreads.empty:
                 print_credit_spreads_report(final_spreads)
+                _print_budget_use(final_spreads, session_budget)
         elif verbose:
             print("\nNo credit spreads found.")
 
@@ -4809,8 +4900,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             # +9.5% here against -11.8% elsewhere, p < 1e-5.
             final_condors = gate_and_report(iron_condors_df, "IRON CONDOR",
                                             label_structures=True, verbose=verbose)
+            final_condors = _budget_board(final_condors, structure_strategy_name,
+                                          session_budget, verbose=verbose)
             if verbose and not final_condors.empty:
                 print_iron_condor_report(final_condors)
+                _print_budget_use(final_condors, session_budget)
         elif verbose:
             print("\nNo iron condors found.")
 
@@ -4823,11 +4917,16 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             # most for short premium.
             final_df = rank_single_legs_by_verdict(picks, mode)
             final_df = gate_and_report(final_df, "PREMIUM SELLING", verbose=verbose)
+            # Labelled per row: this board mixes Short Put, whose risk is the
+            # collateral, with Short Call, whose risk cannot be bounded at all.
+            final_df = _budget_board(final_df, _leg_label, session_budget,
+                                     verbose=verbose)
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
             _display_df = final_df.head(10)
             if verbose:
                 print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_budget_use(final_df.head(10), session_budget)
         elif verbose and picks.empty:
             print("\nNo premium selling candidates found.")
 
@@ -4843,11 +4942,14 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         # Single stock mode
         if not picks.empty:
             final_df = gate_and_report(picks, "TICKER", verbose=verbose)
+            final_df = _budget_board(final_df, _leg_label, session_budget,
+                                     verbose=verbose)
         if not picks.empty and not final_df.empty:
             final_df = categorize_by_premium(final_df, budget=None)
             _display_df = final_df
             if verbose:
                 print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                _print_budget_use(final_df, session_budget)
         elif verbose and picks.empty:
             print("\nNo suitable options found.")
 
@@ -5933,6 +6035,11 @@ def main():
             symbol_input = "DISCOVER"  # reuse discovery flow with custom ticker list
 
         is_budget_mode = (symbol_input == "ALL")
+        # Capital at risk a single position may tie up on THIS scan. A distinct
+        # quantity from `budget` below, which is the Budget-scan mode's cost of
+        # one CONTRACT. Defined here so every mode has the name, including the
+        # ones that never reach the prompt; None means no limit.
+        session_budget: Optional[float] = None
         is_discovery_mode = (symbol_input in ("DISCOVER", "")) or is_my_list_mode
         is_ticker_mode = (symbol_input == "TICKER")  # user chose [1] — will prompt for symbol
         is_premium_selling_mode = (symbol_input == "SELL")
@@ -5995,6 +6102,9 @@ def main():
         elif is_discovery_mode or is_premium_selling_mode or is_credit_spread_mode or is_iron_condor_mode:
             tickers = prompt_for_tickers()
             print(f"Will scan {len(tickers)} tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+            session_budget = prompt_for_budget()
+            if session_budget is not None:
+                print(f"Budget: ${session_budget:,.0f} capital at risk per position")
         elif is_budget_mode:
             try:
                 budget = float(prompt_input("Enter your budget per contract in USD (e.g., 500)", "500"))
@@ -6105,7 +6215,7 @@ def main():
                 surface_greek = getattr(args, 'surface_greek', None)
                 surface_type = surface_greek if surface_greek else 'pnl'
                 show_contours = not getattr(args, 'no_contours', False)
-                scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, custom_weights=_custom_weights, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False), interactive=(_interactive and not getattr(args, 'no_tearsheet', False)), tearsheet_pick=(None if getattr(args, 'no_tearsheet', False) else getattr(args, 'tearsheet', None)))
+                scan_results = run_scan(mode=mode, tickers=tickers, budget=budget, max_expiries=max_expiries, min_dte=min_dte, max_dte=max_dte, trader_profile=trader_profile, logger=logger, market_trend=market_trend, volatility_regime=volatility_regime, macro_risk_active=macro_risk_active, tnx_change_pct=tnx_change_pct, custom_weights=_custom_weights, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=getattr(args, 'compact', False), interactive=(_interactive and not getattr(args, 'no_tearsheet', False)), tearsheet_pick=(None if getattr(args, 'no_tearsheet', False) else getattr(args, 'tearsheet', None)), session_budget=session_budget)
                 if scan_results is None:
                     sys.exit(0)
 
@@ -6686,6 +6796,13 @@ def main():
                                     "trader_pref_score": top_pick_row.get("trader_pref_score"),
                                     "score_adjustments": top_pick_row.get("score_adjustments"),
                                     "weight_profile": _weight_profile_id,
+                                    # The budget this operator chose for this
+                                    # scan, None meaning they chose no limit.
+                                    # The key's PRESENCE is what tells log_trade
+                                    # a prompt was actually answered; the
+                                    # --auto-log paths above deliberately omit
+                                    # it so the scheduler falls back to config.
+                                    "budget_at_entry": session_budget,
                                 }
                                 # AI-score lookup via stable key (see auto-log path comment).
                                 if _ai_ranked is not None and not _ai_ranked.empty:
@@ -6862,6 +6979,10 @@ def main():
                                                 "trader_pref_score": row.get("trader_pref_score"),
                                                 "score_adjustments": row.get("score_adjustments"),
                                                 "weight_profile": _weight_profile_id,
+                                                # See the [P] path: key presence
+                                                # is the signal, and --auto-log
+                                                # must never carry it.
+                                                "budget_at_entry": session_budget,
                                             }
                                             _row_key_l = (
                                                 str(row.get("symbol", "")).upper(),
