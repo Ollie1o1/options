@@ -11,6 +11,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import unittest.mock
 
 import pandas as pd
 
@@ -249,6 +250,45 @@ class TestRecordBoard(unittest.TestCase):
                                    scanned=0), board="discover", db_path=path)
             self.assertEqual(n, 0)
             self.assertEqual(cr.STATS["errors"], 0)
+
+
+class TestGatingFailed(unittest.TestCase):
+    """gate_board's failure-safe branch returns a result byte-identical to a
+    board where every candidate cleared every gate. Recording that as
+    'all passed' would write false data into the one table meant to settle a
+    scientific question."""
+
+    def setUp(self):
+        cr.reset_stats()
+
+    def test_default_is_false(self):
+        self.assertFalse(pr.BoardResult(kept=pd.DataFrame(),
+                                        refused=pd.DataFrame()).gating_failed)
+
+    def test_gate_board_failure_sets_the_flag(self):
+        with unittest.mock.patch.object(
+                pr, "top_quintile_cutoff", side_effect=RuntimeError("boom")):
+            result = pr.gate_board(pd.DataFrame([_leg()]))
+        self.assertTrue(result.gating_failed)
+        self.assertEqual(len(result.kept), 1)      # still failure-safe
+
+    def test_a_healthy_gating_leaves_the_flag_false(self):
+        result = pr.gate_board(pd.DataFrame([_leg()]))
+        self.assertFalse(result.gating_failed)
+
+    def test_failed_gating_is_recorded_as_failed_not_as_all_passed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            result = pr.BoardResult(kept=pd.DataFrame([_leg()]),
+                                    refused=pd.DataFrame(), scanned=1,
+                                    gating_failed=True)
+            with cr.scan("discover"):
+                cr.record_board(result, board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                flag, passed = conn.execute(
+                    "select gating_failed, gate_passed from candidates").fetchone()
+            self.assertEqual(flag, 1)
+            self.assertEqual(passed, 1)   # kept, but the keeping is not evidence
 
 
 if __name__ == "__main__":

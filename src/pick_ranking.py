@@ -99,6 +99,12 @@ class BoardResult:
     scanned: int = 0
     cutoff: Optional[float] = None
     order_basis: str = "cheapest carry first — an ordering, not a ranking"
+    # True when `gate_board` fell through to its failure-safe branch. Without
+    # this, that branch returns a result byte-identical to a board on which
+    # every candidate legitimately cleared every gate — so anything recording
+    # the outcome would state "all passed" about a board that was never gated.
+    # Recorded by `candidate_record`; no decision reads it.
+    gating_failed: bool = False
 
     @property
     def empty(self) -> bool:
@@ -320,4 +326,5 @@ def gate_board(df: Optional[pd.DataFrame],
         # A board that renders everything is a bug; a board that renders
         # nothing because of a bug is worse. Keep the scan alive.
         log.warning("gating failed; showing every candidate", exc_info=True)
-        return BoardResult(kept=df, refused=pd.DataFrame(), scanned=len(df))
+        return BoardResult(kept=df, refused=pd.DataFrame(), scanned=len(df),
+                           gating_failed=True)
