@@ -2137,13 +2137,19 @@ def _process_option_chain(tkr: yf.Ticker, symbol: str, exp: str) -> List[pd.Data
 
     return sub_frames
 
-def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[datetime], df_chain: pd.DataFrame, underlying: float) -> Optional[dict]:
+def calculate_implied_earnings_move(tkr: yf.Ticker, earnings_date: Optional[datetime], df_chain: pd.DataFrame, underlying: Optional[float]) -> Optional[dict]:
     """
     Compare the market-implied earnings move (ATM straddle / underlying)
     with the stock's historical earnings actual moves (last 8 quarters).
     Returns dict with implied_move_pct, hist_avg_move, hist_beat_rate, is_cheap.
+
+    `underlying` is Optional because it is reachable with None — the annotation
+    said `float` and the caller passed None, which is how a missing spot price
+    surfaced here as a TypeError rather than at its source. The source now
+    refuses that symbol; this guard is the second line of defence, so a future
+    caller cannot resurrect the same crash.
     """
-    if earnings_date is None or df_chain.empty or underlying <= 0:
+    if earnings_date is None or df_chain.empty or not underlying or underlying <= 0:
         return None
     try:
         df_chain = df_chain.copy()
@@ -2314,6 +2320,22 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
 
     # 2. Derive Metrics from History
     underlying = safe_float(hist["Close"].iloc[-1])
+    # A non-empty frame can still carry a NaN last Close — that is what
+    # yfinance returns instead of an empty frame when it is rate-limited or
+    # serving a partial response, and `safe_float(NaN)` is None by design. Left
+    # unchecked the None travelled ~170 lines to `calculate_implied_earnings_move`
+    # and raised there instead (observed on 13 large caps in three minutes,
+    # 2026-08-18). Resolve it the way the yahooquery path already does, from
+    # the live quote, and refuse the symbol only if that fails too: every
+    # metric below prices against this number, so a None spot makes the whole
+    # chain meaningless rather than merely incomplete.
+    if underlying is None or underlying <= 0:
+        underlying = get_underlying_price(tkr)
+    if underlying is None or underlying <= 0:
+        # Phrased with "price history" deliberately: `retry_with_backoff`
+        # treats that as a known data condition and skips the traceback dump,
+        # so a rate-limited window does not fill scan_errors.log with noise.
+        raise RuntimeError(f"Could not fetch usable price history for {symbol}")
     hv_30d_rolling = calculate_historical_volatility(hist, period=30)
     hv_ewma = calculate_ewma_volatility(hist, span=20)
     # Long-window realized vol — the basis the EV values multi-month
