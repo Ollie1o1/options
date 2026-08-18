@@ -27,6 +27,25 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/candidates.db"
 
+# Set this to redirect every write away from the real database. Both test
+# runners set it (scripts/run_tests.py locally, tests/conftest.py under
+# pytest), because the suite drives `gate_and_report` and would otherwise mix
+# fixture tickers into the dataset this project intends to draw conclusions
+# from. Read at CALL time — see `_resolve_db_path`.
+DB_PATH_ENV = "OPTIONS_CANDIDATE_DB"
+
+
+def _resolve_db_path(db_path: Optional[str] = None) -> str:
+    """The database to write to, decided at call time.
+
+    Never bound as a default argument. A default is evaluated once at import
+    and is then invisible to anything trying to redirect it — this repo has
+    already shipped a board ranked by `quality_score` because `sort_by`
+    defaulted to it where nothing could see.
+    """
+    import os
+    return db_path or os.environ.get(DB_PATH_ENV) or DEFAULT_DB_PATH
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS candidates (
   scan_id TEXT NOT NULL, ts TEXT NOT NULL, board TEXT NOT NULL,
@@ -62,9 +81,18 @@ _LEG_STRIKES = {
 }
 
 
-def connect(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """Open the candidate database, creating the schema when absent."""
+def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
+    """Open the candidate database, creating the schema when absent.
+
+    The path is resolved from `DEFAULT_DB_PATH` at CALL time, never bound
+    as a default argument. A default argument is evaluated once at import
+    and is then invisible — this repo has already shipped a board ranked
+    by `quality_score` because `sort_by` defaulted to it where nothing
+    could see. It also makes the module untestable without touching the
+    real database.
+    """
     import os
+    db_path = _resolve_db_path(db_path)
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -208,7 +236,8 @@ def _safe(default):
     """
     def deco(fn):
         @functools.wraps(fn)
-        def wrapper(*args, db_path: str = DEFAULT_DB_PATH, **kwargs):
+        def wrapper(*args, db_path: Optional[str] = None, **kwargs):
+            db_path = _resolve_db_path(db_path)
             try:
                 return fn(*args, db_path=db_path, **kwargs)
             except Exception:
@@ -233,7 +262,7 @@ _COLUMNS = ("scan_id", "ts", "board", "contract_key", "symbol", "strategy_name",
 
 @_safe(default=0)
 def record_board_rows(rows: List[Dict[str, Any]], *,
-                      db_path: str = DEFAULT_DB_PATH) -> int:
+                      db_path: Optional[str] = None) -> int:
     """Insert prepared candidate rows. Returns the number written."""
     if not rows:
         return 0
@@ -347,12 +376,17 @@ def row_payload(row: Dict[str, Any], *, board: str, scan_id: str,
     return out
 
 
+@_safe(default=0)
 def record_board(result: Any, *, board: str,
-                 db_path: str = DEFAULT_DB_PATH) -> int:
+                 db_path: Optional[str] = None) -> int:
     """Record a BoardResult: everything it kept and everything it refused.
 
     The refused rows are the point. A table of survivors only would be exactly
     as useless as the ledger this exists to supplement.
+
+    Wrapped even though `record_board_rows` already is: this function does real
+    work of its own — frame conversion, `contract_key`, `row_payload` — and a
+    malformed frame raising here would reach the scan path.
     """
     scan_id = current_scan_id()
     gating_failed = 1 if getattr(result, "gating_failed", False) else 0
@@ -381,7 +415,7 @@ def record_board(result: Any, *, board: str,
 
 @_safe(default=0)
 def mark_ranked(rows: List[Dict[str, Any]], *, board: str,
-                db_path: str = DEFAULT_DB_PATH) -> int:
+                db_path: Optional[str] = None) -> int:
     """Write rank position across a ranked frame, 1-based, in frame order.
 
     Rows with no gate record are inserted AND counted. That count is the
@@ -419,7 +453,7 @@ def mark_ranked(rows: List[Dict[str, Any]], *, board: str,
 
 @_safe(default=0)
 def mark_refused(rows: List[Dict[str, Any]], reason: str, *, board: str,
-                 db_path: str = DEFAULT_DB_PATH) -> int:
+                 db_path: Optional[str] = None) -> int:
     """Record why a ranked candidate never reached the top-N cut.
 
     The auto-log allowlist and the per-scan budget cap both filter BEFORE the
@@ -440,7 +474,7 @@ def mark_refused(rows: List[Dict[str, Any]], reason: str, *, board: str,
 
 @_safe(default=None)
 def mark_logged(row: Dict[str, Any], *, board: str, entry_id: Optional[int],
-                db_path: str = DEFAULT_DB_PATH) -> None:
+                db_path: Optional[str] = None) -> None:
     """Flag one candidate as actually entered, with its ledger entry_id."""
     scan_id = current_scan_id()
     key = contract_key(row)

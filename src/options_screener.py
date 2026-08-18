@@ -807,9 +807,39 @@ def gate_and_report(df, board: str, *, label_structures: bool = False,
     from . import pick_ranking as _pr
 
     result = _pr.gate_board(df, label_structures=label_structures)
+
+    # Record the pre-gate population, refusals included. Every ordering
+    # question this repo has — does rank predict return, do the gates still
+    # hold out of sample — needs the REFUSED rows, and nothing has ever
+    # persisted them: the ledger holds only what was taken. Failure-safe, so a
+    # broken recorder can neither stop a scan nor change a pick.
+    # See docs/CANDIDATE_RECORD_SPEC.md.
+    from . import candidate_record as _cr
+    _cr.record_board(result, board=board)
+
     if verbose and result.refused is not None and len(result.refused):
         _print_refusals(result, board)
     return result.kept
+
+
+def _with_candidate_scan(fn):
+    """Open one candidate-recorder scan_id around a whole scan.
+
+    A decorator rather than a split of the function body: `run_scan` takes 21
+    parameters, and re-typing that signature to forward it is a defect waiting
+    to happen. `functools.wraps` keeps the signature and identity intact.
+
+    One id spans every board the scan produces, which is what lets the gate
+    record and the auto-log record for the same candidate be joined.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(mode, *args, **kwargs):
+        from . import candidate_record as _cr
+        with _cr.scan(str(mode)):
+            return fn(mode, *args, **kwargs)
+    return wrapper
 
 
 def _print_refusals(result, board: str) -> None:
@@ -4734,6 +4764,7 @@ def offer_tearsheet(picks_df, ctx, interactive: bool, preselect=None):
     return html_path
 
 
+@_with_candidate_scan
 def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expiries: int, min_dte: int, max_dte: int, trader_profile: str, logger: logging.Logger, market_trend: str, volatility_regime: str, macro_risk_active: bool = False, tnx_change_pct: float = 0.0, verbose: bool = True, custom_weights: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, interactive: bool = False, tearsheet_pick: Optional[int] = None, session_budget: Optional[float] = None):
     """`session_budget` is the capital at risk one position may tie up, or None
     for no limit. Distinct from `budget`, which is the Budget-scan mode's cost

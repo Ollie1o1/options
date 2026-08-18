@@ -110,6 +110,30 @@ class TestContractKey(unittest.TestCase):
         self.assertEqual(key, "X|2026-09-18|Bull Put|100/95")
 
 
+class TestDbPathResolution(unittest.TestCase):
+    """The path is decided at CALL time. A default argument would be bound at
+    import and be invisible to anything trying to redirect it — the same shape
+    as the `sort_by` default that ranked the board by quality_score for
+    months."""
+
+    def test_explicit_path_wins(self):
+        self.assertEqual(cr._resolve_db_path("/tmp/x.db"), "/tmp/x.db")
+
+    def test_env_var_redirects_when_no_explicit_path(self):
+        with unittest.mock.patch.dict(
+                os.environ, {cr.DB_PATH_ENV: "/tmp/from_env.db"}):
+            self.assertEqual(cr._resolve_db_path(), "/tmp/from_env.db")
+
+    def test_default_is_used_when_nothing_overrides(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(cr._resolve_db_path(), cr.DEFAULT_DB_PATH)
+
+    def test_the_test_suite_is_not_pointed_at_the_real_database(self):
+        # If this fails, the suite is writing fixture tickers into the dataset
+        # the ranker will be judged from.
+        self.assertNotEqual(cr._resolve_db_path(), cr.DEFAULT_DB_PATH)
+
+
 class TestFailureCapture(unittest.TestCase):
     """A recorder that returns cleanly and writes nothing is how four months
     of shadow-mark data went missing. Failures must be counted and persisted."""
