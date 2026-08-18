@@ -244,3 +244,129 @@ def record_board_rows(rows: List[Dict[str, Any]], *,
         conn.commit()
     STATS["recorded"] += len(rows)
     return len(rows)
+
+
+# ── Flattening a scan row into the schema ────────────────────────────────────
+# Fixed columns are read off the row by these source keys, first match wins.
+# Anything not named here goes to features_json, so a new scorer is never a
+# migration.
+_FIELD_SOURCES = {
+    "symbol": ("symbol", "ticker"),
+    "expiration": ("expiration",),
+    "strike": ("strike",),
+    "bid": ("bid",), "ask": ("ask",), "premium": ("premium",),
+    "theta": ("theta",), "delta": ("delta",),
+    "ev_net": ("ev_per_contract", "ev_net"),
+    "ev_gross": ("ev_gross_per_contract", "ev_gross"),
+    "ev_cost": ("ev_cost_per_contract", "ev_cost"),
+    "ev_noise": ("ev_noise", "entry_ev_noise"),
+    "quality_score": ("quality_score",),
+    # `rank_by_verdict` writes Verdict.round_trip_pct into a column named
+    # `friction_pct`. Read it, store it under the name that describes it.
+    "round_trip_pct": ("round_trip_pct", "friction_pct"),
+}
+
+_TEXT_FIELDS = {"symbol", "expiration"}
+
+# Consumed into fixed columns or handled separately; never duplicated into the
+# features blob. `friction_pct` is here so the misleading name does not survive
+# in the tail after being read into round_trip_pct.
+_BLOB_EXCLUDE = (
+    {src for sources in _FIELD_SOURCES.values() for src in sources}
+    | {"refused_by", "verdict", "type", "ticker", "strategy_name",
+       "opt_type", "option_type"}
+)
+
+
+def scan(mode: str):
+    """Open one scan_id for the duration of a scan.
+
+    One id spans every board that scan produces — it is opened around the
+    scan, not around a board. That is what joins a gate record to the
+    auto-log record for the same candidate.
+    """
+    import contextlib
+    import uuid
+
+    @contextlib.contextmanager
+    def _ctx():
+        scan_id = f"{_now()}|{mode}|{uuid.uuid4().hex[:8]}"
+        token = _SCAN_ID.set(scan_id)
+        try:
+            yield scan_id
+        finally:
+            _SCAN_ID.reset(token)
+
+    return _ctx()
+
+
+def current_scan_id() -> str:
+    """The active scan_id, or a standalone one when no scan is open.
+
+    An unparented recording is still worth keeping — dropping rows because a
+    caller forgot the context manager would be the silent-zero failure again.
+    The `orphan` marker makes those rows findable rather than invisible.
+    """
+    import uuid
+    return _SCAN_ID.get() or f"{_now()}|orphan|{uuid.uuid4().hex[:8]}"
+
+
+def _is_jsonable(value: Any) -> bool:
+    if value is None or isinstance(value, (bool, int, str)):
+        return True
+    if isinstance(value, float):
+        return value == value and value not in (float("inf"), float("-inf"))
+    return False
+
+
+def row_payload(row: Dict[str, Any], *, board: str, scan_id: str,
+                **over: Any) -> Dict[str, Any]:
+    """One scan row flattened into the candidates schema."""
+    out: Dict[str, Any] = {
+        "scan_id": scan_id, "ts": _now(), "board": board,
+        "contract_key": contract_key(row),
+        "strategy_name": _strategy_of(row) or None,
+        "opt_type": _opt_type_of(row) or None,
+        "gating_failed": 0, "auto_logged": 0,
+    }
+    for field, sources in _FIELD_SOURCES.items():
+        value = None
+        for src in sources:
+            if row.get(src) is not None:
+                value = row.get(src)
+                break
+        if field in _TEXT_FIELDS:
+            out[field] = str(value).strip() if value is not None else None
+        else:
+            out[field] = _num(value)
+
+    tail = {k: v for k, v in row.items()
+            if k not in _BLOB_EXCLUDE and _is_jsonable(v)}
+    out["features_json"] = json.dumps(tail, sort_keys=True) if tail else None
+    out.update(over)
+    return out
+
+
+def record_board(result: Any, *, board: str,
+                 db_path: str = DEFAULT_DB_PATH) -> int:
+    """Record a BoardResult: everything it kept and everything it refused.
+
+    The refused rows are the point. A table of survivors only would be exactly
+    as useless as the ledger this exists to supplement.
+    """
+    scan_id = current_scan_id()
+    gating_failed = 1 if getattr(result, "gating_failed", False) else 0
+    payloads: List[Dict[str, Any]] = []
+
+    for frame, passed in ((getattr(result, "kept", None), 1),
+                          (getattr(result, "refused", None), 0)):
+        if frame is None or len(frame) == 0:
+            continue
+        for row in frame.to_dict("records"):
+            payloads.append(row_payload(
+                row, board=board, scan_id=scan_id,
+                gate_passed=passed,
+                refused_by=(None if passed else row.get("refused_by")),
+                gating_failed=gating_failed))
+
+    return record_board_rows(payloads, db_path=db_path)

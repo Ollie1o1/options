@@ -154,5 +154,102 @@ class TestFailureCapture(unittest.TestCase):
             self.assertEqual(cr.STATS["recorded"], 1)
 
 
+class TestRecordBoard(unittest.TestCase):
+    def setUp(self):
+        cr.reset_stats()
+
+    def _result(self):
+        kept = pd.DataFrame([_leg()])
+        refused = pd.DataFrame([_leg(strike=200.0, refused_by="negative_ev"),
+                                _leg(strike=205.0, refused_by="friction")])
+        return pr.BoardResult(kept=kept, refused=refused, scanned=3)
+
+    def test_kept_and_refused_are_both_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("discover"):
+                n = cr.record_board(self._result(), board="discover", db_path=path)
+            self.assertEqual(n, 3)
+            with sqlite3.connect(path) as conn:
+                rows = conn.execute(
+                    "select refused_by, gate_passed from candidates "
+                    "order by strike").fetchall()
+            self.assertEqual(rows[0], (None, 1))
+            self.assertEqual(sorted(r[0] for r in rows[1:]),
+                             ["friction", "negative_ev"])
+            self.assertEqual([r[1] for r in rows[1:]], [0, 0])
+
+    def test_scan_id_is_shared_across_boards(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("discover"):
+                cr.record_board(self._result(), board="discover", db_path=path)
+                cr.record_board(self._result(), board="top", db_path=path)
+            with sqlite3.connect(path) as conn:
+                ids = conn.execute(
+                    "select count(distinct scan_id), count(distinct board) "
+                    "from candidates").fetchone()
+            self.assertEqual(ids, (1, 2))
+
+    def test_absent_columns_stay_null_not_zero(self):
+        # NULL means *not recorded*. A row with no EV must not read as EV 0.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            bare = pd.DataFrame([{"symbol": "AAPL", "strategy_name": "Long Call",
+                                  "expiration": "2026-09-18", "strike": 190.0}])
+            with cr.scan("discover"):
+                cr.record_board(pr.BoardResult(kept=bare, refused=pd.DataFrame(),
+                                               scanned=1),
+                                board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                ev, qs = conn.execute(
+                    "select ev_net, quality_score from candidates").fetchone()
+            self.assertIsNone(ev)
+            self.assertIsNone(qs)
+
+    def test_features_json_carries_the_tail(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            df = pd.DataFrame([_leg(gex_score=0.42, pcr_score=0.19)])
+            with cr.scan("discover"):
+                cr.record_board(pr.BoardResult(kept=df, refused=pd.DataFrame(),
+                                               scanned=1),
+                                board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                blob, = conn.execute(
+                    "select features_json from candidates").fetchone()
+            tail = json.loads(blob)
+            self.assertEqual(tail["gex_score"], 0.42)
+            self.assertEqual(tail["pcr_score"], 0.19)
+            # Fixed columns are not duplicated into the blob.
+            self.assertNotIn("quality_score", tail)
+
+    def test_round_trip_pct_is_read_from_the_misnamed_column(self):
+        # rank_by_verdict writes Verdict.round_trip_pct into `friction_pct`.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            df = pd.DataFrame([_leg(friction_pct=0.31)])
+            with cr.scan("discover"):
+                cr.record_board(pr.BoardResult(kept=df, refused=pd.DataFrame(),
+                                               scanned=1),
+                                board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                rt, blob = conn.execute(
+                    "select round_trip_pct, features_json from candidates").fetchone()
+            self.assertAlmostEqual(rt, 0.31)
+            # And it is not ALSO left in the blob under its misleading name.
+            self.assertNotIn("friction_pct", json.loads(blob or "{}"))
+
+    def test_an_empty_board_writes_nothing_and_does_not_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("discover"):
+                n = cr.record_board(
+                    pr.BoardResult(kept=pd.DataFrame(), refused=pd.DataFrame(),
+                                   scanned=0), board="discover", db_path=path)
+            self.assertEqual(n, 0)
+            self.assertEqual(cr.STATS["errors"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
