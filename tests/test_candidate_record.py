@@ -128,9 +128,17 @@ class TestDbPathResolution(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(cr._resolve_db_path(), cr.DEFAULT_DB_PATH)
 
+    @unittest.skipUnless(os.environ.get(cr.DB_PATH_ENV),
+                         "no runner set the override; see the note below")
     def test_the_test_suite_is_not_pointed_at_the_real_database(self):
-        # If this fails, the suite is writing fixture tickers into the dataset
-        # the ranker will be judged from.
+        """If this fails under a runner, the suite is writing fixture tickers
+        into the dataset the ranker will be judged from.
+
+        Skipped under a bare `python -m unittest`, which loads neither
+        `scripts/run_tests.py` nor `tests/conftest.py` and so sets nothing.
+        That invocation CAN still pollute `data/candidates.db` via the other
+        suites that drive `gate_and_report`. Use `scripts/test.sh`.
+        """
         self.assertNotEqual(cr._resolve_db_path(), cr.DEFAULT_DB_PATH)
 
 

@@ -133,5 +133,88 @@ class TestRunScanOpensTheContext(_TempDB):
         self.assertIn("custom_weights", params)
 
 
+class TestAutoLogRefusalReasons(_TempDB):
+    def test_allowlist_and_budget_removals_are_distinguishable(self):
+        rows = [_leg(strike=190.0), _leg(strike=195.0), _leg(strike=200.0)]
+        with cr.scan("test"):
+            osx.record_autolog_rank(pd.DataFrame(rows), board="AUTO-LOG")
+            osx.record_autolog_refusals([rows[1]], "allowlist_drop",
+                                        board="AUTO-LOG")
+            osx.record_autolog_refusals([rows[2]], "budget_displaced",
+                                        board="AUTO-LOG")
+        got = dict(self.rows("strike, refused_by"))
+        self.assertIsNone(got[190.0])
+        self.assertEqual(got[195.0], "allowlist_drop")
+        self.assertEqual(got[200.0], "budget_displaced")
+
+    def test_rank_position_survives_a_refusal_mark(self):
+        rows = [_leg(strike=190.0), _leg(strike=195.0)]
+        with cr.scan("test"):
+            osx.record_autolog_rank(pd.DataFrame(rows), board="AUTO-LOG")
+            osx.record_autolog_refusals([rows[1]], "budget_displaced",
+                                        board="AUTO-LOG")
+        with sqlite3.connect(self.path) as conn:
+            rank = conn.execute("select rank_pos from candidates "
+                                "where strike=195.0").fetchone()[0]
+        self.assertEqual(rank, 2)
+
+    def test_a_refusal_recorded_before_any_rank_is_not_silently_lost(self):
+        # mark_refused is an UPDATE. On a board that is never gated no row
+        # exists until the rank call, so ordering these the other way round
+        # would drop the reason entirely.
+        rows = [_leg()]
+        with cr.scan("test"):
+            osx.record_autolog_rank(pd.DataFrame(rows), board="autolog_structures")
+            osx.record_autolog_refusals(rows, "budget_displaced",
+                                        board="autolog_structures")
+        self.assertEqual(self.rows("refused_by")[0][0], "budget_displaced")
+
+    def test_marking_logged_flags_the_ranked_row(self):
+        rows = [_leg(strike=190.0), _leg(strike=195.0)]
+        with cr.scan("test"):
+            osx.record_autolog_rank(pd.DataFrame(rows), board="AUTO-LOG")
+            osx.record_autolog_logged(rows[0], board="AUTO-LOG", entry_id=99)
+        got = dict(self.rows("strike, auto_logged"))
+        self.assertEqual(got[190.0], 1)
+        self.assertEqual(got[195.0], 0)
+
+
+class TestTheOperativeOrderIsCarryNotEV(_TempDB):
+    """The single-leg auto-log path ranks EV-descending, then gate_and_report
+    re-sorts the survivors by carry, and `.head(N)` consumes THAT order.
+
+    Extends _TempDB because it calls gate_and_report, which records. Every
+    test touching the recorder redirects for itself rather than trusting the
+    runner to have set the environment — a bare `python -m unittest` sets
+    nothing, and this class wrote six rows into the real database before it
+    inherited the redirect.
+
+    This is pinned, not endorsed. `rank_pos` is recorded from the operative
+    queue precisely so the table does not claim an EV ordering the entry path
+    does not use. If the ordering is ever deliberately changed, this test
+    should fail and be updated with the reason.
+    """
+
+    def _frame(self):
+        def row(sym, theta, ev):
+            return {"symbol": sym, "strategy_name": "Long Call", "type": "call",
+                    "expiration": "2026-09-18", "strike": 100.0,
+                    "bid": 9.9, "ask": 10.1, "premium": 10.0, "theta": theta,
+                    "quality_score": 0.5, "ev_per_contract": ev}
+        return pd.DataFrame([row("AAA", -0.01, 10.0),
+                             row("BBB", -0.05, 50.0),
+                             row("CCC", -0.09, 90.0)])
+
+    def test_gating_reverses_the_ev_ranking(self):
+        ranked = osx.rank_single_legs_by_verdict(self._frame(), "Discovery")
+        self.assertEqual(list(ranked.symbol), ["CCC", "BBB", "AAA"])
+
+        gated = osx.gate_and_report(ranked, "AUTO-LOG", verbose=False)
+        self.assertEqual(list(gated.symbol), ["AAA", "BBB", "CCC"])
+
+        # So the top pick sent to the ledger is the LOWEST-EV survivor.
+        self.assertEqual(gated.ev_per_contract.iloc[0], 10.0)
+
+
 if __name__ == "__main__":
     unittest.main()

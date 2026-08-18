@@ -822,6 +822,39 @@ def gate_and_report(df, board: str, *, label_structures: bool = False,
     return result.kept
 
 
+def record_autolog_rank(df, *, board: str):
+    """Record the order the top-N cut actually sees.
+
+    `rank_pos` means "position in the queue that decided entry", not "position
+    the EV ranker put it in". On the single-leg path those differ: the frame is
+    ranked EV-descending and then `gate_and_report` re-sorts the survivors by
+    carry, so the cut consumes the carry order. Recording the intended order
+    instead of the operative one would put a number in the table describing
+    something other than its label — call this immediately before `.head(N)`.
+    """
+    from . import candidate_record as _cr
+    if df is None or len(df) == 0:
+        return 0
+    return _cr.mark_ranked(df.to_dict("records"), board=board)
+
+
+def record_autolog_refusals(rows, reason: str, *, board: str):
+    """Mark ranked candidates removed before the top-N cut, with the reason.
+
+    The allowlist and the per-scan budget cap both filter BEFORE the cut, so
+    without this a candidate that was never eligible is indistinguishable from
+    one that competed and lost.
+    """
+    from . import candidate_record as _cr
+    return _cr.mark_refused(list(rows), reason, board=board)
+
+
+def record_autolog_logged(row, *, board: str, entry_id=None):
+    """Flag a candidate as actually entered."""
+    from . import candidate_record as _cr
+    return _cr.mark_logged(dict(row), board=board, entry_id=entry_id)
+
+
 def _with_candidate_scan(fn):
     """Open one candidate-recorder scan_id around a whole scan.
 
@@ -6765,6 +6798,14 @@ def main():
                             _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
                         _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
 
+                        # Record the queue BEFORE the pre-cut filters, so every
+                        # candidate carries its position and the filters below
+                        # can mark why it left. Marking a refusal is an UPDATE:
+                        # on this board, which is deliberately never gated, no
+                        # row exists until this call, so a refusal recorded
+                        # first would match nothing and be lost.
+                        record_autolog_rank(_spreads, board="autolog_structures")
+
                         # Budget pre-filter — see the single-leg path for why this must run
                         # BEFORE the top-N cut rather than at the ledger door.
                         _budget_cap = auto_log_budget_cap("config.json")
@@ -6777,6 +6818,9 @@ def main():
                                 axis=1,
                             )
                             _displaced = int((~_afford_mask).head(_top_n).sum())
+                            record_autolog_refusals(
+                                _spreads[~_afford_mask].to_dict("records"),
+                                "budget_displaced", board="autolog_structures")
                             _spreads = _spreads[_afford_mask]
                         _candidates = _spreads.head(_top_n)
                         _today_str = datetime.now().strftime("%Y-%m-%d")
@@ -6907,6 +6951,13 @@ def main():
                         if "symbol" in _single_legs.columns:
                             _single_legs = _single_legs.drop_duplicates(subset=["symbol"], keep="first")
                         _today_str = datetime.now().strftime("%Y-%m-%d")
+                        # Record the queue BEFORE the pre-cut filters, so every
+                        # candidate carries its position and the filters below
+                        # can mark why it left. Note what this position MEANS:
+                        # the frame was ranked EV-descending above and then
+                        # re-sorted by carry inside gate_and_report, so this is
+                        # the carry order — which is what the cut consumes.
+                        record_autolog_rank(_single_legs, board="AUTO-LOG")
                         # Drop rows the allowlist would reject entirely (e.g. Long Puts once
                         # removed from paper_only_strategies) BEFORE taking the top-N. Without
                         # this, a scan whose top-scored legs are Long Puts logs almost nothing
@@ -6922,7 +6973,11 @@ def main():
                                     cfg_path="config.json",
                                 )
                                 return _dec != "drop"
-                            _single_legs = _single_legs[_single_legs.apply(_allowlist_keeps, axis=1)]
+                            _allow_mask = _single_legs.apply(_allowlist_keeps, axis=1)
+                            record_autolog_refusals(
+                                _single_legs[~_allow_mask].to_dict("records"),
+                                "allowlist_drop", board="AUTO-LOG")
+                            _single_legs = _single_legs[_allow_mask]
                         _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
                         # Budget pre-filter — same reasoning as the allowlist filter above.
                         # An unaffordable pick IS refused by the ledger, but only after it has
@@ -6942,6 +6997,9 @@ def main():
                             # Report only how many of the WOULD-BE top-N were unaffordable; the
                             # pool-wide count is noise (most of 1,109 were never in contention).
                             _displaced = int((~_afford_mask).head(_top_n).sum())
+                            record_autolog_refusals(
+                                _single_legs[~_afford_mask].to_dict("records"),
+                                "budget_displaced", board="AUTO-LOG")
                             _single_legs = _single_legs[_afford_mask]
                         _candidates = _single_legs.head(_top_n)
 
