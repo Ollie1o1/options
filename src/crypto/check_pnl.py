@@ -248,7 +248,7 @@ def _print_closed(closed_rows: List[sqlite3.Row], width: int, limit: int = 50) -
     rows = closed_rows[:limit]
     header = (
         f"  {'Ticker':<7} {'Type':<6} {'Strike':>9} {'Expiry':<12} {'Opened':<12} {'Closed':<19} "
-        f"{'Entry $':>10} {'Exit $':>10} {'P/L $':>12} {'P/L %':>8}  {'Reason':<22}"
+        f"{'Entry $':>10} {'Exit $':>10} {'P/L $':>12} {'P/L %':>8}  {'Reason':<22}  {'Result'}"
     )
     print(header)
     print("  " + "-" * (width - 2))

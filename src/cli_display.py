@@ -255,7 +255,6 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
             pop = row.get("prob_profit", 0) or 0
             prem = row.get("premium", 0) or 0
             delta = row.get("delta", 0) or 0
-            score = row.get("quality_score", 0) or 0
             drivers = str(row.get("score_drivers", ""))[:24]
             decision, net_ev = _verdict_for_row(row)
             if decision in ("SKIP", "INDETERMINATE"):
@@ -285,8 +284,8 @@ def print_top_n_table(contracts: pd.DataFrame, n: int) -> None:
                 f"{rank:<5} {str(row.get('symbol','')):<7} {str(row.get('type','')):<5} "
                 f"{row.get('strike', 0):>7.1f} {str(row.get('expiration', '')):<12} "
                 f"{dte_val:>4} {delta:>6.2f} {iv_pct*100:>5.0f}% {pop*100:>5.1f}% "
-                f"${prem:>6.2f} {net_cell} {cost_cell:>5} {p2x_cell:>5} {_style_verdict(decision)} "
-                f"{score:>6.3f}  {drivers}"
+                f"${prem:>6.2f} {net_cell} {cost_cell:>5} {p2x_cell:>5} "
+                f"{_style_verdict(decision)}  {drivers}"
             )
             print(line)
             rank += 1
@@ -1445,8 +1444,9 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     width = get_display_width()
 
     # An explicit sort the reader asked for is honoured, including by score —
-    # "show me this sorted by score" is a legitimate request and the column is
-    # labelled. The DEFAULT is board order.
+    # "show me this sorted by score" is a legitimate request, and the header
+    # names the sort even though the column itself is gone. The DEFAULT is
+    # board order.
     #
     # It did not used to be, despite this comment and the ranking guard's
     # allowlist both asserting it for months: `sort_by` defaulted to
@@ -1517,16 +1517,11 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
             exp_str = pd.to_datetime(exp_raw).strftime("%m/%d")
         except Exception:
             exp_str = exp_raw[-5:]
-        score = r.get("quality_score", 0)
         pop = r.get("prob_profit", 0) or 0
         rr = r.get("rr_ratio", 0) or 0
         iv_pct = (r.get("iv_percentile_30", r.get("iv_percentile", 0)) or 0) * 100
         ev = r.get("ev_per_contract", 0) or 0
         spread = (r.get("spread_pct", 0) or 0) * 100
-
-        # Score is a quality grade, not a P&L sign — keep it neutral so the
-        # only colour in the table is EV-sign and SVI cheap/rich.
-        score_str = f"{score:>6.2f}"
 
         # Confidence badge
         conf_badge = ""
@@ -1564,7 +1559,7 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
             p2x_str = "  n/a"
 
         line = (
-            f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8} {score_str}"
+            f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8}"
             f"{conf_badge}"
             f" {pop_str:>5}"
             f" {rr_str:>5} {iv_pct:>4.0f}% {delta_str} {vega_str} {ev_cell} {spread:>4.1f}%"
@@ -1905,11 +1900,14 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
                                          f"Median |\u0394| {median_delta:.2f}"]))
         else:
             print(f"  Summary: Avg IV {format_pct(avg_iv)} | Avg Spread {format_pct(avg_spread)} | Median |\u0394| {median_delta:.2f}\n")
-            # Column headers (plain-text fallback keeps the tabular layout)
+            # Column headers (plain-text fallback keeps the tabular layout).
+            # No trailing `Quality`: the row stops at Tag and never filled it,
+            # and `quality_score` is the metric taken off the boards in
+            # 8e3c8ad for measuring OOS IC -0.12.
             if is_multi:
-                hdr = f"  {'Rank':<8} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
+                hdr = f"  {'Rank':<8} {'Tkr':<6} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}"
             else:
-                hdr = f"  {'Rank':<8} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}  Quality"
+                hdr = f"  {'Rank':<8} {'W':<2} {'Type':<5} {'Strike':>8} {'Expiry':<12} {'Prem':<9} {'IV':<8} {'OI':>9} {'Vol':>9} {'Delta':>7}  {'Tag':<4}"
             print(hdr)
             print("  " + "-" * (WIDTH - 2))
 
