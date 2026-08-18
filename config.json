@@ -446,7 +446,8 @@
     "max_spread_pct": 0.7
   },
   "crypto": {
-    "auto_log_enabled": true,
+    "_auto_log_enabled_note": "OFF since 2026-08-18. The crypto auto-logger has no strategy allowlist — pick_winner takes the single highest top-of-bucket score per currency, and Long Put won 98 of 98 decisions all-time while being the only losing strategy in the crypto book: -$3,186 over 52 closed at 28.8%, against Bear Call +$2,277, Long Call +$3,114, Calendar Put +$1,377. The book's +$3,582 comes entirely from the 11 trades the auto-logger did NOT choose; the auto-logged cohort alone is -$2,400 at 34.6%, and deteriorating (2026-07 was 0-for-4 at -$3,762, 2026-08 20% at -$734). Consistent with the measured crypto VRP: BTC short premium clears the cost wall, long premium does not. This switch is the FIRST check in run_currency, before any scan or ledger access, so nothing is fetched and nothing can be written while it is false. It stops NEW entries only — the crypto exit enforcer is a separate LaunchAgent and still manages the 2 open Long Puts. NOT a verdict on Bear Call: its 9 wins are all BTC inside 2026-05-04..2026-06-25, one regime, and 100% over n=9 is not an edge estimate. Re-enable only alongside a selection rule that does not let one score column monopolise the board.",
+    "auto_log_enabled": false,
     "min_auto_log_score": 0.5
   },
   "equity": {
