@@ -75,6 +75,64 @@ class TestTheAllowlistStillWorks(unittest.TestCase):
         self.assertEqual(flag, 1)
 
 
+class TestBullPutLogsAgain(unittest.TestCase):
+    """Restored 2026-08-18. It was switched off by accident, not by evidence.
+
+    `c0cd5bc` (2026-08-01) removed Bull Put, Bear Call and Short Put from
+    `paper_only_strategies` so the short-premium gate's cohort could authorise
+    capital, and added none of them to `allowed_strategies`. Absence from both
+    lists is exactly how a strategy is switched off, so all three stopped being
+    auto-logged that day — silently, and against the intent of the change.
+
+    Bull Put is the one line in the book that clears its own bar: it needs a
+    50.9% win rate under the exits actually used and has delivered 66.4% over
+    131 closed trades, +$5,315. Bear Call (-7.4pp) and Short Put (-$8,278 over
+    109 closed) do not, and stay off.
+    """
+
+    def test_bull_put_is_logged_and_cohort_eligible(self):
+        self.assertEqual(_decide("Bull Put"), ("insert", 0))
+
+    def test_bull_put_appears_in_allowed_strategies(self):
+        """Pins the mechanism: `paper_only_strategies` would also make it log,
+        but quarantined out of every cohort — which is the state we are
+        leaving, not the one we are moving to."""
+        with open(repo_path("config.json")) as fh:
+            al = json.load(fh)["auto_log"]
+        self.assertIn("Bull Put", al.get("allowed_strategies") or [])
+
+    def test_the_rest_of_the_family_stays_off(self):
+        """The fix restores one strategy on its own evidence, not the family
+        that was switched off alongside it."""
+        for strat in ("Bear Call", "Short Put"):
+            with self.subTest(strategy=strat):
+                self.assertEqual(_decide(strat), ("drop", None))
+
+
+class TestTheHorizonFloorIsLongPremiumReasoning(unittest.TestCase):
+    """The floor asks whether an entry has swing runway before the time-exit
+    force-closes it — a question about a directional long, whose thesis needs
+    time to play out. A credit spread's thesis IS decay, so short DTE is the
+    point of the trade rather than a contamination of it.
+
+    Left global, the floor would have quarantined 119 of 132 historical Bull
+    Puts (median 18 DTE against a 30-DTE floor) as paper_only=1, keeping the
+    strategy's evidence out of the very cohort this restoration exists to
+    feed.
+    """
+
+    def test_a_short_dated_bull_put_stays_cohort_eligible(self):
+        near = {"strategy_name": "Bull Put", "expiration": "2026-08-31",
+                "date": "2026-08-13"}   # 18 DTE — the historical median
+        self.assertEqual(apply_auto_log_allowlist(near), ("insert", 0))
+
+    def test_a_short_dated_long_call_is_still_quarantined(self):
+        """The guard must narrow, not disappear."""
+        near = {"strategy_name": "Long Call", "expiration": "2026-08-20",
+                "date": "2026-08-13"}
+        self.assertEqual(apply_auto_log_allowlist(near), ("insert", 1))
+
+
 class TestTheDeadSwitchesAreGone(unittest.TestCase):
     """They named a behaviour they did not implement.
 
