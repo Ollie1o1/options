@@ -15,9 +15,12 @@ See docs/CANDIDATE_RECORD_SPEC.md.
 from __future__ import annotations
 
 import contextvars
+import functools
 import json
 import logging
 import sqlite3
+import traceback
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
@@ -138,3 +141,106 @@ def contract_key(row: Dict[str, Any]) -> str:
     strike = _num(row.get("strike"))
     return (f"{sym}|{exp}|{_opt_type_of(row) or strategy}|"
             f"{'' if strike is None else format(strike, 'g')}")
+
+
+# ── Observability ────────────────────────────────────────────────────────────
+# A recorder that must never raise is one keystroke away from a recorder that
+# never writes. `update_shadow_marks` returned cleanly under a bare
+# `except: pass` and produced no data for four months before anyone noticed.
+# So every failure lands in a counter, a WARNING, and a row.
+STATS: Dict[str, int] = {"recorded": 0, "errors": 0, "autolog_only": 0}
+
+_SCAN_ID: contextvars.ContextVar = contextvars.ContextVar(
+    "candidate_scan_id", default=None)
+
+
+def reset_stats() -> None:
+    """Zero the counters. For tests and for a fresh scheduler run."""
+    for key in STATS:
+        STATS[key] = 0
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+_ERROR_SCHEMA = """
+CREATE TABLE IF NOT EXISTS recorder_errors (
+  ts TEXT NOT NULL, scan_id TEXT, board TEXT, where_ TEXT, traceback TEXT
+);
+"""
+
+
+def _record_error(where: str, tb: str, db_path: str) -> None:
+    """Persist a recorder failure. Best effort — it must not raise either.
+
+    Deliberately does NOT go through `connect`. That runs the full schema
+    script, including indexes over `candidates`, so a damaged `candidates`
+    table takes the error path down with it — the recorder would then be
+    unable to report the one failure most worth reporting. This touches only
+    the table it writes to.
+
+    When the database file itself is what broke, no write can succeed. The
+    counter and the WARNING are the surviving signal in that case, which is
+    why `health_lines` reads the counter and not only this table.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(_ERROR_SCHEMA)
+            conn.execute(
+                "INSERT INTO recorder_errors (ts, scan_id, board, where_, traceback)"
+                " VALUES (?,?,?,?,?)",
+                (_now(), _SCAN_ID.get(), None, where, tb))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        log.warning("candidate recorder could not persist its own error",
+                    exc_info=True)
+
+
+def _safe(default):
+    """Never raise into a scan; never fail silently.
+
+    A broken recorder must not be able to stop a scan or change a pick. It
+    must also never look like a recorder that had nothing to write.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, db_path: str = DEFAULT_DB_PATH, **kwargs):
+            try:
+                return fn(*args, db_path=db_path, **kwargs)
+            except Exception:
+                STATS["errors"] += 1
+                log.warning("candidate recorder failed in %s",
+                            fn.__name__, exc_info=True)
+                _record_error(fn.__name__, traceback.format_exc(), db_path)
+                return default
+        return wrapper
+    return deco
+
+
+# Column order for every write. Kept in one place so the INSERT and the
+# payload builder cannot drift apart.
+_COLUMNS = ("scan_id", "ts", "board", "contract_key", "symbol", "strategy_name",
+            "expiration", "strike", "opt_type", "bid", "ask", "premium",
+            "theta", "delta", "ev_net", "ev_gross", "ev_cost", "ev_noise",
+            "quality_score", "round_trip_pct", "rank_pos", "refused_by",
+            "gate_passed", "gating_failed", "auto_logged", "entry_id",
+            "features_json")
+
+
+@_safe(default=0)
+def record_board_rows(rows: List[Dict[str, Any]], *,
+                      db_path: str = DEFAULT_DB_PATH) -> int:
+    """Insert prepared candidate rows. Returns the number written."""
+    if not rows:
+        return 0
+    sql = (f"INSERT OR REPLACE INTO candidates ({','.join(_COLUMNS)}) "
+           f"VALUES ({','.join('?' * len(_COLUMNS))})")
+    with connect(db_path) as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in _COLUMNS) for r in rows])
+        conn.commit()
+    STATS["recorded"] += len(rows)
+    return len(rows)

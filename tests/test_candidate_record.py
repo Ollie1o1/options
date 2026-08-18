@@ -109,5 +109,50 @@ class TestContractKey(unittest.TestCase):
         self.assertEqual(key, "X|2026-09-18|Bull Put|100/95")
 
 
+class TestFailureCapture(unittest.TestCase):
+    """A recorder that returns cleanly and writes nothing is how four months
+    of shadow-mark data went missing. Failures must be counted and persisted."""
+
+    def setUp(self):
+        cr.reset_stats()
+
+    def test_unwritable_path_does_not_raise_and_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            # A directory is not a database file: sqlite cannot open it.
+            rows = [{"board": "discover", "contract_key": "K", "scan_id": "S"}]
+            self.assertEqual(cr.record_board_rows(rows, db_path=d), 0)
+            self.assertEqual(cr.STATS["errors"], 1)
+
+    def test_broken_table_writes_an_error_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "candidates.db")
+            cr.connect(path).close()
+            conn = sqlite3.connect(path)
+            conn.execute("DROP TABLE candidates")
+            conn.execute("CREATE TABLE candidates (nonsense TEXT)")
+            conn.commit()
+            conn.close()
+
+            rows = [{"board": "discover", "contract_key": "K", "scan_id": "S"}]
+            self.assertEqual(cr.record_board_rows(rows, db_path=path), 0)
+            self.assertEqual(cr.STATS["errors"], 1)
+
+            with sqlite3.connect(path) as conn:
+                errs = conn.execute("select where_, traceback "
+                                    "from recorder_errors").fetchall()
+            self.assertEqual(len(errs), 1)
+            self.assertIn("record_board_rows", errs[0][0])
+            self.assertTrue(errs[0][1].strip())
+
+    def test_a_clean_write_leaves_the_error_counter_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "candidates.db")
+            rows = [{"scan_id": "S", "ts": "2026-08-18T00:00:00+00:00",
+                     "board": "discover", "contract_key": "K"}]
+            self.assertEqual(cr.record_board_rows(rows, db_path=path), 1)
+            self.assertEqual(cr.STATS["errors"], 0)
+            self.assertEqual(cr.STATS["recorded"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
