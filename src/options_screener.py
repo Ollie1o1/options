@@ -430,6 +430,15 @@ def _strategy_label_for_mode(mode: str, opt_type) -> str:
     return strategy_label_for_mode(mode, opt_type)
 
 
+# Strategies the cohort horizon floor applies to. Long premium only: the floor
+# derives from the time-exit plus swing runway, which is a long's problem. A
+# credit spread entered at 18 DTE is not a contaminated observation, it is the
+# strategy working as intended. Membership is by structure, not by track record
+# — a strategy that fails its breakeven is switched off via the allowlist, not
+# quietly quarantined here.
+_HORIZON_GUARDED_STRATEGIES = frozenset({"Long Call", "Long Put"})
+
+
 def _cohort_min_dte(cfg: dict) -> int:
     """Minimum DTE-at-entry for a Long Call to be eligible for the validation
     cohort. Horizon-aware: an explicit auto_log.cohort_min_dte wins; otherwise
@@ -528,14 +537,23 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
             "paper_only_strategies — treating as allowed.", strat
         )
     if strat in allowed:
-        floor = _cohort_min_dte(cfg)
-        dte = _trade_dte(trade)
-        if dte is not None and dte < floor:
-            logging.info(
-                "cohort horizon: %s at %dDTE < floor %dDTE — logging paper_only=1 "
-                "(data only, excluded from gate).", strat, dte, floor
-            )
-            return ("insert", 1)
+        # The horizon floor only means something for long premium. It asks
+        # whether an entry has swing runway before the time-exit force-closes
+        # it, which is a question about a directional long whose thesis needs
+        # time to play out. A credit spread's thesis IS decay, so a short DTE
+        # is the point of the trade rather than a contamination of it — and
+        # applied to one, the floor quarantines the strategy out of the very
+        # cohort it should be feeding (119 of 132 historical Bull Puts sit
+        # below the 30-DTE floor, median 18).
+        if strat in _HORIZON_GUARDED_STRATEGIES:
+            floor = _cohort_min_dte(cfg)
+            dte = _trade_dte(trade)
+            if dte is not None and dte < floor:
+                logging.info(
+                    "cohort horizon: %s at %dDTE < floor %dDTE — logging paper_only=1 "
+                    "(data only, excluded from gate).", strat, dte, floor
+                )
+                return ("insert", 1)
         return ("insert", 0)
     if strat in paper_only:
         return ("insert", 1)
