@@ -269,7 +269,8 @@ def run_catchup(db_path: str = "paper_trades.db",
                 now: Optional[datetime] = None,
                 runner: Optional[Callable] = None,
                 lock_path: str = DEFAULT_LOCK_PATH,
-                swing_fn: Optional[Callable] = None) -> dict:
+                swing_fn: Optional[Callable] = None,
+                watch_fn: Optional[Callable] = None) -> dict:
     """Run every due working auto-log window for today, blocking, marking state
     after each success so a crash mid-way keeps the windows already done.
     Invoked detached by interactive startup (``-m src.maintenance --catchup``)
@@ -282,10 +283,12 @@ def run_catchup(db_path: str = "paper_trades.db",
     with _catchup_lock(lock_path) as acquired:
         if not acquired:
             return {"ran": [], "skipped": "already-running"}
-        return _run_catchup_locked(db_path, state_path, now, runner, swing_fn)
+        return _run_catchup_locked(db_path, state_path, now, runner, swing_fn,
+                                   watch_fn)
 
 
-def _run_catchup_locked(db_path, state_path, now, runner, swing_fn=None) -> dict:
+def _run_catchup_locked(db_path, state_path, now, runner, swing_fn=None,
+                        watch_fn=None) -> dict:
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
     runner = runner or _default_runner
@@ -317,7 +320,41 @@ def _run_catchup_locked(db_path, state_path, now, runner, swing_fn=None) -> dict
             ran.append("swing-paper")
     except Exception:
         pass
+    # Bull Put cohort watch. Runs AFTER the auto-log windows are marked so the
+    # day's own entries are included, and is isolated the same way the swing
+    # track is: a report must never be able to break the job that produces the
+    # data it reports on. Read-only on the ledger and no network, so the only
+    # realistic failure is a missing file.
+    try:
+        if (watch_fn or _run_bull_put_watch)(db_path) is not None:
+            ran.append("bull-put-watch")
+    except Exception:
+        pass
     return {"ran": ran}
+
+
+def _run_bull_put_watch(db_path: str = "paper_trades.db",
+                        log_path: str = "logs/bull_put_watch.log",
+                        now: Optional[datetime] = None) -> Optional[dict]:
+    """Append today's Bull Put cohort report. Returns the report's headline
+    numbers, or None if it could not be produced.
+
+    Bull Put was restored to the auto-log allowlist on 2026-08-18 after being
+    switched off by accident for seventeen days. Its 66.4% over 131 closed
+    trades was measured on the pre-repair EV layer, so the cohort entered from
+    the restore date is the first evidence about the repaired stack — and it is
+    the thing worth watching for the next few weeks.
+    """
+    from src import bull_put_watch as _bpw
+    rep = _bpw.report(db_path)
+    stamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M")
+    os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+    with open(log_path, "a") as fh:
+        fh.write(f"\n=== {stamp} ===\n")
+        for line in _bpw.render(rep):
+            fh.write(line + "\n")
+    return {"open": rep.n_open, "closed": rep.n_closed,
+            "win_rate": rep.win_rate, "required": rep.required}
 
 
 def _run_swing_paper() -> Optional[dict]:
