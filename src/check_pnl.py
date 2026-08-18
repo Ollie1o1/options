@@ -167,6 +167,82 @@ def _dte(expiration: str) -> int:
         return 0
 
 
+def _price_open_legs(open_trades, pm=None, progress=None) -> dict:
+    """Live mark per leg, keyed (ticker, expiration, strike, opt_type).
+
+    ONE option-chain request per (ticker, expiration), not one lookup per leg.
+
+    This priced every leg with its own `yf.Ticker(occ)` call. On the live book
+    that is 119 open positions, 87 of them four-legged iron condors — about 381
+    round trips, eight at a time. Measured 2026-08-17: over eleven minutes wall
+    clock against 10.9 SECONDS of CPU, i.e. essentially all network wait, and
+    it had to be killed before it finished.
+
+    Those 381 legs sit on only 41 distinct (ticker, expiration) pairs; QQQ
+    2026-09-18 alone carries 15 positions. `PaperManager._fetch_chain_quotes`
+    already serves every leg on a pair from one request and memoises it for
+    60s, which is the same fix the scan path got when the GEX chain path was
+    taking ~90% of every scan.
+
+    A leg the chain cannot answer is left ABSENT rather than guessed: the
+    caller has traded-price rungs to fall back on, and a fabricated mark can
+    fire an exit.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    legs: list = []
+    for r in open_trades:
+        for opt_type, strike, _qty in _legs_for_row(r):
+            legs.append((r["ticker"], str(r["expiration"])[:10], strike, opt_type))
+    legs = list(dict.fromkeys(legs))
+    if not legs:
+        return {}
+
+    if pm is None:
+        try:
+            from .paper_manager import PaperManager
+        except ImportError:
+            from paper_manager import PaperManager  # type: ignore[no-redef]
+        pm = PaperManager(db_path=DB_PATH, config_path="config.json")
+
+    pairs = list(dict.fromkeys((t, e) for t, e, _s, _o in legs))
+
+    def _one_chain(pair):
+        try:
+            return pair, pm._fetch_chain_quotes(pair[0], pair[1])
+        except Exception:
+            # One dead pair must not abort the whole book.
+            return pair, {}
+
+    chains: dict = {}
+    bar = progress(len(pairs), "Pricing open positions") if progress else None
+    try:
+        with ThreadPoolExecutor(max_workers=min(len(pairs), 8)) as ex:
+            for pair, quotes in ex.map(_one_chain, pairs):
+                chains[pair] = quotes
+                if bar:
+                    bar.update(1)
+    finally:
+        if bar:
+            bar.close()
+
+    out: dict = {}
+    for ticker, exp, strike, opt_type in legs:
+        quote = chains.get((ticker, exp), {}).get((float(strike), opt_type))
+        mark = None
+        # Defensive unpack: a chain helper that returns something other than
+        # {(strike, type): (bid, ask)} — a stub, a mock, a malformed row —
+        # must leave the leg unpriced rather than abort marking the book.
+        try:
+            bid, ask = quote
+            if bid is not None and ask is not None and float(ask) > 0:
+                mark = (float(bid) + float(ask)) / 2.0
+        except (TypeError, ValueError):
+            mark = None
+        out[(ticker, exp, strike, opt_type)] = mark
+    return out
+
+
 def _legs_for_row(r) -> list:
     """Return list of (opt_type, strike, qty_sign) for the given DB row.
 
@@ -865,28 +941,11 @@ def view_portfolio(period: Optional[str] = None):
         # Parallel-fetch all live option prices up front. For multi-leg
         # structures (spreads / iron condors) we need ALL legs' marks so the
         # P&L row shows the true net cost-to-close rather than just one leg.
-        from concurrent.futures import ThreadPoolExecutor
-        _live_tasks_set: set = set()
-        for r in open_trades:
-            for opt_type, strike, _qty in _legs_for_row(r):
-                _live_tasks_set.add((r["ticker"], r["expiration"][:10], strike, opt_type))
-        _live_tasks = list(_live_tasks_set)
-        _live_prices: dict = {}
-        def _fetch_one(args):
-            return args, _fetch_live_price(*args)
-        if _live_tasks:
-            # One live quote per leg across every open position (143 open trades
-            # on the real book, up to 4 legs each). This ran silently, so the
-            # viewer looked frozen for as long as the feed took.
-            _workers = min(len(_live_tasks), 8)
-            _price_bar = _progress(len(_live_tasks), "Pricing open positions")
-            try:
-                with ThreadPoolExecutor(max_workers=_workers) as _ex:
-                    for key, price in _ex.map(_fetch_one, _live_tasks):
-                        _live_prices[key] = price
-                        _price_bar.update(1)
-            finally:
-                _price_bar.close()
+        # One option-chain request per (ticker, expiration) — see
+        # `_price_open_legs`. Was one `yf.Ticker(occ)` per LEG: ~381 round
+        # trips on the live book for 41 distinct chains, which ran for over
+        # eleven minutes on 10.9s of CPU.
+        _live_prices = _price_open_legs(open_trades, progress=_progress)
 
         for r in open_trades:
             ticker      = r["ticker"]
