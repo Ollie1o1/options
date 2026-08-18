@@ -291,5 +291,107 @@ class TestGatingFailed(unittest.TestCase):
             self.assertEqual(passed, 1)   # kept, but the keeping is not evidence
 
 
+class TestMarkRanked(unittest.TestCase):
+    def setUp(self):
+        cr.reset_stats()
+
+    def test_rank_updates_an_existing_gate_row_without_duplicating(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            row = _leg()
+            with cr.scan("discover"):
+                cr.record_board(pr.BoardResult(kept=pd.DataFrame([row]),
+                                               refused=pd.DataFrame(), scanned=1),
+                                board="discover", db_path=path)
+                cr.mark_ranked([row], board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                rows = conn.execute(
+                    "select rank_pos, gate_passed from candidates").fetchall()
+            self.assertEqual(len(rows), 1)          # upsert, not insert
+            self.assertEqual(rows[0], (1, 1))       # rank set, gate kept
+
+    def test_rank_is_one_based_and_in_frame_order(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            rows = [_leg(strike=190.0), _leg(strike=195.0), _leg(strike=200.0)]
+            with cr.scan("discover"):
+                cr.mark_ranked(rows, board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                got = conn.execute("select strike, rank_pos from candidates "
+                                   "order by rank_pos").fetchall()
+            self.assertEqual(got, [(190.0, 1), (195.0, 2), (200.0, 3)])
+
+    def test_autolog_only_rows_are_inserted_and_counted(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("discover"):
+                cr.record_board(pr.BoardResult(kept=pd.DataFrame([_leg()]),
+                                               refused=pd.DataFrame(), scanned=1),
+                                board="discover", db_path=path)
+                # A row the board never saw — the divergence this counts.
+                cr.mark_ranked([_leg(), _leg(strike=250.0)],
+                               board="discover", db_path=path)
+            self.assertEqual(cr.STATS["autolog_only"], 1)
+            with sqlite3.connect(path) as conn:
+                n, = conn.execute("select count(*) from candidates").fetchone()
+            self.assertEqual(n, 2)
+
+    def test_mark_logged_sets_the_flag_and_entry_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            row = _leg()
+            with cr.scan("discover"):
+                cr.mark_ranked([row], board="discover", db_path=path)
+                cr.mark_logged(row, board="discover", entry_id=4242, db_path=path)
+            with sqlite3.connect(path) as conn:
+                got = conn.execute("select auto_logged, entry_id, rank_pos "
+                                   "from candidates").fetchone()
+            self.assertEqual(got, (1, 4242, 1))   # rank survives the update
+
+    def test_mark_logged_inserts_a_row_it_has_never_seen(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("discover"):
+                cr.mark_logged(_leg(), board="discover", entry_id=7,
+                               db_path=path)
+            with sqlite3.connect(path) as conn:
+                got = conn.execute(
+                    "select auto_logged, entry_id from candidates").fetchone()
+            self.assertEqual(got, (1, 7))
+
+    def test_refusal_reason_survives_a_rank_update(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            row = _leg()
+            with cr.scan("discover"):
+                cr.record_board(
+                    pr.BoardResult(kept=pd.DataFrame(),
+                                   refused=pd.DataFrame([dict(row,
+                                       refused_by="negative_ev")]), scanned=1),
+                    board="discover", db_path=path)
+                cr.mark_ranked([row], board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                got = conn.execute("select refused_by, gate_passed, rank_pos "
+                                   "from candidates").fetchone()
+            self.assertEqual(got, ("negative_ev", 0, 1))
+
+    def test_mark_refused_records_the_pre_cut_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            rows = [_leg(strike=190.0), _leg(strike=195.0)]
+            with cr.scan("discover"):
+                cr.mark_ranked(rows, board="autolog", db_path=path)
+                cr.mark_refused([rows[1]], "budget_displaced",
+                                board="autolog", db_path=path)
+            with sqlite3.connect(path) as conn:
+                got = dict(conn.execute(
+                    "select strike, refused_by from candidates").fetchall())
+                rank = conn.execute("select rank_pos from candidates "
+                                    "where strike=195.0").fetchone()[0]
+            self.assertIsNone(got[190.0])
+            self.assertEqual(got[195.0], "budget_displaced")
+            self.assertEqual(rank, 2)     # rank survives the refusal mark
+
+
 if __name__ == "__main__":
     unittest.main()

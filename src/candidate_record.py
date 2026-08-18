@@ -370,3 +370,91 @@ def record_board(result: Any, *, board: str,
                 gating_failed=gating_failed))
 
     return record_board_rows(payloads, db_path=db_path)
+
+
+# ── The entry path ───────────────────────────────────────────────────────────
+# These upsert rather than insert. The auto-log frame is derived independently
+# of the gated board (`options_screener.py` picks `_log_src` from picks /
+# credit spreads / condors) and is deliberately NOT gated — G5 must not freeze
+# its own training set. So a row arriving here may or may not have a gate
+# record, and both cases have to work.
+
+@_safe(default=0)
+def mark_ranked(rows: List[Dict[str, Any]], *, board: str,
+                db_path: str = DEFAULT_DB_PATH) -> int:
+    """Write rank position across a ranked frame, 1-based, in frame order.
+
+    Rows with no gate record are inserted AND counted. That count is the
+    board/auto-log divergence — the same structural split that produced the
+    "cleared the gates showed ungated rows" defect, measured rather than
+    assumed absent.
+    """
+    if not rows:
+        return 0
+    scan_id = current_scan_id()
+    keys = [contract_key(r) for r in rows]
+
+    with connect(db_path) as conn:
+        known = {k for (k,) in conn.execute(
+            "SELECT contract_key FROM candidates WHERE scan_id=? AND board=?",
+            (scan_id, board))}
+        conn.executemany(
+            "UPDATE candidates SET rank_pos=? "
+            "WHERE scan_id=? AND board=? AND contract_key=?",
+            [(i, scan_id, board, k) for i, k in enumerate(keys, start=1)
+             if k in known])
+        conn.commit()
+
+    fresh = [(r, i) for i, (r, k) in enumerate(zip(rows, keys), start=1)
+             if k not in known]
+    if fresh:
+        STATS["autolog_only"] += len(fresh)
+        log.warning("%d auto-log rows on board %r had no gate record",
+                    len(fresh), board)
+        record_board_rows(
+            [row_payload(r, board=board, scan_id=scan_id, rank_pos=i)
+             for r, i in fresh], db_path=db_path)
+    return len(rows)
+
+
+@_safe(default=0)
+def mark_refused(rows: List[Dict[str, Any]], reason: str, *, board: str,
+                 db_path: str = DEFAULT_DB_PATH) -> int:
+    """Record why a ranked candidate never reached the top-N cut.
+
+    The auto-log allowlist and the per-scan budget cap both filter BEFORE the
+    cut, so without this a candidate that was never eligible looks identical
+    to one that competed and lost.
+    """
+    if not rows:
+        return 0
+    scan_id = current_scan_id()
+    with connect(db_path) as conn:
+        conn.executemany(
+            "UPDATE candidates SET refused_by=?, gate_passed=0 "
+            "WHERE scan_id=? AND board=? AND contract_key=?",
+            [(reason, scan_id, board, contract_key(r)) for r in rows])
+        conn.commit()
+    return len(rows)
+
+
+@_safe(default=None)
+def mark_logged(row: Dict[str, Any], *, board: str, entry_id: Optional[int],
+                db_path: str = DEFAULT_DB_PATH) -> None:
+    """Flag one candidate as actually entered, with its ledger entry_id."""
+    scan_id = current_scan_id()
+    key = contract_key(row)
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE candidates SET auto_logged=1, entry_id=? "
+            "WHERE scan_id=? AND board=? AND contract_key=?",
+            (entry_id, scan_id, board, key))
+        matched = cur.rowcount
+        conn.commit()
+
+    if matched == 0:
+        # A trade was entered from a candidate nothing recorded. Keep it —
+        # losing the taken row would be the worst possible gap in this table.
+        record_board_rows([row_payload(row, board=board, scan_id=scan_id,
+                                       auto_logged=1, entry_id=entry_id)],
+                          db_path=db_path)
