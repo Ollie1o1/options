@@ -394,6 +394,46 @@ def _progress_bar(total: int, desc: str, enabled: bool = True, stream=None):
                            stream=stream)
 
 
+def _reset_iv_crosscheck() -> None:
+    """Start a scan's IV cross-check tally from zero. The interactive loop runs
+    many scans in one process, so without this the second scan reports the
+    first one's contracts alongside its own."""
+    try:
+        from src import iv_crosscheck as _ivx
+        _ivx.reset()
+    except Exception:
+        pass
+
+
+def _report_iv_crosscheck(verbose: bool = True) -> None:
+    """One line for the whole scan, after scoring.
+
+    `enrich_and_score` tallies per ticker rather than printing: it runs once
+    per TICKER, so an INFO line there is 111 lines on a full scan, written to
+    stderr while the progress bar renders on stdout — the two shred each other.
+
+    Called from BOTH scan entry points. `run_scan` and `run_top_scan` each own
+    their own scoring loop, and wiring only one of them is exactly how this
+    would silently do nothing on the path an operator actually uses.
+    """
+    if not verbose:
+        return
+    try:
+        from src import iv_crosscheck as _ivx
+        lines = _ivx.render(_ivx.summary())
+        if not lines:
+            return
+        print()
+        for i, line in enumerate(lines):
+            txt = "  " + line
+            if HAS_ENHANCED_CLI:
+                txt = (fmt.style(txt, 'muted') if i
+                       else fmt.colorize(txt, fmt.Colors.YELLOW))
+            print(txt)
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def _suppress_scan_noise():
     """Suppress noisy third-party logging/warnings during parallel scan."""
@@ -3085,12 +3125,19 @@ def enrich_and_score(
     if _corrected.any():
         df.loc[_corrected, "impliedVolatility"] = df.loc[_corrected, "iv_solved"]
         _ivlog = logging.getLogger(__name__)
-        # One summary line at INFO; the per-contract detail is DEBUG. The root
-        # logger prints bare messages at INFO, so a per-contract loop here spews
-        # dozens of lines through the middle of the report. Each corrected pick
-        # already carries an "IV corrected (yahoo X% → solved Y%)" provenance tag.
-        _ivlog.info("IV corrected on %d/%d contracts (Yahoo IV failed cross-check)",
-                    int(_corrected.sum()), len(df))
+        # Tallied, not printed. This runs once per TICKER, so an INFO line here
+        # is 111 lines on a full scan — written to stderr while the scoring bar
+        # renders on stdout, so the two shred each other. `run_scan` reports the
+        # scan-wide total once instead. The per-contract detail stays at DEBUG,
+        # and each corrected pick still carries its own
+        # "IV corrected (yahoo X% → solved Y%)" provenance tag.
+        try:
+            from src import iv_crosscheck as _ivx
+            _sym_col = df["symbol"] if "symbol" in df.columns else None
+            _sym = str(_sym_col.iloc[0]) if _sym_col is not None and len(_sym_col) else "?"
+            _ivx.record(_sym, int(_corrected.sum()), len(df))
+        except Exception:
+            pass
         for _i in df.index[_corrected]:
             try:
                 _ivlog.debug(
@@ -4646,6 +4693,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     put separates them by ~170x."""
     # Determine mode booleans for internal logic
 
+    _reset_iv_crosscheck()
+
     # === LOAD CONFIGURATION ===
     if verbose:
         print("\nLoading configuration...")
@@ -4837,6 +4886,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     finally:
         _score_bar.close()
 
+
+    _report_iv_crosscheck(verbose)
 
     # Stale-quote advisory: yfinance periodically serves bid=0/ask=0 chains
     # even when the market is open. If many tickers saw this, warn loudly —
@@ -5592,6 +5643,8 @@ def run_top_scan(
     """
     from .cli_display import print_top_n_table
 
+    _reset_iv_crosscheck()
+
     _logger = setup_logging()
     config = load_config("config.json")
     rfr = get_risk_free_rate()
@@ -5627,6 +5680,8 @@ def run_top_scan(
                         all_rows.append(picks_df)
         except Exception:
             continue
+
+    _report_iv_crosscheck()
 
     if not all_rows:
         print("No results from top scan.")
