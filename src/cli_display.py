@@ -1198,6 +1198,42 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     if df_picks.empty:
         return
 
+    # Gate BEFORE anything is shown. This block used to trust its caller, on a
+    # comment asserting the rows had been gated upstream — a claim about
+    # `run_scan`, and a false one. Every `gate_and_report` call there assigns
+    # to a NEW name (`final_df`, `final_spreads`, `_gated`), so `picks` was
+    # never itself replaced and the raw frame arrived here.
+    #
+    # A live 111-ticker scan on 2026-08-18 printed three XOM calls at -$78,
+    # -$83 and -$67 EV under a heading saying CLEARED THE GATES, on a run whose
+    # own board reported "219 refused — negative expected value after cost".
+    # The heading makes the claim, so this function has to enforce it, for
+    # every caller rather than one.
+    _refused_n = 0
+    try:
+        from . import pick_ranking as _pr
+        _res = _pr.gate_board(df_picks)
+        _refused_n = len(_res.refused) if _res.refused is not None else 0
+        df_picks = _res.kept
+    except Exception:
+        # Failure-safe like the rest of the scan path, but never silently: a
+        # summary that could not gate must not keep asserting that it did.
+        import logging as _lg
+        _lg.getLogger(__name__).warning(
+            "executive summary could not gate its rows; showing them ungated")
+
+    if df_picks.empty:
+        # An empty block under a positive heading reads as "nothing found"
+        # when the truth is "everything was rejected". Different answers, and
+        # an operator acts differently on each.
+        width = get_display_width()
+        print("\n" + ui.rule(width, title="CLEARED THE GATES"))
+        _msg = (f"Nothing cleared — all {_refused_n} candidate"
+                f"{'s were' if _refused_n != 1 else ' was'} refused."
+                if _refused_n else "Nothing cleared the gates.")
+        print("  " + (fmt.style(_msg, 'warn') if HAS_ENHANCED_CLI else _msg))
+        return
+
     if not HAS_ENHANCED_CLI:
         # Fallback to simple summary
         print(f"\n{'='*80}")
@@ -1282,8 +1318,12 @@ def print_executive_summary(df_picks: pd.DataFrame, config: Dict, mode: str = "D
     # ranked by `quality_score`, which measures -0.131 against return on
     # capital on long calls and whose top quintile lost $10,173 across the
     # book. No ordering beat it out of sample either (23 of 48 paired cells,
-    # p=0.89), so the board no longer claims one. Rows arrive already gated
-    # and ordered by carry cost; these are simply the first three.
+    # p=0.89), so the board no longer claims one; these are simply the first
+    # three of what survived the gate applied at the top of this function.
+    #
+    # That gate is applied HERE rather than assumed of the caller — see the
+    # note above the `gate_board` call at the top of this function for why
+    # assuming it was wrong.
     print("\n" + ui.rule(width, title="CLEARED THE GATES"))
 
     top3 = df_picks.head(3)
