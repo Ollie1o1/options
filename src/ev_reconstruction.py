@@ -48,7 +48,7 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
@@ -295,7 +295,8 @@ def build(ledger_path: str = LEDGER_PATH, db_path: str = DB_PATH):
     end = (dt.date.fromisoformat(dates[-1]) + dt.timedelta(days=2)).isoformat()
     hist = fetch_history({t["ticker"] for t in trades}, start, end)
 
-    recons, skipped = [], {}
+    recons: List[Recon] = []
+    skipped: Dict[str, int] = {}
     for t in trades:
         frame = hist.get(str(t["ticker"]).upper())
         if frame is None:
