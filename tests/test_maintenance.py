@@ -166,7 +166,7 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_catchup(
                 state_path=sp, now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
-                swing_fn=lambda: None,
+                swing_fn=lambda: None, watch_fn=lambda db: None,
                 lock_path=os.path.join(d, "catchup.lock"))
             self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
             self.assertEqual(set(m.load_state(sp)["last_autolog"]),
@@ -189,6 +189,7 @@ class TestOrchestrator(unittest.TestCase):
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: 0,
                 swing_fn=lambda: (seen.append(1), {"opened": 1, "closed": 0})[1],
+                watch_fn=lambda db: None,
                 lock_path=os.path.join(d, "catchup.lock"))
             self.assertEqual(seen, [1], "swing hook was not the injected one")
             self.assertIn("swing-paper", summary["ran"])
@@ -203,6 +204,7 @@ class TestOrchestrator(unittest.TestCase):
             summary = m.run_catchup(
                 state_path=sp, now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: 0, swing_fn=_boom,
+                watch_fn=lambda db: None,
                 lock_path=os.path.join(d, "catchup.lock"))
             self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
 
@@ -471,6 +473,7 @@ class TestCatchupSingleInstance(unittest.TestCase):
                     state_path=os.path.join(d, "state.json"),
                     now=datetime(2026, 6, 4, 14, 30),  # Thursday, in RTH band
                     runner=lambda cmd: (calls.append(cmd), 0)[1],
+                    watch_fn=lambda db: None,
                     lock_path=lock_path)
             finally:
                 fcntl.flock(held, fcntl.LOCK_UN)
@@ -485,7 +488,7 @@ class TestCatchupSingleInstance(unittest.TestCase):
                 state_path=os.path.join(d, "state.json"),
                 now=datetime(2026, 6, 4, 14, 30),
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
-                swing_fn=lambda: None,   # offline: the real hook calls Binance
+                swing_fn=lambda: None, watch_fn=lambda db: None,   # offline: the real hook calls Binance
                 lock_path=os.path.join(d, "catchup.lock"))
         flags = {f for c in calls for f in c if f in ("-ds", "-sps", "-ss", "-ics")}
         self.assertEqual(flags, {"-ds", "-sps", "-ss", "-ics"})
