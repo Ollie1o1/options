@@ -394,15 +394,42 @@ def _progress_bar(total: int, desc: str, enabled: bool = True, stream=None):
                            stream=stream)
 
 
-def _reset_iv_crosscheck() -> None:
-    """Start a scan's IV cross-check tally from zero. The interactive loop runs
-    many scans in one process, so without this the second scan reports the
-    first one's contracts alongside its own."""
+def _announce_ranking_degraded() -> None:
+    """Say, once, that board ordering fell back — loudly, and where the board
+    is about to render. This cannot wait for a post-scan reporter: ranking
+    happens at six display call sites, all of them after the scan-level
+    reporting point, so a summary printed there would run before the failure
+    it is meant to describe."""
     try:
-        from src import iv_crosscheck as _ivx
-        _ivx.reset()
+        from src import ranking_health as _rh
+        lines = _rh.render()
+        if not lines:
+            return
+        print()
+        for i, line in enumerate(lines):
+            txt = "  " + line
+            if HAS_ENHANCED_CLI:
+                txt = (fmt.style(txt, 'muted') if i
+                       else fmt.colorize(txt, fmt.Colors.RED))
+            print(txt)
+        logging.warning("board ordering degraded: %s", _rh.reason())
     except Exception:
         pass
+
+
+def _reset_scan_diagnostics() -> None:
+    """Start a scan's diagnostics from zero — the IV cross-check tally and the
+    board-ordering health flag.
+
+    Both are scan-scoped. The interactive loop runs many scans in one process,
+    so without this the second scan reports the first one's corrected contracts
+    and keeps warning about the first one's failed ordering.
+    """
+    for _mod in ("iv_crosscheck", "ranking_health"):
+        try:
+            __import__(f"src.{_mod}", fromlist=[_mod]).reset()
+        except Exception:
+            pass
 
 
 def _report_iv_crosscheck(verbose: bool = True) -> None:
@@ -615,9 +642,19 @@ def rank_by_verdict(df, win_rates: Optional[Dict[str, float]] = None):
     against 33% for a two-leg credit spread.
 
     Failure-safe by design, matching the rest of the scan path: if quotes are
-    missing or anything raises, the old `quality_score` ordering is returned so
-    a scan still produces a report. See src/candidate_verdict.py and
-    docs/EXECUTION_TRUTH.md.
+    missing or anything raises, the rows are still returned so a scan produces
+    a report. They come back in SCAN ORDER, sorted by nothing.
+
+    That fallback used to be `sort_values("quality_score")`, allowlisted by the
+    ranking guard as "a board rendered in a discredited order beats a board
+    that does not render". The hole: `quality_score`'s top quintile is the
+    worst cell in the ledger (31.6% win rate, -19.9% return on capital, against
+    +5.2% for [0.55, 0.65)), and every caller truncates with `.head(N)`. So a
+    degraded board surfaced the WORST candidates first, on exactly the runs
+    where the data was already bad, and said nothing about it. Scan order makes
+    no claim; `ranking_health` carries the fact so the board can announce it.
+
+    See src/candidate_verdict.py and docs/EXECUTION_TRUTH.md.
     """
     if df is None or len(df) == 0:
         return df
@@ -631,10 +668,21 @@ def rank_by_verdict(df, win_rates: Optional[Dict[str, float]] = None):
         out["friction_pct"] = [v.round_trip_pct for v in verdicts]
         out["breakeven_win_rate"] = [v.breakeven for v in verdicts]
         return out.reset_index(drop=True)
-    except Exception:
-        if "quality_score" in getattr(df, "columns", []):
-            return df.sort_values("quality_score", ascending=False).reset_index(drop=True)
-        return df
+    except Exception as _exc:
+        # Sort by NOTHING. See the docstring: the old quality_score fallback
+        # put the worst candidates at the top of a board nobody was told had
+        # changed. Announce once per scan — six display call sites can each
+        # fall back in one run, and the operator needs telling once.
+        try:
+            from src import ranking_health as _rh
+            if _rh.mark_degraded(f"{type(_exc).__name__}: {_exc}"):
+                _announce_ranking_degraded()
+        except Exception:
+            pass
+        try:
+            return df.reset_index(drop=True)
+        except Exception:
+            return df
 
 
 def rank_single_legs_by_verdict(df, mode: str):
@@ -4693,7 +4741,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     put separates them by ~170x."""
     # Determine mode booleans for internal logic
 
-    _reset_iv_crosscheck()
+    _reset_scan_diagnostics()
 
     # === LOAD CONFIGURATION ===
     if verbose:
@@ -5643,7 +5691,7 @@ def run_top_scan(
     """
     from .cli_display import print_top_n_table
 
-    _reset_iv_crosscheck()
+    _reset_scan_diagnostics()
 
     _logger = setup_logging()
     config = load_config("config.json")

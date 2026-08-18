@@ -165,7 +165,7 @@ class TestBothScanEntryPointsAreWired(unittest.TestCase):
         first one's contracts too."""
         for fn in self.ENTRY_POINTS:
             with self.subTest(entry_point=fn):
-                self.assertIn("_reset_iv_crosscheck", self._calls_within(fn))
+                self.assertIn("_reset_scan_diagnostics", self._calls_within(fn))
 
 
 class TestTheReporterActuallyPrints(unittest.TestCase):

@@ -83,13 +83,22 @@ def _variable_key_orderings(path: str):
     return out
 
 
-# Two places may still consult the composite, both documented inline:
+# ONE place may still consult the composite, documented inline:
 #   1. `filter_and_score`'s funnel sort — SELECTION, not display, and the
 #      replacement key tested on 2026-08-09 was a coin flip, so swapping it
 #      would trade a bad key for an unmeasured one.
-#   2. `rank_by_verdict`'s except branch — the failure-safe. A board rendered
-#      in a discredited order beats a board that does not render.
-_ALLOWED_SELECTION_SORTS = 2
+#
+# Entry 2 was `rank_by_verdict`'s except branch, admitted on the reasoning that
+# "a board rendered in a discredited order beats a board that does not render."
+# Removed 2026-08-18, because that reasoning had a hole: `quality_score`'s TOP
+# quintile is the worst cell in the ledger (31.6% win rate, -19.9% return on
+# capital, against +5.2% for [0.55, 0.65)) and every caller truncates with
+# `.head(N)`. The fallback was not rendering a neutral order — it surfaced the
+# WORST candidates first, on exactly the runs where the data was already bad,
+# and said nothing. It now sorts by nothing and announces the degradation. See
+# tests/test_ranking_fallback_is_not_silent.py, which holds this count to 1 so
+# the entry cannot be quietly re-added.
+_ALLOWED_SELECTION_SORTS = 1
 
 
 class NoDiscreditedOrderingTest(unittest.TestCase):
