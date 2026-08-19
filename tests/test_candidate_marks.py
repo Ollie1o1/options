@@ -116,5 +116,78 @@ class TestFamilyFor(unittest.TestCase):
             self.assertIn(family, rules)
 
 
+class TestEntryPricing(unittest.TestCase):
+    def _single(self, **over):
+        row = {"strategy_name": None, "opt_type": "call",
+               "bid": 9.90, "ask": 10.10, "features_json": None}
+        row.update(over)
+        return row
+
+    def test_a_single_leg_is_priced_at_the_limit_fill(self):
+        expected = et.structure_fill(
+            [{"bid": 9.90, "ask": 10.10, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(self._single()), expected)
+
+    def test_a_long_option_prices_as_a_debit(self):
+        # Signed from the trader's cash perspective: paying is negative.
+        self.assertLess(cm.entry_price_for(self._single()), 0)
+
+    def test_a_credit_spread_prices_from_its_legs_in_the_blob(self):
+        # Leg quotes are not fixed columns; they survive in features_json.
+        row = {"strategy_name": "Bull Put", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 2.00, "short_ask": 2.10,
+                                            "long_bid": 1.00, "long_ask": 1.10})}
+        expected = et.structure_fill(
+            [{"bid": 2.00, "ask": 2.10, "side": "sell"},
+             {"bid": 1.00, "ask": 1.10, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(row), expected)
+        self.assertGreater(cm.entry_price_for(row), 0)   # a credit
+
+    def test_a_row_with_no_quotes_cannot_be_priced(self):
+        self.assertIsNone(cm.entry_price_for(
+            {"strategy_name": None, "opt_type": "call",
+             "bid": None, "ask": None, "features_json": None}))
+
+    def test_a_spread_missing_a_leg_cannot_be_priced(self):
+        # Refusing on one bad leg is deliberate: a spread priced from one real
+        # quote and one guess is not a price.
+        row = {"strategy_name": "Bull Put", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 2.00, "short_ask": 2.10})}
+        self.assertIsNone(cm.entry_price_for(row))
+
+    def test_a_short_single_leg_prices_as_a_credit(self):
+        row = self._single(strategy_name="Short Put", opt_type="put")
+        self.assertGreater(cm.entry_price_for(row), 0)
+
+    def test_a_crossed_quote_is_refused(self):
+        self.assertIsNone(cm.entry_price_for(self._single(bid=10.5, ask=9.5)))
+
+
+class TestPnlSign(unittest.TestCase):
+    """Direction comes from the SIGN of the entry, not a family table, so a
+    debit spread cannot be mis-signed by someone forgetting an entry."""
+
+    def test_a_debit_gains_when_the_mark_rises(self):
+        self.assertAlmostEqual(cm.pnl_pct(-10.0, 15.0), 0.5)
+
+    def test_a_debit_loses_when_the_mark_falls(self):
+        self.assertAlmostEqual(cm.pnl_pct(-10.0, 5.0), -0.5)
+
+    def test_a_credit_gains_when_the_mark_falls(self):
+        # Collected 1.00, now costs 0.40 to close -> +60%.
+        self.assertAlmostEqual(cm.pnl_pct(1.00, 0.40), 0.6)
+
+    def test_a_credit_loses_when_the_mark_rises(self):
+        self.assertAlmostEqual(cm.pnl_pct(1.00, 2.00), -1.0)
+
+    def test_a_zero_entry_has_no_return(self):
+        self.assertIsNone(cm.pnl_pct(0.0, 1.0))
+
+    def test_a_missing_mark_has_no_return(self):
+        self.assertIsNone(cm.pnl_pct(-10.0, None))
+
+
 if __name__ == "__main__":
     unittest.main()
