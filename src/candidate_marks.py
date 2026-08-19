@@ -201,3 +201,60 @@ def pnl_pct(entry_signed: Optional[float],
     base = abs(e)
     raw = (m - base) / base
     return raw if e < 0 else -raw
+
+
+# ── The simulated book ───────────────────────────────────────────────────────
+
+@cr._safe(default=0)
+def open_positions(*, db_path: Optional[str] = None,
+                   today: Optional[str] = None) -> int:
+    """Give every recorded candidate without one a simulated position.
+
+    One per (scan_id, board, contract_key) — one per decision instance,
+    matching the primary key of `candidates` itself. The same contract recorded
+    on three scans is three positions at three entry prices sharing one stream
+    of marks. The correlation that creates is handled at analysis time by
+    clustering on `contract_key`: a cluster-robust error can always be computed
+    later, whereas observations discarded here cannot be recovered.
+    """
+    from datetime import datetime
+    if today is None:
+        today = datetime.now().strftime("%Y-%m-%d")
+
+    with connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT c.* FROM candidates c "
+            "LEFT JOIN candidate_positions p "
+            "  ON p.scan_id = c.scan_id AND p.board = c.board "
+            " AND p.contract_key = c.contract_key "
+            "WHERE p.contract_key IS NULL").fetchall()
+
+        made = 0
+        for raw in rows:
+            row = dict(raw)
+            family = family_for(row.get("mode"), row.get("opt_type"),
+                                row.get("strategy_name"))
+            if family is None:
+                # Nothing to derive exit rules from, so nothing to simulate.
+                # Deliberately not an UNMARKABLE row: every pre-`mode` row in
+                # the database would become one, burying the rows that mean
+                # something under thousands of inert placeholders.
+                continue
+
+            if family == "short_premium":
+                status, price, reason = UNSUPPORTED, None, "needs_spot_and_delta"
+            else:
+                price = entry_price_for(row)
+                status = OPEN if price is not None else UNMARKABLE
+                reason = None if price is not None else "no_two_sided_quote"
+
+            conn.execute(
+                "INSERT OR REPLACE INTO candidate_positions "
+                "(scan_id, board, contract_key, family, entry_date, entry_price,"
+                " status, exit_reason) VALUES (?,?,?,?,?,?,?,?)",
+                (row["scan_id"], row["board"], row["contract_key"], family,
+                 today, price, status, reason))
+            made += 1
+        conn.commit()
+    return made

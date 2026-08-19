@@ -189,5 +189,112 @@ class TestPnlSign(unittest.TestCase):
         self.assertIsNone(cm.pnl_pct(-10.0, None))
 
 
+class TestOpenPositions(unittest.TestCase):
+    def test_a_candidate_becomes_exactly_one_position(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            self.assertEqual(cm.open_positions(db_path=path, today="2026-08-19"), 1)
+            with sqlite3.connect(path) as conn:
+                rows = conn.execute(
+                    "select family, status, entry_date from candidate_positions"
+                ).fetchall()
+            self.assertEqual(rows, [("long_option", "OPEN", "2026-08-19")])
+
+    def test_running_twice_does_not_duplicate(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            self.assertEqual(cm.open_positions(db_path=path, today="2026-08-20"), 0)
+            with sqlite3.connect(path) as conn:
+                n, = conn.execute(
+                    "select count(*) from candidate_positions").fetchone()
+            self.assertEqual(n, 1)
+
+    def test_refused_candidates_get_positions_too(self):
+        # The refused population is the entire point of the sub-project.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, gate_passed=0, refused_by="negative_ev")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            with sqlite3.connect(path) as conn:
+                n, = conn.execute(
+                    "select count(*) from candidate_positions").fetchone()
+            self.assertEqual(n, 1)
+
+    def test_the_same_contract_on_three_scans_makes_three_positions(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            for i, px in enumerate([9.9, 10.9, 11.9]):
+                _insert_candidate(path, scan_id=f"S{i}", bid=px, ask=px + 0.2)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            with sqlite3.connect(path) as conn:
+                prices = [r[0] for r in conn.execute(
+                    "select entry_price from candidate_positions order by scan_id")]
+                keys = {r[0] for r in conn.execute(
+                    "select contract_key from candidate_positions")}
+            self.assertEqual(len(prices), 3)
+            self.assertEqual(len(set(prices)), 3)   # three different entries
+            self.assertEqual(len(keys), 1)          # one contract, one mark stream
+
+    def test_a_null_mode_produces_no_position_at_all(self):
+        # Not an UNMARKABLE row: a candidate with no derivable family is not a
+        # decision this can simulate, and thousands of inert placeholders would
+        # bury the rows that mean something.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, mode=None)
+            self.assertEqual(cm.open_positions(db_path=path, today="2026-08-19"), 0)
+            with sqlite3.connect(path) as conn:
+                n, = conn.execute(
+                    "select count(*) from candidate_positions").fetchone()
+            self.assertEqual(n, 0)
+
+    def test_an_unquotable_candidate_opens_unmarkable(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, bid=None, ask=None)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            with sqlite3.connect(path) as conn:
+                status, price = conn.execute(
+                    "select status, entry_price from candidate_positions").fetchone()
+            self.assertEqual(status, "UNMARKABLE")
+            self.assertIsNone(price)
+
+    def test_short_premium_opens_unsupported(self):
+        # Its stops need spot and delta, which a bid/ask mark does not carry.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, mode="Premium Selling", opt_type="put")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            with sqlite3.connect(path) as conn:
+                status, reason = conn.execute(
+                    "select status, exit_reason from candidate_positions").fetchone()
+            self.assertEqual(status, "UNSUPPORTED")
+            self.assertEqual(reason, "needs_spot_and_delta")
+
+    def test_the_paper_ledger_is_never_opened(self):
+        # This module must not be able to touch the book.
+        import builtins
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            real_connect = sqlite3.connect
+            seen = []
+
+            def spy(target, *a, **kw):
+                seen.append(str(target))
+                return real_connect(target, *a, **kw)
+
+            sqlite3.connect = spy
+            try:
+                cm.open_positions(db_path=path, today="2026-08-19")
+            finally:
+                sqlite3.connect = real_connect
+            self.assertTrue(seen)
+            self.assertFalse([s for s in seen if "paper_trades" in s])
+
+
 if __name__ == "__main__":
     unittest.main()
