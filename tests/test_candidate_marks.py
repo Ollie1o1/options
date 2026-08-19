@@ -402,5 +402,112 @@ class TestMarkOpen(unittest.TestCase):
             self.assertEqual(calls, [])
 
 
+class TestResolve(unittest.TestCase):
+    KEY = "AAPL|2026-09-18|call|190"
+
+    def _open(self, path, today="2026-08-01"):
+        _insert_candidate(path)
+        cm.open_positions(db_path=path, today=today)
+
+    def test_take_profit_fires_and_records_the_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            # Entry is a ~10.00 debit; +100% means a mark of ~20.
+            _mark(path, self.KEY, "2026-08-10", 25.0)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-10",
+                                        cfg_path=cfg), 1)
+            with sqlite3.connect(path) as conn:
+                status, reason, pnl = conn.execute(
+                    "select status, exit_reason, pnl_pct "
+                    "from candidate_positions").fetchone()
+            self.assertEqual(status, "CLOSED")
+            self.assertEqual(reason, "take_profit")
+            self.assertGreater(pnl, 1.0)
+
+    def test_stop_loss_fires(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-10", 2.0)     # about -80%
+            cm.resolve(db_path=path, today="2026-08-10", cfg_path=cfg)
+            with sqlite3.connect(path) as conn:
+                reason, = conn.execute(
+                    "select exit_reason from candidate_positions").fetchone()
+            self.assertEqual(reason, "stop_loss")
+
+    def test_min_days_held_suppresses_a_same_day_exit(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path, today="2026-08-01")
+            _mark(path, self.KEY, "2026-08-02", 25.0)    # would take profit
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-02",
+                                        cfg_path=cfg), 0)
+            with sqlite3.connect(path) as conn:
+                status, = conn.execute(
+                    "select status from candidate_positions").fetchone()
+            self.assertEqual(status, "OPEN")
+
+    def test_time_exit_fires_at_the_dte_floor(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            # Expiration 2026-09-18; 21 DTE lands on 2026-08-28.
+            _mark(path, self.KEY, "2026-08-28", 10.5)
+            cm.resolve(db_path=path, today="2026-08-28", cfg_path=cfg)
+            with sqlite3.connect(path) as conn:
+                reason, = conn.execute(
+                    "select exit_reason from candidate_positions").fetchone()
+            self.assertEqual(reason, "time_exit")
+
+    def test_expiry_closes_at_the_final_mark(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cfg = _write_config(d, time_exit_dte=0)
+            self._open(path)
+            _mark(path, self.KEY, "2026-09-18", 3.0)
+            cm.resolve(db_path=path, today="2026-09-19", cfg_path=cfg)
+            with sqlite3.connect(path) as conn:
+                reason, price = conn.execute(
+                    "select exit_reason, exit_price from candidate_positions"
+                ).fetchone()
+            self.assertEqual(reason, "expired")
+            self.assertAlmostEqual(price, 3.0)
+
+    def test_the_thresholds_come_from_config_not_from_source(self):
+        # An allowlist entry is a claim about behaviour; test it by running.
+        # With take_profit raised to 5.0, a +150% mark must NOT close.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cfg = _write_config(d, long_option={"take_profit": 5.0,
+                                                "stop_loss": -0.9})
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-10", 25.0)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-10",
+                                        cfg_path=cfg), 0)
+
+    def test_a_position_with_no_mark_stays_open(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-10",
+                                        cfg_path=cfg), 0)
+
+    def test_a_future_mark_is_not_used(self):
+        # Resolving on day N must not see a mark from day N+1.
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-20", 25.0)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-10",
+                                        cfg_path=cfg), 0)
+
+    def test_the_real_config_is_readable_and_supplies_every_family(self):
+        rules = cm.exit_rules("config.json")
+        self.assertIn("time_exit_dte", rules)
+        for family in ("long_option", "spread"):
+            self.assertIsNotNone(rules.get(family, {}).get("take_profit"))
+
+
 if __name__ == "__main__":
     unittest.main()

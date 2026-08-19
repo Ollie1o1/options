@@ -326,3 +326,111 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
             written += 1
         conn.commit()
     return written
+
+
+# ── Exits ────────────────────────────────────────────────────────────────────
+
+def exit_rules(cfg_path: str = "config.json") -> Dict[str, Any]:
+    """The book's exit rules, READ rather than restated.
+
+    `enforce_exits` reads the same block. Copying these numbers into this
+    module would let them drift, and a counterfactual resolved under different
+    rules than the book's is not a counterfactual — it is a different
+    experiment wearing the same label.
+    """
+    import json
+    try:
+        with open(cfg_path) as fh:
+            return (json.load(fh) or {}).get("exit_rules") or {}
+    except Exception:
+        log.warning("exit rules unreadable at %s", cfg_path, exc_info=True)
+        return {}
+
+
+def _days_between(a: str, b: str) -> Optional[int]:
+    """Calendar days from a to b, or None if either date is unusable."""
+    from datetime import date
+    try:
+        ya, ma, da = (int(x) for x in str(a).split("-"))
+        yb, mb, db = (int(x) for x in str(b).split("-"))
+        return (date(yb, mb, db) - date(ya, ma, da)).days
+    except Exception:
+        return None
+
+
+@cr._safe(default=0)
+def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
+            cfg_path: str = "config.json") -> int:
+    """Close open positions whose latest mark triggers an exit.
+
+    Precedence matches the book: expiry, then the time exit, then take-profit,
+    then stop-loss. `min_days_held` suppresses everything except expiry, so a
+    position cannot be opened and closed on the same mark.
+
+    Only marks dated on or before `today` are considered — resolving day N
+    against a mark from day N+1 would be lookahead, and lookahead in a
+    counterfactual is how a study proves whatever it likes.
+    """
+    from datetime import datetime
+    if today is None:
+        today = datetime.now().strftime("%Y-%m-%d")
+
+    rules = exit_rules(cfg_path)
+    min_days = int(rules.get("min_days_held") or 0)
+    time_exit_dte = int(rules.get("time_exit_dte") or 0)
+
+    with connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT p.rowid AS rid, p.family, p.entry_date, p.entry_price,"
+            "       c.expiration,"
+            "       (SELECT m.mid FROM candidate_marks m "
+            "         WHERE m.contract_key = p.contract_key "
+            "           AND m.mark_date <= ? "
+            "         ORDER BY m.mark_date DESC LIMIT 1) AS mark,"
+            "       (SELECT m.mark_date FROM candidate_marks m "
+            "         WHERE m.contract_key = p.contract_key "
+            "           AND m.mark_date <= ? "
+            "         ORDER BY m.mark_date DESC LIMIT 1) AS mark_date "
+            "FROM candidate_positions p JOIN candidates c "
+            "  ON c.scan_id = p.scan_id AND c.board = p.board "
+            " AND c.contract_key = p.contract_key "
+            "WHERE p.status = ?", (today, today, OPEN))]
+
+        closed = 0
+        for row in rows:
+            mark = cr._num(row.get("mark"))
+            if mark is None:
+                continue
+            pnl = pnl_pct(row.get("entry_price"), mark)
+            if pnl is None:
+                continue
+
+            held = _days_between(row.get("entry_date") or "", today)
+            dte = _days_between(today, row.get("expiration") or "")
+            fam = rules.get(row.get("family")) or {}
+            reason = None
+
+            if dte is not None and dte <= 0:
+                reason = "expired"
+            elif held is not None and held < min_days:
+                reason = None
+            elif dte is not None and time_exit_dte and dte <= time_exit_dte:
+                reason = "time_exit"
+            elif (fam.get("take_profit") is not None
+                    and pnl >= float(fam["take_profit"])):
+                reason = "take_profit"
+            elif (fam.get("stop_loss") is not None
+                    and pnl <= float(fam["stop_loss"])):
+                reason = "stop_loss"
+
+            if reason is None:
+                continue
+            conn.execute(
+                "UPDATE candidate_positions SET status=?, exit_date=?, "
+                "exit_price=?, exit_reason=?, pnl_pct=? WHERE rowid=?",
+                (CLOSED, row.get("mark_date") or today, mark, reason, pnl,
+                 row["rid"]))
+            closed += 1
+        conn.commit()
+    return closed
