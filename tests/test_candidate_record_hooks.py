@@ -189,10 +189,14 @@ class TestTheOperativeOrderIsCarryNotEV(_TempDB):
     nothing, and this class wrote six rows into the real database before it
     inherited the redirect.
 
-    This is pinned, not endorsed. `rank_pos` is recorded from the operative
-    queue precisely so the table does not claim an EV ordering the entry path
-    does not use. If the ordering is ever deliberately changed, this test
-    should fail and be updated with the reason.
+    Pinned because it explains why the EV ranking is discarded, which is half
+    the argument for drawing entries at random (`src/entry_selection.py`): the
+    EV order never reached the ledger, so restoring it would be a change, not
+    a repair.
+
+    Still asserted after that change because `gate_board`'s carry sort is
+    itself unchanged and remains what the DISPLAY boards show. The entry path
+    no longer consumes it — a random draw sits between this and `.head(N)`.
     """
 
     def _frame(self):
