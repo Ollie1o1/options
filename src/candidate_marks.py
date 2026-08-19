@@ -242,6 +242,12 @@ def open_positions(*, db_path: Optional[str] = None,
                 # something under thousands of inert placeholders.
                 continue
 
+            # Declared up front: the first branch assigns a str reason and the
+            # second a None, and without these mypy fixes each name to whatever
+            # the first assignment happened to be.
+            status: str
+            price: Optional[float]
+            reason: Optional[str]
             if family == "short_premium":
                 status, price, reason = UNSUPPORTED, None, "needs_spot_and_delta"
             else:
@@ -408,8 +414,14 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
 
             held = _days_between(row.get("entry_date") or "", today)
             dte = _days_between(today, row.get("expiration") or "")
-            fam = rules.get(row.get("family")) or {}
-            reason = None
+            # An OPEN position always carries a family — `open_positions` only
+            # creates one when `family_for` returned something. The guard is
+            # for the type checker and for safety, not a fallback anyone should
+            # expect to be taken: an empty rule set would leave a position with
+            # no take-profit and no stop, exiting only on time or expiry.
+            fam_key = row.get("family")
+            fam: Dict[str, Any] = (rules.get(str(fam_key)) or {}) if fam_key else {}
+            reason: Optional[str] = None
 
             if dte is not None and dte <= 0:
                 reason = "expired"
