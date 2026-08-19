@@ -258,3 +258,71 @@ def open_positions(*, db_path: Optional[str] = None,
             made += 1
         conn.commit()
     return made
+
+
+def _default_fetch(ticker: str, expiration: str):
+    """Live bid/ask per (strike, type), from the call that marks the real book.
+
+    Using `PaperManager._fetch_chain_quotes` rather than a second fetcher is
+    the whole point: a candidate marked on a different basis than a real trade
+    is not comparable to one, and comparability is the only reason to mark it.
+    """
+    from .paper_manager import PaperManager
+    return PaperManager()._fetch_chain_quotes(ticker, expiration)
+
+
+@cr._safe(default=0)
+def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
+              fetch=None) -> int:
+    """Quote every open position and record the mark. Returns rows written.
+
+    One chain request per (symbol, expiration), shared by every position on
+    that pair — the same shape `PaperManager.update_shadow_marks` uses. A
+    failure on one pair must not cost the others their marks: a missing day is
+    missing forever.
+    """
+    from datetime import datetime
+    if today is None:
+        today = datetime.now().strftime("%Y-%m-%d")
+    if fetch is None:
+        fetch = _default_fetch
+
+    with connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT DISTINCT c.symbol, c.expiration, c.strike, c.opt_type,"
+            "       c.contract_key "
+            "FROM candidate_positions p JOIN candidates c "
+            "  ON c.scan_id = p.scan_id AND c.board = p.board "
+            " AND c.contract_key = p.contract_key "
+            "WHERE p.status = ?", (OPEN,))]
+
+        chains: Dict[Tuple[str, str], dict] = {}
+        written = 0
+        for row in rows:
+            symbol, expiration = row.get("symbol"), row.get("expiration")
+            strike, opt_type = cr._num(row.get("strike")), row.get("opt_type")
+            if not symbol or not expiration or strike is None or not opt_type:
+                continue
+            key = (symbol, expiration)
+            if key not in chains:
+                try:
+                    chains[key] = fetch(symbol, expiration) or {}
+                except Exception:
+                    log.warning("candidate mark fetch failed for %s %s",
+                                symbol, expiration, exc_info=True)
+                    cr.STATS["errors"] += 1
+                    chains[key] = {}
+            q = _quote(*chains[key].get((round(strike, 4),
+                                         str(opt_type).lower()), (None, None)))
+            if q is None:
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO candidate_marks "
+                "(contract_key, mark_date, bid, ask, mid, source) "
+                "VALUES (?,?,?,?,?,?)",
+                (row["contract_key"], today, q[0], q[1], (q[0] + q[1]) / 2.0,
+                 "live_quote"))
+            written += 1
+        conn.commit()
+    return written

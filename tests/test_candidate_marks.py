@@ -296,5 +296,111 @@ class TestOpenPositions(unittest.TestCase):
             self.assertFalse([s for s in seen if "paper_trades" in s])
 
 
+class TestMarkOpen(unittest.TestCase):
+    def _stub(self, quotes, calls=None):
+        def fetch(ticker, expiration):
+            if calls is not None:
+                calls.append((ticker, expiration))
+            return quotes
+        return fetch
+
+    def test_an_open_position_gets_a_mark_at_mid(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub({(190.0, "call"): (11.0, 11.4)}))
+            self.assertEqual(n, 1)
+            with sqlite3.connect(path) as conn:
+                bid, ask, mid, src = conn.execute(
+                    "select bid, ask, mid, source from candidate_marks").fetchone()
+            self.assertAlmostEqual(bid, 11.0)
+            self.assertAlmostEqual(ask, 11.4)
+            self.assertAlmostEqual(mid, 11.2)
+            self.assertEqual(src, "live_quote")
+
+    def test_one_chain_call_serves_every_position_on_a_pair(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            for i in range(3):
+                _insert_candidate(path, scan_id=f"S{i}")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            calls = []
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub({(190.0, "call"): (11.0, 11.4)}, calls))
+            self.assertEqual(calls, [("AAPL", "2026-09-18")])
+
+    def test_unmarkable_and_unsupported_are_never_marked(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="A", bid=None, ask=None)
+            _insert_candidate(path, scan_id="B", mode="Premium Selling",
+                              opt_type="put")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            calls = []
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub({}, calls))
+            self.assertEqual(n, 0)
+            self.assertEqual(calls, [])
+
+    def test_a_failing_fetch_does_not_stop_the_others(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="A", symbol="AAPL",
+                              contract_key="AAPL|2026-09-18|call|190")
+            _insert_candidate(path, scan_id="B", symbol="MSFT",
+                              contract_key="MSFT|2026-09-18|call|500",
+                              strike=500.0)
+            cm.open_positions(db_path=path, today="2026-08-19")
+
+            def fetch(ticker, expiration):
+                if ticker == "AAPL":
+                    raise RuntimeError("boom")
+                return {(500.0, "call"): (4.0, 4.2)}
+
+            n = cm.mark_open(db_path=path, today="2026-08-20", fetch=fetch)
+            self.assertEqual(n, 1)
+            with sqlite3.connect(path) as conn:
+                keys = [r[0] for r in conn.execute(
+                    "select contract_key from candidate_marks")]
+            self.assertEqual(keys, ["MSFT|2026-09-18|call|500"])
+
+    def test_a_missing_quote_writes_no_mark(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub({}))
+            self.assertEqual(n, 0)
+
+    def test_marking_twice_in_a_day_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            stub = self._stub({(190.0, "call"): (11.0, 11.4)})
+            cm.mark_open(db_path=path, today="2026-08-20", fetch=stub)
+            cm.mark_open(db_path=path, today="2026-08-20", fetch=stub)
+            with sqlite3.connect(path) as conn:
+                n, = conn.execute(
+                    "select count(*) from candidate_marks").fetchone()
+            self.assertEqual(n, 1)
+
+    def test_a_closed_position_is_no_longer_marked(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            with cm.connect(path) as conn:
+                conn.execute("update candidate_positions set status='CLOSED'")
+                conn.commit()
+            calls = []
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub({}, calls))
+            self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
