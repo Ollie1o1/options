@@ -668,6 +668,8 @@ def main() -> None:
         # stopped recording becomes visible.
         from src.candidate_record import health_lines as _candidate_health
         print("\n".join(_candidate_health()))
+        from src.candidate_marks import health_lines as _marks_health
+        print("\n".join(_marks_health()))
         banner = health_banner(rep, launchd_jobs=read_launchd_status(),
                                silence_days=launchd_silence_days())
         if banner:

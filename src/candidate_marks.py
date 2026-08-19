@@ -465,3 +465,36 @@ def mark_candidates(*, db_path: Optional[str] = None,
         "marked": mark_open(db_path=db_path, today=today, fetch=fetch),
         "closed": resolve(db_path=db_path, today=today, cfg_path=cfg_path),
     }
+
+
+def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
+    """Marks and simulated positions over the last `days`.
+
+    Silence is only alarming when there is something to mark. No open positions
+    and no marks is an idle system; open positions and no marks is a marker
+    that returned cleanly and wrote nothing — which is how four months of
+    shadow-mark data went missing without anyone noticing.
+    """
+    from datetime import datetime, timedelta, timezone
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    try:
+        with connect(db_path) as conn:
+            marks, = conn.execute(
+                "SELECT COUNT(*) FROM candidate_marks WHERE mark_date >= ?",
+                (since,)).fetchone()
+            open_n, = conn.execute(
+                "SELECT COUNT(*) FROM candidate_positions WHERE status = ?",
+                (OPEN,)).fetchone()
+            closed_n, = conn.execute(
+                "SELECT COUNT(*) FROM candidate_positions WHERE status = ?",
+                (CLOSED,)).fetchone()
+    except Exception:
+        return ["  cand marks     unreadable                        [CRITICAL]"]
+
+    sev = "CRITICAL" if (open_n and not marks) else "OK"
+    out = [f"  {'cand marks':<14} {marks} marks / {open_n} open / "
+           f"{closed_n} closed in {days}d{'':<3}[{sev}]"]
+    if open_n and not marks:
+        out.append("     NO MARKS while positions are open — the refused "
+                   "population is not being followed")
+    return out

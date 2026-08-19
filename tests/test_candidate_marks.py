@@ -509,5 +509,37 @@ class TestResolve(unittest.TestCase):
             self.assertIsNotNone(rules.get(family, {}).get("take_profit"))
 
 
+class TestHealthLines(unittest.TestCase):
+    def test_zero_marks_with_open_positions_is_loud(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            text = " ".join(cm.health_lines(db_path=path)).upper()
+            self.assertIn("NO MARKS", text)
+
+    def test_marks_present_is_not_shouted_about(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-19",
+                         fetch=lambda t, e: {(190.0, "call"): (11.0, 11.4)})
+            text = " ".join(cm.health_lines(db_path=path)).upper()
+            self.assertNotIn("NO MARKS", text)
+
+    def test_no_open_positions_is_not_an_alarm(self):
+        # Nothing to mark is not the same as failing to mark.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cm.connect(path).close()
+            text = " ".join(cm.health_lines(db_path=path)).upper()
+            self.assertNotIn("NO MARKS", text)
+
+    def test_a_missing_database_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(cm.health_lines(db_path=os.path.join(d, "absent.db")))
+
+
 if __name__ == "__main__":
     unittest.main()
