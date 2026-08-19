@@ -98,5 +98,97 @@ class TestSimpsonsParadox(unittest.TestCase):
         self.assertLess(ic, -0.2)           # the truth, negative
 
 
+class TestClusterBootstrap(unittest.TestCase):
+    def _clustered(self, rho, clusters=200, per=10, seed=3):
+        """Every cluster's rows share an outcome shock, so rows within a
+        cluster are far from independent."""
+        rng = np.random.default_rng(seed)
+        rows = []
+        for c in range(clusters):
+            shock = rng.normal() * 2.0
+            for j in range(per):
+                x = rng.normal()
+                rows.append({"feature": x,
+                             "outcome": rho * x + shock + rng.normal(),
+                             "entry_date": f"2026-08-{1 + (j % 10):02d}",
+                             "strategy": "Long Call",
+                             "contract_key": f"K{c}"})
+        return pd.DataFrame(rows)
+
+    def test_the_interval_brackets_a_planted_effect(self):
+        df = self._clustered(0.30)
+        lo, hi = pk.cluster_bootstrap_ci(df, "feature", "outcome",
+                                         ["entry_date", "strategy"],
+                                         "contract_key", n_boot=400, seed=1)
+        ic = pk.rank_ic(df, "feature", "outcome", ["entry_date", "strategy"])
+        self.assertLess(lo, ic)
+        self.assertGreater(hi, ic)
+
+    def test_a_null_frame_gives_an_interval_containing_zero(self):
+        df = self._clustered(0.0)
+        lo, hi = pk.cluster_bootstrap_ci(df, "feature", "outcome",
+                                         ["entry_date", "strategy"],
+                                         "contract_key", n_boot=400, seed=1)
+        self.assertLess(lo, 0.0)
+        self.assertGreater(hi, 0.0)
+
+    def _repeated_contracts(self, clusters=100, per=10, seed=3):
+        """The shape this actually guards against: one contract recorded on
+        many scans, its feature and outcome barely moving between sightings,
+        so the repeats are near-duplicates rather than new information.
+
+        A shock that moves only the outcome LEVEL is the wrong test — cell
+        demeaning removes levels by construction, so it would show no effect.
+        """
+        rng = np.random.default_rng(seed)
+        rows = []
+        for c in range(clusters):
+            f_c = rng.normal()
+            o_c = 0.15 * f_c + rng.normal()
+            for j in range(per):
+                rows.append({"feature": f_c + rng.normal() * 0.05,
+                             "outcome": o_c + rng.normal() * 0.05,
+                             "entry_date": f"2026-08-{1 + (j % 10):02d}",
+                             "strategy": "Long Call",
+                             "contract_key": f"K{c}"})
+        return pd.DataFrame(rows)
+
+    def test_ignoring_clustering_manufactures_significance(self):
+        # The consequence, not merely the width: treating repeats as
+        # independent produces an interval that EXCLUDES zero on data where
+        # the honest interval includes it.
+        df = self._repeated_contracts()
+        lo_c, hi_c = pk.cluster_bootstrap_ci(
+            df, "feature", "outcome", ["entry_date", "strategy"],
+            "contract_key", n_boot=400, seed=1)
+
+        df2 = df.copy()
+        df2["contract_key"] = [f"R{i}" for i in range(len(df2))]
+        lo_i, hi_i = pk.cluster_bootstrap_ci(
+            df2, "feature", "outcome", ["entry_date", "strategy"],
+            "contract_key", n_boot=400, seed=1)
+
+        self.assertGreater(hi_c - lo_c, (hi_i - lo_i) * 2)   # far wider
+        self.assertGreater(lo_i, 0.0)                        # iid: "significant"
+        self.assertLess(lo_c, 0.0)                           # honest: not
+
+    def test_the_same_seed_reproduces_the_interval(self):
+        df = self._clustered(0.20)
+        a = pk.cluster_bootstrap_ci(df, "feature", "outcome",
+                                    ["entry_date", "strategy"],
+                                    "contract_key", n_boot=200, seed=42)
+        b = pk.cluster_bootstrap_ci(df, "feature", "outcome",
+                                    ["entry_date", "strategy"],
+                                    "contract_key", n_boot=200, seed=42)
+        self.assertEqual(a, b)
+
+    def test_an_empty_frame_returns_no_interval(self):
+        empty = pd.DataFrame(columns=["feature", "outcome", "entry_date",
+                                      "strategy", "contract_key"])
+        self.assertEqual(pk.cluster_bootstrap_ci(
+            empty, "feature", "outcome", ["entry_date", "strategy"],
+            "contract_key", n_boot=10, seed=1), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

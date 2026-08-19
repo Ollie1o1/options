@@ -69,3 +69,41 @@ def rank_ic(df: pd.DataFrame, feature: str, outcome: str,
     if x.std() == 0 or y.std() == 0:
         return None
     return float(np.corrcoef(x, y)[0, 1])
+
+
+def cluster_bootstrap_ci(df: pd.DataFrame, feature: str, outcome: str,
+                         cell_cols: Sequence[str], cluster_col: str,
+                         n_boot: int = 10000, alpha: float = 0.05,
+                         seed: int = 0) -> Tuple[Optional[float], Optional[float]]:
+    """Percentile CI for the rank IC, resampling whole clusters.
+
+    The same contract recorded on five scans is one piece of information, not
+    five. Resampling rows would treat it as five and report an interval far too
+    narrow — the same overcounting that made the `n >= 50` gate trigger
+    systematically early (ICC 0.08-0.11, design effect 1.23-1.27).
+
+    Cells are re-derived inside each resample, because a resampled frame has
+    different cell composition.
+    """
+    if df is None or len(df) == 0 or cluster_col not in df.columns:
+        return (None, None)
+
+    groups = {k: g for k, g in df.groupby(cluster_col)}
+    keys = list(groups)
+    if not keys:
+        return (None, None)
+
+    rng = np.random.default_rng(seed)
+    stats: List[float] = []
+    for _ in range(int(n_boot)):
+        drawn = rng.integers(0, len(keys), size=len(keys))
+        sample = pd.concat([groups[keys[i]] for i in drawn], ignore_index=True)
+        ic = rank_ic(sample, feature, outcome, cell_cols)
+        if ic is not None and ic == ic:
+            stats.append(ic)
+
+    if len(stats) < 2:
+        return (None, None)
+    lo = float(np.percentile(stats, 100 * alpha / 2))
+    hi = float(np.percentile(stats, 100 * (1 - alpha / 2)))
+    return (lo, hi)
