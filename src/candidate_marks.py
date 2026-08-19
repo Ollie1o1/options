@@ -434,3 +434,34 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
             closed += 1
         conn.commit()
     return closed
+
+
+# ── The daily run ────────────────────────────────────────────────────────────
+
+def due_candidate_marks(state: Optional[dict], today: str) -> bool:
+    """Once per day.
+
+    Unlike the chain archive this is not time-of-day gated: a mark taken at any
+    hour is a mark, and a day skipped is a day lost forever.
+    """
+    return (state or {}).get("last_candidate_marks") != today
+
+
+def mark_candidates(*, db_path: Optional[str] = None,
+                    today: Optional[str] = None, fetch=None,
+                    cfg_path: str = "config.json") -> Dict[str, int]:
+    """One day's work: open, mark, resolve. Returns the counts.
+
+    Order matters. Opening runs first so a candidate recorded today is marked
+    today; otherwise its first mark lands a day late and every
+    entry-to-first-mark gap is silently wrong. Resolving runs last so it sees
+    today's mark rather than yesterday's.
+    """
+    from datetime import datetime
+    if today is None:
+        today = datetime.now().strftime("%Y-%m-%d")
+    return {
+        "opened": open_positions(db_path=db_path, today=today),
+        "marked": mark_open(db_path=db_path, today=today, fetch=fetch),
+        "closed": resolve(db_path=db_path, today=today, cfg_path=cfg_path),
+    }

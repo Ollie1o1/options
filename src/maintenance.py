@@ -549,6 +549,20 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
+    # 4b. Forward marks for recorded candidates — gives the REFUSED population
+    #     outcomes, which is the only way the ranker can ever be validated: the
+    #     ledger holds only what was taken. Research data, so it must never be
+    #     able to disturb the live book.
+    try:
+        from src import candidate_marks as _cm
+        if _cm.due_candidate_marks(state, today):
+            counts = _cm.mark_candidates()
+            state["last_candidate_marks"] = today
+            if counts.get("marked"):
+                ran.append(f"candidate-marks:{counts['marked']}")
+    except Exception:
+        pass
+
     # 5. Morning briefing (business days, once/day) — HTML/JSON pair under
     #    reports/briefings/ so a fresh page is waiting every morning. Headless
     #    heartbeat only: interactive startup (background=True) must never block
