@@ -325,12 +325,40 @@ def _run_catchup_locked(db_path, state_path, now, runner, swing_fn=None,
     # track is: a report must never be able to break the job that produces the
     # data it reports on. Read-only on the ledger and no network, so the only
     # realistic failure is a missing file.
+    #
+    # Shares the `last_bull_put_watch` key with the copy in
+    # `run_startup_maintenance`, so the report is written once a day whichever
+    # path fires first. This copy is the better one when both are due — it runs
+    # after the day's windows, so the snapshot includes the day's own entries —
+    # which is why it stays here rather than being replaced by the scheduled
+    # one.
+    # State is re-read here rather than carried in a variable, for the same
+    # reason the autolog mark above re-reads: `run_startup_maintenance` writes
+    # this file concurrently, and a stale in-memory copy would clobber its
+    # marks. There is no `state` local in this function — an earlier version of
+    # this block referenced one, and the bare `except` below swallowed the
+    # NameError so the watch silently never ran. That is the same failure that
+    # cost this project four months of shadow-mark data.
     try:
-        if (watch_fn or _run_bull_put_watch)(db_path) is not None:
-            ran.append("bull-put-watch")
+        if due_bull_put_watch(load_state(state_path), today):
+            if (watch_fn or _run_bull_put_watch)(db_path) is not None:
+                cur = load_state(state_path)
+                cur["last_bull_put_watch"] = today
+                save_state(state_path, cur)
+                ran.append("bull-put-watch")
     except Exception:
         pass
     return {"ran": ran}
+
+
+def due_bull_put_watch(state: Optional[dict], today: str) -> bool:
+    """Once per day, on whichever path reaches it first.
+
+    Not time-of-day gated: the report is a snapshot of the ledger and is worth
+    having whenever maintenance runs, and a day skipped is a day with no record
+    of where the cohort stood.
+    """
+    return (state or {}).get("last_bull_put_watch") != today
 
 
 def _run_bull_put_watch(db_path: str = "paper_trades.db",
@@ -468,7 +496,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             track_record_fn: Optional[Callable] = None,
                             chain_archive_fn: Optional[Callable] = None,
                             morning_fn: Optional[Callable] = None,
-                            walk_forward_fn: Optional[Callable] = None) -> dict:
+                            walk_forward_fn: Optional[Callable] = None,
+                            watch_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -563,6 +592,30 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
+    # 4c. Bull Put cohort watch. This ALSO runs at the end of `run_catchup`,
+    #     and both call sites share the `last_bull_put_watch` key so the report
+    #     is written once a day whichever path fires first.
+    #
+    #     It lived ONLY in run_catchup until 2026-08-19, and run_catchup is
+    #     reachable only via `--catchup` — "fired by an interactive launch".
+    #     The LaunchAgent plist runs `python -m src.maintenance` with no
+    #     arguments, which lands in run_headless and never touched it. So the
+    #     watch produced one entry on 2026-08-18 from a manual launch and then
+    #     went silent permanently, with a bare `except Exception: pass` making
+    #     sure nothing ever said so.
+    #
+    #     Found by comparing log mtimes, not by an exit status: maintenance.log
+    #     and launchagent.log were current while bull_put_watch.log was a day
+    #     stale. The scheduler was alive throughout — this was never a dead
+    #     LaunchAgent, it was a job that had not been connected to the timer.
+    try:
+        if due_bull_put_watch(state, today):
+            if (watch_fn or _run_bull_put_watch)(db_path) is not None:
+                state["last_bull_put_watch"] = today
+                ran.append("bull-put-watch")
+    except Exception:
+        pass
+
     # 5. Morning briefing (business days, once/day) — HTML/JSON pair under
     #    reports/briefings/ so a fresh page is waiting every morning. Headless
     #    heartbeat only: interactive startup (background=True) must never block
@@ -616,7 +669,8 @@ def run_headless(db_path: str = "paper_trades.db",
                  track_record_fn: Optional[Callable] = None,
                  chain_archive_fn: Optional[Callable] = None,
                  morning_fn: Optional[Callable] = None,
-                 walk_forward_fn: Optional[Callable] = None) -> dict:
+                 walk_forward_fn: Optional[Callable] = None,
+                 watch_fn: Optional[Callable] = None) -> dict:
     """Run startup maintenance without the interactive screener.
 
     The LaunchAgent entry: reads phase1_start from config.json itself,
@@ -650,7 +704,8 @@ def run_headless(db_path: str = "paper_trades.db",
             db_path=db_path, phase1_start=phase1_start, state_path=state_path,
             now=now, runner=runner, checkpoint_fn=checkpoint_fn,
             track_record_fn=track_record_fn, chain_archive_fn=chain_archive_fn,
-            morning_fn=morning_fn, walk_forward_fn=walk_forward_fn)
+            morning_fn=morning_fn, walk_forward_fn=walk_forward_fn,
+            watch_fn=watch_fn)
     except Exception:
         return {"cohort": "", "ran": []}
 
