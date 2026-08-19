@@ -649,6 +649,11 @@ def main() -> None:
                                             launchd_silence_days, read_launchd_status)
         rep = compute_health(load_state(DEFAULT_STATE_PATH), datetime.now())
         print("\n".join(health_lines(rep)))
+        # The candidate recorder is failure-SAFE, so it cannot announce its own
+        # silence by crashing. Zero rows here is the only way a scan path that
+        # stopped recording becomes visible.
+        from src.candidate_record import health_lines as _candidate_health
+        print("\n".join(_candidate_health()))
         banner = health_banner(rep, launchd_jobs=read_launchd_status(),
                                silence_days=launchd_silence_days())
         if banner:

@@ -83,6 +83,16 @@ def main(argv: list[str]) -> int:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
 
+    # Keep the candidate recorder off the real database. The suite drives
+    # `gate_and_report`, which records every board it gates, so without this
+    # fixture tickers land in the dataset this project draws conclusions from.
+    # Set before any test module is imported.
+    import os
+    import tempfile
+    os.environ.setdefault(
+        "OPTIONS_CANDIDATE_DB",
+        os.path.join(tempfile.gettempdir(), "options_test_candidates.db"))
+
     pattern = argv[1] if len(argv) > 1 else ""
     paths = sorted(
         p for p in TESTS.rglob("test_*.py")
