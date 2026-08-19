@@ -912,5 +912,82 @@ class TestHealthLines(unittest.TestCase):
             self.assertTrue(cm.health_lines(db_path=os.path.join(d, "absent.db")))
 
 
+class TestHealthCatchesPartialSilence(unittest.TestCase):
+    """782 marks existed while 78% of the book was dead, and the line read OK.
+    A health check that tests for total silence does not catch partial silence."""
+
+    CHAIN = {(190.0, "call"): (11.0, 11.4)}
+
+    def test_a_never_marked_open_position_is_critical(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="MARKED")
+            _insert_candidate(path, scan_id="DARK", symbol="MSFT", strike=500.0,
+                              contract_key="MSFT|2026-09-18|call|500")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            # Only AAPL is quoted, so the MSFT position never gets a mark.
+            cm.mark_open(db_path=path, today="2026-08-19",
+                         fetch=lambda t, e: self.CHAIN if t == "AAPL" else {})
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertIn("CRITICAL", text)
+            self.assertIn("1 OPEN POSITIONS HAVE NEVER BEEN MARKED", text)
+
+    def test_the_count_names_how_many_are_dark(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            for i in range(3):
+                _insert_candidate(path, scan_id=f"D{i}", symbol="MSFT",
+                                  strike=500.0 + i,
+                                  contract_key=f"MSFT|2026-09-18|call|{500 + i}")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-19", fetch=lambda t, e: {})
+            line = [l for l in cm.health_lines(db_path=path)
+                    if "NEVER BEEN MARKED" in l.upper()]
+            self.assertTrue(line)
+            self.assertIn("3 OPEN POSITIONS HAVE NEVER BEEN MARKED", line[0])
+
+    def test_every_open_position_marked_is_ok(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-19",
+                         fetch=lambda t, e: self.CHAIN)
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertIn("[OK]", text)
+            self.assertNotIn("CRITICAL", text)
+            self.assertNotIn("NEVER BEEN MARKED", text.upper())
+
+    def test_no_open_positions_is_still_not_an_alarm(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cm.connect(path).close()
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("CRITICAL", text)
+
+    def test_an_unmarkable_position_is_not_counted_as_dark(self):
+        # UNMARKABLE and UNSUPPORTED are recorded refusals, not silent failures.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="A", bid=None, ask=None)
+            _insert_candidate(path, scan_id="B", mode="Premium Selling",
+                              opt_type="put")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("NEVER BEEN MARKED", text.upper())
+
+    def test_a_stale_mark_still_counts_as_marked(self):
+        # This line answers "has it EVER been marked", not "was it marked
+        # today". A position marked once and then dropped is a different
+        # failure, and conflating the two makes the loud one unreadable.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-01-01")
+            _mark(path, "AAPL|2026-09-18|call|190", "2026-01-02", 10.0)
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("NEVER BEEN MARKED", text.upper())
+
+
 if __name__ == "__main__":
     unittest.main()

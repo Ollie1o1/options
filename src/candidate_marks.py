@@ -578,6 +578,18 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
     and no marks is an idle system; open positions and no marks is a marker
     that returned cleanly and wrote nothing — which is how four months of
     shadow-mark data went missing without anyone noticing.
+
+    The total is not enough on its own. A marker that prices most of the book
+    and silently drops the rest keeps the total healthy while the majority goes
+    dark: that is exactly how structures went unmarked for the whole life of
+    this table. So the second number counts open positions carrying NO mark at
+    all, and any is CRITICAL. Both checks are needed — this defect had a
+    healthy total and a dead majority.
+
+    That count asks whether a position has EVER been marked, not whether it was
+    marked today. A position marked once and then dropped is a different
+    failure, and conflating them would turn this line red on any brief chain
+    outage; a health line that is always red is a health line nobody reads.
     """
     from datetime import datetime, timedelta, timezone
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -592,13 +604,22 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
             closed_n, = conn.execute(
                 "SELECT COUNT(*) FROM candidate_positions WHERE status = ?",
                 (CLOSED,)).fetchone()
+            dark_n, = conn.execute(
+                "SELECT COUNT(*) FROM candidate_positions p "
+                "WHERE p.status = ? AND NOT EXISTS ("
+                "  SELECT 1 FROM candidate_marks m "
+                "   WHERE m.contract_key = p.contract_key)",
+                (OPEN,)).fetchone()
     except Exception:
         return ["  cand marks     unreadable                        [CRITICAL]"]
 
-    sev = "CRITICAL" if (open_n and not marks) else "OK"
+    sev = "CRITICAL" if ((open_n and not marks) or dark_n) else "OK"
     out = [f"  {'cand marks':<14} {marks} marks / {open_n} open / "
            f"{closed_n} closed in {days}d{'':<3}[{sev}]"]
     if open_n and not marks:
         out.append("     NO MARKS while positions are open — the refused "
                    "population is not being followed")
+    if dark_n:
+        out.append(f"     {dark_n} OPEN POSITIONS HAVE NEVER BEEN MARKED — "
+                   "they cannot resolve")
     return out
