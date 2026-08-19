@@ -195,3 +195,57 @@ def effective_n(nominal: float, design_effect_value: float) -> float:
     """Nominal observations divided by the design effect."""
     de = float(design_effect_value)
     return float(nominal) / de if de > 0 else float(nominal)
+
+
+# ── Guards ───────────────────────────────────────────────────────────────────
+
+def negative_control(df: pd.DataFrame, feature: str, outcome: str,
+                     cell_cols: Sequence[str], n_shuffles: int = 200,
+                     seed: int = 0) -> Dict[str, float]:
+    """Shuffle the outcome WITHIN cells and re-measure. Must return null.
+
+    This tests the test. A bug in the demeaning or the pooling that
+    manufactures signal is otherwise indistinguishable from a finding, and this
+    repo has already shipped a board ranked by a discredited score because
+    nobody ran the null.
+
+    Shuffling within cells rather than across preserves the cell structure, so
+    only the feature-outcome pairing is destroyed.
+    """
+    observed = rank_ic(df, feature, outcome, cell_cols)
+    rng = np.random.default_rng(seed)
+    stats: List[float] = []
+    for _ in range(int(n_shuffles)):
+        work = df.copy()
+        work[outcome] = work.groupby(list(cell_cols))[outcome].transform(
+            lambda s: s.to_numpy()[rng.permutation(len(s))])
+        ic = rank_ic(work, feature, outcome, cell_cols)
+        if ic is not None and ic == ic:
+            stats.append(ic)
+    arr = np.array(stats, dtype="float64") if stats else np.array([0.0])
+    return {
+        "observed": float(observed) if observed is not None else float("nan"),
+        "mean": float(np.mean(arr)),
+        "p95_abs": float(np.percentile(np.abs(arr), 95)),
+    }
+
+
+def half_sample_ics(df: pd.DataFrame, feature: str, outcome: str,
+                    cell_cols: Sequence[str],
+                    date_col: str) -> Tuple[Optional[float], Optional[float]]:
+    """Rank IC in each half of the sample, split at the median date.
+
+    Reported, not gating. A result resting entirely on one half is visible
+    rather than hidden — the standard already applied to the condor universe
+    rule and the tail study.
+    """
+    if df is None or len(df) == 0 or date_col not in df.columns:
+        return (None, None)
+    dates = sorted(df[date_col].dropna().unique())
+    if len(dates) < 2:
+        return (rank_ic(df, feature, outcome, cell_cols), None)
+    cut = dates[len(dates) // 2]
+    first = df[df[date_col] < cut]
+    second = df[df[date_col] >= cut]
+    return (rank_ic(first, feature, outcome, cell_cols),
+            rank_ic(second, feature, outcome, cell_cols))

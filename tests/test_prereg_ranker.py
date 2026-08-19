@@ -247,5 +247,53 @@ class TestPowerArithmetic(unittest.TestCase):
                                1.0, delta=0.01)
 
 
+class TestNegativeControl(unittest.TestCase):
+    """Tests the test. A pipeline bug that manufactures signal is otherwise
+    indistinguishable from a finding."""
+
+    def test_shuffling_destroys_a_planted_effect(self):
+        df = _planted(0.40, n=2000, cells=10, seed=5)
+        out = pk.negative_control(df, "feature", "outcome",
+                                  ["entry_date", "strategy"],
+                                  n_shuffles=100, seed=1)
+        self.assertGreater(abs(out["observed"]), 0.3)   # the real effect
+        self.assertLess(abs(out["mean"]), 0.05)         # shuffled: nothing
+
+    def test_the_null_band_brackets_zero(self):
+        df = _planted(0.0, n=2000, cells=10, seed=6)
+        out = pk.negative_control(df, "feature", "outcome",
+                                  ["entry_date", "strategy"],
+                                  n_shuffles=100, seed=1)
+        self.assertLess(abs(out["observed"]), out["p95_abs"] + 0.05)
+
+    def test_the_same_seed_reproduces_the_control(self):
+        df = _planted(0.2, n=1000, cells=10, seed=7)
+        a = pk.negative_control(df, "feature", "outcome",
+                                ["entry_date", "strategy"],
+                                n_shuffles=50, seed=9)
+        b = pk.negative_control(df, "feature", "outcome",
+                                ["entry_date", "strategy"],
+                                n_shuffles=50, seed=9)
+        self.assertEqual(a, b)
+
+
+class TestHalfSamples(unittest.TestCase):
+    def test_a_consistent_effect_keeps_its_sign_in_both_halves(self):
+        df = _planted(0.35, n=3000, cells=30, seed=8)
+        first, second = pk.half_sample_ics(df, "feature", "outcome",
+                                           ["entry_date", "strategy"],
+                                           "entry_date")
+        self.assertGreater(first, 0.15)
+        self.assertGreater(second, 0.15)
+
+    def test_a_frame_with_one_date_has_no_second_half(self):
+        df = _planted(0.3, n=200, cells=1, seed=9)
+        first, second = pk.half_sample_ics(df, "feature", "outcome",
+                                           ["entry_date", "strategy"],
+                                           "entry_date")
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
+
 if __name__ == "__main__":
     unittest.main()
