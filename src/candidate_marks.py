@@ -168,6 +168,40 @@ def legs_for(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     return [{"bid": q[0], "ask": q[1], "side": side}]
 
 
+def marking_legs(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """The contracts to look up in today's chain, or None if there are none.
+
+    Entry pricing reads the leg QUOTES recorded at scan time; marking has to
+    find those same legs in a chain fetched today, which needs each leg's
+    strike and option type. Both come from one `_LEG_SPEC`, so a structure
+    cannot be entered on one description of its legs and marked on another.
+
+    A structure whose blob is missing any strike returns None, matching the
+    refusal `legs_for` already applies at entry: a spread priced from one real
+    quote and one guess is not a price. A strategy the spec does not know
+    degrades to its fixed columns and, when those are NULL, to None — the
+    behaviour those rows have today.
+    """
+    strategy = (row.get("strategy_name") or "").strip()
+    spec = _LEG_SPEC.get(strategy)
+    if spec:
+        blob = _blob(row)
+        legs: List[Dict[str, Any]] = []
+        for prefix, opt_type, side in spec:
+            strike = cr._num(blob.get(f"{prefix}_strike"))
+            if strike is None:
+                return None
+            legs.append({"strike": strike, "opt_type": opt_type, "side": side})
+        return legs
+
+    single = cr._num(row.get("strike"))
+    raw_type = row.get("opt_type")
+    if single is None or not raw_type:
+        return None
+    side = "sell" if strategy.startswith("Short") else "buy"
+    return [{"strike": single, "opt_type": str(raw_type).lower(), "side": side}]
+
+
 def entry_price_for(row: Dict[str, Any]) -> Optional[float]:
     """What this candidate would have been entered at, signed.
 

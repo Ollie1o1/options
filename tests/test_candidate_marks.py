@@ -251,6 +251,87 @@ class TestEntryPricingSurvivesTheRefactor(unittest.TestCase):
                          ["sell", "buy"])
 
 
+class TestMarkingLegs(unittest.TestCase):
+    """What must be looked up in the chain to price a position today."""
+
+    def test_a_bull_put_yields_two_puts_from_the_blob(self):
+        row = {"strategy_name": "Bull Put", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": 185.0,
+                                            "long_strike": 180.0})}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 185.0, "opt_type": "put", "side": "sell"},
+            {"strike": 180.0, "opt_type": "put", "side": "buy"}])
+
+    def test_a_bear_call_yields_two_calls(self):
+        row = {"strategy_name": "Bear Call", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": 200.0,
+                                            "long_strike": 205.0})}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 200.0, "opt_type": "call", "side": "sell"},
+            {"strike": 205.0, "opt_type": "call", "side": "buy"}])
+
+    def test_an_iron_condor_yields_four_legs_in_spec_order(self):
+        row = {"strategy_name": "Iron Condor", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_put_strike": 180.0,
+                                            "long_put_strike": 175.0,
+                                            "short_call_strike": 210.0,
+                                            "long_call_strike": 215.0})}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 180.0, "opt_type": "put", "side": "sell"},
+            {"strike": 175.0, "opt_type": "put", "side": "buy"},
+            {"strike": 210.0, "opt_type": "call", "side": "sell"},
+            {"strike": 215.0, "opt_type": "call", "side": "buy"}])
+
+    def test_a_structure_missing_one_strike_is_unmarkable(self):
+        # Not three legs and a guess. The same refusal legs_for applies at entry.
+        row = {"strategy_name": "Iron Condor", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_put_strike": 180.0,
+                                            "long_put_strike": 175.0,
+                                            "short_call_strike": 210.0})}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_an_unparseable_strike_is_unmarkable(self):
+        row = {"strategy_name": "Bull Put", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": "n/a",
+                                            "long_strike": 180.0})}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_a_structure_with_no_blob_at_all_is_unmarkable(self):
+        row = {"strategy_name": "Bull Put", "strike": None, "opt_type": None,
+               "features_json": None}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_a_single_leg_uses_the_fixed_columns(self):
+        row = {"strategy_name": None, "strike": 190.0, "opt_type": "call",
+               "features_json": None}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 190.0, "opt_type": "call", "side": "buy"}])
+
+    def test_a_short_single_leg_is_sold(self):
+        # Matches legs_for: a strategy named Short* is a leg the trader sold.
+        row = {"strategy_name": "Short Put", "strike": 180.0, "opt_type": "put",
+               "features_json": None}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 180.0, "opt_type": "put", "side": "sell"}])
+
+    def test_an_unknown_strategy_with_null_fixed_columns_is_unmarkable(self):
+        # Degrades to unmarkable, never to a half-priced guess. Today's
+        # behaviour for such a row, preserved deliberately.
+        row = {"strategy_name": "Butterfly", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": 185.0})}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_a_missing_option_type_on_a_single_leg_is_unmarkable(self):
+        row = {"strategy_name": None, "strike": 190.0, "opt_type": None,
+               "features_json": None}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_the_option_type_is_lowercased(self):
+        row = {"strategy_name": None, "strike": 190.0, "opt_type": "CALL",
+               "features_json": None}
+        self.assertEqual(cm.marking_legs(row)[0]["opt_type"], "call")
+
+
 class TestPnlSign(unittest.TestCase):
     """Direction comes from the SIGN of the entry, not a family table, so a
     debit spread cannot be mis-signed by someone forgetting an entry."""
