@@ -709,6 +709,15 @@ def rank_single_legs_by_verdict(df, mode: str):
     Ordering only: every input row is returned. The allowlist and budget
     filters downstream do the dropping, and removing candidates here would
     starve the forward cohort.
+
+    **Its ORDER no longer reaches the ledger.** Two things happen after this
+    returns: `gate_and_report` re-sorts the survivors by carry, and then the
+    entry queue is drawn at random (`entry_selection.draw_entry_queue`). The
+    EV ordering here was in fact discarded from the moment the gate call was
+    added, silently and contrary to the paragraph above — so this now runs for
+    its LABELLING and pricing, which are load-bearing, and its ordering is
+    understood to be discarded rather than believed to select the ledger.
+    See src/entry_selection.py.
     """
     if df is None or len(df) == 0 or "type" not in getattr(df, "columns", []):
         return df
@@ -820,6 +829,31 @@ def gate_and_report(df, board: str, *, label_structures: bool = False,
     if verbose and result.refused is not None and len(result.refused):
         _print_refusals(result, board)
     return result.kept
+
+
+def _print_entry_disclosure() -> None:
+    """Say that the entered set was drawn, not ranked.
+
+    Without this a reader sees "Auto-logged 5" under a scan full of ranked
+    boards and assumes the five were the best five. They are five survivors,
+    chosen at random. This repo's most expensive defects have all been a label
+    describing something other than the number beside it.
+    """
+    from . import entry_selection as _es
+    line = "  " + _es.ENTRY_DISCLOSURE
+    print(fmt.style(line, 'muted') if HAS_ENHANCED_CLI else line)
+
+
+def _draw_entry_queue(df):
+    """Shuffle survivors into the order the top-N entry cut will consume.
+
+    Seeded from the recorder's `scan_id`, so the draw is reproducible from
+    `data/candidates.db` after the fact rather than being unrepeatable
+    entropy. See src/entry_selection.py.
+    """
+    from . import candidate_record as _cr
+    from . import entry_selection as _es
+    return _es.draw_entry_queue(df, scan_id=_cr.current_scan_id())
 
 
 def record_autolog_rank(df, *, board: str):
@@ -6793,7 +6827,12 @@ def main():
                         # `scripts/validate_gates.py` can overturn G5 if the edge
                         # was a three-month artifact. Ruled 2026-08-10.
                         _spreads = rank_structures_by_verdict(_spreads)
-                        # One row per ticker — keep highest-scored structure per symbol
+                        # Draw the entry queue at random among survivors — same
+                        # reasoning as the single-leg path. `rank_structures_by_verdict`
+                        # is still called above because it LABELS the structures
+                        # and prices their legs; only its ordering is discarded.
+                        _spreads = _draw_entry_queue(_spreads)
+                        # One row per ticker — the draw above decides which structure per symbol
                         if "symbol" in _spreads.columns:
                             _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
                         _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
@@ -6926,6 +6965,7 @@ def main():
                                 f"${_budget_cap:,.0f} budget"
                             )
                         print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
+                        _print_entry_disclosure()
                         _has_results = False
 
                     # ── Single-leg path (original) ──────────────────────────────
@@ -6946,6 +6986,15 @@ def main():
                         # when the top-EV pick is refused for another reason.
                         _single_legs = gate_and_report(_single_legs, "AUTO-LOG",
                                                        verbose=False)
+                        # Draw the entry queue at random among survivors.
+                        #
+                        # The ordering above does not survive this point anyway:
+                        # `gate_and_report` re-sorts its survivors by carry, so
+                        # the EV rank was already being discarded — silently,
+                        # and against what the comment claimed. Rather than
+                        # restore an ordering no evidence supports, take none.
+                        # See src/entry_selection.py for the three reasons.
+                        _single_legs = _draw_entry_queue(_single_legs)
                         # One row per ticker — keep the highest-scored leg per symbol to avoid
                         # concentration (e.g. ORCL×6 from a single scan).
                         if "symbol" in _single_legs.columns:
@@ -7139,6 +7188,7 @@ def main():
                                 f"${_budget_cap:,.0f} budget"
                             )
                         print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  \u2713 {_summary}")
+                        _print_entry_disclosure()
                     # Skip the interactive save-menu loop below; continue to scan-another prompt
                     _has_results = False
 
