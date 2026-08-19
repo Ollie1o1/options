@@ -165,6 +165,173 @@ class TestEntryPricing(unittest.TestCase):
         self.assertIsNone(cm.entry_price_for(self._single(bid=10.5, ask=9.5)))
 
 
+class TestLegSpec(unittest.TestCase):
+    """The leg spec is the single description of a structure's legs."""
+
+    def test_it_describes_the_same_legs_as_the_recorder_in_the_same_order(self):
+        # Two copies of a contract's identity drifting apart is the defect shape
+        # this project keeps finding. _LEG_STRIKES is load-bearing for
+        # contract_key and cannot change, so this pins the pair instead.
+        from src import candidate_record as cr
+        self.assertEqual(set(cm._LEG_SPEC), set(cr._LEG_STRIKES))
+        for strategy, spec in cm._LEG_SPEC.items():
+            derived = tuple(f"{prefix}_strike" for prefix, _t, _s in spec)
+            self.assertEqual(derived, cr._LEG_STRIKES[strategy], strategy)
+
+    def test_every_leg_names_a_real_option_type_and_side(self):
+        for strategy, spec in cm._LEG_SPEC.items():
+            for prefix, opt_type, side in spec:
+                self.assertIn(opt_type, ("put", "call"), f"{strategy}/{prefix}")
+                self.assertIn(side, ("buy", "sell"), f"{strategy}/{prefix}")
+
+    def test_a_condor_is_two_puts_and_two_calls(self):
+        types = [t for _p, t, _s in cm._LEG_SPEC["Iron Condor"]]
+        self.assertEqual(sorted(types), ["call", "call", "put", "put"])
+
+    def test_a_bull_put_is_two_puts_and_a_bear_call_is_two_calls(self):
+        self.assertEqual([t for _p, t, _s in cm._LEG_SPEC["Bull Put"]],
+                         ["put", "put"])
+        self.assertEqual([t for _p, t, _s in cm._LEG_SPEC["Bear Call"]],
+                         ["call", "call"])
+
+
+class TestEntryPricingSurvivesTheRefactor(unittest.TestCase):
+    """Entry prices are what every open position was booked at. If the leg-spec
+    refactor moves one of them, every position already open is corrupted."""
+
+    def test_a_bull_put_prices_exactly_as_before(self):
+        row = {"strategy_name": "Bull Put", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 2.00, "short_ask": 2.10,
+                                            "long_bid": 1.00, "long_ask": 1.10})}
+        expected = et.structure_fill(
+            [{"bid": 2.00, "ask": 2.10, "side": "sell"},
+             {"bid": 1.00, "ask": 1.10, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(row), expected)
+
+    def test_a_bear_call_prices_exactly_as_before(self):
+        row = {"strategy_name": "Bear Call", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 3.00, "short_ask": 3.20,
+                                            "long_bid": 1.40, "long_ask": 1.60})}
+        expected = et.structure_fill(
+            [{"bid": 3.00, "ask": 3.20, "side": "sell"},
+             {"bid": 1.40, "ask": 1.60, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(row), expected)
+
+    def test_an_iron_condor_prices_from_all_four_legs_in_order(self):
+        blob = {"short_put_bid": 2.00, "short_put_ask": 2.10,
+                "long_put_bid": 1.00, "long_put_ask": 1.10,
+                "short_call_bid": 2.40, "short_call_ask": 2.50,
+                "long_call_bid": 1.20, "long_call_ask": 1.30}
+        row = {"strategy_name": "Iron Condor", "opt_type": None,
+               "bid": None, "ask": None, "features_json": json.dumps(blob)}
+        expected = et.structure_fill(
+            [{"bid": 2.00, "ask": 2.10, "side": "sell"},
+             {"bid": 1.00, "ask": 1.10, "side": "buy"},
+             {"bid": 2.40, "ask": 2.50, "side": "sell"},
+             {"bid": 1.20, "ask": 1.30, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(row), expected)
+        self.assertGreater(cm.entry_price_for(row), 0)   # a condor is a credit
+
+    def test_legs_for_still_refuses_a_structure_missing_one_leg(self):
+        row = {"strategy_name": "Iron Condor", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_put_bid": 2.00,
+                                            "short_put_ask": 2.10})}
+        self.assertIsNone(cm.legs_for(row))
+        self.assertIsNone(cm.entry_price_for(row))
+
+    def test_legs_for_carries_the_side_of_each_leg(self):
+        row = {"strategy_name": "Bull Put", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 2.00, "short_ask": 2.10,
+                                            "long_bid": 1.00, "long_ask": 1.10})}
+        self.assertEqual([leg["side"] for leg in cm.legs_for(row)],
+                         ["sell", "buy"])
+
+
+class TestMarkingLegs(unittest.TestCase):
+    """What must be looked up in the chain to price a position today."""
+
+    def test_a_bull_put_yields_two_puts_from_the_blob(self):
+        row = {"strategy_name": "Bull Put", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": 185.0,
+                                            "long_strike": 180.0})}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 185.0, "opt_type": "put", "side": "sell"},
+            {"strike": 180.0, "opt_type": "put", "side": "buy"}])
+
+    def test_a_bear_call_yields_two_calls(self):
+        row = {"strategy_name": "Bear Call", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": 200.0,
+                                            "long_strike": 205.0})}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 200.0, "opt_type": "call", "side": "sell"},
+            {"strike": 205.0, "opt_type": "call", "side": "buy"}])
+
+    def test_an_iron_condor_yields_four_legs_in_spec_order(self):
+        row = {"strategy_name": "Iron Condor", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_put_strike": 180.0,
+                                            "long_put_strike": 175.0,
+                                            "short_call_strike": 210.0,
+                                            "long_call_strike": 215.0})}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 180.0, "opt_type": "put", "side": "sell"},
+            {"strike": 175.0, "opt_type": "put", "side": "buy"},
+            {"strike": 210.0, "opt_type": "call", "side": "sell"},
+            {"strike": 215.0, "opt_type": "call", "side": "buy"}])
+
+    def test_a_structure_missing_one_strike_is_unmarkable(self):
+        # Not three legs and a guess. The same refusal legs_for applies at entry.
+        row = {"strategy_name": "Iron Condor", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_put_strike": 180.0,
+                                            "long_put_strike": 175.0,
+                                            "short_call_strike": 210.0})}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_an_unparseable_strike_is_unmarkable(self):
+        row = {"strategy_name": "Bull Put", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": "n/a",
+                                            "long_strike": 180.0})}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_a_structure_with_no_blob_at_all_is_unmarkable(self):
+        row = {"strategy_name": "Bull Put", "strike": None, "opt_type": None,
+               "features_json": None}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_a_single_leg_uses_the_fixed_columns(self):
+        row = {"strategy_name": None, "strike": 190.0, "opt_type": "call",
+               "features_json": None}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 190.0, "opt_type": "call", "side": "buy"}])
+
+    def test_a_short_single_leg_is_sold(self):
+        # Matches legs_for: a strategy named Short* is a leg the trader sold.
+        row = {"strategy_name": "Short Put", "strike": 180.0, "opt_type": "put",
+               "features_json": None}
+        self.assertEqual(cm.marking_legs(row), [
+            {"strike": 180.0, "opt_type": "put", "side": "sell"}])
+
+    def test_an_unknown_strategy_with_null_fixed_columns_is_unmarkable(self):
+        # Degrades to unmarkable, never to a half-priced guess. Today's
+        # behaviour for such a row, preserved deliberately.
+        row = {"strategy_name": "Butterfly", "strike": None, "opt_type": None,
+               "features_json": json.dumps({"short_strike": 185.0})}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_a_missing_option_type_on_a_single_leg_is_unmarkable(self):
+        row = {"strategy_name": None, "strike": 190.0, "opt_type": None,
+               "features_json": None}
+        self.assertIsNone(cm.marking_legs(row))
+
+    def test_the_option_type_is_lowercased(self):
+        row = {"strategy_name": None, "strike": 190.0, "opt_type": "CALL",
+               "features_json": None}
+        self.assertEqual(cm.marking_legs(row)[0]["opt_type"], "call")
+
+
 class TestPnlSign(unittest.TestCase):
     """Direction comes from the SIGN of the entry, not a family table, so a
     debit spread cannot be mis-signed by someone forgetting an entry."""
@@ -402,6 +569,210 @@ class TestMarkOpen(unittest.TestCase):
             self.assertEqual(calls, [])
 
 
+def _insert_structure(path, strategy="Bull Put", **over):
+    """A recorded structure candidate: legs in the blob, fixed columns NULL."""
+    blobs = {
+        "Bull Put": {"short_strike": 185.0, "long_strike": 180.0,
+                     "short_bid": 2.00, "short_ask": 2.10,
+                     "long_bid": 1.00, "long_ask": 1.10},
+        "Bear Call": {"short_strike": 200.0, "long_strike": 205.0,
+                      "short_bid": 3.00, "short_ask": 3.20,
+                      "long_bid": 1.40, "long_ask": 1.60},
+        "Iron Condor": {"short_put_strike": 180.0, "long_put_strike": 175.0,
+                        "short_call_strike": 210.0, "long_call_strike": 215.0,
+                        "short_put_bid": 2.00, "short_put_ask": 2.10,
+                        "long_put_bid": 1.00, "long_put_ask": 1.10,
+                        "short_call_bid": 2.40, "short_call_ask": 2.50,
+                        "long_call_bid": 1.20, "long_call_ask": 1.30},
+    }
+    blob = dict(blobs[strategy])
+    blob.update(over.pop("blob", {}))
+    over.setdefault("contract_key", f"AAPL|2026-09-18|{strategy}|blob")
+    return _insert_candidate(path, strategy_name=strategy, mode="Structures",
+                             strike=None, opt_type=None, bid=None, ask=None,
+                             features_json=json.dumps(blob), **over)
+
+
+class TestMarkStructures(unittest.TestCase):
+    """78% of open positions were structures, and none of them was ever marked."""
+
+    # A chain covering every leg of every structure _insert_structure builds.
+    CHAIN = {(185.0, "put"): (1.80, 1.90), (180.0, "put"): (0.90, 1.00),
+             (175.0, "put"): (0.50, 0.60),
+             (200.0, "call"): (2.80, 3.00), (205.0, "call"): (1.30, 1.50),
+             (210.0, "call"): (2.20, 2.30), (215.0, "call"): (1.10, 1.20)}
+
+    def _stub(self, quotes, calls=None):
+        def fetch(ticker, expiration):
+            if calls is not None:
+                calls.append((ticker, expiration))
+            return quotes
+        return fetch
+
+    def test_a_bull_put_is_marked_at_the_net_mid(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            self.assertEqual(n, 1)
+            expected = abs(et.structure_fill(
+                [{"bid": 1.80, "ask": 1.90, "side": "sell"},
+                 {"bid": 0.90, "ask": 1.00, "side": "buy"}], "mid").price)
+            with sqlite3.connect(path) as conn:
+                mid, = conn.execute(
+                    "select mid from candidate_marks").fetchone()
+            self.assertAlmostEqual(mid, expected)
+
+    def test_an_iron_condor_is_marked_from_all_four_legs(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path, strategy="Iron Condor")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            self.assertEqual(n, 1)
+            # Leg order is _LEG_SPEC order: short put, long put, short call,
+            # long call — the same order candidate_record._LEG_STRIKES uses.
+            expected = abs(et.structure_fill(
+                [{"bid": 0.90, "ask": 1.00, "side": "sell"},   # short put 180
+                 {"bid": 0.50, "ask": 0.60, "side": "buy"},    # long put 175
+                 {"bid": 2.20, "ask": 2.30, "side": "sell"},   # short call 210
+                 {"bid": 1.10, "ask": 1.20, "side": "buy"}], "mid").price)
+            with sqlite3.connect(path) as conn:
+                mid, = conn.execute(
+                    "select mid from candidate_marks").fetchone()
+            self.assertAlmostEqual(mid, expected)
+
+    def test_a_structure_mark_has_no_two_sided_quote_and_its_own_source(self):
+        # A structure has no single bid/ask. Inventing one would be a number
+        # describing something other than its label.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub(self.CHAIN))
+            with sqlite3.connect(path) as conn:
+                bid, ask, src = conn.execute(
+                    "select bid, ask, source from candidate_marks").fetchone()
+            self.assertIsNone(bid)
+            self.assertIsNone(ask)
+            self.assertEqual(src, "live_quote_structure")
+
+    def test_one_missing_leg_leaves_the_whole_structure_unmarked(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            chain = {(185.0, "put"): (1.80, 1.90)}   # long leg absent
+            n = cm.open_positions(db_path=path, today="2026-08-19")
+            self.assertEqual(n, 1)
+            self.assertEqual(cm.mark_open(db_path=path, today="2026-08-20",
+                                          fetch=self._stub(chain)), 0)
+            with sqlite3.connect(path) as conn:
+                rows, = conn.execute(
+                    "select count(*) from candidate_marks").fetchone()
+            self.assertEqual(rows, 0)
+
+    def test_one_chain_call_still_serves_a_whole_structure(self):
+        # Every leg of a structure shares one expiration, which is already the
+        # batching key — so this fix must not multiply network calls.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path, strategy="Iron Condor")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            calls = []
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub(self.CHAIN, calls))
+            self.assertEqual(calls, [("AAPL", "2026-09-18")])
+
+    def test_a_structure_and_a_single_leg_share_one_chain_call(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            _insert_candidate(path, scan_id="S2")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            calls = []
+            chain = dict(self.CHAIN)
+            chain[(190.0, "call")] = (11.0, 11.4)
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(chain, calls))
+            self.assertEqual(n, 2)
+            self.assertEqual(calls, [("AAPL", "2026-09-18")])
+
+    def test_a_single_leg_mark_is_unchanged(self):
+        # Byte-for-byte: same mid, same two-sided quote, same source.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub({(190.0, "call"): (11.0, 11.4)}))
+            with sqlite3.connect(path) as conn:
+                bid, ask, mid, src = conn.execute(
+                    "select bid, ask, mid, source from candidate_marks").fetchone()
+            self.assertAlmostEqual(bid, 11.0)
+            self.assertAlmostEqual(ask, 11.4)
+            self.assertAlmostEqual(mid, 11.2)
+            self.assertEqual(src, "live_quote")
+
+    def test_the_same_structure_on_two_scans_writes_one_mark(self):
+        # Marks are keyed by contract_key, not by position. Two scans of the
+        # same structure must not fight over one row.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path, scan_id="S1")
+            _insert_structure(path, scan_id="S2")
+            self.assertEqual(cm.open_positions(db_path=path,
+                                               today="2026-08-19"), 2)
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            self.assertEqual(n, 1)
+
+    def test_a_marked_credit_spread_resolves_on_take_profit(self):
+        # End to end, proving the sign convention: a credit spread whose mark
+        # falls has made money and must hit its target.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cfg = _write_config(d)
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-01")
+            cheap = {(185.0, "put"): (0.20, 0.24), (180.0, "put"): (0.04, 0.06)}
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub(cheap))
+            closed = cm.resolve(db_path=path, today="2026-08-20", cfg_path=cfg)
+            self.assertEqual(closed, 1)
+            with sqlite3.connect(path) as conn:
+                status, reason, pnl = conn.execute(
+                    "select status, exit_reason, pnl_pct "
+                    "from candidate_positions").fetchone()
+            self.assertEqual(status, "CLOSED")
+            self.assertEqual(reason, "take_profit")
+            self.assertGreater(pnl, 0)
+
+    def test_marking_never_opens_the_real_candidate_database(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            real_connect = sqlite3.connect
+            seen = []
+
+            def spy(target, *a, **kw):
+                seen.append(str(target))
+                return real_connect(target, *a, **kw)
+
+            sqlite3.connect = spy
+            try:
+                cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            finally:
+                sqlite3.connect = real_connect
+            self.assertTrue(seen)
+            self.assertTrue(all(s.startswith(d) for s in seen), seen)
+
+
 class TestResolve(unittest.TestCase):
     KEY = "AAPL|2026-09-18|call|190"
 
@@ -539,6 +910,83 @@ class TestHealthLines(unittest.TestCase):
     def test_a_missing_database_does_not_raise(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertTrue(cm.health_lines(db_path=os.path.join(d, "absent.db")))
+
+
+class TestHealthCatchesPartialSilence(unittest.TestCase):
+    """782 marks existed while 78% of the book was dead, and the line read OK.
+    A health check that tests for total silence does not catch partial silence."""
+
+    CHAIN = {(190.0, "call"): (11.0, 11.4)}
+
+    def test_a_never_marked_open_position_is_critical(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="MARKED")
+            _insert_candidate(path, scan_id="DARK", symbol="MSFT", strike=500.0,
+                              contract_key="MSFT|2026-09-18|call|500")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            # Only AAPL is quoted, so the MSFT position never gets a mark.
+            cm.mark_open(db_path=path, today="2026-08-19",
+                         fetch=lambda t, e: self.CHAIN if t == "AAPL" else {})
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertIn("CRITICAL", text)
+            self.assertIn("1 OPEN POSITIONS HAVE NEVER BEEN MARKED", text)
+
+    def test_the_count_names_how_many_are_dark(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            for i in range(3):
+                _insert_candidate(path, scan_id=f"D{i}", symbol="MSFT",
+                                  strike=500.0 + i,
+                                  contract_key=f"MSFT|2026-09-18|call|{500 + i}")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-19", fetch=lambda t, e: {})
+            line = [l for l in cm.health_lines(db_path=path)
+                    if "NEVER BEEN MARKED" in l.upper()]
+            self.assertTrue(line)
+            self.assertIn("3 OPEN POSITIONS HAVE NEVER BEEN MARKED", line[0])
+
+    def test_every_open_position_marked_is_ok(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-19",
+                         fetch=lambda t, e: self.CHAIN)
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertIn("[OK]", text)
+            self.assertNotIn("CRITICAL", text)
+            self.assertNotIn("NEVER BEEN MARKED", text.upper())
+
+    def test_no_open_positions_is_still_not_an_alarm(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cm.connect(path).close()
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("CRITICAL", text)
+
+    def test_an_unmarkable_position_is_not_counted_as_dark(self):
+        # UNMARKABLE and UNSUPPORTED are recorded refusals, not silent failures.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="A", bid=None, ask=None)
+            _insert_candidate(path, scan_id="B", mode="Premium Selling",
+                              opt_type="put")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("NEVER BEEN MARKED", text.upper())
+
+    def test_a_stale_mark_still_counts_as_marked(self):
+        # This line answers "has it EVER been marked", not "was it marked
+        # today". A position marked once and then dropped is a different
+        # failure, and conflating the two makes the loud one unreadable.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-01-01")
+            _mark(path, "AAPL|2026-09-18|call|190", "2026-01-02", 10.0)
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("NEVER BEEN MARKED", text.upper())
 
 
 if __name__ == "__main__":

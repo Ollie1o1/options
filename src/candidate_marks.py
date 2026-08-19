@@ -102,13 +102,19 @@ def family_for(mode: Optional[str], opt_type: Optional[str],
 
 
 # ── Pricing a would-be entry ─────────────────────────────────────────────────
-# Leg quote columns per structure, in the same fixed order as the strikes in
-# `candidate_record._LEG_STRIKES`, with the side each leg is traded on.
-_LEG_QUOTES = {
-    "Iron Condor": (("short_put", "sell"), ("long_put", "buy"),
-                    ("short_call", "sell"), ("long_call", "buy")),
-    "Bull Put": (("short", "sell"), ("long", "buy")),
-    "Bear Call": (("short", "sell"), ("long", "buy")),
+# Every leg of a structure, in the same fixed order as the strikes in
+# `candidate_record._LEG_STRIKES`: (field prefix, option type, side traded).
+#
+# One map, not three. Quote fields are f"{prefix}_bid" / f"{prefix}_ask" and the
+# strike field is f"{prefix}_strike", so entry pricing and marking read the same
+# description of the same legs. Two copies of a contract's identity drifting
+# apart is the defect this fix exists to close; a third parallel map would only
+# move the drift somewhere new.
+_LEG_SPEC: Dict[str, Tuple[Tuple[str, str, str], ...]] = {
+    "Iron Condor": (("short_put", "put", "sell"), ("long_put", "put", "buy"),
+                    ("short_call", "call", "sell"), ("long_call", "call", "buy")),
+    "Bull Put": (("short", "put", "sell"), ("long", "put", "buy")),
+    "Bear Call": (("short", "call", "sell"), ("long", "call", "buy")),
 }
 
 
@@ -144,11 +150,11 @@ def legs_for(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     guess is not a price.
     """
     strategy = (row.get("strategy_name") or "").strip()
-    spec = _LEG_QUOTES.get(strategy)
+    spec = _LEG_SPEC.get(strategy)
     if spec:
         blob = _blob(row)
         legs = []
-        for prefix, side in spec:
+        for prefix, _opt_type, side in spec:
             q = _quote(blob.get(f"{prefix}_bid"), blob.get(f"{prefix}_ask"))
             if q is None:
                 return None
@@ -160,6 +166,40 @@ def legs_for(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         return None
     side = "sell" if strategy.startswith("Short") else "buy"
     return [{"bid": q[0], "ask": q[1], "side": side}]
+
+
+def marking_legs(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """The contracts to look up in today's chain, or None if there are none.
+
+    Entry pricing reads the leg QUOTES recorded at scan time; marking has to
+    find those same legs in a chain fetched today, which needs each leg's
+    strike and option type. Both come from one `_LEG_SPEC`, so a structure
+    cannot be entered on one description of its legs and marked on another.
+
+    A structure whose blob is missing any strike returns None, matching the
+    refusal `legs_for` already applies at entry: a spread priced from one real
+    quote and one guess is not a price. A strategy the spec does not know
+    degrades to its fixed columns and, when those are NULL, to None — the
+    behaviour those rows have today.
+    """
+    strategy = (row.get("strategy_name") or "").strip()
+    spec = _LEG_SPEC.get(strategy)
+    if spec:
+        blob = _blob(row)
+        legs: List[Dict[str, Any]] = []
+        for prefix, opt_type, side in spec:
+            strike = cr._num(blob.get(f"{prefix}_strike"))
+            if strike is None:
+                return None
+            legs.append({"strike": strike, "opt_type": opt_type, "side": side})
+        return legs
+
+    single = cr._num(row.get("strike"))
+    raw_type = row.get("opt_type")
+    if single is None or not raw_type:
+        return None
+    side = "sell" if strategy.startswith("Short") else "buy"
+    return [{"strike": single, "opt_type": str(raw_type).lower(), "side": side}]
 
 
 def entry_price_for(row: Dict[str, Any]) -> Optional[float]:
@@ -286,6 +326,12 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
     that pair — the same shape `PaperManager.update_shadow_marks` uses. A
     failure on one pair must not cost the others their marks: a missing day is
     missing forever.
+
+    A structure's legs all share one expiration, so they are served by the
+    chain request that pair already makes: marking spreads and condors costs
+    no additional network calls. Its mark is the net mid across every leg,
+    stored positive with `bid`/`ask` NULL, because a structure has no single
+    two-sided quote to record.
     """
     from datetime import datetime
     if today is None:
@@ -296,20 +342,33 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
     with connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute(
-            "SELECT DISTINCT c.symbol, c.expiration, c.strike, c.opt_type,"
-            "       c.contract_key "
+            "SELECT c.symbol, c.expiration, c.strike, c.opt_type,"
+            "       c.strategy_name, c.features_json, c.contract_key "
             "FROM candidate_positions p JOIN candidates c "
             "  ON c.scan_id = p.scan_id AND c.board = p.board "
             " AND c.contract_key = p.contract_key "
             "WHERE p.status = ?", (OPEN,))]
 
         chains: Dict[Tuple[str, str], dict] = {}
+        seen: set = set()
         written = 0
         for row in rows:
-            symbol, expiration = row.get("symbol"), row.get("expiration")
-            strike, opt_type = cr._num(row.get("strike")), row.get("opt_type")
-            if not symbol or not expiration or strike is None or not opt_type:
+            # One mark per contract, not per position: `candidate_marks` is
+            # keyed by contract_key, and the same structure recorded on three
+            # scans is three positions sharing one stream of marks. DISTINCT
+            # cannot do this any more now that the blob is selected — two scans
+            # may record the same contract with different feature tails.
+            ck = row.get("contract_key")
+            if not ck or ck in seen:
                 continue
+            symbol, expiration = row.get("symbol"), row.get("expiration")
+            if not symbol or not expiration:
+                continue
+            legs = marking_legs(row)
+            if not legs:
+                continue
+            seen.add(ck)
+
             key = (symbol, expiration)
             if key not in chains:
                 try:
@@ -319,16 +378,49 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
                                 symbol, expiration, exc_info=True)
                     cr.STATS["errors"] += 1
                     chains[key] = {}
-            q = _quote(*chains[key].get((round(strike, 4),
-                                         str(opt_type).lower()), (None, None)))
-            if q is None:
+
+            # Every leg or none. A structure priced from one real quote and one
+            # guess is not a price — the refusal `legs_for` applies at entry.
+            quoted: List[Dict[str, Any]] = []
+            for leg in legs:
+                q = _quote(*chains[key].get(
+                    (round(leg["strike"], 4), leg["opt_type"]), (None, None)))
+                if q is None:
+                    quoted = []
+                    break
+                quoted.append({"bid": q[0], "ask": q[1], "side": leg["side"]})
+            if not quoted:
                 continue
+
+            # Declared before the branch: one arm assigns floats and the other
+            # None, and without these mypy fixes each name to whatever the first
+            # assignment happened to be. Same pattern `open_positions` uses.
+            bid: Optional[float]
+            ask: Optional[float]
+            mid: Optional[float]
+            source: str
+            if len(quoted) == 1:
+                bid, ask = quoted[0]["bid"], quoted[0]["ask"]
+                mid = (bid + ask) / 2.0
+                source = "live_quote"
+            else:
+                # NULL bid/ask because a structure has no single two-sided
+                # quote; its own source so a structure mark can never be
+                # mistaken for a single-leg one in later analysis.
+                from . import execution_truth as et
+                fill = et.structure_fill(quoted, "mid")
+                if fill is None:
+                    continue
+                bid = ask = None
+                mid = abs(fill.price)
+                source = "live_quote_structure"
+            if not mid:
+                continue
+
             conn.execute(
                 "INSERT OR REPLACE INTO candidate_marks "
                 "(contract_key, mark_date, bid, ask, mid, source) "
-                "VALUES (?,?,?,?,?,?)",
-                (row["contract_key"], today, q[0], q[1], (q[0] + q[1]) / 2.0,
-                 "live_quote"))
+                "VALUES (?,?,?,?,?,?)", (ck, today, bid, ask, mid, source))
             written += 1
         conn.commit()
     return written
@@ -486,6 +578,18 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
     and no marks is an idle system; open positions and no marks is a marker
     that returned cleanly and wrote nothing — which is how four months of
     shadow-mark data went missing without anyone noticing.
+
+    The total is not enough on its own. A marker that prices most of the book
+    and silently drops the rest keeps the total healthy while the majority goes
+    dark: that is exactly how structures went unmarked for the whole life of
+    this table. So the second number counts open positions carrying NO mark at
+    all, and any is CRITICAL. Both checks are needed — this defect had a
+    healthy total and a dead majority.
+
+    That count asks whether a position has EVER been marked, not whether it was
+    marked today. A position marked once and then dropped is a different
+    failure, and conflating them would turn this line red on any brief chain
+    outage; a health line that is always red is a health line nobody reads.
     """
     from datetime import datetime, timedelta, timezone
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -500,13 +604,22 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
             closed_n, = conn.execute(
                 "SELECT COUNT(*) FROM candidate_positions WHERE status = ?",
                 (CLOSED,)).fetchone()
+            dark_n, = conn.execute(
+                "SELECT COUNT(*) FROM candidate_positions p "
+                "WHERE p.status = ? AND NOT EXISTS ("
+                "  SELECT 1 FROM candidate_marks m "
+                "   WHERE m.contract_key = p.contract_key)",
+                (OPEN,)).fetchone()
     except Exception:
         return ["  cand marks     unreadable                        [CRITICAL]"]
 
-    sev = "CRITICAL" if (open_n and not marks) else "OK"
+    sev = "CRITICAL" if ((open_n and not marks) or dark_n) else "OK"
     out = [f"  {'cand marks':<14} {marks} marks / {open_n} open / "
            f"{closed_n} closed in {days}d{'':<3}[{sev}]"]
     if open_n and not marks:
         out.append("     NO MARKS while positions are open — the refused "
                    "population is not being followed")
+    if dark_n:
+        out.append(f"     {dark_n} OPEN POSITIONS HAVE NEVER BEEN MARKED — "
+                   "they cannot resolve")
     return out
