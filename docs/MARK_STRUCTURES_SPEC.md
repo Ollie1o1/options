@@ -1,7 +1,7 @@
 # Marking structures — design
 
 Date drafted: 2026-08-19
-Status: **DRAFT, awaiting operator review.** No implementation yet.
+Status: **IMPLEMENTED 2026-08-19.** See the branch `fix/mark-structures`.
 Scope: a defect fix in `src/candidate_marks.py` (shipped in PR #51) plus the
 health check that should have caught it. Prerequisite for sub-project 4, the
 removal test.
