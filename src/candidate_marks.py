@@ -102,13 +102,19 @@ def family_for(mode: Optional[str], opt_type: Optional[str],
 
 
 # ── Pricing a would-be entry ─────────────────────────────────────────────────
-# Leg quote columns per structure, in the same fixed order as the strikes in
-# `candidate_record._LEG_STRIKES`, with the side each leg is traded on.
-_LEG_QUOTES = {
-    "Iron Condor": (("short_put", "sell"), ("long_put", "buy"),
-                    ("short_call", "sell"), ("long_call", "buy")),
-    "Bull Put": (("short", "sell"), ("long", "buy")),
-    "Bear Call": (("short", "sell"), ("long", "buy")),
+# Every leg of a structure, in the same fixed order as the strikes in
+# `candidate_record._LEG_STRIKES`: (field prefix, option type, side traded).
+#
+# One map, not three. Quote fields are f"{prefix}_bid" / f"{prefix}_ask" and the
+# strike field is f"{prefix}_strike", so entry pricing and marking read the same
+# description of the same legs. Two copies of a contract's identity drifting
+# apart is the defect this fix exists to close; a third parallel map would only
+# move the drift somewhere new.
+_LEG_SPEC: Dict[str, Tuple[Tuple[str, str, str], ...]] = {
+    "Iron Condor": (("short_put", "put", "sell"), ("long_put", "put", "buy"),
+                    ("short_call", "call", "sell"), ("long_call", "call", "buy")),
+    "Bull Put": (("short", "put", "sell"), ("long", "put", "buy")),
+    "Bear Call": (("short", "call", "sell"), ("long", "call", "buy")),
 }
 
 
@@ -144,11 +150,11 @@ def legs_for(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     guess is not a price.
     """
     strategy = (row.get("strategy_name") or "").strip()
-    spec = _LEG_QUOTES.get(strategy)
+    spec = _LEG_SPEC.get(strategy)
     if spec:
         blob = _blob(row)
         legs = []
-        for prefix, side in spec:
+        for prefix, _opt_type, side in spec:
             q = _quote(blob.get(f"{prefix}_bid"), blob.get(f"{prefix}_ask"))
             if q is None:
                 return None

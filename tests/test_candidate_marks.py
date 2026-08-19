@@ -165,6 +165,92 @@ class TestEntryPricing(unittest.TestCase):
         self.assertIsNone(cm.entry_price_for(self._single(bid=10.5, ask=9.5)))
 
 
+class TestLegSpec(unittest.TestCase):
+    """The leg spec is the single description of a structure's legs."""
+
+    def test_it_describes_the_same_legs_as_the_recorder_in_the_same_order(self):
+        # Two copies of a contract's identity drifting apart is the defect shape
+        # this project keeps finding. _LEG_STRIKES is load-bearing for
+        # contract_key and cannot change, so this pins the pair instead.
+        from src import candidate_record as cr
+        self.assertEqual(set(cm._LEG_SPEC), set(cr._LEG_STRIKES))
+        for strategy, spec in cm._LEG_SPEC.items():
+            derived = tuple(f"{prefix}_strike" for prefix, _t, _s in spec)
+            self.assertEqual(derived, cr._LEG_STRIKES[strategy], strategy)
+
+    def test_every_leg_names_a_real_option_type_and_side(self):
+        for strategy, spec in cm._LEG_SPEC.items():
+            for prefix, opt_type, side in spec:
+                self.assertIn(opt_type, ("put", "call"), f"{strategy}/{prefix}")
+                self.assertIn(side, ("buy", "sell"), f"{strategy}/{prefix}")
+
+    def test_a_condor_is_two_puts_and_two_calls(self):
+        types = [t for _p, t, _s in cm._LEG_SPEC["Iron Condor"]]
+        self.assertEqual(sorted(types), ["call", "call", "put", "put"])
+
+    def test_a_bull_put_is_two_puts_and_a_bear_call_is_two_calls(self):
+        self.assertEqual([t for _p, t, _s in cm._LEG_SPEC["Bull Put"]],
+                         ["put", "put"])
+        self.assertEqual([t for _p, t, _s in cm._LEG_SPEC["Bear Call"]],
+                         ["call", "call"])
+
+
+class TestEntryPricingSurvivesTheRefactor(unittest.TestCase):
+    """Entry prices are what every open position was booked at. If the leg-spec
+    refactor moves one of them, every position already open is corrupted."""
+
+    def test_a_bull_put_prices_exactly_as_before(self):
+        row = {"strategy_name": "Bull Put", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 2.00, "short_ask": 2.10,
+                                            "long_bid": 1.00, "long_ask": 1.10})}
+        expected = et.structure_fill(
+            [{"bid": 2.00, "ask": 2.10, "side": "sell"},
+             {"bid": 1.00, "ask": 1.10, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(row), expected)
+
+    def test_a_bear_call_prices_exactly_as_before(self):
+        row = {"strategy_name": "Bear Call", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 3.00, "short_ask": 3.20,
+                                            "long_bid": 1.40, "long_ask": 1.60})}
+        expected = et.structure_fill(
+            [{"bid": 3.00, "ask": 3.20, "side": "sell"},
+             {"bid": 1.40, "ask": 1.60, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(row), expected)
+
+    def test_an_iron_condor_prices_from_all_four_legs_in_order(self):
+        blob = {"short_put_bid": 2.00, "short_put_ask": 2.10,
+                "long_put_bid": 1.00, "long_put_ask": 1.10,
+                "short_call_bid": 2.40, "short_call_ask": 2.50,
+                "long_call_bid": 1.20, "long_call_ask": 1.30}
+        row = {"strategy_name": "Iron Condor", "opt_type": None,
+               "bid": None, "ask": None, "features_json": json.dumps(blob)}
+        expected = et.structure_fill(
+            [{"bid": 2.00, "ask": 2.10, "side": "sell"},
+             {"bid": 1.00, "ask": 1.10, "side": "buy"},
+             {"bid": 2.40, "ask": 2.50, "side": "sell"},
+             {"bid": 1.20, "ask": 1.30, "side": "buy"}], "limit").price
+        self.assertAlmostEqual(cm.entry_price_for(row), expected)
+        self.assertGreater(cm.entry_price_for(row), 0)   # a condor is a credit
+
+    def test_legs_for_still_refuses_a_structure_missing_one_leg(self):
+        row = {"strategy_name": "Iron Condor", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_put_bid": 2.00,
+                                            "short_put_ask": 2.10})}
+        self.assertIsNone(cm.legs_for(row))
+        self.assertIsNone(cm.entry_price_for(row))
+
+    def test_legs_for_carries_the_side_of_each_leg(self):
+        row = {"strategy_name": "Bull Put", "opt_type": None,
+               "bid": None, "ask": None,
+               "features_json": json.dumps({"short_bid": 2.00, "short_ask": 2.10,
+                                            "long_bid": 1.00, "long_ask": 1.10})}
+        self.assertEqual([leg["side"] for leg in cm.legs_for(row)],
+                         ["sell", "buy"])
+
+
 class TestPnlSign(unittest.TestCase):
     """Direction comes from the SIGN of the entry, not a family table, so a
     debit spread cannot be mis-signed by someone forgetting an entry."""
