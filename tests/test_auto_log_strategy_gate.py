@@ -23,6 +23,7 @@ logging on 2026-07-31 and needed no change.
 from __future__ import annotations
 
 import json
+import os
 import unittest
 
 from src.options_screener import apply_auto_log_allowlist
@@ -60,19 +61,62 @@ class TestTheFamiliesThatFailTheirBreakevenAreNotLogged(unittest.TestCase):
 class TestTheAllowlistStillWorks(unittest.TestCase):
     """Guards against 'switch it off' becoming 'switch everything off'."""
 
-    def test_long_call_is_still_logged_and_cohort_eligible(self):
-        self.assertEqual(_decide("Long Call"), ("insert", 0))
+    def test_bull_put_is_still_logged_and_cohort_eligible(self):
+        self.assertEqual(_decide("Bull Put"), ("insert", 0))
 
     def test_an_unknown_strategy_is_dropped_rather_than_logged(self):
         self.assertEqual(_decide("Jade Lizard"), ("drop", None))
 
-    def test_a_short_dated_long_call_is_quarantined_not_dropped(self):
-        """The DTE floor marks paper_only=1; it must not silently drop."""
-        near = {"strategy_name": "Long Call", "expiration": "2026-08-20",
-                "date": "2026-08-13"}
-        decision, flag = apply_auto_log_allowlist(near)
-        self.assertEqual(decision, "insert")
-        self.assertEqual(flag, 1)
+
+class TestLongCallIsOffOnItsEvidence(unittest.TestCase):
+    """Switched off 2026-08-19, by evidence rather than by accident.
+
+    Audited on the ledger with position sizing removed — every row is
+    `quantity = 1.0`, so as-sized P&L mostly describes option premiums rather
+    than picks. Equal-weighted over 295 closed Long Calls: PF 1.035, 95%
+    bootstrap CI [0.783, 1.335]. The interval contains 1, so there is no
+    detectable edge.
+
+    The post-repair cohort is the same story at full volume: 25 closed,
+    -$9,890, 24% win, PF 0.098. That was audited for a defect and none was
+    found — exit prices reconcile against `chain_archive.db`, an archive the
+    ledger never reads (QQQ recorded 6.28 against 6.43, 6.80 against 6.87),
+    the -50% stop rule is implemented correctly, and the underlying moved
+    against the position in 12 of 16 measurable cases. The trades simply lost.
+
+    Bull Put stays: PF 1.911, CI [1.280, 3.081] — the only line in the book
+    whose interval clears 1.
+
+    Long Call keeps being SCANNED and recorded to `data/candidates.db`, which
+    marks refused candidates forward. The strategy therefore keeps generating
+    evidence without consuming book capital, which is the whole point of the
+    counterfactual database.
+    """
+
+    def test_long_call_is_dropped(self):
+        self.assertEqual(_decide("Long Call"), ("drop", None))
+
+    def test_long_call_is_absent_from_BOTH_config_lists(self):
+        """Pins the mechanism, not the outcome. `paper_only_strategies` still
+        returns ("insert", 1) — it logs the trade and merely quarantines it out
+        of the cohort. Only absence from both lists actually stops the entry,
+        and this project has already shipped one 'switch it off' edit that
+        moved a strategy between lists and kept logging it."""
+        with open(repo_path("config.json")) as fh:
+            al = json.load(fh)["auto_log"]
+        both = set(al.get("allowed_strategies") or []) | set(
+            al.get("paper_only_strategies") or [])
+        self.assertNotIn("Long Call", both)
+
+    def test_no_dte_makes_it_come_back(self):
+        """The horizon floor quarantines; it must never resurrect. A dropped
+        strategy is dropped at every DTE."""
+        for exp in ("2026-08-20", "2026-10-31", None):
+            with self.subTest(expiration=exp):
+                trade = {"strategy_name": "Long Call", "date": "2026-08-13"}
+                if exp:
+                    trade["expiration"] = exp
+                self.assertEqual(apply_auto_log_allowlist(trade), ("drop", None))
 
 
 class TestBullPutLogsAgain(unittest.TestCase):
@@ -126,11 +170,27 @@ class TestTheHorizonFloorIsLongPremiumReasoning(unittest.TestCase):
                 "date": "2026-08-13"}   # 18 DTE — the historical median
         self.assertEqual(apply_auto_log_allowlist(near), ("insert", 0))
 
-    def test_a_short_dated_long_call_is_still_quarantined(self):
-        """The guard must narrow, not disappear."""
+    def test_the_floor_still_quarantines_a_short_dated_long_premium_entry(self):
+        """The guard must narrow, not disappear.
+
+        Asserted against an explicit config rather than the live one, because
+        Long Call left `allowed_strategies` on 2026-08-19 and a dropped
+        strategy never reaches the DTE floor. The floor is still live code —
+        it governs Long Put, and Long Call if it is ever restored — so it keeps
+        a test that does not depend on which strategies are currently enabled.
+        """
+        import json as _json
+        import tempfile as _tf
         near = {"strategy_name": "Long Call", "expiration": "2026-08-20",
                 "date": "2026-08-13"}
-        self.assertEqual(apply_auto_log_allowlist(near), ("insert", 1))
+        with _tf.TemporaryDirectory() as d:
+            path = os.path.join(d, "cfg.json")
+            with open(path, "w") as fh:
+                _json.dump({"auto_log": {"allowed_strategies": ["Long Call"],
+                                         "paper_only_strategies": [],
+                                         "cohort_min_dte": 30}}, fh)
+            self.assertEqual(apply_auto_log_allowlist(near, cfg_path=path),
+                             ("insert", 1))
 
 
 class TestTheDeadSwitchesAreGone(unittest.TestCase):
