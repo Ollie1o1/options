@@ -249,3 +249,64 @@ def half_sample_ics(df: pd.DataFrame, feature: str, outcome: str,
     second = df[df[date_col] >= cut]
     return (rank_ic(first, feature, outcome, cell_cols),
             rank_ic(second, feature, outcome, cell_cols))
+
+
+# ── The one I/O boundary ─────────────────────────────────────────────────────
+
+COHORT_COLUMNS = ["entry_date", "strategy", "contract_key", "pnl_pct",
+                  "ev_net", "quality_score", "carry", "delta"]
+
+
+def load_cohort(db_path: str, *, survivors_only: bool = True) -> pd.DataFrame:
+    """The analysis population. THE ONLY I/O IN THIS MODULE.
+
+    Closed, marked positions joined to their recorded candidate. Restricted to
+    gate survivors by default, because the primary hypothesis is about ordering
+    what the gates KEEP — the refused population belongs to the separate
+    removal question, which needs its own pre-registration.
+
+    `strategy` is derived, never `candidate_positions.family`: that collapses
+    Long Call and Long Put into `long_option`, and a call and a put on the same
+    day are not exchangeable.
+    """
+    import sqlite3
+    from .trade_analysis import strategy_label_for_mode
+
+    sql = (
+        "SELECT p.entry_date, p.pnl_pct, p.contract_key,"
+        "       c.mode, c.opt_type, c.strategy_name,"
+        "       c.ev_net, c.quality_score, c.theta, c.premium, c.delta "
+        "FROM candidate_positions p JOIN candidates c "
+        "  ON c.scan_id = p.scan_id AND c.board = p.board "
+        " AND c.contract_key = p.contract_key "
+        "WHERE p.status = 'CLOSED' AND p.pnl_pct IS NOT NULL"
+    )
+    if survivors_only:
+        sql += " AND c.gate_passed = 1"
+
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            df = pd.read_sql(sql, conn)
+    except Exception:
+        log.warning("cohort unreadable at %s", db_path, exc_info=True)
+        return pd.DataFrame(columns=COHORT_COLUMNS)
+
+    if len(df) == 0:
+        return pd.DataFrame(columns=COHORT_COLUMNS)
+
+    def _strategy(row: Any) -> Optional[str]:
+        name = row.get("strategy_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        if not row.get("mode") or not row.get("opt_type"):
+            return None
+        try:
+            return strategy_label_for_mode(str(row["mode"]), row["opt_type"])
+        except Exception:
+            return None
+
+    df["strategy"] = [_strategy(r) for _, r in df.iterrows()]
+    theta = pd.to_numeric(df["theta"], errors="coerce").abs()
+    premium = pd.to_numeric(df["premium"], errors="coerce").replace(0, np.nan)
+    df["carry"] = theta / premium
+    return df[COHORT_COLUMNS]

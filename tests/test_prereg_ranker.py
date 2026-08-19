@@ -7,6 +7,8 @@ Every statistic is checked against a frame with a KNOWN answer. A statistics
 module nobody has pointed at a known answer is a statistics module nobody has
 tested.
 """
+import os
+import tempfile
 import unittest
 
 import numpy as np
@@ -293,6 +295,85 @@ class TestHalfSamples(unittest.TestCase):
                                            "entry_date")
         self.assertIsNotNone(first)
         self.assertIsNone(second)
+
+
+def _seed_db(path, rows):
+    """Rows shaped as candidates + candidate_positions, via the real schema."""
+    from src import candidate_marks as cm
+    with cm.connect(path) as conn:
+        for r in rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO candidates (scan_id, ts, board, mode,"
+                " contract_key, symbol, opt_type, expiration, ev_net,"
+                " quality_score, theta, premium, delta, gate_passed)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (r["scan_id"], "2026-08-19T00:00:00+00:00", "b", r["mode"],
+                 r["contract_key"], "AAPL", r["opt_type"], "2026-09-18",
+                 r["ev_net"], r["quality_score"], -0.05, 10.0, 0.5,
+                 r["gate_passed"]))
+            conn.execute(
+                "INSERT OR REPLACE INTO candidate_positions (scan_id, board,"
+                " contract_key, family, entry_date, entry_price, status,"
+                " pnl_pct) VALUES (?,?,?,?,?,?,?,?)",
+                (r["scan_id"], "b", r["contract_key"], "long_option",
+                 r["entry_date"], -10.0, r["status"], r["pnl_pct"]))
+        conn.commit()
+
+
+def _row(**over):
+    row = {"scan_id": "S1", "contract_key": "K1", "mode": "Discovery scan",
+           "opt_type": "call", "ev_net": 25.0, "quality_score": 0.5,
+           "gate_passed": 1, "entry_date": "2026-08-19", "status": "CLOSED",
+           "pnl_pct": 0.2}
+    row.update(over)
+    return row
+
+
+class TestLoadCohort(unittest.TestCase):
+    def test_only_closed_survivors_with_a_pnl_are_loaded(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _seed_db(path, [
+                _row(scan_id="A", contract_key="K1"),                    # in
+                _row(scan_id="B", contract_key="K2", status="OPEN"),     # out
+                _row(scan_id="C", contract_key="K3", pnl_pct=None),      # out
+                _row(scan_id="D", contract_key="K4", gate_passed=0),     # out
+            ])
+            df = pk.load_cohort(path)
+            self.assertEqual(len(df), 1)
+            self.assertEqual(df["contract_key"].iloc[0], "K1")
+
+    def test_the_strategy_is_derived_not_the_family(self):
+        # Long Call and Long Put must not collapse into `long_option`: a call
+        # and a put on the same day are not exchangeable.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _seed_db(path, [
+                _row(scan_id="A", contract_key="K1", opt_type="call"),
+                _row(scan_id="B", contract_key="K2", opt_type="put"),
+            ])
+            df = pk.load_cohort(path)
+            self.assertEqual(set(df["strategy"]), {"Long Call", "Long Put"})
+
+    def test_carry_is_computed_from_theta_and_premium(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _seed_db(path, [_row()])
+            df = pk.load_cohort(path)
+            self.assertAlmostEqual(df["carry"].iloc[0], 0.05 / 10.0)
+
+    def test_refused_rows_load_when_survivors_only_is_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _seed_db(path, [_row(scan_id="A", contract_key="K1", gate_passed=0)])
+            self.assertEqual(len(pk.load_cohort(path)), 0)
+            self.assertEqual(len(pk.load_cohort(path, survivors_only=False)), 1)
+
+    def test_a_missing_database_returns_an_empty_frame(self):
+        with tempfile.TemporaryDirectory() as d:
+            df = pk.load_cohort(os.path.join(d, "absent.db"))
+            self.assertEqual(len(df), 0)
+            self.assertIn("pnl_pct", df.columns)
 
 
 if __name__ == "__main__":
