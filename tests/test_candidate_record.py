@@ -425,5 +425,52 @@ class TestMarkRanked(unittest.TestCase):
             self.assertEqual(rank, 2)     # rank survives the refusal mark
 
 
+class TestHealthLines(unittest.TestCase):
+    def test_zero_rows_is_reported_loudly(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cr.connect(path).close()
+            text = " ".join(cr.health_lines(db_path=path))
+            self.assertIn("NO CANDIDATES RECORDED", text.upper())
+
+    def test_recent_rows_are_counted_and_not_shouted_about(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("discover"):
+                cr.record_board(pr.BoardResult(kept=pd.DataFrame([_leg()]),
+                                               refused=pd.DataFrame(), scanned=1),
+                                board="discover", db_path=path)
+            text = " ".join(cr.health_lines(db_path=path))
+            self.assertIn("1 rows", text)
+            self.assertNotIn("NO CANDIDATES RECORDED", text.upper())
+
+    def test_recorder_errors_are_surfaced(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("discover"):
+                cr.record_board(pr.BoardResult(kept=pd.DataFrame([_leg()]),
+                                               refused=pd.DataFrame(), scanned=1),
+                                board="discover", db_path=path)
+            cr._record_error("somewhere", "a traceback", path)
+            text = " ".join(cr.health_lines(db_path=path))
+            self.assertIn("1 recorder errors", text)
+
+    def test_rows_outside_the_window_do_not_count(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.connect(path) as conn:
+                conn.execute(
+                    "insert into candidates (scan_id, ts, board, contract_key) "
+                    "values ('s', '2020-01-01T00:00:00+00:00', 'b', 'k')")
+                conn.commit()
+            text = " ".join(cr.health_lines(db_path=path))
+            self.assertIn("NO CANDIDATES RECORDED", text.upper())
+
+    def test_a_missing_database_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as d:
+            lines = cr.health_lines(db_path=os.path.join(d, "absent.db"))
+            self.assertTrue(lines)
+
+
 if __name__ == "__main__":
     unittest.main()

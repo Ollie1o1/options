@@ -492,3 +492,36 @@ def mark_logged(row: Dict[str, Any], *, board: str, entry_id: Optional[int],
         record_board_rows([row_payload(row, board=board, scan_id=scan_id,
                                        auto_logged=1, entry_id=entry_id)],
                           db_path=db_path)
+
+
+def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
+    """Candidate rows and recorder errors over the last `days`.
+
+    Zero rows is stated loudly. A recorder that returns cleanly and writes
+    nothing is the exact failure that cost this project four months of
+    shadow-mark data, and it is invisible unless something asks. An exit code
+    is not an outcome; neither is a clean return.
+    """
+    from datetime import timedelta
+    path = _resolve_db_path(db_path)
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(
+        timespec="seconds")
+    try:
+        with connect(path) as conn:
+            rows, = conn.execute(
+                "SELECT COUNT(*) FROM candidates WHERE ts >= ?",
+                (since,)).fetchone()
+            errs, = conn.execute(
+                "SELECT COUNT(*) FROM recorder_errors WHERE ts >= ?",
+                (since,)).fetchone()
+    except Exception:
+        return [f"  {'candidates':<14} unreadable at {path}       [CRITICAL]"]
+
+    out = [f"  {'candidates':<14} {rows} rows / {errs} errors in "
+           f"{days}d{'':<6}[{'CRITICAL' if rows == 0 else 'OK'}]"]
+    if rows == 0:
+        out.append("     NO CANDIDATES RECORDED — the ranker cannot be "
+                   "validated without them")
+    elif errs:
+        out.append(f"     {errs} recorder errors — see recorder_errors in {path}")
+    return out
