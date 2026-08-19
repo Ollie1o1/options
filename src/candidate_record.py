@@ -50,6 +50,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS candidates (
   scan_id TEXT NOT NULL, ts TEXT NOT NULL, board TEXT NOT NULL,
   contract_key TEXT NOT NULL,
+  mode TEXT,
   symbol TEXT, strategy_name TEXT, expiration TEXT, strike REAL, opt_type TEXT,
   bid REAL, ask REAL, premium REAL, theta REAL, delta REAL,
   ev_net REAL, ev_gross REAL, ev_cost REAL, ev_noise REAL,
@@ -81,6 +82,20 @@ _LEG_STRIKES = {
 }
 
 
+# Columns added after the table first shipped. `CREATE TABLE IF NOT EXISTS`
+# does not alter an existing table, so a database written by an earlier version
+# keeps its old shape and every INSERT naming a new column fails. Checked and
+# added on every connect: cheap, and it cannot silently skip.
+_ADDED_COLUMNS = (("mode", "TEXT"),)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(candidates)")}
+    for name, decl in _ADDED_COLUMNS:
+        if name not in have:
+            conn.execute(f"ALTER TABLE candidates ADD COLUMN {name} {decl}")
+
+
 def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Open the candidate database, creating the schema when absent.
 
@@ -98,6 +113,7 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
         os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.executescript(_SCHEMA)
+    _add_missing_columns(conn)
     conn.commit()
     return conn
 
@@ -181,6 +197,14 @@ STATS: Dict[str, int] = {"recorded": 0, "errors": 0, "autolog_only": 0}
 _SCAN_ID: contextvars.ContextVar = contextvars.ContextVar(
     "candidate_scan_id", default=None)
 
+# The scan mode, recorded so a candidate's exit-rule FAMILY can be derived
+# later. `strategy_name` is NULL on every row a discovery board produces —
+# those rows carry `type='call'|'put'`, which is an option type and not a
+# strategy — so without this there is nothing to derive a family from, and
+# the only alternative is parsing it back out of the composite scan_id.
+_SCAN_MODE: contextvars.ContextVar = contextvars.ContextVar(
+    "candidate_scan_mode", default=None)
+
 
 def reset_stats() -> None:
     """Zero the counters. For tests and for a fresh scheduler run."""
@@ -252,7 +276,7 @@ def _safe(default):
 
 # Column order for every write. Kept in one place so the INSERT and the
 # payload builder cannot drift apart.
-_COLUMNS = ("scan_id", "ts", "board", "contract_key", "symbol", "strategy_name",
+_COLUMNS = ("scan_id", "ts", "board", "mode", "contract_key", "symbol", "strategy_name",
             "expiration", "strike", "opt_type", "bid", "ask", "premium",
             "theta", "delta", "ev_net", "ev_gross", "ev_cost", "ev_noise",
             "quality_score", "round_trip_pct", "rank_pos", "refused_by",
@@ -321,10 +345,12 @@ def scan(mode: str):
     def _ctx():
         scan_id = f"{_now()}|{mode}|{uuid.uuid4().hex[:8]}"
         token = _SCAN_ID.set(scan_id)
+        mode_token = _SCAN_MODE.set(mode)
         try:
             yield scan_id
         finally:
             _SCAN_ID.reset(token)
+            _SCAN_MODE.reset(mode_token)
 
     return _ctx()
 
@@ -353,6 +379,7 @@ def row_payload(row: Dict[str, Any], *, board: str, scan_id: str,
     """One scan row flattened into the candidates schema."""
     out: Dict[str, Any] = {
         "scan_id": scan_id, "ts": _now(), "board": board,
+        "mode": _SCAN_MODE.get(),
         "contract_key": contract_key(row),
         "strategy_name": _strategy_of(row) or None,
         "opt_type": _opt_type_of(row) or None,
