@@ -569,6 +569,210 @@ class TestMarkOpen(unittest.TestCase):
             self.assertEqual(calls, [])
 
 
+def _insert_structure(path, strategy="Bull Put", **over):
+    """A recorded structure candidate: legs in the blob, fixed columns NULL."""
+    blobs = {
+        "Bull Put": {"short_strike": 185.0, "long_strike": 180.0,
+                     "short_bid": 2.00, "short_ask": 2.10,
+                     "long_bid": 1.00, "long_ask": 1.10},
+        "Bear Call": {"short_strike": 200.0, "long_strike": 205.0,
+                      "short_bid": 3.00, "short_ask": 3.20,
+                      "long_bid": 1.40, "long_ask": 1.60},
+        "Iron Condor": {"short_put_strike": 180.0, "long_put_strike": 175.0,
+                        "short_call_strike": 210.0, "long_call_strike": 215.0,
+                        "short_put_bid": 2.00, "short_put_ask": 2.10,
+                        "long_put_bid": 1.00, "long_put_ask": 1.10,
+                        "short_call_bid": 2.40, "short_call_ask": 2.50,
+                        "long_call_bid": 1.20, "long_call_ask": 1.30},
+    }
+    blob = dict(blobs[strategy])
+    blob.update(over.pop("blob", {}))
+    over.setdefault("contract_key", f"AAPL|2026-09-18|{strategy}|blob")
+    return _insert_candidate(path, strategy_name=strategy, mode="Structures",
+                             strike=None, opt_type=None, bid=None, ask=None,
+                             features_json=json.dumps(blob), **over)
+
+
+class TestMarkStructures(unittest.TestCase):
+    """78% of open positions were structures, and none of them was ever marked."""
+
+    # A chain covering every leg of every structure _insert_structure builds.
+    CHAIN = {(185.0, "put"): (1.80, 1.90), (180.0, "put"): (0.90, 1.00),
+             (175.0, "put"): (0.50, 0.60),
+             (200.0, "call"): (2.80, 3.00), (205.0, "call"): (1.30, 1.50),
+             (210.0, "call"): (2.20, 2.30), (215.0, "call"): (1.10, 1.20)}
+
+    def _stub(self, quotes, calls=None):
+        def fetch(ticker, expiration):
+            if calls is not None:
+                calls.append((ticker, expiration))
+            return quotes
+        return fetch
+
+    def test_a_bull_put_is_marked_at_the_net_mid(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            self.assertEqual(n, 1)
+            expected = abs(et.structure_fill(
+                [{"bid": 1.80, "ask": 1.90, "side": "sell"},
+                 {"bid": 0.90, "ask": 1.00, "side": "buy"}], "mid").price)
+            with sqlite3.connect(path) as conn:
+                mid, = conn.execute(
+                    "select mid from candidate_marks").fetchone()
+            self.assertAlmostEqual(mid, expected)
+
+    def test_an_iron_condor_is_marked_from_all_four_legs(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path, strategy="Iron Condor")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            self.assertEqual(n, 1)
+            # Leg order is _LEG_SPEC order: short put, long put, short call,
+            # long call — the same order candidate_record._LEG_STRIKES uses.
+            expected = abs(et.structure_fill(
+                [{"bid": 0.90, "ask": 1.00, "side": "sell"},   # short put 180
+                 {"bid": 0.50, "ask": 0.60, "side": "buy"},    # long put 175
+                 {"bid": 2.20, "ask": 2.30, "side": "sell"},   # short call 210
+                 {"bid": 1.10, "ask": 1.20, "side": "buy"}], "mid").price)
+            with sqlite3.connect(path) as conn:
+                mid, = conn.execute(
+                    "select mid from candidate_marks").fetchone()
+            self.assertAlmostEqual(mid, expected)
+
+    def test_a_structure_mark_has_no_two_sided_quote_and_its_own_source(self):
+        # A structure has no single bid/ask. Inventing one would be a number
+        # describing something other than its label.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub(self.CHAIN))
+            with sqlite3.connect(path) as conn:
+                bid, ask, src = conn.execute(
+                    "select bid, ask, source from candidate_marks").fetchone()
+            self.assertIsNone(bid)
+            self.assertIsNone(ask)
+            self.assertEqual(src, "live_quote_structure")
+
+    def test_one_missing_leg_leaves_the_whole_structure_unmarked(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            chain = {(185.0, "put"): (1.80, 1.90)}   # long leg absent
+            n = cm.open_positions(db_path=path, today="2026-08-19")
+            self.assertEqual(n, 1)
+            self.assertEqual(cm.mark_open(db_path=path, today="2026-08-20",
+                                          fetch=self._stub(chain)), 0)
+            with sqlite3.connect(path) as conn:
+                rows, = conn.execute(
+                    "select count(*) from candidate_marks").fetchone()
+            self.assertEqual(rows, 0)
+
+    def test_one_chain_call_still_serves_a_whole_structure(self):
+        # Every leg of a structure shares one expiration, which is already the
+        # batching key — so this fix must not multiply network calls.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path, strategy="Iron Condor")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            calls = []
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub(self.CHAIN, calls))
+            self.assertEqual(calls, [("AAPL", "2026-09-18")])
+
+    def test_a_structure_and_a_single_leg_share_one_chain_call(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            _insert_candidate(path, scan_id="S2")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            calls = []
+            chain = dict(self.CHAIN)
+            chain[(190.0, "call")] = (11.0, 11.4)
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(chain, calls))
+            self.assertEqual(n, 2)
+            self.assertEqual(calls, [("AAPL", "2026-09-18")])
+
+    def test_a_single_leg_mark_is_unchanged(self):
+        # Byte-for-byte: same mid, same two-sided quote, same source.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub({(190.0, "call"): (11.0, 11.4)}))
+            with sqlite3.connect(path) as conn:
+                bid, ask, mid, src = conn.execute(
+                    "select bid, ask, mid, source from candidate_marks").fetchone()
+            self.assertAlmostEqual(bid, 11.0)
+            self.assertAlmostEqual(ask, 11.4)
+            self.assertAlmostEqual(mid, 11.2)
+            self.assertEqual(src, "live_quote")
+
+    def test_the_same_structure_on_two_scans_writes_one_mark(self):
+        # Marks are keyed by contract_key, not by position. Two scans of the
+        # same structure must not fight over one row.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path, scan_id="S1")
+            _insert_structure(path, scan_id="S2")
+            self.assertEqual(cm.open_positions(db_path=path,
+                                               today="2026-08-19"), 2)
+            n = cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            self.assertEqual(n, 1)
+
+    def test_a_marked_credit_spread_resolves_on_take_profit(self):
+        # End to end, proving the sign convention: a credit spread whose mark
+        # falls has made money and must hit its target.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cfg = _write_config(d)
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-01")
+            cheap = {(185.0, "put"): (0.20, 0.24), (180.0, "put"): (0.04, 0.06)}
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=self._stub(cheap))
+            closed = cm.resolve(db_path=path, today="2026-08-20", cfg_path=cfg)
+            self.assertEqual(closed, 1)
+            with sqlite3.connect(path) as conn:
+                status, reason, pnl = conn.execute(
+                    "select status, exit_reason, pnl_pct "
+                    "from candidate_positions").fetchone()
+            self.assertEqual(status, "CLOSED")
+            self.assertEqual(reason, "take_profit")
+            self.assertGreater(pnl, 0)
+
+    def test_marking_never_opens_the_real_candidate_database(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_structure(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            real_connect = sqlite3.connect
+            seen = []
+
+            def spy(target, *a, **kw):
+                seen.append(str(target))
+                return real_connect(target, *a, **kw)
+
+            sqlite3.connect = spy
+            try:
+                cm.mark_open(db_path=path, today="2026-08-20",
+                             fetch=self._stub(self.CHAIN))
+            finally:
+                sqlite3.connect = real_connect
+            self.assertTrue(seen)
+            self.assertTrue(all(s.startswith(d) for s in seen), seen)
+
+
 class TestResolve(unittest.TestCase):
     KEY = "AAPL|2026-09-18|call|190"
 

@@ -326,6 +326,12 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
     that pair — the same shape `PaperManager.update_shadow_marks` uses. A
     failure on one pair must not cost the others their marks: a missing day is
     missing forever.
+
+    A structure's legs all share one expiration, so they are served by the
+    chain request that pair already makes: marking spreads and condors costs
+    no additional network calls. Its mark is the net mid across every leg,
+    stored positive with `bid`/`ask` NULL, because a structure has no single
+    two-sided quote to record.
     """
     from datetime import datetime
     if today is None:
@@ -336,20 +342,33 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
     with connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute(
-            "SELECT DISTINCT c.symbol, c.expiration, c.strike, c.opt_type,"
-            "       c.contract_key "
+            "SELECT c.symbol, c.expiration, c.strike, c.opt_type,"
+            "       c.strategy_name, c.features_json, c.contract_key "
             "FROM candidate_positions p JOIN candidates c "
             "  ON c.scan_id = p.scan_id AND c.board = p.board "
             " AND c.contract_key = p.contract_key "
             "WHERE p.status = ?", (OPEN,))]
 
         chains: Dict[Tuple[str, str], dict] = {}
+        seen: set = set()
         written = 0
         for row in rows:
-            symbol, expiration = row.get("symbol"), row.get("expiration")
-            strike, opt_type = cr._num(row.get("strike")), row.get("opt_type")
-            if not symbol or not expiration or strike is None or not opt_type:
+            # One mark per contract, not per position: `candidate_marks` is
+            # keyed by contract_key, and the same structure recorded on three
+            # scans is three positions sharing one stream of marks. DISTINCT
+            # cannot do this any more now that the blob is selected — two scans
+            # may record the same contract with different feature tails.
+            ck = row.get("contract_key")
+            if not ck or ck in seen:
                 continue
+            symbol, expiration = row.get("symbol"), row.get("expiration")
+            if not symbol or not expiration:
+                continue
+            legs = marking_legs(row)
+            if not legs:
+                continue
+            seen.add(ck)
+
             key = (symbol, expiration)
             if key not in chains:
                 try:
@@ -359,16 +378,49 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
                                 symbol, expiration, exc_info=True)
                     cr.STATS["errors"] += 1
                     chains[key] = {}
-            q = _quote(*chains[key].get((round(strike, 4),
-                                         str(opt_type).lower()), (None, None)))
-            if q is None:
+
+            # Every leg or none. A structure priced from one real quote and one
+            # guess is not a price — the refusal `legs_for` applies at entry.
+            quoted: List[Dict[str, Any]] = []
+            for leg in legs:
+                q = _quote(*chains[key].get(
+                    (round(leg["strike"], 4), leg["opt_type"]), (None, None)))
+                if q is None:
+                    quoted = []
+                    break
+                quoted.append({"bid": q[0], "ask": q[1], "side": leg["side"]})
+            if not quoted:
                 continue
+
+            # Declared before the branch: one arm assigns floats and the other
+            # None, and without these mypy fixes each name to whatever the first
+            # assignment happened to be. Same pattern `open_positions` uses.
+            bid: Optional[float]
+            ask: Optional[float]
+            mid: Optional[float]
+            source: str
+            if len(quoted) == 1:
+                bid, ask = quoted[0]["bid"], quoted[0]["ask"]
+                mid = (bid + ask) / 2.0
+                source = "live_quote"
+            else:
+                # NULL bid/ask because a structure has no single two-sided
+                # quote; its own source so a structure mark can never be
+                # mistaken for a single-leg one in later analysis.
+                from . import execution_truth as et
+                fill = et.structure_fill(quoted, "mid")
+                if fill is None:
+                    continue
+                bid = ask = None
+                mid = abs(fill.price)
+                source = "live_quote_structure"
+            if not mid:
+                continue
+
             conn.execute(
                 "INSERT OR REPLACE INTO candidate_marks "
                 "(contract_key, mark_date, bid, ask, mid, source) "
-                "VALUES (?,?,?,?,?,?)",
-                (row["contract_key"], today, q[0], q[1], (q[0] + q[1]) / 2.0,
-                 "live_quote"))
+                "VALUES (?,?,?,?,?,?)", (ck, today, bid, ask, mid, source))
             written += 1
         conn.commit()
     return written
