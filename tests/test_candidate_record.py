@@ -425,6 +425,61 @@ class TestMarkRanked(unittest.TestCase):
             self.assertEqual(rank, 2)     # rank survives the refusal mark
 
 
+class TestModeColumn(unittest.TestCase):
+    """The exit-rule family is derived from the mode. strategy_name is NULL on
+    every discovery row — those carry an option type in `type`, not a strategy
+    — so without this there is nothing to derive a family from."""
+
+    def setUp(self):
+        cr.reset_stats()
+
+    def test_the_scan_mode_is_recorded_on_every_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            with cr.scan("Discovery scan"):
+                cr.record_board(pr.BoardResult(kept=pd.DataFrame([_leg()]),
+                                               refused=pd.DataFrame(), scanned=1),
+                                board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                mode, = conn.execute("select mode from candidates").fetchone()
+            self.assertEqual(mode, "Discovery scan")
+
+    def test_an_existing_database_gains_the_column(self):
+        # The recorder already shipped; databases exist without this column,
+        # and CREATE TABLE IF NOT EXISTS will not add one.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            # Exactly the shipped schema, minus the new column — derived from
+            # _SCHEMA rather than retyped, so this cannot rot into testing a
+            # table shape the recorder never actually wrote.
+            pre_mode = cr._SCHEMA.replace("  mode TEXT,\n", "")
+            self.assertNotIn("mode TEXT", pre_mode)     # the removal worked
+            conn = sqlite3.connect(path)
+            conn.executescript(pre_mode)
+            conn.execute(
+                "INSERT INTO candidates (scan_id, ts, board, contract_key) "
+                "VALUES ('S','2026-08-18T00:00:00+00:00','b','K')")
+            conn.commit()
+            conn.close()
+
+            with cr.connect(path) as conn:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(candidates)")}
+                mode, = conn.execute("select mode from candidates").fetchone()
+            self.assertIn("mode", cols)
+            self.assertIsNone(mode)   # existing rows are not invented into a mode
+
+    def test_rows_recorded_outside_a_scan_have_a_null_mode(self):
+        # NULL means not recorded. Such rows get no simulated position at all.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cr.record_board(pr.BoardResult(kept=pd.DataFrame([_leg()]),
+                                           refused=pd.DataFrame(), scanned=1),
+                            board="discover", db_path=path)
+            with sqlite3.connect(path) as conn:
+                mode, = conn.execute("select mode from candidates").fetchone()
+            self.assertIsNone(mode)
+
+
 class TestHealthLines(unittest.TestCase):
     def test_zero_rows_is_reported_loudly(self):
         with tempfile.TemporaryDirectory() as d:
