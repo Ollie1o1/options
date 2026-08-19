@@ -190,5 +190,62 @@ class TestClusterBootstrap(unittest.TestCase):
             "contract_key", n_boot=10, seed=1), (None, None))
 
 
+class TestPowerArithmetic(unittest.TestCase):
+    def test_required_n_matches_the_fisher_z_formula(self):
+        # ((1.959964 + 0.8416212) / atanh(rho))**2 + 3
+        self.assertAlmostEqual(pk.required_effective_n(0.08), 1224, delta=2)
+        self.assertAlmostEqual(pk.required_effective_n(0.10), 783, delta=2)
+        self.assertAlmostEqual(pk.required_effective_n(0.15), 347, delta=2)
+
+    def test_a_smaller_effect_needs_more_data(self):
+        self.assertGreater(pk.required_effective_n(0.05),
+                           pk.required_effective_n(0.20))
+
+    def test_an_impossible_target_is_rejected(self):
+        with self.assertRaises(ValueError):
+            pk.required_effective_n(0.0)
+        with self.assertRaises(ValueError):
+            pk.required_effective_n(1.0)
+
+    def test_icc_is_near_zero_when_clusters_carry_no_signal(self):
+        rng = np.random.default_rng(11)
+        df = pd.DataFrame({"outcome": rng.normal(size=2000),
+                           "contract_key": [f"K{i // 5}" for i in range(2000)]})
+        self.assertLess(abs(pk.icc_oneway(df, "outcome", "contract_key")), 0.06)
+
+    def test_icc_is_high_when_clusters_dominate(self):
+        rng = np.random.default_rng(12)
+        rows = []
+        for c in range(400):
+            shock = rng.normal() * 5.0
+            for _ in range(5):
+                rows.append({"outcome": shock + rng.normal() * 0.5,
+                             "contract_key": f"K{c}"})
+        df = pd.DataFrame(rows)
+        self.assertGreater(pk.icc_oneway(df, "outcome", "contract_key"), 0.8)
+
+    def test_design_effect_follows_the_formula(self):
+        rng = np.random.default_rng(13)
+        rows = []
+        for c in range(400):
+            shock = rng.normal() * 5.0
+            for _ in range(5):
+                rows.append({"outcome": shock + rng.normal() * 0.5,
+                             "contract_key": f"K{c}"})
+        df = pd.DataFrame(rows)
+        icc = pk.icc_oneway(df, "outcome", "contract_key")
+        self.assertAlmostEqual(pk.design_effect(df, "outcome", "contract_key"),
+                               1 + (5 - 1) * icc, delta=0.05)
+
+    def test_effective_n_divides_by_the_design_effect(self):
+        self.assertAlmostEqual(pk.effective_n(1000, 2.0), 500.0)
+
+    def test_singleton_clusters_give_a_design_effect_of_one(self):
+        df = pd.DataFrame({"outcome": [1.0, 2.0, 3.0, 4.0],
+                           "contract_key": ["a", "b", "c", "d"]})
+        self.assertAlmostEqual(pk.design_effect(df, "outcome", "contract_key"),
+                               1.0, delta=0.01)
+
+
 if __name__ == "__main__":
     unittest.main()

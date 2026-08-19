@@ -107,3 +107,91 @@ def cluster_bootstrap_ci(df: pd.DataFrame, feature: str, outcome: str,
     lo = float(np.percentile(stats, 100 * alpha / 2))
     hi = float(np.percentile(stats, 100 * (1 - alpha / 2)))
     return (lo, hi)
+
+
+# ── Power arithmetic ─────────────────────────────────────────────────────────
+
+def required_effective_n(target_ic: float, power: float = 0.80,
+                         alpha: float = 0.05) -> float:
+    """Effective observations needed to detect `target_ic`, by Fisher-z.
+
+        n = ((z_{alpha/2} + z_{power}) / atanh(rho))^2 + 3
+
+    This is the arithmetic the LC gate got wrong. It demanded `IC >= 0.08 AND
+    p < 0.05` at a trigger of n >= 50, when detecting 0.08 needs n ~ 1224 — so
+    the 0.08 was decorative and the p-clause silently bound. Here n* is powered
+    FOR the threshold, which makes the two conditions unable to disagree.
+    """
+    from scipy.stats import norm
+    rho = abs(float(target_ic))
+    if not 0 < rho < 1:
+        raise ValueError("target_ic must be strictly between 0 and 1")
+    z_a = float(norm.ppf(1 - alpha / 2))
+    z_b = float(norm.ppf(power))
+    return ((z_a + z_b) / math.atanh(rho)) ** 2 + 3
+
+
+def icc_oneway(df: pd.DataFrame, value_col: str,
+               cluster_col: str) -> Optional[float]:
+    """One-way random-effects ICC by ANOVA, clamped to [0, 1].
+
+    A negative ANOVA estimate means "no more agreement within clusters than
+    between", which is an ICC of 0 rather than a negative correlation.
+    """
+    if df is None or len(df) == 0:
+        return None
+    work = df.dropna(subset=[value_col, cluster_col])
+    groups = [g[value_col].to_numpy(dtype="float64")
+              for _, g in work.groupby(cluster_col)]
+    groups = [g for g in groups if len(g)]
+    k = len(groups)
+    n = sum(len(g) for g in groups)
+    if k < 2 or n <= k:
+        return None
+
+    grand = float(np.mean(np.concatenate(groups)))
+    ss_between = sum(len(g) * (float(np.mean(g)) - grand) ** 2 for g in groups)
+    ss_within = sum(float(np.sum((g - np.mean(g)) ** 2)) for g in groups)
+    ms_between = ss_between / (k - 1)
+    ms_within = ss_within / (n - k)
+
+    # Mean cluster size for the unbalanced case.
+    sizes = np.array([len(g) for g in groups], dtype="float64")
+    m0 = (n - (float(np.sum(sizes ** 2)) / n)) / (k - 1)
+    denom = ms_between + (m0 - 1) * ms_within
+    if m0 <= 0 or denom == 0:
+        return None
+    icc = (ms_between - ms_within) / denom
+    return float(min(1.0, max(0.0, icc)))
+
+
+def design_effect(df: pd.DataFrame, value_col: str,
+                  cluster_col: str) -> Optional[float]:
+    """1 + (mean cluster size - 1) * ICC.
+
+    When every cluster is a singleton the design effect is exactly 1 whatever
+    the ICC, and `icc_oneway` correctly declines to estimate one — there is no
+    within-cluster variance to estimate it from. Returning None there would
+    propagate a None into the power arithmetic on exactly the early data this
+    is first run against, so the degenerate case is answered directly.
+    """
+    if df is None or len(df) == 0:
+        return None
+    work = df.dropna(subset=[value_col, cluster_col])
+    k = int(work[cluster_col].nunique())
+    if not k:
+        return None
+    mean_size = len(work) / k
+    if mean_size <= 1.0:
+        return 1.0
+
+    icc = icc_oneway(df, value_col, cluster_col)
+    if icc is None:
+        return None
+    return float(1.0 + (mean_size - 1.0) * icc)
+
+
+def effective_n(nominal: float, design_effect_value: float) -> float:
+    """Nominal observations divided by the design effect."""
+    de = float(design_effect_value)
+    return float(nominal) / de if de > 0 else float(nominal)
