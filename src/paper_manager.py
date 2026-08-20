@@ -745,6 +745,31 @@ def _get_multiplier(ticker: str) -> float:
     return 100.0
 
 
+def _lots(quantity: Any) -> float:
+    """Contracts held, defaulting to one.
+
+    A row whose quantity is NULL, zero, negative or unparseable is one the
+    ledger never sized — every row written before 2026-08-19 is in that state.
+    Falling back to 1.0 keeps those rows reading exactly as they always have;
+    falling back to 0.0 would erase their P&L.
+    """
+    try:
+        qty = float(quantity)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(qty) or qty <= 0:
+        return 1.0
+    return qty
+
+
+def _row_lots(row) -> float:
+    """`_lots` for a sqlite3.Row / mapping, tolerating a missing column."""
+    try:
+        return _lots(row["quantity"])
+    except (KeyError, IndexError, TypeError):
+        return 1.0
+
+
 def _sanitize_close_values(
     strategy_name: str,
     entry_price: float,
@@ -752,6 +777,7 @@ def _sanitize_close_values(
     pnl_pct: float,
     max_loss_floor: float | None = None,
     multiplier: float = 100.0,
+    quantity: Any = 1.0,
 ) -> tuple[float, float, float]:
     """Clamp close-time values to physically possible bounds and derive pnl_usd.
 
@@ -775,6 +801,15 @@ def _sanitize_close_values(
     pnl_usd is computed deterministically from the sanitized pnl_pct so it can never
     be NULL after a close (caller bug: 115 historical closes were NULL because
     pnl_usd wasn't being written by the auto-exit UPDATE statements).
+
+    ``quantity`` scales the DOLLARS and nothing else — a return is a return at
+    any size, so pnl_pct is untouched (it feeds the IC sample). This existed
+    only implicitly until 2026-08-19: every ledger row carried the migration
+    default of 1.0, so a per-contract figure and a whole-position figure were
+    the same number. Position sizing writes 2 and 3, and an unscaled column
+    would book a two-lot winner at half its value — into `book_equity`, which
+    is what sizes the NEXT position. A missing or absurd value falls back to
+    one contract rather than zeroing the trade.
     """
     safe_exit = max(float(exit_price), 0.0) if exit_price is not None else 0.0
     raw_pct = float(pnl_pct) if pnl_pct is not None else 0.0
@@ -792,7 +827,7 @@ def _sanitize_close_values(
     else:
         clamped_pct = max(-1.0, raw_pct)  # loss capped, gain unbounded (long premium)
 
-    pnl_usd = round(float(entry_price) * clamped_pct * multiplier, 2)
+    pnl_usd = round(float(entry_price) * clamped_pct * multiplier * _lots(quantity), 2)
     return safe_exit, clamped_pct, pnl_usd
 
 
@@ -2201,6 +2236,7 @@ class PaperManager:
                     safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
                         row["strategy_name"] or "", entry_credit, close_cost, pnl_raw,
                         multiplier=_get_multiplier(ticker),
+                        quantity=_row_lots(row),
                     )
                 else:
                     is_short = _is_short_position(row["strategy_name"] or "")
@@ -2213,6 +2249,7 @@ class PaperManager:
                     safe_exit, clamped_pct, pnl_usd = _sanitize_close_values(
                         row["strategy_name"] or "", entry_price, intrinsic, pnl_raw,
                         multiplier=_get_multiplier(ticker),
+                        quantity=_row_lots(row),
                     )
                 closed_this_run.append(
                     f"{ticker} {row['strategy_name']} → {reason} (settle: {pnl_raw:+.1%})"
@@ -2339,6 +2376,7 @@ class PaperManager:
                         current_credit_to_close, pnl_realistic,
                         max_loss_floor=max_loss_floor,
                         multiplier=_get_multiplier(ticker),
+                        quantity=_row_lots(row),
                     )
                     with self._get_connection() as conn:
                         conn.execute(
@@ -2436,6 +2474,7 @@ class PaperManager:
                         row["strategy_name"] or "", entry_price,
                         current_price, pnl_realistic,
                         multiplier=_get_multiplier(ticker),
+                        quantity=_row_lots(row),
                     )
                     update_query = """
                     UPDATE trades
