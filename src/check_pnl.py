@@ -146,6 +146,32 @@ def _get_multiplier(ticker: str) -> float:
     return 100.0
 
 
+def _lots(quantity: Any) -> float:
+    """Contracts held, defaulting to one.
+
+    Every row written before 2026-08-19 carries 1.0 because `log_trade` never
+    wrote the column; position sizing (src/book_sizing.py) writes 2 and 3. Each
+    dollar figure on this screen is `per-contract x multiplier`, so without this
+    a multi-lot position would be displayed at a fraction of what it is doing —
+    P&L, cost basis, concentration, portfolio max loss and the Greeks alike.
+    A NULL, zero or unparseable quantity is a row that was never sized, not an
+    empty position, so it falls back to one rather than to zero.
+    """
+    try:
+        qty = float(quantity)
+    except (TypeError, ValueError):
+        return 1.0
+    return qty if (qty == qty and 0 < qty < float("inf")) else 1.0
+
+
+def _row_lots(row) -> float:
+    """`_lots` for a row mapping, tolerating a missing column."""
+    try:
+        return _lots(row["quantity"])
+    except (KeyError, IndexError, TypeError):
+        return 1.0
+
+
 def _width() -> int:
     try:
         return max(80, min(shutil.get_terminal_size(fallback=(100, 24)).columns, 120))
@@ -416,7 +442,9 @@ def _print_pnl_attribution(closed_trades: list, stock_prices: dict, width: int):
             pnl_ratio = float(r["pnl_pct"]) if r["pnl_pct"] is not None else 0.0
 
             # We don't have S_entry/S_exit stored, so use pnl_ratio * entry_price * mult as actual P&L
-            mult = _get_multiplier(r.get("ticker", ""))
+            # Contracts fold into the multiplier so the realised total and the
+            # Greek decomposition it is compared against scale together.
+            mult = _get_multiplier(r.get("ticker", "")) * _row_lots(r)
             actual_pnl = pnl_ratio * entry_price * mult
 
             # Estimate days held
@@ -539,7 +567,7 @@ def _print_equity_curve(closed_trades: list, width: int, min_trades: int = 10):
     depth = []
     for r in chrono:
         ep = float(r["entry_price"]) if r.get("entry_price") else 0.0
-        mult = _get_multiplier(r.get("ticker", ""))
+        mult = _get_multiplier(r.get("ticker", "")) * _row_lots(r)
         pnl_u = float(r["pnl_pct"]) * ep * mult if ep > 0 else 0.0
         cum += pnl_u
         peak = max(peak, cum)
@@ -669,15 +697,19 @@ def _print_portfolio_greeks(open_trades: list, width: int):
             row_gamma = 0.0
             row_vega  = 0.0
             row_theta = 0.0
+            # Portfolio Greeks are exposure, so they count contracts: two lots
+            # of the same spread carry twice the delta, vega and theta. `leg_qty`
+            # here is the leg's SIGN within one structure, not the position size.
+            lots = _row_lots(r)
             for leg_type, leg_strike, leg_qty in legs:
                 d = float(bs_delta(leg_type, S, leg_strike, T, rfr, sigma))
                 g = float(bs_gamma(S, leg_strike, T, rfr, sigma))
                 v = float(bs_vega(S, leg_strike, T, rfr, sigma))
                 t = float(bs_theta(leg_type, S, leg_strike, T, rfr, sigma))
-                row_delta += leg_qty * d
-                row_gamma += leg_qty * g
-                row_vega  += leg_qty * v
-                row_theta += leg_qty * t
+                row_delta += leg_qty * d * lots
+                row_gamma += leg_qty * g * lots
+                row_vega  += leg_qty * v * lots
+                row_theta += leg_qty * t * lots
             mult = _get_multiplier(ticker)
             net_delta        += row_delta
             net_gamma_dollar += 0.5 * row_gamma * (S * 0.01) ** 2 * mult
@@ -1011,14 +1043,19 @@ def view_portfolio(period: Optional[str] = None):
             all_legs_priced = bool(leg_marks) and all(lp is not None and lp > 0 for _, lp in leg_marks)
 
             mult = _get_multiplier(ticker)
+            # Contracts held. Every row written before 2026-08-19 carries 1.0
+            # because the column was never written; from position sizing on it
+            # can be 2 or 3, and an unscaled mark would show the operator a
+            # fraction of what the position is actually doing.
+            lots = _row_lots(r)
             if structure == "single":
                 live_price = leg_marks[0][1] if leg_marks else None
                 live_str = f"${live_price:.2f}" if (live_price is not None and live_price > 0) else None
                 if live_price is not None and live_price > 0:
                     pnl_per = (entry_price - live_price) if short else (live_price - entry_price)
-                    pnl_usd_row = pnl_per * mult
+                    pnl_usd_row = pnl_per * mult * lots
                     pnl_pct_row = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
-                    cost_basis = entry_price * mult
+                    cost_basis = entry_price * mult * lots
                 else:
                     pnl_usd_row = None
                     pnl_pct_row = None
@@ -1029,12 +1066,21 @@ def view_portfolio(period: Optional[str] = None):
                     # current_credit_to_close = short_now - long_now
                     current_credit = sum(-qty * lp for qty, lp in leg_marks)
                     pnl_per = entry_price - current_credit  # decay = profit for credit seller
-                    pnl_usd_row = pnl_per * mult
+                    pnl_usd_row = pnl_per * mult * lots
                     pnl_pct_row = pnl_per / entry_price * 100 if entry_price > 0 else 0.0
                     live_str = f"${current_credit:.2f}"
-                    # Cost basis ≈ max_loss (true defined risk) for concentration math
+                    # Cost basis ≈ max_loss (true defined risk) for concentration
+                    # math. `capital_at_risk` is stored at the sized quantity and
+                    # `max_loss_usd` per contract, so prefer the former and scale
+                    # the latter — concentration is about the whole position.
+                    _car = _num_or_none(r.get("capital_at_risk"))
                     _ml = _num_or_none(r.get("max_loss_usd"))
-                    cost_basis = abs(_ml) if _ml is not None else entry_price * mult
+                    if _car is not None and _car > 0:
+                        cost_basis = abs(_car)
+                    elif _ml is not None:
+                        cost_basis = abs(_ml) * lots
+                    else:
+                        cost_basis = entry_price * mult * lots
                 else:
                     pnl_usd_row = None
                     pnl_pct_row = None
@@ -1185,7 +1231,7 @@ def view_portfolio(period: Optional[str] = None):
             ticker_exp: dict = {}
             for r in open_trades:
                 t = r["ticker"]
-                mult = _get_multiplier(t)
+                mult = _get_multiplier(t) * _row_lots(r)
                 ticker_exp[t] = ticker_exp.get(t, 0.0) + float(r["entry_price"]) * mult
             hot = {t: v / total_cost_usd for t, v in ticker_exp.items() if v / total_cost_usd > 0.40}
             if hot:
@@ -1203,14 +1249,18 @@ def view_portfolio(period: Optional[str] = None):
         for r in open_trades:
             structure = _classify_structure(r)
             sn = str(r.get("strategy_name", ""))
+            # max_loss_usd is stored per contract; the portfolio's worst case is
+            # what the whole position can lose.
+            lots = _row_lots(r)
             if structure in ("spread", "iron_condor"):
                 _ml = _num_or_none(r.get("max_loss_usd"))
-                ml_val = abs(_ml) if _ml is not None else None
+                ml_val = abs(_ml) * lots if _ml is not None else None
                 if ml_val is None and sn.startswith("SPREAD:"):
                     # Legacy fallback parsing
                     try:
                         parts = sn.split(":")
-                        ml_val = abs(float(parts[3])) * 100 if len(parts) >= 4 else None
+                        ml_val = (abs(float(parts[3])) * 100 * lots
+                                  if len(parts) >= 4 else None)
                     except (ValueError, IndexError):
                         ml_val = None
                 if ml_val is None:
@@ -1220,7 +1270,7 @@ def view_portfolio(period: Optional[str] = None):
             else:
                 # Single-leg: max loss = entry_price * mult (for longs) or unlimited (shorts)
                 ep = abs(float(r.get("entry_price", 0)))
-                mult = _get_multiplier(r.get("ticker", ""))
+                mult = _get_multiplier(r.get("ticker", "")) * lots
                 if _is_short(sn):
                     has_undefined_risk = True
                 else:
@@ -1301,7 +1351,9 @@ def view_portfolio(period: Optional[str] = None):
             # Use it to determine win/loss so the row count matches BY STRATEGY
             # and the IC analytics. Fall back to mark-to-market recomputation
             # only when DB lacks pnl_pct (historical rows).
-            mult = _get_multiplier(ticker)
+            # Contracts fold in here so this reconstruction agrees with the
+            # stored pnl_usd, which paper_manager writes at the sized quantity.
+            mult = _get_multiplier(ticker) * _row_lots(r)
             if r["pnl_pct"] is not None:
                 pnl_pct = pnl_ratio * 100
                 pnl_usd = pnl_ratio * entry_price * mult
@@ -1421,7 +1473,7 @@ def view_portfolio(period: Optional[str] = None):
             cum_usd, peak_usd, max_dd_usd = 0.0, 0.0, 0.0
             for r in chrono:
                 ep = float(r["entry_price"]) if r["entry_price"] else 0.0
-                mult = _get_multiplier(r.get("ticker", ""))
+                mult = _get_multiplier(r.get("ticker", "")) * _row_lots(r)
                 pnl_u = float(r["pnl_pct"]) * ep * mult if ep > 0 else 0.0
                 cum_usd += pnl_u
                 peak_usd = max(peak_usd, cum_usd)
