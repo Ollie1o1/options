@@ -208,6 +208,49 @@ class SizedInsert(unittest.TestCase):
         self.assertLessEqual(row["capital_at_risk"], row["budget_at_entry"])
 
 
+class RefusalsAreCountable(unittest.TestCase):
+    """What the auto-log summary line arithmetic depends on.
+
+    The feeder counts every `False` as `_skipped` and then subtracts the
+    manager's refusal counters to work out how many really were duplicates:
+    `_dupes = _skipped - _refused - _near_dupes - _unsized`. If a sizing
+    refusal did not increment its own counter it would be reported as a
+    duplicate — the same defect that once printed "skipped 5 duplicates" for a
+    window that logged nothing because everything was over budget.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.dir.name, "book.db")
+        self.cfg = _write_config(os.path.join(self.dir.name, "config.json"))
+        self.pm = PaperManager(db_path=self.db, config_path=self.cfg)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def _too_big(self, **over):
+        return _bull_put(ticker="CRM", spread_width=20.0, net_credit=5.32,
+                         max_loss_usd=1_468.0, entry_price=5.32, **over)
+
+    def test_the_if_new_wrapper_reports_a_sizing_refusal_as_a_refusal(self):
+        self.assertFalse(self.pm.log_trade_if_new(self._too_big(), auto_log=True))
+        self.assertEqual(self.pm.unsized_rejected, 1)
+        self.assertEqual(self.pm.duplicate_rejected, 0)
+        self.assertEqual(self.pm.unaffordable_rejected, 0)
+
+    def test_a_spread_refusal_counts_once_through_log_spread(self):
+        spread = {"ticker": "CRM", "expiration": _EXPIRY,
+                  "short_strike": 100.0, "long_strike": 80.0, "type": "Bull Put",
+                  "net_credit": 5.32, "max_profit": 532.0, "max_loss": 1_468.0}
+        self.assertFalse(self.pm.log_spread(spread))
+        self.assertEqual(self.pm.unsized_rejected, 1)
+
+    def test_the_counter_is_per_manager_not_global(self):
+        other = PaperManager(db_path=self.db, config_path=self.cfg)
+        self.pm.log_trade(self._too_big())
+        self.assertEqual(other.unsized_rejected, 0)
+
+
 class RealLedgerUntouched(unittest.TestCase):
     """Spec test 12 — these tests write no book but their own.
 

@@ -6871,6 +6871,9 @@ def main():
                         # Same for near-duplicates of an entry from the last few days —
                         # the catch-up replay case the same-day dedup cannot see.
                         _dup_before = getattr(pm, "duplicate_rejected", 0)
+                        # And for positions the account cannot size to a whole
+                        # contract: another refusal that is not a duplicate.
+                        _unsized_before = getattr(pm, "unsized_rejected", 0)
 
                         # Component-score fields carried over from the spread enrichment
                         _spread_score_keys = (
@@ -6950,7 +6953,8 @@ def main():
                         # A budget refusal is not a duplicate — see the single-leg path.
                         _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
                         _near_dupes = getattr(pm, "duplicate_rejected", 0) - _dup_before
-                        _dupes = max(0, _skipped - _refused - _near_dupes)
+                        _unsized = getattr(pm, "unsized_rejected", 0) - _unsized_before
+                        _dupes = max(0, _skipped - _refused - _near_dupes - _unsized)
                         _summary = (
                             f"Auto-logged {_inserted} spreads/condors, "
                             f"skipped {_dupes} duplicates{_bc_suffix} (profile: {_tag})"
@@ -6959,6 +6963,12 @@ def main():
                             _summary += f", refused {_near_dupes} as re-logs of a recent entry"
                         if _refused:
                             _summary += f", refused {_refused} over budget"
+                        if _unsized:
+                            # Deliberately not naming a threshold here: the
+                            # per-trade cap and the concurrent cap both land in
+                            # this count, and log_trade has already printed the
+                            # equity, the budget and the reason for each one.
+                            _summary += f", refused {_unsized} on position size"
                         if _displaced:
                             _summary += (
                                 f", {_displaced} of the top {_top_n} exceeded the "
@@ -7060,6 +7070,9 @@ def main():
                         # Same for near-duplicates of an entry from the last few days —
                         # the catch-up replay case the same-day dedup cannot see.
                         _dup_before = getattr(pm, "duplicate_rejected", 0)
+                        # And for positions the account cannot size to a whole
+                        # contract: another refusal that is not a duplicate.
+                        _unsized_before = getattr(pm, "unsized_rejected", 0)
                         # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
                         # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
                         # and re-sorted, so positional alignment with picks is not preserved.
@@ -7174,12 +7187,19 @@ def main():
                         # pick was over budget — the one line that would have shown the problem.
                         _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
                         _near_dupes = getattr(pm, "duplicate_rejected", 0) - _dup_before
-                        _dupes = max(0, _skipped - _refused - _near_dupes)
+                        _unsized = getattr(pm, "unsized_rejected", 0) - _unsized_before
+                        _dupes = max(0, _skipped - _refused - _near_dupes - _unsized)
                         _summary = f"Auto-logged {_inserted} new, skipped {_dupes} duplicates (profile: {_tag})"
                         if _near_dupes:
                             _summary += f", refused {_near_dupes} as re-logs of a recent entry"
                         if _refused:
                             _summary += f", refused {_refused} over budget"
+                        if _unsized:
+                            # Deliberately not naming a threshold here: the
+                            # per-trade cap and the concurrent cap both land in
+                            # this count, and log_trade has already printed the
+                            # equity, the budget and the reason for each one.
+                            _summary += f", refused {_unsized} on position size"
                         if _skipped_long_puts:
                             _summary += f", filtered {_skipped_long_puts} disallowed pick(s)"
                         if _displaced:
