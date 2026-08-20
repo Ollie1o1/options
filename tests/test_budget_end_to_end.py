@@ -126,10 +126,15 @@ class TestTheSpreadLedgerIsBudgetGatedToo(unittest.TestCase):
         from src.paper_manager import PaperManager
         return PaperManager(os.path.join(tmpdir, "ledger.db"))
 
+    # `allow_unsized` for the same reason the fixtures elsewhere carry
+    # `allow_unaffordable`: position sizing runs AFTER the budget gate and would
+    # refuse a $9,500 spread on its own (2% of a $50,000 book is $1,000), which
+    # is not what these tests are about. See src/book_sizing.py.
     def _spread(self, **kw):
         d = {"date": "2026-08-16", "ticker": "SPY", "expiration": "2026-09-18",
              "short_strike": 600.0, "long_strike": 500.0, "type": "Bull Put",
-             "net_credit": 5.0, "max_profit": 500.0, "max_loss": 9500.0}
+             "net_credit": 5.0, "max_profit": 500.0, "max_loss": 9500.0,
+             "allow_unsized": True}
         d.update(kw)
         return d
 
@@ -137,7 +142,8 @@ class TestTheSpreadLedgerIsBudgetGatedToo(unittest.TestCase):
         d = {"date": "2026-08-16", "ticker": "SPY", "expiration": "2026-09-18",
              "short_put_strike": 600.0, "long_put_strike": 500.0,
              "short_call_strike": 700.0, "long_call_strike": 800.0,
-             "total_credit": 5.0, "max_profit": 500.0, "max_risk": 9500.0}
+             "total_credit": 5.0, "max_profit": 500.0, "max_risk": 9500.0,
+             "allow_unsized": True}
         d.update(kw)
         return d
 

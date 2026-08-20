@@ -34,6 +34,8 @@ def _get_yf_and_session():
 from .utils import is_short_position as _is_short_position
 from .utils import bs_delta as _bs_delta
 from .capital_risk import capital_at_risk, within_budget
+from .book_sizing import (SizingDecision, book_equity, load_sizing_config,
+                          open_risk, size)
 
 # ── Chain-quote memo ─────────────────────────────────────────────────────────
 # _fetch_chain_quotes already serves every leg on a (ticker, expiration) from
@@ -826,6 +828,7 @@ class PaperManager:
                 "max_friction_to_credit", DEFAULT_MAX_FRICTION_TO_CREDIT)
             self._max_friction_to_credit = (
                 float(_fric) if _fric not in (None, "", 0, False) else None)
+            self._sizing_cfg = load_sizing_config(_cfg)
         except Exception:
             self._commission_per_contract = COMMISSION_PER_CONTRACT
             self._slippage_per_share = SLIPPAGE_PER_SHARE
@@ -833,6 +836,9 @@ class PaperManager:
             self._max_capital_at_risk = None
             self._dedup_window_days = DEFAULT_DEDUP_WINDOW_DAYS
             self._max_friction_to_credit = DEFAULT_MAX_FRICTION_TO_CREDIT
+            # An unreadable config is not permission to size positions off
+            # numbers nobody chose: fall back to one contract, today's behaviour.
+            self._sizing_cfg = load_sizing_config(None)
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
         # Count of trades refused for exceeding the budget this session. Callers
         # print it so a feeder that has gone quiet is visibly gated, not broken.
@@ -843,6 +849,13 @@ class PaperManager:
         # And for credit trades whose bid-ask cost swallows the credit. Counted
         # separately so a quiet feeder names the gate that held it back.
         self.untradeable_rejected = 0
+        # And for positions the account cannot size to a whole contract, or
+        # that have no room left under the concurrent cap. A book that has gone
+        # quiet must be able to say WHICH rule silenced it.
+        self.unsized_rejected = 0
+        # The last decision `log_trade` reached, for callers that want to show
+        # the size they got rather than re-deriving it. None until one is made.
+        self.last_sizing_decision: Optional[SizingDecision] = None
         self._init_db()
 
     # Exit reasons worth a counterfactual. Stop-outs realise -60.3% from an
@@ -1211,6 +1224,90 @@ class PaperManager:
         print(f"  ! {msg}")
         return True
 
+    # Ledgers that size themselves before they get here. The crypto book trades
+    # fractional coins and caps each position at $1,000 of unit risk
+    # (src/core/sizing.py::capped_quantity); book sizing is calibrated on the
+    # equity book's own equity and must not overwrite that.
+    _SELF_SIZED_TICKERS = ("BTC", "ETH")
+
+    def _resolve_quantity(
+        self, trade_dict: Dict[str, Any], budget: Optional[float]
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """How many contracts this position gets, and what it ties up at that size.
+
+        Returns ``(None, None)`` when sizing refuses the trade, matching the
+        three refusals above it. Otherwise ``(quantity, capital_at_risk)``, both
+        of which are what gets STORED — a `capital_at_risk` computed at one
+        contract on a two-contract position would be a number describing
+        something other than its label, which is the defect class this whole
+        change exists to remove.
+        """
+        self.last_sizing_decision = None
+
+        def _risk_at(qty: float) -> Optional[float]:
+            # The multi-leg fields are passed deliberately: without
+            # spread_width/net_credit a credit structure with no stored max loss
+            # prices as None (unsizable) rather than as width - credit.
+            return capital_at_risk(
+                strategy_name=trade_dict["strategy_name"],
+                entry_price=trade_dict.get("entry_price"),
+                strike=trade_dict.get("strike"),
+                max_loss_usd=trade_dict.get("max_loss_usd"),
+                spread_width=trade_dict.get("spread_width"),
+                net_credit=trade_dict.get("net_credit"),
+                quantity=qty,
+                ticker=trade_dict.get("ticker"),
+            )
+
+        try:
+            _caller = trade_dict.get("quantity")
+            caller_qty = (float(_caller)
+                          if _caller is not None and np.isfinite(float(_caller))
+                          and float(_caller) > 0 else None)
+        except (TypeError, ValueError):
+            caller_qty = None
+        ticker = str(trade_dict.get("ticker") or "").upper()
+
+        # Three ways past the sizer, all of them deliberate: a self-sizing
+        # ledger, a caller that already chose a size, and the manual override.
+        if (ticker in self._SELF_SIZED_TICKERS
+                or (caller_qty is not None and caller_qty != 1.0)
+                or trade_dict.get("allow_unsized")):
+            qty = caller_qty if caller_qty is not None else 1.0
+            return qty, _risk_at(qty)
+
+        per_contract = _risk_at(1.0)
+        with self._get_connection() as conn:
+            equity = book_equity(conn, self._sizing_cfg)
+            exposure = open_risk(conn, self._sizing_cfg)
+        decision = size(per_contract, equity, exposure, self._sizing_cfg)
+        self.last_sizing_decision = decision
+
+        if decision.contracts < 1:
+            self.unsized_rejected += 1
+            shown = (f"${decision.risk_per_contract:,.0f}"
+                     if decision.risk_per_contract is not None else "unbounded")
+            print(
+                f"Skipped {trade_dict['strategy_name']} on "
+                f"{trade_dict.get('ticker')}: {shown} of risk per contract "
+                f"({decision.reason}) against ${equity:,.0f} of book equity, "
+                f"${equity * float(self._sizing_cfg['max_risk_pct']):,.0f} per "
+                f"trade and ${exposure:,.0f} already at risk"
+            )
+            return None, None
+
+        contracts = decision.contracts
+        # The budget gate ran BEFORE this and cleared ONE contract. Multiplying
+        # up must not carry the position past the cap it just cleared, or the
+        # row would store a capital_at_risk above its own budget_at_entry.
+        # Clamping can never refuse a trade the budget already admitted.
+        if (contracts > 1 and per_contract and budget is not None
+                and not trade_dict.get("allow_unaffordable")
+                and not within_budget(per_contract * contracts, budget)):
+            contracts = max(1, int(float(budget) // per_contract))
+
+        return float(contracts), _risk_at(float(contracts))
+
     def log_trade(self, trade_dict: Dict[str, Any]):
         """
         Logs a new paper trade to the SQLite database.
@@ -1227,6 +1324,13 @@ class PaperManager:
         Returns True if the row was inserted, False if it was refused for
         exceeding ``auto_log.max_capital_at_risk``. Pass
         ``allow_unaffordable=True`` to log a deliberate over-budget entry.
+
+        Also refused when POSITION SIZING cannot fit a whole contract inside
+        ``position_sizing.max_risk_pct`` of book equity, or inside what is left
+        under ``max_open_risk_pct`` — a position too big to size is one the
+        account cannot afford. ``allow_unsized=True`` bypasses that for one
+        deliberate manual entry and logs at quantity 1. The stored ``quantity``
+        and ``capital_at_risk`` describe the position actually taken.
 
         Set ``auto_log=True`` for entries written by an automated feeder: that
         arms the near-duplicate guard below. It is off by default so a manual,
@@ -1307,6 +1411,21 @@ class PaperManager:
             )
             return False
 
+        # Sizing — the LAST gate, deliberately. A trade that fails budget or
+        # tradeability is refused for that reason rather than for its size, so
+        # refusal reasons stay diagnostic.
+        #
+        # Risk per contract comes from capital_at_risk with the multi-leg
+        # fields, never from entry premium: a Bull Put risks `width - credit`
+        # and receives its credit, so premium-based sizing (what
+        # src/execution/sizing.py does, for long calls) would price the trade at
+        # a quarter of its loss and buy several times too many contracts.
+        _qty, _sized_risk = self._resolve_quantity(trade_dict, _budget)
+        if _qty is None:
+            return False
+        if _sized_risk is not None:
+            risk = _sized_risk
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         query = """
@@ -1326,7 +1445,8 @@ class PaperManager:
             weight_profile,
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
-            paper_only, era, lottery_edge, capital_at_risk, budget_at_entry
+            paper_only, era, lottery_edge, capital_at_risk, budget_at_entry,
+            quantity
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1336,7 +1456,8 @@ class PaperManager:
             ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?,
+            ?
         )
         """
 
@@ -1423,12 +1544,22 @@ class PaperManager:
             (int(bool(trade_dict["lottery_edge"])) if trade_dict.get("lottery_edge") is not None else None),
             risk,
             _budget,   # budget_at_entry — NULL means no limit was in force
+            # Contracts. Until 2026-08-19 this column was never written at all:
+            # every row inherited the migration's DEFAULT 1.0, so bet size was
+            # the option premium and the book's headline P&L was a sizing
+            # artifact. See src/book_sizing.py.
+            _qty,
         )
 
         with self._get_connection() as conn:
             conn.execute(query, params)
 
-        print(f"Logged {trade_dict['strategy_name']} on {trade_dict['ticker']} at ${float(trade_dict['entry_price']):.2f}")
+        # Record the size back so a caller holding this dict can report what it
+        # actually bought. `log_spread`/`log_iron_condor` hand us a COPY, so
+        # they see it only via `last_sizing_decision`.
+        trade_dict["quantity"] = _qty
+        _lots = f" x{_qty:g}" if _qty != 1.0 else ""
+        print(f"Logged {trade_dict['strategy_name']} on {trade_dict['ticker']}{_lots} at ${float(trade_dict['entry_price']):.2f}")
         return True
 
     def log_trade_if_new(self, trade_dict: Dict[str, Any], auto_log: bool = False) -> bool:

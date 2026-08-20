@@ -71,7 +71,11 @@ class LedgerRefusesOutsideCalibrationTest(unittest.TestCase):
                 "quality_score": 50.0,
                 # Not what these tests are about; the affordability gate is
                 # covered elsewhere and would otherwise refuse every fixture.
-                "allow_unaffordable": True}
+                "allow_unaffordable": True,
+                # Same again for position sizing, which runs last: this fixture
+                # records no spread_width and no max_loss_usd, so a Bull Put's
+                # risk cannot be bounded and sizing correctly refuses to guess.
+                "allow_unsized": True}
 
     def _logged(self) -> int:
         with self.mgr._get_connection() as conn:
