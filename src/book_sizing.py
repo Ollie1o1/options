@@ -91,7 +91,7 @@ def load_sizing_config(config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     to take the ledger down. It cannot silently *loosen* anything either — the
     defaults are the conservative end of every knob.
     """
-    block = {}
+    block: Mapping[str, Any] = {}
     if isinstance(config, Mapping):
         raw = config.get("position_sizing")
         if isinstance(raw, Mapping):
