@@ -1,7 +1,9 @@
 # Position sizing for the paper book — design
 
 Date drafted: 2026-08-19
-Status: **APPROVED, NOT BUILT.** No implementation exists.
+Status: **BUILT 2026-08-19.** `src/book_sizing.py`, `config.position_sizing`,
+wired at `src/paper_manager.py::log_trade`. See §8 for what shipped and the
+three places the build departed from this design.
 Scope: make position size a decision instead of an accident of option premium.
 Prerequisite for: any P&L number this system reports meaning what its label says.
 
@@ -236,3 +238,52 @@ network.
 - `reports/TRACK_RECORD.md`, which still publishes the as-sized headline. It
   should gain the equal-weighted figure, but that is a reporting change, not
   this one.
+
+---
+
+## 8. What was built, and where it departed from this design
+
+Built 2026-08-19 on `feat/book-sizing`. Every decision in §3 shipped as
+written; the arithmetic in §3 reproduces exactly against the real ledger
+(equity $40,109.62, budget $802.19, DIA 1 contract, WMT 2, NVDA 1, CRM refused).
+
+Three departures, each forced by something this design did not know:
+
+1. **`book_equity` splits on ENTRY date, not exit date.** §6 test 7 says
+   "excludes trades closed before it", which entry-dating also satisfies — a
+   trade closed before the basis was necessarily entered before it. Entry-dating
+   is what the 2026-08-05 restart means everywhere else in this system, and it
+   is the population §3's numbers were measured on: exit-dating gives -$4,281
+   over 64 trades instead of the -$9,890 over 25 that the $50,000 balance was
+   chosen against.
+
+2. **`sizing_start_date` is 2026-08-20, not the 2026-08-19 build date.** Six
+   positions were auto-logged unsized earlier on the 19th carrying $4,567 of
+   risk — already past the $4,011 concurrent ceiling. Dating the sized era to
+   the 19th would have held those trades against a rule they were never subject
+   to and refused every new entry until they closed: the §3 grandfathering
+   argument in miniature. The boundary is the first day sizing governs an entry.
+
+3. **Realised P&L had to be made quantity-aware first**, which §7 did not
+   anticipate. `_sanitize_close_values` computed
+   `pnl_usd = entry_price x pnl_pct x multiplier` and no equity exit path scaled
+   it, so every realised dollar described ONE contract. Invisible while every
+   row carried `quantity = 1.0`; the moment sizing writes 2, a two-lot winner
+   books at half its value — into `book_equity`, which is what sizes the next
+   position. Fixed at all four close paths plus the eight per-contract dollar
+   figures in the portfolio view. `pnl_pct` is deliberately untouched: a return
+   is a return at any size, and it feeds the IC sample.
+
+Also found and fixed on the way: **`quantity` was never written to the table at
+all.** The INSERT had no such column, so every row inherited the migration's
+`DEFAULT 1.0` — including the crypto screener's carefully computed fractional
+quantities, which a backfill script had been patching in afterwards.
+
+Two consequences to expect that §5 did not name:
+
+- **A Bull Put with no recorded `spread_width`/`max_loss_usd` is now REFUSED**
+  rather than sized off its credit. The live auto-log path always records one;
+  two test fixtures did not, and now carry `allow_unsized` for the same reason
+  they already carried `allow_unaffordable`.
+- **The concurrent cap cannot bind until 2026-08-20.** Between the merge and
+  midnight the per-trade cap applies alone.
