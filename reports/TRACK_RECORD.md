@@ -1,32 +1,53 @@
 # Paper Trading Track Record
 
-_Generated 2026-08-13 13:59 • 866 closed trades_
+_Generated 2026-08-20 11:34 • 900 closed trades_
 
 > **Methodology & caveats.** These are **paper trades**, not live fills. Entries and exits use **delayed retail data** (Yahoo Finance) and a **modeled friction** assumption (spread/slippage), so realized results would differ. The descriptive stats below are real; the **predictive edge of the ranking model is still under out-of-sample evaluation** and is *not* established — see [docs/VALIDATION_POWER.md](../docs/VALIDATION_POWER.md).
 
-_Ranking model: EXPERIMENTAL — OOS IC -0.14 (p=0.09, n=192) | gate: STOP (n=120/50)
-OOS walk-forward as of 2026-08-02 (11d old) | cohort IC -0.064 pearson / -0.134 rank_
+_Ranking model: EXPERIMENTAL — OOS IC -0.12 (p=0.11, n=232), folds +0.07 [95% CI -0.10..+0.24], 11/18 positive — NOT distinguishable from zero | gate: STOP (n=138/50)
+OOS walk-forward as of 2026-08-17 (3d old) | cohort IC -0.113 pearson / -0.169 rank_
 
 ## Headline
 
-- Net P&L: **+$5,639.30** across 866 closed trades with a recorded dollar result
-- Return on capital risked: **+0.2%** (+$5,639.30 of $3,295,780 risked across 866 trades with capital_at_risk recorded)
-- Within the $4,000 per-position ceiling: **+3.8%** of capital risked (+$20,324.62 of $536,774 risked, 772 trades) — the subset the account could actually have held
+- Net P&L: **+$6,421.62** across 900 closed trades with a recorded dollar result
+- Return on capital risked: **+0.2%** (+$6,421.62 of $3,327,823 risked across 900 trades with capital_at_risk recorded)
+- Within the $4,000 per-position ceiling: **+3.7%** of capital risked (+$21,106.94 of $568,817 risked, 806 trades) — the subset the account could actually have held
 
 Secondary, size-blind figures:
 
-- Win rate: **48.5%** = 420 wins / 866 closed trades with a recorded return; 0 closed trades excluded for missing returns
-- Mean return per trade: **-0.9%** (unweighted mean of per-trade returns **on entry premium** — a $28 spread counts the same as a $27,000 cash-secured put, and the premium denominator is a debit on long structures but a credit on short ones; not the headline for either reason)
+- Win rate: **48.3%** = 435 wins / 900 closed trades with a recorded return; 0 closed trades excluded for missing returns
+- Mean return per trade: **-0.7%** (unweighted mean of per-trade returns **on entry premium** — a $28 spread counts the same as a $27,000 cash-secured put, and the premium denominator is a debit on long structures but a credit on short ones; not the headline for either reason)
 - Median return per trade: **-0.3%** of capital risked (typical trade, size-blind)
+
+## Equal-weighted — the same book with size taken out
+
+Every closed trade given the **same $1,000 of capital at risk**. Until 2026-08-20 no ledger row recorded a chosen position size — `quantity` was 1.0 on all of them — so bet size was the option's premium, a function of share price and implied volatility rather than of the pick. This is the headline with that removed.
+
+- Equal-weighted P&L: **+$8,130.33** at $1,000 a trade across 900 closed trades
+- Mean return per trade: **+0.9%** of capital risked
+- Profit factor, equal-weighted: **1.044** (95% bootstrap CI [0.87, 1.24])
+  - **The interval contains 1**, so no book-level edge is established: this book has not been shown to make money per trade, whatever the dollar headline says.
+- The same exercise on **entry premium** instead of capital at risk gives 0.971, a different sign of result from the same trades — which is why the basis has to be stated. Capital at risk is used above because premium is a debit on long structures and a credit on short ones.
+
+| Strategy | Closed | Profit factor (equal-weighted) | 95% CI | Mean return on risk |
+|----------|-------:|------:|:------:|------:|
+| Long Call | 302 | 1.025 | [0.78, 1.32] | +0.8% |
+| Iron Condor | 146 | 0.565 | [0.36, 0.86] | -5.7% |
+| Bear Call | 135 | 0.791 | [0.51, 1.24] | -4.7% |
+| Bull Put | 134 | 2.023 | [1.35, 3.23] | +17.5% |
+| Short Put | 108 | 1.945 | [0.45, 5.31] | +0.6% |
+| Long Put | 75 | 0.782 | [0.39, 1.39] | -5.0% |
+
+_A line whose interval contains 1 has not been shown to have an edge at this sample size; one whose interval sits below 1 has been shown to lose. Intervals are seeded bootstraps over per-trade returns on capital at risk, so they are stable across regenerations of this file._
 
 ## By strategy
 
 | Strategy | Closed | Win rate | Net $ | Return on risk (aggregate, of capital risked) | Median return on risk (per trade, of capital risked) | Mean return per trade (unweighted) |
 |----------|-------:|---------:|------:|------:|------:|------:|
 | Bear Call | 135 | 59.3% | +$108.04 | +1.1% | +6.9% | -7.1% |
-| Bull Put | 131 | 66.4% | +$5,315.25 | +27.7% | +24.6% | +16.9% |
-| Iron Condor | 142 | 50.0% | +$4,323.81 | +2.2% | +0.2% | -7.5% |
-| Long Call | 275 | 38.2% | -$1,376.58 | -0.5% | -26.4% | -1.3% |
+| Bull Put | 134 | 65.7% | +$5,148.25 | +23.6% | +22.9% | +14.5% |
+| Iron Condor | 146 | 49.3% | +$2,856.81 | +1.4% | -0.3% | -8.8% |
+| Long Call | 302 | 39.1% | +$1,039.74 | +0.4% | -26.3% | +0.8% |
 | Long Put | 75 | 32.0% | +$5,611.77 | +12.4% | -17.3% | -5.0% |
 | Short Put | 108 | 49.1% | -$8,342.99 | -0.3% | -0.0% | -2.3% |
 
@@ -37,14 +58,14 @@ _Win rate counts trades with a recorded return; aggregate return on risk and med
 | Strategy | Closed | Credit collected | Net $ | Return on credit (of credit collected) | Median return on credit (per trade) | Return on risk (of capital risked) |
 |----------|-------:|-----------------:|------:|------:|------:|------:|
 | Bear Call | 135 | $8,528 | +$108.04 | +1.3% | +8.4% | +1.1% |
-| Bull Put | 131 | $17,152 | +$5,315.25 | +31.0% | +32.0% | +27.7% |
-| Iron Condor | 142 | $106,236 | +$4,323.81 | +4.1% | +0.2% | +2.2% |
+| Bull Put | 134 | $18,020 | +$5,148.25 | +28.6% | +31.2% | +23.6% |
+| Iron Condor | 146 | $110,450 | +$2,856.81 | +2.6% | -0.6% | +1.4% |
 | Short Put (cash-secured) | 108 | $73,063 | -$8,342.99 | -11.4% | -1.2% | -0.3% |
 
 ## Forward-cohort gate
 
 - Gate decision: **STOP**
-- Cohort size: **120** (closed cohort trades accumulated since the gate window opened)
+- Cohort size: **138** (closed cohort trades accumulated since the gate window opened)
 
 ## Methodology notes
 
@@ -52,12 +73,14 @@ _Win rate counts trades with a recorded return; aggregate return on risk and med
 
 Every percentage in this document names its basis. **Of capital risked** means dollars of P&L over dollars of capital_at_risk (the ledger's own per-position risk figure: premium paid on debits, collateral or width less credit on credits). **Of credit collected** is P&L over premium taken in. **Unweighted mean** is the arithmetic mean of per-trade percentage returns, which counts every trade equally no matter its size and is reported only as a secondary line.
 
-Size dominates the raw aggregate: of $3,295,780 risked across the book, only $536,774 sat inside the $4,000 per-position ceiling the ledger now enforces (`auto_log.max_capital_at_risk`). The oversized positions are a sizing artifact of an unbounded feeder, not a strategy result, which is why the affordable subset is published beside the whole book.
+Size dominates the raw aggregate: of $3,327,823 risked across the book, only $568,817 sat inside the $4,000 per-position ceiling the ledger now enforces (`auto_log.max_capital_at_risk`). The oversized positions are a sizing artifact of an unbounded feeder, not a strategy result, which is why the affordable subset is published beside the whole book.
 
 ### Median vs aggregate
 
 Aggregate return on risk is a dollar-weighted number: one large contract can carry a whole line. The median per-trade return on risk is published beside it so the typical trade is visible. Where the two disagree in sign, the aggregate is a story about one or two positions.
 
+- **Iron Condor**: aggregate +1.4% of capital risked but median -0.3% per trade — one MSFT trade (-$1,405.20) is -49% of the line's net.
+- **Long Call**: aggregate +0.4% of capital risked but median -26.3% per trade — one META trade (+$4,025.70) is +387% of the line's net.
 - **Long Put**: aggregate +12.4% of capital risked but median -17.3% per trade — one GS trade (+$3,255.70) is +58% of the line's net.
 
 ### Cash-secured collateral denominator
@@ -70,13 +93,13 @@ A cash-secured short posts the whole strike as collateral, so its capital_at_ris
 
 Exit checks run inside `update_positions`, which runs when the screener is opened — not on a timer. The scheduled LaunchAgents stopped running on **2026-06-15**, so from that date exits were checked at irregular, manual intervals. A stop rule cannot fire on a day nobody looked, so stopped-out trades in that window record the loss they had drifted to by the next check, not the loss the rule specified.
 
-Measured over 121 closed trades whose exit reason states a numeric stop level (of 155 stop exits in total; 30 more stopped on a strike breach, which has no numeric level to overshoot). Overshoot is the realized loss minus the stated stop, in percent of entry premium:
+Measured over 136 closed trades whose exit reason states a numeric stop level (of 170 stop exits in total; 30 more stopped on a strike breach, which has no numeric level to overshoot). Overshoot is the realized loss minus the stated stop, in percent of entry premium:
 
 | window | trades | median overshoot | p90 | worst | share past their stop |
 |---|---:|---:|---:|---:|---:|
 | Before 2026-06-15 | 32 | +8.3% | +24.3% | +66.7% | 75% |
-| After 2026-06-15 (manual cadence) | 89 | +11.1% | +33.5% | +57.5% | 96% |
-| All | 121 | +10.7% | +32.5% | +66.7% | 90% |
+| After 2026-06-15 (manual cadence) | 104 | +10.7% | +33.5% | +154.2% | 96% |
+| All | 136 | +10.1% | +32.5% | +154.2% | 91% |
 
 **The recorded exits are not corrected for this and never will be.** The record stays as-traded; this note is how it is read. Losses on stopped trades in the manual-cadence window are overstated relative to the rules that were supposed to govern them, and because defined-risk credit structures state their stops as a multiple of a small credit, the overstatement falls hardest on exactly the lines the credit-vs-debit comparison depends on.
 
@@ -849,6 +872,7 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-07-22 | AAPL | Short Put | $7.55 | $4.70 | +31.6% | +$238.40 | $31,245 | Take Profit (35% @ 19d) |
 | 2026-07-22 | CRM | Short Put | $6.65 | $9.35 | -46.8% | -$311.20 | $15,335 | Stop Loss (strike breached) |
 | 2026-07-22 | XOM | Short Put | $4.10 | $3.19 | +13.2% | +$54.10 | $14,590 | Time Exit (21d to expiry) |
+| 2026-07-22 | QQQ | Iron Condor | $15.19 | $7.57 | +47.5% | +$722.00 | $2,981 | Take Profit (50% of credit) |
 | 2026-07-23 | SPY | Bear Call | $0.50 | $0.39 | -24.4% | -$12.10 | $50 | Time Exit (5d to expiry) |
 | 2026-07-23 | QQQ | Bull Put | $0.46 | $0.17 | +13.9% | +$6.40 | $54 | Take Profit (50% of credit) |
 | 2026-07-23 | DIA | Bear Call | $0.47 | $0.14 | +22.9% | +$10.90 | $53 | Take Profit (50% of credit) |
@@ -868,6 +892,7 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-07-27 | IWM | Long Call | $5.03 | $6.70 | +27.1% | +$136.32 | $503 | Time Exit (21d to expiry) |
 | 2026-07-27 | SLV | Long Call | $2.01 | $4.03 | +94.2% | +$189.44 | $201 | Take Profit (100%) |
 | 2026-07-27 | UNH | Long Call | $10.50 | $4.72 | -61.0% | -$640.50 | $1,050 | Stop Loss (-50%) |
+| 2026-07-27 | TSLA | Long Call | $15.50 | $27.48 | +71.3% | +$1,104.50 | $1,550 | Time Exit (21d to expiry) |
 | 2026-07-27 | SPY | Bear Call | $0.48 | $0.01 | +50.8% | +$24.40 | $52 | Take Profit (50% of credit) |
 | 2026-07-27 | DIA | Bear Call | $0.47 | $2.15 | -110.5% | -$52.50 | $53 | Stop Loss (100% of credit) |
 | 2026-07-27 | GLD | Bear Call | $0.23 | $0.55 | -122.2% | -$27.50 | $27 | Stop Loss (100% of credit) |
@@ -878,6 +903,7 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-07-27 | CAT | Short Put | $27.40 | $50.45 | -90.8% | -$2,487.20 | $77,260 | Stop Loss (strike breached) |
 | 2026-07-27 | RIVN | Short Put | $1.02 | $1.33 | -43.2% | -$44.06 | $1,498 | Time Exit (21d to expiry) |
 | 2026-07-27 | AAPL | Short Put | $6.40 | $7.55 | -27.0% | -$172.60 | $32,360 | Time Exit (15d to expiry) |
+| 2026-07-27 | GLD | Iron Condor | $6.55 | $13.25 | -108.2% | -$709.50 | $1,344 | Stop Loss (100% of credit) |
 | 2026-07-27 | TLT | Iron Condor | $0.59 | $0.48 | -49.2% | -$29.00 | $91 | Time Exit (21d to expiry) |
 | 2026-07-28 | SPY | Bear Call | $0.51 | $0.25 | +8.8% | +$4.47 | $49 | Take Profit (50% of credit) |
 | 2026-07-28 | INTC | Bull Put | $1.03 | $0.45 | +33.6% | +$34.42 | $97 | Take Profit (50% of credit) |
@@ -889,6 +915,7 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-07-28 | AAPL | Short Put | $6.40 | $30.15 | -380.1% | -$2,432.60 | $32,360 | Time Exit (21d to expiry) |
 | 2026-07-28 | NVDA | Short Put | $4.20 | $3.55 | +6.5% | +$27.20 | $18,330 | Time Exit (21d to expiry) |
 | 2026-07-28 | WMT | Short Put | $1.95 | $2.88 | -56.7% | -$110.55 | $10,805 | Time Exit (21d to expiry) |
+| 2026-07-28 | GLD | Iron Condor | $9.77 | $19.58 | -104.5% | -$1,021.00 | $2,023 | Stop Loss (100% of credit) |
 | 2026-07-28 | SPY | Iron Condor | $8.99 | $10.38 | -19.9% | -$179.00 | $2,001 | Time Exit (21d to expiry) |
 | 2026-07-28 | HD | Long Call | $10.05 | $5.00 | -59.2% | -$595.45 | $1,005 | Stop Loss (-50%) |
 | 2026-07-28 | TLT | Long Call | $0.82 | $0.39 | -67.6% | -$55.46 | $82 | Stop Loss (-50%) |
@@ -897,7 +924,9 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-07-28 | XLF | Long Call | $0.90 | $0.45 | -64.1% | -$57.70 | $90 | Stop Loss (-50%) |
 | 2026-07-29 | AAPL | Long Call | $9.20 | $0.50 | -100.0% | -$920.00 | $920 | Stop Loss (-50%) |
 | 2026-07-29 | TLT | Long Call | $0.75 | $0.30 | -76.3% | -$57.25 | $75 | Stop Loss (-50%) |
+| 2026-07-29 | TSLA | Long Call | $13.50 | $31.22 | +125.3% | +$1,691.50 | $1,350 | Take Profit (100%) |
 | 2026-07-29 | QQQ | Long Call | $13.68 | $27.95 | +98.3% | +$1,344.92 | $1,368 | Take Profit (100%) |
+| 2026-07-29 | XLF | Long Call | $0.89 | $0.84 | -16.9% | -$15.00 | $89 | Time Exit (21d to expiry) |
 | 2026-07-29 | QQQ | Bull Put | $0.50 | $0.00 | +100.0% | +$50.50 | $50 | Take Profit (50% of credit) |
 | 2026-07-29 | SPY | Bear Call | $0.96 | $2.02 | -108.3% | -$104.00 | $104 | Stop Loss (100% of credit) |
 | 2026-07-29 | GLD | Bear Call | $0.45 | $1.20 | -122.2% | -$55.00 | $55 | Stop Loss (100% of credit) |
@@ -908,16 +937,20 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-07-30 | XLE | Long Call | $1.38 | $0.68 | -58.0% | -$80.00 | $138 | Stop Loss (-50%) |
 | 2026-07-30 | MSFT | Long Call | $12.50 | $32.22 | +151.8% | +$1,897.50 | $1,250 | Take Profit (100%) |
 | 2026-07-30 | SLV | Long Call | $1.89 | $4.08 | +109.6% | +$207.16 | $189 | Take Profit (100%) |
+| 2026-07-30 | NFLX | Long Call | $2.09 | $4.25 | +97.3% | +$203.46 | $209 | Take Profit (100%) |
 | 2026-07-30 | QQQ | Bull Put | $0.52 | $0.00 | +83.5% | +$43.44 | $48 | Take Profit (50% of credit) |
 | 2026-07-30 | IWM | Bear Call | $0.49 | $0.44 | -29.3% | -$14.50 | $51 | Time Exit (19d to expiry) |
 | 2026-07-30 | DIA | Bull Put | $0.25 | $0.00 | +49.0% | +$12.25 | $25 | Take Profit (50% of credit) |
 | 2026-07-30 | INTC | Bull Put | $1.50 | $0.70 | +40.0% | +$60.00 | $150 | Take Profit (50% of credit) |
 | 2026-07-30 | SPY | Bear Call | $0.90 | $2.02 | -121.0% | -$109.50 | $110 | Stop Loss (100% of credit) |
+| 2026-07-30 | SPY | Iron Condor | $10.63 | $14.82 | -43.1% | -$458.50 | $2,436 | Time Exit (21d to expiry) |
 | 2026-07-30 | LCID | Short Put | $0.87 | $0.72 | +6.3% | +$5.50 | $613 | Time Exit (19d to expiry) |
 | 2026-07-30 | RIVN | Short Put | $0.82 | $0.98 | -34.7% | -$28.46 | $1,468 | Stop Loss (strike breached) |
 | 2026-07-30 | NKE | Short Put | $1.05 | $1.00 | -5.2% | -$5.50 | $3,995 | Time Exit (19d to expiry) |
 | 2026-07-30 | LYFT | Short Put | $0.51 | $0.36 | +9.8% | +$5.00 | $1,349 | Time Exit (12d to expiry) |
 | 2026-07-30 | CMCSA | Short Put | $0.40 | $0.24 | +12.0% | +$4.80 | $2,260 | Take Profit (35% @ 14d) |
+| 2026-07-31 | TSLA | Long Call | $13.60 | $27.48 | +96.0% | +$1,305.90 | $1,360 | Take Profit (100%) |
+| 2026-07-31 | TLT | Long Call | $0.74 | $0.43 | -55.4% | -$41.00 | $74 | Time Exit (21d to expiry) |
 | 2026-07-31 | AMZN | Long Call | $7.45 | $3.38 | -60.7% | -$452.20 | $745 | Stop Loss (-50%) |
 | 2026-07-31 | GOOGL | Long Call | $10.50 | $21.10 | +95.0% | +$997.00 | $1,050 | Take Profit (100%) |
 | 2026-07-31 | XLE | Long Call | $1.58 | $0.68 | -63.3% | -$100.00 | $158 | Stop Loss (-50%) |
@@ -931,10 +964,14 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-07-31 | NIO | Short Put | $0.12 | $0.11 | -70.8% | -$8.50 | $438 | Time Exit (18d to expiry) |
 | 2026-07-31 | RIVN | Short Put | $0.36 | $0.21 | +12.5% | +$4.50 | $1,364 | Take Profit (35% @ 18d) |
 | 2026-07-31 | NKE | Short Put | $0.55 | $0.41 | +8.2% | +$4.50 | $3,895 | Time Exit (18d to expiry) |
+| 2026-08-03 | NVDA | Long Call | $8.45 | $16.32 | +87.2% | +$736.80 | $845 | Time Exit (21d to expiry) |
+| 2026-08-03 | NFLX | Long Call | $2.37 | $4.25 | +73.3% | +$173.78 | $237 | Time Exit (21d to expiry) |
 | 2026-08-03 | QQQ | Long Call | $13.51 | $27.23 | +95.6% | +$1,291.44 | $1,351 | Take Profit (100%) |
 | 2026-08-03 | AMZN | Long Call | $8.75 | $4.20 | -58.0% | -$507.50 | $875 | Stop Loss (-50%) |
 | 2026-08-04 | AMZN | Long Call | $8.10 | $3.52 | -62.5% | -$506.10 | $810 | Stop Loss (-50%) |
+| 2026-08-04 | NFLX | Long Call | $2.69 | $5.47 | +97.5% | +$262.36 | $269 | Take Profit (100%) |
 | 2026-08-04 | COP | Long Call | $4.20 | $8.85 | +104.7% | +$439.80 | $420 | Take Profit (100%) |
+| 2026-08-04 | C | Long Call | $4.10 | $2.04 | -56.2% | -$230.60 | $410 | Stop Loss (-50%) |
 | 2026-08-04 | XLE | Long Call | $0.86 | $0.52 | -51.2% | -$44.00 | $86 | Time Exit (14d to expiry) |
 | 2026-08-04 | NFLX | Long Call | $1.69 | $1.55 | -14.3% | -$24.14 | $169 | Time Exit (14d to expiry) |
 | 2026-08-04 | NVDA | Long Call | $8.10 | $13.15 | +56.3% | +$456.40 | $810 | Time Exit (21d to expiry) |
@@ -943,15 +980,35 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-08-05 | AMZN | Long Call | $9.80 | $4.65 | -58.6% | -$573.80 | $980 | Stop Loss (-50%) |
 | 2026-08-05 | MRK | Long Call | $3.55 | $1.70 | -58.1% | -$206.30 | $355 | Stop Loss (-50%) |
 | 2026-08-05 | GS | Long Call | $32.85 | $15.23 | -56.7% | -$1,862.50 | $3,285 | Stop Loss (-50%) |
+| 2026-08-05 | EOG | Long Call | $5.00 | $10.65 | +107.0% | +$535.00 | $500 | Take Profit (100%) |
 | 2026-08-05 | NFLX | Long Call | $1.45 | $1.15 | -27.9% | -$40.50 | $145 | Time Exit (12d to expiry) |
 | 2026-08-05 | C | Long Call | $2.58 | $1.24 | -57.9% | -$149.48 | $258 | Stop Loss (-50%) |
 | 2026-08-05 | GS | Long Call | $27.30 | $8.60 | -72.2% | -$1,970.00 | $2,730 | Stop Loss (-50%) |
 | 2026-08-05 | AAPL | Long Call | $5.75 | $4.97 | -19.5% | -$112.00 | $575 | Time Exit (12d to expiry) |
 | 2026-08-05 | VZ | Long Call | $1.11 | $1.94 | +65.8% | +$73.00 | $111 | Time Exit (19d to expiry) |
+| 2026-08-06 | AMZN | Long Call | $8.65 | $3.80 | -62.1% | -$536.90 | $865 | Stop Loss (-50%) |
 | 2026-08-06 | GOOGL | Long Call | $10.95 | $4.42 | -65.6% | -$718.20 | $1,095 | Stop Loss (-50%) |
+| 2026-08-07 | BA | Long Call | $7.40 | $3.50 | -58.7% | -$434.40 | $740 | Stop Loss (-50%) |
 | 2026-08-07 | AMZN | Long Call | $4.65 | $3.97 | -20.5% | -$95.40 | $465 | Time Exit (11d to expiry) |
 | 2026-08-07 | AAPL | Long Call | $5.75 | $2.71 | -58.8% | -$338.00 | $575 | Stop Loss (-50%) |
 | 2026-08-07 | TSLA | Long Call | $8.30 | $9.80 | +12.1% | +$100.20 | $830 | Time Exit (11d to expiry) |
 | 2026-08-07 | NVDA | Long Call | $5.00 | $4.10 | -24.0% | -$120.00 | $500 | Time Exit (11d to expiry) |
 | 2026-08-10 | MSFT | Long Call | $13.25 | $5.92 | -61.3% | -$812.00 | $1,325 | Stop Loss (-50%) |
+| 2026-08-10 | TMO | Long Call | $15.30 | $31.90 | +102.5% | +$1,568.20 | $1,530 | Take Profit (100%) |
+| 2026-08-10 | PYPL | Long Call | $1.60 | $3.62 | +120.3% | +$192.50 | $160 | Take Profit (100%) |
 | 2026-08-11 | SLB | Long Call | $1.75 | $0.81 | -59.7% | -$104.50 | $175 | Stop Loss (-50%) |
+| 2026-08-11 | LMT | Long Call | $15.60 | $7.15 | -60.2% | -$938.60 | $1,560 | Stop Loss (-50%) |
+| 2026-08-11 | BAC | Long Call | $1.19 | $0.55 | -62.2% | -$74.00 | $119 | Stop Loss (-50%) |
+| 2026-08-13 | QQQ | Long Call | $13.75 | $6.80 | -56.5% | -$777.50 | $1,375 | Stop Loss (-50%) |
+| 2026-08-13 | TMO | Long Call | $13.70 | $6.80 | -56.4% | -$772.20 | $1,370 | Stop Loss (-50%) |
+| 2026-08-13 | PFE | Long Call | $0.71 | $1.63 | +115.5% | +$82.00 | $71 | Take Profit (100%) |
+| 2026-08-13 | UNH | Long Call | $9.60 | $4.53 | -58.9% | -$565.10 | $960 | Stop Loss (-50%) |
+| 2026-08-14 | SPY | Long Call | $9.34 | $4.30 | -60.0% | -$560.04 | $934 | Stop Loss (-50%) |
+| 2026-08-14 | SBUX | Long Call | $2.69 | $1.29 | -58.2% | -$156.64 | $269 | Stop Loss (-50%) |
+| 2026-08-14 | QQQ | Long Call | $13.21 | $6.28 | -58.5% | -$772.26 | $1,321 | Stop Loss (-50%) |
+| 2026-08-17 | PFE | Long Call | $0.60 | $1.67 | +161.7% | +$97.00 | $60 | Take Profit (100%) |
+| 2026-08-17 | QQQ | Long Call | $13.84 | $6.80 | -56.8% | -$786.54 | $1,384 | Stop Loss (-50%) |
+| 2026-08-17 | NVDA | Bull Put | $2.28 | $3.52 | -63.4% | -$144.50 | $772 | Time Exit (15d to expiry) |
+| 2026-08-18 | AMGN | Long Call | $10.15 | $22.00 | +110.7% | +$1,124.10 | $1,015 | Take Profit (100%) |
+| 2026-08-18 | CRM | Bull Put | $5.33 | $2.60 | +47.3% | +$252.00 | $1,468 | Take Profit (50% of credit) |
+| 2026-08-18 | WMT | Bull Put | $1.08 | $3.62 | -254.2% | -$274.50 | $392 | Stop Loss (100% of credit) |

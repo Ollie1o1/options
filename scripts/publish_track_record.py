@@ -16,6 +16,23 @@ mean describes a portfolio nobody could have held. It is kept as a clearly
 labelled secondary line, never as the headline. Every percentage in this
 document names its basis (of capital risked / of credit collected / unweighted).
 
+Why an equal-weighted section beside it
+---------------------------------------
+The dollar headline describes a book in which position size was never chosen:
+every ledger row carried `quantity = 1.0` until 2026-08-20, so bet size was the
+option's premium — share price and implied volatility, not the pick. A reader
+cannot tell from the headline alone how much of it is the picks and how much is
+which trades happened to be large. `equal_weighted` answers that by giving every
+closed trade the SAME capital at risk.
+
+The basis is capital at risk, deliberately, not entry premium: premium is a
+debit on long structures and a credit on short ones, so equalising it compares
+two different quantities — and on this book the two bases disagree about the
+SIGN of the result. The interval is published beside the point estimate and the
+document says in words whether it contains 1, because a profit factor of 1.06
+reads like an edge and an interval of [0.88, 1.26] is not one. The bootstrap is
+seeded so a regenerated file does not churn.
+
 Publish flow
 ------------
 Weekly startup maintenance regenerates this file (`_run_track_record` in
@@ -41,6 +58,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sqlite3
 import statistics
 import sys
@@ -164,6 +182,100 @@ def credit_collected(row: Dict[str, Any]) -> Optional[float]:
     if qty is None or qty <= 0:
         qty = 1.0
     return abs(per_share) * 100.0 * qty
+
+
+#: Capital at risk every trade is given in the equal-weighted view. A round
+#: number, close to the live per-trade budget (2% of ~$41k equity = ~$820), and
+#: fixed rather than derived so the published figure does not move when the
+#: book's equity does.
+EQUAL_WEIGHT_RISK = 1_000.0
+
+#: Bootstrap resamples, and the seed that makes the interval reproducible. This
+#: file is committed; an unseeded interval would differ on every regeneration
+#: and the diff would stop being readable.
+_BOOTSTRAP_N = 4_000
+_BOOTSTRAP_SEED = 20260820
+
+
+def profit_factor(returns: Sequence[float]) -> Optional[float]:
+    """Gross wins over gross losses, or None when the ratio has no meaning.
+
+    None for an empty sample and None for a sample with NO losses: an infinite
+    profit factor is a statement about sample size, not about performance, and
+    printing "inf" invites reading it as one.
+    """
+    wins = sum(r for r in returns if r > 0)
+    losses = -sum(r for r in returns if r < 0)
+    if not returns or losses <= 0:
+        return None
+    return wins / losses
+
+
+def _pf_interval(returns: Sequence[float]) -> Tuple[Optional[float], Optional[float]]:
+    """Seeded 95% bootstrap interval for `profit_factor`."""
+    if len(returns) < 2:
+        return None, None
+    rnd = random.Random(_BOOTSTRAP_SEED)
+    draws: List[float] = []
+    for _ in range(_BOOTSTRAP_N):
+        pf = profit_factor([rnd.choice(returns) for _ in returns])
+        if pf is not None:
+            draws.append(pf)
+    if len(draws) < _BOOTSTRAP_N // 2:
+        # Too many resamples had no losing trade for an interval to mean much.
+        return None, None
+    draws.sort()
+    return draws[int(0.025 * len(draws))], draws[int(0.975 * len(draws)) - 1]
+
+
+def equal_weighted(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """The book with every trade given the same capital at risk.
+
+    Answers "how much of the headline is the picks and how much is which trades
+    happened to be large" — the question the dollar figures cannot separate
+    while every historical row carries `quantity = 1.0`.
+
+    Rows with no recorded capital at risk are EXCLUDED, never counted as zero
+    risk: NULL means the column was not written, and a zero denominator is not
+    a free trade.
+    """
+    returns = per_trade_returns_on_risk(rows)
+    pf = profit_factor(returns)
+    low, high = _pf_interval(returns)
+    return {
+        "n": len(returns),
+        "profit_factor": pf,
+        "ci_low": low,
+        "ci_high": high,
+        "risk_per_trade": EQUAL_WEIGHT_RISK,
+        "net_pnl": sum(returns) * EQUAL_WEIGHT_RISK if returns else None,
+        "mean_return": (sum(returns) / len(returns)) if returns else None,
+        # Same exercise on entry premium instead of capital at risk. Published
+        # as the contrast, because on this book it flips the sign.
+        "profit_factor_on_premium": profit_factor(
+            [r for r in (_f(x.get("pnl_pct")) for x in rows) if r is not None]),
+    }
+
+
+def summarize_equal_weighted_strategies(
+    rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """`equal_weighted` per strategy, sorted by closed count.
+
+    A strategy too short to bootstrap is still listed, with a blank interval:
+    dropping it would silently remove a line from the comparison, which is the
+    opposite of what a track record is for.
+    """
+    by: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        by.setdefault(str(row.get("strategy_name") or "Unknown"), []).append(row)
+    out = []
+    for name, group in by.items():
+        stats = equal_weighted(group)
+        stats["strategy"] = name
+        stats["n_closed"] = len(group)
+        out.append(stats)
+    return sorted(out, key=lambda s: (-s["n_closed"], s["strategy"]))
 
 
 def summarize_book(rows: Sequence[Dict[str, Any]],
@@ -523,6 +635,86 @@ def _note_collateral_denominator(credit: Sequence[Dict[str, Any]]
 # Rendering
 # --------------------------------------------------------------------------- #
 
+def _fmt_pf(value: Optional[float]) -> str:
+    return f"{value:.3f}" if value is not None else "n/a"
+
+
+def _fmt_ci(low: Optional[float], high: Optional[float]) -> str:
+    if low is None or high is None:
+        return "n/a"
+    return f"[{low:.2f}, {high:.2f}]"
+
+
+def _render_equal_weighted(rows: Sequence[Dict[str, Any]]) -> List[str]:
+    """The same book with every trade given the same capital at risk."""
+    eq = equal_weighted(rows)
+    out: List[str] = ["## Equal-weighted — the same book with size taken out", ""]
+    if not eq["n"]:
+        out.append("_No closed trade carries a recorded capital at risk._")
+        out.append("")
+        return out
+
+    size = _fmt_dollars(eq["risk_per_trade"])
+    out.append(
+        f"Every closed trade given the **same {size} of capital at risk**. Until "
+        "2026-08-20 no ledger row recorded a chosen position size — `quantity` "
+        "was 1.0 on all of them — so bet size was the option's premium, a "
+        "function of share price and implied volatility rather than of the pick. "
+        "This is the headline with that removed."
+    )
+    out.append("")
+    out.append(f"- Equal-weighted P&L: **{_fmt_signed_money(eq['net_pnl'])}** "
+               f"at {size} a trade across {eq['n']} closed trades")
+    out.append(f"- Mean return per trade: **{_fmt_pct(eq['mean_return'])}** of "
+               "capital risked")
+    pf_txt = _fmt_pf(eq["profit_factor"])
+    out.append(f"- Profit factor, equal-weighted: **{pf_txt}** "
+               f"(95% bootstrap CI {_fmt_ci(eq['ci_low'], eq['ci_high'])})")
+    if eq["ci_low"] is not None and eq["ci_high"] is not None:
+        if eq["ci_low"] <= 1.0 <= eq["ci_high"]:
+            out.append("  - **The interval contains 1**, so no book-level edge is "
+                       "established: this book has not been shown to make money "
+                       "per trade, whatever the dollar headline says.")
+        elif eq["ci_low"] > 1.0:
+            out.append("  - The interval sits entirely above 1.")
+        else:
+            out.append("  - The interval sits entirely below 1.")
+    prem = eq["profit_factor_on_premium"]
+    if prem is not None and eq["profit_factor"] is not None:
+        out.append(
+            f"- The same exercise on **entry premium** instead of capital at "
+            f"risk gives {_fmt_pf(prem)}"
+            + (", a different sign of result from the same trades — which is why "
+               "the basis has to be stated. Capital at risk is used above "
+               "because premium is a debit on long structures and a credit on "
+               "short ones."
+               if (prem - 1.0) * (eq["profit_factor"] - 1.0) < 0 else
+               ". Both bases agree on the direction here.")
+        )
+    out.append("")
+
+    per_strategy = summarize_equal_weighted_strategies(rows)
+    if len(per_strategy) > 1:
+        out.append("| Strategy | Closed | Profit factor (equal-weighted) | "
+                   "95% CI | Mean return on risk |")
+        out.append("|----------|-------:|------:|:------:|------:|")
+        for s in per_strategy:
+            out.append(
+                f"| {s['strategy']} | {s['n_closed']} | "
+                f"{_fmt_pf(s['profit_factor'])} | "
+                f"{_fmt_ci(s['ci_low'], s['ci_high'])} | "
+                f"{_fmt_pct(s['mean_return'])} |"
+            )
+        out.append("")
+        out.append("_A line whose interval contains 1 has not been shown to have "
+                   "an edge at this sample size; one whose interval sits below 1 "
+                   "has been shown to lose. Intervals are seeded bootstraps over "
+                   "per-trade returns on capital at risk, so they are stable "
+                   "across regenerations of this file._")
+        out.append("")
+    return out
+
+
 def render_track_record(rows: List[Dict[str, Any]],
                         evidence: Dict[str, Any],
                         breakdown: Optional[Sequence[Dict[str, Any]]] = None,
@@ -596,6 +788,9 @@ def render_track_record(rows: List[Dict[str, Any]],
     out.append(f"- Median return per trade: **{_fmt_pct(book['median_return_on_risk'])}** "
                "of capital risked (typical trade, size-blind)")
     out.append("")
+
+    # --- Equal-weighted: the headline with size taken out --------------------
+    out.extend(_render_equal_weighted(rows))
 
     # --- Per-strategy breakdown ----------------------------------------------
     out.append("## By strategy")
