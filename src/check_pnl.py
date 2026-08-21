@@ -823,6 +823,29 @@ def _filter_by_period(rows: list, period: Optional[str]) -> list:
     return [r for r in rows if _period_for_row(r) == period]
 
 
+def resolve_period(choice: Optional[str]) -> Optional[str]:
+    """Which slice the viewer shows, given what the caller asked for.
+
+    **No choice means the CURRENT book**, not the whole ledger. The 866 closed
+    trades from before the restart are almost all strategies since switched off
+    — Long Call, Iron Condor, Bear Call, Long Put — picked by a ranker measured
+    at OOS IC -0.12 and scored on EV estimates later found to be the short
+    leg's. Opening on them buries the handful of trades the operator is
+    actually running.
+
+    Nothing is deleted, and that is deliberate: those rows are what establish
+    Bull Put's profit factor (131 of its 134 closes predate the restart), the
+    50.9% required win rate over 415 credit trades, and the pre-registered
+    ranker test frozen to 2026-11-19. Evidence, not daily reading.
+    ``all`` asks for the whole book.
+    """
+    if choice == "all":
+        return None
+    if choice in ("current", "before"):
+        return choice
+    return "current"
+
+
 def view_portfolio_menu() -> None:
     """Interactive entry point — prompt for which slice of the book, then render."""
     print()
@@ -835,8 +858,8 @@ def view_portfolio_menu() -> None:
     except (EOFError, KeyboardInterrupt):
         choice = "C"
         print()
-    period = {"C": "current", "B": "before"}.get(choice)
-    view_portfolio(period=period)
+    period = {"C": "current", "B": "before", "A": "all"}.get(choice, "current")
+    view_portfolio(period=resolve_period(period))
 
     # Auto-refresh the SVG chart. The calibration-cohort views are gone from this
     # menu, so the chart always renders the whole equity book.
@@ -1626,9 +1649,12 @@ if __name__ == "__main__":
     import argparse
 
     _p = argparse.ArgumentParser(description="Paper portfolio viewer")
-    _p.add_argument("--period", choices=["current", "before"], default=None,
-                    help=f"Filter the book: 'current' = logged {BOOK_RESTART_DATE} "
-                         "onward plus every open position, 'before' = closed history")
+    _p.add_argument("--period", choices=["current", "before", "all"], default=None,
+                    help=f"Filter the book: 'current' (DEFAULT) = logged "
+                         f"{BOOK_RESTART_DATE} onward plus every open position, "
+                         "'before' = closed history, 'all' = the whole ledger")
+    _p.add_argument("--all", dest="show_all", action="store_true",
+                    help="Show the whole ledger including pre-restart history")
     _p.add_argument("--current", dest="current", action="store_true",
                     help=f"Show the current book ({BOOK_RESTART_DATE} onward + open positions)")
     _p.add_argument("--before", dest="before", action="store_true",
@@ -1641,8 +1667,10 @@ if __name__ == "__main__":
         view_portfolio_menu()
     else:
         _period = _args.period
-        if _args.current:
+        if _args.show_all:
+            _period = "all"
+        elif _args.current:
             _period = "current"
         elif _args.before:
             _period = "before"
-        view_portfolio(period=_period)
+        view_portfolio(period=resolve_period(_period))
