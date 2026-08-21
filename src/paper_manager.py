@@ -36,6 +36,8 @@ from .utils import bs_delta as _bs_delta
 from .capital_risk import capital_at_risk, within_budget
 from .book_sizing import (SizingDecision, book_equity, load_sizing_config,
                           open_risk, size)
+from .earnings_gate import (THROUGH, UNKNOWN, load_earnings_gate_config,
+                            verdict_for_trade)
 
 # ── Chain-quote memo ─────────────────────────────────────────────────────────
 # _fetch_chain_quotes already serves every leg on a (ticker, expiration) from
@@ -745,6 +747,25 @@ def _get_multiplier(ticker: str) -> float:
     return 100.0
 
 
+def _earnings_dates_in_window(trade_dict: Dict[str, Any], cfg: Dict[str, Any],
+                              time_exit_dte: Any) -> List[str]:
+    """The event dates a refusal is about, for the message that names them.
+
+    A refusal the operator cannot check is a refusal they cannot trust, so the
+    print says WHICH date rather than only that there was one.
+    """
+    from .earnings_gate import cached_earnings_dates, horizon_end
+    entry = str(trade_dict.get("date") or
+                datetime.now().strftime("%Y-%m-%d"))[:10]
+    end = horizon_end(trade_dict.get("expiration"), time_exit_dte,
+                      str(cfg.get("horizon")))
+    if not end:
+        return []
+    return [d for d in cached_earnings_dates(
+        str(trade_dict.get("ticker") or ""), str(cfg.get("cache_path")))
+        if entry < str(d)[:10] <= end]
+
+
 def _lots(quantity: Any) -> float:
     """Contracts held, defaulting to one.
 
@@ -864,6 +885,9 @@ class PaperManager:
             self._max_friction_to_credit = (
                 float(_fric) if _fric not in (None, "", 0, False) else None)
             self._sizing_cfg = load_sizing_config(_cfg)
+            self._earnings_cfg = load_earnings_gate_config(_cfg)
+            self._time_exit_dte = (_cfg.get("exit_rules") or {}).get(
+                "time_exit_dte", 21)
         except Exception:
             self._commission_per_contract = COMMISSION_PER_CONTRACT
             self._slippage_per_share = SLIPPAGE_PER_SHARE
@@ -874,6 +898,8 @@ class PaperManager:
             # An unreadable config is not permission to size positions off
             # numbers nobody chose: fall back to one contract, today's behaviour.
             self._sizing_cfg = load_sizing_config(None)
+            self._earnings_cfg = load_earnings_gate_config(None)
+            self._time_exit_dte = 21
         self._friction_per_share = (2 * self._slippage_per_share) + (2 * self._commission_per_contract / 100.0)
         # Count of trades refused for exceeding the budget this session. Callers
         # print it so a feeder that has gone quiet is visibly gated, not broken.
@@ -888,6 +914,13 @@ class PaperManager:
         # that have no room left under the concurrent cap. A book that has gone
         # quiet must be able to say WHICH rule silenced it.
         self.unsized_rejected = 0
+        # Short-premium entries refused for holding through a known earnings
+        # date, and — counted separately and just as deliberately — entries the
+        # gate could not judge because the calendar has no coverage for that
+        # symbol. 72% of the book is in the second state, so a gate reporting
+        # only its refusals would look far more active than it is.
+        self.through_earnings_rejected = 0
+        self.earnings_unknown = 0
         # The last decision `log_trade` reached, for callers that want to show
         # the size they got rather than re-deriving it. None until one is made.
         self.last_sizing_decision: Optional[SizingDecision] = None
@@ -1445,6 +1478,41 @@ class PaperManager:
                 f"${_budget:,.0f} budget"
             )
             return False
+
+        # Earnings. A short-premium structure held across a dated, public,
+        # binary event is short a gap nobody priced. Refused here rather than
+        # ranked down, because a score penalty is a preference and this is a
+        # risk the account should not take at any rank. See src/earnings_gate.py
+        # for the WMT trade that prompted it, and for why UNKNOWN is not CLEAR.
+        if not trade_dict.get("allow_through_earnings"):
+            _earn = verdict_for_trade(
+                strategy_name=trade_dict["strategy_name"],
+                symbol=trade_dict.get("ticker"),
+                entry_date=str(trade_dict.get("date") or
+                               datetime.now().strftime("%Y-%m-%d"))[:10],
+                expiration=trade_dict.get("expiration"),
+                time_exit_dte=self._time_exit_dte,
+                cfg=self._earnings_cfg,
+            )
+            if _earn == THROUGH:
+                self.through_earnings_rejected += 1
+                _when = _earnings_dates_in_window(
+                    trade_dict, self._earnings_cfg, self._time_exit_dte)
+                print(
+                    f"Skipped {trade_dict['strategy_name']} on "
+                    f"{trade_dict.get('ticker')}: holds through earnings on "
+                    f"{', '.join(_when) if _when else 'a known date'} — "
+                    "selling premium across a dated binary event"
+                )
+                return False
+            if _earn == UNKNOWN:
+                self.earnings_unknown += 1
+                logger.info(
+                    "earnings gate: no calendar coverage for %s at %s, logging "
+                    "unchecked — run `python -m src.dolt_earnings --dates %s` "
+                    "to give the gate something to work with",
+                    trade_dict.get("ticker"), trade_dict.get("expiration"),
+                    trade_dict.get("ticker"))
 
         # Sizing — the LAST gate, deliberately. A trade that fails budget or
         # tradeability is refused for that reason rather than for its size, so
