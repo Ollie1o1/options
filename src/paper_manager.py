@@ -36,8 +36,9 @@ from .utils import bs_delta as _bs_delta
 from .capital_risk import capital_at_risk, within_budget
 from .book_sizing import (SizingDecision, book_equity, load_sizing_config,
                           open_risk, size)
-from .earnings_gate import (THROUGH, UNKNOWN, load_earnings_gate_config,
-                            verdict_for_trade)
+from .earnings_gate import (PROJECTED_THROUGH, THROUGH, UNKNOWN,
+                            cached_earnings_dates, load_earnings_gate_config,
+                            project_next_earnings, refuses, verdict_for_trade)
 
 # ── Chain-quote memo ─────────────────────────────────────────────────────────
 # _fetch_chain_quotes already serves every leg on a (ticker, expiration) from
@@ -921,6 +922,10 @@ class PaperManager:
         # only its refusals would look far more active than it is.
         self.through_earnings_rejected = 0
         self.earnings_unknown = 0
+        # Entries whose PROJECTED next report lands inside the window. Counted
+        # even when it does not refuse, because the report-only default exists
+        # precisely to measure how often this fires before it acts.
+        self.projected_earnings_flagged = 0
         # The last decision `log_trade` reached, for callers that want to show
         # the size they got rather than re-deriving it. None until one is made.
         self.last_sizing_decision: Optional[SizingDecision] = None
@@ -1494,7 +1499,21 @@ class PaperManager:
                 time_exit_dte=self._time_exit_dte,
                 cfg=self._earnings_cfg,
             )
-            if _earn == THROUGH:
+            if _earn == PROJECTED_THROUGH:
+                # An estimate, so it is COUNTED whether or not it refuses —
+                # the point of the report-only default is to see how often it
+                # fires on the live board before it starts acting.
+                self.projected_earnings_flagged += 1
+                _proj = project_next_earnings(cached_earnings_dates(
+                    str(trade_dict.get("ticker") or ""),
+                    str(self._earnings_cfg.get("cache_path"))))
+                print(
+                    f"  ! {trade_dict['strategy_name']} on "
+                    f"{trade_dict.get('ticker')}: no announced date, but its "
+                    f"cadence projects a report around {_proj} — inside this "
+                    f"trade's window"
+                )
+            if refuses(_earn, self._earnings_cfg):
                 self.through_earnings_rejected += 1
                 _when = _earnings_dates_in_window(
                     trade_dict, self._earnings_cfg, self._time_exit_dte)
