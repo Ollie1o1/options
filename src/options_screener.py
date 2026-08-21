@@ -6874,6 +6874,10 @@ def main():
                         # And for positions the account cannot size to a whole
                         # contract: another refusal that is not a duplicate.
                         _unsized_before = getattr(pm, "unsized_rejected", 0)
+                        # And short premium refused for holding through a known
+                        # earnings date — another refusal that is not a duplicate.
+                        _earn_before = getattr(pm, "through_earnings_rejected", 0)
+                        _earn_unk_before = getattr(pm, "earnings_unknown", 0)
 
                         # Component-score fields carried over from the spread enrichment
                         _spread_score_keys = (
@@ -6954,7 +6958,9 @@ def main():
                         _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
                         _near_dupes = getattr(pm, "duplicate_rejected", 0) - _dup_before
                         _unsized = getattr(pm, "unsized_rejected", 0) - _unsized_before
-                        _dupes = max(0, _skipped - _refused - _near_dupes - _unsized)
+                        _earn = getattr(pm, "through_earnings_rejected", 0) - _earn_before
+                        _earn_unk = getattr(pm, "earnings_unknown", 0) - _earn_unk_before
+                        _dupes = max(0, _skipped - _refused - _near_dupes - _unsized - _earn)
                         _summary = (
                             f"Auto-logged {_inserted} spreads/condors, "
                             f"skipped {_dupes} duplicates{_bc_suffix} (profile: {_tag})"
@@ -6969,6 +6975,15 @@ def main():
                             # this count, and log_trade has already printed the
                             # equity, the budget and the reason for each one.
                             _summary += f", refused {_unsized} on position size"
+                        if _earn:
+                            _summary += f", refused {_earn} holding through earnings"
+                        if _earn_unk:
+                            # Reported even with nothing refused: the calendar
+                            # covers about a quarter of this book's symbols, and
+                            # a gate that is blind on a name has to say so rather
+                            # than look like it cleared it.
+                            _summary += (f", {_earn_unk} logged with no earnings "
+                                         f"coverage")
                         if _displaced:
                             _summary += (
                                 f", {_displaced} of the top {_top_n} exceeded the "
@@ -7073,6 +7088,10 @@ def main():
                         # And for positions the account cannot size to a whole
                         # contract: another refusal that is not a duplicate.
                         _unsized_before = getattr(pm, "unsized_rejected", 0)
+                        # And short premium refused for holding through a known
+                        # earnings date — another refusal that is not a duplicate.
+                        _earn_before = getattr(pm, "through_earnings_rejected", 0)
+                        _earn_unk_before = getattr(pm, "earnings_unknown", 0)
                         # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
                         # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
                         # and re-sorted, so positional alignment with picks is not preserved.
@@ -7188,7 +7207,9 @@ def main():
                         _refused = getattr(pm, "unaffordable_rejected", 0) - _rejected_before
                         _near_dupes = getattr(pm, "duplicate_rejected", 0) - _dup_before
                         _unsized = getattr(pm, "unsized_rejected", 0) - _unsized_before
-                        _dupes = max(0, _skipped - _refused - _near_dupes - _unsized)
+                        _earn = getattr(pm, "through_earnings_rejected", 0) - _earn_before
+                        _earn_unk = getattr(pm, "earnings_unknown", 0) - _earn_unk_before
+                        _dupes = max(0, _skipped - _refused - _near_dupes - _unsized - _earn)
                         _summary = f"Auto-logged {_inserted} new, skipped {_dupes} duplicates (profile: {_tag})"
                         if _near_dupes:
                             _summary += f", refused {_near_dupes} as re-logs of a recent entry"
@@ -7200,6 +7221,15 @@ def main():
                             # this count, and log_trade has already printed the
                             # equity, the budget and the reason for each one.
                             _summary += f", refused {_unsized} on position size"
+                        if _earn:
+                            _summary += f", refused {_earn} holding through earnings"
+                        if _earn_unk:
+                            # Reported even with nothing refused: the calendar
+                            # covers about a quarter of this book's symbols, and
+                            # a gate that is blind on a name has to say so rather
+                            # than look like it cleared it.
+                            _summary += (f", {_earn_unk} logged with no earnings "
+                                         f"coverage")
                         if _skipped_long_puts:
                             _summary += f", filtered {_skipped_long_puts} disallowed pick(s)"
                         if _displaced:
