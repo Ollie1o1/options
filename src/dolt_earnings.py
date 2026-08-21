@@ -11,11 +11,15 @@ CLI:
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import sqlite3
+import time as _time
 from statistics import mean, median
 from typing import Any, Dict, List, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 EARNINGS_API = "https://www.dolthub.com/api/v1alpha1/post-no-preference/earnings/master"
 DEFAULT_CACHE = "data/dolt_options.db"
@@ -54,23 +58,159 @@ def _fetch_live(symbol: str) -> List[Dict[str, str]]:
     return rows
 
 
-def earnings_dates(symbol: str, db_path: str = DEFAULT_CACHE) -> List[str]:
-    """Sorted list of earnings dates (ISO) for a symbol. Cache-first."""
+def _is_stale(fetched_at: Optional[str], max_age_days: Optional[int]) -> bool:
+    """True when a cached symbol is old enough to be worth re-querying.
+
+    ``max_age_days=None`` means never — the original behaviour, which every
+    existing caller relies on.
+    """
+    if max_age_days is None:
+        return False
+    if not fetched_at:
+        return True
+    try:
+        when = _dt.datetime.fromisoformat(str(fetched_at))
+    except ValueError:
+        return True
+    return (_dt.datetime.now() - when).days >= int(max_age_days)
+
+
+def earnings_dates(symbol: str, db_path: str = DEFAULT_CACHE,
+                   max_age_days: Optional[int] = None,
+                   fetcher: Optional[Any] = None) -> List[str]:
+    """Sorted list of earnings dates (ISO) for a symbol. Cache-first.
+
+    ``max_age_days`` re-queries a symbol whose cache entry is at least that
+    old. Without it a symbol is fetched exactly ONCE, ever — which is how the
+    calendar came to hold every past quarter and almost no future one. Measured
+    2026-08-20: 163 symbols cached, 18 with any date at or after that day, the
+    oldest fetch marker 2026-06-15. Companies announce roughly three to four
+    weeks ahead, so a weekly refresh is what keeps the earnings gate
+    (src/earnings_gate.py) able to answer at all.
+
+    Re-fetching only ever ADDS: a provider returning less than last time must
+    not erase history, because `iv_crush` reads the same table. A failed fetch
+    leaves the cache exactly as it was — an outage is not new information.
+    """
     symbol = symbol.upper()
     _ensure(db_path)
+    fetch = fetcher or _fetch_live
     with sqlite3.connect(db_path) as conn:
-        done = conn.execute("SELECT 1 FROM earnings_fetched WHERE symbol=?",
-                            (symbol,)).fetchone()
-        if done is None:
-            rows = _fetch_live(symbol)
-            for r in rows:
-                conn.execute("INSERT OR REPLACE INTO earnings_cal (symbol,date,whn) VALUES (?,?,?)",
-                             (symbol, r.get("date"), r.get("when")))
-            conn.execute("INSERT OR REPLACE INTO earnings_fetched (symbol,fetched_at) VALUES (?,?)",
-                         (symbol, _dt.datetime.now().isoformat(timespec="seconds")))
-            conn.commit()
+        row = conn.execute("SELECT fetched_at FROM earnings_fetched WHERE symbol=?",
+                           (symbol,)).fetchone()
+        if row is None or _is_stale(row[0], max_age_days):
+            try:
+                rows = fetch(symbol)
+            except Exception as exc:
+                # Keep whatever is cached. A symbol that has never been fetched
+                # stays unmarked so the next run tries again.
+                logger.warning("earnings fetch failed for %s: %s", symbol, exc)
+                rows = None
+            if rows is not None:
+                for r in rows:
+                    conn.execute("INSERT OR REPLACE INTO earnings_cal (symbol,date,whn) VALUES (?,?,?)",
+                                 (symbol, r.get("date"), r.get("when")))
+                conn.execute("INSERT OR REPLACE INTO earnings_fetched (symbol,fetched_at) VALUES (?,?)",
+                             (symbol, _dt.datetime.now().isoformat(timespec="seconds")))
+                conn.commit()
         cur = conn.execute("SELECT date FROM earnings_cal WHERE symbol=? ORDER BY date", (symbol,))
         return [r[0] for r in cur.fetchall() if r[0]]
+
+
+def refresh_symbols(symbols: List[str], db_path: str = DEFAULT_CACHE,
+                    max_age_days: int = 7,
+                    fetcher: Optional[Any] = None,
+                    sleep_s: float = 1.5,
+                    pause: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
+    """Re-query a whole universe, reporting per symbol what it now holds.
+
+    ``has_future`` is the number that decides whether the earnings gate can act
+    on a symbol at all: a calendar of past quarters answers nothing about a
+    holding period that starts today.
+
+    One symbol's failure never stops the run — a universe refresh is 120-odd
+    HTTP calls and losing the other 119 to one bad ticker would be absurd.
+
+    **Paced.** Run flat out, 124 symbols tripped DoltHub's capacity wall on
+    2026-08-20: 68 came back empty and the same symbols fetched cleanly one at
+    a time a minute later. See [[project_dolthub_real_options]] — this source
+    has always been capacity-walled. ``sleep_s`` is the gap between symbols.
+    """
+    today = _dt.date.today().isoformat()
+    wait = pause if pause is not None else _time.sleep
+    out: Dict[str, Dict[str, Any]] = {}
+    for symbol in symbols:
+        wait(sleep_s)
+        key = str(symbol).upper()
+        try:
+            before = _fetch_marker(key, db_path)
+            dates = earnings_dates(key, db_path=db_path,
+                                   max_age_days=max_age_days, fetcher=fetcher)
+            after = _fetch_marker(key, db_path)
+            entry: Dict[str, Any] = {
+                "dates": len(dates),
+                "latest": dates[-1] if dates else None,
+                "has_future": bool(dates and dates[-1] >= today),
+            }
+            # `earnings_dates` deliberately swallows a fetch failure and hands
+            # back the cache, because it runs on paths that must not break. A
+            # REFRESH is a different job: a run that fetched nothing and
+            # reported success would be the silent failure this repo keeps
+            # finding. The marker only advances on a fetch that returned, so
+            # comparing it is how the outcome is verified rather than assumed.
+            if after == before:
+                entry["error"] = "fetch did not complete; cache unchanged"
+            out[key] = entry
+        except Exception as exc:
+            out[key] = {"error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
+def scan_universe(config_path: str = "config.json",
+                  ledger_path: str = "paper_trades.db",
+                  candidates_path: str = "data/candidates.db") -> List[str]:
+    """Every symbol the screener might have to judge.
+
+    The configured watchlists are not enough on their own: the earnings gate
+    has to answer for whatever actually reaches `log_trade`, which includes
+    names the book has traded historically and names the scanner has recorded
+    as candidates. Missing sources are skipped rather than raising — this is a
+    maintenance helper, not a gate.
+    """
+    import json
+    symbols: set = set()
+    try:
+        with open(config_path) as fh:
+            for value in (json.load(fh).get("watchlists") or {}).values():
+                if isinstance(value, list):
+                    symbols.update(str(v).upper() for v in value)
+    except Exception:
+        pass
+    for path, query in ((ledger_path, "SELECT DISTINCT ticker FROM trades"),
+                        (candidates_path,
+                         "SELECT DISTINCT symbol FROM candidates")):
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            symbols.update(str(r[0]).upper() for r in conn.execute(query)
+                           if r[0])
+            conn.close()
+        except Exception:
+            continue
+    # Option symbols only: crypto rows and any junk key are not earnings names.
+    return sorted(s for s in symbols
+                  if s.isalpha() and 1 <= len(s) <= 5 and s not in ("BTC", "ETH"))
+
+
+def _fetch_marker(symbol: str, db_path: str) -> Optional[str]:
+    """`earnings_fetched.fetched_at` for a symbol, or None if never fetched."""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT fetched_at FROM earnings_fetched WHERE symbol=?",
+                (symbol.upper(),)).fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
 
 
 def earnings_in_window(symbol: str, start: str, end: str,
@@ -138,7 +278,32 @@ def _cli():
     ap.add_argument("--dates", metavar="SYMBOL")
     ap.add_argument("--iv-crush", metavar="SYMBOL")
     ap.add_argument("--db", default=DEFAULT_CACHE)
+    ap.add_argument("--refresh", nargs="*", metavar="SYMBOL",
+                    help="re-query symbols whose cache is older than "
+                         "--max-age-days; no arguments means the whole scan "
+                         "universe (watchlists + everything the book has "
+                         "traded or scanned)")
+    ap.add_argument("--max-age-days", type=int, default=7,
+                    help="refresh a symbol cached at least this many days ago "
+                         "(default 7; companies announce ~3-4 weeks ahead)")
     args = ap.parse_args()
+    if args.refresh is not None:
+        symbols = args.refresh or scan_universe()
+        print(f"refreshing {len(symbols)} symbols, max age {args.max_age_days}d")
+        report = refresh_symbols(symbols, db_path=args.db,
+                                 max_age_days=args.max_age_days)
+        future = [s for s, r in report.items() if r.get("has_future")]
+        failed = [s for s, r in report.items() if r.get("error")]
+        for sym in sorted(report):
+            r = report[sym]
+            note = r.get("error") or (
+                f"{r['dates']} dates, latest {r['latest']}"
+                f"{'  <- FUTURE' if r.get('has_future') else ''}")
+            print(f"  {sym:6} {note}")
+        print(f"\n{len(future)} of {len(report)} symbols carry a future "
+              f"earnings date — that is what the earnings gate can act on.")
+        if failed:
+            print(f"{len(failed)} failed: {', '.join(sorted(failed))}")
     if args.dates:
         ds = earnings_dates(args.dates, db_path=args.db)
         print(f"{args.dates}: {len(ds)} earnings dates, {ds[:3]} ... {ds[-3:]}")
