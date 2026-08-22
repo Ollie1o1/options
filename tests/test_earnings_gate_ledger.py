@@ -204,5 +204,74 @@ class EarningsRefusal(unittest.TestCase):
         self.assertIn("WMT", out)
 
 
+class ProjectedEarnings(unittest.TestCase):
+    """A projected report counts, and only refuses when told to.
+
+    The estimate is trustworthy to about a day for regular reporters, but it is
+    still an estimate — so it ships counting and printing, and the operator
+    flips it to refusing once they have watched it on the live board.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.dir.name, "book.db")
+        self.cache = os.path.join(self.dir.name, "earnings.db")
+        self.cfg = _write_config(os.path.join(self.dir.name, "config.json"),
+                                 self.cache, earnings_projection="report")
+        # Nine quarterly reports, the most recent 76 days ago: a demonstrated
+        # cadence with no announced future date — the 93% case. 76 + 91 puts
+        # the projection ~15 days out, inside this trade's 30-day window, and
+        # 76 days is inside the 120-day staleness guard.
+        anchor = (_ENTRY - timedelta(days=76)).date()
+        _seed_cache(self.cache, [
+            ("AAA", (anchor - timedelta(days=91 * i)).isoformat(), "amc")
+            for i in range(9)])
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def _pm(self, **over):
+        if over:
+            _write_config(self.cfg, self.cache, **over)
+        return PaperManager(db_path=self.db, config_path=self.cfg)
+
+    def _count(self):
+        conn = sqlite3.connect(self.db)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_report_mode_flags_it_and_still_logs(self):
+        pm = self._pm()
+        self.assertTrue(pm.log_trade(_bull_put(ticker="AAA")))
+        self.assertEqual(self._count(), 1)
+        self.assertEqual(pm.projected_earnings_flagged, 1)
+        self.assertEqual(pm.through_earnings_rejected, 0)
+
+    def test_refuse_mode_turns_it_away(self):
+        pm = self._pm(earnings_projection="refuse")
+        self.assertFalse(pm.log_trade(_bull_put(ticker="AAA")))
+        self.assertEqual(self._count(), 0)
+        self.assertEqual(pm.through_earnings_rejected, 1)
+        self.assertEqual(pm.projected_earnings_flagged, 1)
+
+    def test_off_means_the_symbol_is_simply_unknown(self):
+        pm = self._pm(earnings_projection="off")
+        self.assertTrue(pm.log_trade(_bull_put(ticker="AAA")))
+        self.assertEqual(pm.projected_earnings_flagged, 0)
+        self.assertEqual(pm.earnings_unknown, 1)
+
+    def test_the_flag_names_the_projected_date(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self._pm().log_trade(_bull_put(ticker="AAA"))
+        out = buf.getvalue()
+        self.assertIn("cadence projects", out)
+        self.assertIn("AAA", out)
+
+
 if __name__ == "__main__":
     unittest.main()
