@@ -52,6 +52,25 @@ THROUGH = "through_earnings"
 CLEAR = "clear_of_earnings"
 #: Nothing is known about this holding period — NOT the same as clear.
 UNKNOWN = "earnings_unknown"
+#: No announced date, but the symbol's own cadence puts its next report inside
+#: the holding period. An ESTIMATE, kept as its own verdict so it can never be
+#: read as an observation.
+PROJECTED_THROUGH = "projected_through_earnings"
+#: Cadence is regular and the projected report falls outside the window.
+PROJECTED_CLEAR = "projected_clear_of_earnings"
+
+# Projection guards, all measured 2026-08-21 against the 16 symbols whose next
+# report was already announced, with the answer hidden:
+#
+#   regular cadence   n=10  median |error| 1 day    worst 8   9/10 within 7d
+#   irregular/stale   n= 6  median |error| 19 days  worst 77  1/6  within 7d
+#
+# The two properties below are what separate those buckets, and both are
+# knowable in advance from the symbol's own history.
+_MIN_HISTORY = 8          # fewer reports is a coincidence, not a cadence
+_MAX_GAP_SPREAD_DAYS = 20  # SJM 25 -> off by 15; GME 91 -> off by 77
+_MAX_STALE_DAYS = 120     # past a quarter, a report has gone unrecorded
+_BUFFER_DAYS = 7          # covered 9 of 10 regular symbols
 
 #: Where `src/dolt_earnings.py` caches the calendar.
 DEFAULT_CACHE = "data/dolt_options.db"
@@ -68,6 +87,7 @@ _DEFAULTS: Dict[str, Any] = {
     "enabled": False,
     "horizon": "expiration",
     "cache_path": DEFAULT_CACHE,
+    "projection": "off",
 }
 
 # Credit structures name themselves; none of these words is one
@@ -114,6 +134,10 @@ def load_earnings_gate_config(config: Optional[Mapping[str, Any]]) -> Dict[str, 
     out["horizon"] = horizon if horizon in _HORIZONS else "expiration"
     path = block.get("earnings_cache_path") or DEFAULT_CACHE
     out["cache_path"] = str(path)
+    # off / report / refuse. An unrecognised value falls back to OFF, never to
+    # refuse: a typo must not silently start turning trades away on an estimate.
+    mode = str(block.get("earnings_projection", "off")).strip().lower()
+    out["projection"] = mode if mode in ("off", "report", "refuse") else "off"
     return out
 
 
@@ -187,6 +211,97 @@ def classify(dates: Sequence[str], entry_date: str,
     return CLEAR
 
 
+def project_next_earnings(dates: Sequence[str],
+                          today: Optional[_dt.date] = None,
+                          min_history: int = _MIN_HISTORY,
+                          max_spread_days: int = _MAX_GAP_SPREAD_DAYS,
+                          max_stale_days: int = _MAX_STALE_DAYS) -> Optional[str]:
+    """The symbol's next report, projected from its own cadence, or None.
+
+    None whenever the estimate would not be trustworthy, and the three reasons
+    are all properties of the history rather than of the outcome:
+
+    * fewer than ``min_history`` reports — a cadence needs to be demonstrated;
+    * gaps that vary by more than ``max_spread_days`` — the irregular bucket
+      missed by a median of 19 days and by 77 at worst;
+    * a last known report more than ``max_stale_days`` ago — at least one
+      report has happened without being recorded, so the anchor is wrong.
+
+    Returns the first projected date strictly after ``today``: stepping forward
+    by whole quarters matters when the calendar is a little behind.
+    """
+    today = today or _dt.date.today()
+    parsed: List[_dt.date] = []
+    for value in dates:
+        try:
+            parsed.append(_dt.date.fromisoformat(str(value)[:10]))
+        except (TypeError, ValueError):
+            continue
+    parsed.sort()
+    past = [d for d in parsed if d <= today]
+    if len(past) < min_history:
+        return None
+
+    window = past[-min_history:]
+    gaps = [(window[i + 1] - window[i]).days for i in range(len(window) - 1)]
+    if not gaps or (max(gaps) - min(gaps)) > max_spread_days:
+        return None
+
+    anchor = past[-1]
+    if (today - anchor).days > max_stale_days:
+        return None
+
+    step = sorted(gaps)[len(gaps) // 2]
+    if step <= 0:
+        return None
+    projected = anchor + _dt.timedelta(days=step)
+    while projected <= today:
+        projected += _dt.timedelta(days=step)
+    return projected.isoformat()
+
+
+def classify_with_projection(dates: Sequence[str], entry_date: str,
+                             end_date: Optional[str],
+                             today: Optional[_dt.date] = None,
+                             buffer_days: int = _BUFFER_DAYS,
+                             enabled: bool = True) -> str:
+    """`classify`, with a cadence projection filling in for a silent calendar.
+
+    Precedence, and the order matters:
+
+    1. An ANNOUNCED event inside the window is THROUGH. An observation always
+       beats an estimate.
+    2. Otherwise the projection is consulted — including when the announced
+       check would have said CLEAR only because the calendar reaches just past
+       the entry date. A trade long enough to span the NEXT quarter is exposed
+       whether or not that report has been announced yet, and that case is
+       invisible to the announced check alone.
+    3. Then the announced CLEAR, which is authoritative when the calendar
+       carries a real future date.
+    4. Otherwise UNKNOWN.
+    """
+    announced = classify(dates, entry_date, end_date)
+    if announced == THROUGH or not enabled or not end_date:
+        return announced
+
+    today = today or _dt.date.today()
+    projected = project_next_earnings(dates, today=today)
+    if projected is None:
+        return announced
+
+    entry = str(entry_date)[:10]
+    try:
+        end = _dt.date.fromisoformat(str(end_date)[:10]) + _dt.timedelta(
+            days=max(0, int(buffer_days)))
+    except (TypeError, ValueError):
+        return announced
+    if entry < projected <= end.isoformat():
+        return PROJECTED_THROUGH
+    # An announced future date is a real observation about the next event and
+    # outranks a projection that agrees with it.
+    return announced if announced == CLEAR else PROJECTED_CLEAR
+
+
 def verdict_for_trade(strategy_name: Optional[str], symbol: Optional[str],
                       entry_date: str, expiration: Optional[str],
                       time_exit_dte: Any, cfg: Mapping[str, Any]) -> Optional[str]:
@@ -200,4 +315,21 @@ def verdict_for_trade(strategy_name: Optional[str], symbol: Optional[str],
     end = horizon_end(expiration, time_exit_dte, str(cfg.get("horizon")))
     dates = cached_earnings_dates(str(symbol or ""),
                                   str(cfg.get("cache_path") or DEFAULT_CACHE))
-    return classify(dates, entry_date, end)
+    mode = str(cfg.get("projection", "off"))
+    return classify_with_projection(dates, entry_date, end,
+                                    enabled=mode in ("report", "refuse"))
+
+
+def refuses(verdict: Optional[str], cfg: Mapping[str, Any]) -> bool:
+    """Whether a verdict should stop the trade.
+
+    An announced event always does. A PROJECTION only does under
+    ``earnings_projection: "refuse"`` — it is an estimate, and the deliberate
+    default is to count and print it for a while first, so its behaviour on the
+    live board is observed before it starts turning trades away.
+    """
+    if verdict == THROUGH:
+        return True
+    if verdict == PROJECTED_THROUGH:
+        return str(cfg.get("projection", "off")) == "refuse"
+    return False

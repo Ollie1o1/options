@@ -6878,6 +6878,7 @@ def main():
                         # earnings date — another refusal that is not a duplicate.
                         _earn_before = getattr(pm, "through_earnings_rejected", 0)
                         _earn_unk_before = getattr(pm, "earnings_unknown", 0)
+                        _earn_proj_before = getattr(pm, "projected_earnings_flagged", 0)
 
                         # Component-score fields carried over from the spread enrichment
                         _spread_score_keys = (
@@ -6960,6 +6961,7 @@ def main():
                         _unsized = getattr(pm, "unsized_rejected", 0) - _unsized_before
                         _earn = getattr(pm, "through_earnings_rejected", 0) - _earn_before
                         _earn_unk = getattr(pm, "earnings_unknown", 0) - _earn_unk_before
+                        _earn_proj = getattr(pm, "projected_earnings_flagged", 0) - _earn_proj_before
                         _dupes = max(0, _skipped - _refused - _near_dupes - _unsized - _earn)
                         _summary = (
                             f"Auto-logged {_inserted} spreads/condors, "
@@ -6977,6 +6979,12 @@ def main():
                             _summary += f", refused {_unsized} on position size"
                         if _earn:
                             _summary += f", refused {_earn} holding through earnings"
+                        if _earn_proj:
+                            # Counted whether or not it refused: in "report"
+                            # mode this is the whole output, and it is how the
+                            # projection earns the right to start acting.
+                            _summary += (f", {_earn_proj} flagged on a "
+                                         f"PROJECTED earnings date")
                         if _earn_unk:
                             # Reported even with nothing refused: the calendar
                             # covers about a quarter of this book's symbols, and
@@ -7092,6 +7100,7 @@ def main():
                         # earnings date — another refusal that is not a duplicate.
                         _earn_before = getattr(pm, "through_earnings_rejected", 0)
                         _earn_unk_before = getattr(pm, "earnings_unknown", 0)
+                        _earn_proj_before = getattr(pm, "projected_earnings_flagged", 0)
                         # AI-score lookup keyed on (symbol, strike, expiration, type) — index-based
                         # lookups are unsafe because _ai_ranked is reset_index'd inside ranking.combine_scores
                         # and re-sorted, so positional alignment with picks is not preserved.
@@ -7209,6 +7218,7 @@ def main():
                         _unsized = getattr(pm, "unsized_rejected", 0) - _unsized_before
                         _earn = getattr(pm, "through_earnings_rejected", 0) - _earn_before
                         _earn_unk = getattr(pm, "earnings_unknown", 0) - _earn_unk_before
+                        _earn_proj = getattr(pm, "projected_earnings_flagged", 0) - _earn_proj_before
                         _dupes = max(0, _skipped - _refused - _near_dupes - _unsized - _earn)
                         _summary = f"Auto-logged {_inserted} new, skipped {_dupes} duplicates (profile: {_tag})"
                         if _near_dupes:
@@ -7223,6 +7233,12 @@ def main():
                             _summary += f", refused {_unsized} on position size"
                         if _earn:
                             _summary += f", refused {_earn} holding through earnings"
+                        if _earn_proj:
+                            # Counted whether or not it refused: in "report"
+                            # mode this is the whole output, and it is how the
+                            # projection earns the right to start acting.
+                            _summary += (f", {_earn_proj} flagged on a "
+                                         f"PROJECTED earnings date")
                         if _earn_unk:
                             # Reported even with nothing refused: the calendar
                             # covers about a quarter of this book's symbols, and
