@@ -18,6 +18,7 @@ entry selection is: a decision that cannot be replayed cannot be audited.
 """
 from __future__ import annotations
 
+import os
 import unittest
 
 import numpy as np
@@ -104,6 +105,35 @@ class TestAllocation(unittest.TestCase):
     def test_no_eligible_structures_yields_no_weights(self):
         a = sa.allocate(_book(), [], explore_rate=0.25, as_of="2026-08-24")
         self.assertEqual(a.weights, {})
+
+    def test_an_empty_book_allocates_NOTHING_rather_than_everything(self):
+        """The bug CI caught (PR #63). With no ledger there are no posteriors,
+        and the weights fell through to UNIFORM — 1/4 each across the four
+        eligible structures, silently widening the book to trade everything
+        equally, including structures with no evidence at all. Uniform is the
+        most dangerous default available: it is maximum exposure justified by
+        zero information. No evidence must mean NO allocation, so the caller
+        falls back to the allowlist."""
+        empty = pd.DataFrame(columns=["strategy", "entry_date", "ret_on_risk"])
+        a = sa.allocate(empty, ELIGIBLE, explore_rate=0.25, as_of="2026-08-24")
+        self.assertEqual(a.weights, {},
+                         "an empty book produced tradeable weights")
+
+    def test_a_book_too_thin_for_any_posterior_allocates_nothing(self):
+        thin = pd.DataFrame([
+            {"strategy": "Bull Put", "entry_date": "2026-05-01",
+             "ret_on_risk": 0.1}] * 3)
+        a = sa.allocate(thin, ELIGIBLE, explore_rate=0.25, as_of="2026-08-24")
+        self.assertEqual(a.weights, {})
+
+    def test_one_measured_structure_is_enough_to_allocate(self):
+        """It must not become so cautious that it never engages: a single
+        structure clearing MIN_ROWS_FOR_POSTERIOR is a real basis."""
+        df = _book()
+        df = df[df["strategy"].isin(["Bull Put", "Bear Call"])]
+        a = sa.allocate(df, ELIGIBLE, explore_rate=0.25, as_of="2026-08-24")
+        self.assertTrue(a.weights)
+        self.assertGreater(a.weights["Bull Put"], 0.0)
 
 
 class TestAdmission(unittest.TestCase):
@@ -249,6 +279,41 @@ class TestAutoLogIntegration(unittest.TestCase):
     def tearDown(self):
         self.os_._allocation_cache_clear()
 
+    def _ledger(self, d, per_strategy=40):
+        """A self-contained ledger with enough closed trades per structure to
+        form posteriors.
+
+        These tests used to depend on the REAL `paper_trades.db` existing.
+        That is the "tests must not name the real ledger" rule wearing a
+        different hat — depending on it rather than writing to it — and it is
+        why they passed locally and failed on CI, where the ledger is
+        gitignored and absent. A test whose result depends on a file outside
+        the repo is not a test of the code.
+        """
+        import sqlite3, os
+        path = os.path.join(d, "ledger.db")
+        conn = sqlite3.connect(path)
+        conn.execute("""CREATE TABLE trades (
+            entry_id INTEGER PRIMARY KEY, date TEXT, expiration TEXT,
+            strategy_name TEXT, status TEXT, pnl_usd REAL, entry_delta REAL,
+            entry_iv REAL, iv_rank_score REAL, net_credit REAL,
+            spread_width REAL, capital_at_risk REAL)""")
+        rng = np.random.default_rng(3)
+        # Bull Put genuinely best, mirroring the real book's shape.
+        means = {"Bull Put": 60.0, "Long Call": -5.0, "Long Put": -20.0,
+                 "Short Put": 2.0, "Bear Call": -18.0, "Iron Condor": -20.0}
+        i = 0
+        for strat, m in means.items():
+            for k in range(per_strategy):
+                i += 1
+                conn.execute(
+                    "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (i, f"2026-06-{1 + (k % 28):02d}", "2026-12-31", strat,
+                     "CLOSED", float(rng.normal(m, 40.0)), -0.3, 0.3, 0.5,
+                     1.2, 5.0, 400.0))
+        conn.commit(); conn.close()
+        return path
+
     def _cfg(self, d, **allocation):
         import json, os
         cfg = {"auto_log": {
@@ -257,6 +322,7 @@ class TestAutoLogIntegration(unittest.TestCase):
             "cohort_min_dte": 30,
         }}
         if allocation:
+            allocation.setdefault("ledger_path", self._ledger(d))
             cfg["auto_log"]["allocation"] = allocation
         path = os.path.join(d, "config.json")
         with open(path, "w") as fh:
@@ -355,6 +421,27 @@ class TestAutoLogIntegration(unittest.TestCase):
                 self.os_.apply_auto_log_allowlist({"strategy_name": "Bull Put"},
                                                   cfg)[0],
                 "insert")
+
+    def test_a_missing_ledger_falls_back_to_the_allowlist(self):
+        """End of the same chain. CI has no paper_trades.db, so the allocation
+        had no evidence and admitted Bull Put at 0.25 and Long Call at 0.25 —
+        four tests failed and the real defect was that a book with no history
+        would trade everything uniformly."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d, enabled=True, explore_rate=0.15,
+                            ledger_path=os.path.join(d, "no_such_ledger.db"),
+                            eligible_strategies=["Bull Put", "Long Call"])
+            self.assertEqual(
+                self.os_.apply_auto_log_allowlist(
+                    self._trade("Bull Put", "k1"), cfg),
+                ("insert", 0), "the allowlist fallback did not admit Bull Put")
+            for i in range(200):
+                self.assertEqual(
+                    self.os_.apply_auto_log_allowlist(
+                        self._trade("Long Call", f"k{i}"), cfg)[0],
+                    "drop",
+                    "with no ledger, Long Call reached the book anyway")
 
     def test_the_decision_replays(self):
         import tempfile

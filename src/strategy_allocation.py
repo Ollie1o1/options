@@ -169,6 +169,19 @@ def allocate(df: pd.DataFrame, eligible: Sequence[str],
     draws = {k: v for k, v in draws.items() if k in eligible}
     post = p_best(draws)
 
+    if not post:
+        # NO EVIDENCE MEANS NO ALLOCATION, never uniform. Uniform is the most
+        # dangerous default available here: maximum exposure justified by zero
+        # information, spread equally over structures that include measured
+        # losers. Caught by CI on PR #63, which has no `paper_trades.db` — the
+        # weights fell through to 1/4 each and Long Call was admitted at 25%.
+        # Returning nothing lets the caller fall back to the allowlist, which
+        # can only narrow what the book takes.
+        log.warning("strategy allocation: no structure has %d closed trades "
+                    "yet — no allocation, the allowlist stands",
+                    MIN_ROWS_FOR_POSTERIOR)
+        return Allocation({}, {}, {}, rate, as_of)
+
     uniform = 1.0 / len(eligible)
     weights: Dict[str, float] = {}
     for s in eligible:
@@ -176,9 +189,8 @@ def allocate(df: pd.DataFrame, eligible: Sequence[str],
 
     total = sum(weights.values())
     if total <= 0:
-        weights = {s: uniform for s in eligible}
-    else:
-        weights = {s: v / total for s, v in weights.items()}
+        return Allocation({}, post, {}, rate, as_of)
+    weights = {s: v / total for s, v in weights.items()}
 
     n_eff = {k: v for k, v in effective_n(df, as_of, half_life_days).items()
              if k in eligible}

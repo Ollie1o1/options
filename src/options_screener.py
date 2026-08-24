@@ -610,6 +610,15 @@ def _allocation_for(cfg: dict, cfg_path: str):
         logging.warning("strategy allocation unavailable; falling back to the "
                         "allowlist", exc_info=True)
         alloc = None
+    if alloc is not None and not alloc.weights:
+        # Empty weights mean the book had no structure with enough closed
+        # trades to form a posterior — a fresh checkout, a missing ledger, or
+        # CI. That is not a licence to trade everything: it is the case where
+        # the allowlist should rule. `allocate` used to return UNIFORM here,
+        # which on PR #63 admitted Long Call at 25%.
+        logging.warning("strategy allocation has no evidence to work from; "
+                        "the allowlist stands")
+        alloc = None
     _ALLOCATION_CACHE[key] = alloc
     return alloc
 
