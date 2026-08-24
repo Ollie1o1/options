@@ -1705,6 +1705,22 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
     _stamp = _CAL_CACHE.get("stamp")
     if _show_cal and _stamp:
         print(fmt.style(f"  Cal: {_stamp}", 'muted'))
+
+    # Say what the order IS, because a numbered column implies a ranking and
+    # this one is not a ranking by expected outcome. Raced 2026-08-24 over 612
+    # out-of-sample closed trades, rank IC against return on capital at risk
+    # with days as bootstrap clusters: cal_pop +0.1431 [-0.0420, +0.3277],
+    # exp_return +0.0087, quality_score -0.0194, abs_delta -0.0821 — every
+    # interval contains zero, so nothing available earned the top slot. The
+    # key the board DOES sort by, net-of-cost EV, could not be raced at all:
+    # it exists only in candidates.db, which is the frozen pre-registration's
+    # cohort, and reading it early is the one thing that test forbids.
+    print(fmt.style(
+        "  #1 = highest EV after its own trading costs, among gate survivors. "
+        "That is not a claim", 'muted'))
+    print(fmt.style(
+        "       that it wins most often — whether EV orders outcome reads out "
+        "2026-11-19 (pre-registered).", 'muted'))
     sort_hint = "  Sort: [C]omposite  [I]V Rank  [S]pread  [D]TE  [E]V"
     print(fmt.style(sort_hint, 'muted'))
     print()

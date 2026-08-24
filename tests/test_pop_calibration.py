@@ -444,6 +444,17 @@ class TestBoardRendering(unittest.TestCase):
         self.assertNotIn("CalPoP", out)
         self.assertIn("PoP:", out)  # the rest of the board is untouched
 
+    def test_the_board_says_what_number_one_means_and_what_it_does_not(self):
+        """A column headed by rank implies a ranking. Measured 2026-08-24 on
+        612 out-of-sample closed trades, no key available on the ledger orders
+        return on risk: cal_pop IC +0.1431 [-0.0420, +0.3277], exp_return
+        +0.0087, quality_score -0.0194 — every interval contains zero. So the
+        board must not imply that #1 is the best available trade."""
+        self.cd._CAL_CACHE.update(model=None, rel=None, mod=None, stamp=None)
+        out = self._board()
+        self.assertIn("highest EV after its own trading costs", out)
+        self.assertIn("not a claim", out.lower())
+
     def _board(self):
         import io, contextlib
         rows = pd.DataFrame([{
