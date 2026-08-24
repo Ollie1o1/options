@@ -111,8 +111,34 @@ def categorize_by_premium(df: pd.DataFrame, budget: Optional[float] = None) -> p
     return df
 
 
+
+def _ev_per_risk_column(df: pd.DataFrame) -> pd.Series:
+    """EV per dollar AT RISK for each row, -inf where it cannot be computed.
+
+    The selection key. It used to be `quality_score`, which was removed as a
+    board SORT for measuring -0.132 against return on the long-premium book —
+    its top quintile is the worst cell in the ledger — but kept CHOOSING which
+    contracts the board shows, because this function was never revisited. See
+    tests/test_bucket_pick_not_quality_score.py.
+
+    -inf for unmeasurable rows matches `candidate_verdict.rank`: an unknown
+    must never outrank a candidate that demonstrably clears its costs.
+    """
+    from .candidate_verdict import ev_per_risk
+    if df is None or len(df) == 0:
+        return pd.Series(dtype=float)
+    return pd.Series(
+        [ev_per_risk(row) for row in df.to_dict("records")],
+        index=df.index, dtype=float)
+
+
 def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers: bool = False) -> pd.DataFrame:
     """Pick top options per bucket, optionally diversifying across tickers."""
+    # An empty frame, or one that never went through `categorize_by_premium`,
+    # has no `price_bucket` column and used to raise KeyError here.
+    if df is None or len(df) == 0 or "price_bucket" not in df.columns:
+        return pd.DataFrame()
+
     picks = []
     for bucket in ["LOW", "MEDIUM", "HIGH"]:
         sub = df[df["price_bucket"] == bucket].copy()
@@ -121,8 +147,9 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
         
         if diversify_tickers and "symbol" in sub.columns:
             # Try to get diverse tickers in budget mode
-            _sort_cols = ["quality_score", "spread_pct", "volume", "openInterest", "T_years"]
-            _sort_asc  = [False,           True,         False,   False,          True]
+            sub["_ev_per_risk"] = _ev_per_risk_column(sub)
+            _sort_cols = ["_ev_per_risk", "quality_score", "spread_pct", "volume", "openInterest", "T_years"]
+            _sort_asc  = [False,          False,           True,         False,   False,          True]
             _present   = [(c, a) for c, a in zip(_sort_cols, _sort_asc) if c in sub.columns]
             if _present:
                 sub = sub.sort_values(
@@ -155,9 +182,12 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
             
             picks.append(pd.DataFrame(selected))
         else:
-            # Standard sorting for single-stock mode
-            _sort_cols = ["quality_score", "spread_pct", "volume", "openInterest", "T_years"]
-            _sort_asc  = [False,           True,         False,   False,          True]
+            # Standard sorting for single-stock mode. Same key as the
+            # diversified branch above — fixing one and not the other would
+            # leave single-stock mode choosing by the discredited score.
+            sub["_ev_per_risk"] = _ev_per_risk_column(sub)
+            _sort_cols = ["_ev_per_risk", "quality_score", "spread_pct", "volume", "openInterest", "T_years"]
+            _sort_asc  = [False,          False,           True,         False,   False,          True]
             _present   = [(c, a) for c, a in zip(_sort_cols, _sort_asc) if c in sub.columns]
             if _present:
                 sub = sub.sort_values(
@@ -169,7 +199,7 @@ def pick_top_per_bucket(df: pd.DataFrame, per_bucket: int = 5, diversify_tickers
     if not picks:
         return pd.DataFrame()
     out = pd.concat(picks, ignore_index=True)
-    return out
+    return out.drop(columns=["_ev_per_risk"], errors="ignore")
 
 def filter_iv_smile_outliers(
     df: pd.DataFrame,

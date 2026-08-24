@@ -208,31 +208,62 @@ def rank(rows: Sequence[Dict[str, Any]],
                                    max_friction_pct=max_friction_pct)
         out.append(r)
 
-    def _ev(r) -> float:
-        """Net-of-cost EV per contract, or -inf when it was never computed.
-
-        An absent EV must never outrank a measured positive one — treating
-        'unknown' as 'zero' would float unpriced candidates above the ones
-        that demonstrably clear their costs."""
-        v = r.get("ev_per_contract")
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            return float("-inf")
-        return f if f == f else float("-inf")     # NaN is not a number either
-
     # Cost is a GATE, not the sort key. A live scan made this obvious: among
     # single legs the round-trip cost sits at 1-4% across the whole board and
     # separates almost nothing, so ranking on it put a pick with net EV -36 and
     # a SKIP verdict above the only board pick that cleared its costs (+253,
-    # TAKE). Order: survives the gate, then net-of-cost EV, then cheapest to
-    # trade, then quality_score purely to break ties.
+    # TAKE). Order: survives the gate, then EV PER DOLLAR AT RISK, then
+    # cheapest to trade, then quality_score purely to break ties.
     out.sort(key=lambda r: (1 if r["verdict"].passed else 0,
-                            _ev(r),
+                            ev_per_risk(r),
                             -(r["verdict"].round_trip_pct
                               if r["verdict"].round_trip_pct is not None else 9e9),
                             float(r.get("quality_score") or 0.0)), reverse=True)
     return out
+
+
+def ev_per_risk(row: Dict[str, Any]) -> float:
+    """Net-of-cost EV per DOLLAR AT RISK, or -inf when it cannot be computed.
+
+    The sort key. It used to be EV in dollars per contract, which scales with
+    the contract's price and therefore ranked by position SIZE. Measured on a
+    live scan 2026-08-24, with MU at $910 and SLB at $54:
+
+        SLB $55C    risk $139     EV/$risk +0.070    dollar EV    +$10
+        WMT $105P   risk $172     EV/$risk +0.430    dollar EV    +$74
+        MU  $900P   risk $4,367   EV/$risk +0.288    dollar EV  +$1,288
+
+    MU took the top slot on a per-dollar edge that was only third best, and
+    all twelve of its contracts swept the top fifteen. The position was also
+    unenterable — $4,475 against a $4,000 cap — so board space was going to a
+    contract the book cannot take.
+
+    This is a DENOMINATOR CORRECTION, not a new ranking hypothesis. Whether EV
+    orders outcome at all remains pre-registered and frozen until 2026-11-19;
+    this only stops the same quantity being compared across positions thirty
+    times apart in size.
+
+    -inf for anything unmeasurable, matching what the dollar-EV key did: an
+    absent EV, an uncomputable risk, or a zero denominator must never outrank
+    a candidate that demonstrably clears its costs. A zero denominator would
+    otherwise mint the best pick on the board out of a missing number.
+    """
+    from . import capital_risk as _cr
+
+    try:
+        ev = float(row.get("ev_per_contract"))
+    except (TypeError, ValueError):
+        return float("-inf")
+    if ev != ev:                                  # NaN is not a number either
+        return float("-inf")
+
+    try:
+        risk = _cr.capital_at_risk_for_pick(row, str(row.get("strategy_name") or ""))
+    except Exception:
+        return float("-inf")
+    if risk is None or risk != risk or risk <= 0:
+        return float("-inf")
+    return ev / risk
 
 
 @lru_cache(maxsize=8)
