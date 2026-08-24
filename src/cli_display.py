@@ -591,6 +591,41 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     return [x for x in (verdict, worth_line, do_line) if x]
 
 
+_CAL_CACHE: Dict[str, Any] = {}
+
+
+def _calibrated_pop_line(row) -> Optional[str]:
+    """The calibrated probability line for one pick, or None to draw nothing.
+
+    Loaded once per process. `load_model` returns None for an artifact that
+    failed its reliability guard, so a refused model cannot reach a board —
+    and there is deliberately NO fallback to `pop_score`, whose silent
+    substitution is how `quality_score` ranked these boards unnoticed.
+    """
+    if "model" not in _CAL_CACHE:
+        try:
+            from . import pop_calibration as _pcal
+            model = _pcal.load_model()
+            rel = pd.DataFrame()
+            if model is not None:
+                import json
+                with open(_pcal.DEFAULT_MODEL_PATH) as fh:
+                    rel = pd.DataFrame(json.load(fh).get("reliability", []))
+            _CAL_CACHE["model"], _CAL_CACHE["rel"] = model, rel
+            _CAL_CACHE["mod"] = _pcal
+        except Exception:
+            _CAL_CACHE["model"], _CAL_CACHE["rel"], _CAL_CACHE["mod"] = None, None, None
+
+    model, rel, mod = _CAL_CACHE["model"], _CAL_CACHE["rel"], _CAL_CACHE["mod"]
+    if model is None or mod is None:
+        return None
+    try:
+        data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        return mod.describe_row(data, model, rel)
+    except Exception:
+        return None
+
+
 def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> list:
     """Return themed sub-lines for analysis."""
     INDENT = "         "
@@ -622,6 +657,14 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
                 val.append(f"PoP: {pop_str}")
         else:
             val.append(f"PoP: {format_pct(pop)}")
+
+    # The calibrated probability, beside the model one. Draws NOTHING unless a
+    # model was fitted AND cleared its own out-of-sample reliability guard AND
+    # this row lands in a bucket that guard actually checked. See
+    # src/pop_calibration.py; refit with scripts.pop_calibration_report.
+    cal = _calibrated_pop_line(row)
+    if cal:
+        val.append(fmt.style(cal, 'muted'))
 
     if mode == "Premium Selling":
         ror = row.get("return_on_risk", pd.NA)
