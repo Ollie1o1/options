@@ -972,10 +972,18 @@ def record_autolog_refusals(rows, reason: str, *, board: str):
     return _cr.mark_refused(list(rows), reason, board=board)
 
 
-def record_autolog_logged(row, *, board: str, entry_id=None):
-    """Flag a candidate as actually entered."""
+def record_autolog_logged(row, *, board: str, entry_id=None, db_path=None):
+    """Flag a candidate as actually entered.
+
+    Call this on every successful insert. Without it `auto_logged` stays 0 and
+    the table cannot answer which of the candidates it offered the book
+    actually took — which is what measuring the strategy allocation needs.
+    Failure-safe like the rest of the recorder: it can neither stop a scan nor
+    change a pick.
+    """
     from . import candidate_record as _cr
-    return _cr.mark_logged(dict(row), board=board, entry_id=entry_id)
+    return _cr.mark_logged(dict(row), board=board, entry_id=entry_id,
+                           db_path=db_path)
 
 
 def _with_candidate_scan(fn):
@@ -7050,6 +7058,8 @@ def main():
                                     })
                                     if pm.log_iron_condor_if_new(_payload, auto_log=True):
                                         _inserted += 1
+                                        record_autolog_logged(
+                                            row, board="autolog_structures")
                                     else:
                                         _skipped += 1
                                 else:
@@ -7069,6 +7079,8 @@ def main():
                                     })
                                     if pm.log_spread_if_new(_payload, auto_log=True):
                                         _inserted += 1
+                                        record_autolog_logged(
+                                            row, board="autolog_structures")
                                     else:
                                         _skipped += 1
                             except Exception as _log_exc:
@@ -7331,6 +7343,7 @@ def main():
                             try:
                                 if pm.log_trade_if_new(_trade, auto_log=True):
                                     _inserted += 1
+                                    record_autolog_logged(row, board="AUTO-LOG")
                                 else:
                                     _skipped += 1
                             except Exception as _log_exc:
