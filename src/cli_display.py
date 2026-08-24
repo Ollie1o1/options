@@ -5,7 +5,7 @@ import re
 import sys
 import shutil
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 
 import pandas as pd
 

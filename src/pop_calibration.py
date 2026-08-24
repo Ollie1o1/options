@@ -154,14 +154,17 @@ def _design(df: pd.DataFrame, features: Sequence[str],
     n = len(df)
     parts: List[np.ndarray] = [np.ones((n, 1)), x]
     if interacted:
-        s = short_flags(df).reshape(-1, 1)
-        parts.extend([s, x * s])
+        # Named `short`, not `s`: the strategy loop below binds `s` to a
+        # string, and one name meaning two things in one function is how the
+        # column and the label get crossed.
+        short = short_flags(df).reshape(-1, 1)
+        parts.extend([short, x * short])
     if len(strategies) > 1:
         labels = df["strategy"].astype(str).to_numpy() if "strategy" in df \
             else np.array([""] * n)
         onehot = np.zeros((n, len(strategies) - 1))
-        for j, s in enumerate(strategies[1:]):
-            onehot[:, j] = (labels == s).astype(float)
+        for j, name in enumerate(strategies[1:]):
+            onehot[:, j] = (labels == name).astype(float)
         parts.append(onehot)
     return np.hstack(parts)
 
