@@ -614,14 +614,26 @@ def _allocation_for(cfg: dict, cfg_path: str):
     return alloc
 
 
-def _admission_key(trade: dict) -> str:
-    """A stable identity for one candidate, for the deterministic draw."""
+def _admission_key(trade: dict) -> Optional[str]:
+    """A stable identity for one candidate, or None if it has none.
+
+    None matters. The draw is deterministic in this key, so a key that is the
+    same for every candidate of a structure makes the decision all-or-nothing
+    per structure per day rather than per contract, and the realised share
+    never approaches its target. The auto-log path called the allowlist with
+    `{"strategy_name": ...}` and nothing else, which produced exactly that:
+    `"|Bull Put|||"` for every Bull Put on the board.
+    """
     for name in ("contract_key", "entry_id", "scan_id"):
         val = trade.get(name)
         if val:
             return str(val)
-    return "|".join(str(trade.get(k, "")) for k in
-                    ("symbol", "strategy_name", "expiration", "strike", "type"))
+    parts = [str(trade.get(k) or "") for k in
+             ("symbol", "ticker", "expiration", "strike", "type",
+              "short_put_strike", "short_call_strike")]
+    if not any(parts):
+        return None
+    return "|".join([str(trade.get("strategy_name") or "")] + parts)
 
 
 def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tuple:
@@ -659,9 +671,18 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
     # point, including the long-premium horizon floor, is unchanged; so is
     # every other gate. See src/strategy_allocation.py.
     alloc = _allocation_for(cfg, cfg_path)
-    if alloc is not None:
+    _key = _admission_key(trade)
+    if alloc is not None and _key is None:
+        # Fail SAFE, never open. A degenerate key would admit or refuse a
+        # whole structure at once; falling back to the allowlist can only
+        # narrow what the book takes, never widen it.
+        logging.warning(
+            "auto_log allocation: '%s' arrived with no identifying fields, so "
+            "its draw would be degenerate — falling back to the allowlist for "
+            "this candidate.", strat)
+    elif alloc is not None:
         from . import strategy_allocation as _sa
-        if not _sa.admits(alloc, strat, _admission_key(trade)):
+        if not _sa.admits(alloc, strat, _key or ""):
             return ("drop", None)
         allowed = set(alloc.weights)
 
@@ -6987,8 +7008,21 @@ def main():
                                 # Derive strategy name to feed the allowlist helper.
                                 _strat_name = structure_strategy_name(row)
                                 _is_condor = _strat_name == "Iron Condor"
+                                # Identity and expiration both matter here.
+                                # Without identity the allocation draw is the
+                                # same for every candidate of this structure;
+                                # without expiration the long-premium DTE
+                                # floor cannot quarantine.
                                 _decision, _paper_only_flag = apply_auto_log_allowlist(
-                                    {"strategy_name": _strat_name}, cfg_path="config.json"
+                                    {"strategy_name": _strat_name,
+                                     "symbol": _sym,
+                                     "expiration": row.get("expiration"),
+                                     "strike": row.get("strike"),
+                                     "short_put_strike": row.get("short_put_strike"),
+                                     "short_call_strike": row.get("short_call_strike"),
+                                     "type": row.get("type"),
+                                     "date": _today_str},
+                                    cfg_path="config.json"
                                 )
                                 if _decision == "drop":
                                     _skipped_bear_calls += 1  # reuse counter for the summary
@@ -7136,7 +7170,10 @@ def main():
                                 _sn = _strategy_label_for_mode(mode, _row.get("type"))
                                 _dec, _ = apply_auto_log_allowlist(
                                     {"strategy_name": _sn,
+                                     "symbol": _row.get("symbol"),
                                      "expiration": _row.get("expiration"),
+                                     "strike": _row.get("strike"),
+                                     "type": _row.get("type"),
                                      "date": _today_str},
                                     cfg_path="config.json",
                                 )
@@ -7220,7 +7257,11 @@ def main():
                             # short-horizon Long Calls (else they slip into the gate).
                             _decision, _paper_only_flag = apply_auto_log_allowlist(
                                 {"strategy_name": _strat_name,
-                                 "expiration": row["expiration"], "date": _today_str},
+                                 "symbol": row.get("symbol"),
+                                 "expiration": row["expiration"],
+                                 "strike": row.get("strike"),
+                                 "type": row.get("type"),
+                                 "date": _today_str},
                                 cfg_path="config.json",
                             )
                             if _decision == "drop":

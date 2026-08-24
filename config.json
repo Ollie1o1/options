@@ -156,13 +156,12 @@
       "half_life_days": 45,
       "eligible_strategies": [
         "Bull Put",
-        "Bear Call",
-        "Iron Condor",
         "Long Call",
         "Long Put",
         "Short Put"
       ]
-    }
+    },
+    "_allocation_eligibility_note": "eligible_strategies deliberately EXCLUDES Bear Call and Iron Condor. Those two are not off for absence of evidence - they FAIL their own measured breakeven under the exits actually used: Iron Condor needs 60.1% and delivers 50.0% (-10.1pp over 142 closed), Bear Call needs 66.7% against 59.3% (-7.4pp). Exploration buys information about structures whose edge is UNKNOWN; it is not a reason to re-run a structure whose edge has been measured and is negative. Bull Put, Long Call, Long Put and Short Put all have return-on-risk intervals that straddle or clear zero, so their ranking is genuinely open."
   },
   "position_sizing": {
     "_note": "How many contracts the paper book buys, and when it refuses to buy any. Built 2026-08-19 (docs/BOOK_SIZING_SPEC.md). It exists because every one of the 1,011 ledger rows carried quantity = 1.0 \u2014 a migration default nothing ever wrote \u2014 so bet size was the option's PREMIUM, a function of share price and IV with no relation to the pick. Measured over 889 closed trades the book made +$8,198 at PF 1.061 as sized and -$2,266 at PF 0.997 (CI [0.844, 1.178]) equal-weighted: the entire headline profit was an artifact of which trades happened to be large. Capital committed ranged 55x ($60 to $3,285) inside the post-repair cohort alone. Sizing is a GATE as well as a scale \u2014 below one contract the trade is REFUSED, because a position too big to size is one the account cannot afford. Risk per contract comes from capital_at_risk (width - credit for a credit spread, collateral for a short put, None for a naked call), NEVER from entry premium; src/execution/sizing.py is long-call mirror-mode code that cannot price a Bull Put, which is the only auto-logged strategy, and is deliberately not used here. enabled: false restores the old behaviour of exactly 1 contract; allow_unsized=True in a trade_dict bypasses this for one deliberate manual entry.",

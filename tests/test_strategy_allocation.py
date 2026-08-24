@@ -320,6 +320,42 @@ class TestAutoLogIntegration(unittest.TestCase):
             self.assertTrue(all(f == 1 for f in inserted),
                             "a short-dated long call skipped the floor")
 
+    def test_two_contracts_of_one_structure_get_different_keys(self):
+        """Found by reading the real call site, not by a passing suite. The
+        auto-log path called this with `{"strategy_name": ...}` and nothing
+        else, so every Bull Put on a given day shared one key — the draw would
+        have been all-or-nothing per structure per day instead of per
+        candidate, and the realised share would never approach its target."""
+        a = self.os_._admission_key({"strategy_name": "Bull Put",
+                                     "symbol": "NVDA", "strike": 140.0,
+                                     "expiration": "2026-10-16"})
+        b = self.os_._admission_key({"strategy_name": "Bull Put",
+                                     "symbol": "NVDA", "strike": 145.0,
+                                     "expiration": "2026-10-16"})
+        self.assertIsNotNone(a)
+        self.assertNotEqual(a, b)
+
+    def test_a_trade_with_no_identity_has_no_key(self):
+        self.assertIsNone(self.os_._admission_key({"strategy_name": "Bull Put"}))
+
+    def test_an_unidentifiable_trade_falls_back_to_the_allowlist(self):
+        """Fail SAFE. Without a key the draw is degenerate, so the allocation
+        must stand aside rather than admit or refuse a whole structure at
+        once. Falling back to the allowlist can only narrow, never widen."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d, enabled=True, explore_rate=1.0,
+                            eligible_strategies=["Bull Put", "Long Call"])
+            self.assertEqual(
+                self.os_.apply_auto_log_allowlist({"strategy_name": "Long Call"},
+                                                  cfg)[0],
+                "drop", "an unidentifiable Long Call was admitted by a "
+                        "degenerate draw")
+            self.assertEqual(
+                self.os_.apply_auto_log_allowlist({"strategy_name": "Bull Put"},
+                                                  cfg)[0],
+                "insert")
+
     def test_the_decision_replays(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
