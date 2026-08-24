@@ -1,0 +1,242 @@
+"""Which structure the book takes next.
+
+THE PROBLEM WITH A NAME LIST. `auto_log.allowed_strategies` is self-sealing.
+Under `["Bull Put"]` no other structure can enter the book, so no other
+structure can accumulate evidence, so a rule that cited absence of evidence
+guarantees that absence permanently. Bear Call, Short Put and Iron Condor last
+entered on 2026-07-30 and 2026-07-31; Long Put on 2026-07-13. Under the list
+as it stands, none of them ever will again, whatever the market does.
+
+WHAT THE MEASUREMENT ACTUALLY SAYS. Bull Put is not an arbitrary pick.
+Bootstrap posteriors on mean return on CAPITAL AT RISK, 2026-08-24:
+
+    Bull Put    +16.80%  [ +6.85%, +26.95%]   P(best) 99.0%
+    Short Put    +0.59%  [ -0.41%,  +2.36%]   P(best)  0.0%
+    Long Call    -0.18%  [ -8.45%,  +8.31%]   P(best)  0.6%
+    Bear Call    -4.73%  [-13.85%,  +4.36%]   P(best)  0.1%
+    Long Put     -4.96%  [-16.37%,  +7.27%]   P(best)  0.4%
+    Iron Condor  -5.33%  [ -9.60%,  -1.08%]   P(best)  0.0%
+
+So Thompson sampling alone does NOT fix the problem: it allocates 99% to Bull
+Put, which at two entries a day is one exploratory trade every seven weeks.
+Time-decaying the evidence barely moves it (99.3% at a 45-day half-life),
+because the entire book is four months old.
+
+EXPLORATION IS THEREFORE A PURCHASE, NOT A FREE LUNCH. It buys information
+about structures whose evidence is going stale, and it pays for that in
+expected return. `information_cost` prices it in return on capital at risk per
+entry so the rate is chosen against its cost rather than by taste. The weights
+are `(1 - rate)` on the posterior and `rate` spread uniformly over everything
+eligible.
+
+WHAT THIS DOES NOT DO. It does not rank contracts — `expected_return` tried
+that and its guard refused it (walk-forward slope 0.442, 95% CI [-0.891,
+1.774]). It does not remove a safety rail: `eligible` still bounds what the
+book may ever take, and every existing gate (friction, EV, earnings, sizing,
+the DTE floor on long premium) still runs first and still refuses. It only
+decides which structures are in play, and it never closes a door permanently.
+
+The draw is deterministic in the candidate's key, seeded through blake2b
+rather than the builtin `hash`, which Python randomises per process. A
+decision that cannot be replayed cannot be audited.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+import pandas as pd
+
+log = logging.getLogger(__name__)
+
+DEFAULT_HALF_LIFE_DAYS = 45.0
+DEFAULT_DRAWS = 4000
+#: A structure with fewer closed trades than this has no posterior worth
+#: sampling; it relies on the exploration share to earn one.
+MIN_ROWS_FOR_POSTERIOR = 20
+
+
+@dataclass
+class Allocation:
+    """Target share of entries per structure, and the evidence behind it."""
+    weights: Dict[str, float]
+    posterior: Dict[str, float] = field(default_factory=dict)
+    n_eff: Dict[str, float] = field(default_factory=dict)
+    explore_rate: float = 0.0
+    as_of: str = ""
+
+    def share(self, strategy: Optional[str]) -> float:
+        return float(self.weights.get(str(strategy or ""), 0.0))
+
+
+def _ages(df: pd.DataFrame, as_of: str) -> np.ndarray:
+    when = pd.to_datetime(df["entry_date"], errors="coerce")
+    days = (pd.Timestamp(as_of) - when).dt.days
+    return days.fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
+
+
+def _weights(df: pd.DataFrame, as_of: str, half_life_days: float) -> np.ndarray:
+    """Exponential decay by age. Recent evidence counts for more because the
+    market it describes is closer to the one being traded."""
+    if half_life_days is None or half_life_days <= 0:
+        return np.ones(len(df))
+    return np.asarray(0.5 ** (_ages(df, as_of) / float(half_life_days)))
+
+
+def effective_n(df: pd.DataFrame, as_of: str,
+                half_life_days: float = DEFAULT_HALF_LIFE_DAYS
+                ) -> Dict[str, float]:
+    """Kish effective sample size per structure once evidence is decayed.
+
+    Stale evidence must WIDEN a posterior, never narrow it. This is the
+    quantity that makes that happen.
+    """
+    out: Dict[str, float] = {}
+    if df is None or len(df) == 0 or "strategy" not in df:
+        return out
+    for name, g in df.groupby("strategy"):
+        w = _weights(g, as_of, half_life_days)
+        total = float(w.sum())
+        out[str(name)] = (total * total / float((w * w).sum())
+                          if total > 0 else 0.0)
+    return out
+
+
+def posteriors(df: pd.DataFrame, as_of: str,
+               half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+               n_draws: int = DEFAULT_DRAWS,
+               seed: int = 20260824) -> Dict[str, np.ndarray]:
+    """Bootstrap draws of each structure's mean return on capital at risk.
+
+    Return on capital at risk, not dollars: the 2026-08-20 position-sizing
+    change makes dollar figures incomparable across the split, and this metric
+    is scale-free so it reads across it cleanly.
+    """
+    out: Dict[str, np.ndarray] = {}
+    if df is None or len(df) == 0 or "ret_on_risk" not in df:
+        return out
+    rng = np.random.default_rng(seed)
+    for name, g in df.groupby("strategy"):
+        r = pd.to_numeric(g["ret_on_risk"], errors="coerce")
+        keep = r.notna()
+        r = r[keep].to_numpy(dtype=float)
+        if len(r) < MIN_ROWS_FOR_POSTERIOR:
+            continue
+        w = _weights(g[keep.to_numpy()], as_of, half_life_days)
+        if w.sum() <= 0:
+            continue
+        p = w / w.sum()
+        m = max(2, int(round(float(p.sum() ** 2 / (p * p).sum()))))
+        idx = rng.choice(len(r), size=(n_draws, m), replace=True, p=p)
+        out[str(name)] = r[idx].mean(axis=1)
+    return out
+
+
+def p_best(draws: Dict[str, np.ndarray]) -> Dict[str, float]:
+    """P(this structure has the highest true mean return on risk)."""
+    names = [k for k, v in draws.items() if len(v)]
+    if not names:
+        return {}
+    n = min(len(draws[k]) for k in names)
+    matrix = np.column_stack([draws[k][:n] for k in names])
+    winner = matrix.argmax(axis=1)
+    return {k: float((winner == i).mean()) for i, k in enumerate(names)}
+
+
+def allocate(df: pd.DataFrame, eligible: Sequence[str],
+             explore_rate: float = 0.25, as_of: str = "",
+             half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+             seed: int = 20260824) -> Allocation:
+    """Target share of entries per eligible structure.
+
+    `(1 - explore_rate)` follows the posterior; `explore_rate` is spread
+    uniformly so that nothing is ever locked out. A structure with no history
+    at all draws only the exploration share — which is the whole point, since
+    that is the only way it can ever earn a posterior.
+    """
+    eligible = [str(s) for s in (eligible or [])]
+    if not eligible:
+        return Allocation({}, {}, {}, float(explore_rate), str(as_of))
+
+    as_of = str(as_of or pd.Timestamp.today().strftime("%Y-%m-%d"))
+    rate = float(min(max(explore_rate, 0.0), 1.0))
+
+    draws = posteriors(df, as_of, half_life_days, seed=seed)
+    draws = {k: v for k, v in draws.items() if k in eligible}
+    post = p_best(draws)
+
+    uniform = 1.0 / len(eligible)
+    weights: Dict[str, float] = {}
+    for s in eligible:
+        weights[s] = (1.0 - rate) * float(post.get(s, 0.0)) + rate * uniform
+
+    total = sum(weights.values())
+    if total <= 0:
+        weights = {s: uniform for s in eligible}
+    else:
+        weights = {s: v / total for s, v in weights.items()}
+
+    n_eff = {k: v for k, v in effective_n(df, as_of, half_life_days).items()
+             if k in eligible}
+    return Allocation(weights, post, n_eff, rate, as_of)
+
+
+def admits(alloc: Allocation, strategy: Optional[str], key: str) -> bool:
+    """Is this candidate the one that fills its structure's share?
+
+    Deterministic in `key`, via blake2b rather than the builtin `hash`, which
+    Python randomises per process — the same defect that once made every PoP
+    and every quality_score differ between interpreters on identical input.
+    """
+    share = alloc.share(strategy)
+    if share <= 0.0:
+        return False
+    if share >= 1.0:
+        return True
+    digest = hashlib.blake2b(
+        f"{alloc.as_of}|{strategy}|{key}".encode(), digest_size=8).digest()
+    draw = int.from_bytes(digest, "big") / float(1 << 64)
+    return draw < share
+
+
+def information_cost(alloc: Allocation, df: pd.DataFrame) -> float:
+    """Expected return on risk given up per entry, versus pure exploitation.
+
+    The price of the exploration budget, in the same units the book is
+    measured in. A rate chosen without this number is a rate chosen by taste.
+    """
+    if not alloc.weights or df is None or len(df) == 0:
+        return 0.0
+    means = df.groupby("strategy")["ret_on_risk"].mean()
+    known = {s: float(means[s]) for s in alloc.weights if s in means.index}
+    if not known:
+        return 0.0
+
+    best = max(known.values())
+    # Structures with no history are priced at the worst known mean rather
+    # than at zero: an unmeasured structure is not a free one.
+    floor = min(known.values())
+    spent = sum(w * (best - known.get(s, floor))
+                for s, w in alloc.weights.items())
+    return float(max(0.0, spent))
+
+
+def describe(alloc: Allocation, df: pd.DataFrame) -> List[str]:
+    """Human-readable allocation table, for the report and the scan header."""
+    if not alloc.weights:
+        return ["no eligible structures — nothing can be logged"]
+    means = (df.groupby("strategy")["ret_on_risk"].mean()
+             if df is not None and len(df) else pd.Series(dtype=float))
+    lines = [f"Allocation as of {alloc.as_of} — explore rate "
+             f"{alloc.explore_rate:.0%}, information cost "
+             f"{information_cost(alloc, df):+.2%} of return on risk per entry",
+             f"  {'structure':<14}{'share':>8}{'P(best)':>9}"
+             f"{'n_eff':>8}{'mean ret':>10}"]
+    for s, w in sorted(alloc.weights.items(), key=lambda kv: -kv[1]):
+        mean = f"{means[s]:+.2%}" if s in getattr(means, "index", []) else "  no data"
+        lines.append(f"  {s:<14}{w:>8.1%}{alloc.posterior.get(s, 0.0):>9.1%}"
+                     f"{alloc.n_eff.get(s, 0.0):>8.0f}{mean:>10}")
+    return lines

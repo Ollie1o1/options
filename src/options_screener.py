@@ -571,6 +571,59 @@ def auto_log_budget_cap(cfg_path: str = "config.json"):
         return None
 
 
+_ALLOCATION_CACHE: dict = {}
+
+
+def _allocation_cache_clear() -> None:
+    """Drop the memoised allocation. Called by tests and after a refit."""
+    _ALLOCATION_CACHE.clear()
+
+
+def _allocation_for(cfg: dict, cfg_path: str):
+    """The live strategy allocation, or None when the allowlist still rules.
+
+    Memoised per config path: it reads the whole closed book to build its
+    posteriors, and a scan asks about every candidate.
+    """
+    alloc_cfg = (cfg.get("auto_log") or {}).get("allocation") or {}
+    if not alloc_cfg.get("enabled"):
+        return None
+    key = str(cfg_path)
+    if key in _ALLOCATION_CACHE:
+        return _ALLOCATION_CACHE[key]
+
+    alloc = None
+    try:
+        from . import pop_calibration as _pc
+        from . import strategy_allocation as _sa
+        book = _pc.load_training_set(
+            _repo_path(alloc_cfg.get("ledger_path") or "paper_trades.db"))
+        book = book.dropna(subset=["ret_on_risk"]) if len(book) else book
+        alloc = _sa.allocate(
+            book,
+            alloc_cfg.get("eligible_strategies") or [],
+            explore_rate=float(alloc_cfg.get("explore_rate", 0.25)),
+            as_of=str(alloc_cfg.get("as_of") or ""),
+            half_life_days=float(alloc_cfg.get("half_life_days", 45.0)))
+    except Exception:
+        # A broken allocation must not silently widen what the book takes.
+        logging.warning("strategy allocation unavailable; falling back to the "
+                        "allowlist", exc_info=True)
+        alloc = None
+    _ALLOCATION_CACHE[key] = alloc
+    return alloc
+
+
+def _admission_key(trade: dict) -> str:
+    """A stable identity for one candidate, for the deterministic draw."""
+    for name in ("contract_key", "entry_id", "scan_id"):
+        val = trade.get(name)
+        if val:
+            return str(val)
+    return "|".join(str(trade.get(k, "")) for k in
+                    ("symbol", "strategy_name", "expiration", "strike", "type"))
+
+
 def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tuple:
     """
     Phase 1 cohort quarantine. Returns one of:
@@ -597,6 +650,21 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
     allowed = set(al.get("allowed_strategies") or [])
     paper_only = set(al.get("paper_only_strategies") or [])
     strat = str(trade.get("strategy_name") or "")
+
+    # An allowlist by NAME is self-sealing: nothing outside it can enter, so
+    # nothing outside it can ever accumulate the evidence that would let it
+    # in. When an allocation is configured it replaces the `allowed` set with
+    # a share per structure — mostly the posterior best, with a priced
+    # exploration budget so no door closes permanently. Everything below this
+    # point, including the long-premium horizon floor, is unchanged; so is
+    # every other gate. See src/strategy_allocation.py.
+    alloc = _allocation_for(cfg, cfg_path)
+    if alloc is not None:
+        from . import strategy_allocation as _sa
+        if not _sa.admits(alloc, strat, _admission_key(trade)):
+            return ("drop", None)
+        allowed = set(alloc.weights)
+
     overlap = allowed & paper_only
     if strat in overlap:
         logging.warning(
