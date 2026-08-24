@@ -250,8 +250,11 @@ def ev_per_risk(row: Dict[str, Any]) -> float:
     """
     from . import capital_risk as _cr
 
+    raw = row.get("ev_per_contract")
+    if raw is None:
+        return float("-inf")
     try:
-        ev = float(row.get("ev_per_contract"))
+        ev = float(raw)
     except (TypeError, ValueError):
         return float("-inf")
     if ev != ev:                                  # NaN is not a number either
