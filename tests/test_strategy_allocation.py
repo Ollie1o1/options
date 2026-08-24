@@ -165,6 +165,75 @@ class TestInformationCost(unittest.TestCase):
                            sa.information_cost(a, df))
 
 
+class TestReplay(unittest.TestCase):
+    """Replaying the policy over trades that actually happened.
+
+    The analytic cost is only the mean of a FIXED allocation. A replay shows
+    the path: posteriors update as exploration returns evidence, so the
+    weights move. That is the part a closed form cannot answer, and it is what
+    "what do we get for the rate" actually asks.
+
+    It is honest only because the historical book contains all six structures
+    — every entry replayed is a trade that really occurred, with its real
+    return. Nothing is simulated except WHICH of them the policy takes.
+    """
+
+    def test_a_replay_only_ever_takes_trades_that_existed(self):
+        df = _book()
+        out = sa.replay(df, ELIGIBLE, explore_rate=0.25, warmup=120)
+        self.assertGreater(len(out.taken), 0)
+        real = set(zip(df["entry_date"], df["strategy"],
+                       df["ret_on_risk"].round(9)))
+        for _, r in out.taken.iterrows():
+            self.assertIn((r["entry_date"], r["strategy"],
+                           round(r["ret_on_risk"], 9)), real)
+
+    def test_no_trade_is_taken_twice(self):
+        out = sa.replay(_book(), ELIGIBLE, explore_rate=0.30, warmup=120)
+        self.assertEqual(len(out.taken), len(out.taken.drop_duplicates()))
+
+    def test_pure_exploitation_concentrates_on_the_best_structure(self):
+        """`per_day` must be well below the day's supply or the policy has no
+        choice to express: filling 18 slots from 18 available trades gives a
+        uniform mix whatever the weights say."""
+        out = sa.replay(_book(), ELIGIBLE, explore_rate=0.0, warmup=120,
+                        per_day=2)
+        share = (out.taken["strategy"] == "Bull Put").mean()
+        self.assertGreater(share, 0.75)
+
+    def test_taking_everything_on_offer_is_not_a_choice(self):
+        """The failure mode that made the first two replays meaningless.
+        When slots meet supply, availability decides the mix, not the policy —
+        so a replay must be read together with its cadence."""
+        greedy = sa.replay(_book(), ELIGIBLE, explore_rate=0.0, warmup=120,
+                           per_day=18)
+        share = (greedy.taken["strategy"] == "Bull Put").mean()
+        self.assertLess(share, 0.40)
+
+    def test_exploration_reaches_the_other_structures(self):
+        out = sa.replay(_book(), ELIGIBLE, explore_rate=0.40, warmup=120,
+                        per_day=2)
+        self.assertGreater(out.taken["strategy"].nunique(), 2)
+
+    def test_it_never_uses_evidence_from_the_future(self):
+        """Each allocation is built only from trades entered strictly before
+        the slot it is choosing for."""
+        out = sa.replay(_book(), ELIGIBLE, explore_rate=0.25, warmup=120)
+        self.assertTrue((out.decisions["evidence_through"]
+                         < out.decisions["entry_date"]).all())
+
+    def test_the_same_seed_replays_identically(self):
+        a = sa.replay(_book(), ELIGIBLE, explore_rate=0.25, warmup=120, seed=7)
+        b = sa.replay(_book(), ELIGIBLE, explore_rate=0.25, warmup=120, seed=7)
+        pd.testing.assert_frame_equal(a.taken, b.taken)
+
+    def test_a_book_shorter_than_the_warmup_replays_nothing(self):
+        out = sa.replay(_book().head(10), ELIGIBLE, explore_rate=0.25,
+                        warmup=120)
+        self.assertEqual(len(out.taken), 0)
+        self.assertEqual(out.mean_return, 0.0)
+
+
 class TestAutoLogIntegration(unittest.TestCase):
     """The allowlist is replaced, not bypassed. Every other gate still runs.
 

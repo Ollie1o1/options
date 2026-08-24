@@ -149,7 +149,8 @@ def p_best(draws: Dict[str, np.ndarray]) -> Dict[str, float]:
 def allocate(df: pd.DataFrame, eligible: Sequence[str],
              explore_rate: float = 0.25, as_of: str = "",
              half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
-             seed: int = 20260824) -> Allocation:
+             seed: int = 20260824,
+             n_draws: int = DEFAULT_DRAWS) -> Allocation:
     """Target share of entries per eligible structure.
 
     `(1 - explore_rate)` follows the posterior; `explore_rate` is spread
@@ -164,7 +165,7 @@ def allocate(df: pd.DataFrame, eligible: Sequence[str],
     as_of = str(as_of or pd.Timestamp.today().strftime("%Y-%m-%d"))
     rate = float(min(max(explore_rate, 0.0), 1.0))
 
-    draws = posteriors(df, as_of, half_life_days, seed=seed)
+    draws = posteriors(df, as_of, half_life_days, n_draws=n_draws, seed=seed)
     draws = {k: v for k, v in draws.items() if k in eligible}
     post = p_best(draws)
 
@@ -222,6 +223,119 @@ def information_cost(alloc: Allocation, df: pd.DataFrame) -> float:
     spent = sum(w * (best - known.get(s, floor))
                 for s, w in alloc.weights.items())
     return float(max(0.0, spent))
+
+
+@dataclass
+class Replay:
+    """What the policy would have taken, and what it would have earned."""
+    taken: pd.DataFrame
+    decisions: pd.DataFrame
+    mean_return: float = 0.0
+    explore_rate: float = 0.0
+
+    @property
+    def mix(self) -> Dict[str, int]:
+        if len(self.taken) == 0:
+            return {}
+        return {str(k): int(v) for k, v
+                in self.taken["strategy"].value_counts().items()}
+
+
+def entries_per_day(df: pd.DataFrame) -> float:
+    """The book's actual entry cadence, for sizing a replay's slots."""
+    if df is None or len(df) == 0:
+        return 1.0
+    per = df.groupby("entry_date").size()
+    return float(max(1.0, round(per.mean())))
+
+
+def replay(df: pd.DataFrame, eligible: Sequence[str],
+           explore_rate: float = 0.25, warmup: int = 200,
+           half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+           seed: int = 20260824,
+           per_day: Optional[float] = None) -> Replay:
+    """Walk the policy forward over trades that actually happened.
+
+    One pass per DATE, taking at most `per_day` entries — the book's real
+    cadence. Sizing the replay by the number of historical trades instead
+    would have it take fifteen entries a day against a book that takes two:
+    it exhausts the day's supply of its first choice and then spends the
+    remaining slots on whatever is left, so AVAILABILITY rather than the
+    policy decides the realised mix. Measured at 70.6% and then 30.1% Bull
+    Put under pure exploitation, against a target weight of 99.5%.
+
+    At each slot the allocation is rebuilt from trades entered STRICTLY
+    BEFORE that date, restricted to the structures the board actually offered
+    that day, and one unused real trade of the drawn structure is taken.
+    Every return recorded really occurred; the only thing simulated is which
+    of the available trades the policy would have chosen.
+
+    The honest limit: it can only take what was on the board. After
+    2026-07-31 the book produced nothing but Bull Put, so no policy can show
+    anything else there — which is the self-sealing problem, visible.
+    """
+    cols = ["entry_date", "strategy", "ret_on_risk"]
+    dcols = ["entry_date", "wanted", "got", "evidence_through"]
+    empty = Replay(pd.DataFrame(columns=cols), pd.DataFrame(columns=dcols),
+                   0.0, float(explore_rate))
+    if df is None or len(df) <= warmup:
+        return empty
+
+    book = (df.dropna(subset=["ret_on_risk"])
+              .sort_values("entry_date", kind="mergesort")
+              .reset_index(drop=True))
+    if len(book) <= warmup:
+        return empty
+
+    slots = int(per_day if per_day else entries_per_day(book))
+    rng = np.random.default_rng(seed)
+    names = [str(s) for s in eligible]
+    dates = book["entry_date"].astype(str)
+    start_date = str(dates.iloc[warmup])
+
+    used: set = set()
+    taken: List[Dict[str, Any]] = []
+    decisions: List[Dict[str, Any]] = []
+
+    for slot_date in sorted(d for d in dates.unique() if d >= start_date):
+        past = book[dates < slot_date]
+        if len(past) == 0:
+            continue
+        evidence_through = str(past["entry_date"].max())
+        alloc = allocate(past, names, explore_rate, as_of=slot_date,
+                         half_life_days=half_life_days, seed=seed,
+                         n_draws=1000)
+        if not alloc.weights:
+            continue
+
+        for _ in range(slots):
+            today = book[(dates == slot_date) & (~book.index.isin(used))]
+            offered = [k for k in alloc.weights
+                       if (today["strategy"] == k).any()]
+            if not offered:
+                decisions.append({"entry_date": slot_date, "wanted": None,
+                                  "got": None,
+                                  "evidence_through": evidence_through})
+                break
+            probs = np.array([alloc.weights[k] for k in offered], dtype=float)
+            if probs.sum() <= 0:
+                break
+            wanted = str(rng.choice(offered, p=probs / probs.sum()))
+            pool = today[today["strategy"] == wanted]
+            pick = pool.index[0]
+            used.add(pick)
+            row = book.loc[pick]
+            taken.append({"entry_date": str(row["entry_date"]),
+                          "strategy": str(row["strategy"]),
+                          "ret_on_risk": float(row["ret_on_risk"])})
+            decisions.append({"entry_date": slot_date, "wanted": wanted,
+                              "got": wanted,
+                              "evidence_through": evidence_through})
+
+    taken_df = pd.DataFrame(taken, columns=cols)
+    mean = float(taken_df["ret_on_risk"].mean()) if len(taken_df) else 0.0
+    return Replay(taken_df, pd.DataFrame(decisions, columns=dcols), mean,
+                  float(explore_rate))
 
 
 def describe(alloc: Allocation, df: pd.DataFrame) -> List[str]:
