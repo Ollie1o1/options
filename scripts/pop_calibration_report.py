@@ -47,7 +47,8 @@ def run(db_path: str = DEFAULT_DB, model_path: str = pc.DEFAULT_MODEL_PATH,
     rel = pc.reliability(oos)
     ok, reason = pc.ship_check(rel)
     out["pop"] = {"shipped": ok, "reason": reason, "n_oos": int(len(oos)),
-                  "reliability": rel}
+                  "reliability": rel,
+                  "by_strategy": pc.strategy_reliability(oos)}
 
     model = pc.fit(df) if len(df) else None
     if model is not None:
@@ -86,6 +87,22 @@ def _print(out: Dict[str, Any]) -> None:
             print("(no out-of-sample predictions)")
         verdict = "SHIPS" if block["shipped"] else "REFUSED"
         print(f"\n  {verdict}: {block['reason']}\n")
+
+        by = block.get("by_strategy")
+        if by is not None and len(by):
+            print("  Per strategy — does the number ORDER this structure?")
+            print("  (median split of the same out-of-sample predictions; "
+                  "diagnostic only, nothing is gated on it)")
+            for _, r in by.iterrows():
+                if not bool(r["sufficient"]):
+                    print(f"    {r['strategy']:<13} n={int(r['n']):>4}   "
+                          f"too few to split")
+                    continue
+                mark = "inverted" if r["gap"] < -0.02 else ""
+                print(f"    {r['strategy']:<13} n={int(r['n']):>4}   "
+                      f"low {r['low_win']:>5.1%}   high {r['high_win']:>5.1%}   "
+                      f"gap {r['gap']:>+6.1%}  {mark}")
+            print()
 
     if not out["ret"]["shipped"] and out["pop"]["shipped"]:
         print("Read this carefully: the probability is validated, the return "

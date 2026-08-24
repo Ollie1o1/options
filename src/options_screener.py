@@ -1668,6 +1668,25 @@ def calculate_metrics(
         pop_arr = np.where(is_call, 1.0 - df["delta"].values, 1.0 + df["delta"].values)
     df["prob_profit"] = np.clip(pop_arr, 0.0, 1.0)
 
+    # Put `prob_profit` on the SELLER's side here, before anything blends into
+    # it. `calculate_probability_of_profit` returns the BUYER's probability;
+    # the Monte Carlo below is already the seller's on every one of these
+    # modes (`is_short=_is_short_mode`). Averaging one of each was the defect:
+    #
+    #     0.6*s + 0.4*(1 - s) = 0.4 + 0.2*s
+    #
+    # which crushes every seller probability in [0.5, 1.0] into [0.50, 0.60].
+    # That was the entire range of the shipped number — nothing in 909 closed
+    # trades exceeded 0.6139. A flip applied AFTER the blend, and only for
+    # Premium Selling, then gave 0.6 - 0.2*s, which falls as the true
+    # probability rises; Short Put's high-PoP half won 37.0% against its low
+    # half's 61.8%. Convert once, at the source, on the same mode set the
+    # simulation uses. See tests/test_pop_seller_convention.py.
+    SHORT_MODES = {"Premium Selling", "Credit Spreads", "Iron Condor"}
+    _is_short_mode = mode in SHORT_MODES
+    if _is_short_mode:
+        df["prob_profit"] = (1.0 - df["prob_profit"]).clip(0.0, 1.0)
+
     _pot_result = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
     df["prob_touch"] = _pot_result if _pot_result is not None else np.nan
     _em_factor = config.get("rr_expected_move_factor", 0.68)
@@ -1798,8 +1817,6 @@ def calculate_metrics(
     # Monte Carlo
     if HAS_SIMULATION:
         n_sims = config.get("monte_carlo_simulations", 10000)
-        _short_modes = {"Premium Selling", "Credit Spreads", "Iron Condor"}
-        _is_short_mode = mode in _short_modes
         # Deterministic seed for reproducible PoP across runs on the same date.
         #
         # This used `hash()` on a tuple containing a string, and Python
@@ -1864,17 +1881,18 @@ def calculate_metrics(
                 T_vals[_crush_valid], _crush_adj_iv, prem_vals[_crush_valid], r=risk_free_rate, q=_q,
             )
             if _pop_crush is not None:
+                # Same conversion as at the source: this is another BUYER's
+                # probability about to be blended into a seller's column.
+                if _is_short_mode:
+                    _pop_crush = np.clip(1.0 - np.asarray(_pop_crush), 0.0, 1.0)
                 # Blend: 70% crush-adjusted, 30% raw (uncertainty in crush magnitude)
                 df.loc[_crush_valid, "prob_profit"] = np.clip(
                     0.7 * _pop_crush + 0.3 * df.loc[_crush_valid, "prob_profit"].values, 0.0, 1.0
                 )
 
-    # For Premium Selling, flip PoP to reflect the SELLER's perspective.
-    # calculate_probability_of_profit() returns the BUYER's PoP (P option expires ITM).
-    # Seller profits when that same option expires worthless, so seller's PoP = 1 − buyer's PoP.
-    # e.g. OTM put buyer: 30% PoP → seller: 70% PoP (which is what we want to score highly).
-    if mode == "Premium Selling":
-        df["prob_profit"] = (1.0 - df["prob_profit"]).clip(0.0, 1.0)
+    # NOTE: `prob_profit` is already the seller's on short modes — converted at
+    # the source, above, before the Monte Carlo blend. A second flip here is
+    # what produced 0.6 - 0.2*s for Premium Selling.
 
     # Theoretical value and P(ITM) using market IV (for display/reference)
     d1, d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, IV_vals, q=_q)

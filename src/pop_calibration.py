@@ -49,8 +49,19 @@ DEFAULT_FEATURES: Tuple[str, ...] = (
 )
 
 TRAINING_COLUMNS: Tuple[str, ...] = DEFAULT_FEATURES + (
-    "strategy", "entry_date", "won", "ret_on_risk",
+    "strategy", "entry_date", "won", "ret_on_risk", "is_short",
 )
+
+#: Structures where the account is NET SHORT premium. The distinction is not
+#: cosmetic: a high |delta| makes a long call MORE likely to win and a short
+#: put LESS likely to, so a single shared coefficient lets whichever family has
+#: more rows set the sign for both. With 383 long-premium and 526 short-premium
+#: closed trades, that is exactly what happened — a TLT short put at delta 0.05
+#: scored 27% while an NVDA short put at delta 0.36 scored 47%.
+SHORT_STRATEGIES = frozenset({
+    "Bull Put", "Bear Call", "Short Put", "Short Call", "Iron Condor",
+    "Iron Butterfly", "Credit Spread", "Short Strangle", "Short Straddle",
+})
 
 DEFAULT_MODEL_PATH = os.path.join("data", "pop_calibration.json")
 
@@ -80,6 +91,10 @@ class Model:
     trained_through: str
     base_rate: float = 0.5
     kind: str = "logistic"
+    #: True when the fit carried short/long interaction terms. Only possible
+    #: when BOTH families were present in training — an interaction with no
+    #: variation to fit is perfectly collinear with its own main effect.
+    interacted: bool = False
     meta: Dict[str, Any] = field(default_factory=dict)
 
     def coefficient(self, name: str) -> float:
@@ -108,19 +123,39 @@ def _continuous(df: pd.DataFrame, features: Sequence[str]) -> np.ndarray:
     return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def short_flags(df: pd.DataFrame) -> np.ndarray:
+    """1.0 where the account is net short premium, 0.0 where it is long."""
+    if "is_short" in df:
+        vals = pd.to_numeric(df["is_short"], errors="coerce")
+        if vals.notna().any():
+            return vals.fillna(0.0).astype(float).to_numpy()
+    labels = (df["strategy"].astype(str) if "strategy" in df
+              else pd.Series([""] * len(df), index=df.index))
+    return labels.isin(SHORT_STRATEGIES).astype(float).to_numpy()
+
+
 def _design(df: pd.DataFrame, features: Sequence[str],
-            strategies: Sequence[str], mean: np.ndarray,
-            std: np.ndarray) -> np.ndarray:
-    """Intercept, standardised continuous features, then one-hot strategies.
+            strategies: Sequence[str], mean: np.ndarray, std: np.ndarray,
+            interacted: bool) -> np.ndarray:
+    """Intercept, standardised features, short/long interactions, strategies.
 
     The first strategy level is dropped as the baseline. An unseen strategy
     encodes as all-zero, which puts it on the baseline rather than raising —
     a new structure should read as "no strategy-specific adjustment", not as
     a crash on a live board.
+
+    When `interacted`, every continuous feature appears twice: once as its own
+    main effect and once multiplied by the short flag. That lets |delta|, DTE
+    and IV carry a DIFFERENT sign for a seller than for a buyer, which they
+    genuinely do. A strategy one-hot cannot express this on its own — it moves
+    the intercept per structure, not the slope.
     """
     x = (_continuous(df, features) - mean) / std
     n = len(df)
     parts: List[np.ndarray] = [np.ones((n, 1)), x]
+    if interacted:
+        s = short_flags(df).reshape(-1, 1)
+        parts.extend([s, x * s])
     if len(strategies) > 1:
         labels = df["strategy"].astype(str).to_numpy() if "strategy" in df \
             else np.array([""] * n)
@@ -162,7 +197,12 @@ def _fit_core(df: pd.DataFrame, features: Sequence[str], target: str,
 
     strategies = (sorted(df["strategy"].astype(str).unique().tolist())
                   if "strategy" in df else [])
-    x = _design(df, features, strategies, mean, std)
+    # An interaction needs both families present; with only one, the term is
+    # perfectly collinear with its own main effect and the ridge would simply
+    # halve the coefficient.
+    flags = short_flags(df)
+    interacted = bool(len(flags)) and 0 < float(flags.mean()) < 1
+    x = _design(df, features, strategies, mean, std, interacted)
 
     k = x.shape[1]
     penalty = np.eye(k) * ridge
@@ -190,7 +230,8 @@ def _fit_core(df: pd.DataFrame, features: Sequence[str], target: str,
     return Model(features=features, strategies=strategies, beta=beta,
                  mean=mean, std=std, n_train=int(len(df)),
                  trained_through=str(dates.max()) if len(df) else "",
-                 base_rate=float(y.mean()) if len(y) else 0.5, kind=kind)
+                 base_rate=float(y.mean()) if len(y) else 0.5, kind=kind,
+                 interacted=interacted)
 
 
 def fit(df: pd.DataFrame, features: Sequence[str] = DEFAULT_FEATURES,
@@ -217,7 +258,8 @@ def predict(model: Model, df: pd.DataFrame) -> np.ndarray:
     A probability in [0, 1] for a logistic model; an expected return on
     capital at risk, unbounded and signed, for a linear one.
     """
-    x = _design(df, model.features, model.strategies, model.mean, model.std)
+    x = _design(df, model.features, model.strategies, model.mean, model.std,
+                model.interacted)
     eta = x @ model.beta
     if model.kind == "linear":
         return np.asarray(eta, dtype=float)
@@ -522,6 +564,9 @@ def load_training_set(db_path: str) -> pd.DataFrame:
         # coincide only for long premium; on the wrong denominator the same
         # trades give the opposite sign.
         "ret_on_risk": pnl / risk,
+        # Which side of the premium the account is on. |delta|, DTE and IV all
+        # carry the OPPOSITE sign for a seller, so the fit needs to know.
+        "is_short": df["strategy_name"].astype(str).isin(SHORT_STRATEGIES).astype(int),
     })
 
     for col in ("abs_delta", "dte", "entry_iv", "iv_rank_score"):
@@ -545,6 +590,7 @@ def save_model(model: Model, path: str, *, shipped: bool, reason: str,
         "mean": [float(m) for m in model.mean],
         "std": [float(s) for s in model.std],
         "n_train": model.n_train,
+        "interacted": model.interacted,
         "trained_through": model.trained_through,
         "base_rate": model.base_rate,
         "meta": model.meta,
@@ -582,6 +628,7 @@ def load_model(path: str = DEFAULT_MODEL_PATH) -> Optional[Model]:
             mean=np.asarray(payload["mean"], dtype=float),
             std=np.asarray(payload["std"], dtype=float),
             n_train=int(payload.get("n_train", 0)),
+            interacted=bool(payload.get("interacted", False)),
             trained_through=str(payload.get("trained_through", "")),
             base_rate=float(payload.get("base_rate", 0.5)),
             meta=dict(payload.get("meta", {})),
@@ -626,6 +673,76 @@ def row_features(row: Dict[str, Any]) -> Dict[str, float]:
     width = pick(("spread_width", "width"))
     out["credit_to_width"] = credit / width if width else 0.0
     return out
+
+
+def strategy_reliability(oos: pd.DataFrame, min_n: int = 30) -> pd.DataFrame:
+    """Per-strategy median split of the out-of-sample predictions.
+
+    The aggregate reliability curve is what `ship_check` tests, and it can be
+    clean while an individual cell runs backwards. This is the diagnostic that
+    shows it. `gap` is the high half's win rate minus the low half's: positive
+    means the model orders that structure, negative means it inverts it.
+
+    Reported, never gated on. Picking which strategies to display using the
+    same data that measured them would fit the display to noise — at ~50 rows
+    a side these cells are worth about 1.5 standard errors.
+    """
+    cols = ["strategy", "n", "low_win", "high_win", "gap", "sufficient"]
+    if len(oos) == 0 or "strategy" not in oos:
+        return pd.DataFrame(columns=cols)
+
+    rows: List[Dict[str, Any]] = []
+    for name, g in oos.groupby("strategy"):
+        n = int(len(g))
+        entry: Dict[str, Any] = {"strategy": str(name), "n": n,
+                                 "low_win": float("nan"),
+                                 "high_win": float("nan"),
+                                 "gap": float("nan"),
+                                 "sufficient": n >= min_n}
+        if n >= min_n:
+            med = g["predicted"].median()
+            lo, hi = g[g["predicted"] <= med], g[g["predicted"] > med]
+            if len(lo) and len(hi):
+                entry["low_win"] = float(lo["won"].mean())
+                entry["high_win"] = float(hi["won"].mean())
+                entry["gap"] = entry["high_win"] - entry["low_win"]
+        rows.append(entry)
+    return pd.DataFrame(rows, columns=cols).sort_values("n", ascending=False)
+
+
+def probability_for(row: Dict[str, Any],
+                    model: Optional[Model]) -> Optional[float]:
+    """The calibrated probability for one row, or None without a model."""
+    if model is None:
+        return None
+    frame = pd.DataFrame([{**row_features(row),
+                           "strategy": str(row.get("strategy")
+                                           or row.get("strategy_name") or "")}])
+    return float(predict(model, frame)[0])
+
+
+def provenance(path: str = DEFAULT_MODEL_PATH) -> Optional[str]:
+    """One line naming what licences the number, or None if nothing does.
+
+    The closing clause is not boilerplate. Measured out-of-sample on this
+    book, win rate rises monotonically with the calibrated probability while
+    money does not follow it — the 0.4-0.5 bucket wins 44.3% at PF 0.66 and
+    the 0.3-0.4 bucket wins 36.5% at PF 1.13. A reader who takes the
+    probability as a profitability claim is reading it wrong, and the board
+    has to say so where the number is.
+    """
+    try:
+        with open(path) as fh:
+            payload = json.load(fh)
+    except Exception:
+        return None
+    if not payload.get("shipped"):
+        return None
+    reason = str(payload.get("reason", ""))
+    slope = reason.split("—")[0].strip() if "—" in reason else reason.strip()
+    return (f"Calibrated on {payload.get('n_train', 0)} closed trades through "
+            f"{payload.get('trained_through', '?')} · walk-forward {slope} · "
+            f"probability of closing green, not expected profit")
 
 
 def describe_row(row: Dict[str, Any], model: Optional[Model],

@@ -444,6 +444,212 @@ class TestBoardRendering(unittest.TestCase):
         self.assertNotIn("CalPoP", out)
         self.assertIn("PoP:", out)  # the rest of the board is untouched
 
+    def _board(self):
+        import io, contextlib
+        rows = pd.DataFrame([{
+            "symbol": "NVDA", "type": "put", "strike": 140.0,
+            "expiration": "2026-10-16", "prob_profit": 0.78, "rr_ratio": 0.3,
+            "iv_percentile_30": 0.55, "delta": -0.22, "vega": 0.11,
+            "ev_per_contract": 12.0, "spread_pct": 0.03, "T_years": 0.15,
+            "impliedVolatility": 0.32, "net_credit": 1.2, "spread_width": 5.0,
+            "strategy": "Bull Put",
+        }])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.cd.print_comparison_table(rows, mode="Credit Spreads")
+        return buf.getvalue()
+
+    def test_the_board_carries_the_calibrated_column_and_its_stamp(self):
+        df = _planted(beta=2.0)
+        model = pc.fit(df, features=list(pc.DEFAULT_FEATURES))
+        rel = pc.reliability(pc.walk_forward(df, seed_n=300, step=50))
+        self.cd._CAL_CACHE.update(model=model, rel=rel, mod=pc,
+                                  stamp="Calibrated on 909 closed trades "
+                                        "through 2026-08-18 · walk-forward "
+                                        "slope 0.711 · probability of closing "
+                                        "green, not expected profit")
+        out = self._board()
+        self.assertIn("Cal", out)
+        self.assertIn("Calibrated on 909 closed trades", out)
+        self.assertIn("not expected profit", out)
+
+    def test_the_board_is_unchanged_when_nothing_is_calibrated(self):
+        self.cd._CAL_CACHE.update(model=None, rel=None, mod=None, stamp=None)
+        out = self._board()
+        self.assertIn("PoP", out)
+        self.assertNotIn("Calibrated on", out)
+
+
+class TestDirectionAwareFeatures(unittest.TestCase):
+    """A feature can mean the opposite thing to a buyer and a seller.
+
+    A high |delta| makes a LONG call more likely to win and a SHORT put more
+    likely to lose. Fitting one shared coefficient across 383 long-premium and
+    526 short-premium rows lets the larger family set the sign for both. Caught
+    by rendering the board on 2026-08-24: a TLT short put at delta 0.05 scored
+    27% while an NVDA short put at delta 0.36 scored 47% — safer read as worse.
+
+    The same reversal is visible in the outcomes it produced: the pooled
+    model's high-prediction half of Bear Call won 21.2pp LESS than its low
+    half, and Short Put 16.0pp less.
+    """
+
+    def _mixed(self, n=1200, seed=5):
+        """Half long premium, half short, with OPPOSITE delta signs."""
+        rng = np.random.default_rng(seed)
+        rows = []
+        for i in range(n):
+            short = i % 2 == 0
+            d = float(rng.uniform(0.05, 0.60))
+            # Short: safer (low delta) wins more. Long: higher delta wins more.
+            p = (1.0 - d) if short else d
+            rows.append({
+                "abs_delta": d, "dte": 30.0, "entry_iv": 0.3,
+                "iv_rank_score": 0.5, "credit_to_width": 0.25 if short else 0.0,
+                "strategy": "Bull Put" if short else "Long Call",
+                "entry_date": (pd.to_datetime("2026-01-01")
+                               + pd.Timedelta(days=i // 8)).strftime("%Y-%m-%d"),
+                "won": int(rng.random() < p),
+            })
+        return pd.DataFrame(rows)
+
+    def test_the_seller_side_is_not_ordered_by_the_buyer_sides_sign(self):
+        df = self._mixed()
+        oos = pc.walk_forward(df, seed_n=400, step=50)
+        shorts = oos[oos["strategy"] == "Bull Put"]
+        self.assertGreater(len(shorts), 100)
+        med = shorts["predicted"].median()
+        lo = shorts[shorts["predicted"] <= med]["won"].mean()
+        hi = shorts[shorts["predicted"] > med]["won"].mean()
+        self.assertGreater(
+            hi, lo + 0.10,
+            f"short-premium rows the model rates HIGHER win {hi:.1%} against "
+            f"{lo:.1%} for the ones it rates lower — the seller side is "
+            f"ordered by the buyer side's sign")
+
+    def test_the_buyer_side_is_still_ordered_correctly(self):
+        df = self._mixed()
+        oos = pc.walk_forward(df, seed_n=400, step=50)
+        longs = oos[oos["strategy"] == "Long Call"]
+        med = longs["predicted"].median()
+        lo = longs[longs["predicted"] <= med]["won"].mean()
+        hi = longs[longs["predicted"] > med]["won"].mean()
+        self.assertGreater(hi, lo + 0.10)
+
+    def test_a_safer_short_put_outranks_a_riskier_one(self):
+        """The board case, directly: same structure, only delta differs."""
+        model = pc.fit(self._mixed())
+        safe = pc.probability_for({"delta": -0.05, "dte": 30,
+                                   "impliedVolatility": 0.3, "iv_rank": 0.5,
+                                   "net_credit": 1.25, "spread_width": 5.0,
+                                   "strategy": "Bull Put"}, model)
+        risky = pc.probability_for({"delta": -0.36, "dte": 30,
+                                    "impliedVolatility": 0.3, "iv_rank": 0.5,
+                                    "net_credit": 1.25, "spread_width": 5.0,
+                                    "strategy": "Bull Put"}, model)
+        assert safe is not None and risky is not None
+        self.assertGreater(safe, risky,
+                           f"delta 0.05 scored {safe:.0%} and delta 0.36 "
+                           f"scored {risky:.0%}")
+
+    def test_the_loader_marks_which_side_of_the_trade_each_row_is(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ledger.db")
+            TestLoadTrainingSet()._ledger(path)
+            df = pc.load_training_set(path)
+        self.assertEqual(int(df[df["strategy"] == "Bull Put"].iloc[0]["is_short"]), 1)
+        self.assertEqual(int(df[df["strategy"] == "Long Call"].iloc[0]["is_short"]), 0)
+
+
+class TestStrategyDiagnostics(unittest.TestCase):
+    """Aggregate calibration can hide a cell that runs backwards.
+
+    Measured 2026-08-24 with the interaction terms in place: Bull Put +17.7pp,
+    Iron Condor +14.3pp, Long Put +44.5pp — but Bear Call -17.3pp and Short
+    Put -20.0pp. Those cells hold ~50 rows a side, so they are roughly 1.5 SE
+    and cannot carry a decision. They are REPORTED rather than gated on:
+    choosing which strategies to display from the same data that measured them
+    is fitting the display to noise.
+    """
+
+    def _oos(self):
+        rows = []
+        for i in range(400):
+            good = i % 2 == 0
+            rows.append({"strategy": "Bull Put" if good else "Bear Call",
+                         "predicted": 0.7 if i % 4 < 2 else 0.3,
+                         "won": int((i % 4 < 2) == good)})
+        return pd.DataFrame(rows)
+
+    def test_each_strategy_gets_its_own_row(self):
+        out = pc.strategy_reliability(self._oos(), min_n=10)
+        self.assertEqual(set(out["strategy"]), {"Bull Put", "Bear Call"})
+
+    def test_an_inverted_cell_is_flagged(self):
+        out = pc.strategy_reliability(self._oos(), min_n=10)
+        bear = out[out["strategy"] == "Bear Call"].iloc[0]
+        bull = out[out["strategy"] == "Bull Put"].iloc[0]
+        self.assertLess(bear["gap"], 0, "an inverted cell must read negative")
+        self.assertGreater(bull["gap"], 0)
+
+    def test_a_thin_strategy_is_reported_without_a_gap(self):
+        thin = pd.DataFrame({"strategy": ["Long Put"] * 4,
+                             "predicted": [0.4, 0.5, 0.6, 0.7],
+                             "won": [0, 1, 1, 1]})
+        out = pc.strategy_reliability(thin, min_n=30)
+        self.assertEqual(len(out), 1)
+        self.assertFalse(bool(out.iloc[0]["sufficient"]))
+
+
+class TestProvenance(unittest.TestCase):
+    """A number on a quant board travels with the evidence that licences it.
+    Without that stamp the reader cannot tell a validated figure from a
+    decorative one — which is how `quality_score` sat on these boards."""
+
+    def _artifact(self, d, shipped=True):
+        df = _planted(beta=2.0)
+        model = pc.fit(df, features=["abs_delta"])
+        rel = pc.reliability(pc.walk_forward(df, features=["abs_delta"],
+                                             seed_n=300, step=50))
+        path = os.path.join(d, "m.json")
+        pc.save_model(model, path, shipped=shipped,
+                      reason="slope 0.900, 95% CI [0.700, 1.100] — clears zero "
+                             "on 5 buckets, n=581",
+                      reliability_table=rel)
+        return path
+
+    def test_the_stamp_names_the_sample_and_the_slope(self):
+        with tempfile.TemporaryDirectory() as d:
+            line = pc.provenance(self._artifact(d))
+        self.assertIsNotNone(line)
+        assert line is not None
+        self.assertIn("3000", line)          # trades trained on
+        self.assertIn("slope", line)
+        self.assertIn("not expected profit", line.lower())
+
+    def test_an_unshipped_artifact_has_no_stamp(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pc.provenance(self._artifact(d, shipped=False)))
+
+    def test_a_missing_artifact_has_no_stamp(self):
+        self.assertIsNone(pc.provenance("/nonexistent/m.json"))
+
+    def test_probability_for_returns_none_without_a_model(self):
+        self.assertIsNone(pc.probability_for({"delta": -0.3}, None))
+
+    def test_probability_for_is_the_same_number_the_line_quotes(self):
+        df = _planted(beta=2.0)
+        model = pc.fit(df, features=["abs_delta"])
+        rel = pc.reliability(pc.walk_forward(df, features=["abs_delta"],
+                                             seed_n=300, step=50))
+        row = {"abs_delta": 1.0, "strategy": "Bull Put"}
+        p = pc.probability_for(row, model)
+        self.assertIsNotNone(p)
+        assert p is not None
+        line = pc.describe_row(row, model=model, rel=rel)
+        assert line is not None
+        self.assertIn(f"{p:.0%}", line)
+
 
 class TestReport(unittest.TestCase):
     """The report is what turns a fit into a shipped artifact, so its refusal
