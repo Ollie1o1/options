@@ -604,12 +604,19 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
             closed_n, = conn.execute(
                 "SELECT COUNT(*) FROM candidate_positions WHERE status = ?",
                 (CLOSED,)).fetchone()
+            # Positions entered TODAY have not missed a mark run, they are
+            # waiting for their first. Counting them made this go CRITICAL
+            # every day: 2026-08-24 reported 3,905 never-marked and every one
+            # was entered that morning, while every earlier entry date showed
+            # zero. An alarm that is red daily carries the same information as
+            # one that is never red.
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             dark_n, = conn.execute(
                 "SELECT COUNT(*) FROM candidate_positions p "
-                "WHERE p.status = ? AND NOT EXISTS ("
+                "WHERE p.status = ? AND p.entry_date < ? AND NOT EXISTS ("
                 "  SELECT 1 FROM candidate_marks m "
                 "   WHERE m.contract_key = p.contract_key)",
-                (OPEN,)).fetchone()
+                (OPEN, today)).fetchone()
     except Exception:
         return ["  cand marks     unreadable                        [CRITICAL]"]
 

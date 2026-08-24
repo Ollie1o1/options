@@ -70,7 +70,7 @@ Not every part of this repo is equally proven. These tiers are honest about wher
 
 This tool separates **verifiable facts** from **unproven predictions**, and labels each honestly.
 
-### Where the evidence stands — snapshot, 2026-08-03
+### Where the evidence stands — snapshot, 2026-08-24
 
 A summary of settled questions. It is a snapshot and will go stale; the live
 numbers come from `reports/TRACK_RECORD.md` and the checkpoint reports, which
@@ -78,32 +78,59 @@ are generated, not written by hand.
 
 | Question | Verdict | Evidence |
 |---|---|---|
-| Does the scorer rank **long calls**? | **STOP** — resolved 2026-07-31, do not re-litigate without new data | n=92 closed, Pearson −0.065, rank IC −0.132, P(true rank IC ≥ 0.08) = 4%. Gate v1 and v2 agree. |
-| Does the **short-premium family** (bull put / bear call / short put) make money? | **READY** (Arm A) — authorises capital, not a trade | P(true median net RoR > 0) = 100% on a clustered bootstrap over entry days. |
-| Does the scorer rank **within** that family? | **EXTEND** (Arm B) — decides 2026-08-15 | Rank IC ≈ +0.10, posterior between the bands. Extension 1 of 2. |
 | Is real money switched on? | **No.** | No gate authorises it and no live path is wired. |
+| Does the **book** have a measured edge? | **No.** | 912 closed. Equal-weighted on capital at risk, PF **1.044, CI [0.87, 1.24]** — contains 1. Always name the denominator: on entry premium the same trades give 0.971. |
+| Which structure makes money? | **Bull Put, and only Bull Put.** | Mean return on capital at risk **+16.80% [+6.85%, +26.95%]**, P(highest true mean) = 99.0%. Short Put +0.59%, Long Call −0.18%, Bear Call −4.73%, Long Put −4.96%, Iron Condor −5.33%. |
+| Should Bear Call / Iron Condor trade? | **No** — measured failure, not absence of evidence | Under the exits actually used, Iron Condor needs a 60.1% win rate and delivers 50.0% (−10.1pp over 142 closed); Bear Call needs 66.7% against 59.3% (−7.4pp). |
+| Does the scorer rank **long calls**? | **STOP** — resolved 2026-07-31, do not re-litigate without new data | n=92 closed, Pearson −0.065, rank IC −0.132, P(true rank IC ≥ 0.08) = 4%. |
+| Is the per-contract **probability of closing green** trustworthy? | **Yes** — it passed its own out-of-sample guard | Walk-forward over 612 held-out trades: reliability slope **0.572, 95% CI [0.329, 0.815]**. With the strategy term removed entirely it is 0.871 [0.577, 1.165], so the discrimination comes from the contract, not the structure label. |
+| Does anything predict **expected profit** per contract? | **No.** | Predicting return directly: slope 0.368, CI [−0.252, 0.987]. Decomposed as `p·W + (1−p)·L`: slope 0.442, CI [−0.891, 1.774]. Both **refused** by the guard; neither is displayed. |
+| Does anything **order the board**? | **Not established.** | Pre-declared race, 2026-08-24, 612 out-of-sample closed trades, rank IC vs return on risk with days as bootstrap clusters: `cal_pop` +0.1431 [−0.0420, +0.3277], `exp_return` +0.0087, `quality_score` −0.0194, `abs_delta` −0.0821. Every interval contains zero. |
+| Does **EV** order the board? | **Frozen — reads out 2026-11-19.** | `docs/PREREG_RANKER_TEST.md`, one look at n=1,424 closed gate survivors (currently 312). Do not run early or route around it. |
 
-**Read Arm A's READY with its caveats attached, not separately.** The gate
-prints them on every run: the tail is unobserved (under two months, no
-volatility shock, and the affordability cap excludes every large loss the wider
-ledger contains), and exit fidelity is degraded — see below. A high posterior on
-this data means *no evidence against*, not *the tail has been survived*.
+**What `#1` on the board means.** The highest EV *after its own trading costs*,
+among candidates that survived the gates. It is **not** a claim that #1 wins
+most often — no key has earned that, and the one the board sorts by is under a
+frozen pre-registration. The board prints this under every comparison table.
 
-**The scheduler is not running, and that is an operator-only fix.** The three
-`com.ollie.options.*` LaunchAgents have not fired since 2026-06-15, so exit
-checks happen only when someone opens the screener; 94% of stopped trades ran
-past their stop. This biases recorded losses *upward*, so it does not threaten a
-positive verdict — but the exit rules in this repo describe what was intended,
-not what was enforced. To fix it: **System Settings → General → Login Items &
-Extensions → Allow in the Background**, enable the three `com.ollie.options.*`
-entries. Nothing scheduled runs until then. Verify afterwards with `python -m
-src.maintenance --health` — the banner clears on its own once the agents start
-writing `logs/launchagent.log` again.
+**Win rate is not profit, and on this book they disagree.** Out-of-sample, the
+calibrated probability orders win rate cleanly and monotonically while money
+does not follow it: the 0.4–0.5 bucket wins 44.3% at PF 0.66 while the 0.3–0.4
+bucket wins 36.5% at PF 1.13. Read `CalPoP` as the probability of closing
+green and nothing more; the board says so beside the number.
+
+**Entries are drawn at random among gate survivors, by design.** A cohort
+selected by rule X cannot be used to test rule X. So the pick at the top of
+your board and the trade the book actually enters are deliberately different
+things, and will stay that way until the pre-registration reads out.
 
 **Descriptive layer — verifiable (trust the numbers, mind the staleness).**
 Market prices, IV rank/percentile, spreads, open interest, and Greeks are computed from the live chain. As of the trust-data-integrity work, every contract also carries:
 - **Quote provenance & freshness** — `quote_source`, `quote_as_of`, `quote_age_min`, and a `quote_freshness` label (`fresh` / `delayed` / `stale` / `unknown`). Stale quotes are flagged in the output and lightly penalized, never silently served. Aggregate freshness is reported after each scan.
 - **IV cross-validation** — Yahoo's reported implied volatility is verified against the IV implied by each contract's own mid price (Black-Scholes inversion). Where Yahoo's value is wrong, the solved IV is adopted for all downstream Greeks/PoP/EV math and the correction is shown (`IV corrected (yahoo 72% → solved 38%)`) and logged.
+
+**Calibrated layer — validated, and narrow on purpose.**
+`CalPoP` sits beside `PoP` on every board. `PoP` is the model's theoretical
+probability; `CalPoP` is fitted to what the exit rules *actually did* on 912
+closed trades and checked out of sample. It reads as, for example,
+`CalPoP 46% — at this level 47% of 137 out-of-sample analogues closed green
+[39%, 56%]`, and the table carries a stamp naming the sample, the walk-forward
+slope and its CI.
+
+It draws **nothing** unless a model was fitted, cleared its reliability guard,
+and the row lands in a bucket that guard actually checked. There is deliberately
+no fallback to the old `pop_score` — a silent substitution is how `quality_score`
+ended up ranking these boards unnoticed. Refit with
+`python -m scripts.pop_calibration_report`, which prints both reliability curves,
+both verdicts, and a per-strategy diagnostic showing which structures the number
+orders and which it inverts. A refusal is a successful measurement, not a failed
+run: `load_model` returns `None` for a refused artifact so it can never reach a
+board.
+
+Known limits, printed by that report: within Bear Call and Short Put the ordering
+still inverts (~50 rows a side, about 1.5 standard errors). Those cells are
+reported, never gated on — choosing what to display from the same data that
+measured it fits the display to noise.
 
 **Predictive layer — experimental (do not treat as established).**
 The composite `quality_score`, the AI `final_score`, and the ranked order are **models under evaluation**, not proven edges. The out-of-sample evidence is surfaced live in the output as an evidence banner shaped like `Ranking model: EXPERIMENTAL — OOS IC ±0.XX (p=0.XX, n=XX) | gate: <STATE> (n=X/50)`, followed by a second line giving the walk-forward artifact's own age (flagged once it's over 30 days stale — it only re-runs monthly) and the cohort's Pearson/rank IC side by side. It is read live from the validation artifacts, not hardcoded — it updates as evidence accumulates and will only read READY once the forward-cohort gate fires. **For current numbers, see [reports/TRACK_RECORD.md](reports/TRACK_RECORD.md)** (refreshed weekly) and [docs/VALIDATION_POWER.md](docs/VALIDATION_POWER.md) for the power analysis behind the gate.
@@ -857,11 +884,54 @@ It:
 
 - Runs a **Discovery scan** across the top 100 most-liquid tickers (thousands of contracts screened).
 - Applies the **baseline** weight profile (a snapshot of `config.json`'s `composite_weights` — the control).
-- After scoring, takes the **top 5 picks** by `quality_score` and logs them to `paper_trades.db`.
+- Takes up to **5 picks** and logs them to `paper_trades.db`. **Not by `quality_score`** — that was removed as a sort key (its top quintile is the worst cell in the ledger: 31.6% win rate, −19.9% return on capital, against +5.2% for the [0.55, 0.65) bucket; Wilcoxon p=0.89 at the #1 slot). It survives only as a tie-break. Boards are ordered by EV net of trading cost, and the entries themselves are **drawn at random among gate survivors** so the resulting cohort can test the ordering — a cohort selected by rule X cannot test rule X.
 - **Deduplicates**: if you re-run the same day under the same profile, duplicates are skipped so noise doesn't pollute the dataset.
 - **No prompts** (`--auto`): runs end-to-end unattended.
 
 Each auto-logged trade is identical to a manually-logged one — it appears in the portfolio view (`python -m src.check_pnl` or `7` at the mode menu), contributes to portfolio Greeks/stress test, and can be closed with `--close-trades`.
+
+### Which structure gets logged — allocation, not a name list
+
+Live since 2026-08-24 (`config.json → auto_log.allocation`). Before it, the
+auto-logger used `allowed_strategies: ["Bull Put"]`, which is **self-sealing**:
+nothing outside the list can enter the book, so nothing outside it can ever
+accumulate the evidence that would let it in. Bear Call, Short Put and Iron
+Condor last entered on 2026-07-30/31, Long Put on 2026-07-13 — and under that
+list, never again, whatever the market did.
+
+What replaces it is a **share per structure**: `(1 − explore_rate)` follows a
+bootstrap posterior of mean return on capital at risk, and `explore_rate` is
+spread uniformly so no door closes permanently. Evidence **decays by age**, so a
+structure going stale widens rather than hardens, and if Bull Put degrades the
+weight moves on its own with no config edit. The draw is deterministic per
+contract (blake2b, never the builtin `hash`, which Python randomises per
+process), so entries replay.
+
+`explore_rate` is **0.15**, chosen by a walk-forward policy replay over trades
+that actually happened rather than by taste:
+
+| explore | mean return on risk | 95% CI |
+|---|---|---|
+| 0% | +6.64% | [+2.60%, +11.01%] |
+| **15%** | **+2.66%** | **[+0.47%, +7.59%]** |
+| 25% | +2.68% | [−1.55%, +6.70%] |
+| 40% | +1.80% | [−4.21%, +6.41%] |
+
+15% is the highest rate whose backtested return still excludes zero. **Read the
+replay for what it is:** it prices the *cost* of exploring and structurally
+cannot price the benefit — a fixed history has no regime change for the
+insurance to pay off against, so it is biased against exploration by
+construction. It is a price tag, not a verdict.
+
+`eligible_strategies` is the hard rail and deliberately excludes **Bear Call and
+Iron Condor**: those two are not unmeasured, they fail their own breakeven
+(−7.4pp and −10.1pp). Exploration buys information where the edge is *unknown*;
+it is not a licence to re-run a structure already measured negative. Live
+admission: Bull Put 88%, Long Call 3.0%, Long Put 3.2%, Short Put 3.4%.
+
+Nothing else changed. Every other gate — friction, EV, earnings, position
+sizing, the long-premium DTE floor — still runs first and still refuses. Set
+`allocation.enabled: false` to restore the old allowlist exactly.
 
 ### A/B-testing weight sets
 

@@ -571,6 +571,80 @@ def auto_log_budget_cap(cfg_path: str = "config.json"):
         return None
 
 
+_ALLOCATION_CACHE: dict = {}
+
+
+def _allocation_cache_clear() -> None:
+    """Drop the memoised allocation. Called by tests and after a refit."""
+    _ALLOCATION_CACHE.clear()
+
+
+def _allocation_for(cfg: dict, cfg_path: str):
+    """The live strategy allocation, or None when the allowlist still rules.
+
+    Memoised per config path: it reads the whole closed book to build its
+    posteriors, and a scan asks about every candidate.
+    """
+    alloc_cfg = (cfg.get("auto_log") or {}).get("allocation") or {}
+    if not alloc_cfg.get("enabled"):
+        return None
+    key = str(cfg_path)
+    if key in _ALLOCATION_CACHE:
+        return _ALLOCATION_CACHE[key]
+
+    alloc = None
+    try:
+        from . import pop_calibration as _pc
+        from . import strategy_allocation as _sa
+        book = _pc.load_training_set(
+            _repo_path(alloc_cfg.get("ledger_path") or "paper_trades.db"))
+        book = book.dropna(subset=["ret_on_risk"]) if len(book) else book
+        alloc = _sa.allocate(
+            book,
+            alloc_cfg.get("eligible_strategies") or [],
+            explore_rate=float(alloc_cfg.get("explore_rate", 0.25)),
+            as_of=str(alloc_cfg.get("as_of") or ""),
+            half_life_days=float(alloc_cfg.get("half_life_days", 45.0)))
+    except Exception:
+        # A broken allocation must not silently widen what the book takes.
+        logging.warning("strategy allocation unavailable; falling back to the "
+                        "allowlist", exc_info=True)
+        alloc = None
+    if alloc is not None and not alloc.weights:
+        # Empty weights mean the book had no structure with enough closed
+        # trades to form a posterior — a fresh checkout, a missing ledger, or
+        # CI. That is not a licence to trade everything: it is the case where
+        # the allowlist should rule. `allocate` used to return UNIFORM here,
+        # which on PR #63 admitted Long Call at 25%.
+        logging.warning("strategy allocation has no evidence to work from; "
+                        "the allowlist stands")
+        alloc = None
+    _ALLOCATION_CACHE[key] = alloc
+    return alloc
+
+
+def _admission_key(trade: dict) -> Optional[str]:
+    """A stable identity for one candidate, or None if it has none.
+
+    None matters. The draw is deterministic in this key, so a key that is the
+    same for every candidate of a structure makes the decision all-or-nothing
+    per structure per day rather than per contract, and the realised share
+    never approaches its target. The auto-log path called the allowlist with
+    `{"strategy_name": ...}` and nothing else, which produced exactly that:
+    `"|Bull Put|||"` for every Bull Put on the board.
+    """
+    for name in ("contract_key", "entry_id", "scan_id"):
+        val = trade.get(name)
+        if val:
+            return str(val)
+    parts = [str(trade.get(k) or "") for k in
+             ("symbol", "ticker", "expiration", "strike", "type",
+              "short_put_strike", "short_call_strike")]
+    if not any(parts):
+        return None
+    return "|".join([str(trade.get("strategy_name") or "")] + parts)
+
+
 def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tuple:
     """
     Phase 1 cohort quarantine. Returns one of:
@@ -597,6 +671,30 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
     allowed = set(al.get("allowed_strategies") or [])
     paper_only = set(al.get("paper_only_strategies") or [])
     strat = str(trade.get("strategy_name") or "")
+
+    # An allowlist by NAME is self-sealing: nothing outside it can enter, so
+    # nothing outside it can ever accumulate the evidence that would let it
+    # in. When an allocation is configured it replaces the `allowed` set with
+    # a share per structure — mostly the posterior best, with a priced
+    # exploration budget so no door closes permanently. Everything below this
+    # point, including the long-premium horizon floor, is unchanged; so is
+    # every other gate. See src/strategy_allocation.py.
+    alloc = _allocation_for(cfg, cfg_path)
+    _key = _admission_key(trade)
+    if alloc is not None and _key is None:
+        # Fail SAFE, never open. A degenerate key would admit or refuse a
+        # whole structure at once; falling back to the allowlist can only
+        # narrow what the book takes, never widen it.
+        logging.warning(
+            "auto_log allocation: '%s' arrived with no identifying fields, so "
+            "its draw would be degenerate — falling back to the allowlist for "
+            "this candidate.", strat)
+    elif alloc is not None:
+        from . import strategy_allocation as _sa
+        if not _sa.admits(alloc, strat, _key or ""):
+            return ("drop", None)
+        allowed = set(alloc.weights)
+
     overlap = allowed & paper_only
     if strat in overlap:
         logging.warning(
@@ -883,10 +981,18 @@ def record_autolog_refusals(rows, reason: str, *, board: str):
     return _cr.mark_refused(list(rows), reason, board=board)
 
 
-def record_autolog_logged(row, *, board: str, entry_id=None):
-    """Flag a candidate as actually entered."""
+def record_autolog_logged(row, *, board: str, entry_id=None, db_path=None):
+    """Flag a candidate as actually entered.
+
+    Call this on every successful insert. Without it `auto_logged` stays 0 and
+    the table cannot answer which of the candidates it offered the book
+    actually took — which is what measuring the strategy allocation needs.
+    Failure-safe like the rest of the recorder: it can neither stop a scan nor
+    change a pick.
+    """
     from . import candidate_record as _cr
-    return _cr.mark_logged(dict(row), board=board, entry_id=entry_id)
+    return _cr.mark_logged(dict(row), board=board, entry_id=entry_id,
+                           db_path=db_path)
 
 
 def _with_candidate_scan(fn):
@@ -1668,6 +1774,25 @@ def calculate_metrics(
         pop_arr = np.where(is_call, 1.0 - df["delta"].values, 1.0 + df["delta"].values)
     df["prob_profit"] = np.clip(pop_arr, 0.0, 1.0)
 
+    # Put `prob_profit` on the SELLER's side here, before anything blends into
+    # it. `calculate_probability_of_profit` returns the BUYER's probability;
+    # the Monte Carlo below is already the seller's on every one of these
+    # modes (`is_short=_is_short_mode`). Averaging one of each was the defect:
+    #
+    #     0.6*s + 0.4*(1 - s) = 0.4 + 0.2*s
+    #
+    # which crushes every seller probability in [0.5, 1.0] into [0.50, 0.60].
+    # That was the entire range of the shipped number — nothing in 909 closed
+    # trades exceeded 0.6139. A flip applied AFTER the blend, and only for
+    # Premium Selling, then gave 0.6 - 0.2*s, which falls as the true
+    # probability rises; Short Put's high-PoP half won 37.0% against its low
+    # half's 61.8%. Convert once, at the source, on the same mode set the
+    # simulation uses. See tests/test_pop_seller_convention.py.
+    SHORT_MODES = {"Premium Selling", "Credit Spreads", "Iron Condor"}
+    _is_short_mode = mode in SHORT_MODES
+    if _is_short_mode:
+        df["prob_profit"] = (1.0 - df["prob_profit"]).clip(0.0, 1.0)
+
     _pot_result = calculate_probability_of_touch(types_vals, S_vals, K_vals, T_vals, IV_vals)
     df["prob_touch"] = _pot_result if _pot_result is not None else np.nan
     _em_factor = config.get("rr_expected_move_factor", 0.68)
@@ -1798,8 +1923,6 @@ def calculate_metrics(
     # Monte Carlo
     if HAS_SIMULATION:
         n_sims = config.get("monte_carlo_simulations", 10000)
-        _short_modes = {"Premium Selling", "Credit Spreads", "Iron Condor"}
-        _is_short_mode = mode in _short_modes
         # Deterministic seed for reproducible PoP across runs on the same date.
         #
         # This used `hash()` on a tuple containing a string, and Python
@@ -1864,17 +1987,18 @@ def calculate_metrics(
                 T_vals[_crush_valid], _crush_adj_iv, prem_vals[_crush_valid], r=risk_free_rate, q=_q,
             )
             if _pop_crush is not None:
+                # Same conversion as at the source: this is another BUYER's
+                # probability about to be blended into a seller's column.
+                if _is_short_mode:
+                    _pop_crush = np.clip(1.0 - np.asarray(_pop_crush), 0.0, 1.0)
                 # Blend: 70% crush-adjusted, 30% raw (uncertainty in crush magnitude)
                 df.loc[_crush_valid, "prob_profit"] = np.clip(
                     0.7 * _pop_crush + 0.3 * df.loc[_crush_valid, "prob_profit"].values, 0.0, 1.0
                 )
 
-    # For Premium Selling, flip PoP to reflect the SELLER's perspective.
-    # calculate_probability_of_profit() returns the BUYER's PoP (P option expires ITM).
-    # Seller profits when that same option expires worthless, so seller's PoP = 1 − buyer's PoP.
-    # e.g. OTM put buyer: 30% PoP → seller: 70% PoP (which is what we want to score highly).
-    if mode == "Premium Selling":
-        df["prob_profit"] = (1.0 - df["prob_profit"]).clip(0.0, 1.0)
+    # NOTE: `prob_profit` is already the seller's on short modes — converted at
+    # the source, above, before the Monte Carlo blend. A second flip here is
+    # what produced 0.6 - 0.2*s for Premium Selling.
 
     # Theoretical value and P(ITM) using market IV (for display/reference)
     d1, d2 = _d1d2(S_vals, K_vals, T_vals, risk_free_rate, IV_vals, q=_q)
@@ -6901,8 +7025,21 @@ def main():
                                 # Derive strategy name to feed the allowlist helper.
                                 _strat_name = structure_strategy_name(row)
                                 _is_condor = _strat_name == "Iron Condor"
+                                # Identity and expiration both matter here.
+                                # Without identity the allocation draw is the
+                                # same for every candidate of this structure;
+                                # without expiration the long-premium DTE
+                                # floor cannot quarantine.
                                 _decision, _paper_only_flag = apply_auto_log_allowlist(
-                                    {"strategy_name": _strat_name}, cfg_path="config.json"
+                                    {"strategy_name": _strat_name,
+                                     "symbol": _sym,
+                                     "expiration": row.get("expiration"),
+                                     "strike": row.get("strike"),
+                                     "short_put_strike": row.get("short_put_strike"),
+                                     "short_call_strike": row.get("short_call_strike"),
+                                     "type": row.get("type"),
+                                     "date": _today_str},
+                                    cfg_path="config.json"
                                 )
                                 if _decision == "drop":
                                     _skipped_bear_calls += 1  # reuse counter for the summary
@@ -6930,6 +7067,8 @@ def main():
                                     })
                                     if pm.log_iron_condor_if_new(_payload, auto_log=True):
                                         _inserted += 1
+                                        record_autolog_logged(
+                                            row, board="autolog_structures")
                                     else:
                                         _skipped += 1
                                 else:
@@ -6949,6 +7088,8 @@ def main():
                                     })
                                     if pm.log_spread_if_new(_payload, auto_log=True):
                                         _inserted += 1
+                                        record_autolog_logged(
+                                            row, board="autolog_structures")
                                     else:
                                         _skipped += 1
                             except Exception as _log_exc:
@@ -7050,7 +7191,10 @@ def main():
                                 _sn = _strategy_label_for_mode(mode, _row.get("type"))
                                 _dec, _ = apply_auto_log_allowlist(
                                     {"strategy_name": _sn,
+                                     "symbol": _row.get("symbol"),
                                      "expiration": _row.get("expiration"),
+                                     "strike": _row.get("strike"),
+                                     "type": _row.get("type"),
                                      "date": _today_str},
                                     cfg_path="config.json",
                                 )
@@ -7134,7 +7278,11 @@ def main():
                             # short-horizon Long Calls (else they slip into the gate).
                             _decision, _paper_only_flag = apply_auto_log_allowlist(
                                 {"strategy_name": _strat_name,
-                                 "expiration": row["expiration"], "date": _today_str},
+                                 "symbol": row.get("symbol"),
+                                 "expiration": row["expiration"],
+                                 "strike": row.get("strike"),
+                                 "type": row.get("type"),
+                                 "date": _today_str},
                                 cfg_path="config.json",
                             )
                             if _decision == "drop":
@@ -7204,6 +7352,7 @@ def main():
                             try:
                                 if pm.log_trade_if_new(_trade, auto_log=True):
                                     _inserted += 1
+                                    record_autolog_logged(row, board="AUTO-LOG")
                                 else:
                                     _skipped += 1
                             except Exception as _log_exc:

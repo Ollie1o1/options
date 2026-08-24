@@ -5,7 +5,7 @@ import re
 import sys
 import shutil
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 
 import pandas as pd
 
@@ -591,6 +591,59 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     return [x for x in (verdict, worth_line, do_line) if x]
 
 
+_CAL_CACHE: Dict[str, Any] = {}
+
+
+def _load_calibration() -> None:
+    """Load the shipped model once per process, or record that there is none."""
+    if "model" in _CAL_CACHE:
+        return
+    try:
+        from . import pop_calibration as _pcal
+        model = _pcal.load_model()
+        rel = pd.DataFrame()
+        if model is not None:
+            import json
+            with open(_pcal.DEFAULT_MODEL_PATH) as fh:
+                rel = pd.DataFrame(json.load(fh).get("reliability", []))
+        _CAL_CACHE.update(model=model, rel=rel, mod=_pcal,
+                          stamp=_pcal.provenance())
+    except Exception:
+        _CAL_CACHE.update(model=None, rel=None, mod=None, stamp=None)
+
+
+def _calibrated_pop(row) -> Optional[float]:
+    """The calibrated probability for one board row, or None."""
+    _load_calibration()
+    model, mod = _CAL_CACHE.get("model"), _CAL_CACHE.get("mod")
+    if model is None or mod is None:
+        return None
+    try:
+        data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        return mod.probability_for(data, model)
+    except Exception:
+        return None
+
+
+def _calibrated_pop_line(row) -> Optional[str]:
+    """The calibrated probability line for one pick, or None to draw nothing.
+
+    Loaded once per process. `load_model` returns None for an artifact that
+    failed its reliability guard, so a refused model cannot reach a board —
+    and there is deliberately NO fallback to `pop_score`, whose silent
+    substitution is how `quality_score` ranked these boards unnoticed.
+    """
+    _load_calibration()
+    model, rel, mod = _CAL_CACHE["model"], _CAL_CACHE["rel"], _CAL_CACHE["mod"]
+    if model is None or mod is None:
+        return None
+    try:
+        data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        return mod.describe_row(data, model, rel)
+    except Exception:
+        return None
+
+
 def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> list:
     """Return themed sub-lines for analysis."""
     INDENT = "         "
@@ -622,6 +675,14 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
                 val.append(f"PoP: {pop_str}")
         else:
             val.append(f"PoP: {format_pct(pop)}")
+
+    # The calibrated probability, beside the model one. Draws NOTHING unless a
+    # model was fitted AND cleared its own out-of-sample reliability guard AND
+    # this row lands in a bucket that guard actually checked. See
+    # src/pop_calibration.py; refit with scripts.pop_calibration_report.
+    cal = _calibrated_pop_line(row)
+    if cal:
+        val.append(fmt.style(cal, 'muted'))
 
     if mode == "Premium Selling":
         ror = row.get("return_on_risk", pd.NA)
@@ -1537,8 +1598,16 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         col_hdr += f" {'':>4}"
     _delta_hdr = "\u0394"
     _vega_hdr = "\u03BD"
+    col_hdr += f" {'PoP':>5}"
+    # `PoP` is the model's probability; `Cal` is the one fitted to what these
+    # exit rules actually did and checked out-of-sample. Both, or neither —
+    # printing only the model number is what this repo has always done, and
+    # printing only the calibrated one hides the disagreement between them.
+    _load_calibration()
+    _show_cal = _CAL_CACHE.get("model") is not None
+    if _show_cal:
+        col_hdr += f" {'Cal':>5}"
     col_hdr += (
-        f" {'PoP':>5}"
         f" {'R/R':>5} {'IV%':>5} {_delta_hdr:>5} {_vega_hdr:>5} {'EV':>7} {'Sprd':>5}"
         f" {'P2x':>5}"
     )
@@ -1598,10 +1667,16 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         except Exception:
             p2x_str = "  n/a"
 
+        cal_cell = ""
+        if _show_cal:
+            _cal = _calibrated_pop(r)
+            cal_cell = f" {'  n/a' if _cal is None else f'{_cal*100:>4.0f}%':>5}"
+
         line = (
             f"  {rank_i:>3}  {sym:<6} {strike_str:<8} {exp_str:>8}"
             f"{conf_badge}"
             f" {pop_str:>5}"
+            f"{cal_cell}"
             f" {rr_str:>5} {iv_pct:>4.0f}% {delta_str} {vega_str} {ev_cell} {spread:>4.1f}%"
             f" {p2x_str:>5}"
         )
@@ -1625,6 +1700,27 @@ def print_comparison_table(df_top: pd.DataFrame, mode: str = "Discovery", sort_b
         print(line)
 
     print(fmt.style(sep_line, 'muted'))
+    # The stamp travels with the column. A probability whose provenance the
+    # reader cannot see is indistinguishable from a decorative one.
+    _stamp = _CAL_CACHE.get("stamp")
+    if _show_cal and _stamp:
+        print(fmt.style(f"  Cal: {_stamp}", 'muted'))
+
+    # Say what the order IS, because a numbered column implies a ranking and
+    # this one is not a ranking by expected outcome. Raced 2026-08-24 over 612
+    # out-of-sample closed trades, rank IC against return on capital at risk
+    # with days as bootstrap clusters: cal_pop +0.1431 [-0.0420, +0.3277],
+    # exp_return +0.0087, quality_score -0.0194, abs_delta -0.0821 — every
+    # interval contains zero, so nothing available earned the top slot. The
+    # key the board DOES sort by, net-of-cost EV, could not be raced at all:
+    # it exists only in candidates.db, which is the frozen pre-registration's
+    # cohort, and reading it early is the one thing that test forbids.
+    print(fmt.style(
+        "  #1 = highest EV after its own trading costs, among gate survivors. "
+        "That is not a claim", 'muted'))
+    print(fmt.style(
+        "       that it wins most often — whether EV orders outcome reads out "
+        "2026-11-19 (pre-registered).", 'muted'))
     sort_hint = "  Sort: [C]omposite  [I]V Rank  [S]pread  [D]TE  [E]V"
     print(fmt.style(sort_hint, 'muted'))
     print()

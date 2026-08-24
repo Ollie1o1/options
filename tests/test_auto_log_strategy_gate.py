@@ -36,6 +36,24 @@ def _decide(strategy):
     return apply_auto_log_allowlist(dict(FAR_DATED, strategy_name=strategy))
 
 
+def _admission_rate(strategy, n=600):
+    """Share of DISTINCT contracts of `strategy` the auto-logger admits.
+
+    Since the allocation went live (2026-08-24) admission is a SHARE, not an
+    invariant: the draw is deterministic per contract, so a single candidate
+    is no longer representative of the structure. Asserting one contract here
+    would be asserting a coin flip.
+    """
+    hits = 0
+    for i in range(n):
+        decision, _ = apply_auto_log_allowlist(
+            dict(FAR_DATED, strategy_name=strategy, symbol="NVDA",
+                 strike=100.0 + i, type="put"))
+        hits += decision == "insert"
+    return hits / n
+
+
+
 class TestTheFamiliesThatFailTheirBreakevenAreNotLogged(unittest.TestCase):
     """Both miss their own required win rate; neither may be auto-logged."""
 
@@ -61,8 +79,13 @@ class TestTheFamiliesThatFailTheirBreakevenAreNotLogged(unittest.TestCase):
 class TestTheAllowlistStillWorks(unittest.TestCase):
     """Guards against 'switch it off' becoming 'switch everything off'."""
 
-    def test_bull_put_is_still_logged_and_cohort_eligible(self):
-        self.assertEqual(_decide("Bull Put"), ("insert", 0))
+    def test_bull_put_still_takes_the_large_majority_of_entries(self):
+        """Was `_decide("Bull Put") == ("insert", 0)`. The allocation made
+        admission a share rather than a certainty — Bull Put holds ~88% of it,
+        the rest being the priced exploration budget. The guard this test
+        exists for is unchanged: 'switch it off' must not become 'switch
+        everything off'."""
+        self.assertGreater(_admission_rate("Bull Put"), 0.70)
 
     def test_an_unknown_strategy_is_dropped_rather_than_logged(self):
         self.assertEqual(_decide("Jade Lizard"), ("drop", None))
@@ -135,7 +158,17 @@ class TestBullPutLogsAgain(unittest.TestCase):
     """
 
     def test_bull_put_is_logged_and_cohort_eligible(self):
-        self.assertEqual(_decide("Bull Put"), ("insert", 0))
+        """Admitted candidates are cohort-eligible (flag 0), and Bull Put
+        holds the large majority of the allocation. See
+        `test_bull_put_still_takes_the_large_majority_of_entries`."""
+        self.assertGreater(_admission_rate("Bull Put"), 0.70)
+        flags = {apply_auto_log_allowlist(
+                     dict(FAR_DATED, strategy_name="Bull Put", symbol="NVDA",
+                          strike=100.0 + i, type="put"))
+                 for i in range(200)}
+        self.assertIn(("insert", 0), flags)
+        self.assertNotIn(("insert", 1), flags,
+                         "a far-dated Bull Put was quarantined")
 
     def test_bull_put_appears_in_allowed_strategies(self):
         """Pins the mechanism: `paper_only_strategies` would also make it log,
