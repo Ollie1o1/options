@@ -249,13 +249,14 @@ class ConfigLoading(unittest.TestCase):
             cfg = load_sizing_config(json.load(f))
         self.assertTrue(cfg["enabled"])
         self.assertEqual(cfg["opening_balance"], 50_000.0)
-        # 0.015 since 2026-08-25. Raised entry throughput at IDENTICAL total
-        # risk: the book was pinned against the concurrent cap (5 of 5 slots,
-        # 0.9 positions of headroom), and throughput is slots over hold time.
-        # The same 10% now buys 6.7 slots instead of 5. Candidate supply was
-        # never the constraint - 168 Bull Puts cleared the gates the day this
-        # was measured and 2-3 were taken.
-        self.assertEqual(cfg["max_risk_pct"], 0.015)
+        # Held at 0.02. Tried 0.015 on 2026-08-25 to buy slots and reverted
+        # the same night: sizing REFUSES any candidate whose risk per contract
+        # exceeds the per-trade cap, and since the friction gate tightened the
+        # book has moved to wider spreads (median $580/contract after
+        # 2026-08-01, against a 1.5% cap of $569). 82% sizeable at 2.0% versus
+        # 45% at 1.5% — cutting size removes candidates faster than it adds
+        # slots. The lever for throughput is max_open_risk_pct, not this.
+        self.assertEqual(cfg["max_risk_pct"], 0.02)
         self.assertEqual(cfg["max_open_risk_pct"], 0.10)
         self.assertEqual(cfg["equity_basis_date"], "2026-08-05")
 
