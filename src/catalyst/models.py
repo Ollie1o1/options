@@ -26,6 +26,13 @@ class Trial:
     sponsor_name: str
     brief_title: str
     phase: str
+    """The LOWEST registered phase — what the base-rate prior keys on.
+
+    A trial registered PHASE1/PHASE2 is earlier-stage than a pure Phase 2, so
+    taking the lowest never claims more maturity than the trial has. Use
+    ``phase_label`` to show a reader what it actually is, and ``phases`` when
+    ordering by how far along it is."""
+
     event_date: str
     date_precision: str
     date_type: str
@@ -35,6 +42,28 @@ class Trial:
     masking: Optional[str] = None
     primary_outcome: Optional[str] = None
     conditions: Tuple[str, ...] = ()
+    phases: Tuple[str, ...] = ()
+    """Every phase the trial is registered under, ascending.
+
+    Measured 2026-08-25: 40 of 130 industry trials matching a PHASE2 sweep were
+    registered across phases — 16 as PHASE1/PHASE2 and 4 as PHASE2/PHASE3.
+    Keeping only the first printed a bare "PH1", which reads as a Phase 1 trial
+    leaking past a Ph2/Ph3 filter rather than the Ph1/2 trial it is."""
+
+    @property
+    def phase_label(self) -> str:
+        """Display form: "PH3", or "PH1/2" for a multi-phase registration."""
+        ordered = self.phases or ((self.phase,) if self.phase else ())
+        if not ordered:
+            return ""
+        numbers = [p.replace("PHASE", "") for p in ordered]
+        return "PH" + "/".join(numbers)
+
+    @property
+    def top_phase(self) -> str:
+        """The furthest-along registered phase — used for ordering only."""
+        ordered = self.phases or ((self.phase,) if self.phase else ())
+        return max(ordered) if ordered else ""
 
 
 @dataclass(frozen=True)

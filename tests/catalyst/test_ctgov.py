@@ -60,6 +60,26 @@ class TestParseStudies(unittest.TestCase):
         self.assertEqual(t.allocation, "RANDOMIZED")
         self.assertEqual(t.masking, "QUADRUPLE")
 
+    def test_single_phase_registration(self):
+        t = self.by_id["NCT06510816"]
+        self.assertEqual(t.phases, ("PHASE3",))
+        self.assertEqual(t.phase, "PHASE3")
+
+    def test_multi_phase_registration_keeps_every_phase(self):
+        p = payload()
+        p["studies"][0]["protocolSection"]["designModule"]["phases"] = \
+            ["PHASE1", "PHASE2"]
+        t = {x.nct_id: x for x in ctgov.parse_studies(p)}["NCT06880276"]
+        self.assertEqual(t.phases, ("PHASE1", "PHASE2"))
+
+    def test_phase_is_the_lowest_registered_not_merely_the_first(self):
+        # The prior must never claim more maturity than the trial has.
+        p = payload()
+        p["studies"][0]["protocolSection"]["designModule"]["phases"] = \
+            ["PHASE2", "PHASE1"]
+        t = {x.nct_id: x for x in ctgov.parse_studies(p)}["NCT06880276"]
+        self.assertEqual(t.phase, "PHASE1")
+
     def test_study_missing_date_is_skipped_not_defaulted(self):
         p = payload()
         del p["studies"][0]["protocolSection"]["statusModule"]["primaryCompletionDateStruct"]
