@@ -1,0 +1,7 @@
+{
+  "_comment": "Sponsor name -> ticker overrides for subsidiaries that run trials under their own name. Keys are normalised on load (lowercase, suffixes stripped), so write them naturally. Add ONLY entries you have verified by hand: a wrong ticker here silently attaches a real company to someone else's trial.",
+  "Acerta Pharma BV": "AZN",
+  "Actelion": "JNJ",
+  "Janssen Research & Development, LLC": "JNJ",
+  "Genentech, Inc.": "RHHBY"
+}

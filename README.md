@@ -226,7 +226,49 @@ These all still work; none of them is the one to learn first.
 | `python -m src.options_screener` | The screener directly, skipping the launcher menu |
 | `start_all.py` | Starts the API and bots, not the interactive screener |
 | `python -m src.check_pnl` | Portfolio viewer |
+| `python -m src.catalyst` | Pharma catalyst calendar (see below) |
 | `streamlit run src/dashboard.py` | Web dashboard |
+
+### Catalyst Calendar
+
+Dated Phase 2/3 clinical events for US-listed biotechs between $50M and $10B,
+**sorted by date**. Each row carries cash runway (is the company funded through
+its own catalyst?), the trial's amendment history, the options-implied move for
+the expiry spanning the date, and a phase base rate.
+
+```
+PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --window 6m
+PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --funded-only
+PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --limit 80
+PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst ANNX
+PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --mark
+```
+
+Only the soonest `--limit` names (default 40) get the per-ticker network
+lookups, because runway, amendments and chains each cost a request. A six-month
+Ph2+Ph3 window resolves ~96 names, so the default truncates — and the board
+says so explicitly (`showing 40 of 96 names — 56 not fetched`) rather than
+leaving you to assume you are seeing everything.
+
+Sources are free and keyless: ClinicalTrials.gov v2 for the sweep, its internal
+history endpoint for amendment flags, EDGAR XBRL for cash and burn, Yahoo for
+caps and chains. Set `SEC_EDGAR_CONTACT` to your email so SEC requests identify
+themselves.
+
+Read the board with three things in mind:
+
+- **Coverage is ~27-30% of industry-sponsored trials.** Most sponsors are
+  private, foreign-listed, or subsidiaries; unresolved sponsors are dropped and
+  counted, never guessed. Absence from the board is not evidence of no catalyst.
+- **The date is primary completion, not topline.** Expect a 1-3 month lag, and
+  note that roughly half of all forward dates carry only month precision — the
+  board marks those `~2026-11 (est, month)`.
+- **Nothing here predicts whether a drug works,** and the board is not ranked.
+  It tells you what is dated, funded and designed how; the judgement is yours.
+
+Every event is written to `data/catalysts.db` with `first_seen`, and `--mark`
+re-observes elapsed events, so the calendar can eventually be checked against
+what actually happened rather than merely trusted.
 
 **Platform support:** the screener itself runs on macOS, Linux and Windows.
 *Scheduled automation is macOS-only* — it uses launchd, and the plists in

@@ -1,0 +1,45 @@
+{
+  "totalCount": 599,
+  "nextPageToken": "ZVt07cGHkvI2wRk2CJf6_LLtgIbeLJAod7KrgP4enTI",
+  "studies": [
+    {"protocolSection": {
+      "identificationModule": {"nctId": "NCT06880276", "briefTitle": "Efficacy and Safety Study of QLM3003 Ointment in Atopic Dermatitis"},
+      "statusModule": {"overallStatus": "RECRUITING", "primaryCompletionDateStruct": {"date": "2027-03", "type": "ESTIMATED"}},
+      "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Qilu Pharmaceutical Co., Ltd."}},
+      "conditionsModule": {"conditions": ["Atopic Dermatitis"]},
+      "designModule": {"phases": ["PHASE3"], "enrollmentInfo": {"count": 360},
+        "designInfo": {"allocation": "RANDOMIZED", "maskingInfo": {"masking": "QUADRUPLE"}}},
+      "outcomesModule": {"primaryOutcomes": [{"measure": "Percentage of Participants Achieving EASI-75 at Week 8"}]}}},
+    {"protocolSection": {
+      "identificationModule": {"nctId": "NCT06510816", "briefTitle": "A Study Investigating Vonaprument in Dry AMD With Geographic Atrophy"},
+      "statusModule": {"overallStatus": "ACTIVE_NOT_RECRUITING", "primaryCompletionDateStruct": {"date": "2026-10-31", "type": "ESTIMATED"}},
+      "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Annexon, Inc."}},
+      "conditionsModule": {"conditions": ["Geographic Atrophy", "Macular Degeneration"]},
+      "designModule": {"phases": ["PHASE3"], "enrollmentInfo": {"count": 400},
+        "designInfo": {"allocation": "RANDOMIZED", "maskingInfo": {"masking": "QUADRUPLE"}}},
+      "outcomesModule": {"primaryOutcomes": [{"measure": "Change From Baseline in GA Lesion Area"}]}}},
+    {"protocolSection": {
+      "identificationModule": {"nctId": "NCT06000001", "briefTitle": "A Study of an Investigational Product"},
+      "statusModule": {"overallStatus": "RECRUITING", "primaryCompletionDateStruct": {"date": "2026-12-30", "type": "ESTIMATED"}},
+      "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Pfizer"}},
+      "conditionsModule": {"conditions": ["Breast Cancer"]},
+      "designModule": {"phases": ["PHASE3"], "enrollmentInfo": {"count": 1200},
+        "designInfo": {"allocation": "RANDOMIZED", "maskingInfo": {"masking": "DOUBLE"}}},
+      "outcomesModule": {"primaryOutcomes": [{"measure": "Progression Free Survival"}]}}},
+    {"protocolSection": {
+      "identificationModule": {"nctId": "NCT06000002", "briefTitle": "NaviFUS System in Recurrent Glioblastoma"},
+      "statusModule": {"overallStatus": "RECRUITING", "primaryCompletionDateStruct": {"date": "2026-12-31", "type": "ESTIMATED"}},
+      "sponsorCollaboratorsModule": {"leadSponsor": {"name": "NaviFUS Corporation"}},
+      "conditionsModule": {"conditions": ["Glioblastoma"]},
+      "designModule": {"phases": ["PHASE3"],
+        "designInfo": {"allocation": "NON_RANDOMIZED", "maskingInfo": {"masking": "NONE"}}},
+      "outcomesModule": {"primaryOutcomes": [{"measure": "Overall Survival"}]}}},
+    {"protocolSection": {
+      "identificationModule": {"nctId": "NCT06000003", "briefTitle": "A Study of Gene Therapy in DMD"},
+      "statusModule": {"overallStatus": "ACTIVE_NOT_RECRUITING", "primaryCompletionDateStruct": {"date": "2026-10-31", "type": "ACTUAL"}},
+      "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Sarepta Therapeutics, Inc."}},
+      "conditionsModule": {"conditions": ["Duchenne Muscular Dystrophy"]},
+      "designModule": {"phases": ["PHASE3"]},
+      "outcomesModule": {}}}
+  ]
+}
