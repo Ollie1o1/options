@@ -249,7 +249,13 @@ class ConfigLoading(unittest.TestCase):
             cfg = load_sizing_config(json.load(f))
         self.assertTrue(cfg["enabled"])
         self.assertEqual(cfg["opening_balance"], 50_000.0)
-        self.assertEqual(cfg["max_risk_pct"], 0.02)
+        # 0.015 since 2026-08-25. Raised entry throughput at IDENTICAL total
+        # risk: the book was pinned against the concurrent cap (5 of 5 slots,
+        # 0.9 positions of headroom), and throughput is slots over hold time.
+        # The same 10% now buys 6.7 slots instead of 5. Candidate supply was
+        # never the constraint - 168 Bull Puts cleared the gates the day this
+        # was measured and 2-3 were taken.
+        self.assertEqual(cfg["max_risk_pct"], 0.015)
         self.assertEqual(cfg["max_open_risk_pct"], 0.10)
         self.assertEqual(cfg["equity_basis_date"], "2026-08-05")
 
