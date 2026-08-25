@@ -1,0 +1,17 @@
+{
+  "outcomesUpdateCount": 3,
+  "lastUpdateVersions": {"outcomes": 10, "primaryOutcomes": 10, "secondaryOutcomes": 10, "enrollmentInfo": 9},
+  "changes": [
+    {"version": 0, "date": "2024-07-15", "status": "NOT_YET_RECRUITING", "moduleLabels": []},
+    {"version": 1, "date": "2024-08-30", "status": "RECRUITING", "moduleLabels": ["Study Status", "Oversight", "Outcome Measures", "Contacts/Locations"]},
+    {"version": 2, "date": "2024-11-01", "status": "RECRUITING", "moduleLabels": ["Study Status", "Outcome Measures", "Contacts/Locations"]},
+    {"version": 3, "date": "2024-12-02", "status": "RECRUITING", "moduleLabels": ["Study Status", "Contacts/Locations"]},
+    {"version": 4, "date": "2025-02-07", "status": "RECRUITING", "moduleLabels": ["Study Status", "Contacts/Locations"]},
+    {"version": 5, "date": "2025-03-05", "status": "RECRUITING", "moduleLabels": ["Study Status", "Contacts/Locations"]},
+    {"version": 6, "date": "2025-03-24", "status": "RECRUITING", "moduleLabels": ["Study Status", "Contacts/Locations"]},
+    {"version": 7, "date": "2025-04-11", "status": "RECRUITING", "moduleLabels": ["Study Status", "Contacts/Locations"]},
+    {"version": 8, "date": "2025-05-08", "status": "RECRUITING", "moduleLabels": ["Study Status", "Contacts/Locations"]},
+    {"version": 9, "date": "2025-11-05", "status": "ACTIVE_NOT_RECRUITING", "moduleLabels": ["Study Identification", "Study Status", "Study Description", "Study Design", "Arms and Interventions", "Contacts/Locations", "IPDSharing"]},
+    {"version": 10, "date": "2026-04-28", "status": "ACTIVE_NOT_RECRUITING", "moduleLabels": ["Study Identification", "Study Status", "Study Description", "Outcome Measures", "Eligibility", "Contacts/Locations"]}
+  ]
+}
