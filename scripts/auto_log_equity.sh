@@ -78,7 +78,12 @@ fi
 MODE=""
 if   (( HMN >= 1015 && HMN <= 1130 )); then MODE="-ds"
 elif (( HMN >= 1215 && HMN <= 1330 )); then MODE="-sps"
-elif (( HMN >= 1400 && HMN <= 1500 )); then MODE="-ics"
+# 14:15 was -ics until 2026-08-25. Iron Condor is excluded from
+# auto_log.allocation.eligible_strategies (it fails its own measured breakeven:
+# needs 60.1%, delivers 50.0% over 142 closed), so that window could log NOTHING
+# - a third of the daily entry budget spent on a structurally dead scan. The
+# 12:30 -sps window was the only one that could enter at all. Pointed here too.
+elif (( HMN >= 1400 && HMN <= 1500 )); then MODE="-sps"
 fi
 if [[ -z "$MODE" ]]; then
   echo "[auto-log-eq] skipped: no mode window for clock $HM"
