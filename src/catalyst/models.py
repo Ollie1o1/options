@@ -1,0 +1,82 @@
+"""Shapes shared across the catalyst package.
+
+Deliberately logic-free and sibling-free: store.py and board.py need these
+types without needing the network modules that produce them.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+PRIMARY_COMPLETION = "PRIMARY_COMPLETION"
+
+
+@dataclass(frozen=True)
+class Trial:
+    """One ClinicalTrials.gov study, as the API gave it.
+
+    ``event_date`` may be day-precision ("2026-10-31") or month-precision
+    ("2027-03"); ``date_precision`` says which. ``date_type`` is CT.gov's own
+    ESTIMATED/ACTUAL flag. Both are carried rather than normalised away — an
+    estimated month is not a tradeable date and the board must be able to say
+    so.
+    """
+
+    nct_id: str
+    sponsor_name: str
+    brief_title: str
+    phase: str
+    event_date: str
+    date_precision: str
+    date_type: str
+    status: str
+    enrollment: Optional[int] = None
+    allocation: Optional[str] = None
+    masking: Optional[str] = None
+    primary_outcome: Optional[str] = None
+    conditions: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CatalystEvent:
+    """A trial that resolved to a ticker and survived the cap band."""
+
+    trial: Trial
+    ticker: str
+    mcap: Optional[float] = None
+    event_type: str = PRIMARY_COMPLETION
+
+    @property
+    def event_id(self) -> str:
+        return f"{self.trial.nct_id}:{self.event_type}"
+
+    @property
+    def event_date(self) -> str:
+        return self.trial.event_date
+
+    @property
+    def phase(self) -> str:
+        return self.trial.phase
+
+
+@dataclass
+class Coverage:
+    """What the run saw and what it threw away.
+
+    Printed on every board. A tool with 27% coverage that says so is honest;
+    the same tool silently showing 27% is a lie of omission.
+    """
+
+    swept: int = 0
+    resolved: int = 0
+    dropped_unresolved: int = 0
+    dropped_out_of_band: int = 0
+    deep_failures: int = 0
+    notes: List[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        pct = (100.0 * self.resolved / self.swept) if self.swept else 0.0
+        return (f"swept {self.swept} trials, resolved {self.resolved} "
+                f"({pct:.1f}%), dropped {self.dropped_unresolved} unresolved / "
+                f"{self.dropped_out_of_band} out-of-band, "
+                f"{self.deep_failures} deep lookups failed")
