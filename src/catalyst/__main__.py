@@ -113,8 +113,12 @@ def build_rows(start: str, end: str, phases: Sequence[str] = ("PHASE2", "PHASE3"
             continue
         events.append(CatalystEvent(trial=trial, ticker=ticker, mcap=mcap))
 
+    collapsed = B.collapse(events)
+    coverage.shown = min(len(collapsed), deep_limit)
+    coverage.truncated = max(0, len(collapsed) - deep_limit)
+
     rows: List[B.BoardRow] = []
-    for event, others in B.collapse(events)[:deep_limit]:
+    for event, others in collapsed[:deep_limit]:
         amendments, cash, move = _deep(event, coverage)
         if funded_only and cash.funded_through is not True:
             continue
@@ -170,7 +174,8 @@ def run_board(args: argparse.Namespace) -> int:
     phases = {"2": ("PHASE2",), "3": ("PHASE3",)}.get(args.phase,
                                                       ("PHASE2", "PHASE3"))
     rows, coverage = build_rows(start, end, phases=phases,
-                                funded_only=args.funded_only)
+                                funded_only=args.funded_only,
+                                deep_limit=args.limit)
     conn = store.connect(args.db)
     try:
         today = dt.date.today().isoformat()
@@ -212,6 +217,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--phase", choices=["2", "3", "all"], default="all")
     parser.add_argument("--funded-only", action="store_true",
                         help="only names funded through their own catalyst")
+    parser.add_argument("--limit", type=int, default=DEEP_TIER_LIMIT,
+                        help=f"how many names to deep-fetch "
+                             f"(default {DEEP_TIER_LIMIT}); the board states "
+                             f"how many it withheld")
     parser.add_argument("--db", default=store.DEFAULT_DB)
     parser.add_argument("--mark", action="store_true",
                         help="resolve elapsed events into catalyst_marks")

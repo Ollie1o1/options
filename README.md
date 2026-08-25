@@ -239,9 +239,16 @@ the expiry spanning the date, and a phase base rate.
 ```
 PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --window 6m
 PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --funded-only
+PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --limit 80
 PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst ANNX
 PYTHONPATH=$PWD ~/.venvs/options/bin/python -m src.catalyst --mark
 ```
+
+Only the soonest `--limit` names (default 40) get the per-ticker network
+lookups, because runway, amendments and chains each cost a request. A six-month
+Ph2+Ph3 window resolves ~96 names, so the default truncates — and the board
+says so explicitly (`showing 40 of 96 names — 56 not fetched`) rather than
+leaving you to assume you are seeing everything.
 
 Sources are free and keyless: ClinicalTrials.gov v2 for the sweep, its internal
 history endpoint for amendment flags, EDGAR XBRL for cash and burn, Yahoo for

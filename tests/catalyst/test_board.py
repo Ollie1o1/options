@@ -163,6 +163,23 @@ class TestRender(unittest.TestCase):
     def test_no_ansi_when_color_disabled(self):
         self.assertNotIn("\033[", self.out)
 
+    def test_truncation_is_stated_on_the_board(self):
+        c = coverage()
+        c.shown, c.truncated = 40, 97
+        out = board.render([a_row()], c)
+        self.assertIn("40", out)
+        self.assertIn("137", out)
+        self.assertIn("--limit", out)
+
+    def test_no_truncation_notice_when_nothing_was_withheld(self):
+        self.assertNotIn("--limit", self.out)
+
+    def test_truncation_is_stated_even_on_an_empty_board(self):
+        # An empty board with withheld names is the worst case to hide.
+        c = coverage()
+        c.shown, c.truncated = 0, 12
+        self.assertIn("12", board.render([], c))
+
 
 if __name__ == "__main__":
     unittest.main()

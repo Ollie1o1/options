@@ -72,6 +72,8 @@ class Coverage:
     dropped_unresolved: int = 0
     dropped_out_of_band: int = 0
     deep_failures: int = 0
+    shown: Optional[int] = None
+    truncated: int = 0
     notes: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -80,3 +82,17 @@ class Coverage:
                 f"({pct:.1f}%), dropped {self.dropped_unresolved} unresolved / "
                 f"{self.dropped_out_of_band} out-of-band, "
                 f"{self.deep_failures} deep lookups failed")
+
+    def truncation_note(self) -> Optional[str]:
+        """Names the deep-tier cap withheld, or None.
+
+        A board that quietly shows the first N of a longer list is the same
+        failure shape as unreported coverage: the reader cannot tell the
+        difference between "these are all of them" and "these are the ones we
+        got round to". So this is stated, never implied.
+        """
+        if self.truncated <= 0:
+            return None
+        total = (self.shown or 0) + self.truncated
+        return (f"showing {self.shown or 0} of {total} names — {self.truncated} "
+                f"not fetched (raise with --limit)")

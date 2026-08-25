@@ -125,10 +125,13 @@ def render(rows: Sequence[BoardRow], coverage: Coverage,
         fmt.style("UPCOMING CLINICAL CATALYSTS", "heading"),
         fmt.draw_separator(width),
     ]
+    truncation = coverage.truncation_note()
     if not rows:
         lines.append("  no catalysts in the window after filtering")
         lines.append(fmt.draw_separator(width))
         lines.append("  " + coverage.summary())
+        if truncation:
+            lines.append("  " + truncation)
         return "\n".join(lines)
 
     for row in rows:
@@ -155,6 +158,8 @@ def render(rows: Sequence[BoardRow], coverage: Coverage,
 
     lines.append(fmt.draw_separator(width))
     lines.append("  " + coverage.summary())
+    if truncation:
+        lines.append("  " + fmt.style(truncation, "warn"))
     lines.append("  Sorted by date. NOT ranked - no key on this board has been "
                  "shown to order it.")
     lines.append("  Primary completion is not topline; expect a 1-3 month lag.")

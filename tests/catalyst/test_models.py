@@ -67,6 +67,21 @@ class TestCoverage(unittest.TestCase):
         self.assertIn("162", line)
         self.assertIn("27.0%", line)
 
+    def test_truncation_defaults_to_none_shown_and_zero_dropped(self):
+        c = Coverage()
+        self.assertEqual(c.truncated, 0)
+        self.assertIsNone(c.shown)
+
+    def test_truncation_note_names_both_numbers(self):
+        c = Coverage(shown=40, truncated=97)
+        note = c.truncation_note()
+        assert note is not None
+        self.assertIn("40", note)
+        self.assertIn("137", note)  # 40 shown + 97 withheld
+
+    def test_no_truncation_note_when_nothing_was_withheld(self):
+        self.assertIsNone(Coverage(shown=12, truncated=0).truncation_note())
+
 
 if __name__ == "__main__":
     unittest.main()

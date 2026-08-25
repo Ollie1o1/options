@@ -71,6 +71,47 @@ class TestBuildRows(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertGreaterEqual(coverage.deep_failures, 1)
 
+    def test_records_how_many_names_the_deep_limit_withheld(self):
+        many = [Trial(nct_id=f"NCT{i}", sponsor_name=f"Co{i}", brief_title="S",
+                      phase="PHASE3", event_date=f"2026-10-{i+1:02d}",
+                      date_precision="day", date_type="ESTIMATED",
+                      status="RECRUITING", enrollment=100, allocation="RANDOMIZED",
+                      masking="DOUBLE", primary_outcome="OS",
+                      conditions=("Breast Cancer",))
+                for i in range(5)]
+        with _patch_all() as m:
+            m["_sweep"].return_value = many
+            m["_name_index"].return_value = {f"co{i}": f"TK{i}" for i in range(5)}
+            m["_aliases"].return_value = {}
+            m["_market_caps"].return_value = {f"TK{i}": 1e9 for i in range(5)}
+            m["_amendments"].return_value = cli.Amendments()
+            m["_runway"].return_value = cli.Runway()
+            m["_implied"].return_value = cli.ImpliedMove()
+            rows, coverage = cli.build_rows("2026-09-01", "2027-03-01",
+                                            deep_limit=2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(coverage.shown, 2)
+        self.assertEqual(coverage.truncated, 3)
+
+    def test_no_truncation_recorded_when_all_names_fit(self):
+        with _patch_all() as m:
+            m["_sweep"].return_value = trials()[:1]
+            m["_name_index"].return_value = {"annexon": "ANNX"}
+            m["_aliases"].return_value = {}
+            m["_market_caps"].return_value = {"ANNX": 976_332_558.0}
+            m["_amendments"].return_value = cli.Amendments()
+            m["_runway"].return_value = cli.Runway()
+            m["_implied"].return_value = cli.ImpliedMove()
+            _, coverage = cli.build_rows("2026-09-01", "2027-03-01")
+        self.assertEqual(coverage.truncated, 0)
+
+    def test_limit_flag_reaches_build_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(cli, "build_rows") as build:
+                build.return_value = ([], cli.Coverage(swept=0))
+                cli.main(["--limit", "7", "--db", os.path.join(d, "c.db")])
+        self.assertEqual(build.call_args.kwargs["deep_limit"], 7)
+
     def test_funded_only_filters_out_underfunded_names(self):
         with _patch_all() as m:
             m["_sweep"].return_value = trials()[:1]
