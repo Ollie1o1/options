@@ -119,17 +119,66 @@ class TestFundedThrough(unittest.TestCase):
         self.assertTrue(runway.funded_through("2028-03-31", "2027-03"))
 
 
+def facts(cash=None, flow=None, extra=None):
+    """companyfacts-shaped payload with the concepts runway_for reads."""
+    gaap = {
+        runway.CASH_CONCEPT: {"units": {"USD": (cash or CASH_PAYLOAD)["units"]["USD"]}},
+        runway.FLOW_CONCEPT: {"units": {"USD": (flow or FLOW_PAYLOAD)["units"]["USD"]}},
+    }
+    gaap.update(extra or {})
+    return {"facts": {"us-gaap": gaap}}
+
+
+class TestLiquidity(unittest.TestCase):
+    def test_cash_only_when_no_securities_reported(self):
+        total, as_of, basis = runway.liquidity(facts())
+        self.assertEqual(total, 412_000_000.0)
+        self.assertEqual(as_of, "2026-06-30")
+        self.assertEqual(basis, "cash only")
+
+    def test_adds_short_term_marketable_securities(self):
+        # The CGON case, measured 2026-08-25: $19.6m cash, $1,008.6m securities.
+        cgon_cash = {"units": {"USD": [
+            {"end": "2026-06-30", "val": 19_600_000.0}]}}
+        extra = {"MarketableSecuritiesCurrent": {"units": {"USD": [
+            {"end": "2026-06-30", "val": 1_008_600_000.0}]}}}
+        total, _, basis = runway.liquidity(facts(cash=cgon_cash, extra=extra))
+        self.assertAlmostEqual(total, 1_028_200_000.0, delta=1.0)
+        self.assertIn("MarketableSecuritiesCurrent", basis)
+
+    def test_ignores_securities_from_a_different_reporting_date(self):
+        extra = {"MarketableSecuritiesCurrent": {"units": {"USD": [
+            {"end": "2025-12-31", "val": 900_000_000.0}]}}}
+        total, _, basis = runway.liquidity(facts(extra=extra))
+        self.assertEqual(total, 412_000_000.0)
+        self.assertEqual(basis, "cash only")
+
+    def test_uses_only_the_first_matching_concept_no_double_count(self):
+        extra = {
+            "MarketableSecuritiesCurrent": {"units": {"USD": [
+                {"end": "2026-06-30", "val": 100_000_000.0}]}},
+            "ShortTermInvestments": {"units": {"USD": [
+                {"end": "2026-06-30", "val": 100_000_000.0}]}},
+        }
+        total, _, _ = runway.liquidity(facts(extra=extra))
+        self.assertEqual(total, 512_000_000.0)
+
+    def test_no_cash_concept_yields_none(self):
+        self.assertEqual(runway.liquidity({"facts": {"us-gaap": {}}}),
+                         (None, None, None))
+
+
 class TestRunwayFor(unittest.TestCase):
     def _patched(self):
         return mock.patch.multiple(
             runway,
             _cik=mock.DEFAULT,
-            _concept=mock.DEFAULT)
+            _facts=mock.DEFAULT)
 
     def test_computes_quarters_and_funded_flag(self):
         with self._patched() as m:
             m["_cik"].return_value = 1_000_000
-            m["_concept"].side_effect = [CASH_PAYLOAD, FLOW_PAYLOAD]
+            m["_facts"].return_value = facts()
             r = runway.runway_for("ANNX", "2026-10-31")
         self.assertEqual(r.cash, 412_000_000.0)
         self.assertAlmostEqual(r.burn_per_quarter, EXPECTED_BURN, delta=1.0)
@@ -148,7 +197,7 @@ class TestRunwayFor(unittest.TestCase):
     def test_network_failure_yields_all_none_not_raise(self):
         with self._patched() as m:
             m["_cik"].return_value = 1_000_000
-            m["_concept"].side_effect = OSError("boom")
+            m["_facts"].side_effect = OSError("boom")
             r = runway.runway_for("ANNX", "2026-10-31")
         self.assertIsNone(r.cash)
 
@@ -158,10 +207,37 @@ class TestRunwayFor(unittest.TestCase):
              "val": 120_000_000.0, "form": "10-Q"}]}}
         with self._patched() as m:
             m["_cik"].return_value = 1_000_000
-            m["_concept"].side_effect = [CASH_PAYLOAD, positive]
+            m["_facts"].return_value = facts(flow=positive)
             r = runway.runway_for("PROF", "2026-10-31")
         self.assertIsNone(r.quarters)
         self.assertTrue(r.cash_generative)
+
+    def test_securities_flip_a_false_raise_before_into_funded(self):
+        """The CGON regression, end to end.
+
+        $19.6m cash against a $37m/quarter burn reads as 0.5 quarters and
+        'RAISE BEFORE'. With the $1,008.6m of securities the company actually
+        holds, it is funded for years."""
+        cgon_cash = {"units": {"USD": [{"end": "2026-06-30", "val": 19_600_000.0}]}}
+        burn = {"units": {"USD": [{"start": "2025-01-01", "end": "2025-12-31",
+                                   "val": -148_000_000.0}]}}
+        securities = {"MarketableSecuritiesCurrent": {"units": {"USD": [
+            {"end": "2026-06-30", "val": 1_008_600_000.0}]}}}
+
+        with self._patched() as m:
+            m["_cik"].return_value = 1_000_000
+            m["_facts"].return_value = facts(cash=cgon_cash, flow=burn)
+            without = runway.runway_for("CGON", "2026-11-01")
+        self.assertLess(without.quarters, 1.0)
+        self.assertFalse(without.funded_through)
+
+        with self._patched() as m:
+            m["_cik"].return_value = 1_000_000
+            m["_facts"].return_value = facts(cash=cgon_cash, flow=burn,
+                                             extra=securities)
+            withsec = runway.runway_for("CGON", "2026-11-01")
+        self.assertGreater(withsec.quarters, 20.0)
+        self.assertTrue(withsec.funded_through)
 
 
 if __name__ == "__main__":

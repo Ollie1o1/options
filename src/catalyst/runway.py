@@ -29,11 +29,27 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-CONCEPT_URL = ("https://data.sec.gov/api/xbrl/companyconcept/"
-               "CIK{cik:010d}/us-gaap/{concept}.json")
+FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 CASH_CONCEPT = "CashAndCashEquivalentsAtCarryingValue"
 FLOW_CONCEPT = "NetCashProvidedByUsedInOperatingActivities"
 DAYS_PER_QUARTER = 91.3125
+
+# Clinical-stage biotechs hold most of their money in short-term marketable
+# securities, NOT in "cash and equivalents". Measured 2026-08-25: CGON reported
+# $19.6m of CashAndCashEquivalentsAtCarryingValue and $1,008.6m of
+# MarketableSecuritiesCurrent on the same date. Reading cash alone gave 0.6
+# quarters of runway and a "RAISE BEFORE" verdict for a company sitting on over
+# a billion dollars.
+#
+# Only the FIRST present tag is added to cash. Filers differ in which they use,
+# and summing several risks double-counting the same securities — undercounting
+# liquidity is the safe direction for a runway estimate, overcounting is not.
+SHORT_TERM_CONCEPTS = (
+    "MarketableSecuritiesCurrent",
+    "ShortTermInvestments",
+    "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
+    "OtherShortTermInvestments",
+)
 
 
 @dataclass(frozen=True)
@@ -52,10 +68,44 @@ def _cik(ticker: str) -> Optional[int]:
     return cik_for(ticker)
 
 
-def _concept(cik: int, concept: str) -> Dict[str, Any]:
+def _facts(cik: int) -> Dict[str, Any]:
+    """All XBRL facts for a filer in ONE request, rather than one request per
+    concept — we need several concepts and SEC asks clients to be polite."""
     from src.insider.edgar import _get
-    return dict(_get(CONCEPT_URL.format(cik=cik, concept=concept),
-                     timeout=30).json())
+    return dict(_get(FACTS_URL.format(cik=cik), timeout=60).json())
+
+
+def concept_points(facts: Dict[str, Any],
+                   concept: str) -> List[Tuple[Optional[str], str, float]]:
+    """(start, end, value) points for one us-gaap concept inside companyfacts."""
+    node = ((facts.get("facts") or {}).get("us-gaap") or {}).get(concept)
+    if not node:
+        return []
+    points: List[Tuple[Optional[str], str, float]] = []
+    for unit, items in (node.get("units") or {}).items():
+        if unit != "USD":
+            continue
+        points.extend(parse_concept({"units": {unit: items}}, "USD"))
+    return sorted(points, key=lambda p: p[1])
+
+
+def liquidity(facts: Dict[str, Any]) -> Tuple[Optional[float], Optional[str],
+                                              Optional[str]]:
+    """(total, as_of, basis) — cash plus short-term investments.
+
+    Matched at the SAME reporting date: adding a cash balance from one quarter
+    to securities from another would invent money that never coexisted.
+    """
+    cash_points = concept_points(facts, CASH_CONCEPT)
+    if not cash_points:
+        return None, None, None
+    _, as_of, cash = cash_points[-1]
+
+    for concept in SHORT_TERM_CONCEPTS:
+        for start, end, value in reversed(concept_points(facts, concept)):
+            if end == as_of:
+                return cash + value, as_of, f"cash + {concept}"
+    return cash, as_of, "cash only"
 
 
 def parse_concept(payload: Dict[str, Any],
@@ -152,15 +202,16 @@ def runway_for(ticker: str, event_date: str) -> Runway:
     if cik is None:
         return Runway()
     try:
-        cash_points = parse_concept(_concept(cik, CASH_CONCEPT), "USD")
-        flow_points = parse_concept(_concept(cik, FLOW_CONCEPT), "USD")
+        facts = _facts(cik)
+        cash, as_of, cash_basis = liquidity(facts)
+        flow_points = concept_points(facts, FLOW_CONCEPT)
     except Exception:
         return Runway()
-    if not cash_points or not flow_points:
+    if cash is None or as_of is None or not flow_points:
         return Runway()
 
-    _, as_of, cash = cash_points[-1]
-    burn_per_quarter, basis = quarterly_burn(flow_points)
+    burn_per_quarter, burn_basis = quarterly_burn(flow_points)
+    basis = f"{cash_basis} @ {as_of}; burn {burn_basis}"
     if burn_per_quarter is None:
         return Runway(cash=cash)
     if burn_per_quarter <= 0:
