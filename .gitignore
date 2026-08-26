@@ -72,6 +72,10 @@ reports/*
 # ...and the duplicate-row audit, which is a worklist the operator rules on
 # rather than a derived artifact — the rulings have to be reviewable in history.
 !reports/duplicate_trades_audit.md
+# Pre-registration is worthless if it is not in git history. The whole
+# guarantee is that the hypotheses were committed, timestamped, BEFORE any
+# result existed — an untracked prereg file proves nothing.
+!reports/CATALYST_PREREG.md
 
 # Editor/tooling state
 .claude/
