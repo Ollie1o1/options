@@ -82,6 +82,41 @@ def parse_studies(payload: Dict[str, Any]) -> List[Trial]:
     return out
 
 
+# Studies that structurally CANNOT surprise. An extension enrols patients who
+# already took the drug in the parent trial, so there is no comparator and no
+# readout — it has a primary completion date but is not an event.
+#
+# NOTE, and this corrects an error made while designing this filter: OPEN-LABEL
+# IS NOT THE SAME AS NON-BINARY. Counting open-label trials as non-events put
+# "52% of the board" in that bucket, which was wrong — RGNX's single-arm
+# open-label gene-therapy trial in Duchenne carried a 38% implied move, and
+# single-arm is standard in rare disease and oncology. Only the title patterns
+# below are excluded; design is reported, never used to disqualify.
+_NON_EVENT_TITLE = (
+    "extension",
+    "long-term safety",
+    "long term safety",
+    "rollover",
+    "roll-over",
+    "expanded access",
+    "compassionate use",
+    "continued access",
+)
+
+
+def is_event(trial: Trial) -> bool:
+    """False for studies that cannot produce a binary readout.
+
+    A missing title is left as an event: unknown is not disqualifying, and a
+    false exclusion silently shrinks the board where a false inclusion is at
+    least visible on screen.
+    """
+    title = (trial.brief_title or "").lower()
+    if not title:
+        return True
+    return not any(k in title for k in _NON_EVENT_TITLE)
+
+
 def _url(start: str, end: str, phase: str, token: Optional[str]) -> str:
     advanced = (f"AREA[LeadSponsorClass]INDUSTRY AND AREA[Phase]{phase} AND "
                 f"AREA[PrimaryCompletionDate]RANGE[{start},{end}]")
