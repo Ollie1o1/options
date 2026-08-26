@@ -108,3 +108,73 @@ def trial_as_of(nct_id: str, as_of: str,
     study = payload.get("study") or payload
     trials = ctgov.parse_studies({"studies": [study]})
     return trials[0] if trials else None
+
+
+def _fetch_facts(cik: int) -> Optional[Dict[str, Any]]:
+    try:
+        from src.insider.edgar import _get
+        return dict(_get(runway.FACTS_URL.format(cik=cik), timeout=60).json())
+    except Exception:
+        return None
+
+
+def facts_as_of(facts: Dict[str, Any], as_of: str) -> Dict[str, Any]:
+    """A copy of ``facts`` containing only points FILED on or before as_of.
+
+    A point with no `filed` date is dropped rather than kept: we cannot show
+    that it was knowable, and assuming it was is the whole error this guards.
+    The input is never mutated — callers reuse one cached payload across many
+    vantage dates.
+    """
+    gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+    out: Dict[str, Any] = {}
+    for concept, node in gaap.items():
+        units: Dict[str, Any] = {}
+        for unit, items in (node.get("units") or {}).items():
+            units[unit] = [p for p in items
+                           if p.get("filed") and str(p["filed"]) <= as_of]
+        out[concept] = {"units": units}
+    return {"facts": {"us-gaap": out}}
+
+
+def _facts(cik: int, conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    cached = pit_cache.get_facts(conn, cik)
+    if cached is not None:
+        return cached
+    fetched = _fetch_facts(cik)
+    if fetched is None:
+        return None
+    pit_cache.put_facts(conn, cik, fetched)
+    return fetched
+
+
+def runway_as_of(cik: int, as_of: str, event_date: str,
+                 conn: sqlite3.Connection) -> Runway:
+    """Cash runway as it was computable on ``as_of``. Never raises."""
+    import datetime as dt
+
+    facts = _facts(cik, conn)
+    if not facts:
+        return Runway()
+    visible = facts_as_of(facts, as_of)
+    cash, cash_at, cash_basis = runway.liquidity(visible)
+    flow = runway.concept_points(visible, runway.FLOW_CONCEPT)
+    if cash is None or cash_at is None or not flow:
+        return Runway(cash=cash)
+    burn, burn_basis = runway.quarterly_burn(flow)
+    basis = f"{cash_basis} @ {cash_at}; burn {burn_basis}"
+    if burn is None:
+        return Runway(cash=cash)
+    if burn <= 0:
+        return Runway(cash=cash, cash_generative=True, burn_basis=basis)
+    quarters = cash / burn
+    try:
+        end = (dt.date.fromisoformat(cash_at)
+               + dt.timedelta(days=quarters * runway.DAYS_PER_QUARTER))
+        runway_end: Optional[str] = end.isoformat()
+    except (ValueError, OverflowError):
+        runway_end = None
+    return Runway(cash=cash, burn_per_quarter=burn, quarters=quarters,
+                  runway_end=runway_end,
+                  funded_through=runway.funded_through(runway_end, event_date),
+                  burn_basis=basis)
