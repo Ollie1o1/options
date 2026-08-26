@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.catalyst import board as B
 from src.catalyst import (ctgov, design, implied, pdufa, resolve, runway,

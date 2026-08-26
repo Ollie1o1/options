@@ -193,12 +193,42 @@ class TestBullPutLogsAgain(unittest.TestCase):
             al = json.load(fh)["auto_log"]
         self.assertIn("Bull Put", al.get("allowed_strategies") or [])
 
-    def test_the_rest_of_the_family_stays_off(self):
-        """The fix restores one strategy on its own evidence, not the family
-        that was switched off alongside it."""
-        for strat in ("Bear Call", "Short Put"):
-            with self.subTest(strategy=strat):
-                self.assertEqual(_decide(strat), ("drop", None))
+    def test_bear_call_stays_off_entirely(self):
+        """The fix restored one strategy on its own evidence, not the family
+        that was switched off alongside it.
+
+        Bear Call is absent from `eligible_strategies`, so the allocation can
+        never draw it — 0% in every environment."""
+        self.assertEqual(_admission_rate("Bear Call"), 0.0)
+
+    def test_short_put_is_exploration_only_not_a_restoration(self):
+        """SUPERSEDED ASSERTION, REWRITTEN 2026-08-26.
+
+        This used to assert Short Put always drops. That was true under the
+        name allowlist and stopped being true when allocation went live on
+        2026-08-24: Short Put sits in `eligible_strategies` and draws a small
+        exploration share. Measured locally: Bull Put 0.903, Short Put 0.040.
+
+        Worse than merely stale, the old assertion was ENVIRONMENT-DEPENDENT.
+        The allocation posterior reads the ledger, which is not in git, so the
+        test passed on CI (no ledger, fallback drops it) and failed locally
+        (ledger present, 4% admitted). A test that disagrees with itself across
+        machines is worse than one that is simply wrong.
+
+        What is invariant, and what this now asserts: Short Put is eligible for
+        exploration but is NOT restored to the posterior-best rate. The bound
+        holds at 0.04 locally and at 0.0 with no ledger.
+        """
+        self.assertLessEqual(_admission_rate("Short Put"), 0.25)
+
+    def test_short_put_is_eligible_while_bear_call_is_not(self):
+        """The config invariant behind the two tests above, asserted directly
+        so the distinction survives a change in the posterior."""
+        with open(repo_path("config.json")) as fh:
+            alloc = (json.load(fh)["auto_log"].get("allocation") or {})
+        eligible = set(alloc.get("eligible_strategies") or [])
+        self.assertIn("Short Put", eligible)
+        self.assertNotIn("Bear Call", eligible)
 
 
 class TestTheHorizonFloorIsLongPremiumReasoning(unittest.TestCase):
