@@ -178,3 +178,68 @@ def runway_as_of(cik: int, as_of: str, event_date: str,
                   runway_end=runway_end,
                   funded_through=runway.funded_through(runway_end, event_date),
                   burn_basis=basis)
+
+
+def _index() -> Dict[str, str]:
+    from src.catalyst import resolve
+    return resolve.name_index()
+
+
+def _aliases() -> Dict[str, str]:
+    from src.catalyst import resolve
+    return resolve.load_aliases()
+
+
+def _caps(tickers: Any) -> Dict[str, Any]:
+    from src.catalyst import universe
+    return universe.market_caps(sorted(tickers))
+
+
+def board_as_of(as_of: str, nct_ids: Any, conn: sqlite3.Connection,
+                horizon_days: int = 365) -> Any:
+    """The board as it would have printed on ``as_of``.
+
+    MARKET CAP IS TODAY'S, NOT THE VINTAGE'S. yfinance exposes no historical
+    market cap, and reconstructing shares-outstanding per vintage is a bigger
+    project than this study. The band is a universe definition rather than a
+    feature under test, so the contamination is bounded — but it is real, and
+    the report states it rather than hiding it.
+    """
+    import datetime as dt
+
+    from src.catalyst import resolve, universe
+    from src.catalyst.models import CatalystEvent, Coverage
+
+    coverage = Coverage()
+    horizon = (dt.date.fromisoformat(as_of)
+               + dt.timedelta(days=horizon_days)).isoformat()
+
+    seen = []
+    for nct_id in nct_ids:
+        trial = trial_as_of(nct_id, as_of, conn)
+        if trial is None:
+            continue
+        coverage.swept += 1
+        if not (as_of < trial.event_date <= horizon):
+            continue
+        seen.append(trial)
+
+    index, aliases = _index(), _aliases()
+    resolved = []
+    for trial in seen:
+        ticker = resolve.resolve(trial.sponsor_name, index, aliases)
+        if ticker:
+            resolved.append((trial, ticker))
+        else:
+            coverage.dropped_unresolved += 1
+    coverage.resolved = len(resolved)
+
+    caps = _caps({t for _, t in resolved})
+    events = []
+    for trial, ticker in resolved:
+        mcap = caps.get(ticker)
+        if not universe.in_band(mcap):
+            coverage.dropped_out_of_band += 1
+            continue
+        events.append(CatalystEvent(trial=trial, ticker=ticker, mcap=mcap))
+    return events, coverage
