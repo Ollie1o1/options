@@ -164,5 +164,55 @@ class TestSettingsMenu(unittest.TestCase):
         self.assertNotIn("Cyberpunk Neon", out)  # only the theme picker prints theme labels
 
 
+class TestResearchMenuCatalysts(unittest.TestCase):
+    """[4] RESEARCH -> [4] CATALYSTS reaches the catalyst CLI.
+
+    The calendar belongs in RESEARCH specifically because that submenu is
+    read-only by construction: it never scores, never trades, never touches the
+    ledger, which is exactly this tool's stance.
+    """
+
+    def _route(self, inputs):
+        calls = []
+        orig_input, orig_argv = builtins.input, sys.argv
+        import src.catalyst.__main__ as catalyst_main
+        orig_main = catalyst_main.main
+        _inputs = iter(inputs)
+        builtins.input = lambda *_a, **_k: next(_inputs, "Q")
+        sys.argv = ["prog"]
+        catalyst_main.main = lambda argv=None: calls.append(list(argv or []))
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                launcher.main()
+        finally:
+            builtins.input, sys.argv = orig_input, orig_argv
+            catalyst_main.main = orig_main
+        return calls, buf.getvalue()
+
+    def test_choice_4_then_4_runs_the_catalyst_calendar(self):
+        calls, _ = self._route(["4", "4", "", "B", "Q"])
+        self.assertEqual(len(calls), 1)
+
+    def test_default_window_is_the_fast_one_not_six_months(self):
+        # A 6m sweep is ~96 names x 3 network calls. A menu pick must not
+        # silently start a multi-minute run.
+        calls, _ = self._route(["4", "4", "", "B", "Q"])
+        self.assertIn("--window", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--window") + 1], "90d")
+
+    def test_a_typed_window_is_passed_through(self):
+        calls, _ = self._route(["4", "4", "6m", "B", "Q"])
+        self.assertEqual(calls[0][calls[0].index("--window") + 1], "6m")
+
+    def test_catalysts_is_listed_in_the_research_menu(self):
+        _, out = self._route(["4", "B", "Q"])
+        self.assertIn("CATALYSTS", out.upper())
+
+    def test_unknown_research_choice_mentions_the_new_option(self):
+        _, out = self._route(["4", "9", "B", "Q"])
+        self.assertIn("4", out)
+
+
 if __name__ == "__main__":
     unittest.main()

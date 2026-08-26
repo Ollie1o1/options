@@ -66,7 +66,8 @@ def _menu_rows() -> list:
     rows.append(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
     rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
     rows.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
-    rows.append(_row("4", "RESEARCH", "breakout · vol-intelligence · equity-VRP",
+    rows.append(_row("4", "RESEARCH",
+                     "breakout · vol-intelligence · equity-VRP · pharma catalysts",
                      tag="read-only"))
     rows.append(_row("5", "HOLDINGS", "long-term stock accumulation — buy zones · tranches · TFSA book"))
     rows.append(_row("6", "STRATEGIES",
@@ -154,6 +155,8 @@ def _research_menu() -> None:
         print(_row("2", "VOL-INTEL", "IV movers + implied-vs-realized (VRP)", tag="monitor"))
         print(_row("3", "EQUITY-VRP", "delta-hedged short-straddle backtest",
                    tag="no single-name edge"))
+        print(_row("4", "CATALYSTS", "dated pharma Ph2/Ph3 events — runway · amendments · implied move",
+                   tag="not ranked"))
         print(_row("B", "BACK", "", muted_key=True))
         print(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
         try:
@@ -175,8 +178,29 @@ def _research_menu() -> None:
             _loading("Running equity-VRP backtest over dolt chains…")
             from src.equity_vol.report import main as _evrp_main
             _evrp_main([])
+        elif choice in ("4", "CATALYSTS", "CATALYST"):
+            _catalyst_prompt()
         else:
-            print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, or B")
+            print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, or B")
+
+
+def _catalyst_prompt() -> None:
+    """Ask for a window, then run the catalyst calendar.
+
+    The window is asked rather than assumed because the cost is not uniform:
+    each name on the board costs three network calls, and a six-month sweep
+    resolves ~96 names where 90 days resolves a handful. Defaulting a menu pick
+    to the multi-minute run would be a surprise, so 90d is the default and the
+    slower sweep is opt-in.
+    """
+    try:
+        window = (input("  Window [90d] (e.g. 90d, 6m): ").strip() or "90d")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    _loading(f"Sweeping ClinicalTrials.gov ({window}) — a few minutes…")
+    from src.catalyst.__main__ import main as _catalyst_main
+    _catalyst_main(["--window", window])
 
 
 def _theme_picker() -> None:

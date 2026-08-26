@@ -49,7 +49,7 @@ def sort_key(event: CatalystEvent) -> Tuple[str, int, int]:
     """Soonest first; ties to the later phase, then larger enrollment. Both
     tie-breaks are facts about the trial, not judgements about it."""
     return (event.event_date,
-            -_PHASE_ORDER.get(event.phase, 0),
+            -_PHASE_ORDER.get(event.trial.top_phase or event.phase, 0),
             -(event.trial.enrollment or 0))
 
 
@@ -138,7 +138,7 @@ def render(rows: Sequence[BoardRow], coverage: Coverage,
         t = row.event.trial
         header = (f"{row.event.ticker:<6} {_mcap(row.event.mcap):>10}   "
                   f"{format_event_date(t.event_date, t.date_precision, t.date_type):<22} "
-                  f"{t.phase.replace('PHASE', 'PH')} PRIMARY COMPLETION")
+                  f"{t.phase_label} PRIMARY COMPLETION")
         if row.other_events == 1:
             header += "   +1 more event"
         elif row.other_events > 1:

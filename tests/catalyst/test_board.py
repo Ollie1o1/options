@@ -174,6 +174,18 @@ class TestRender(unittest.TestCase):
     def test_no_truncation_notice_when_nothing_was_withheld(self):
         self.assertNotIn("--limit", self.out)
 
+    def test_multi_phase_trial_shows_both_phases_not_just_the_first(self):
+        # Live 2026-08-25: 40 of 130 trials in a PHASE2 sweep were registered
+        # across phases. Rendering the first alone printed a bare "PH1", which
+        # reads as a Phase 1 trial leaking past a Ph2/Ph3 filter.
+        ev = CatalystEvent(trial=a_trial(), ticker="VSTM", mcap=641_000_000.0)
+        object.__setattr__(ev.trial, "phases", ("PHASE1", "PHASE2"))
+        out = board.render([board.BoardRow(event=ev)], coverage())
+        self.assertIn("PH1/2", out)
+
+    def test_phase_label_for_a_single_phase_is_unchanged(self):
+        self.assertIn("PH3 PRIMARY COMPLETION", self.out)
+
     def test_truncation_is_stated_even_on_an_empty_board(self):
         # An empty board with withheld names is the worst case to hide.
         c = coverage()

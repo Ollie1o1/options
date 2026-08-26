@@ -58,7 +58,9 @@ def parse_studies(payload: Dict[str, Any]) -> List[Trial]:
         ident = p.get("identificationModule") or {}
         design = p.get("designModule") or {}
         info = design.get("designInfo") or {}
-        phases = design.get("phases") or []
+        # Sorted so "lowest" and "highest" are well defined regardless of the
+        # order CT.gov happens to serialise them in.
+        phases = sorted(design.get("phases") or [])
         enrollment = (design.get("enrollmentInfo") or {}).get("count")
         out.append(Trial(
             nct_id=ident.get("nctId") or "",
@@ -66,6 +68,7 @@ def parse_studies(payload: Dict[str, Any]) -> List[Trial]:
                           .get("leadSponsor") or {}).get("name") or "",
             brief_title=ident.get("briefTitle") or "",
             phase=phases[0] if phases else "",
+            phases=tuple(phases),
             event_date=date_text,
             date_precision=_precision(date_text),
             date_type=struct.get("type") or "ESTIMATED",
