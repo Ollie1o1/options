@@ -253,3 +253,105 @@ class TestPdufaSection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBandedRender(unittest.TestCase):
+    TODAY = "2026-08-26"
+
+    def rows(self, n_near=2, n_mid=3, n_far=2):
+        out = []
+        for i in range(n_near):
+            out.append(a_row(event=CatalystEvent(
+                trial=a_trial(f"NCT-N{i}", f"2026-09-{5 + i:02d}"),
+                ticker=f"NEAR{i}", mcap=5e8)))
+        for i in range(n_mid):
+            out.append(a_row(event=CatalystEvent(
+                trial=a_trial(f"NCT-M{i}", f"2026-10-{5 + i:02d}"),
+                ticker=f"MID{i}", mcap=5e8)))
+        for i in range(n_far):
+            out.append(a_row(event=CatalystEvent(
+                trial=a_trial(f"NCT-F{i}", f"2027-01-{5 + i:02d}"),
+                ticker=f"FAR{i}", mcap=5e8)))
+        return out
+
+    def test_prints_a_header_for_each_populated_band(self):
+        out = board.render(self.rows(), coverage(), today=self.TODAY)
+        self.assertIn("NEXT 30 DAYS", out)
+        self.assertIn("31–90 DAYS", out)
+        self.assertIn("BEYOND 90 DAYS", out)
+
+    def test_an_empty_band_prints_no_header(self):
+        # Dead chrome is worse than no chrome: a permanently empty section
+        # trains a reader to skip the region it lives in.
+        out = board.render(self.rows(n_far=0), coverage(), today=self.TODAY)
+        self.assertNotIn("BEYOND 90 DAYS", out)
+
+    def test_bands_appear_soonest_first(self):
+        out = board.render(self.rows(), coverage(), today=self.TODAY)
+        self.assertLess(out.index("NEXT 30 DAYS"), out.index("31–90 DAYS"))
+        self.assertLess(out.index("31–90 DAYS"), out.index("BEYOND 90 DAYS"))
+
+    def test_detail_top_bounds_the_number_of_full_blocks(self):
+        out = board.render(self.rows(n_near=6, n_mid=6, n_far=6), coverage(),
+                           today=self.TODAY, detail_top=3)
+        self.assertEqual(out.count("design "), 3)
+
+    def test_rows_past_detail_top_still_appear_compactly(self):
+        out = board.render(self.rows(n_near=6, n_mid=6, n_far=6), coverage(),
+                           today=self.TODAY, detail_top=3)
+        self.assertIn("FAR5", out)
+
+    def test_detail_goes_to_the_soonest_rows(self):
+        out = board.render(self.rows(n_near=2, n_mid=6, n_far=6), coverage(),
+                           today=self.TODAY, detail_top=2)
+        near_block = out.index("NEAR0")
+        self.assertIn("design", out[near_block:near_block + 400])
+
+    def test_month_precision_survives_into_a_compact_row(self):
+        # "~2027-03" and "2027-03-15" are different objects. Compacting a row
+        # must not quietly promote an estimated month to a date.
+        rows = [a_row(event=CatalystEvent(
+            trial=a_trial("NCT-X", "2027-03", precision="month"),
+            ticker="MONTHY", mcap=5e8))]
+        out = board.render(rows, coverage(), today=self.TODAY, detail_top=0)
+        self.assertIn("~2027-03", out)
+
+    def test_compact_rows_carry_the_asset_so_the_drug_is_identifiable(self):
+        out = board.render(self.rows(), coverage(), today=self.TODAY,
+                           detail_top=0)
+        self.assertIn("Vonaprument", out)
+
+    def test_states_per_band_coverage_at_the_top(self):
+        from src.catalyst.models import BandCoverage
+        c = coverage()
+        c.bands = [BandCoverage(band="NEXT_30", found=6, shown=6),
+                   BandCoverage(band="D31_90", found=21, shown=14),
+                   BandCoverage(band="BEYOND_90", found=70, shown=20)]
+        out = board.render(self.rows(), c, today=self.TODAY)
+        head = out[:out.index("NEXT 30 DAYS", out.index("NEXT 30 DAYS") + 1)]
+        self.assertIn("14", head)
+        self.assertIn("21", head)
+
+    def test_no_ansi_when_color_disabled(self):
+        out = board.render(self.rows(), coverage(), today=self.TODAY)
+        self.assertNotIn("\033[", out)
+
+
+class TestSuperlativeAnnotations(unittest.TestCase):
+    TODAY = "2026-08-26"
+
+    def test_names_the_shortest_runway_on_the_board(self):
+        rows = []
+        for i, q in enumerate((2.0, 9.0, 15.0)):
+            rows.append(a_row(
+                event=CatalystEvent(trial=a_trial(f"NCT{i}", f"2026-09-{5+i:02d}"),
+                                    ticker=f"TK{i}", mcap=5e8),
+                runway=Runway(cash=1e8, burn_per_quarter=2e7, quarters=q,
+                              runway_end="2027-01-01", funded_through=True)))
+        out = board.render(rows, coverage(), today=self.TODAY, detail_top=3)
+        self.assertIn("shortest runway shown", out)
+
+    def test_a_single_row_board_claims_no_superlative(self):
+        out = board.render([a_row()], coverage(), today=self.TODAY)
+        self.assertNotIn("shortest runway", out)
+        self.assertNotIn("most-amended", out)

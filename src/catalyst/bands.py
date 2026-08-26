@@ -30,7 +30,7 @@ BEYOND_90 = "BEYOND_90"
 TRIAL_BANDS: Tuple[str, str, str] = (NEXT_30, D31_90, BEYOND_90)
 
 BAND_TITLES: Dict[str, str] = {
-    FIRM: "REGULATORY DECISIONS — FDA decision dates, firm",
+    FIRM: "REGULATORY DECISIONS (PDUFA) — FDA decision dates, firm",
     NEXT_30: "NEXT 30 DAYS — estimated primary completion",
     D31_90: "31–90 DAYS",
     BEYOND_90: "BEYOND 90 DAYS",
