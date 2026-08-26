@@ -72,6 +72,18 @@ class TestRender(unittest.TestCase):
         self.assertNotIn("95% CI", out)
 
 
+class TestNotComputableRendering(unittest.TestCase):
+    def test_states_not_computable_and_shows_no_ci(self):
+        r = Result(key="H4", label="implied vs realised — no historical chains",
+                   n_true=0, n_false=0, mean_true=0.0, mean_false=0.0,
+                   diff=0.0, ci_lo=0.0, ci_hi=0.0, verdict="NOT COMPUTABLE")
+        out = report.render([r], vintage_counts={6: 12}, dropped_delisted=0,
+                            prereg_ok=True)
+        self.assertIn("NOT COMPUTABLE", out)
+        self.assertNotIn("95% CI", out)
+        self.assertIn("no historical chains", out)
+
+
 class TestMain(unittest.TestCase):
     def test_returns_two_when_prereg_is_missing(self):
         from src.catalyst.backtest import __main__ as cli

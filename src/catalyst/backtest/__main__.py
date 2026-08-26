@@ -95,12 +95,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             built, _ = P.build(vintage, ncts, conn)
             rows.extend(built)
 
+        # Each hypothesis is (key, label, horizon, splitter). The splitter
+        # returns True/False for the two arms, or None to exclude the row —
+        # tri-state throughout, so "unknown" never silently joins an arm.
+        splits = (
+            ("H1", "FUNDED THROUGH vs RAISE BEFORE", 6,
+             lambda r: r.funded_through),
+            ("H2", "ENDPOINT AMENDED vs NOT", 6,
+             lambda r: r.amended),
+            ("H3", "PHASE 3 vs PHASE 2", 6,
+             lambda r: (None if r.phase not in ("PHASE2", "PHASE3")
+                        else r.phase == "PHASE3")),
+        )
+        arms: Dict[str, List[List[float]]] = {k: [[], []] for k, _, _, _ in splits}
+
         by_ticker: Dict[str, Dict[str, float]] = {}
-        funded_t: List[float] = []
-        funded_f: List[float] = []
         counts: Dict[int, int] = {}
         for row in rows:
-            if row.funded_through is None:
+            if all(fn(row) is None for _, _, _, fn in splits):
                 continue
             if row.ticker not in by_ticker:
                 by_ticker[row.ticker] = _prices(row.ticker, args.start,
@@ -109,13 +121,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                   by_ticker[row.ticker], bench)
             for o in outs:
                 counts[o.months] = counts.get(o.months, 0) + 1
-                if o.months != 6 or o.relative is None:
+                if o.relative is None:
                     continue
-                (funded_t if row.funded_through else funded_f).append(o.relative)
+                for key, _, horizon, fn in splits:
+                    if o.months != horizon:
+                        continue
+                    side = fn(row)
+                    if side is None:
+                        continue
+                    arms[key][0 if side else 1].append(o.relative)
 
-        results = [S.compare(
-            funded_t, funded_f, key="H1",
-            label="FUNDED THROUGH vs RAISE BEFORE (6mo, XBI-rel)")]
+        results = [
+            S.compare(arms[k][0], arms[k][1], key=k,
+                      label=f"{lbl} ({h}mo, XBI-rel)")
+            for k, lbl, h, _ in splits
+        ]
+        # H4 needs the implied move AS OF each vintage, which needs historical
+        # option chains. Verified 2026-08-26: data/chain_archive.db holds only
+        # mega-cap tech (AAPL, NVDA, META...) and no biotech at all, and no
+        # free source backfills small-cap chains. Declared, not runnable.
+        results.append(S.not_computable(
+            "H4", "IMPLIED vs REALISED MOVE (3mo)",
+            "no historical option chains exist for these names"))
+
         dropped = sum(1 for t in by_ticker if not by_ticker[t])
         print(report.render(results, counts, dropped, prereg_ok=True))
     finally:

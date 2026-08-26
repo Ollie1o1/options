@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily prediction-market archive.
+
+  Fires once a day at 16:30 local, every day including weekends: these are
+  macro contracts, not equities, and they keep quoting outside RTH. launchd
+  (not cron) because cron silently SKIPS jobs while the Mac is asleep and never
+  catches up — that defect cost this project 61% of its entry windows before
+  2026-08-21.
+
+  After installing you MUST approve it once:
+    System Settings -> General -> Login Items & Extensions -> Allow in the Background
+  Until approved, launchctl reports status 78 (EX_CONFIG) and nothing runs.
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/ollie</string>
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.ollie.options.predmarkets</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/ollie/Projects/options/scripts/predmarkets_archive.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/ollie/Projects/options/logs/predmarkets.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/ollie/Projects/options/logs/predmarkets.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>16</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+	</array>
+</dict>
+</plist>

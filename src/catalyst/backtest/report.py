@@ -26,10 +26,14 @@ def render(results: Sequence[Result], vintage_counts: Dict[int, int],
     for r in results:
         tag = "  [EXPLORATORY]" if r.key in _EXPLORATORY else ""
         lines.append(fmt.style(f"{r.key}  {r.label}{tag}", "emph"))
-        lines.append(f"    n = {r.n_true} vs {r.n_false}")
-        lines.append(f"    mean {r.mean_true:+.3f} vs {r.mean_false:+.3f}"
-                     f"   diff {r.diff:+.3f}")
-        if r.verdict == "UNDERPOWERED":
+        if r.verdict != "NOT COMPUTABLE":
+            lines.append(f"    n = {r.n_true} vs {r.n_false}")
+            lines.append(f"    mean {r.mean_true:+.3f} vs {r.mean_false:+.3f}"
+                         f"   diff {r.diff:+.3f}")
+        if r.verdict == "NOT COMPUTABLE":
+            lines.append(f"    {fmt.style('NOT COMPUTABLE', 'warn')} "
+                         f"— declared, but the data to test it does not exist")
+        elif r.verdict == "UNDERPOWERED":
             lines.append(f"    {fmt.style('UNDERPOWERED', 'warn')} "
                          f"— an arm is too small to say anything")
         else:

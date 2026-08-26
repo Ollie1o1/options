@@ -50,5 +50,23 @@ class TestCompare(unittest.TestCase):
         self.assertAlmostEqual(r.diff, 0.1, places=6)
 
 
+class TestNotComputable(unittest.TestCase):
+    """A declared hypothesis that cannot be run must SAY SO.
+
+    Silently omitting it would leave a reader thinking it came back empty,
+    which is a different claim from "the data to test this does not exist".
+    """
+
+    def test_verdict_and_reason_are_carried(self):
+        r = study.not_computable("H4", "implied vs realised",
+                                 "no historical option chains for biotech")
+        self.assertEqual(r.verdict, "NOT COMPUTABLE")
+        self.assertIn("chains", r.label)
+
+    def test_arms_are_zero_not_fabricated(self):
+        r = study.not_computable("H4", "x", "y")
+        self.assertEqual((r.n_true, r.n_false), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

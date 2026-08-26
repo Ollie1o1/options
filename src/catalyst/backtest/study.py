@@ -49,6 +49,17 @@ def bootstrap_ci(a: Sequence[float], b: Sequence[float], seed: int = 0,
     return lo, hi
 
 
+def not_computable(key: str, label: str, reason: str) -> Result:
+    """A declared hypothesis the available data cannot test.
+
+    Reported explicitly rather than omitted: "we could not run this" and "this
+    came back empty" are different claims, and dropping a pre-registered
+    hypothesis from the output silently narrows the study after the fact.
+    """
+    return Result(key, f"{label} — {reason}", 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                  "NOT COMPUTABLE")
+
+
 def compare(values_true: Sequence[float], values_false: Sequence[float],
             key: str, label: str, seed: int = 0) -> Result:
     """Difference of means with a CI and an explicit verdict."""
