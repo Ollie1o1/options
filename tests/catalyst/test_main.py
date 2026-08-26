@@ -38,6 +38,81 @@ def _patch_all():
         _implied=mock.DEFAULT)
 
 
+class TestBandAllocation(unittest.TestCase):
+    """The deep-fetch budget spreads across the window instead of front-loading.
+
+    Measured 2026-08-26: `collapsed[:40]` returned 40 names all falling
+    between 2026-08-30 and 2026-10-31 for a SIX MONTH window, silently
+    withholding 57 later names. The board answered a 2-month question.
+    """
+
+    TODAY = "2026-08-26"
+
+    def setUp(self):
+        # 3 near (<=30d), 8 mid (31-90d), 30 far (>90d).
+        dates = ([f"2026-09-{10 + i:02d}" for i in range(3)]
+                 + [f"2026-10-{10 + i:02d}" for i in range(8)]
+                 + [f"2027-01-{1 + i:02d}" for i in range(30)])
+        self.dates = dates
+        self.trials = [
+            Trial(nct_id=f"NCT{i}", sponsor_name=f"Co{i}", brief_title="A Study",
+                  phase="PHASE3", event_date=d, date_precision="day",
+                  date_type="ESTIMATED", status="RECRUITING", enrollment=100,
+                  allocation="RANDOMIZED", masking="DOUBLE",
+                  primary_outcome="OS", conditions=("Breast Cancer",))
+            for i, d in enumerate(dates)]
+
+    def _run(self, deep_limit):
+        n = len(self.trials)
+        with _patch_all() as m:
+            m["_sweep"].return_value = self.trials
+            m["_name_index"].return_value = {f"co{i}": f"TK{i:02d}" for i in range(n)}
+            m["_aliases"].return_value = {}
+            m["_market_caps"].return_value = {f"TK{i:02d}": 1e9 for i in range(n)}
+            m["_amendments"].return_value = cli.Amendments()
+            m["_runway"].return_value = cli.Runway()
+            m["_implied"].return_value = cli.ImpliedMove()
+            return cli.build_rows("2026-08-26", "2027-02-22",
+                                  deep_limit=deep_limit, today=self.TODAY)
+
+    def test_the_far_band_is_reached_at_all(self):
+        rows, _ = self._run(deep_limit=15)
+        far = [r for r in rows if r.event.event_date >= "2027-01-01"]
+        self.assertGreater(len(far), 0)
+
+    def test_the_near_band_is_never_sacrificed(self):
+        rows, _ = self._run(deep_limit=15)
+        near = [r for r in rows if r.event.event_date < "2026-10-01"]
+        self.assertEqual(len(near), 3)
+
+    def test_total_respects_the_limit(self):
+        rows, _ = self._run(deep_limit=15)
+        self.assertLessEqual(len(rows), 15)
+
+    def test_coverage_records_each_band(self):
+        _, coverage = self._run(deep_limit=15)
+        by_band = {b.band: b for b in coverage.bands}
+        self.assertEqual(by_band["NEXT_30"].found, 3)
+        self.assertEqual(by_band["D31_90"].found, 8)
+        self.assertEqual(by_band["BEYOND_90"].found, 30)
+
+    def test_coverage_records_what_each_band_withheld(self):
+        _, coverage = self._run(deep_limit=15)
+        by_band = {b.band: b for b in coverage.bands}
+        self.assertGreater(by_band["BEYOND_90"].withheld, 0)
+        self.assertEqual(by_band["NEXT_30"].withheld, 0)
+
+    def test_everything_is_fetched_when_the_budget_allows(self):
+        rows, coverage = self._run(deep_limit=100)
+        self.assertEqual(len(rows), 41)
+        self.assertEqual(coverage.truncated, 0)
+
+    def test_rows_come_back_in_date_order(self):
+        rows, _ = self._run(deep_limit=15)
+        dates = [r.event.event_date for r in rows]
+        self.assertEqual(dates, sorted(dates))
+
+
 class TestBuildRows(unittest.TestCase):
     def test_drops_unresolved_and_out_of_band_and_counts_both(self):
         with _patch_all() as m:

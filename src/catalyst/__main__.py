@@ -19,11 +19,11 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.catalyst import board as B
-from src.catalyst import (ctgov, design, implied, pdufa, resolve, runway,
-                          store, universe)
+from src.catalyst import (bands, ctgov, design, implied, pdufa, resolve,
+                          runway, store, universe)
 from src.catalyst.design import Amendments
 from src.catalyst.implied import ImpliedMove
-from src.catalyst.models import CatalystEvent, Coverage, Trial
+from src.catalyst.models import BandCoverage, CatalystEvent, Coverage, Trial
 from src.catalyst.runway import Runway
 
 DEEP_TIER_LIMIT = 40
@@ -126,8 +126,13 @@ def _deep(event: CatalystEvent,
 
 def build_rows(start: str, end: str, phases: Sequence[str] = ("PHASE2", "PHASE3"),
                funded_only: bool = False,
-               deep_limit: int = DEEP_TIER_LIMIT) -> Tuple[List[B.BoardRow], Coverage]:
-    """Sweep, resolve, band-filter, collapse, then deep-fetch the survivors."""
+               deep_limit: int = DEEP_TIER_LIMIT,
+               today: Optional[str] = None) -> Tuple[List[B.BoardRow], Coverage]:
+    """Sweep, resolve, cap-filter, collapse, band, allocate, then deep-fetch.
+
+    ``today`` exists so tests can band deterministically; production passes
+    None and gets the real date.
+    """
     coverage = Coverage()
     trials = _sweep(start, end, phases)
     coverage.swept = len(trials)
@@ -152,11 +157,33 @@ def build_rows(start: str, end: str, phases: Sequence[str] = ("PHASE2", "PHASE3"
         events.append(CatalystEvent(trial=trial, ticker=ticker, mcap=mcap))
 
     collapsed = B.collapse(events)
-    coverage.shown = min(len(collapsed), deep_limit)
-    coverage.truncated = max(0, len(collapsed) - deep_limit)
+    as_of = today or dt.date.today().isoformat()
+
+    # Band first, THEN spend the budget. Taking collapsed[:deep_limit]
+    # front-loaded by date: measured 2026-08-26, a 6-month window returned
+    # 40 names that all fell inside 2 months and withheld 57 later ones
+    # without saying which part of the window had gone missing.
+    banded: Dict[str, List[Tuple[CatalystEvent, int]]] = {
+        band: [] for band in bands.TRIAL_BANDS}
+    for event, others in collapsed:
+        banded[bands.band_for(event.event_date, as_of)].append((event, others))
+
+    counts = {band: len(banded[band]) for band in bands.TRIAL_BANDS}
+    budget = bands.allocate(counts, deep_limit)
+    coverage.bands = [BandCoverage(band=band, found=counts[band],
+                                   shown=budget[band])
+                      for band in bands.TRIAL_BANDS]
+
+    selected: List[Tuple[CatalystEvent, int]] = []
+    for band in bands.TRIAL_BANDS:
+        selected.extend(banded[band][:budget[band]])
+    selected.sort(key=lambda pair: B.sort_key(pair[0]))
+
+    coverage.shown = len(selected)
+    coverage.truncated = max(0, len(collapsed) - len(selected))
 
     rows: List[B.BoardRow] = []
-    for event, others in collapsed[:deep_limit]:
+    for event, others in selected:
         amendments, cash, move = _deep(event, coverage)
         if funded_only and cash.funded_through is not True:
             continue
