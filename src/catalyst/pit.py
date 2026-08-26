@@ -214,14 +214,19 @@ def board_as_of(as_of: str, nct_ids: Any, conn: sqlite3.Connection,
     horizon = (dt.date.fromisoformat(as_of)
                + dt.timedelta(days=horizon_days)).isoformat()
 
+    # `swept` counts the population resolution is ATTEMPTED on, i.e. after the
+    # horizon filter — not every trial that merely existed. Counting existence
+    # here while computing `resolved` over the horizon-filtered subset would
+    # print a percentage whose numerator and denominator come from different
+    # populations, which is the defect this codebase keeps rediscovering.
     seen = []
     for nct_id in nct_ids:
         trial = trial_as_of(nct_id, as_of, conn)
         if trial is None:
             continue
-        coverage.swept += 1
         if not (as_of < trial.event_date <= horizon):
             continue
+        coverage.swept += 1
         seen.append(trial)
 
     index, aliases = _index(), _aliases()
