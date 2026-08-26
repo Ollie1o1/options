@@ -134,9 +134,16 @@ class TestRender(unittest.TestCase):
     def test_missing_implied_move_omits_the_line_rather_than_showing_zero(self):
         # Asserting "0%" is absent would match "27.0%" in the coverage footer;
         # the real claim is that the implied row is not rendered at all.
-        out = board.render([a_row(implied=ImpliedMove())], coverage())
+        #
+        # Rendered without the legend, because the legend always DEFINES
+        # "implied" — the claim under test is that the ROW is absent, not
+        # that the word never appears on screen.
+        out = board.render([a_row(implied=ImpliedMove())], coverage(),
+                           legend=False)
         self.assertNotIn("implied", out)
-        self.assertIn("implied", self.out)  # present when the move IS known
+        # present when the move IS known
+        self.assertIn("implied", board.render([a_row()], coverage(),
+                                              legend=False))
 
     def test_shows_other_event_count(self):
         self.assertIn("+2 more", self.out)
@@ -355,3 +362,53 @@ class TestSuperlativeAnnotations(unittest.TestCase):
         out = board.render([a_row()], coverage(), today=self.TODAY)
         self.assertNotIn("shortest runway", out)
         self.assertNotIn("most-amended", out)
+
+
+class TestLegendAndFooter(unittest.TestCase):
+    def test_defines_every_field_it_prints(self):
+        out = board.render([a_row()], coverage())
+        for label in ("runway", "implied", "amend", "prior"):
+            self.assertIn(label, out)
+
+    def test_states_the_month_precision_convention(self):
+        # The mid-month rule decides which band a row lands in, so a reader
+        # must be able to see the rule being applied.
+        out = board.render([a_row()], coverage())
+        self.assertIn("mid-month", out.lower())
+
+    def test_the_base_rate_caveat_appears_exactly_once(self):
+        # It used to ride on every row — ~30 repetitions of the same 9 words.
+        rows = [a_row(event=CatalystEvent(
+            trial=a_trial(f"NCT{i}", f"2026-09-{5 + i:02d}"),
+            ticker=f"TK{i}", mcap=5e8)) for i in range(5)]
+        out = board.render(rows, coverage(), detail_top=5)
+        self.assertEqual(out.lower().count("not a forecast"), 1)
+
+    def test_says_it_is_not_ranked(self):
+        self.assertIn("NOT ranked", board.render([a_row()], coverage()))
+
+    def test_states_the_no_evidence_finding(self):
+        out = board.render([a_row()], coverage())
+        self.assertIn("NO EVIDENCE", out.upper())
+
+    def test_legend_can_be_suppressed(self):
+        out = board.render([a_row()], coverage(), legend=False)
+        self.assertNotIn("mid-month", out.lower())
+
+    def test_coverage_still_prints_when_the_legend_is_off(self):
+        # Coverage is not decoration. A board that hides how little it saw
+        # is the failure this package was built to avoid.
+        out = board.render([a_row()], coverage(), legend=False)
+        self.assertIn("599", out)
+
+    def test_truncation_hint_appears_when_names_were_withheld(self):
+        c = coverage()
+        c.shown, c.truncated = 40, 57
+        out = board.render([a_row()], c)
+        self.assertIn("--limit", out)
+        self.assertIn("57", out)
+
+    def test_window_label_is_shown_when_given(self):
+        out = board.render([a_row()], coverage(),
+                           window_label="6m window · 2026-08-26 → 2027-02-22")
+        self.assertIn("2027-02-22", out)
