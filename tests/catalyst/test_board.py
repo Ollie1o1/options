@@ -193,5 +193,63 @@ class TestRender(unittest.TestCase):
         self.assertIn("12", board.render([], c))
 
 
+class TestPdufaSection(unittest.TestCase):
+    """PDUFA rows render SEPARATELY from trial rows.
+
+    They come from an 8-K, not CT.gov, so they have no phase, enrollment or
+    masking. Forcing them through the trial row would mean inventing those
+    fields — the same defect as every other number in this repo that described
+    something other than its label.
+    """
+
+    def _row(self, date="2026-11-14", funded=True):
+        from src.catalyst.pdufa import PdufaEvent
+        return board.PdufaRow(
+            event=PdufaEvent(ticker="CYTK", cik=1, event_date=date,
+                             filed="2026-05-05", doc_url="https://x/y.htm"),
+            runway=Runway(cash=4.2e8, burn_per_quarter=6e7, quarters=7.0,
+                          runway_end="2028-01-01", funded_through=funded),
+            implied=ImpliedMove(expiry="2026-11-20", spot=50.0, straddle=9.0,
+                                move_pct=0.18))
+
+    def test_section_appears_with_its_own_heading(self):
+        out = board.render([], coverage(), pdufa=[self._row()])
+        self.assertIn("PDUFA", out.upper())
+        self.assertIn("CYTK", out)
+
+    def test_the_date_is_shown_without_an_estimated_qualifier(self):
+        # A PDUFA date is firm. Rendering it "(est)" would understate it.
+        out = board.render([], coverage(), pdufa=[self._row()])
+        self.assertIn("2026-11-14", out)
+        self.assertNotIn("2026-11-14 (est)", out)
+
+    def test_shows_the_funded_verdict(self):
+        out = board.render([], coverage(), pdufa=[self._row()])
+        self.assertIn("FUNDED THROUGH", out.upper())
+
+    def test_shows_a_raise_before_warning(self):
+        out = board.render([], coverage(), pdufa=[self._row(funded=False)])
+        self.assertIn("RAISE BEFORE", out.upper())
+
+    def test_shows_the_implied_move(self):
+        self.assertIn("18", board.render([], coverage(), pdufa=[self._row()]))
+
+    def test_states_when_it_was_announced(self):
+        self.assertIn("2026-05-05",
+                      board.render([], coverage(), pdufa=[self._row()]))
+
+    def test_no_section_when_there_are_no_pdufa_rows(self):
+        self.assertNotIn("PDUFA", board.render([a_row()], coverage()).upper())
+
+    def test_pdufa_rows_alone_do_not_trigger_the_empty_board_message(self):
+        out = board.render([], coverage(), pdufa=[self._row()])
+        self.assertNotIn("no catalysts", out.lower())
+
+    def test_rows_are_sorted_by_date(self):
+        out = board.render([], coverage(),
+                           pdufa=[self._row("2027-01-05"), self._row("2026-09-26")])
+        self.assertLess(out.index("2026-09-26"), out.index("2027-01-05"))
+
+
 if __name__ == "__main__":
     unittest.main()

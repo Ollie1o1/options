@@ -19,7 +19,8 @@ import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.catalyst import board as B
-from src.catalyst import ctgov, design, implied, resolve, runway, store, universe
+from src.catalyst import (ctgov, design, implied, pdufa, resolve, runway,
+                          store, universe)
 from src.catalyst.design import Amendments
 from src.catalyst.implied import ImpliedMove
 from src.catalyst.models import CatalystEvent, Coverage, Trial
@@ -54,6 +55,43 @@ def _runway(ticker: str, event_date: str) -> Runway:
 
 def _implied(ticker: str, event_date: str) -> ImpliedMove:
     return implied.implied_move(ticker, event_date)
+
+
+def _pdufa(start: str, end: str) -> List[Any]:
+    return pdufa.pdufa_events(start, end)
+
+
+def pdufa_rows(today: str, end: str, lookback_days: int = 180
+               ) -> List[B.PdufaRow]:
+    """Upcoming FDA decision dates, with runway and implied move attached.
+
+    Announcements are searched over the LOOKBACK (a PDUFA date is announced
+    months before it lands), then filtered to dates still ahead of us. Rows
+    are not cap-banded: an approval decision is material to a company of any
+    size, and unlike the trial calendar there is no resolver ceiling to work
+    around — EDGAR hands us the ticker directly.
+    """
+    import datetime as dt
+
+    since = (dt.date.fromisoformat(today)
+             - dt.timedelta(days=lookback_days)).isoformat()
+    rows: List[B.PdufaRow] = []
+    seen = set()
+    for event in _pdufa(since, today):
+        if not (today <= event.event_date <= end) or event.ticker in seen:
+            continue
+        seen.add(event.ticker)
+        cash, move = Runway(), ImpliedMove()
+        try:
+            cash = _runway(event.ticker, event.event_date)
+        except Exception:
+            pass
+        try:
+            move = _implied(event.ticker, event.event_date)
+        except Exception:
+            pass
+        rows.append(B.PdufaRow(event=event, runway=cash, implied=move))
+    return rows
 
 
 def window(spec: str, today: Optional[str] = None) -> Tuple[str, str]:
@@ -176,6 +214,7 @@ def run_board(args: argparse.Namespace) -> int:
     rows, coverage = build_rows(start, end, phases=phases,
                                 funded_only=args.funded_only,
                                 deep_limit=args.limit)
+    reg = [] if args.no_pdufa else pdufa_rows(start, end)
     conn = store.connect(args.db)
     try:
         today = dt.date.today().isoformat()
@@ -186,7 +225,7 @@ def run_board(args: argparse.Namespace) -> int:
                            row.implied.spot)
     finally:
         conn.close()
-    print(B.render(rows, coverage))
+    print(B.render(rows, coverage, pdufa=reg))
     return 0
 
 
@@ -221,6 +260,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help=f"how many names to deep-fetch "
                              f"(default {DEEP_TIER_LIMIT}); the board states "
                              f"how many it withheld")
+    parser.add_argument("--no-pdufa", action="store_true",
+                        help="skip the FDA decision-date section")
     parser.add_argument("--db", default=store.DEFAULT_DB)
     parser.add_argument("--mark", action="store_true",
                         help="resolve elapsed events into catalyst_marks")

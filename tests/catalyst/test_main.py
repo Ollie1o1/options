@@ -106,8 +106,11 @@ class TestBuildRows(unittest.TestCase):
         self.assertEqual(coverage.truncated, 0)
 
     def test_limit_flag_reaches_build_rows(self):
+        # pdufa_rows MUST be mocked: unmocked it fetches real 8-Ks and this
+        # single test took 22.8s of network while appearing to pass.
         with tempfile.TemporaryDirectory() as d:
-            with mock.patch.object(cli, "build_rows") as build:
+            with mock.patch.object(cli, "build_rows") as build, \
+                 mock.patch.object(cli, "pdufa_rows", return_value=[]):
                 build.return_value = ([], cli.Coverage(swept=0))
                 cli.main(["--limit", "7", "--db", os.path.join(d, "c.db")])
         self.assertEqual(build.call_args.kwargs["deep_limit"], 7)
@@ -144,10 +147,21 @@ class TestMain(unittest.TestCase):
     def test_board_path_writes_events_and_prints(self):
         with tempfile.TemporaryDirectory() as d:
             db = os.path.join(d, "catalysts.db")
-            with mock.patch.object(cli, "build_rows") as build:
+            with mock.patch.object(cli, "build_rows") as build, \
+                 mock.patch.object(cli, "pdufa_rows", return_value=[]):
                 build.return_value = ([], cli.Coverage(swept=0))
                 rc = cli.main(["--window", "6m", "--db", db])
         self.assertEqual(rc, 0)
+
+    def test_no_pdufa_flag_skips_the_regulatory_fetch(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(cli, "build_rows") as build, \
+                 mock.patch.object(cli, "pdufa_rows",
+                                   side_effect=AssertionError("fetched!")) as p:
+                build.return_value = ([], cli.Coverage(swept=0))
+                rc = cli.main(["--no-pdufa", "--db", os.path.join(d, "c.db")])
+        self.assertEqual(rc, 0)
+        p.assert_not_called()
 
     def test_mark_path_returns_zero_with_nothing_outstanding(self):
         with tempfile.TemporaryDirectory() as d:
@@ -209,6 +223,55 @@ class TestDetail(unittest.TestCase):
                 rc = cli.main(["ANNX", "--db", os.path.join(d, "c.db")])
         self.assertEqual(rc, 0)
         detail.assert_called_once()
+
+
+class TestPdufaRows(unittest.TestCase):
+    def _event(self, date, ticker="CYTK"):
+        from src.catalyst.pdufa import PdufaEvent
+        return PdufaEvent(ticker=ticker, cik=1, event_date=date,
+                          filed="2026-05-05", doc_url="u")
+
+    def _patch(self, events):
+        return mock.patch.multiple(
+            cli, _pdufa=mock.DEFAULT, _runway=mock.DEFAULT,
+            _implied=mock.DEFAULT)
+
+    def test_keeps_only_dates_inside_the_window(self):
+        evs = [self._event("2026-11-14"), self._event("2030-01-01", "ZZZZ")]
+        with mock.patch.multiple(cli, _pdufa=mock.DEFAULT, _runway=mock.DEFAULT,
+                                 _implied=mock.DEFAULT) as m:
+            m["_pdufa"].return_value = evs
+            m["_runway"].return_value = cli.Runway()
+            m["_implied"].return_value = cli.ImpliedMove()
+            rows = cli.pdufa_rows("2026-08-26", "2027-02-26")
+        self.assertEqual([r.event.ticker for r in rows], ["CYTK"])
+
+    def test_drops_a_date_already_in_the_past(self):
+        with mock.patch.multiple(cli, _pdufa=mock.DEFAULT, _runway=mock.DEFAULT,
+                                 _implied=mock.DEFAULT) as m:
+            m["_pdufa"].return_value = [self._event("2026-01-01")]
+            m["_runway"].return_value = cli.Runway()
+            m["_implied"].return_value = cli.ImpliedMove()
+            self.assertEqual(cli.pdufa_rows("2026-08-26", "2027-02-26"), [])
+
+    def test_one_row_per_ticker(self):
+        evs = [self._event("2026-11-14"), self._event("2026-12-01")]
+        with mock.patch.multiple(cli, _pdufa=mock.DEFAULT, _runway=mock.DEFAULT,
+                                 _implied=mock.DEFAULT) as m:
+            m["_pdufa"].return_value = evs
+            m["_runway"].return_value = cli.Runway()
+            m["_implied"].return_value = cli.ImpliedMove()
+            self.assertEqual(len(cli.pdufa_rows("2026-08-26", "2027-02-26")), 1)
+
+    def test_a_runway_failure_does_not_drop_the_row(self):
+        with mock.patch.multiple(cli, _pdufa=mock.DEFAULT, _runway=mock.DEFAULT,
+                                 _implied=mock.DEFAULT) as m:
+            m["_pdufa"].return_value = [self._event("2026-11-14")]
+            m["_runway"].side_effect = OSError("boom")
+            m["_implied"].return_value = cli.ImpliedMove()
+            rows = cli.pdufa_rows("2026-08-26", "2027-02-26")
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0].runway.cash)
 
 
 if __name__ == "__main__":
