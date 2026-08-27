@@ -27,7 +27,11 @@ def render(results: Sequence[Result], vintage_counts: Dict[int, int],
         tag = "  [EXPLORATORY]" if r.key in _EXPLORATORY else ""
         lines.append(fmt.style(f"{r.key}  {r.label}{tag}", "emph"))
         if r.verdict != "NOT COMPUTABLE":
-            lines.append(f"    n = {r.n_true} vs {r.n_false}")
+            # The cluster count is the honest sample size. A k of 0 means it
+            # was not measured, so nothing is printed rather than "0 tickers".
+            clusters = (f"   ({r.k_true} vs {r.k_false} tickers)"
+                        if r.k_true or r.k_false else "")
+            lines.append(f"    n = {r.n_true} vs {r.n_false} rows{clusters}")
             lines.append(f"    mean {r.mean_true:+.3f} vs {r.mean_false:+.3f}"
                          f"   diff {r.diff:+.3f}")
         if r.verdict == "NOT COMPUTABLE":
@@ -55,5 +59,8 @@ def render(results: Sequence[Result], vintage_counts: Dict[int, int],
                  "under test")
     lines.append("  overlapping quarterly vintages are NOT independent "
                  "observations")
+    lines.append("  CIs are cluster-robust, resampling TICKERS — the forward "
+                 "return is a property of the ticker, so trials sharing one "
+                 "ticker and vintage are one observation, not several")
     lines.append("  a CI containing zero is NO EVIDENCE, not a weak finding")
     return "\n".join(lines)
