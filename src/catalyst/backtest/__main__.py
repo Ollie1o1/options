@@ -107,7 +107,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              lambda r: (None if r.phase not in ("PHASE2", "PHASE3")
                         else r.phase == "PHASE3")),
         )
-        arms: Dict[str, List[List[float]]] = {k: [[], []] for k, _, _, _ in splits}
+        # (value, cluster, arm) per hypothesis. The cluster is the TICKER,
+        # because that is what the outcome belongs to — `outcomes_for` never
+        # sees an nct_id, so trials sharing a ticker and a vintage carry the
+        # same number and are one observation between them.
+        arms: Dict[str, List[S.Observation]] = {k: [] for k, _, _, _ in splits}
 
         by_ticker: Dict[str, Dict[str, float]] = {}
         counts: Dict[int, int] = {}
@@ -129,11 +133,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     side = fn(row)
                     if side is None:
                         continue
-                    arms[key][0 if side else 1].append(o.relative)
+                    arms[key].append((o.relative, row.ticker, bool(side)))
 
         results = [
-            S.compare(arms[k][0], arms[k][1], key=k,
-                      label=f"{lbl} ({h}mo, XBI-rel)")
+            S.compare_clustered(arms[k], key=k,
+                                label=f"{lbl} ({h}mo, XBI-rel)")
             for k, lbl, h, _ in splits
         ]
         # H4 needs the implied move AS OF each vintage, which needs historical

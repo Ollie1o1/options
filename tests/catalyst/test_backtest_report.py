@@ -19,6 +19,39 @@ def a_result(verdict="NO EVIDENCE", key="H1"):
                   ci_lo=-0.02, ci_hi=0.11, verdict=verdict)
 
 
+class TestClusterCountsAreShown(unittest.TestCase):
+    """A row count that hides the cluster count is how this went wrong.
+
+    "n = 2137" reads as 2,137 observations. When those rows come from 659
+    clusters the honest sample size is 659, and a reader who is shown only the
+    row count cannot tell the difference.
+    """
+
+    def _clustered(self):
+        return Result(key="H1", label="funded through", n_true=180,
+                      n_false=96, mean_true=0.031, mean_false=-0.012,
+                      diff=0.043, ci_lo=-0.09, ci_hi=0.18,
+                      verdict="NO EVIDENCE", k_true=41, k_false=23)
+
+    def test_the_cluster_count_appears_beside_the_row_count(self):
+        out = report.render([self._clustered()], vintage_counts={6: 12},
+                            dropped_delisted=12, prereg_ok=True)
+        self.assertIn("41", out)
+        self.assertIn("23", out)
+        self.assertIn("ticker", out.lower())
+
+    def test_a_result_with_no_cluster_count_does_not_invent_one(self):
+        # k=0 means "not measured". Printing "0 tickers" would be a claim.
+        out = report.render([a_result()], vintage_counts={6: 12},
+                            dropped_delisted=12, prereg_ok=True)
+        self.assertNotIn("0 tickers", out)
+
+    def test_it_says_the_ci_is_cluster_robust(self):
+        out = report.render([self._clustered()], vintage_counts={6: 12},
+                            dropped_delisted=12, prereg_ok=True)
+        self.assertIn("cluster", out.lower())
+
+
 class TestRefusal(unittest.TestCase):
     def test_refuses_without_a_matching_prereg(self):
         out = report.render([a_result()], vintage_counts={6: 12},
