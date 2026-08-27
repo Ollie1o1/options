@@ -27,6 +27,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 from src.catalyst import ctgov, pit_cache, runway
+from src.catalyst.design import OUTCOME_EDIT_FLAG_THRESHOLD, Amendments
 from src.catalyst.models import Trial
 from src.catalyst.runway import Runway
 
@@ -68,6 +69,49 @@ def version_at(versions: List[Dict[str, Any]], as_of: str) -> Optional[int]:
         if date >= best_date:
             best_date, best = date, int(entry.get("version", 0))
     return best
+
+
+#: The moduleLabel marking a PROTOCOL outcome-measure edit.
+#:
+#: "Outcome Measures (Results)" is a different label and is deliberately NOT
+#: counted: posting results is not amending an endpoint. Validated 2026-08-27
+#: against the live `outcomesUpdateCount` on 12 of 12 cached trials, including
+#: one with three results-section updates whose live count stayed at its three
+#: protocol edits. This is a restriction of the live statistic, not a new one.
+_OUTCOME_LABEL = "Outcome Measures"
+
+
+def amendments_as_of(versions: Optional[List[Dict[str, Any]]],
+                     as_of: str) -> Amendments:
+    """Amendment history as it stood on ``as_of``.
+
+    `design.amendments_for` counts every change ever recorded, so an endpoint
+    amended in 2025 marked a row "amended" at a 2023 vintage — lookahead in
+    the one feature H2 is about. The dated version list needed to answer this
+    correctly was already in the cache.
+
+    An empty or missing list, and a trial whose first version postdates
+    ``as_of``, both yield ``available=False`` rather than a confident zero:
+    "we could not look" and "nothing changed" are different answers, and a
+    trial registered after the vantage date is genuinely absent.
+    """
+    seen = [v for v in (versions or [])
+            if str(v.get("date") or "") and str(v["date"]) <= as_of]
+    if not seen:
+        return Amendments()
+    seen.sort(key=lambda v: str(v.get("date")))
+    outcomes = sum(1 for v in seen
+                   if _OUTCOME_LABEL in (v.get("moduleLabels") or []))
+    flags: List[str] = []
+    if outcomes >= OUTCOME_EDIT_FLAG_THRESHOLD:
+        flags.append(f"outcome measures edited {outcomes}x")
+    return Amendments(
+        versions=len(seen),
+        outcomes_updated=outcomes,
+        status_now=seen[-1].get("status"),
+        flags=tuple(flags),
+        available=True,
+    )
 
 
 def _versions(nct_id: str, conn: sqlite3.Connection) -> Optional[List[Dict[str, Any]]]:

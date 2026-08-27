@@ -65,7 +65,7 @@ HYPOTHESES: Tuple[Hypothesis, ...] = (
     ),
 )
 
-_PREAMBLE = """# Catalyst Backtest — Pre-Registration v2
+_PREAMBLE = """# Catalyst Backtest — Pre-Registration v3
 
 The runner refuses to emit a report unless this file's SHA-256 matches the
 hypotheses declared in `src/catalyst/backtest/prereg.py`.
@@ -104,6 +104,42 @@ changes is any claim that rests on the WIDTH of those intervals — above all
 the claim that large effects were ruled out.
 
 v1 remains in git history. Nothing about it is deleted or amended in place.
+
+## v3 supersedes v2 — H2's FEATURE was contaminated by lookahead
+
+**H2 as run in v1 and v2 did not test what it claims, and both of its results
+are withdrawn.** The verdict was NO EVIDENCE either way, so nothing false was
+published; but a test that reads the future is not evidence of absence either.
+
+`design.amendments_for(nct_id)` fetched the amendment history LIVE and
+`parse_history` counted every change ever recorded, with no `as_of` filter.
+An endpoint amended in 2025 therefore marked a row "amended" at the
+2023-01-01 vintage. Every other feature on the panel — trial state, cash
+runway, phase — was already reconstructed point-in-time through `pit.py`;
+this one silently was not, and it is the only feature H2 is about.
+
+**H2, v3:** `amended` is TRUE when the trial had two or more PROTOCOL
+outcome-measure edits **dated on or before the vintage**, counted from the
+cached version list via `pit.amendments_as_of`. A trial whose first version
+postdates the vintage is `available=False` and enters neither arm, exactly as
+an unknown funded-through does.
+
+The outcome-edit definition is a RESTRICTION of the live statistic, not a new
+one: counting versions whose `moduleLabels` contain "Outcome Measures"
+reproduced the live `outcomesUpdateCount` on **12 of 12** cached trials
+checked 2026-08-27. "Outcome Measures (Results)" is excluded — posting results
+is not amending an endpoint — and the live API excludes it too, verified on a
+trial carrying three of them.
+
+**H1 and H3 are unchanged in definition.** They are re-run only because the
+panel is rebuilt as one object; their v2 results should reappear up to the
+data drift noted below.
+
+**Known reproducibility limit, stated not fixed:** the panel is rebuilt from
+live ClinicalTrials.gov on every run, so two runs are not guaranteed identical
+inputs. Between v1 and v2 this moved H3's difference from -0.039 to -0.068
+with no estimator change. Until the sweep is pinned to the cache, small
+between-run differences in the MEANS are data drift, not findings.
 """
 
 
