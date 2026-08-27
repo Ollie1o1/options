@@ -89,6 +89,24 @@ class CatalystEvent:
 
 
 @dataclass
+class BandCoverage:
+    """How many names one time band had, and how many were deep-fetched.
+
+    Carried so the header can say "31–90 DAYS 14 of 21" instead of leaving a
+    reader to discover on the last line that most of the window was withheld.
+    Data only — bands.py owns the band names, board.py owns the rendering.
+    """
+
+    band: str
+    found: int = 0
+    shown: int = 0
+
+    @property
+    def withheld(self) -> int:
+        return max(0, self.found - self.shown)
+
+
+@dataclass
 class Coverage:
     """What the run saw and what it threw away.
 
@@ -104,6 +122,7 @@ class Coverage:
     shown: Optional[int] = None
     truncated: int = 0
     notes: List[str] = field(default_factory=list)
+    bands: List[BandCoverage] = field(default_factory=list)
 
     def summary(self) -> str:
         pct = (100.0 * self.resolved / self.swept) if self.swept else 0.0
