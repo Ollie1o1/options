@@ -83,5 +83,26 @@ class TestCoverage(unittest.TestCase):
         self.assertIsNone(Coverage(shown=12, truncated=0).truncation_note())
 
 
+class TestBandCoverage(unittest.TestCase):
+    def test_withheld_is_found_minus_shown(self):
+        from src.catalyst.models import BandCoverage
+        self.assertEqual(BandCoverage(band="D31_90", found=21, shown=14).withheld, 7)
+
+    def test_withheld_never_goes_negative(self):
+        from src.catalyst.models import BandCoverage
+        self.assertEqual(BandCoverage(band="NEXT_30", found=6, shown=6).withheld, 0)
+
+    def test_coverage_starts_with_no_bands(self):
+        self.assertEqual(Coverage().bands, [])
+
+    def test_two_coverages_do_not_share_a_band_list(self):
+        # A mutable default would make every Coverage in a process alias one
+        # list; the deep-fetch loop appends to this per run.
+        from src.catalyst.models import BandCoverage
+        first, second = Coverage(), Coverage()
+        first.bands.append(BandCoverage(band="NEXT_30", found=1, shown=1))
+        self.assertEqual(second.bands, [])
+
+
 if __name__ == "__main__":
     unittest.main()

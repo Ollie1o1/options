@@ -51,21 +51,50 @@ def _decide(strategy):
     return apply_auto_log_allowlist(dict(FAR_DATED, strategy_name=strategy))
 
 
-def _admission_rate(strategy, n=600):
+def _admission_rate(strategy, n=600, dte=114):
     """Share of DISTINCT contracts of `strategy` the auto-logger admits.
 
     Since the allocation went live (2026-08-24) admission is a SHARE, not an
     invariant: the draw is deterministic per contract, so a single candidate
     is no longer representative of the structure. Asserting one contract here
     would be asserting a coin flip.
+
+    `dte` sets the expiration, which is PART of the admission key — so the
+    realised share for one DTE drifts a little from day to day as the date
+    moves under it. Measured across 20 DTEs on 2026-08-27: Long Call ranged
+    2.50%-5.67% around its 3.81% weight, Bull Put 86.0%-91.0% around 88.4%.
+    That drift is why every assertion below is a band, never a point.
     """
+    expiration = (_dt.date.today() + _dt.timedelta(days=dte)).isoformat()
     hits = 0
     for i in range(n):
         decision, _ = apply_auto_log_allowlist(
-            dict(FAR_DATED, strategy_name=strategy, symbol="NVDA",
+            dict(strategy_name=strategy, date="2026-08-13",
+                 expiration=expiration, symbol="NVDA",
                  strike=100.0 + i, type="put"))
         hits += decision == "insert"
     return hits / n
+
+
+#: Sampling tolerance around a configured weight, from the drift measured in
+#: `_admission_rate`'s docstring (worst observed gap ~1.9pp; 3pp leaves room).
+_RATE_TOLERANCE = 0.03
+
+
+def _exploration_share():
+    """What ONE eligible structure receives from the exploration budget alone.
+
+    Read from config rather than hardcoded, so this tracks the mechanism
+    instead of a number that silently goes stale when the budget is retuned.
+    `explore_rate` is spread uniformly across `eligible_strategies`, so a
+    structure with no posterior share at all still floats at this level.
+    """
+    with open(repo_path("config.json")) as fh:
+        alloc = (json.load(fh)["auto_log"].get("allocation") or {})
+    eligible = alloc.get("eligible_strategies") or []
+    if not alloc.get("enabled") or not eligible:
+        return 0.0
+    return float(alloc.get("explore_rate") or 0.0) / len(eligible)
 
 
 
@@ -106,8 +135,17 @@ class TestTheAllowlistStillWorks(unittest.TestCase):
         self.assertEqual(_decide("Jade Lizard"), ("drop", None))
 
 
-class TestLongCallIsOffOnItsEvidence(unittest.TestCase):
-    """Switched off 2026-08-19, by evidence rather than by accident.
+class TestLongCallIsHeldToItsExplorationShare(unittest.TestCase):
+    """Held to a small share 2026-08-19, by evidence rather than by accident.
+
+    RENAMED 2026-08-27, from `TestLongCallIsOffOnItsEvidence`. "Off" stopped
+    being true when the allocation went live on 2026-08-24: Long Call sits in
+    `eligible_strategies`, so it floats at the exploration budget's
+    per-structure share (~3.8%) rather than being refused outright. The old
+    name described a policy the code no longer implements, and the two tests
+    underneath it asserted single contracts against a probabilistic gate —
+    coin flips that fired on 2026-08-27. A label that does not match the
+    mechanism is the defect shape this repo keeps paying for.
 
     Audited on the ledger with position sizing removed — every row is
     `quantity = 1.0`, so as-sized P&L mostly describes option premiums rather
@@ -131,8 +169,33 @@ class TestLongCallIsOffOnItsEvidence(unittest.TestCase):
     counterfactual database.
     """
 
-    def test_long_call_is_dropped(self):
-        self.assertEqual(_decide("Long Call"), ("drop", None))
+    def test_long_call_takes_no_more_than_its_exploration_share(self):
+        """Was `_decide("Long Call") == ("drop", None)`, which asserted a coin
+        flip and fired on 2026-08-27.
+
+        Long Call is not absent from the book any more: the allocation lists
+        it in `eligible_strategies`, so it floats at the exploration budget's
+        per-structure share. A single contract admits or refuses
+        deterministically on its own key, and `_decide` used one fixed
+        contract whose expiration moved daily under `_exp_in` — so the old
+        assertion passed or failed on whatever date the suite happened to run.
+
+        The evidence-based claim is unchanged and is what is asserted here:
+        Long Call earns no MATERIAL share of entries. Its edge was measured
+        (295 closed, PF 1.035, CI [0.783, 1.335]) and the interval contains 1.
+        """
+        share = _exploration_share()
+        rate = _admission_rate("Long Call")
+        self.assertLessEqual(
+            rate, share + _RATE_TOLERANCE,
+            f"Long Call admitted {rate:.1%} of contracts, above the "
+            f"{share:.1%} exploration budget it is entitled to — something "
+            f"has given it posterior weight it has not earned.")
+        self.assertLess(
+            rate, 0.10,
+            f"Long Call admitted {rate:.1%} of contracts. Whatever the "
+            f"mechanism, that is a material share of the book for a "
+            f"structure whose profit-factor interval contains 1.")
 
     def test_long_call_is_absent_from_BOTH_config_lists(self):
         """Pins the mechanism, not the outcome. `paper_only_strategies` still
@@ -147,14 +210,38 @@ class TestLongCallIsOffOnItsEvidence(unittest.TestCase):
         self.assertNotIn("Long Call", both)
 
     def test_no_dte_makes_it_come_back(self):
-        """The horizon floor quarantines; it must never resurrect. A dropped
-        strategy is dropped at every DTE."""
-        for exp in (_exp_in(7), _exp_in(66), None):
-            with self.subTest(expiration=exp):
-                trade = {"strategy_name": "Long Call", "date": "2026-08-13"}
-                if exp:
-                    trade["expiration"] = exp
-                self.assertEqual(apply_auto_log_allowlist(trade), ("drop", None))
+        """The horizon floor quarantines; it must never resurrect.
+
+        The floor runs only on structures the allocation has ALREADY admitted,
+        and it chooses paper_only 0 vs 1 — it must never turn a refusal into
+        an entry. So the claim is about the share at each DTE, not about one
+        contract: the old version asserted three single contracts per run,
+        which was three coin flips a day and fired on 2026-08-27.
+        """
+        ceiling = _exploration_share() + _RATE_TOLERANCE
+        for dte in (7, 66, 114):
+            with self.subTest(dte=dte):
+                rate = _admission_rate("Long Call", dte=dte)
+                self.assertLessEqual(
+                    rate, ceiling,
+                    f"at {dte} DTE Long Call admitted {rate:.1%}, above the "
+                    f"{ceiling:.1%} ceiling — the horizon floor is raising "
+                    f"admission rather than quarantining it.")
+
+    def test_a_candidate_with_no_identifying_fields_falls_back_and_drops(self):
+        """The `expiration=None` case from the old test, kept as a real
+        invariant rather than a draw.
+
+        A trade with no symbol, strike or expiration has no admission key, so
+        the allocation cannot draw on it at all — `apply_auto_log_allowlist`
+        fails SAFE and falls back to the name allowlist, where Long Call is
+        absent from both lists. Absence from both is what actually stops an
+        entry, so this path is deterministic and must stay that way.
+        """
+        self.assertEqual(
+            apply_auto_log_allowlist({"strategy_name": "Long Call",
+                                      "date": "2026-08-13"}),
+            ("drop", None))
 
 
 class TestBullPutLogsAgain(unittest.TestCase):
