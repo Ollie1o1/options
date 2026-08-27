@@ -351,3 +351,40 @@ class TestPdufaRows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _parse(argv):
+    """Parse argv with the REAL CLI parser, so a renamed flag fails a test."""
+    import contextlib
+    import io
+    captured = {}
+
+    def _capture(args):
+        captured["args"] = args
+        return 0
+
+    with mock.patch.object(cli, "run_board", _capture), \
+         mock.patch.object(cli, "run_detail", _capture), \
+         contextlib.redirect_stdout(io.StringIO()):
+        cli.main(argv)
+    return captured["args"]
+
+
+class TestDisplayFlags(unittest.TestCase):
+    def test_detail_top_defaults_to_eight(self):
+        self.assertEqual(_parse(["--window", "6m"]).detail_top, 8)
+
+    def test_detail_flag_is_off_by_default(self):
+        self.assertFalse(_parse([]).detail)
+
+    def test_detail_flag_parses(self):
+        self.assertTrue(_parse(["--detail"]).detail)
+
+    def test_no_legend_parses(self):
+        self.assertTrue(_parse(["--no-legend"]).no_legend)
+
+    def test_detail_top_parses_an_integer(self):
+        self.assertEqual(_parse(["--detail-top", "3"]).detail_top, 3)
+
+    def test_the_per_ticker_drilldown_also_accepts_no_legend(self):
+        self.assertTrue(_parse(["ANNX", "--no-legend"]).no_legend)

@@ -14,6 +14,7 @@ Two labelling rules that are not cosmetic:
 from __future__ import annotations
 
 import datetime as dt
+import textwrap
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -35,7 +36,13 @@ _PHASE_ORDER = {"PHASE3": 3, "PHASE2": 2}
 DETAIL_TOP_DEFAULT = 8
 
 #: Compact-row column widths. Fixed so bands align with one another.
-_W_TICKER, _W_MCAP, _W_DATE, _W_PHASE, _W_RUNWAY, _W_IMPLIED = 7, 8, 13, 6, 11, 6
+#:
+#: _W_DATE must fit the WIDEST rendered date, which is the month-precision
+#: estimate "~2026-09 (est, month)" at 21 characters — not the bare
+#: "2026-10-31" at 10. Sizing it to the short form let every month-precision
+#: row shove the phase, runway and implied columns rightwards, which cost the
+#: board the column alignment that is the entire point of a compact row.
+_W_TICKER, _W_MCAP, _W_DATE, _W_PHASE, _W_RUNWAY, _W_IMPLIED = 7, 8, 21, 6, 11, 6
 
 LEGEND_ROWS: Tuple[Tuple[str, str], ...] = (
     ("runway", "cash ÷ quarterly burn, measured against the event date"),
@@ -196,8 +203,22 @@ def _date_cell(trial) -> Tuple[str, str]:
     return text, "muted" if trial.date_precision == "month" else "value"
 
 
-def _compact_row(row: BoardRow, width: int) -> List[str]:
-    """One scannable line plus a dim asset subline."""
+def _notes(row: BoardRow, sup: relative.Superlatives) -> List[str]:
+    """Every superlative this row holds, in a stable order."""
+    found = [relative.note_for(row.event.ticker, field, sup)
+             for field in ("runway", "implied", "amend")]
+    return [note for note in found if note]
+
+
+def _compact_row(row: BoardRow, sup: relative.Superlatives,
+                 width: int) -> List[str]:
+    """One scannable line plus a dim asset subline.
+
+    Superlatives ride the subline rather than being dropped: they are
+    computed across every row on the board, so confining them to the detail
+    blocks made them almost never render — measured 2026-08-26, zero of four
+    appeared on a live 40-name board.
+    """
     trial = row.event.trial
     date_text, date_style = _date_cell(trial)
     runway_text, runway_style = _runway_cell(row.runway)
@@ -212,8 +233,13 @@ def _compact_row(row: BoardRow, width: int) -> List[str]:
         fmt.style(ui.pad(implied_text, _W_IMPLIED, "right"), implied_style),
         fmt.style(extra, "muted"),
     ]).rstrip()
-    asset = ui.clip(trial.brief_title, width - 6)
-    return [line, "    " + fmt.style(asset, "muted")]
+    notes = _notes(row, sup)
+    budget = width - 6 - (sum(len(n) + 3 for n in notes) if notes else 0)
+    asset = ui.clip(trial.brief_title, max(20, budget))
+    sub = "    " + fmt.style(asset, "muted")
+    for note in notes:
+        sub += fmt.style(f"  ({note})", "muted")
+    return [line, sub]
 
 
 def _full_block(row: BoardRow, sup: relative.Superlatives,
@@ -300,27 +326,42 @@ def _header_context(coverage: Coverage, window_label: str) -> List[str]:
     return out
 
 
+def _note_lines(text: str, width: int, style: str = "muted") -> List[str]:
+    """A footer note wrapped to the board width, indented two, continuations
+    aligned under the first character rather than the margin."""
+    wrapped = textwrap.wrap(text, max(20, width - 4)) or [""]
+    return ["  " + fmt.style(line, style) for line in wrapped]
+
+
 def _footer(coverage: Coverage, width: int, legend: bool) -> List[str]:
     """Legend and the standing caveats — each stated ONCE."""
     lines: List[str] = [""]
     if legend:
-        body = [ui.kv_line(label, fmt.style(text, "muted"), indent=0)
-                for label, text in LEGEND_ROWS]
+        # ui.card pads but never wraps, so a description longer than the box
+        # pushes the right border out. Wrap to the inner width instead: the
+        # `prior` row overflowed by 40 columns on a live run.
+        body: List[str] = []
+        text_width = max(20, width - 6 - ui.LABEL_W)
+        for label, text in LEGEND_ROWS:
+            wrapped = textwrap.wrap(text, text_width) or [""]
+            body.append(ui.kv_line(label, fmt.style(wrapped[0], "muted"),
+                                   indent=0))
+            for cont in wrapped[1:]:
+                body.append(ui.kv_line("", fmt.style(cont, "muted"), indent=0))
         lines.append(ui.card("LEGEND", body, width, boxed=True))
     lines.append(ui.rule(width))
-    lines.append("  " + fmt.style(coverage.summary(), "muted"))
+    lines.extend(_note_lines(coverage.summary(), width))
     if legend:
-        lines.extend([
-            "  " + fmt.style("Sorted by date within band. NOT ranked — no key "
-                             "on this board has been shown to order it.", "muted"),
-            "  " + fmt.style("Primary completion is not topline; expect a 1–3 "
-                             "month lag.", "muted"),
-            "  " + fmt.style("Amendments, funded-through and phase were tested "
-                             "2026-08-26 (n~2,100): NO EVIDENCE any of them "
-                             "predicts returns.", "muted"),
-            "  " + fmt.style("Superlatives describe this board's spread. They "
-                             "do not rank and they do not recommend.", "muted"),
-        ])
+        for caveat in (
+            "Sorted by date within band. NOT ranked — no key on this board "
+            "has been shown to order it.",
+            "Primary completion is not topline; expect a 1–3 month lag.",
+            "Amendments, funded-through and phase were tested 2026-08-26 "
+            "(n~2,100): NO EVIDENCE any of them predicts returns.",
+            "Superlatives describe this board's spread. They do not rank and "
+            "they do not recommend.",
+        ):
+            lines.extend(_note_lines(caveat, width))
     return lines
 
 
@@ -364,7 +405,7 @@ def render(rows: Sequence[BoardRow], coverage: Coverage,
             if id(row) in detailed:
                 lines.extend(_full_block(row, sup, width))
             else:
-                lines.extend(_compact_row(row, width))
+                lines.extend(_compact_row(row, sup, width))
             lines.append("")
 
     if not ordered:

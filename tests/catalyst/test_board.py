@@ -412,3 +412,70 @@ class TestLegendAndFooter(unittest.TestCase):
         out = board.render([a_row()], coverage(),
                            window_label="6m window · 2026-08-26 → 2027-02-22")
         self.assertIn("2027-02-22", out)
+
+
+class TestLiveRunRegressions(unittest.TestCase):
+    """Two defects a green suite missed and one live run caught, 2026-08-26."""
+
+    TODAY = "2026-08-26"
+
+    def test_the_legend_box_borders_line_up(self):
+        # ui.card pads but never truncates, so a description longer than the
+        # box pushes the right border out. The `prior` row overflowed by 40
+        # columns and printed a ragged box.
+        out = board.render([a_row()], coverage(), width=100)
+        box = [ln for ln in out.splitlines() if ln.startswith("│")]
+        self.assertTrue(box, "legend box did not render")
+        self.assertEqual(len({len(ln) for ln in box}), 1,
+                         f"ragged legend box: widths {sorted({len(ln) for ln in box})}")
+
+    def test_no_line_exceeds_the_requested_width(self):
+        out = board.render([a_row()], coverage(), width=100)
+        too_long = [ln for ln in out.splitlines() if len(ln) > 100]
+        self.assertEqual(too_long, [], f"lines over width: {too_long}")
+
+    def test_a_superlative_on_a_compact_row_is_still_shown(self):
+        # Superlatives are computed across EVERY row but were rendered only
+        # in detail blocks, so on a live 40-name board zero of four appeared.
+        rows = []
+        for i, q in enumerate((2.0, 9.0, 15.0, 20.0)):
+            rows.append(a_row(
+                event=CatalystEvent(
+                    trial=a_trial(f"NCT{i}", f"2026-09-{5 + i:02d}"),
+                    ticker=f"TK{i}", mcap=5e8),
+                runway=Runway(cash=1e8, burn_per_quarter=2e7, quarters=q,
+                              runway_end="2027-01-01", funded_through=True)))
+        # detail_top=1 pushes TK3 (the longest runway) onto a compact row.
+        out = board.render(rows, coverage(), today=self.TODAY, detail_top=1)
+        self.assertIn("longest runway shown", out)
+
+    def test_the_compact_asset_still_renders_alongside_a_note(self):
+        rows = []
+        for i, q in enumerate((2.0, 9.0, 15.0)):
+            rows.append(a_row(
+                event=CatalystEvent(
+                    trial=a_trial(f"NCT{i}", f"2026-09-{5 + i:02d}"),
+                    ticker=f"TK{i}", mcap=5e8),
+                runway=Runway(cash=1e8, burn_per_quarter=2e7, quarters=q,
+                              runway_end="2027-01-01", funded_through=True)))
+        out = board.render(rows, coverage(), today=self.TODAY, detail_top=0)
+        self.assertIn("Vonaprument", out)
+        self.assertIn("shortest runway shown", out)
+
+    def test_compact_columns_align_across_date_precisions(self):
+        # "~2027-03 (est, month)" is 21 chars and "2026-09-05 (est)" is 16.
+        # Sizing the date column to the short form let every month-precision
+        # row shove phase, runway and implied rightwards.
+        rows = [
+            a_row(event=CatalystEvent(
+                trial=a_trial("NCT-D", "2026-09-05"), ticker="DAYY", mcap=5e8)),
+            a_row(event=CatalystEvent(
+                trial=a_trial("NCT-M", "2026-09", precision="month"),
+                ticker="MONY", mcap=5e8)),
+        ]
+        out = board.render(rows, coverage(), today=self.TODAY, detail_top=0)
+        lines = out.splitlines()
+        day = next(ln for ln in lines if ln.startswith("  DAYY"))
+        month = next(ln for ln in lines if ln.startswith("  MONY"))
+        self.assertEqual(day.index("FUND"), month.index("FUND"),
+                         f"runway column misaligned:\n{day!r}\n{month!r}")

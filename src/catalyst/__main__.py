@@ -6,6 +6,13 @@
     python -m src.catalyst --funded-only      drop names that must raise first
     python -m src.catalyst ANNX               every in-window event for one name
     python -m src.catalyst --mark             resolve elapsed events, no render
+    python -m src.catalyst --detail           full block for every name
+    python -m src.catalyst --detail-top 3     how many get the full block
+    python -m src.catalyst --no-legend        drop the legend and caveats
+
+The board is banded by time-to-event (see bands.py) and the deep-fetch budget
+is split across those bands, so a 6-month window returns six months of names
+rather than the soonest N.
 
 The seams (_sweep, _name_index, _market_caps, _amendments, _runway, _implied)
 are module-level indirections so tests can replace every network boundary
@@ -230,7 +237,11 @@ def detail_rows(ticker: str, start: str, end: str,
 def run_detail(args: argparse.Namespace) -> int:
     start, end = window(args.window)
     rows, coverage = detail_rows(args.ticker, start, end)
-    print(B.render(rows, coverage))
+    label = f"{args.ticker.upper()} · {args.window} window · {start} → {end}"
+    # A per-ticker drill-down asked about this name explicitly, so every row
+    # gets full detail regardless of --detail-top.
+    print(B.render(rows, coverage, today=start, detail_top=len(rows),
+                   legend=not args.no_legend, window_label=label))
     return 0
 
 
@@ -252,7 +263,11 @@ def run_board(args: argparse.Namespace) -> int:
                            row.implied.spot)
     finally:
         conn.close()
-    print(B.render(rows, coverage, pdufa=reg))
+    detail_top = len(rows) if args.detail else args.detail_top
+    label = f"{args.window} window · {start} → {end}"
+    print(B.render(rows, coverage, pdufa=reg, today=start,
+                   detail_top=detail_top, legend=not args.no_legend,
+                   window_label=label))
     return 0
 
 
@@ -289,6 +304,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              f"how many it withheld")
     parser.add_argument("--no-pdufa", action="store_true",
                         help="skip the FDA decision-date section")
+    parser.add_argument("--detail", action="store_true",
+                        help="full detail for every name, not just the "
+                             "soonest few")
+    parser.add_argument("--detail-top", type=int, default=B.DETAIL_TOP_DEFAULT,
+                        help=f"how many of the soonest names get a full "
+                             f"detail block (default {B.DETAIL_TOP_DEFAULT}); "
+                             f"the rest render as one line")
+    parser.add_argument("--no-legend", action="store_true",
+                        help="drop the legend and standing caveats")
     parser.add_argument("--db", default=store.DEFAULT_DB)
     parser.add_argument("--mark", action="store_true",
                         help="resolve elapsed events into catalyst_marks")
