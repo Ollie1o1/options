@@ -26,10 +26,25 @@ import json
 import os
 import unittest
 
+import datetime as _dt
+
 from src.options_screener import apply_auto_log_allowlist
 from src.paths import repo_path
 
-FAR_DATED = {"expiration": "2026-12-18", "date": "2026-08-13"}
+
+def _exp_in(days: int) -> str:
+    """An expiration `days` from TODAY.
+
+    The DTE floor measures from today, not from a row's `date` field, so a
+    hardcoded expiration is a time bomb: the Bull Put case below was written
+    2026-08-13 with a fixed 2026-08-31 expiry — 18 DTE then, 5 DTE by
+    2026-08-26 — and started failing on a calendar roll rather than a code
+    change. Anchoring to today keeps each test measuring the DTE it names.
+    """
+    return (_dt.date.today() + _dt.timedelta(days=days)).isoformat()
+
+
+FAR_DATED = {"expiration": _exp_in(114), "date": "2026-08-13"}
 
 
 def _decide(strategy):
@@ -134,7 +149,7 @@ class TestLongCallIsOffOnItsEvidence(unittest.TestCase):
     def test_no_dte_makes_it_come_back(self):
         """The horizon floor quarantines; it must never resurrect. A dropped
         strategy is dropped at every DTE."""
-        for exp in ("2026-08-20", "2026-10-31", None):
+        for exp in (_exp_in(7), _exp_in(66), None):
             with self.subTest(expiration=exp):
                 trade = {"strategy_name": "Long Call", "date": "2026-08-13"}
                 if exp:
@@ -178,12 +193,42 @@ class TestBullPutLogsAgain(unittest.TestCase):
             al = json.load(fh)["auto_log"]
         self.assertIn("Bull Put", al.get("allowed_strategies") or [])
 
-    def test_the_rest_of_the_family_stays_off(self):
-        """The fix restores one strategy on its own evidence, not the family
-        that was switched off alongside it."""
-        for strat in ("Bear Call", "Short Put"):
-            with self.subTest(strategy=strat):
-                self.assertEqual(_decide(strat), ("drop", None))
+    def test_bear_call_stays_off_entirely(self):
+        """The fix restored one strategy on its own evidence, not the family
+        that was switched off alongside it.
+
+        Bear Call is absent from `eligible_strategies`, so the allocation can
+        never draw it — 0% in every environment."""
+        self.assertEqual(_admission_rate("Bear Call"), 0.0)
+
+    def test_short_put_is_exploration_only_not_a_restoration(self):
+        """SUPERSEDED ASSERTION, REWRITTEN 2026-08-26.
+
+        This used to assert Short Put always drops. That was true under the
+        name allowlist and stopped being true when allocation went live on
+        2026-08-24: Short Put sits in `eligible_strategies` and draws a small
+        exploration share. Measured locally: Bull Put 0.903, Short Put 0.040.
+
+        Worse than merely stale, the old assertion was ENVIRONMENT-DEPENDENT.
+        The allocation posterior reads the ledger, which is not in git, so the
+        test passed on CI (no ledger, fallback drops it) and failed locally
+        (ledger present, 4% admitted). A test that disagrees with itself across
+        machines is worse than one that is simply wrong.
+
+        What is invariant, and what this now asserts: Short Put is eligible for
+        exploration but is NOT restored to the posterior-best rate. The bound
+        holds at 0.04 locally and at 0.0 with no ledger.
+        """
+        self.assertLessEqual(_admission_rate("Short Put"), 0.25)
+
+    def test_short_put_is_eligible_while_bear_call_is_not(self):
+        """The config invariant behind the two tests above, asserted directly
+        so the distinction survives a change in the posterior."""
+        with open(repo_path("config.json")) as fh:
+            alloc = (json.load(fh)["auto_log"].get("allocation") or {})
+        eligible = set(alloc.get("eligible_strategies") or [])
+        self.assertIn("Short Put", eligible)
+        self.assertNotIn("Bear Call", eligible)
 
 
 class TestTheHorizonFloorIsLongPremiumReasoning(unittest.TestCase):
@@ -199,9 +244,33 @@ class TestTheHorizonFloorIsLongPremiumReasoning(unittest.TestCase):
     """
 
     def test_a_short_dated_bull_put_stays_cohort_eligible(self):
-        near = {"strategy_name": "Bull Put", "expiration": "2026-08-31",
+        """Asserted against an EXPLICIT config, like the Long Call case below.
+
+        Two reasons, both learned the hard way. The DTE floor measures from
+        TODAY, so a hardcoded expiration is a calendar time bomb — the original
+        `2026-08-31` was 18 DTE when written and 5 DTE by 2026-08-26. And since
+        the 2026-08-24 allocation went live, `apply_auto_log_allowlist` runs a
+        deterministic hash draw over the trade's identifying fields, so a live
+        config makes this a lottery: changing the expiration changes the key,
+        changes the draw, and flips the verdict for reasons that have nothing
+        to do with the floor this test is about.
+
+        Pinning the config isolates the one behaviour under test — the horizon
+        floor is long-premium reasoning and must not quarantine a credit
+        spread whose thesis IS decay.
+        """
+        import json as _json
+        import tempfile as _tf
+        near = {"strategy_name": "Bull Put", "expiration": _exp_in(18),
                 "date": "2026-08-13"}   # 18 DTE — the historical median
-        self.assertEqual(apply_auto_log_allowlist(near), ("insert", 0))
+        with _tf.TemporaryDirectory() as d:
+            path = os.path.join(d, "cfg.json")
+            with open(path, "w") as fh:
+                _json.dump({"auto_log": {"allowed_strategies": ["Bull Put"],
+                                         "paper_only_strategies": [],
+                                         "cohort_min_dte": 30}}, fh)
+            self.assertEqual(apply_auto_log_allowlist(near, cfg_path=path),
+                             ("insert", 0))
 
     def test_the_floor_still_quarantines_a_short_dated_long_premium_entry(self):
         """The guard must narrow, not disappear.
@@ -214,7 +283,7 @@ class TestTheHorizonFloorIsLongPremiumReasoning(unittest.TestCase):
         """
         import json as _json
         import tempfile as _tf
-        near = {"strategy_name": "Long Call", "expiration": "2026-08-20",
+        near = {"strategy_name": "Long Call", "expiration": _exp_in(7),
                 "date": "2026-08-13"}
         with _tf.TemporaryDirectory() as d:
             path = os.path.join(d, "cfg.json")

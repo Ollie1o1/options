@@ -21,6 +21,7 @@ from src.catalyst import baserates
 from src.catalyst.design import Amendments
 from src.catalyst.implied import ImpliedMove
 from src.catalyst.models import CatalystEvent, Coverage
+from src.catalyst.pdufa import PdufaEvent
 from src.catalyst.runway import Runway
 
 _PHASE_ORDER = {"PHASE3": 3, "PHASE2": 2}
@@ -31,6 +32,20 @@ class BoardRow:
     event: CatalystEvent
     other_events: int = 0
     amendments: Amendments = field(default_factory=Amendments)
+    runway: Runway = field(default_factory=Runway)
+    implied: ImpliedMove = field(default_factory=ImpliedMove)
+
+
+@dataclass
+class PdufaRow:
+    """A regulatory decision date, which is NOT a trial.
+
+    It carries no phase, enrollment or masking because an 8-K does not state
+    them. Those fields are absent rather than defaulted — inventing them to
+    reuse BoardRow would put fabricated design data on screen.
+    """
+
+    event: PdufaEvent
     runway: Runway = field(default_factory=Runway)
     implied: ImpliedMove = field(default_factory=ImpliedMove)
 
@@ -118,14 +133,49 @@ def _design_line(row: BoardRow) -> str:
     return "  design     " + (", ".join(bits) if bits else "not reported")
 
 
+def _pdufa_section(rows: Sequence[PdufaRow], width: int) -> List[str]:
+    """Regulatory decisions, rendered apart from trial readouts.
+
+    A PDUFA date is FIRM and day-precision, so it prints bare — no "(est)",
+    no "~". That visual difference from the trial rows is the point: those are
+    estimates that slip, these are decision dates.
+    """
+    lines: List[str] = [
+        fmt.style("REGULATORY DECISIONS  (PDUFA)", "heading"),
+        fmt.draw_separator(width),
+    ]
+    for row in sorted(rows, key=lambda r: r.event.event_date):
+        e = row.event
+        lines.append(fmt.style(
+            f"{e.ticker:<6} {e.event_date}   FDA DECISION DATE"
+            f"      announced {e.filed}", "emph"))
+        lines.append(_runway_line(row.runway))
+        implied_line = _implied_line(row.implied)
+        if implied_line:
+            lines.append(implied_line)
+        lines.append(f"  source     {e.doc_url}")
+        lines.append("")
+    lines.append("  Firm decision dates, not estimates. NOT ranked, and an "
+                 "approval is not a share price.")
+    return lines
+
+
 def render(rows: Sequence[BoardRow], coverage: Coverage,
-           width: int = 100) -> str:
+           width: int = 100,
+           pdufa: Sequence[PdufaRow] = ()) -> str:
     """The board. Date-sorted, never scored."""
     lines: List[str] = [
         fmt.style("UPCOMING CLINICAL CATALYSTS", "heading"),
         fmt.draw_separator(width),
     ]
     truncation = coverage.truncation_note()
+    if not rows and pdufa:
+        lines.append("  no trial readouts in the window after filtering")
+        lines.append("")
+        lines.extend(_pdufa_section(pdufa, width))
+        lines.append(fmt.draw_separator(width))
+        lines.append("  " + coverage.summary())
+        return "\n".join(lines)
     if not rows:
         lines.append("  no catalysts in the window after filtering")
         lines.append(fmt.draw_separator(width))
@@ -155,6 +205,9 @@ def render(rows: Sequence[BoardRow], coverage: Coverage,
         if prior:
             lines.append(f"  prior      {prior}")
         lines.append("")
+
+    if pdufa:
+        lines.extend(_pdufa_section(pdufa, width))
 
     lines.append(fmt.draw_separator(width))
     lines.append("  " + coverage.summary())

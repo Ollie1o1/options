@@ -86,6 +86,57 @@ class TestParseStudies(unittest.TestCase):
         self.assertEqual(len(ctgov.parse_studies(p)), 4)
 
 
+class TestIsEvent(unittest.TestCase):
+    """A long-term extension is not a catalyst.
+
+    Correcting an overstatement made while investigating this: OPEN-LABEL is
+    not the same as not-a-catalyst. RGNX's single-arm open-label gene-therapy
+    trial in Duchenne carried a 38% implied move — single-arm is standard in
+    rare disease and oncology. Only studies that structurally cannot surprise
+    are excluded: extensions, rollovers, expanded access.
+    """
+
+    def _t(self, title, masking="QUADRUPLE", allocation="RANDOMIZED"):
+        from src.catalyst.models import Trial
+        return Trial(nct_id="N", sponsor_name="S", brief_title=title,
+                     phase="PHASE3", event_date="2026-10-31",
+                     date_precision="day", date_type="ESTIMATED",
+                     status="RECRUITING", enrollment=100,
+                     allocation=allocation, masking=masking,
+                     primary_outcome="OS", conditions=(), phases=("PHASE3",))
+
+    def test_a_long_term_extension_is_not_an_event(self):
+        self.assertFalse(ctgov.is_event(self._t(
+            "Open-label Study to Evaluate Long-term Safety of SPN-812",
+            masking="NONE", allocation=None)))
+
+    def test_an_extension_study_is_not_an_event(self):
+        self.assertFalse(ctgov.is_event(self._t("An Extension Study of X")))
+
+    def test_a_rollover_is_not_an_event(self):
+        self.assertFalse(ctgov.is_event(self._t("Rollover Study for Subjects")))
+
+    def test_expanded_access_is_not_an_event(self):
+        self.assertFalse(ctgov.is_event(self._t("Expanded Access Protocol")))
+
+    def test_a_blinded_rct_is_an_event(self):
+        self.assertTrue(ctgov.is_event(self._t(
+            "Efficacy and Safety of BEM/RZR vs SOF/VEL in Chronic HCV")))
+
+    def test_a_single_arm_open_label_trial_IS_still_an_event(self):
+        # The RGNX case. Open-label does not mean non-binary.
+        self.assertTrue(ctgov.is_event(self._t(
+            "AFFINITY DUCHENNE: RGX-202 Gene Therapy in Participants With DMD",
+            masking="NONE", allocation="NON_RANDOMIZED")))
+
+    def test_extension_matching_is_case_insensitive(self):
+        self.assertFalse(ctgov.is_event(self._t("LONG-TERM SAFETY EXTENSION")))
+
+    def test_a_missing_title_is_left_as_an_event(self):
+        # Unknown is not disqualifying; a false exclusion is worse here.
+        self.assertTrue(ctgov.is_event(self._t("")))
+
+
 class TestSweep(unittest.TestCase):
     def test_follows_page_tokens_and_stops(self):
         first = payload()
