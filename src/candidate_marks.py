@@ -306,6 +306,39 @@ def open_positions(*, db_path: Optional[str] = None,
     return made
 
 
+# Attempts per (symbol, expiration) before a pair is written off for the run.
+#
+# `_fetch_chain_quotes` RETURNS {} on failure rather than raising — it catches
+# its own exceptions — so the `except` arm below never fired in production and
+# a transient outage arrived here indistinguishable from "this chain has no
+# quotes". Pinning that first answer cost 132 contracts their mark on
+# 2026-08-27 across 14 pairs, SPY 2026-09-18 and QQQ 2026-09-18 among them; a
+# day skipped is a day lost forever. Bounded at 2 because the alternative
+# failure is refetching a genuinely dead pair once per contract.
+_CHAIN_ATTEMPTS = 2
+
+
+def _fetch_chain(fetch, symbol: str, expiration: str) -> Dict[Any, Any]:
+    """Today's chain for one pair, retried, or {} once the budget is spent.
+
+    An empty answer is treated as a failure rather than as an answer. That is
+    the same line `_fetch_chain_quotes` already holds for its own TTL cache —
+    "a transient outage must not pin this pair to 'no quotes'" — held one
+    layer up, where the pin actually happened.
+    """
+    for attempt in range(_CHAIN_ATTEMPTS):
+        try:
+            chain = fetch(symbol, expiration) or {}
+        except Exception:
+            log.warning("candidate mark fetch raised for %s %s (attempt %d/%d)",
+                        symbol, expiration, attempt + 1, _CHAIN_ATTEMPTS,
+                        exc_info=True)
+            chain = {}
+        if chain:
+            return chain
+    return {}
+
+
 def _default_fetch(ticker: str, expiration: str):
     """Live bid/ask per (strike, type), from the call that marks the real book.
 
@@ -371,13 +404,16 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
 
             key = (symbol, expiration)
             if key not in chains:
-                try:
-                    chains[key] = fetch(symbol, expiration) or {}
-                except Exception:
-                    log.warning("candidate mark fetch failed for %s %s",
-                                symbol, expiration, exc_info=True)
+                chains[key] = _fetch_chain(fetch, symbol, expiration)
+                if not chains[key]:
+                    # Written off for the rest of the run so a dead pair is not
+                    # refetched once per contract — but LOUDLY, because the
+                    # silence is the defect this exists to close.
+                    log.warning(
+                        "candidate marks: no quotes for %s %s after %d "
+                        "attempts — every open position on this pair loses "
+                        "today's mark", symbol, expiration, _CHAIN_ATTEMPTS)
                     cr.STATS["errors"] += 1
-                    chains[key] = {}
 
             # Every leg or none. A structure priced from one real quote and one
             # guess is not a price — the refusal `legs_for` applies at entry.
@@ -617,10 +653,31 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
                 "  SELECT 1 FROM candidate_marks m "
                 "   WHERE m.contract_key = p.contract_key)",
                 (OPEN, today)).fetchone()
+            # A pair every one of whose open contracts missed today's mark.
+            #
+            # The count above asks "ever marked" and is deliberately blind to a
+            # chain that priced for weeks and then stopped — which is how 14
+            # pairs went dark on 2026-08-27 behind a never-marked count of 4.
+            # The unit is the PAIR, not the contract: one unquoted strike is
+            # ordinary illiquidity, whereas every contract on one expiration
+            # falling silent at once is a failed fetch.
+            stopped_n, = conn.execute(
+                "SELECT COUNT(*) FROM ("
+                "  SELECT c.symbol, c.expiration FROM candidate_positions p "
+                "    JOIN candidates c ON c.scan_id = p.scan_id "
+                "     AND c.board = p.board AND c.contract_key = p.contract_key "
+                "   WHERE p.status = ? AND p.entry_date < ? "
+                "   GROUP BY c.symbol, c.expiration "
+                "  HAVING SUM(CASE WHEN EXISTS ("
+                "     SELECT 1 FROM candidate_marks m "
+                "      WHERE m.contract_key = p.contract_key "
+                "        AND m.mark_date = ?) THEN 1 ELSE 0 END) = 0)",
+                (OPEN, today, today)).fetchone()
     except Exception:
         return ["  cand marks     unreadable                        [CRITICAL]"]
 
-    sev = "CRITICAL" if ((open_n and not marks) or dark_n) else "OK"
+    sev = "CRITICAL" if ((open_n and not marks) or dark_n) else (
+        "WARN" if stopped_n else "OK")
     out = [f"  {'cand marks':<14} {marks} marks / {open_n} open / "
            f"{closed_n} closed in {days}d{'':<3}[{sev}]"]
     if open_n and not marks:
@@ -629,4 +686,7 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
     if dark_n:
         out.append(f"     {dark_n} OPEN POSITIONS HAVE NEVER BEEN MARKED — "
                    "they cannot resolve")
+    if stopped_n:
+        out.append(f"     {stopped_n} SYMBOL/EXPIRY PAIRS WENT DARK TODAY — "
+                   "every open contract on them missed today's mark")
     return out
