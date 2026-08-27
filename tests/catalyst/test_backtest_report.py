@@ -34,7 +34,7 @@ class TestClusterCountsAreShown(unittest.TestCase):
                       verdict="NO EVIDENCE", k_true=41, k_false=23)
 
     def test_the_cluster_count_appears_beside_the_row_count(self):
-        out = report.render([self._clustered()], vintage_counts={6: 12},
+        out = report.render([self._clustered()], horizon_counts={6: 12},
                             dropped_delisted=12, prereg_ok=True)
         self.assertIn("41", out)
         self.assertIn("23", out)
@@ -42,31 +42,31 @@ class TestClusterCountsAreShown(unittest.TestCase):
 
     def test_a_result_with_no_cluster_count_does_not_invent_one(self):
         # k=0 means "not measured". Printing "0 tickers" would be a claim.
-        out = report.render([a_result()], vintage_counts={6: 12},
+        out = report.render([a_result()], horizon_counts={6: 12},
                             dropped_delisted=12, prereg_ok=True)
         self.assertNotIn("0 tickers", out)
 
     def test_it_says_the_ci_is_cluster_robust(self):
-        out = report.render([self._clustered()], vintage_counts={6: 12},
+        out = report.render([self._clustered()], horizon_counts={6: 12},
                             dropped_delisted=12, prereg_ok=True)
         self.assertIn("cluster", out.lower())
 
 
 class TestRefusal(unittest.TestCase):
     def test_refuses_without_a_matching_prereg(self):
-        out = report.render([a_result()], vintage_counts={6: 12},
+        out = report.render([a_result()], horizon_counts={6: 12},
                             dropped_delisted=12, prereg_ok=False)
         self.assertIn("REFUS", out.upper())
 
     def test_refusal_shows_no_numbers(self):
-        out = report.render([a_result()], vintage_counts={6: 12},
+        out = report.render([a_result()], horizon_counts={6: 12},
                             dropped_delisted=12, prereg_ok=False)
         self.assertNotIn("0.043", out)
 
 
 class TestRender(unittest.TestCase):
     def setUp(self):
-        self.out = report.render([a_result()], vintage_counts={6: 12},
+        self.out = report.render([a_result()], horizon_counts={6: 12},
                                  dropped_delisted=12, prereg_ok=True)
 
     def test_states_the_verdict(self):
@@ -89,7 +89,7 @@ class TestRender(unittest.TestCase):
         self.assertIn("independent", self.out.lower())
 
     def test_labels_exploratory_results(self):
-        out = report.render([a_result(key="H2")], vintage_counts={6: 12},
+        out = report.render([a_result(key="H2")], horizon_counts={6: 12},
                             dropped_delisted=0, prereg_ok=True)
         self.assertIn("EXPLORATORY", out.upper())
 
@@ -99,7 +99,7 @@ class TestRender(unittest.TestCase):
 
     def test_underpowered_says_so_instead_of_showing_a_ci(self):
         out = report.render([a_result(verdict="UNDERPOWERED")],
-                            vintage_counts={6: 12}, dropped_delisted=0,
+                            horizon_counts={6: 12}, dropped_delisted=0,
                             prereg_ok=True)
         self.assertIn("UNDERPOWERED", out)
         self.assertNotIn("95% CI", out)
@@ -110,7 +110,7 @@ class TestNotComputableRendering(unittest.TestCase):
         r = Result(key="H4", label="implied vs realised — no historical chains",
                    n_true=0, n_false=0, mean_true=0.0, mean_false=0.0,
                    diff=0.0, ci_lo=0.0, ci_hi=0.0, verdict="NOT COMPUTABLE")
-        out = report.render([r], vintage_counts={6: 12}, dropped_delisted=0,
+        out = report.render([r], horizon_counts={6: 12}, dropped_delisted=0,
                             prereg_ok=True)
         self.assertIn("NOT COMPUTABLE", out)
         self.assertNotIn("95% CI", out)
@@ -125,6 +125,24 @@ class TestMain(unittest.TestCase):
                            "--db", os.path.join(d, "pit.db")])
         self.assertEqual(rc, 2)
 
+class TestTheHorizonCounterIsLabelledHonestly(unittest.TestCase):
+    """It counts OBSERVATIONS, and printed them as "vintages".
+
+    There are 12 vintages. The 2026-08-27 run printed "3mo: 2103 vintages",
+    which is the observation count wearing the wrong noun — the same defect
+    shape this repo keeps paying for.
+    """
+
+    def test_it_does_not_call_observation_counts_vintages(self):
+        out = report.render([a_result()], horizon_counts={6: 2103},
+                            dropped_delisted=0, prereg_ok=True)
+        self.assertIn("2103", out)
+        self.assertNotIn("2103 vintages", out)
+
+    def test_it_names_them_observations(self):
+        out = report.render([a_result()], horizon_counts={6: 2103},
+                            dropped_delisted=0, prereg_ok=True)
+        self.assertIn("observation", out.lower())
 
 if __name__ == "__main__":
     unittest.main()

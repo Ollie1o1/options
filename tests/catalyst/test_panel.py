@@ -118,3 +118,65 @@ class TestBuild(PanelCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAmendmentsArePointInTime(PanelCase):
+    """The panel must not read an amendment that had not happened yet.
+
+    `_amendments` called `design.amendments_for(nct_id)`, which fetches the
+    LIVE history and counts every change ever recorded — so an endpoint edited
+    in 2025 marked a row "amended" at the 2023 vintage. Every other feature on
+    this panel is reconstructed point-in-time; this one silently was not.
+    """
+
+    VERSIONS = [
+        {"version": 0, "date": "2023-01-10", "status": "RECRUITING",
+         "moduleLabels": ["Study Status"]},
+        {"version": 1, "date": "2025-06-01", "status": "RECRUITING",
+         "moduleLabels": ["Outcome Measures"]},
+        {"version": 2, "date": "2025-07-01", "status": "RECRUITING",
+         "moduleLabels": ["Outcome Measures"]},
+    ]
+
+    def test_amendments_takes_the_vintage_and_the_cache(self):
+        # The signature is the fix: a function given only an nct_id cannot
+        # answer "as of when".
+        import inspect
+        params = list(inspect.signature(panel._amendments).parameters)
+        self.assertIn("as_of", params)
+        self.assertIn("conn", params)
+
+    def test_a_later_edit_does_not_mark_an_earlier_vintage(self):
+        pit_cache.put_versions(self.conn, "NCT1", self.VERSIONS)
+        ev = CatalystEvent(trial=a_trial(), ticker="ANNX", mcap=1e9)
+        with mock.patch.multiple(panel, _board=mock.DEFAULT,
+                                 _runway=mock.DEFAULT, _cik=mock.DEFAULT) as m:
+            m["_board"].return_value = ([ev], Coverage(swept=1, resolved=1))
+            m["_cik"].return_value = None
+            rows, _ = panel.build("2024-01-01", ["NCT1"], self.conn)
+        # Both outcome edits are in 2025; at the 2024 vintage there are none.
+        self.assertFalse(rows[0].amended)
+
+    def test_the_same_trial_is_amended_once_the_edits_have_happened(self):
+        pit_cache.put_versions(self.conn, "NCT1", self.VERSIONS)
+        ev = CatalystEvent(trial=a_trial(), ticker="ANNX", mcap=1e9)
+        with mock.patch.multiple(panel, _board=mock.DEFAULT,
+                                 _runway=mock.DEFAULT, _cik=mock.DEFAULT) as m:
+            m["_board"].return_value = ([ev], Coverage(swept=1, resolved=1))
+            m["_cik"].return_value = None
+            rows, _ = panel.build("2025-10-01", ["NCT1"], self.conn)
+        self.assertTrue(rows[0].amended)
+
+    def test_it_does_not_reach_the_network(self):
+        # The cache holds the answer; a live fetch here would be the bug.
+        pit_cache.put_versions(self.conn, "NCT1", self.VERSIONS)
+        ev = CatalystEvent(trial=a_trial(), ticker="ANNX", mcap=1e9)
+        with mock.patch.multiple(panel, _board=mock.DEFAULT,
+                                 _runway=mock.DEFAULT, _cik=mock.DEFAULT) as m, \
+                mock.patch("src.catalyst.design.fetch_history") as live, \
+                mock.patch("src.catalyst.pit._fetch_versions") as pit_live:
+            m["_board"].return_value = ([ev], Coverage(swept=1, resolved=1))
+            m["_cik"].return_value = None
+            panel.build("2025-10-01", ["NCT1"], self.conn)
+        live.assert_not_called()
+        pit_live.assert_not_called()

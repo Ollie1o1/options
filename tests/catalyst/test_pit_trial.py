@@ -93,3 +93,78 @@ class TestTrialAsOf(TrialCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAmendmentsAsOf(unittest.TestCase):
+    """Amendment history as it stood on a date, not as it stands today.
+
+    `panel._amendments` called the LIVE `design.amendments_for`, which counts
+    every change ever recorded. An endpoint amended in 2025 therefore marked a
+    row "amended" at the 2023 vintage — lookahead, in the one feature H2 is
+    about. The dated version lists were already in the cache the whole time.
+
+    The outcome-edit definition is validated, not invented: counting versions
+    whose moduleLabels contain "Outcome Measures" reproduced the live
+    `outcomesUpdateCount` on 12 of 12 trials checked 2026-08-27, and
+    "Outcome Measures (Results)" is excluded there too — posting results is
+    not amending an endpoint.
+    """
+
+    VERSIONS = [
+        {"version": 0, "date": "2023-01-10", "status": "RECRUITING",
+         "moduleLabels": ["Study Status"]},
+        {"version": 1, "date": "2023-06-01", "status": "RECRUITING",
+         "moduleLabels": ["Outcome Measures", "Study Design"]},
+        {"version": 2, "date": "2024-03-01", "status": "RECRUITING",
+         "moduleLabels": ["Outcome Measures"]},
+        {"version": 3, "date": "2025-02-01", "status": "COMPLETED",
+         "moduleLabels": ["Outcome Measures (Results)"]},
+    ]
+
+    def test_it_counts_only_versions_on_or_before_the_date(self):
+        a = pit.amendments_as_of(self.VERSIONS, "2023-12-31")
+        self.assertTrue(a.available)
+        self.assertEqual(a.versions, 2)
+
+    def test_a_later_endpoint_edit_is_invisible_at_an_earlier_vintage(self):
+        # THE bug: the 2024 outcome edit must not exist on 2023-12-31.
+        early = pit.amendments_as_of(self.VERSIONS, "2023-12-31")
+        late = pit.amendments_as_of(self.VERSIONS, "2024-12-31")
+        self.assertEqual(early.outcomes_updated, 1)
+        self.assertEqual(late.outcomes_updated, 2)
+
+    def test_results_section_updates_are_not_endpoint_amendments(self):
+        # "Outcome Measures (Results)" is posting results, not amending.
+        a = pit.amendments_as_of(self.VERSIONS, "2025-12-31")
+        self.assertEqual(a.outcomes_updated, 2)
+
+    def test_a_trial_not_yet_registered_is_unavailable_not_zero(self):
+        # "we could not look" and "nothing changed" are different answers.
+        a = pit.amendments_as_of(self.VERSIONS, "2022-01-01")
+        self.assertFalse(a.available)
+        self.assertEqual(a.versions, 0)
+
+    def test_no_version_list_is_unavailable(self):
+        self.assertFalse(pit.amendments_as_of(None, "2024-01-01").available)
+        self.assertFalse(pit.amendments_as_of([], "2024-01-01").available)
+
+    def test_status_is_the_status_at_the_date_not_today(self):
+        a = pit.amendments_as_of(self.VERSIONS, "2024-06-01")
+        self.assertEqual(a.status_now, "RECRUITING")
+        later = pit.amendments_as_of(self.VERSIONS, "2025-06-01")
+        self.assertEqual(later.status_now, "COMPLETED")
+
+    def test_the_flag_threshold_uses_the_as_of_count(self):
+        from src.catalyst.design import OUTCOME_EDIT_FLAG_THRESHOLD
+        self.assertEqual(OUTCOME_EDIT_FLAG_THRESHOLD, 2)
+        self.assertEqual(pit.amendments_as_of(self.VERSIONS, "2023-12-31").flags, ())
+        self.assertTrue(pit.amendments_as_of(self.VERSIONS, "2024-12-31").flags)
+
+    def test_at_a_far_future_date_it_matches_the_live_parser(self):
+        # Same payload, same totals — the point-in-time version is a
+        # restriction of the live one, not a different statistic.
+        from src.catalyst.design import parse_history
+        live = parse_history({"changes": self.VERSIONS, "outcomesUpdateCount": 2})
+        pit_view = pit.amendments_as_of(self.VERSIONS, "2099-01-01")
+        self.assertEqual(pit_view.versions, live.versions)
+        self.assertEqual(pit_view.outcomes_updated, live.outcomes_updated)

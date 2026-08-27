@@ -11,7 +11,7 @@ WIDTH = 100
 _EXPLORATORY = {h.key for h in HYPOTHESES if h.exploratory}
 
 
-def render(results: Sequence[Result], vintage_counts: Dict[int, int],
+def render(results: Sequence[Result], horizon_counts: Dict[int, int],
            dropped_delisted: int, prereg_ok: bool) -> str:
     """The study report. Refuses outright if the prereg hash does not match."""
     lines: List[str] = [fmt.style("CATALYST BACKTEST", "heading"),
@@ -46,10 +46,14 @@ def render(results: Sequence[Result], vintage_counts: Dict[int, int],
         lines.append("")
 
     lines.append(fmt.draw_separator(WIDTH))
-    counts = ", ".join(f"{m}mo: {n} vintages"
-                       for m, n in sorted(vintage_counts.items()))
+    # Observations, not vintages. There are 12 vintages; the 2026-08-27 run
+    # printed "3mo: 2103 vintages", which was this count wearing the wrong
+    # noun. Horizons differ because a 12-month window has not elapsed for the
+    # late vintages, so the arms are genuinely different sizes per horizon.
+    counts = ", ".join(f"{m}mo: {n} observations"
+                       for m, n in sorted(horizon_counts.items()))
     if counts:
-        lines.append(f"  horizons run on different vintage counts — {counts}")
+        lines.append(f"  elapsed observations per horizon — {counts}")
     lines.append(f"  {dropped_delisted} names dropped as delisted and "
                  f"unpriceable; measured 6.4% of resolvable 2024 sponsors, "
                  f"skewed toward ACQUISITIONS, so the residual bias is likely "

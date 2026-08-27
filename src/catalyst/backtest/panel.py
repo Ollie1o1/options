@@ -55,9 +55,16 @@ def _runway(cik: int, as_of: str, event_date: str,
     return pit.runway_as_of(cik, as_of, event_date, conn)
 
 
-def _amendments(nct_id: str) -> Any:
-    from src.catalyst import design
-    return design.amendments_for(nct_id)
+def _amendments(nct_id: str, as_of: str, conn: sqlite3.Connection) -> Any:
+    """Amendment history AS OF the vintage, from the cached version list.
+
+    `design.amendments_for` fetches live and counts every change ever made, so
+    an endpoint edited in 2025 marked a row "amended" at the 2023 vintage.
+    Every other feature on this panel was already reconstructed point-in-time;
+    this one was not, and H2 is the hypothesis about exactly this feature.
+    """
+    from src.catalyst import pit
+    return pit.amendments_as_of(pit._versions(nct_id, conn), as_of)
 
 
 def _cik(ticker: str) -> Optional[int]:
@@ -75,7 +82,7 @@ def build(vintage: str, nct_ids: Sequence[str],
         funded: Optional[bool] = None
         if cik is not None:
             funded = _runway(cik, vintage, event.event_date, conn).funded_through
-        amendments = _amendments(event.trial.nct_id)
+        amendments = _amendments(event.trial.nct_id, vintage, conn)
         amended: Optional[bool] = None
         if amendments.available:
             amended = amendments.outcomes_updated >= 2
