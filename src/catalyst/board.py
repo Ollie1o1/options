@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import textwrap
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import src.formatting as fmt
 import src.ui as ui
@@ -76,6 +76,16 @@ class PdufaRow:
     event: PdufaEvent
     runway: Runway = field(default_factory=Runway)
     implied: ImpliedMove = field(default_factory=ImpliedMove)
+
+
+#: Rows carrying the two market columns both sections render.
+#:
+#: Cash runway and implied move are properties of the TICKER, not of the trial,
+#: so the PDUFA section reuses the same two renderers rather than growing a
+#: second copy that could drift. Spelled as a union of the two real row types
+#: instead of a Protocol: there are exactly two, and naming them keeps a type
+#: error pointing at a real class when a third arrives.
+MarketRow = Union[BoardRow, PdufaRow]
 
 
 def format_event_date(date: str, precision: str, date_type: str) -> str:
@@ -139,7 +149,7 @@ def _amend_body(row: BoardRow, sup: relative.Superlatives) -> str:
     return body + (fmt.style(f"   ({note})", "muted") if note else "")
 
 
-def _runway_body(row: BoardRow, sup: relative.Superlatives) -> str:
+def _runway_body(row: MarketRow, sup: relative.Superlatives) -> str:
     r = row.runway
     if r.cash is None:
         return fmt.style("unknown (no XBRL cash concept reported)", "muted")
@@ -161,7 +171,7 @@ def _runway_body(row: BoardRow, sup: relative.Superlatives) -> str:
     return body + (fmt.style(f"   ({note})", "muted") if note else "")
 
 
-def _implied_body(row: BoardRow, sup: relative.Superlatives) -> Optional[str]:
+def _implied_body(row: MarketRow, sup: relative.Superlatives) -> Optional[str]:
     if row.implied.move_pct is None:
         return None
     body = (f"{row.implied.expiry} straddle → "
