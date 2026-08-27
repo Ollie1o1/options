@@ -66,4 +66,22 @@ result may motivate a new registration; it can never move this one.
 
 ## Result
 
-*Not yet run.* `scripts/prereg_ranker_test.py` writes here, once.
+Run 2026-08-27. One look, as registered.
+
+```
+decision: FAIL
+n: 2137
+rank_ic: -0.09753975752667834
+ci_low: -0.20330892835792652
+ci_high: 0.012209833547679834
+design_effect: 3.1078172712059975
+effective_n: 687.620864907135
+negative_control_mean: -0.0017945803694571236
+negative_control_p95_abs: 0.052002531437921114
+half1_ic: 0.1179401757532451
+half2_ic: -0.13129115823965107
+secondary_quality_score_ic: 0.06407421261521777
+secondary_carry_ic: 0.15186578573640974
+secondary_delta_ic: -0.14762395362725333
+```
+ `scripts/prereg_ranker_test.py` writes here, once.
