@@ -14,6 +14,7 @@ import tempfile
 import unittest
 
 from src import candidate_marks as cm
+from src import candidate_record as cr
 from src import execution_truth as et
 
 
@@ -1010,6 +1011,179 @@ class TestHealthCatchesPartialSilence(unittest.TestCase):
             _mark(path, "AAPL|2026-09-18|call|190", "2026-01-02", 10.0)
             text = " ".join(cm.health_lines(db_path=path))
             self.assertNotIn("NEVER BEEN MARKED", text.upper())
+
+
+class TestAnEmptyChainIsNotPinnedForTheRun(unittest.TestCase):
+    """A transient empty chain cost 132 contracts their mark on 2026-08-27.
+
+    `_fetch_chain_quotes` returns {} on any failure rather than raising, so
+    `mark_open`'s `except` arm — the only place that warned — never fired. The
+    empty dict was stored in `chains[key]` and every remaining contract on that
+    (symbol, expiration) was skipped in silence. SPY 2026-09-18 (40 contracts)
+    and QQQ 2026-09-18 (63) went fully dark that way, and a day skipped is a
+    day lost forever.
+
+    `_fetch_chain_quotes` already refuses to cache an empty result for exactly
+    this reason; these tests hold the same line one layer up.
+    """
+
+    CHAIN = {(190.0, "call"): (11.0, 11.4), (500.0, "call"): (4.0, 4.2)}
+
+    def _pair(self, path):
+        """Two contracts sharing one (symbol, expiration)."""
+        _insert_candidate(path, scan_id="A",
+                          contract_key="AAPL|2026-09-18|call|190")
+        _insert_candidate(path, scan_id="B", strike=500.0,
+                          contract_key="AAPL|2026-09-18|call|500")
+        cm.open_positions(db_path=path, today="2026-08-19")
+
+    def test_a_transient_empty_chain_is_retried_and_the_pair_is_marked(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._pair(path)
+            calls = []
+
+            def fetch(ticker, expiration):
+                calls.append((ticker, expiration))
+                return {} if len(calls) == 1 else self.CHAIN
+
+            n = cm.mark_open(db_path=path, today="2026-08-20", fetch=fetch)
+            # Both contracts, not zero: the first empty answer was a blip.
+            self.assertEqual(n, 2)
+            self.assertGreaterEqual(len(calls), 2)
+
+    def test_a_successful_fetch_is_still_one_call_per_pair(self):
+        # The retry must not cost a network call per contract on the happy path.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._pair(path)
+            calls = []
+
+            def fetch(ticker, expiration):
+                calls.append((ticker, expiration))
+                return self.CHAIN
+
+            cm.mark_open(db_path=path, today="2026-08-20", fetch=fetch)
+            self.assertEqual(calls, [("AAPL", "2026-09-18")])
+
+    def test_a_genuinely_empty_pair_is_attempted_a_bounded_number_of_times(self):
+        # A dead pair must not be refetched once per contract: three contracts
+        # on one pair, still only the retry budget in network calls.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._pair(path)
+            _insert_candidate(path, scan_id="C", strike=600.0,
+                              contract_key="AAPL|2026-09-18|call|600")
+            cm.open_positions(db_path=path, today="2026-08-19")
+            calls = []
+
+            def fetch(ticker, expiration):
+                calls.append((ticker, expiration))
+                return {}
+
+            n = cm.mark_open(db_path=path, today="2026-08-20", fetch=fetch)
+            self.assertEqual(n, 0)
+            self.assertEqual(len(calls), cm._CHAIN_ATTEMPTS)
+
+    def test_a_pair_that_stays_dark_is_counted_as_an_error(self):
+        # The silence is the defect. A pair that yields nothing has to leave a
+        # trace somewhere a human reads.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._pair(path)
+            before = cr.STATS.get("errors", 0)
+            cm.mark_open(db_path=path, today="2026-08-20",
+                         fetch=lambda t, e: {})
+            self.assertGreater(cr.STATS.get("errors", 0), before)
+
+    def test_a_raising_fetch_is_also_retried(self):
+        # The exception arm was unreachable in production, but the injected
+        # fetcher in these tests can still raise; both failure shapes are one
+        # kind of event and must be handled identically.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._pair(path)
+            calls = []
+
+            def fetch(ticker, expiration):
+                calls.append((ticker, expiration))
+                if len(calls) == 1:
+                    raise RuntimeError("boom")
+                return self.CHAIN
+
+            n = cm.mark_open(db_path=path, today="2026-08-20", fetch=fetch)
+            self.assertEqual(n, 2)
+
+
+class TestHealthCatchesAPairGoingDarkToday(unittest.TestCase):
+    """"Never marked" and "stopped being marked" are different failures.
+
+    The never-marked count is deliberately blind to the second one, so a whole
+    chain can stop pricing and the line stays green as long as each contract
+    was marked once. On 2026-08-27 that hid 14 fully dark pairs behind a
+    never-marked count of 4.
+
+    A single unquoted strike is ordinary illiquidity, so the unit here is the
+    PAIR: every open contract on one (symbol, expiration) missing today's mark
+    is the fetch-failure shape, not the illiquid-strike shape.
+    """
+
+    CHAIN = {(190.0, "call"): (11.0, 11.4)}
+
+    def test_a_pair_that_stopped_pricing_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="OK")
+            _insert_candidate(path, scan_id="DARK", symbol="MSFT", strike=500.0,
+                              contract_key="MSFT|2026-09-18|call|500")
+            cm.open_positions(db_path=path, today=_days_ago(3))
+            # Both marked two days ago; only AAPL prices today.
+            cm.mark_open(db_path=path, today=_days_ago(2),
+                         fetch=lambda t, e: self.CHAIN if t == "AAPL"
+                         else {(500.0, "call"): (4.0, 4.2)})
+            cm.mark_open(db_path=path, today=_days_ago(0),
+                         fetch=lambda t, e: self.CHAIN if t == "AAPL" else {})
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertIn("WENT DARK TODAY", text.upper())
+            self.assertIn("1 ", text)
+            # Never-marked stays green: both contracts have a mark.
+            self.assertNotIn("NEVER BEEN MARKED", text.upper())
+
+    def test_every_pair_pricing_today_says_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today=_days_ago(3))
+            cm.mark_open(db_path=path, today=_days_ago(0),
+                         fetch=lambda t, e: self.CHAIN)
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("WENT DARK TODAY", text.upper())
+
+    def test_one_unquoted_strike_beside_a_quoted_one_is_not_a_dark_pair(self):
+        # Ordinary illiquidity on one strike must not raise the alarm, or the
+        # alarm is red every day and nobody reads it.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="A",
+                              contract_key="AAPL|2026-09-18|call|190")
+            _insert_candidate(path, scan_id="B", strike=500.0,
+                              contract_key="AAPL|2026-09-18|call|500")
+            cm.open_positions(db_path=path, today=_days_ago(3))
+            _mark(path, "AAPL|2026-09-18|call|500", _days_ago(2), 4.1)
+            # Only the 190 strike quotes today; 500 is simply illiquid.
+            cm.mark_open(db_path=path, today=_days_ago(0),
+                         fetch=lambda t, e: self.CHAIN)
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("WENT DARK TODAY", text.upper())
+
+    def test_a_position_entered_today_cannot_make_a_pair_dark(self):
+        # It has not missed a run; it is waiting for its first.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today=_days_ago(0))
+            text = " ".join(cm.health_lines(db_path=path))
+            self.assertNotIn("WENT DARK TODAY", text.upper())
 
 
 if __name__ == "__main__":
