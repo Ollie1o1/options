@@ -6,6 +6,7 @@ Run:
 No test touches the network: the quote fetcher is injected everywhere. No test
 names the real ledger, the real candidates database, or the real config.
 """
+import datetime as _dt
 import json
 import os
 import sqlite3
@@ -14,6 +15,22 @@ import unittest
 
 from src import candidate_marks as cm
 from src import execution_truth as et
+
+
+def _days_ago(n: int) -> str:
+    """A date `n` days before TODAY.
+
+    `health_lines` is the one function here that measures from the real clock:
+    it counts marks with `mark_date >= now_utc - days`. A fixture pinned to a
+    literal date therefore drifts out of that window as the calendar moves —
+    the marks below were written at 2026-08-19, which was exactly 7 days old
+    on 2026-08-26 and 8 days old on 2026-08-27, falling outside the 7-day
+    window and turning a green suite red with no code change.
+
+    Every other function in this module takes an explicit `today`, so only the
+    `health_lines` fixtures need anchoring.
+    """
+    return (_dt.date.today() - _dt.timedelta(days=n)).isoformat()
 
 
 def _insert_candidate(path, **over):
@@ -893,8 +910,11 @@ class TestHealthLines(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "c.db")
             _insert_candidate(path)
-            cm.open_positions(db_path=path, today="2026-08-19")
-            cm.mark_open(db_path=path, today="2026-08-19",
+            # Entered days ago, marked today: the position is old enough to be
+            # eligible for the never-marked count, and its mark is inside the
+            # window health_lines measures from the real clock.
+            cm.open_positions(db_path=path, today=_days_ago(3))
+            cm.mark_open(db_path=path, today=_days_ago(0),
                          fetch=lambda t, e: {(190.0, "call"): (11.0, 11.4)})
             text = " ".join(cm.health_lines(db_path=path)).upper()
             self.assertNotIn("NO MARKS", text)
@@ -950,8 +970,11 @@ class TestHealthCatchesPartialSilence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "c.db")
             _insert_candidate(path)
-            cm.open_positions(db_path=path, today="2026-08-19")
-            cm.mark_open(db_path=path, today="2026-08-19",
+            # Entered days ago rather than today, so the position is genuinely
+            # eligible for the never-marked count — entered-today rows are
+            # excluded from it, which would let this pass without the mark.
+            cm.open_positions(db_path=path, today=_days_ago(3))
+            cm.mark_open(db_path=path, today=_days_ago(0),
                          fetch=lambda t, e: self.CHAIN)
             text = " ".join(cm.health_lines(db_path=path))
             self.assertIn("[OK]", text)
