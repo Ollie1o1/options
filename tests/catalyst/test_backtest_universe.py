@@ -245,5 +245,149 @@ class TestAFailedRunRefusesInsteadOfReportingZeros(unittest.TestCase):
         self.assertNotIn("H1", out)
 
 
+class TestFetchPricesReportsFailure(UniverseCase):
+    """A fetcher that swallows its own exceptions cannot report failure.
+
+    `_fetch_prices` returned {} on ANY exception, which made three separate
+    bugs possible in one day: empty series cached as answers, a rate-limited
+    benchmark rendering as UNDERPOWERED, and single tickers silently dropping
+    out so the sample shrank between runs (1544 vs 1545 rows, and a moved CI).
+
+    THREE outcomes must stay distinguishable:
+      * a series            — data
+      * an empty series     — we looked, this ticker has no bars (delisted)
+      * PriceFetchError     — we could not look
+    """
+
+    def test_a_transport_failure_raises_instead_of_returning_empty(self):
+        with mock.patch.object(cli, "_history",
+                               side_effect=RuntimeError("429 rate limited")):
+            with self.assertRaises(cli.PriceFetchError):
+                cli._fetch_prices("ABC", "a", "b")
+
+    def test_an_empty_frame_is_an_ANSWER_not_a_failure(self):
+        # A genuinely delisted name returns no bars and no exception. That is
+        # data, and must not be confused with a source outage.
+        with mock.patch.object(cli, "_history", return_value=[]):
+            self.assertEqual(cli._fetch_prices("ABC", "a", "b"), {})
+
+    def test_prices_retries_a_failing_fetch(self):
+        calls = []
+
+        def flaky(ticker, start, end):
+            calls.append(ticker)
+            if len(calls) == 1:
+                raise cli.PriceFetchError("boom")
+            return {"2026-01-02": 10.0}
+
+        with mock.patch.object(cli, "_fetch_prices", side_effect=flaky):
+            got = cli._prices("ABC", "a", "2026-08-27", conn=self.conn,
+                              today="2026-08-27")
+        self.assertEqual(got, {"2026-01-02": 10.0})
+        self.assertEqual(len(calls), 2)
+
+    def test_prices_raises_once_the_retry_budget_is_spent(self):
+        with mock.patch.object(cli, "_fetch_prices",
+                               side_effect=cli.PriceFetchError("boom")) as f:
+            with self.assertRaises(cli.PriceFetchError):
+                cli._prices("ABC", "a", "2026-08-27", conn=self.conn,
+                            today="2026-08-27")
+        self.assertEqual(f.call_count, cli._PRICE_ATTEMPTS)
+
+    def test_a_failed_fetch_is_never_cached_as_an_empty_series(self):
+        with mock.patch.object(cli, "_fetch_prices",
+                               side_effect=cli.PriceFetchError("boom")):
+            with self.assertRaises(cli.PriceFetchError):
+                cli._prices("ABC", "a", "2026-08-27", conn=self.conn,
+                            today="2026-08-27")
+        self.assertIsNone(pit_cache.get_prices(self.conn, "ABC", "a",
+                                               "2026-08-27",
+                                               today="2026-08-27"))
+
+
+class TestTheRunRefusesWhenPricesFailMaterially(unittest.TestCase):
+    """Dropping tickers quietly is how the sample shrank between runs."""
+
+    def test_the_report_names_failed_fetches_separately_from_delistings(self):
+        from src.catalyst.backtest import report
+        import src.formatting as fmt
+        fmt._COLOR_ENABLED = False
+        out = report.render([a_result_stub()], horizon_counts={6: 10},
+                            dropped_delisted=3, prereg_ok=True,
+                            failed_fetches=7)
+        # "delisted" and "we could not look" are different claims.
+        self.assertIn("7", out)
+        self.assertIn("failed", out.lower())
+
+    def test_no_failures_says_nothing(self):
+        from src.catalyst.backtest import report
+        import src.formatting as fmt
+        fmt._COLOR_ENABLED = False
+        out = report.render([a_result_stub()], horizon_counts={6: 10},
+                            dropped_delisted=3, prereg_ok=True,
+                            failed_fetches=0)
+        self.assertNotIn("failed price", out.lower())
+
+
+def a_result_stub():
+    from src.catalyst.backtest.study import Result
+    return Result(key="H1", label="x", n_true=40, n_false=22, mean_true=0.0,
+                  mean_false=0.0, diff=0.0, ci_lo=-0.1, ci_hi=0.1,
+                  verdict="NO EVIDENCE")
+
+
+class TestPartialSeriesAreNeverCached(UniverseCase):
+    """A truncated fetch is non-empty, so it slipped past the empty guard.
+
+    Measured 2026-08-28 on two runs against one pinned universe: identical
+    TICKER counts (183/62, 99/203, 109/179) but different ROW counts
+    (1544->1538, 534->532, 736->732), and H2's difference moved +0.007 ->
+    +0.029. Whole tickers were not dropping; individual (ticker, vintage)
+    observations were, because throttled responses came back SHORT. Being
+    non-empty, those partial series were cached and persisted.
+
+    Raising on exceptions cannot catch this — a truncated response never
+    raises. The series has to be checked against the benchmark, which defines
+    the trading calendar for the window.
+    """
+
+    BENCH_LAST = "2026-08-27"
+
+    def test_a_series_reaching_the_benchmark_is_cached(self):
+        full = {"2026-08-26": 9.0, "2026-08-27": 10.0}
+        with mock.patch.object(cli, "_fetch_prices", return_value=full):
+            cli._prices("ABC", "a", "2026-08-28", conn=self.conn,
+                        today="2026-08-28", expect_through=self.BENCH_LAST)
+        self.assertIsNotNone(pit_cache.get_prices(
+            self.conn, "ABC", "a", "2026-08-28", today="2026-08-28"))
+
+    def test_a_TRUNCATED_series_is_not_cached(self):
+        short = {"2026-01-02": 9.0}
+        with mock.patch.object(cli, "_fetch_prices", return_value=short) as f:
+            first = cli._prices("ABC", "a", "2026-08-28", conn=self.conn,
+                                today="2026-08-28",
+                                expect_through=self.BENCH_LAST)
+            cli._prices("ABC", "a", "2026-08-28", conn=self.conn,
+                        today="2026-08-28", expect_through=self.BENCH_LAST)
+        self.assertEqual(first, short)      # still returned, not discarded
+        self.assertEqual(f.call_count, 2)   # but refetched, never served
+        self.assertIsNone(pit_cache.get_prices(
+            self.conn, "ABC", "a", "2026-08-28", today="2026-08-28"))
+
+    def test_without_an_expectation_nothing_changes(self):
+        short = {"2026-01-02": 9.0}
+        with mock.patch.object(cli, "_fetch_prices", return_value=short):
+            cli._prices("ABC", "a", "2026-08-28", conn=self.conn,
+                        today="2026-08-28")
+        self.assertIsNotNone(pit_cache.get_prices(
+            self.conn, "ABC", "a", "2026-08-28", today="2026-08-28"))
+
+    def test_is_complete_compares_the_last_bar(self):
+        self.assertTrue(cli._is_complete({"2026-08-27": 1.0}, "2026-08-27"))
+        self.assertTrue(cli._is_complete({"2026-08-28": 1.0}, "2026-08-27"))
+        self.assertFalse(cli._is_complete({"2026-06-01": 1.0}, "2026-08-27"))
+        self.assertFalse(cli._is_complete({}, "2026-08-27"))
+
+
 if __name__ == "__main__":
     unittest.main()

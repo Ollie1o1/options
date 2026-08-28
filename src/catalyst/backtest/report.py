@@ -15,7 +15,8 @@ def render(results: Sequence[Result], horizon_counts: Dict[int, int],
            dropped_delisted: int, prereg_ok: bool,
            universe_pinned_at: Optional[str] = None,
            universe_n: Optional[int] = None,
-           run_failed: Optional[str] = None) -> str:
+           run_failed: Optional[str] = None,
+           failed_fetches: int = 0) -> str:
     """The study report. Refuses outright if the prereg hash does not match."""
     lines: List[str] = [fmt.style("CATALYST BACKTEST", "heading"),
                         fmt.draw_separator(WIDTH)]
@@ -68,6 +69,14 @@ def render(results: Sequence[Result], horizon_counts: Dict[int, int],
                        for m, n in sorted(horizon_counts.items()))
     if counts:
         lines.append(f"  elapsed observations per horizon — {counts}")
+    if failed_fetches:
+        # "Delisted" and "we could not look" are different claims. A ticker
+        # lost to a source failure takes its whole cluster out of the study
+        # and moves every interval, so it is never folded into the
+        # survivorship line.
+        lines.append(f"  {failed_fetches} tickers dropped after FAILED price "
+                     f"fetches — a source outage, NOT a delisting; the sample "
+                     f"is smaller than the pinned universe")
     lines.append(f"  {dropped_delisted} names dropped as delisted and "
                  f"unpriceable; measured 6.4% of resolvable 2024 sponsors, "
                  f"skewed toward ACQUISITIONS, so the residual bias is likely "

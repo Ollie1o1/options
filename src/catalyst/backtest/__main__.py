@@ -20,22 +20,78 @@ from src.catalyst.backtest import study as S
 BENCHMARK = "XBI"
 
 
-def _fetch_prices(ticker: str, start: str, end: str) -> Dict[str, float]:
-    """Close series from yfinance. {} on any failure."""
-    try:
-        import warnings
+class PriceFetchError(RuntimeError):
+    """The price SOURCE failed. Not the same as "this ticker has no prices".
 
-        import yfinance as yf
-        warnings.filterwarnings("ignore")
-        hist = yf.Ticker(ticker).history(start=start, end=end)
-        return {d.date().isoformat(): float(c)
-                for d, c in zip(hist.index, hist["Close"])}
-    except Exception:
-        return {}
+    Keeping these apart is the whole point. Three outcomes must stay
+    distinguishable, and collapsing them caused three separate bugs in one
+    day — empty series cached as answers, a rate-limited benchmark rendering
+    as UNDERPOWERED, and single tickers silently dropping out so the sample
+    shrank between runs:
+
+        a series          data
+        an empty series   we looked; this ticker has no bars (delisted)
+        PriceFetchError   we could not look
+    """
+
+
+#: Attempts per ticker before a fetch failure is raised to the caller.
+#: Bounded for the same reason `candidate_marks._CHAIN_ATTEMPTS` is: the
+#: opposite failure is hammering a source that is already rate-limiting us.
+_PRICE_ATTEMPTS = 2
+
+#: Above this share of unreachable tickers the run is refused: the
+#: surviving sample is no longer the population that was pinned.
+_MAX_FAILED_FRACTION = 0.05
+
+
+def _history(ticker: str, start: str, end: str) -> Any:
+    """Raw bars from yfinance. Raises whatever the library raises."""
+    import warnings
+
+    import yfinance as yf
+    warnings.filterwarnings("ignore")
+    hist = yf.Ticker(ticker).history(start=start, end=end)
+    return list(zip(hist.index, hist["Close"]))
+
+
+def _fetch_prices(ticker: str, start: str, end: str) -> Dict[str, float]:
+    """Close series, or PriceFetchError if the source could not be read.
+
+    An EMPTY result is returned normally: a delisted name genuinely has no
+    bars, and that is data. Only a raised exception — a transport error, a
+    429, a malformed payload — becomes a PriceFetchError.
+    """
+    try:
+        rows = _history(ticker, start, end)
+    except Exception as exc:
+        raise PriceFetchError(f"{ticker}: {exc}") from exc
+    try:
+        return {d.date().isoformat(): float(c) for d, c in rows}
+    except Exception as exc:
+        raise PriceFetchError(f"{ticker}: unreadable payload: {exc}") from exc
+
+
+def _is_complete(series: Dict[str, float], expect_through: str) -> bool:
+    """Does this series reach the date the benchmark reached?
+
+    A truncated response is NON-EMPTY, so it slips past every falsy check and
+    gets cached — which is how two runs on one pinned universe returned 1544
+    and 1538 rows with identical ticker counts. The benchmark defines the
+    trading calendar for the window, so its last bar is the yardstick.
+
+    A genuinely delisted name also fails this, and that is the right outcome:
+    its data is real but we cannot tell it apart from a truncation, so it is
+    refetched rather than frozen into the cache.
+    """
+    if not series:
+        return False
+    return max(series) >= expect_through
 
 
 def _prices(ticker: str, start: str, end: str, conn: Optional[Any] = None,
-            today: Optional[str] = None) -> Dict[str, float]:
+            today: Optional[str] = None,
+            expect_through: Optional[str] = None) -> Dict[str, float]:
     """Close series, cached with a freshness rule that matches the data.
 
     This was the run's dominant cost: one uncached, serial yfinance call per
@@ -48,18 +104,31 @@ def _prices(ticker: str, start: str, end: str, conn: Optional[Any] = None,
     cached = pit_cache.get_prices(conn, ticker, start, end, today=today)
     if cached is not None:
         return cached
-    series = _fetch_prices(ticker, start, end)
-    # AN EMPTY SERIES IS NEVER CACHED. `_fetch_prices` returns {} on ANY
-    # exception, so an empty result is indistinguishable from a rate-limit or
-    # a network blip. Caching it poisons every later run: on 2026-08-28 a
-    # rate-limited run stored 145 empty series and the NEXT run returned n=0
-    # for every hypothesis — the entire study evaluated to nothing, silently.
-    # This is the `_fetch_chain_quotes` defect exactly (see
-    # `candidate_marks._fetch_chain`): a fetcher that swallows its own
-    # exceptions cannot report failure, so its caller must not read a falsy
-    # result as an answer. Refetching a genuinely delisted ticker every run is
-    # far cheaper than a study that quietly returns nothing.
-    if series:
+
+    # Retry a source failure, then RAISE. Returning {} here is what let a
+    # rate-limited ticker vanish from the study without a trace, shrinking the
+    # sample between two runs on the same pinned universe.
+    last: Optional[PriceFetchError] = None
+    series: Optional[Dict[str, float]] = None
+    for _ in range(_PRICE_ATTEMPTS):
+        try:
+            series = _fetch_prices(ticker, start, end)
+            break
+        except PriceFetchError as exc:
+            last = exc
+    if series is None:
+        raise last if last else PriceFetchError(f"{ticker}: unknown failure")
+    # An empty series is still not cached, even now that it can only mean
+    # "delisted". yfinance also returns an empty frame WITHOUT raising when it
+    # soft-throttles, so {} remains ambiguous at the library boundary; a
+    # rate-limited run once cached 145 of them and the next run returned n=0
+    # for every hypothesis. Refetching a genuinely dead ticker each run is far
+    # cheaper than a study that quietly evaluates to nothing.
+    # Cache only a series we can show is COMPLETE. Empty means "we looked and
+    # there is nothing", truncated means "we cannot tell how much we got" —
+    # neither may be frozen, because a partial series cached once poisons
+    # every later run and silently shrinks the sample.
+    if series and (expect_through is None or _is_complete(series, expect_through)):
         pit_cache.put_prices(conn, ticker, start, end, series, fetched_at=today)
     return series
 
@@ -172,8 +241,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         universe_n = len(ncts)
         if args.limit:
             ncts = ncts[:args.limit]
-        bench = _prices(BENCHMARK, args.start, args.today,
-                        conn=conn, today=args.today)
+        try:
+            bench = _prices(BENCHMARK, args.start, args.today,
+                            conn=conn, today=args.today)
+        except PriceFetchError as exc:
+            bench = {}
+            print(report.render([], {}, 0, prereg_ok=True,
+                                run_failed=f"benchmark {BENCHMARK} "
+                                           f"unreadable: {exc}"))
+            return 3
         # EVERY hypothesis is XBI-relative, so an empty benchmark nulls every
         # outcome and the study silently evaluates to nothing. Observed
         # 2026-08-28 under yfinance rate-limiting: three hypotheses printed
@@ -185,6 +261,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                            f"prices; every outcome is "
                                            f"{BENCHMARK}-relative"))
             return 3
+        # The benchmark's last bar is the yardstick for every other series:
+        # it defines the trading calendar the study actually observed.
+        bench_last = max(bench)
 
         rows: List[P.PanelRow] = []
         for vintage in P.vintages(args.start, args.end):
@@ -210,14 +289,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         arms: Dict[str, List[S.Observation]] = {k: [] for k, _, _, _ in splits}
 
         by_ticker: Dict[str, Dict[str, float]] = {}
+        failed_fetches: set = set()
         counts: Dict[int, int] = {}
         for row in rows:
             if all(fn(row) is None for _, _, _, fn in splits):
                 continue
             if row.ticker not in by_ticker:
-                by_ticker[row.ticker] = _prices(
-                    row.ticker, args.start, args.today,
-                    conn=conn, today=args.today)
+                # A source failure is COUNTED, never silently dropped. A
+                # ticker that vanishes takes its cluster with it and moves
+                # every interval — that is how two runs on one pinned
+                # universe returned 1544 and 1545 rows.
+                try:
+                    by_ticker[row.ticker] = _prices(
+                        row.ticker, args.start, args.today,
+                        conn=conn, today=args.today,
+                        expect_through=bench_last)
+                except PriceFetchError:
+                    failed_fetches.add(row.ticker)
+                    by_ticker[row.ticker] = {}
             outs = O.outcomes_for(row.ticker, row.vintage, args.today,
                                   by_ticker[row.ticker], bench)
             for o in outs:
@@ -246,9 +335,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "no historical option chains exist for these names"))
 
         dropped = sum(1 for t in by_ticker if not by_ticker[t])
+        # A material share of the universe unreachable is a failed run, not a
+        # smaller study: the sample is no longer the pinned population.
+        reachable = max(len(by_ticker), 1)
+        if len(failed_fetches) / reachable > _MAX_FAILED_FRACTION:
+            print(report.render(
+                [], {}, 0, prereg_ok=True,
+                run_failed=f"{len(failed_fetches)} of {len(by_ticker)} tickers "
+                           f"could not be priced; the sample is not the "
+                           f"pinned universe"))
+            return 3
         print(report.render(results, counts, dropped, prereg_ok=True,
                             universe_pinned_at=pinned_at,
-                            universe_n=universe_n))
+                            universe_n=universe_n,
+                            failed_fetches=len(failed_fetches)))
     finally:
         conn.close()
     return 0
