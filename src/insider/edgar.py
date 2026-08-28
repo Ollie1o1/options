@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 def _user_agent() -> str:
     """SEC asks every client to identify itself with a contact address. That
@@ -47,13 +47,41 @@ def _get(url: str, timeout: int = 20):
     return resp
 
 
+#: In-process memo for the ticker map, as (mtime, mapping).
+#:
+#: The disk cache already has a 30-day TTL; this only removes the REPEATED
+#: PARSE. `cik_for` reopens and json.loads a ~10k-entry file on every lookup,
+#: which cost 3.5s across 2,234 lookups in the catalyst backtest — 24% of the
+#: run — all of it re-reading bytes that had not changed.
+#:
+#: Keyed by the file's mtime so a refreshed cache is picked up rather than
+#: shadowed: the memo is a speed layer, never a second and longer expiry.
+_TICKER_MEMO: Optional[Tuple[float, Dict[str, int]]] = None
+
+
+def reset_ticker_map() -> None:
+    """Drop the in-process ticker map. Tests, and any deliberate refresh."""
+    global _TICKER_MEMO
+    _TICKER_MEMO = None
+
+
 def _ticker_map() -> Dict[str, int]:
-    """ticker → CIK, disk-cached for 30 days."""
+    """ticker → CIK, disk-cached for 30 days and memoized in process."""
+    global _TICKER_MEMO
     try:
-        age_days = (time.time() - os.path.getmtime(TICKER_CACHE)) / 86400.0
+        mtime = os.path.getmtime(TICKER_CACHE)
+        age_days = (time.time() - mtime) / 86400.0
         if age_days <= TICKER_CACHE_DAYS:
+            if _TICKER_MEMO is not None and _TICKER_MEMO[0] == mtime:
+                return _TICKER_MEMO[1]
             with open(TICKER_CACHE) as f:
-                return json.load(f)
+                mapping = json.load(f)
+            # An empty map is NEVER memoized: `_ticker_map` returns {} when it
+            # can neither read nor fetch, and freezing that would poison every
+            # later lookup in the process.
+            if mapping:
+                _TICKER_MEMO = (mtime, mapping)
+            return mapping
     except (OSError, ValueError):
         pass
     try:
