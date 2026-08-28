@@ -262,6 +262,29 @@ def put_universe(conn: sqlite3.Connection, key: str, swept_at: str,
     conn.commit()
 
 
+def get_versions_entry(conn: sqlite3.Connection, nct_id: str
+                       ) -> Optional[Tuple[Optional[str], List[Dict[str, Any]]]]:
+    """(fetched_at, versions) with NO freshness filter applied.
+
+    For callers that memoize in-process: they hold the stamp and re-apply
+    `_fresh_for` themselves, so one SQLite read serves many `as_of` values
+    without ever loosening the rule.
+    """
+    row = conn.execute(
+        "SELECT payload, fetched_at FROM pit_versions WHERE nct_id=?",
+        (nct_id,)).fetchone()
+    return (row[1], list(json.loads(row[0]))) if row else None
+
+
+def get_facts_entry(conn: sqlite3.Connection, cik: int
+                    ) -> Optional[Tuple[Optional[str], Dict[str, Any]]]:
+    """(fetched_at, companyfacts) with NO freshness filter applied."""
+    row = conn.execute(
+        "SELECT payload, fetched_at FROM pit_facts WHERE cik=?",
+        (cik,)).fetchone()
+    return (row[1], dict(json.loads(row[0]))) if row else None
+
+
 def get_caps(conn: sqlite3.Connection, tickers: Any,
              today: Optional[str] = None) -> Dict[str, float]:
     """Caps fetched TODAY for the requested tickers. Missing keys are misses."""
