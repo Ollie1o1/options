@@ -100,5 +100,114 @@ class TestBoardAsOf(BoardCase):
         self.assertEqual(cov.swept, 0)
 
 
+class TestCapsAreCachedPerDay(unittest.TestCase):
+    """`_caps` refetched every ticker on every vintage — 93% of a 460s run.
+
+    The cap is TODAY'S by construction, so all 12 vintage passes fetched the
+    same number ~230 times over. Cached per ticker-day it is fetched once.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.conn = pit_cache.connect(os.path.join(self._dir.name, "pit.db"))
+        self.addCleanup(self.conn.close)
+
+    def test_a_second_call_the_same_day_does_not_refetch(self):
+        with mock.patch("src.catalyst.universe.market_caps",
+                        return_value={"ABC": 1e9}) as m:
+            pit._caps(["ABC"], conn=self.conn, today="2026-08-28")
+            pit._caps(["ABC"], conn=self.conn, today="2026-08-28")
+        m.assert_called_once()
+
+    def test_only_the_uncached_tickers_are_fetched(self):
+        pit_cache.put_caps(self.conn, {"ABC": 1e9}, fetched_at="2026-08-28")
+        with mock.patch("src.catalyst.universe.market_caps",
+                        return_value={"XYZ": 2e9}) as m:
+            got = pit._caps(["ABC", "XYZ"], conn=self.conn, today="2026-08-28")
+        m.assert_called_once_with(["XYZ"])
+        self.assertEqual(got, {"ABC": 1e9, "XYZ": 2e9})
+
+    def test_an_unknown_cap_is_returned_but_not_frozen(self):
+        with mock.patch("src.catalyst.universe.market_caps",
+                        return_value={"ABC": None}) as m:
+            first = pit._caps(["ABC"], conn=self.conn, today="2026-08-28")
+            pit._caps(["ABC"], conn=self.conn, today="2026-08-28")
+        self.assertIsNone(first["ABC"])
+        self.assertEqual(m.call_count, 2)   # retried, not cached
+
+    def test_without_a_connection_it_still_fetches(self):
+        with mock.patch("src.catalyst.universe.market_caps",
+                        return_value={"ABC": 1e9}) as m:
+            got = pit._caps(["ABC"])
+        m.assert_called_once()
+        self.assertEqual(got, {"ABC": 1e9})
+
+
+class TestInProcessMemo(unittest.TestCase):
+    """The same payloads were re-read and re-parsed once per vintage.
+
+    Profiled 2026-08-28 after the cap fix: `_facts` 2,234 reads across ~235
+    distinct filers (24.9s) and `trial_as_of` re-parsing each study 12 times.
+    All cache-resident CPU, none of it network.
+
+    A memo must not loosen the freshness rule: it holds the stamp and
+    re-applies it, so one SQLite read serves many `as_of` values without ever
+    answering a question newer than the fetch.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.conn = pit_cache.connect(os.path.join(self._dir.name, "pit.db"))
+        self.addCleanup(self.conn.close)
+        pit.reset_memos()
+        self.addCleanup(pit.reset_memos)
+
+    def test_versions_hit_sqlite_once_across_vintages(self):
+        pit_cache.put_versions(self.conn, "NCT1", [{"version": 0,
+                                                   "date": "2023-01-01"}],
+                               fetched_at="2026-08-28")
+        with mock.patch.object(pit_cache, "get_versions_entry",
+                               wraps=pit_cache.get_versions_entry) as g:
+            for vintage in ("2023-04-01", "2023-07-01", "2023-10-01"):
+                pit._versions("NCT1", self.conn, as_of=vintage)
+        g.assert_called_once()
+
+    def test_the_memo_still_refuses_an_as_of_after_the_fetch(self):
+        pit_cache.put_versions(self.conn, "NCT1", [{"version": 0,
+                                                   "date": "2023-01-01"}],
+                               fetched_at="2026-08-28")
+        # Warm the memo with a valid question first.
+        self.assertIsNotNone(pit._versions("NCT1", self.conn,
+                                           as_of="2023-01-01"))
+        # A question NEWER than the fetch must not be served from the memo.
+        with mock.patch.object(pit, "_fetch_versions", return_value=None) as f:
+            got = pit._versions("NCT1", self.conn, as_of="2099-01-01")
+        f.assert_called_once()
+        self.assertIsNone(got)
+
+    def test_facts_hit_sqlite_once_across_vintages(self):
+        pit_cache.put_facts(self.conn, 42, {"facts": {"us-gaap": {}}},
+                            fetched_at="2026-08-28")
+        with mock.patch.object(pit_cache, "get_facts_entry",
+                               wraps=pit_cache.get_facts_entry) as g:
+            for vintage in ("2023-04-01", "2023-07-01", "2023-10-01"):
+                pit._facts(42, self.conn, as_of=vintage)
+        g.assert_called_once()
+
+    def test_a_new_connection_clears_the_memo(self):
+        # Otherwise one test's temp database answers another's questions.
+        pit_cache.put_versions(self.conn, "NCT1", [{"version": 0}],
+                               fetched_at="2026-08-28")
+        pit._versions("NCT1", self.conn, as_of="2023-01-01")
+        other = pit_cache.connect(os.path.join(self._dir.name, "other.db"))
+        self.addCleanup(other.close)
+        with mock.patch.object(pit, "_fetch_versions", return_value=None):
+            self.assertIsNone(pit._versions("NCT1", other, as_of="2023-01-01"))
+
+
 if __name__ == "__main__":
     unittest.main()

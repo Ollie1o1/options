@@ -114,6 +114,42 @@ def amendments_as_of(versions: Optional[List[Dict[str, Any]]],
     )
 
 
+
+# ── In-process memo ──────────────────────────────────────────────────────────
+# The SQLite cache removed the network; this removes the repeated READ. The
+# study asks the same questions once per vintage: profiled 2026-08-28,
+# `_facts` did 2,234 reads across ~235 distinct filers and `trial_as_of`
+# re-parsed each study 12 times, all cache-resident CPU.
+#
+# THE MEMO NEVER LOOSENS THE FRESHNESS RULE. It stores the stamp alongside the
+# payload and re-applies `_fresh_for`, so one read serves many `as_of` values
+# while a question newer than the fetch still misses and refetches.
+#
+# Keyed to one connection: a different connection clears everything, so one
+# temp database can never answer another's questions. The connection is held
+# by strong reference so its id cannot be reused by a later object.
+_MEMO_CONN: Optional[sqlite3.Connection] = None
+_TRIAL_MEMO: Dict[Any, Any] = {}
+_VERSIONS_MEMO: Dict[str, Any] = {}
+_FACTS_MEMO: Dict[int, Any] = {}
+
+
+def reset_memos() -> None:
+    """Drop every in-process memo. Tests, and any deliberate refresh."""
+    global _MEMO_CONN
+    _MEMO_CONN = None
+    _TRIAL_MEMO.clear()
+    _VERSIONS_MEMO.clear()
+    _FACTS_MEMO.clear()
+
+
+def _bind_memo(conn: sqlite3.Connection) -> None:
+    global _MEMO_CONN
+    if _MEMO_CONN is not conn:
+        reset_memos()
+        _MEMO_CONN = conn
+
+
 def _versions(nct_id: str, conn: sqlite3.Connection,
               as_of: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
     """The version list, refetched when the cached one predates ``as_of``.
@@ -123,13 +159,20 @@ def _versions(nct_id: str, conn: sqlite3.Connection,
     it must: a 2023 vintage is served from cache forever, while a live board
     asking about today refetches once a day.
     """
-    cached = pit_cache.get_versions(conn, nct_id, as_of=as_of)
-    if cached is not None:
-        return cached
+    _bind_memo(conn)
+    entry = _VERSIONS_MEMO.get(nct_id)
+    if entry is None:
+        entry = pit_cache.get_versions_entry(conn, nct_id)
+        if entry is not None:
+            _VERSIONS_MEMO[nct_id] = entry
+    if entry is not None and pit_cache._fresh_for(entry[0], as_of):
+        return list(entry[1])
+
     fetched = _fetch_versions(nct_id)
     if fetched is None:
         return None
     pit_cache.put_versions(conn, nct_id, fetched)
+    _VERSIONS_MEMO.pop(nct_id, None)
     return fetched
 
 
@@ -154,12 +197,20 @@ def trial_as_of(nct_id: str, as_of: str,
     version = version_at(versions, as_of)
     if version is None:
         return None
+    # (nct_id, version) is IMMUTABLE — a frozen historical record — so the
+    # parsed Trial is too and can be memoized without a freshness question.
+    # Many vintages resolve to the same version, which is where the reuse is.
+    key = (nct_id, version)
+    if key in _TRIAL_MEMO:
+        return _TRIAL_MEMO[key]
     payload = _study(nct_id, version, conn)
     if not payload:
         return None
     study = payload.get("study") or payload
     trials = ctgov.parse_studies({"studies": [study]})
-    return trials[0] if trials else None
+    trial = trials[0] if trials else None
+    _TRIAL_MEMO[key] = trial
+    return trial
 
 
 def _fetch_facts(cik: int) -> Optional[Dict[str, Any]]:
@@ -191,13 +242,20 @@ def facts_as_of(facts: Dict[str, Any], as_of: str) -> Dict[str, Any]:
 
 def _facts(cik: int, conn: sqlite3.Connection,
            as_of: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    cached = pit_cache.get_facts(conn, cik, as_of=as_of)
-    if cached is not None:
-        return cached
+    _bind_memo(conn)
+    entry = _FACTS_MEMO.get(cik)
+    if entry is None:
+        entry = pit_cache.get_facts_entry(conn, cik)
+        if entry is not None:
+            _FACTS_MEMO[cik] = entry
+    if entry is not None and pit_cache._fresh_for(entry[0], as_of):
+        return entry[1]
+
     fetched = _fetch_facts(cik)
     if fetched is None:
         return None
     pit_cache.put_facts(conn, cik, fetched)
+    _FACTS_MEMO.pop(cik, None)
     return fetched
 
 
@@ -243,9 +301,33 @@ def _aliases() -> Dict[str, str]:
     return resolve.load_aliases()
 
 
-def _caps(tickers: Any) -> Dict[str, Any]:
+def _caps(tickers: Any, conn: Optional[sqlite3.Connection] = None,
+          today: Optional[str] = None) -> Dict[str, Any]:
+    """Market caps, cached per ticker-DAY.
+
+    `board_as_of` states that the cap is TODAY'S, not the vintage's — so the
+    12 vintage passes were each fetching the same number for the same ~230
+    tickers. Profiled 2026-08-28: that was 428.1s of a 460s run, 93% of the
+    wall clock, in ~2,760 serial yfinance `fast_info` calls.
+
+    Only KNOWN caps are cached. `universe.market_caps` swallows its exceptions
+    and returns None, so a None means "we could not look" as often as "there
+    is no cap"; freezing one would silently drop a name from the universe
+    filter for the rest of the day.
+    """
     from src.catalyst import universe
-    return universe.market_caps(sorted(tickers))
+
+    wanted = sorted({str(t) for t in tickers})
+    if conn is None:
+        return universe.market_caps(wanted)
+
+    out: Dict[str, Any] = dict(pit_cache.get_caps(conn, wanted, today=today))
+    missing = [t for t in wanted if t not in out]
+    if missing:
+        fetched = universe.market_caps(missing)
+        pit_cache.put_caps(conn, fetched, fetched_at=today)
+        out.update(fetched)
+    return out
 
 
 def board_as_of(as_of: str, nct_ids: Any, conn: sqlite3.Connection,
@@ -292,7 +374,10 @@ def board_as_of(as_of: str, nct_ids: Any, conn: sqlite3.Connection,
             coverage.dropped_unresolved += 1
     coverage.resolved = len(resolved)
 
-    caps = _caps({t for _, t in resolved})
+    # today=None on purpose: the cap is TODAY'S, not the vintage's, so all 12
+    # vintage passes must share ONE cache key. Keying by `as_of` would give
+    # each vintage its own entry and fetch exactly as often as before.
+    caps = _caps({t for _, t in resolved}, conn=conn)
     events = []
     for trial, ticker in resolved:
         mcap = caps.get(ticker)
