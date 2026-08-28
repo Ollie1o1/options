@@ -758,11 +758,20 @@ def provenance(path: str = DEFAULT_MODEL_PATH,
             f"{payload.get('trained_through', '?')} · walk-forward {slope} · "
             f"probability of closing green, not expected profit")
 
-    # The count is frozen at the last `--calibrate`; the book keeps closing
-    # trades. Saying how far behind the shipped model is turns a stale number
-    # into a visible fact instead of a silent one.
+    # The count is frozen at the last fit; the book keeps closing trades.
+    # Saying how far behind the shipped model is turns a stale number into a
+    # visible fact instead of a silent one.
+    #
+    # NAME THE RIGHT COMMAND. The first version of this said "re-run
+    # --calibrate", which reads as `src.backtester --calibrate` — that
+    # computes a WEIGHT recommendation, prints it, and writes nothing without
+    # `--apply`. It never touches this artifact. `scripts.pop_calibration_report`
+    # is the only caller of `save_model` and the only thing that refits this
+    # model; a reader following the old text would watch the staleness refuse
+    # to go away.
     if closed_now is not None and closed_now > n_train:
-        line += f" · {closed_now - n_train} trades behind the book, re-run --calibrate"
+        line += (f" · {closed_now - n_train} trades behind the book, re-run "
+                 f"`python -m scripts.pop_calibration_report`")
     return line
 
 
