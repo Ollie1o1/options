@@ -638,6 +638,51 @@ class TestProvenance(unittest.TestCase):
         self.assertIn("slope", line)
         self.assertIn("not expected profit", line.lower())
 
+    def test_the_stamp_does_not_call_the_date_a_CLOSING_cutoff(self):
+        """`trained_through` is `df["entry_date"].max()` — the NEWEST ENTRY in
+        the training set, not a cutoff on when trades closed.
+
+        The old wording, "Calibrated on 912 closed trades through
+        2026-08-21", reads as a filter that was never applied. Checked against
+        the real ledger 2026-08-28: 904 trades had CLOSED by that date and 914
+        had been ENTERED by it. Neither is 912, and neither could be — 912 was
+        simply the training-set size at fit time. A reader reconciling the
+        banner's live count against it is sent looking for a filter that does
+        not exist.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            line = pc.provenance(self._artifact(d))
+        assert line is not None
+        self.assertNotIn("closed trades through", line)
+        self.assertIn("newest entry", line.lower())
+
+    def test_the_stamp_says_the_count_is_the_training_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            line = pc.provenance(self._artifact(d))
+        assert line is not None
+        self.assertIn("fitted on", line.lower())
+
+    def test_it_reports_how_stale_the_shipped_model_is(self):
+        # 920 closed trades available against 912 trained on: the model is 8
+        # trades behind, and the old wording hid that completely.
+        with tempfile.TemporaryDirectory() as d:
+            line = pc.provenance(self._artifact(d), closed_now=3050)
+        assert line is not None
+        self.assertIn("50", line)
+        self.assertIn("behind", line.lower())
+
+    def test_a_current_model_is_not_described_as_stale(self):
+        with tempfile.TemporaryDirectory() as d:
+            line = pc.provenance(self._artifact(d), closed_now=3000)
+        assert line is not None
+        self.assertNotIn("behind", line.lower())
+
+    def test_an_unknown_live_count_makes_no_staleness_claim(self):
+        with tempfile.TemporaryDirectory() as d:
+            line = pc.provenance(self._artifact(d))
+        assert line is not None
+        self.assertNotIn("behind", line.lower())
+
     def test_an_unshipped_artifact_has_no_stamp(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(pc.provenance(self._artifact(d, shipped=False)))
