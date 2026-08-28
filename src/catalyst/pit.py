@@ -243,9 +243,33 @@ def _aliases() -> Dict[str, str]:
     return resolve.load_aliases()
 
 
-def _caps(tickers: Any) -> Dict[str, Any]:
+def _caps(tickers: Any, conn: Optional[sqlite3.Connection] = None,
+          today: Optional[str] = None) -> Dict[str, Any]:
+    """Market caps, cached per ticker-DAY.
+
+    `board_as_of` states that the cap is TODAY'S, not the vintage's — so the
+    12 vintage passes were each fetching the same number for the same ~230
+    tickers. Profiled 2026-08-28: that was 428.1s of a 460s run, 93% of the
+    wall clock, in ~2,760 serial yfinance `fast_info` calls.
+
+    Only KNOWN caps are cached. `universe.market_caps` swallows its exceptions
+    and returns None, so a None means "we could not look" as often as "there
+    is no cap"; freezing one would silently drop a name from the universe
+    filter for the rest of the day.
+    """
     from src.catalyst import universe
-    return universe.market_caps(sorted(tickers))
+
+    wanted = sorted({str(t) for t in tickers})
+    if conn is None:
+        return universe.market_caps(wanted)
+
+    out: Dict[str, Any] = dict(pit_cache.get_caps(conn, wanted, today=today))
+    missing = [t for t in wanted if t not in out]
+    if missing:
+        fetched = universe.market_caps(missing)
+        pit_cache.put_caps(conn, fetched, fetched_at=today)
+        out.update(fetched)
+    return out
 
 
 def board_as_of(as_of: str, nct_ids: Any, conn: sqlite3.Connection,
@@ -292,7 +316,10 @@ def board_as_of(as_of: str, nct_ids: Any, conn: sqlite3.Connection,
             coverage.dropped_unresolved += 1
     coverage.resolved = len(resolved)
 
-    caps = _caps({t for _, t in resolved})
+    # today=None on purpose: the cap is TODAY'S, not the vintage's, so all 12
+    # vintage passes must share ONE cache key. Keying by `as_of` would give
+    # each vintage its own entry and fetch exactly as often as before.
+    caps = _caps({t for _, t in resolved}, conn=conn)
     events = []
     for trial, ticker in resolved:
         mcap = caps.get(ticker)

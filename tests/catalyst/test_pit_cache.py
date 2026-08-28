@@ -203,5 +203,46 @@ class TestPriceCache(CacheCase):
                                                today="2026-08-27"))
 
 
+class TestCapCache(CacheCase):
+    """Market cap is TODAY'S by construction, and was refetched per vintage.
+
+    `board_as_of`'s own docstring says the cap is today's, not the vintage's —
+    so the 12 vintage passes each fetched the SAME number. Profiled
+    2026-08-28: `_board` was 428.1s of a 460s run (93%), essentially all of it
+    ~2,760 serial yfinance `fast_info` calls for ~230 tickers.
+
+    Valid only on the day it was taken, exactly like an open price window: a
+    cap fetched yesterday is not today's cap.
+    """
+
+    def test_a_miss_returns_nothing_for_that_ticker(self):
+        self.assertEqual(pit_cache.get_caps(self.conn, ["ABC"],
+                                            today="2026-08-28"), {})
+
+    def test_roundtrip_on_the_same_day(self):
+        pit_cache.put_caps(self.conn, {"ABC": 1.5e9}, fetched_at="2026-08-28")
+        self.assertEqual(pit_cache.get_caps(self.conn, ["ABC"],
+                                            today="2026-08-28"), {"ABC": 1.5e9})
+
+    def test_yesterdays_cap_is_not_todays_cap(self):
+        pit_cache.put_caps(self.conn, {"ABC": 1.5e9}, fetched_at="2026-08-27")
+        self.assertEqual(pit_cache.get_caps(self.conn, ["ABC"],
+                                            today="2026-08-28"), {})
+
+    def test_only_the_requested_tickers_come_back(self):
+        pit_cache.put_caps(self.conn, {"ABC": 1.0, "XYZ": 2.0},
+                           fetched_at="2026-08-28")
+        got = pit_cache.get_caps(self.conn, ["ABC"], today="2026-08-28")
+        self.assertEqual(got, {"ABC": 1.0})
+
+    def test_an_unknown_cap_is_never_stored(self):
+        # `universe.market_caps` swallows its exceptions and returns None, so
+        # None means "we could not look" as often as "there is no cap".
+        # Storing it would freeze a fetch failure into the universe filter.
+        pit_cache.put_caps(self.conn, {"ABC": None}, fetched_at="2026-08-28")
+        self.assertEqual(pit_cache.get_caps(self.conn, ["ABC"],
+                                            today="2026-08-28"), {})
+
+
 if __name__ == "__main__":
     unittest.main()

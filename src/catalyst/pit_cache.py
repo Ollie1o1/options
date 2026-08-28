@@ -80,6 +80,16 @@ _DDL = [
         swept_at  TEXT NOT NULL,
         payload   TEXT NOT NULL
     )""",
+    # Market cap is TODAY'S by construction (board_as_of says so), so it is an
+    # open-window value: good for the day it was taken and no longer. `cap` is
+    # NOT NULL because an unknown cap must never be frozen — `market_caps`
+    # swallows its exceptions and returns None, so None means "we could not
+    # look" as often as "there is no cap".
+    """CREATE TABLE IF NOT EXISTS pit_caps (
+        ticker      TEXT PRIMARY KEY,
+        fetched_at  TEXT NOT NULL,
+        cap         REAL NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS pit_prices (
         ticker      TEXT NOT NULL,
         start       TEXT NOT NULL,
@@ -249,6 +259,40 @@ def put_universe(conn: sqlite3.Connection, key: str, swept_at: str,
         "ON CONFLICT(key) DO UPDATE SET swept_at=excluded.swept_at, "
         "payload=excluded.payload",
         (key, swept_at, json.dumps(list(nct_ids))))
+    conn.commit()
+
+
+def get_caps(conn: sqlite3.Connection, tickers: Any,
+             today: Optional[str] = None) -> Dict[str, float]:
+    """Caps fetched TODAY for the requested tickers. Missing keys are misses."""
+    wanted = list(dict.fromkeys(str(t) for t in tickers))
+    if not wanted:
+        return {}
+    now = today or _today()
+    out: Dict[str, float] = {}
+    for chunk_start in range(0, len(wanted), 400):
+        chunk = wanted[chunk_start:chunk_start + 400]
+        marks = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT ticker, cap FROM pit_caps "
+            f"WHERE fetched_at = ? AND ticker IN ({marks})",
+            [now, *chunk]).fetchall()
+        out.update({str(r[0]): float(r[1]) for r in rows})
+    return out
+
+
+def put_caps(conn: sqlite3.Connection, caps: Dict[str, Any],
+             fetched_at: Optional[str] = None) -> None:
+    """Store the caps that are KNOWN. A None is skipped, never stored."""
+    stamp = fetched_at or _today()
+    rows = [(str(t), stamp, float(v)) for t, v in (caps or {}).items()
+            if v is not None]
+    if not rows:
+        return
+    conn.executemany(
+        "INSERT INTO pit_caps (ticker, fetched_at, cap) VALUES (?,?,?) "
+        "ON CONFLICT(ticker) DO UPDATE SET fetched_at=excluded.fetched_at, "
+        "cap=excluded.cap", rows)
     conn.commit()
 
 
