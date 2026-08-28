@@ -724,7 +724,8 @@ def probability_for(row: Dict[str, Any],
     return float(predict(model, frame)[0])
 
 
-def provenance(path: str = DEFAULT_MODEL_PATH) -> Optional[str]:
+def provenance(path: str = DEFAULT_MODEL_PATH,
+               closed_now: Optional[int] = None) -> Optional[str]:
     """One line naming what licences the number, or None if nothing does.
 
     The closing clause is not boilerplate. Measured out-of-sample on this
@@ -743,9 +744,26 @@ def provenance(path: str = DEFAULT_MODEL_PATH) -> Optional[str]:
         return None
     reason = str(payload.get("reason", ""))
     slope = reason.split("—")[0].strip() if "—" in reason else reason.strip()
-    return (f"Calibrated on {payload.get('n_train', 0)} closed trades through "
+    n_train = int(payload.get("n_train", 0) or 0)
+
+    # "closed trades through <date>" was WRONG. `trained_through` is
+    # `df["entry_date"].max()` — the newest ENTRY in the training set, never a
+    # cutoff on when trades closed. Checked against the ledger 2026-08-28: 904
+    # trades had CLOSED by 2026-08-21 and 914 had been ENTERED by it, while
+    # the stamp said 912. Neither number could match, because 912 is simply
+    # the training-set SIZE at fit time. A reader reconciling the banner's
+    # live count against the stamp was sent looking for a filter that does not
+    # exist — the same defect shape as "2103 vintages" on the catalyst report.
+    line = (f"Fitted on {n_train} closed trades, newest entry "
             f"{payload.get('trained_through', '?')} · walk-forward {slope} · "
             f"probability of closing green, not expected profit")
+
+    # The count is frozen at the last `--calibrate`; the book keeps closing
+    # trades. Saying how far behind the shipped model is turns a stale number
+    # into a visible fact instead of a silent one.
+    if closed_now is not None and closed_now > n_train:
+        line += f" · {closed_now - n_train} trades behind the book, re-run --calibrate"
+    return line
 
 
 def describe_row(row: Dict[str, Any], model: Optional[Model],

@@ -606,8 +606,21 @@ def _load_calibration() -> None:
             import json
             with open(_pcal.DEFAULT_MODEL_PATH) as fh:
                 rel = pd.DataFrame(json.load(fh).get("reliability", []))
+        # Pass the LIVE closed count so the stamp can say how far behind the
+        # shipped model is. The training count is frozen at the last
+        # `--calibrate` while the book keeps closing trades, and without this
+        # the reader sees two different numbers with no way to reconcile them.
+        _closed_now = None
+        try:
+            from .paths import repo_path
+            from .pop_calibration import load_training_set
+            # repo_path, not `candidate_record.DEFAULT_DB_PATH` — that one
+            # points at data/candidates.db, a different database entirely.
+            _closed_now = len(load_training_set(repo_path("paper_trades.db")))
+        except Exception:
+            _closed_now = None
         _CAL_CACHE.update(model=model, rel=rel, mod=_pcal,
-                          stamp=_pcal.provenance())
+                          stamp=_pcal.provenance(closed_now=_closed_now))
     except Exception:
         _CAL_CACHE.update(model=None, rel=None, mod=None, stamp=None)
 
