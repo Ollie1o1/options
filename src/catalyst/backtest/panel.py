@@ -64,7 +64,7 @@ def _amendments(nct_id: str, as_of: str, conn: sqlite3.Connection) -> Any:
     this one was not, and H2 is the hypothesis about exactly this feature.
     """
     from src.catalyst import pit
-    return pit.amendments_as_of(pit._versions(nct_id, conn), as_of)
+    return pit.amendments_as_of(pit._versions(nct_id, conn, as_of=as_of), as_of)
 
 
 def _cik(ticker: str) -> Optional[int]:

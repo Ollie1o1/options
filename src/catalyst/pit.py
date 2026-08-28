@@ -114,8 +114,16 @@ def amendments_as_of(versions: Optional[List[Dict[str, Any]]],
     )
 
 
-def _versions(nct_id: str, conn: sqlite3.Connection) -> Optional[List[Dict[str, Any]]]:
-    cached = pit_cache.get_versions(conn, nct_id)
+def _versions(nct_id: str, conn: sqlite3.Connection,
+              as_of: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """The version list, refetched when the cached one predates ``as_of``.
+
+    The list GROWS with every amendment, so an entry fetched before ``as_of``
+    cannot answer for it. Passing ``as_of`` is what makes the cache renew when
+    it must: a 2023 vintage is served from cache forever, while a live board
+    asking about today refetches once a day.
+    """
+    cached = pit_cache.get_versions(conn, nct_id, as_of=as_of)
     if cached is not None:
         return cached
     fetched = _fetch_versions(nct_id)
@@ -140,7 +148,7 @@ def _study(nct_id: str, version: int,
 def trial_as_of(nct_id: str, as_of: str,
                 conn: sqlite3.Connection) -> Optional[Trial]:
     """The trial as it was recorded on ``as_of``, or None."""
-    versions = _versions(nct_id, conn)
+    versions = _versions(nct_id, conn, as_of=as_of)
     if not versions:
         return None
     version = version_at(versions, as_of)
@@ -181,8 +189,9 @@ def facts_as_of(facts: Dict[str, Any], as_of: str) -> Dict[str, Any]:
     return {"facts": {"us-gaap": out}}
 
 
-def _facts(cik: int, conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
-    cached = pit_cache.get_facts(conn, cik)
+def _facts(cik: int, conn: sqlite3.Connection,
+           as_of: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    cached = pit_cache.get_facts(conn, cik, as_of=as_of)
     if cached is not None:
         return cached
     fetched = _fetch_facts(cik)
@@ -197,7 +206,7 @@ def runway_as_of(cik: int, as_of: str, event_date: str,
     """Cash runway as it was computable on ``as_of``. Never raises."""
     import datetime as dt
 
-    facts = _facts(cik, conn)
+    facts = _facts(cik, conn, as_of=as_of)
     if not facts:
         return Runway()
     visible = facts_as_of(facts, as_of)
