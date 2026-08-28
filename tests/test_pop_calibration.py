@@ -671,6 +671,22 @@ class TestProvenance(unittest.TestCase):
         self.assertIn("50", line)
         self.assertIn("behind", line.lower())
 
+    def test_it_names_the_command_that_actually_REFITS_THIS_model(self):
+        """The first version of this clause said "re-run --calibrate".
+
+        That reads as `python -m src.backtester --calibrate`, which computes a
+        WEIGHT recommendation, prints it, and writes nothing at all without
+        `--apply`. It never touches data/pop_calibration.json. The PoP model
+        is fitted by `scripts/pop_calibration_report`, the only caller of
+        `save_model`. Right warning, wrong command — a reader following it
+        would watch the staleness refuse to go away.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            line = pc.provenance(self._artifact(d), closed_now=3050)
+        assert line is not None
+        self.assertIn("pop_calibration_report", line)
+        self.assertNotIn("--calibrate", line)
+
     def test_a_current_model_is_not_described_as_stale(self):
         with tempfile.TemporaryDirectory() as d:
             line = pc.provenance(self._artifact(d), closed_now=3000)
