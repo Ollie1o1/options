@@ -46,6 +46,25 @@ that is wrong by several times.
 name. This repo shipped a defect where every Bear Call was labelled "Bull
 Put" for months, so a name is not a structure.
 
+The "baseline" column is what the system actually charges TODAY, not the
+historic flat $0.05 assumption: `execution_costs.load_measured_model()`, the
+same measured per-strategy table `short_premium_gate.py` reads for its live
+verdicts and `paper_manager.py` falls back to when it has no per-leg quote.
+Comparing the surface against a dead constant instead of the live one can
+flip the SIGN of "change" for a strategy — a surface that looks more
+expensive than a flat $0.05 can be cheaper than what is actually charged
+today, or vice versa. The numbers move with every refit and every
+`execution_costs` measurement; do not hardcode a comparison here.
+
+Every row also carries its own lookup provenance (`TierRow.provenance` /
+`conservative_provenance`): "cell" means a real measured cell, anything else
+("oi_collapsed", "dte_collapsed", "global", "caller_default") is a fallback
+rung. A fallback that renders identically to a measurement is how an invented
+number gets quoted as fact — see `spread_surface.SpreadSurface.relative`'s
+own docstring. `render_report` refuses outright when the surface has zero
+cells (unfitted): every row would otherwise be a `caller_default` fallback
+indistinguishable on the page from a real measurement.
+
 This module renders. It does not decide anything.
 """
 from __future__ import annotations
@@ -54,10 +73,14 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from src.execution_costs import CostModel, load_measured_model
 from src.spread_surface import (DEFAULT_ARCHIVE, REFIT_COMMAND, SpreadSurface,
                                 load_surface)
 
 DEFAULT_LEDGER = "paper_trades.db"
+
+# All dollar figures in this module are $/share of half-spread.
+UNITS = "$/share (half-spread)"
 
 
 @dataclass(frozen=True)
@@ -65,7 +88,7 @@ class TierRow:
     entry_id: int
     strategy: str
     tier: int
-    old_friction: float
+    baseline_friction: float
     new_friction: float
     provenance: str
     # Tier 2 only: open interest is unknown for these trades (the ledger has
@@ -98,26 +121,50 @@ _TIER1_SQL = """
      AND cs.expiration = tr.expiration
      AND substr(cs.type, 1, 1) = substr(tr.type, 1, 1)
      AND cs.snap_date = substr(tr.date, 1, 10)
-    WHERE tr.status != 'OPEN' AND cs.bid > 0 AND cs.ask > cs.bid
+    WHERE (tr.status IS NULL OR tr.status != 'OPEN')
+      AND cs.bid > 0 AND cs.ask > cs.bid
+      AND cs.delta IS NOT NULL
+      AND tr.expiration IS NOT NULL AND tr.date IS NOT NULL
     GROUP BY tr.entry_id
 """
 
 # The exclusion clause is built rather than formatted with a bare "NULL":
 # `entry_id NOT IN (NULL)` evaluates to NULL for every row, which is falsy, so
 # an empty tier 1 would silently empty the rest of the buckets too.
+#
+# `tr.status IS NULL OR tr.status != 'OPEN'` (both here and in _TIER1_SQL,
+# not the bare `!= 'OPEN'`) is deliberate: SQL's `NULL != 'OPEN'` evaluates to
+# NULL, which is falsy, so a NULL-status row would be silently dropped from
+# every bucket, quietly breaking the report's exhaustiveness claim. None
+# exist in today's ledger; a NULL status is treated as "not stated OPEN" —
+# i.e. eligible for classification like any other closed row — rather than
+# hidden.
 _REST_SQL = """
     SELECT tr.entry_id, tr.strategy_name, tr.entry_price, tr.net_credit,
            tr.entry_delta, julianday(tr.expiration) - julianday(tr.date)
     FROM trades tr
-    WHERE tr.status != 'OPEN'{exclusion}
+    WHERE (tr.status IS NULL OR tr.status != 'OPEN'){exclusion}
 """
 
 
 def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
                    archive_db: str = DEFAULT_ARCHIVE,
                    surface: Optional[SpreadSurface] = None,
-                   old_half_spread: float = 0.05) -> Dict[str, List[Any]]:
+                   cost_model: Optional[CostModel] = None) -> Dict[str, List[Any]]:
+    """Classify the closed book into pricing tiers.
+
+    `cost_model` supplies the "baseline" figure each row is compared against
+    — what the system actually charges TODAY (default:
+    `execution_costs.load_measured_model()`, the same measured per-strategy
+    table the live gate and ledger use), not the historic flat $0.05. Tests
+    MUST inject an explicit `CostModel` — the default reads
+    data/chain_archive.db and paper_trades.db.
+    """
     surface = surface if surface is not None else load_surface()
+    if cost_model is None:
+        cost_model = load_measured_model(archive_db, ledger_db,
+                                         commission_per_contract=0.0,
+                                         fx_rate=0.0)
     con = sqlite3.connect(ledger_db)
     try:
         con.execute("ATTACH DATABASE ? AS ar", (archive_db,))
@@ -141,15 +188,22 @@ def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
         # the wrong number even though a real leg mid was available.
         if not mid or mid <= 0:
             continue
+        strategy = strat or "?"
+        # Context-free call (no mid/delta/dte/oi): CostModel.half_spread falls
+        # straight to its per-strategy measured lookup, never the surface —
+        # this is what the LIVE system charges today, not the surface being
+        # evaluated here.
+        baseline = cost_model.half_spread(strategy)
         rel, prov = surface.relative(abs_delta=ad, dte=dte, open_interest=oi,
-                                     default=old_half_spread / float(mid))
-        tier1.append(TierRow(eid, strat or "?", 1, old_half_spread,
+                                     default=baseline / float(mid))
+        tier1.append(TierRow(eid, strategy, 1, baseline,
                              rel * float(mid), prov))
 
     tier2: List[TierRow] = []
     no_leg_mid: List[UnpricedRow] = []
     uncovered: List[int] = []
     for eid, strat, entry_price, net_credit, ad, dte in rest:
+        strategy = strat or "?"
         if ad is None or dte is None:
             uncovered.append(eid)
             continue
@@ -158,7 +212,7 @@ def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
             # net_credit; single legs never do) with no archived quote. Its
             # entry_price is a net credit, not a leg mid, and there is no leg
             # mid anywhere else in the ledger for it — refuse to price it.
-            no_leg_mid.append(UnpricedRow(eid, strat or "?"))
+            no_leg_mid.append(UnpricedRow(eid, strategy))
             continue
         mid = entry_price
         if not mid or mid <= 0:
@@ -172,13 +226,14 @@ def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
         # open_interest=None)` gives the illiquid-bucket-0 pin
         # (conservative). See the module docstring: these are NOT the same
         # number for a populated surface.
-        default = old_half_spread / float(mid)
+        baseline = cost_model.half_spread(strategy)
+        default = baseline / float(mid)
         central_rel, central_prov = surface.oi_collapsed_relative(
             abs_delta=ad, dte=dte, default=default)
         conservative_rel, conservative_prov = surface.relative(
             abs_delta=ad, dte=dte, open_interest=None, default=default)
         tier2.append(TierRow(
-            eid, strat or "?", 2, old_half_spread,
+            eid, strategy, 2, baseline,
             central_rel * float(mid), central_prov,
             conservative_rel * float(mid), conservative_prov))
 
@@ -208,18 +263,40 @@ def _count_block(title: str, note: str, rows: List[UnpricedRow]) -> List[str]:
     return lines + [""]
 
 
+def _provenance_counts(rows: List[TierRow], attr: str) -> Dict[str, int]:
+    """How many rows resolved off a real measured cell versus a fallback
+    rung. A row's `provenance`/`conservative_provenance` is the only thing
+    that distinguishes a measurement from an invented number once both are
+    printed as a plain float — this is what makes that distinction visible."""
+    counts: Dict[str, int] = {}
+    for r in rows:
+        key = getattr(r, attr)
+        if key is None:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _format_provenance(counts: Dict[str, int]) -> str:
+    if not counts:
+        return "n/a"
+    return ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+
+
 def _tier_block(title: str, note: str, rows: List[TierRow]) -> List[str]:
     lines = [f"  {title}  (n={len(rows)})", f"    {note}", ""]
     if not rows:
         lines.append("    no trades in this tier")
         return lines + [""]
-    lines.append(f"    {'strategy':<14}{'n':>5}{'charged':>10}"
-                 f"{'measured':>10}{'change':>10}")
+    lines.append(f"    {'strategy':<14}{'n':>5}{'baseline':>10}"
+                 f"{'surface':>10}{'change':>10}")
     for strat, rs in sorted(_by_strategy(rows).items()):
-        old = sum(r.old_friction for r in rs) / len(rs)
+        base = sum(r.baseline_friction for r in rs) / len(rs)
         new = sum(r.new_friction for r in rs) / len(rs)
-        lines.append(f"    {strat:<14}{len(rs):>5}{old:>10.3f}"
-                     f"{new:>10.3f}{new - old:>+10.3f}")
+        lines.append(f"    {strat:<14}{len(rs):>5}{base:>10.3f}"
+                     f"{new:>10.3f}{new - base:>+10.3f}")
+    lines.append(f"    provenance: "
+                 f"{_format_provenance(_provenance_counts(rows, 'provenance'))}")
     return lines + [""]
 
 
@@ -232,30 +309,64 @@ def _tier2_block(title: str, note: str, rows: List[TierRow]) -> List[str]:
     if not rows:
         lines.append("    no trades in this tier")
         return lines + [""]
-    lines.append(f"    {'strategy':<14}{'n':>5}{'charged':>10}"
+    lines.append(f"    {'strategy':<14}{'n':>5}{'baseline':>10}"
                  f"{'central':>10}{'conserv.':>10}")
     for strat, rs in sorted(_by_strategy(rows).items()):
-        old = sum(r.old_friction for r in rs) / len(rs)
+        base = sum(r.baseline_friction for r in rs) / len(rs)
         central = sum(r.new_friction for r in rs) / len(rs)
-        conservative = sum(
-            r.conservative_friction if r.conservative_friction is not None
-            else r.new_friction
-            for r in rs) / len(rs)
-        lines.append(f"    {strat:<14}{len(rs):>5}{old:>10.3f}"
+        # classify_tiers always populates conservative_friction for a tier 2
+        # row; a row that somehow lacks it must not silently render
+        # conservative == central (an unreachable rung of the caller's
+        # fallback ladder rendering as a real, matching value would be the
+        # same defect this module refuses everywhere else). Raise instead.
+        conservative_values: List[float] = []
+        for r in rs:
+            cf = r.conservative_friction
+            if cf is None:
+                raise ValueError(
+                    f"tier 2 row entry_id={r.entry_id} ({strat}) has no "
+                    f"conservative_friction; classify_tiers must always "
+                    f"populate it for a tier 2 row")
+            conservative_values.append(cf)
+        conservative = sum(conservative_values) / len(rs)
+        lines.append(f"    {strat:<14}{len(rs):>5}{base:>10.3f}"
                      f"{central:>10.3f}{conservative:>10.3f}")
+    lines.append(
+        f"    central provenance: "
+        f"{_format_provenance(_provenance_counts(rows, 'provenance'))}")
+    lines.append(
+        f"    conservative provenance: "
+        f"{_format_provenance(_provenance_counts(rows, 'conservative_provenance'))}")
     return lines + [""]
 
 
-def render_report(tiers: Dict[str, List[Any]], stamp: Dict[str, Any]) -> str:
+def render_report(tiers: Dict[str, List[Any]], surface: SpreadSurface) -> str:
     """Render the reprice report. Dollars per share of half-spread."""
+    if not surface.cells:
+        return "\n".join([
+            "",
+            "  MEASURED SPREAD SURFACE — REPRICE REPORT",
+            "",
+            "  REFUSING TO RENDER: the surface has 0 cells (unfitted).",
+            "  Every figure below would be a caller-default fallback with",
+            "  nothing to distinguish it on the page from a real",
+            "  measurement. Fit the surface first, then re-run --report:",
+            "",
+            f"    {REFIT_COMMAND}",
+            "",
+        ])
+    stamp = surface.stamp
     lines = ["", "  MEASURED SPREAD SURFACE — REPRICE REPORT", ""]
     fit = stamp.get("fit_date", "unknown")
     lines.append(f"    surface fit {fit}; refit with "
                  f"{stamp.get('refit_command', REFIT_COMMAND)}")
+    lines.append(f"    all dollar figures below are {UNITS}")
     lines.append("")
     lines += _tier_block(
         "Tier 1 — archived quote, full surface",
-        "real open interest; this is the trustworthy number",
+        "real open interest; this is the trustworthy number. baseline is "
+        "the measured per-strategy half-spread execution_costs.py charges "
+        "TODAY (load_measured_model), not the historic flat $0.05",
         tiers["tier1"])
     lines += _tier2_block(
         "Tier 2 — single-leg, no archived quote, open interest UNKNOWN",
@@ -263,7 +374,9 @@ def render_report(tiers: Dict[str, List[Any]], stamp: Dict[str, Any]) -> str:
         "from one lookup: central collapses across OI buckets (the "
         "genuine marginal); conserv. assumes the most illiquid bucket "
         "(the worst case). True cost lies between the two. Both are fit "
-        "on 15 liquid symbols, applied to a 91-ticker book",
+        "on 15 liquid symbols, applied to a 91-ticker book. baseline is "
+        "the measured per-strategy half-spread charged TODAY, same as "
+        "tier 1",
         tiers["tier2"])
     lines += _count_block(
         "No leg mid — multi-leg net credit, no archived quote",

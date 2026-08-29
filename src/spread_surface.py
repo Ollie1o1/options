@@ -46,20 +46,32 @@ def bucket_index(value: float, edges: Sequence[float]) -> int:
     return len(edges)
 
 
+def _is_missing(v: Optional[float]) -> bool:
+    """True for None or NaN — both mean "not recorded", never zero.
+
+    `v != v` is the stdlib-only NaN test (NaN is the only float unequal to
+    itself). Without it, `v < edge` is False for every edge when `v` is NaN,
+    so a NaN silently lands in the TOP (cheapest, most-liquid-looking) bucket
+    of every dimension instead of following the same worst-case convention as
+    an explicit None.
+    """
+    return v is None or v != v
+
+
 def cell_key(abs_delta: Optional[float], dte: Optional[float],
              open_interest: Optional[float]) -> Tuple[int, int, int]:
     """Grid coordinates for a contract.
 
-    A missing value is not zero cost. NULL open interest means "not recorded",
-    and the conservative reading is the most illiquid bucket — assuming
-    liquidity we did not observe would understate friction, which is the
-    direction that flatters a book.
+    A missing value is not zero cost. NULL (or NaN) open interest means "not
+    recorded", and the conservative reading is the most illiquid bucket —
+    assuming liquidity we did not observe would understate friction, which is
+    the direction that flatters a book.
     """
     return (
-        bucket_index(abs(float(abs_delta)) if abs_delta is not None else 0.0,
+        bucket_index(abs(float(abs_delta)) if not _is_missing(abs_delta) else 0.0,
                      DELTA_EDGES),
-        bucket_index(float(dte) if dte is not None else 0.0, DTE_EDGES),
-        bucket_index(float(open_interest) if open_interest is not None else 0.0,
+        bucket_index(float(dte) if not _is_missing(dte) else 0.0, DTE_EDGES),
+        bucket_index(float(open_interest) if not _is_missing(open_interest) else 0.0,
                      OI_EDGES),
     )
 
@@ -305,7 +317,7 @@ def _cli_main() -> None:
         from src.spread_surface_report import classify_tiers, render_report
         surface = load_surface(args.surface)
         tiers = classify_tiers(args.ledger, args.archive, surface)
-        print(render_report(tiers, surface.stamp))
+        print(render_report(tiers, surface))
         return
 
     p.print_help()

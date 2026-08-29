@@ -58,6 +58,17 @@ class CellKeyTest(unittest.TestCase):
         # would understate cost.
         self.assertEqual(cell_key(0.50, 30.0, None)[2], 0)
 
+    def test_nan_resolves_identically_to_none_in_every_dimension(self):
+        # `v < edge` is False for every edge when v is NaN, so before the
+        # fix a NaN delta/dte/open_interest landed in the TOP (cheapest,
+        # most-liquid-looking) bucket instead of following the same
+        # worst-case convention as an explicit None.
+        nan = float("nan")
+        self.assertEqual(cell_key(nan, 30.0, 500.0), cell_key(None, 30.0, 500.0))
+        self.assertEqual(cell_key(0.50, nan, 500.0), cell_key(0.50, None, 500.0))
+        self.assertEqual(cell_key(0.50, 30.0, nan), cell_key(0.50, 30.0, None))
+        self.assertEqual(cell_key(nan, nan, nan), cell_key(None, None, None))
+
 
 def _make_archive(path, rows):
     """rows: (symbol, snap_date, strike, expiration, bid, ask, delta, oi,
@@ -372,10 +383,14 @@ class RealArchivePropertyTest(unittest.TestCase):
                       if k[0] == 3])
         self.assertGreater(otm, atm)
 
-    def test_every_recorded_cell_clears_the_observation_floor(self):
-        for cell in self.surface.cells.values():
-            self.assertGreaterEqual(cell.n, MIN_CELL_OBS)
-
-    def test_no_cell_reports_a_free_or_negative_spread(self):
-        for cell in self.surface.cells.values():
-            self.assertGreater(cell.rel_half_spread, 0.0)
+    # test_every_recorded_cell_clears_the_observation_floor and
+    # test_no_cell_reports_a_free_or_negative_spread were removed here: both
+    # were true by construction (fit_surface already filters on MIN_CELL_OBS,
+    # and the SQL's `ask > bid` makes a negative spread impossible), they
+    # restated the code above them rather than testing a falsifiable claim
+    # about the data, and this whole class is skipped whenever
+    # data/chain_archive.db is absent (i.e. in CI). See
+    # test_spread_surface_report.RenderTest.
+    # test_an_unfitted_surface_refuses_to_render_measurements for a real,
+    # always-running test covering the empty-surface path these two never
+    # exercised anyway.
