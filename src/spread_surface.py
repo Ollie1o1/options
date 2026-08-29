@@ -15,7 +15,11 @@ the ledger, the scanner or the gate.
 """
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+import sqlite3
+from dataclasses import dataclass
+from datetime import date
+from statistics import median
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 # Four edges => five buckets. Upper-exclusive: a value equal to an edge belongs
 # to the bucket ABOVE it.
@@ -25,7 +29,8 @@ OI_EDGES: Tuple[float, ...] = (10.0, 100.0, 1000.0, 10000.0)
 
 # Below this many quotes a cell cannot set a cost constant. No cell in today's
 # archive trips it; it exists for refits against a thinner archive or a finer
-# bucketing. Mirrors MIN_OBSERVATIONS in execution_costs.py.
+# bucketing. Same floor-below-which-we-refuse pattern as MIN_OBSERVATIONS in
+# execution_costs.py, not the same value (that one is 10).
 MIN_CELL_OBS = 30
 
 
@@ -56,12 +61,6 @@ def cell_key(abs_delta: Optional[float], dte: Optional[float],
     )
 
 
-import sqlite3
-from dataclasses import dataclass
-from datetime import date
-from statistics import median
-from typing import Dict, List, Set
-
 DEFAULT_ARCHIVE = "data/chain_archive.db"
 REFIT_COMMAND = ("PYTHONPATH=$PWD ~/.venvs/options/bin/python "
                  "-m src.spread_surface --fit")
@@ -79,6 +78,73 @@ class SpreadSurface:
                  stamp: dict):
         self.cells = cells
         self.stamp = stamp
+
+    def _median_over(
+        self, predicate: Callable[[Tuple[int, int, int]], bool]
+    ) -> Optional[float]:
+        vals = [c.rel_half_spread for k, c in self.cells.items()
+                if predicate(k)]
+        return float(median(vals)) if vals else None
+
+    def relative(self, *, abs_delta: Optional[float], dte: Optional[float],
+                 open_interest: Optional[float],
+                 default: Optional[float] = None) -> Tuple[float, str]:
+        """Relative half-spread for a contract, with its provenance.
+
+        Always returns (value, provenance) rather than a bare float. A fallback
+        that is indistinguishable from a measurement is how an invented number
+        gets quoted as fact.
+        """
+        d, t, o = cell_key(abs_delta, dte, open_interest)
+
+        cell = self.cells.get((d, t, o))
+        if cell is not None:
+            return cell.rel_half_spread, "cell"
+
+        collapsed = self._median_over(lambda k: k[0] == d and k[1] == t)
+        if collapsed is not None:
+            return collapsed, "oi_collapsed"
+
+        collapsed = self._median_over(lambda k: k[0] == d)
+        if collapsed is not None:
+            return collapsed, "dte_collapsed"
+
+        overall = self._median_over(lambda k: True)
+        if overall is not None:
+            return overall, "global"
+
+        if default is None:
+            raise ValueError(
+                "empty spread surface and no caller default; refusing to "
+                "report a cost of zero")
+        return float(default), "caller_default"
+
+    def half_spread(self, mid: float, *, abs_delta: Optional[float],
+                    dte: Optional[float], open_interest: Optional[float],
+                    default: Optional[float] = None) -> float:
+        """Dollars per share. A non-positive mid is not a free contract, it is
+        a row the caller should skip."""
+        m = float(mid)
+        if m <= 0:
+            raise ValueError(f"mid must be positive, got {m}")
+        rel, _ = self.relative(abs_delta=abs_delta, dte=dte,
+                               open_interest=open_interest, default=default)
+        return rel * m
+
+    def depth_ok(self, contracts: float, *, abs_delta: Optional[float],
+                 dte: Optional[float],
+                 open_interest: Optional[float]) -> bool:
+        """Whether an order of this size sits inside displayed depth.
+
+        An unmeasured cell returns False: no measurement is not permission.
+        This is the measurable half of the market-impact question — 13.8% of
+        archived quotes show under 5 contracts at the touch, and there is
+        nothing in this repo to calibrate an impact coefficient against.
+        """
+        cell = self.cells.get(cell_key(abs_delta, dte, open_interest))
+        if cell is None:
+            return False
+        return float(contracts) <= float(cell.median_depth)
 
 
 _FIT_SQL = """

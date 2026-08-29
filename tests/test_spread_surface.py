@@ -6,10 +6,14 @@ Run:
 """
 from __future__ import annotations
 
+import os
+import sqlite3
+import tempfile
 import unittest
 
 from src.spread_surface import (DELTA_EDGES, DTE_EDGES, MIN_CELL_OBS,
-                                OI_EDGES, bucket_index, cell_key)
+                                OI_EDGES, Cell, SpreadSurface, bucket_index,
+                                cell_key, fit_surface)
 
 
 class BucketIndexTest(unittest.TestCase):
@@ -50,13 +54,6 @@ class CellKeyTest(unittest.TestCase):
         # illiquid bucket is the conservative reading; treating it as liquid
         # would understate cost.
         self.assertEqual(cell_key(0.50, 30.0, None)[2], 0)
-
-
-import os
-import sqlite3
-import tempfile
-
-from src.spread_surface import Cell, SpreadSurface, fit_surface
 
 
 def _make_archive(path, rows):
@@ -146,3 +143,90 @@ class FitSurfaceTest(unittest.TestCase):
         _make_archive(self.db, self._rows(40, 0.90, 1.10, 0.50, 500))
         a, b = fit_surface(self.db), fit_surface(self.db)
         self.assertEqual(a.cells, b.cells)
+
+
+class LookupProvenanceTest(unittest.TestCase):
+    def _surface(self, cells):
+        return SpreadSurface(cells, {"fit_date": "2026-08-28"})
+
+    def test_an_exact_cell_reports_cell_provenance(self):
+        s = self._surface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 50)})
+        value, prov = s.relative(abs_delta=0.50, dte=30.0, open_interest=500.0)
+        self.assertAlmostEqual(value, 0.02)
+        self.assertEqual(prov, "cell")
+
+    def test_a_missing_cell_collapses_open_interest_first(self):
+        # Same delta/DTE, different OI bucket. Collapsing OI keeps the two
+        # dimensions the caller is most likely to have right.
+        s = self._surface({cell_key(0.50, 30.0, 5.0): Cell(40, 0.05, 50)})
+        value, prov = s.relative(abs_delta=0.50, dte=30.0,
+                                 open_interest=500.0)
+        self.assertAlmostEqual(value, 0.05)
+        self.assertEqual(prov, "oi_collapsed")
+
+    def test_it_collapses_dte_when_no_oi_match_exists(self):
+        s = self._surface({cell_key(0.50, 120.0, 5.0): Cell(40, 0.07, 50)})
+        value, prov = s.relative(abs_delta=0.50, dte=30.0,
+                                 open_interest=500.0)
+        self.assertAlmostEqual(value, 0.07)
+        self.assertEqual(prov, "dte_collapsed")
+
+    def test_it_falls_back_to_the_global_median(self):
+        s = self._surface({cell_key(0.05, 3.0, 5.0): Cell(40, 0.09, 50)})
+        value, prov = s.relative(abs_delta=0.50, dte=30.0,
+                                 open_interest=500.0)
+        self.assertAlmostEqual(value, 0.09)
+        self.assertEqual(prov, "global")
+
+    def test_an_empty_surface_returns_the_caller_default(self):
+        value, prov = self._surface({}).relative(
+            abs_delta=0.50, dte=30.0, open_interest=500.0, default=0.03)
+        self.assertAlmostEqual(value, 0.03)
+        self.assertEqual(prov, "caller_default")
+
+    def test_an_empty_surface_without_a_default_refuses(self):
+        # Returning 0.0 would report a free trade. Refuse instead.
+        with self.assertRaises(ValueError):
+            self._surface({}).relative(abs_delta=0.5, dte=30.0,
+                                       open_interest=500.0)
+
+    def test_provenance_is_never_a_bare_float(self):
+        s = self._surface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 50)})
+        self.assertIsInstance(
+            s.relative(abs_delta=0.5, dte=30.0, open_interest=500.0), tuple)
+
+
+class HalfSpreadTest(unittest.TestCase):
+    def test_dollars_are_relative_times_mid(self):
+        s = SpreadSurface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 50)}, {})
+        self.assertAlmostEqual(
+            s.half_spread(2.50, abs_delta=0.50, dte=30.0,
+                          open_interest=500.0), 0.05)
+
+    def test_a_positive_mid_never_costs_zero(self):
+        s = SpreadSurface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 50)}, {})
+        self.assertGreater(
+            s.half_spread(0.05, abs_delta=0.50, dte=30.0,
+                          open_interest=500.0), 0.0)
+
+    def test_a_non_positive_mid_refuses(self):
+        s = SpreadSurface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 50)}, {})
+        with self.assertRaises(ValueError):
+            s.half_spread(0.0, abs_delta=0.50, dte=30.0, open_interest=500.0)
+
+
+class DepthTest(unittest.TestCase):
+    def test_an_order_inside_displayed_depth_is_ok(self):
+        s = SpreadSurface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 42)}, {})
+        self.assertTrue(s.depth_ok(3, abs_delta=0.50, dte=30.0,
+                                   open_interest=500.0))
+
+    def test_an_order_exceeding_displayed_depth_is_not_ok(self):
+        s = SpreadSurface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 4)}, {})
+        self.assertFalse(s.depth_ok(10, abs_delta=0.50, dte=30.0,
+                                    open_interest=500.0))
+
+    def test_an_unknown_cell_is_not_ok(self):
+        # No measurement is not permission.
+        self.assertFalse(SpreadSurface({}, {}).depth_ok(
+            1, abs_delta=0.50, dte=30.0, open_interest=500.0))
