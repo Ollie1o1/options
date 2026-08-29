@@ -11,8 +11,8 @@ in the system currently sees it.
 
 This module is the one place that answers "what price do I actually get". It
 takes quotes and returns fills; it does not know about the ledger, the scanner
-or the scoring. Callers depend on it, it depends on nothing but `dolt_slippage`
-for the fallback spread table.
+or the scoring. Callers depend on it, it depends on nothing: a leg without a
+real two-sided quote is refused, never repaired from a modelled spread.
 
 CLI:
     python -m src.execution_truth --explain 1.00 1.20   # one leg, all policies
