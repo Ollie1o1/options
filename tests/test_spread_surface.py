@@ -119,6 +119,20 @@ class FitSurfaceTest(unittest.TestCase):
         s = fit_surface(self.db)
         self.assertEqual(s.cells[cell_key(0.50, 30.0, 500.0)].median_depth, 7)
 
+    def test_median_depth_with_one_side_missing_is_conservative(self):
+        # bid_size is recorded (7) but ask_size is missing. Falling back to
+        # min() over the single surviving value would silently use the
+        # *other* side's size (200 from test_median_depth_is_the_tighter_side
+        # would leak in as 7 here too if we only ever set bid_size) as if it
+        # were the tighter side — that overstates liquidity. A missing side
+        # is not evidence of depth, so it must resolve to the worst case (0),
+        # not the favorable one.
+        rows = [("TEST", "2026-06-10", 100.0, "2026-07-10", 0.90, 1.10, 0.50,
+                 500, 7, None) for _ in range(40)]
+        _make_archive(self.db, rows)
+        s = fit_surface(self.db)
+        self.assertEqual(s.cells[cell_key(0.50, 30.0, 500.0)].median_depth, 0)
+
     def test_stamp_names_the_command_that_refits_the_model(self):
         _make_archive(self.db, self._rows(40, 0.90, 1.10, 0.50, 500))
         s = fit_surface(self.db)

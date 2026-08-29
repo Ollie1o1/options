@@ -115,8 +115,14 @@ def fit_surface(archive_db: str = DEFAULT_ARCHIVE) -> SpreadSurface:
             continue
         key = cell_key(ad, dte, oi)
         rel.setdefault(key, []).append(float(half) / float(mid))
-        sides = [s for s in (bsz, asz) if s is not None]
-        depth.setdefault(key, []).append(float(min(sides)) if sides else 0.0)
+        # A missing side is not evidence of depth (same convention as
+        # cell_key above): only when BOTH sizes are recorded do we take the
+        # tighter side. If either is missing we do not know how thin that
+        # side is, so the observation resolves to 0 rather than silently
+        # reusing the other side's size as a stand-in.
+        depth.setdefault(key, []).append(
+            float(min(bsz, asz)) if bsz is not None and asz is not None
+            else 0.0)
         symbols.add(sym)
         dates.append(snap)
 
