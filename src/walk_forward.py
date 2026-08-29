@@ -27,8 +27,16 @@ MIN_TRAIN_AFTER_PURGE = 2 * len(WEIGHT_KEYS)
 MIN_FOLDS = 3
 
 # Trials per fold inside `optimize_weights` — the size of the weight search,
-# needed to state the bar a result has to clear.
+# needed to state the bar a result has to clear. `_fit_weights_on_fold` passes
+# this straight to `optimize_weights(n_trials=...)`, so this is the ONLY
+# place the search size is written down.
 TRIALS_PER_FOLD = 200
+
+# Default train_size for both `run_walk_forward` and the CLI. A module-level
+# constant so the two cannot drift the way they did before: the CLI's
+# argparse default was left at the pre-purge value of 44 while the function
+# default moved to 100, silently making every unflagged CLI run refuse.
+DEFAULT_TRAIN_SIZE = 100
 
 # Map WEIGHT_KEYS names to their actual column names in paper_trades.db.
 # Most follow the pattern "<key>_score", but a few deviate.
@@ -168,7 +176,7 @@ def _fit_weights_on_fold(train_trades: List[Trade]) -> np.ndarray:
     w_dict = optimize_weights(
         bt,
         method="minimize",
-        n_trials=200,
+        n_trials=TRIALS_PER_FOLD,
         l2_lambda=0.10,
         verbose=False,
         current_weights=CURRENT_WEIGHTS,
@@ -261,7 +269,7 @@ def _refused_summary(db_path: str, strategy: str, n_total: int,
 def run_walk_forward(
     db_path: str,
     strategy: str = "Long Call",
-    train_size: int = 100,
+    train_size: int = DEFAULT_TRAIN_SIZE,
     test_size: int = 10,
     step: int = 10,
     output_dir: Optional[str] = None,
@@ -378,8 +386,8 @@ def _format_markdown(s: dict) -> str:
         f"- DB: `{s['db_path']}`",
         f"- Total trades: {s['n_total_trades']}",
         (
-            f"- Folds: {s['n_folds']} kept of {s.get('n_folds_attempted', s['n_folds'])} "
-            f"attempted ({s.get('n_folds_dropped', 0)} dropped below the training "
+            f"- Folds: {s['n_folds']} kept of {s['n_folds_attempted']} "
+            f"attempted ({s['n_folds_dropped']} dropped below the training "
             f"floor)  (train={s['train_size']}, test={s['test_size']}, "
             f"step={s['step']})"
         ),
@@ -420,7 +428,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Walk-forward OOS IC validation")
     ap.add_argument("--db", default="paper_trades.db")
     ap.add_argument("--strategy", default="Long Call")
-    ap.add_argument("--train", type=int, default=44)
+    ap.add_argument("--train", type=int, default=DEFAULT_TRAIN_SIZE)
     ap.add_argument("--test", type=int, default=10)
     ap.add_argument("--step", type=int, default=10)
     ap.add_argument("--output", default="reports")

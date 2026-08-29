@@ -217,20 +217,30 @@ class TestWritesReportFiles(unittest.TestCase):
     """run_walk_forward must write .json and .md into output_dir."""
 
     def test_report_files_created(self):
-        """94 trades => after run, walk_forward_*.json and walk_forward_*.md exist."""
+        """300 trades, train=120 => a genuine successful run writes both files.
+
+        train_size=44 (the pre-purge default) drops every fold below the
+        MIN_TRAIN_AFTER_PURGE floor and refuses; that would make this test
+        exercise the refusal path while still claiming to test a normal
+        write, since file-existence and key-presence assertions pass on
+        either branch. train=120 with 300 trades clears the floor on every
+        fold, so `refused` is asserted False to pin the premise.
+        """
         import glob
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "trades.db")
             out_dir = os.path.join(tmp, "reports")
-            _seed_db(db, n_trades=94)
+            _seed_db(db, n_trades=300, seed=5)
             result = run_walk_forward(
                 db_path=db,
                 strategy="Long Call",
-                train_size=44,
+                train_size=120,
                 test_size=10,
                 step=10,
                 output_dir=out_dir,
             )
+            self.assertFalse(result["refused"],
+                              "this test means to exercise a successful run")
             json_files = glob.glob(os.path.join(out_dir, "walk_forward_*.json"))
             md_files = glob.glob(os.path.join(out_dir, "walk_forward_*.md"))
             self.assertTrue(
@@ -391,6 +401,36 @@ class TestPurgeFloorAndRefusal(unittest.TestCase):
                               "a refused run must not report 0.0 as an IC")
             self.assertIsNone(r["fold_ic_mean"])
             self.assertIn("fold", r["refused_reason"].lower())
+
+    def test_a_refusal_writes_its_artifacts_to_disk(self):
+        # src/maintenance.py is the only production caller of
+        # run_walk_forward and it always passes output_dir="reports" —
+        # refusal-with-output_dir is the path every scheduled run takes when
+        # the book is too thin, not a hypothetical. Read the file back off
+        # disk rather than trusting the in-memory dict: the dict being right
+        # is not evidence the write happened correctly.
+        import glob
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            out_dir = os.path.join(tmp, "reports")
+            _seed_db(db, n_trades=70, seed=9)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=44, test_size=10, step=10,
+                                 output_dir=out_dir)
+            self.assertTrue(r["refused"])
+
+            json_files = glob.glob(os.path.join(out_dir, "walk_forward_*.json"))
+            md_files = glob.glob(os.path.join(out_dir, "walk_forward_*.md"))
+            self.assertEqual(len(json_files), 1,
+                              f"expected one report json in {out_dir}")
+            self.assertEqual(len(md_files), 1,
+                              f"expected one report md in {out_dir}")
+
+            with open(json_files[0]) as fh:
+                on_disk = json.load(fh)
+            self.assertIs(on_disk["refused"], True)
+            self.assertIsNone(on_disk["pooled_ic"])
 
     def test_a_successful_run_is_not_marked_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
