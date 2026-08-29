@@ -250,6 +250,11 @@ def _cli_main() -> None:
                         f"{DEFAULT_SURFACE_PATH}")
     p.add_argument("--archive", default=DEFAULT_ARCHIVE)
     p.add_argument("--out", default=DEFAULT_SURFACE_PATH)
+    p.add_argument("--report", action="store_true",
+                   help="reprice the closed book under the surface (binds "
+                        "nothing)")
+    p.add_argument("--ledger", default="paper_trades.db")
+    p.add_argument("--surface", default=DEFAULT_SURFACE_PATH)
     args = p.parse_args()
 
     if args.fit:
@@ -260,6 +265,14 @@ def _cli_main() -> None:
         print(f"  symbols: {len(surface.stamp['symbols'])}  "
               f"range: {surface.stamp['date_range']}")
         return
+
+    if args.report:
+        from src.spread_surface_report import classify_tiers, render_report
+        surface = load_surface(args.surface)
+        tiers = classify_tiers(args.ledger, args.archive, surface)
+        print(render_report(tiers, surface.stamp))
+        return
+
     p.print_help()
 
 

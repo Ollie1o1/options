@@ -6,12 +6,15 @@ Run:
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 
-from src.spread_surface import Cell, SpreadSurface, cell_key
+from src.spread_surface import Cell, SpreadSurface, cell_key, _cli_main
 from src.spread_surface_report import (TierRow, UnpricedRow, classify_tiers,
                                        render_report)
 
@@ -207,3 +210,33 @@ class RenderTest(unittest.TestCase):
         out = render_report(self._rows(), {"fit_date": "2026-08-28"}).lower()
         for banned in ("ci ", "confidence interval", "95%"):
             self.assertNotIn(banned, out)
+
+    def test_states_no_book_wide_total_is_offered_because_of_unpriced_trades(
+            self):
+        # no_leg_mid is a real fraction of the closed book (29% in the real
+        # ledger) and is entirely unpriced. Any total a reader assembles from
+        # tier1 + tier2 alone would undercount, so the report must say so
+        # rather than let a reader compute a silent, wrong total.
+        out = render_report(self._rows(), {"fit_date": "2026-08-28"}).lower()
+        self.assertIn("no book-wide total", out)
+        self.assertIn("unpriced", out)
+        # 1 of 4 fixture trades is no_leg_mid -> 25%.
+        self.assertIn("25%", out)
+
+
+class CliReportTest(unittest.TestCase):
+    def test_report_flag_renders_without_touching_the_real_ledger(self):
+        d = tempfile.mkdtemp()
+        led, arc = os.path.join(d, "l.db"), os.path.join(d, "a.db")
+        _ledger(led, [(1, "ZZZZ", 100.0, "2026-07-10", "2026-06-10",
+                       "CLOSED", 0.5, "Bull Put", None, 1.0)])
+        _archive(arc, [])
+        argv = sys.argv
+        sys.argv = ["prog", "--report", "--ledger", led, "--archive", arc]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _cli_main()
+        finally:
+            sys.argv = argv
+        self.assertIn("REPRICE REPORT", buf.getvalue())

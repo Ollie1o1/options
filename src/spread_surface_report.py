@@ -212,4 +212,14 @@ def render_report(tiers: Dict[str, List[Any]], stamp: Dict[str, Any]) -> str:
     lines.append(f"  uncovered: {len(tiers['uncovered'])} closed trades "
                  f"lack both a quote and an entry delta")
     lines.append("")
+    total = (len(tiers["tier1"]) + len(tiers["tier2"])
+             + len(tiers["no_leg_mid"]) + len(tiers["uncovered"]))
+    if total:
+        unpriced_pct = 100.0 * len(tiers["no_leg_mid"]) / total
+        lines.append(
+            f"  {unpriced_pct:.0f}% of the closed book "
+            f"({len(tiers['no_leg_mid'])} of {total} trades) is unpriced "
+            f"(no_leg_mid); no book-wide total is offered here because "
+            f"summing tier 1 and tier 2 alone would silently undercount it.")
+        lines.append("")
     return "\n".join(lines)
