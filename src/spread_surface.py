@@ -54,3 +54,83 @@ def cell_key(abs_delta: Optional[float], dte: Optional[float],
         bucket_index(float(open_interest) if open_interest is not None else 0.0,
                      OI_EDGES),
     )
+
+
+import sqlite3
+from dataclasses import dataclass
+from datetime import date
+from statistics import median
+from typing import Dict, List, Set
+
+DEFAULT_ARCHIVE = "data/chain_archive.db"
+REFIT_COMMAND = ("PYTHONPATH=$PWD ~/.venvs/options/bin/python "
+                 "-m src.spread_surface --fit")
+
+
+@dataclass(frozen=True)
+class Cell:
+    n: int
+    rel_half_spread: float
+    median_depth: int
+
+
+class SpreadSurface:
+    def __init__(self, cells: Dict[Tuple[int, int, int], Cell],
+                 stamp: dict):
+        self.cells = cells
+        self.stamp = stamp
+
+
+_FIT_SQL = """
+    SELECT (ask - bid) / 2.0                              AS half,
+           (ask + bid) / 2.0                              AS mid,
+           abs(delta)                                     AS ad,
+           julianday(expiration) - julianday(snap_date)   AS dte,
+           open_interest                                  AS oi,
+           bid_size, ask_size, symbol, snap_date
+    FROM chain_snapshots
+    WHERE bid > 0 AND ask > bid AND delta IS NOT NULL
+"""
+
+
+def fit_surface(archive_db: str = DEFAULT_ARCHIVE) -> SpreadSurface:
+    """Fit the surface from archived quotes.
+
+    Only two-sided quotes count. A zero bid or a crossed book is missing data,
+    and averaging it in would understate the real cost of crossing — the same
+    rule execution_costs.measure_half_spreads already applies.
+    """
+    con = sqlite3.connect(archive_db)
+    try:
+        rows = con.execute(_FIT_SQL).fetchall()
+    finally:
+        con.close()
+
+    rel: Dict[Tuple[int, int, int], List[float]] = {}
+    depth: Dict[Tuple[int, int, int], List[float]] = {}
+    symbols: Set[str] = set()
+    dates: List[str] = []
+    for half, mid, ad, dte, oi, bsz, asz, sym, snap in rows:
+        if mid is None or mid <= 0 or half is None or half < 0:
+            continue
+        key = cell_key(ad, dte, oi)
+        rel.setdefault(key, []).append(float(half) / float(mid))
+        sides = [s for s in (bsz, asz) if s is not None]
+        depth.setdefault(key, []).append(float(min(sides)) if sides else 0.0)
+        symbols.add(sym)
+        dates.append(snap)
+
+    cells = {
+        key: Cell(n=len(vals),
+                  rel_half_spread=float(median(vals)),
+                  median_depth=int(median(depth[key])))
+        for key, vals in rel.items() if len(vals) >= MIN_CELL_OBS
+    }
+    stamp = {
+        "fit_date": date.today().isoformat(),
+        "rows": sum(len(v) for v in rel.values()),
+        "symbols": sorted(symbols),
+        "date_range": [min(dates), max(dates)] if dates else None,
+        "refit_command": REFIT_COMMAND,
+    }
+    return SpreadSurface(cells, stamp)
