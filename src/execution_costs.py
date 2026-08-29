@@ -108,6 +108,25 @@ def half_spread_for(strategy: str, table: Dict[str, Dict[str, Any]],
     return default
 
 
+def is_measured(strategy: str, table: Dict[str, Dict[str, Any]]) -> bool:
+    """Whether `half_spread_for` would return this table's own measured
+    value for `strategy` rather than falling back to the caller's default.
+
+    Same matching and MIN_OBSERVATIONS floor as `half_spread_for`, kept in
+    lockstep with it here rather than duplicated at each call site — a
+    caller that wants to label a number as "measured" must ask this, not
+    assume a table entry means a measurement: a strategy with fewer than
+    MIN_OBSERVATIONS matched quotes has an entry in the table but its
+    value is never used.
+    """
+    wanted = _key(strategy)
+    for name, cell in table.items():
+        if _key(name) != wanted:
+            continue
+        return int(cell.get("n", 0)) >= MIN_OBSERVATIONS
+    return False
+
+
 def fx_cost(cash_usd: float, rate: float, round_trip: bool = True) -> float:
     """Currency conversion cost on money moved, in dollars.
 

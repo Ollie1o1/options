@@ -356,3 +356,56 @@ class CliReportTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("REPRICE REPORT", out)
         self.assertIn("Tier 2", out)
+
+
+class BaselineMeasuredTest(unittest.TestCase):
+    """The "baseline" column must not be described as a measurement for a
+    strategy execution_costs.py itself could not measure. A table entry
+    existing is not the same as it being used: `half_spread_for` falls back
+    to the model's own $0.05 default below MIN_OBSERVATIONS even when the
+    strategy is present in the table."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.led = os.path.join(self.dir, "ledger.db")
+        self.arc = os.path.join(self.dir, "archive.db")
+
+    def _thin_cost_model(self):
+        # "Long Put" has a table entry (0.10) but only 6 matched quotes —
+        # below MIN_OBSERVATIONS (10) — so half_spread_for returns the
+        # $0.05 default, not the table's 0.10.
+        return CostModel(
+            table={"Long Put": {"n": 6, "median_half_spread": 0.10}},
+            default_half_spread=0.05)
+
+    def test_classify_tiers_marks_the_row_as_not_measured(self):
+        _ledger(self.led, [(1, "ZZZZ", 100.0, "2026-07-10", "2026-06-10",
+                            "CLOSED", 0.5, "Long Put", None, 1.0)])
+        _archive(self.arc, [])
+        out = classify_tiers(self.led, self.arc,
+                             cost_model=self._thin_cost_model())
+        self.assertEqual(len(out["tier2"]), 1)
+        row = out["tier2"][0]
+        # The $0.05 default was used, NOT the table's 0.10 — n=6 is below
+        # MIN_OBSERVATIONS.
+        self.assertAlmostEqual(row.baseline_friction, 0.05, places=6)
+        self.assertFalse(row.baseline_measured)
+
+    def test_render_report_does_not_describe_the_default_as_measured(self):
+        # Fails against the wording in place before this fix: the tier 2
+        # note said unconditionally "the measured per-strategy half-spread
+        # ... not the historic flat $0.05" while THIS row's baseline is
+        # exactly that flat $0.05 — the note denied what the number was.
+        surface = SpreadSurface(
+            {cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 50)},
+            {"fit_date": "2026-08-28"})
+        rows = {
+            "tier1": [],
+            "tier2": [TierRow(1, "Long Put", 2, 0.05, 0.03, "cell", 0.06,
+                              "cell", baseline_measured=False)],
+            "no_leg_mid": [],
+            "uncovered": [],
+        }
+        out = render_report(rows, surface)
+        self.assertIn("*", out)
+        self.assertIn("not a measurement", out.lower())

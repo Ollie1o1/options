@@ -46,15 +46,24 @@ that is wrong by several times.
 name. This repo shipped a defect where every Bear Call was labelled "Bull
 Put" for months, so a name is not a structure.
 
-The "baseline" column is what the system actually charges TODAY, not the
-historic flat $0.05 assumption: `execution_costs.load_measured_model()`, the
-same measured per-strategy table `short_premium_gate.py` reads for its live
-verdicts and `paper_manager.py` falls back to when it has no per-leg quote.
-Comparing the surface against a dead constant instead of the live one can
-flip the SIGN of "change" for a strategy — a surface that looks more
-expensive than a flat $0.05 can be cheaper than what is actually charged
-today, or vice versa. The numbers move with every refit and every
-`execution_costs` measurement; do not hardcode a comparison here.
+The "baseline" column is what `execution_costs.load_measured_model()` charges
+TODAY — the same measured per-strategy table `short_premium_gate.py` reads
+for its live verdicts and `paper_manager.py` falls back to when it has no
+per-leg quote — not the flat $0.05 `CostModel` default this branch's
+`classify_tiers` used to hardcode. Comparing the surface against that dead
+constant instead of the live model can flip the SIGN of "change" for a
+strategy — a surface that looks more expensive than a flat $0.05 can be
+cheaper than what is actually charged today, or vice versa. The numbers move
+with every refit and every `execution_costs` measurement; do not hardcode a
+comparison here.
+
+`execution_costs.load_measured_model` is itself a measurement with its own
+floor: below `execution_costs.MIN_OBSERVATIONS` matched quotes for a
+strategy, `half_spread_for` falls back to ITS OWN $0.05 default — a table
+entry existing is not the same as that entry being used (see
+`execution_costs.is_measured`). Such a row's baseline is that default, not a
+measurement, and is marked `*` in the rendered table with a footnote — the
+note text never claims a "*" row is measured when it is not.
 
 Every row also carries its own lookup provenance (`TierRow.provenance` /
 `conservative_provenance`): "cell" means a real measured cell, anything else
@@ -73,7 +82,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from src.execution_costs import CostModel, load_measured_model
+from src.execution_costs import CostModel, is_measured, load_measured_model
 from src.spread_surface import (DEFAULT_ARCHIVE, REFIT_COMMAND, SpreadSurface,
                                 load_surface)
 
@@ -99,6 +108,12 @@ class TierRow:
     # have real open interest and need only one number.
     conservative_friction: Optional[float] = None
     conservative_provenance: Optional[str] = None
+    # Whether `baseline_friction` is a real execution_costs measurement for
+    # this strategy (n >= execution_costs.MIN_OBSERVATIONS) or that module's
+    # OWN $0.05 fallback below its floor. A strategy can have a table entry
+    # and still not be measured — see execution_costs.is_measured. Defaults
+    # True so existing positional TierRow(...) calls in tests are unaffected.
+    baseline_measured: bool = True
 
 
 @dataclass(frozen=True)
@@ -156,9 +171,13 @@ def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
     `cost_model` supplies the "baseline" figure each row is compared against
     — what the system actually charges TODAY (default:
     `execution_costs.load_measured_model()`, the same measured per-strategy
-    table the live gate and ledger use), not the historic flat $0.05. Tests
-    MUST inject an explicit `CostModel` — the default reads
-    data/chain_archive.db and paper_trades.db.
+    table the live gate and ledger use). That model is itself measured with
+    a floor: a strategy below its MIN_OBSERVATIONS still gets a baseline
+    from `half_spread`, but it is that model's own $0.05 default, not a
+    measurement — `TierRow.baseline_measured` (via `execution_costs.
+    is_measured`) records which one a given row got. Tests MUST inject an
+    explicit `CostModel` — the default reads data/chain_archive.db and
+    paper_trades.db.
     """
     surface = surface if surface is not None else load_surface()
     if cost_model is None:
@@ -194,10 +213,11 @@ def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
         # this is what the LIVE system charges today, not the surface being
         # evaluated here.
         baseline = cost_model.half_spread(strategy)
+        baseline_measured = is_measured(strategy, cost_model.table)
         rel, prov = surface.relative(abs_delta=ad, dte=dte, open_interest=oi,
                                      default=baseline / float(mid))
-        tier1.append(TierRow(eid, strategy, 1, baseline,
-                             rel * float(mid), prov))
+        tier1.append(TierRow(eid, strategy, 1, baseline, rel * float(mid),
+                             prov, baseline_measured=baseline_measured))
 
     tier2: List[TierRow] = []
     no_leg_mid: List[UnpricedRow] = []
@@ -227,6 +247,7 @@ def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
         # (conservative). See the module docstring: these are NOT the same
         # number for a populated surface.
         baseline = cost_model.half_spread(strategy)
+        baseline_measured = is_measured(strategy, cost_model.table)
         default = baseline / float(mid)
         central_rel, central_prov = surface.oi_collapsed_relative(
             abs_delta=ad, dte=dte, default=default)
@@ -235,7 +256,8 @@ def classify_tiers(ledger_db: str = DEFAULT_LEDGER,
         tier2.append(TierRow(
             eid, strategy, 2, baseline,
             central_rel * float(mid), central_prov,
-            conservative_rel * float(mid), conservative_prov))
+            conservative_rel * float(mid), conservative_prov,
+            baseline_measured=baseline_measured))
 
     return {"tier1": tier1, "tier2": tier2, "no_leg_mid": no_leg_mid,
             "uncovered": uncovered}
@@ -283,6 +305,20 @@ def _format_provenance(counts: Dict[str, int]) -> str:
     return ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
 
 
+def _baseline_marker(rs: List[TierRow]) -> str:
+    """" *" when this strategy's baseline is execution_costs.py's OWN $0.05
+    default (fewer than its MIN_OBSERVATIONS matched quotes) rather than a
+    measurement — the same distinction the surface side already carries as
+    `provenance`, made visible here too rather than left implicit in a note
+    that would otherwise say "measured" for a number that is not."""
+    return "" if all(r.baseline_measured for r in rs) else "  *"
+
+
+_BASELINE_FOOTNOTE = ("    * baseline is execution_costs.py's own $0.05 "
+                     "default for this strategy (fewer than its "
+                     "MIN_OBSERVATIONS matched quotes), not a measurement")
+
+
 def _tier_block(title: str, note: str, rows: List[TierRow]) -> List[str]:
     lines = [f"  {title}  (n={len(rows)})", f"    {note}", ""]
     if not rows:
@@ -290,11 +326,16 @@ def _tier_block(title: str, note: str, rows: List[TierRow]) -> List[str]:
         return lines + [""]
     lines.append(f"    {'strategy':<14}{'n':>5}{'baseline':>10}"
                  f"{'surface':>10}{'change':>10}")
+    any_unmeasured = False
     for strat, rs in sorted(_by_strategy(rows).items()):
         base = sum(r.baseline_friction for r in rs) / len(rs)
         new = sum(r.new_friction for r in rs) / len(rs)
+        marker = _baseline_marker(rs)
+        any_unmeasured = any_unmeasured or bool(marker)
         lines.append(f"    {strat:<14}{len(rs):>5}{base:>10.3f}"
-                     f"{new:>10.3f}{new - base:>+10.3f}")
+                     f"{new:>10.3f}{new - base:>+10.3f}{marker}")
+    if any_unmeasured:
+        lines.append(_BASELINE_FOOTNOTE)
     lines.append(f"    provenance: "
                  f"{_format_provenance(_provenance_counts(rows, 'provenance'))}")
     return lines + [""]
@@ -311,6 +352,7 @@ def _tier2_block(title: str, note: str, rows: List[TierRow]) -> List[str]:
         return lines + [""]
     lines.append(f"    {'strategy':<14}{'n':>5}{'baseline':>10}"
                  f"{'central':>10}{'conserv.':>10}")
+    any_unmeasured = False
     for strat, rs in sorted(_by_strategy(rows).items()):
         base = sum(r.baseline_friction for r in rs) / len(rs)
         central = sum(r.new_friction for r in rs) / len(rs)
@@ -329,8 +371,12 @@ def _tier2_block(title: str, note: str, rows: List[TierRow]) -> List[str]:
                     f"populate it for a tier 2 row")
             conservative_values.append(cf)
         conservative = sum(conservative_values) / len(rs)
+        marker = _baseline_marker(rs)
+        any_unmeasured = any_unmeasured or bool(marker)
         lines.append(f"    {strat:<14}{len(rs):>5}{base:>10.3f}"
-                     f"{central:>10.3f}{conservative:>10.3f}")
+                     f"{central:>10.3f}{conservative:>10.3f}{marker}")
+    if any_unmeasured:
+        lines.append(_BASELINE_FOOTNOTE)
     lines.append(
         f"    central provenance: "
         f"{_format_provenance(_provenance_counts(rows, 'provenance'))}")
@@ -365,8 +411,9 @@ def render_report(tiers: Dict[str, List[Any]], surface: SpreadSurface) -> str:
     lines += _tier_block(
         "Tier 1 — archived quote, full surface",
         "real open interest; this is the trustworthy number. baseline is "
-        "the measured per-strategy half-spread execution_costs.py charges "
-        "TODAY (load_measured_model), not the historic flat $0.05",
+        "what execution_costs.py charges TODAY (load_measured_model): "
+        "measured per strategy where enough quotes exist, else that "
+        "module's own $0.05 default ('*' rows below)",
         tiers["tier1"])
     lines += _tier2_block(
         "Tier 2 — single-leg, no archived quote, open interest UNKNOWN",
@@ -375,8 +422,9 @@ def render_report(tiers: Dict[str, List[Any]], surface: SpreadSurface) -> str:
         "genuine marginal); conserv. assumes the most illiquid bucket "
         "(the worst case). True cost lies between the two. Both are fit "
         "on 15 liquid symbols, applied to a 91-ticker book. baseline is "
-        "the measured per-strategy half-spread charged TODAY, same as "
-        "tier 1",
+        "what execution_costs.py charges TODAY, same as tier 1 (measured "
+        "where enough quotes exist, else its $0.05 default — '*' rows "
+        "below)",
         tiers["tier2"])
     lines += _count_block(
         "No leg mid — multi-leg net credit, no archived quote",
