@@ -15,6 +15,9 @@ the ledger, the scanner or the gate.
 """
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
@@ -206,3 +209,59 @@ def fit_surface(archive_db: str = DEFAULT_ARCHIVE) -> SpreadSurface:
         "refit_command": REFIT_COMMAND,
     }
     return SpreadSurface(cells, stamp)
+
+
+DEFAULT_SURFACE_PATH = "data/spread_surface.json"
+
+
+def save_surface(surface: SpreadSurface,
+                 path: str = DEFAULT_SURFACE_PATH) -> None:
+    blob = {
+        "stamp": surface.stamp,
+        "cells": [{"key": list(k), "n": c.n,
+                   "rel_half_spread": c.rel_half_spread,
+                   "median_depth": c.median_depth}
+                  for k, c in sorted(surface.cells.items())],
+    }
+    with open(path, "w") as fh:
+        json.dump(blob, fh, indent=2, sort_keys=True)
+
+
+def load_surface(path: str = DEFAULT_SURFACE_PATH) -> SpreadSurface:
+    """Load a fitted surface. A missing file yields an EMPTY surface, not a
+    default-valued one: callers must supply their own default and see the
+    `caller_default` provenance rather than silently inheriting a guess."""
+    if not os.path.exists(path):
+        return SpreadSurface({}, {})
+    with open(path) as fh:
+        blob = json.load(fh)
+    cells = {tuple(c["key"]): Cell(n=int(c["n"]),
+                                   rel_half_spread=float(c["rel_half_spread"]),
+                                   median_depth=int(c["median_depth"]))
+             for c in blob.get("cells", [])}
+    return SpreadSurface(cells, blob.get("stamp", {}))
+
+
+def _cli_main() -> None:
+    p = argparse.ArgumentParser(
+        description="Measured spread surface: fit, inspect, reprice")
+    p.add_argument("--fit", action="store_true",
+                   help=f"refit from the archive and write "
+                        f"{DEFAULT_SURFACE_PATH}")
+    p.add_argument("--archive", default=DEFAULT_ARCHIVE)
+    p.add_argument("--out", default=DEFAULT_SURFACE_PATH)
+    args = p.parse_args()
+
+    if args.fit:
+        surface = fit_surface(args.archive)
+        save_surface(surface, args.out)
+        print(f"fitted {len(surface.cells)} cells from "
+              f"{surface.stamp['rows']} quotes -> {args.out}")
+        print(f"  symbols: {len(surface.stamp['symbols'])}  "
+              f"range: {surface.stamp['date_range']}")
+        return
+    p.print_help()
+
+
+if __name__ == "__main__":
+    _cli_main()

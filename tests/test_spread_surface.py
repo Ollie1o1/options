@@ -6,14 +6,17 @@ Run:
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
 import unittest
+from statistics import median
 
-from src.spread_surface import (DELTA_EDGES, DTE_EDGES, MIN_CELL_OBS,
-                                OI_EDGES, Cell, SpreadSurface, bucket_index,
-                                cell_key, fit_surface)
+from src.spread_surface import (DEFAULT_SURFACE_PATH, DELTA_EDGES, DTE_EDGES,
+                                MIN_CELL_OBS, OI_EDGES, Cell, SpreadSurface,
+                                bucket_index, cell_key, fit_surface,
+                                load_surface, save_surface)
 
 
 class BucketIndexTest(unittest.TestCase):
@@ -230,3 +233,65 @@ class DepthTest(unittest.TestCase):
         # No measurement is not permission.
         self.assertFalse(SpreadSurface({}, {}).depth_ok(
             1, abs_delta=0.50, dte=30.0, open_interest=500.0))
+
+
+class PersistenceTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "surface.json")
+
+    def test_a_saved_surface_reloads_identically(self):
+        s = SpreadSurface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 42)},
+                          {"fit_date": "2026-08-28", "rows": 40})
+        save_surface(s, self.path)
+        back = load_surface(self.path)
+        self.assertEqual(back.cells, s.cells)
+        self.assertEqual(back.stamp, s.stamp)
+
+    def test_the_saved_file_is_readable_json_with_a_stamp(self):
+        s = SpreadSurface({cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 42)},
+                          {"fit_date": "2026-08-28"})
+        save_surface(s, self.path)
+        with open(self.path) as fh:
+            blob = json.load(fh)
+        self.assertIn("stamp", blob)
+        self.assertIn("cells", blob)
+
+    def test_loading_a_missing_file_returns_an_empty_surface(self):
+        s = load_surface(os.path.join(self.dir, "absent.json"))
+        self.assertEqual(s.cells, {})
+
+
+@unittest.skipUnless(os.path.exists("data/chain_archive.db"),
+                     "archive not present")
+class RealArchivePropertyTest(unittest.TestCase):
+    """Properties the measured surface must hold. These are the claims the
+    design rests on; if the archive stops supporting them, that is a finding."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.surface = fit_surface("data/chain_archive.db")
+
+    def test_relative_spread_is_non_increasing_in_open_interest(self):
+        # Averaged across delta/DTE cells, deeper open interest is cheaper.
+        by_oi = {}
+        for (d, t, o), cell in self.surface.cells.items():
+            by_oi.setdefault(o, []).append(cell.rel_half_spread)
+        meds = [median(by_oi[o]) for o in sorted(by_oi)]
+        for lo, hi in zip(meds, meds[1:]):
+            self.assertLessEqual(hi, lo + 1e-9)
+
+    def test_deep_otm_is_worse_than_at_the_money(self):
+        otm = median([c.rel_half_spread for k, c in self.surface.cells.items()
+                      if k[0] == 0])
+        atm = median([c.rel_half_spread for k, c in self.surface.cells.items()
+                      if k[0] == 3])
+        self.assertGreater(otm, atm)
+
+    def test_every_recorded_cell_clears_the_observation_floor(self):
+        for cell in self.surface.cells.values():
+            self.assertGreaterEqual(cell.n, MIN_CELL_OBS)
+
+    def test_no_cell_reports_a_free_or_negative_spread(self):
+        for cell in self.surface.cells.values():
+            self.assertGreater(cell.rel_half_spread, 0.0)
