@@ -26,6 +26,8 @@ import sqlite3
 from statistics import median
 from typing import Any, Dict, Optional
 
+from src.spread_surface import SpreadSurface
+
 DEFAULT_ARCHIVE = "data/chain_archive.db"
 DEFAULT_LEDGER = "paper_trades.db"
 
@@ -106,6 +108,25 @@ def half_spread_for(strategy: str, table: Dict[str, Dict[str, Any]],
     return default
 
 
+def is_measured(strategy: str, table: Dict[str, Dict[str, Any]]) -> bool:
+    """Whether `half_spread_for` would return this table's own measured
+    value for `strategy` rather than falling back to the caller's default.
+
+    Same matching and MIN_OBSERVATIONS floor as `half_spread_for`, kept in
+    lockstep with it here rather than duplicated at each call site — a
+    caller that wants to label a number as "measured" must ask this, not
+    assume a table entry means a measurement: a strategy with fewer than
+    MIN_OBSERVATIONS matched quotes has an entry in the table but its
+    value is never used.
+    """
+    wanted = _key(strategy)
+    for name, cell in table.items():
+        if _key(name) != wanted:
+            continue
+        return int(cell.get("n", 0)) >= MIN_OBSERVATIONS
+    return False
+
+
 def fx_cost(cash_usd: float, rate: float, round_trip: bool = True) -> float:
     """Currency conversion cost on money moved, in dollars.
 
@@ -147,15 +168,38 @@ class CostModel:
                  default_half_spread: float = 0.05,
                  commission_per_contract: float = FALLBACK_COMMISSION_PER_CONTRACT,
                  fx_rate: float = 0.0,
-                 multiplier: float = 100.0):
+                 multiplier: float = 100.0,
+                 surface: Optional[SpreadSurface] = None):
         self.table = table or {}
         self.default_half_spread = float(default_half_spread)
         self.commission_per_contract = float(commission_per_contract)
         self.fx_rate = float(fx_rate)
         self.multiplier = float(multiplier)
+        self.surface = surface
 
-    def half_spread(self, strategy: str) -> float:
-        return half_spread_for(strategy, self.table, self.default_half_spread)
+    def half_spread(self, strategy: str, *, mid: Optional[float] = None,
+                    abs_delta: Optional[float] = None,
+                    dte: Optional[float] = None,
+                    open_interest: Optional[float] = None) -> float:
+        """Half-spread in dollars per share.
+
+        With full contract context and a fitted surface, the contract prices
+        itself: a strategy name is not a contract, and the per-strategy
+        constant charges a Bull Put's cheap long wing the same as its short
+        leg. Without full context — or without a surface — this is exactly the
+        previous per-strategy lookup, so existing callers are unaffected.
+
+        Partial context does NOT half-guess a cell. A mid with no delta cannot
+        locate a bucket, and inventing the missing dimension is how a number
+        that describes something other than its label gets used.
+        """
+        fallback = half_spread_for(strategy, self.table, self.default_half_spread)
+        if (self.surface is not None and mid is not None and mid > 0
+                and abs_delta is not None and dte is not None):
+            return self.surface.half_spread(
+                mid, abs_delta=abs_delta, dte=dte,
+                open_interest=open_interest, default=fallback / float(mid))
+        return fallback
 
     def friction(self, strategy: str, n_legs: int, entry_credit: float = 0.0,
                  round_trip: bool = True) -> float:

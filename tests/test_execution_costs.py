@@ -19,10 +19,12 @@ from src.execution_costs import (
     CostModel,
     fx_cost,
     half_spread_for,
+    is_measured,
     measure_half_spreads,
     reprice_pnl_pct,
     round_trip_friction,
 )
+from src.spread_surface import Cell, SpreadSurface, cell_key
 
 
 class TestHalfSpreadLookup(unittest.TestCase):
@@ -46,6 +48,18 @@ class TestHalfSpreadLookup(unittest.TestCase):
 
     def test_matching_is_case_and_whitespace_tolerant(self):
         self.assertAlmostEqual(half_spread_for(" bull put ", self.table, default=0.05), 0.162)
+
+    def test_is_measured_true_for_a_structure_clearing_the_floor(self):
+        self.assertTrue(is_measured("Bull Put", self.table))
+
+    def test_is_measured_false_below_min_observations(self):
+        # Thin Thing has a table entry, but half_spread_for never uses its
+        # value — n=3 is below MIN_OBSERVATIONS, so it falls back to the
+        # caller's default. is_measured must say so, not just "found".
+        self.assertFalse(is_measured("Thin Thing", self.table))
+
+    def test_is_measured_false_for_a_structure_absent_from_the_table(self):
+        self.assertFalse(is_measured("Calendar", self.table))
 
 
 class TestRoundTripFriction(unittest.TestCase):
@@ -229,6 +243,39 @@ class TestMeasurementFromTheArchive(unittest.TestCase):
         arc.commit(); arc.close()
         table = measure_half_spreads(self.archive, self.ledger)
         self.assertNotIn("Bull Put", table)
+
+
+class SurfaceBackedCostModelTest(unittest.TestCase):
+    def _surface(self):
+        return SpreadSurface(
+            {cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 42)}, {})
+
+    def test_without_contract_context_the_strategy_table_still_wins(self):
+        # Every existing caller passes no context and must be unaffected.
+        m = CostModel(table={"Bull Put": {"n": 50, "median_half_spread": 0.162}},
+                      default_half_spread=0.05, surface=self._surface())
+        self.assertAlmostEqual(m.half_spread("Bull Put"), 0.162)
+
+    def test_without_a_surface_behaviour_is_exactly_as_before(self):
+        m = CostModel(table={"Bull Put": {"n": 50, "median_half_spread": 0.162}},
+                      default_half_spread=0.05)
+        self.assertAlmostEqual(m.half_spread("Bull Put"), 0.162)
+        self.assertAlmostEqual(m.half_spread("Unknown"), 0.05)
+
+    def test_with_contract_context_the_surface_prices_it(self):
+        m = CostModel(table={"Bull Put": {"n": 50, "median_half_spread": 0.162}},
+                      default_half_spread=0.05, surface=self._surface())
+        # rel 0.02 * mid 2.50 = 0.05
+        self.assertAlmostEqual(
+            m.half_spread("Bull Put", mid=2.50, abs_delta=0.50, dte=30.0,
+                          open_interest=500.0), 0.05)
+
+    def test_partial_context_falls_back_to_the_strategy_table(self):
+        # A mid without a delta is not enough to locate a cell; silently
+        # guessing the missing dimension is how a wrong number gets used.
+        m = CostModel(table={"Bull Put": {"n": 50, "median_half_spread": 0.162}},
+                      default_half_spread=0.05, surface=self._surface())
+        self.assertAlmostEqual(m.half_spread("Bull Put", mid=2.50), 0.162)
 
 
 if __name__ == "__main__":
