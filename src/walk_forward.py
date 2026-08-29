@@ -12,10 +12,23 @@ from typing import Iterator, List, Optional, Tuple
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
+from src.alloc.validate import expected_max_sharpe
 from src.backtest_optimizer import (
     BacktestResult, CURRENT_WEIGHTS, WEIGHT_KEYS, optimize_weights,
 )
 from src.ledger_filters import exclude_ruled_duplicates
+
+# Weights fitted per fold. Below twice this many observations the fit is
+# underdetermined and its OOS IC is noise with a decimal point.
+MIN_TRAIN_AFTER_PURGE = 2 * len(WEIGHT_KEYS)
+
+# Fewer surviving folds than this and the run reports nothing rather than an
+# average of two numbers.
+MIN_FOLDS = 3
+
+# Trials per fold inside `optimize_weights` — the size of the weight search,
+# needed to state the bar a result has to clear.
+TRIALS_PER_FOLD = 200
 
 # Map WEIGHT_KEYS names to their actual column names in paper_trades.db.
 # Most follow the pattern "<key>_score", but a few deviate.
@@ -186,10 +199,69 @@ def _bootstrap_ci(
     return float(lo), float(hi)
 
 
+def _write_artifacts(summary: dict, output_dir: Optional[str]) -> None:
+    """Write the JSON/markdown report pair, if an output_dir was given.
+
+    Called from both the success and refusal paths in `run_walk_forward` so
+    a refusal still leaves a fresh artifact behind — otherwise the evidence
+    banner (which always reads the newest `walk_forward_*.json`) would keep
+    quoting a stale, pre-purge run as current.
+    """
+    if not output_dir:
+        return
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    strategy = summary["strategy"]
+    json_name = (
+        f"walk_forward_{strategy.lower().replace(' ', '_')}_{stamp}.json"
+    )
+    md_name = json_name.replace(".json", ".md")
+    (out_path / json_name).write_text(json.dumps(summary, indent=2))
+    (out_path / md_name).write_text(_format_markdown(summary))
+    summary["json_path"] = json_name
+    summary["md_path"] = md_name
+
+
+def _refused_summary(db_path: str, strategy: str, n_total: int,
+                     train_size: int, test_size: int, step: int,
+                     n_attempted: int, n_dropped: int, reason: str,
+                     output_dir: Optional[str] = None) -> dict:
+    """A run that could not measure anything.
+
+    Every statistic is None, never 0.0: a zero here would render in the
+    evidence banner as a measured zero IC rather than an absence.
+    """
+    summary = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "db_path": db_path,
+        "strategy": strategy,
+        "n_total_trades": n_total,
+        "n_folds": 0,
+        "n_folds_attempted": n_attempted,
+        "n_folds_dropped": n_dropped,
+        "train_size": train_size,
+        "test_size": test_size,
+        "step": step,
+        "refused": True,
+        "refused_reason": reason,
+        "pooled_ic": None,
+        "pooled_pvalue": None,
+        "fold_ic_mean": None,
+        "fold_ic_ci_95": None,
+        "folds_ic_positive": None,
+        "n_trials": 0,
+        "search_bar_sharpe": None,
+        "folds": [],
+    }
+    _write_artifacts(summary, output_dir)
+    return summary
+
+
 def run_walk_forward(
     db_path: str,
     strategy: str = "Long Call",
-    train_size: int = 44,
+    train_size: int = 100,
     test_size: int = 10,
     step: int = 10,
     output_dir: Optional[str] = None,
@@ -201,12 +273,19 @@ def run_walk_forward(
     per_fold: List[dict] = []
     all_test_scores: List[float] = []
     all_test_pnls: List[float] = []
+    n_dropped = 0
+    n_attempted = len(folds)
 
     for fold_idx, (train_ids, test_ids) in enumerate(folds):
         train_set = set(train_ids)
         test_set = set(test_ids)
         train_trades = [t for t in trades if t.rowid in train_set]
         test_trades = [t for t in trades if t.rowid in test_set]
+        n_requested = len(train_trades)
+        train_trades = purge_overlapping(train_trades, test_trades)
+        if len(train_trades) < MIN_TRAIN_AFTER_PURGE:
+            n_dropped += 1
+            continue
         weights = _fit_weights_on_fold(train_trades)
         composite_test = _score_test_fold(test_trades, weights)
         pnl_test = np.array([t.pnl_pct for t in test_trades])
@@ -224,6 +303,7 @@ def run_walk_forward(
             {
                 "fold": fold_idx,
                 "n_train": len(train_trades),
+                "n_train_purged": n_requested - len(train_trades),
                 "n_test": len(test_trades),
                 "ic_pearson": ic_p,
                 "p_pearson": ic_p_pval,
@@ -233,6 +313,16 @@ def run_walk_forward(
         )
         all_test_scores.extend(composite_test.tolist())
         all_test_pnls.extend(pnl_test.tolist())
+
+    if len(per_fold) < MIN_FOLDS:
+        return _refused_summary(
+            db_path, strategy, n_total, train_size, test_size, step,
+            n_attempted, n_dropped,
+            reason=(f"only {len(per_fold)} of {n_attempted} folds kept "
+                    f"{MIN_TRAIN_AFTER_PURGE}+ training trades after purging "
+                    f"(minimum {MIN_FOLDS}); widen train_size or wait for more "
+                    f"closed trades"),
+            output_dir=output_dir)
 
     pooled_s = np.array(all_test_scores)
     pooled_p = np.array(all_test_pnls)
@@ -255,46 +345,55 @@ def run_walk_forward(
         "db_path": db_path,
         "strategy": strategy,
         "n_total_trades": n_total,
-        "n_folds": len(folds),
+        "n_folds": len(per_fold),
+        "n_folds_attempted": n_attempted,
+        "n_folds_dropped": n_dropped,
         "train_size": train_size,
         "test_size": test_size,
         "step": step,
+        "refused": False,
+        "refused_reason": None,
         "pooled_ic": pooled_ic,
         "pooled_pvalue": pooled_pval,
         "fold_ic_mean": float(fold_ics.mean()) if fold_ics.size else 0.0,
         "fold_ic_ci_95": [ci_lo, ci_hi],
         "folds_ic_positive": int((fold_ics >= 0).sum()),
+        "n_trials": TRIALS_PER_FOLD * len(per_fold),
+        "search_bar_sharpe": expected_max_sharpe(
+            TRIALS_PER_FOLD * len(per_fold),
+            trial_variance=1.0 / max(len(pooled_p), 1)),
         "folds": per_fold,
     }
 
-    if output_dir:
-        out_path = Path(output_dir)
-        out_path.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y-%m-%d")
-        json_name = (
-            f"walk_forward_{strategy.lower().replace(' ', '_')}_{stamp}.json"
-        )
-        md_name = json_name.replace(".json", ".md")
-        (out_path / json_name).write_text(json.dumps(summary, indent=2))
-        (out_path / md_name).write_text(_format_markdown(summary))
-        summary["json_path"] = json_name
-        summary["md_path"] = md_name
+    _write_artifacts(summary, output_dir)
 
     return summary
 
 
 def _format_markdown(s: dict) -> str:
-    lines = [
+    header = [
         f"# Walk-Forward OOS IC — {s['strategy']}",
         "",
         f"- Generated: {s['generated_at']}",
         f"- DB: `{s['db_path']}`",
         f"- Total trades: {s['n_total_trades']}",
         (
-            f"- Folds: {s['n_folds']}  "
-            f"(train={s['train_size']}, test={s['test_size']}, step={s['step']})"
+            f"- Folds: {s['n_folds']} kept of {s.get('n_folds_attempted', s['n_folds'])} "
+            f"attempted ({s.get('n_folds_dropped', 0)} dropped below the training "
+            f"floor)  (train={s['train_size']}, test={s['test_size']}, "
+            f"step={s['step']})"
         ),
         "",
+    ]
+    if s.get("refused"):
+        header += [
+            "## Refused",
+            "",
+            f"This run reports no statistics: {s['refused_reason']}",
+            "",
+        ]
+        return "\n".join(header) + "\n"
+    lines = header + [
         "## Aggregate",
         f"- **Pooled OOS IC:** {s['pooled_ic']:+.3f}  (p={s['pooled_pvalue']:.3f})",
         f"- Per-fold IC mean: {s['fold_ic_mean']:+.3f}",

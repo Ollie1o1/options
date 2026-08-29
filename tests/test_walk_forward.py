@@ -14,8 +14,8 @@ import numpy as np
 
 from src.backtest_optimizer import WEIGHT_KEYS
 from src.walk_forward import (
-    Trade, _as_date, build_folds, load_trades, purge_overlapping,
-    run_walk_forward,
+    MIN_TRAIN_AFTER_PURGE, Trade, _as_date, build_folds, load_trades,
+    purge_overlapping, run_walk_forward,
 )
 from src.paper_manager import PaperManager
 
@@ -333,6 +333,73 @@ class TestPurgeOverlapping(unittest.TestCase):
             train, test = trades[:40], trades[40:]
             purged = purge_overlapping(train, test)
             self.assertEqual([t.rowid for t in purged], [t.rowid for t in train])
+
+
+class TestPurgeFloorAndRefusal(unittest.TestCase):
+    def test_a_fold_below_the_training_floor_is_dropped_and_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=200, seed=3)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=60, test_size=10, step=10)
+            self.assertEqual(
+                r["n_folds"] + r["n_folds_dropped"], r["n_folds_attempted"],
+                "every attempted fold must be either kept or counted as dropped")
+
+    def test_surviving_folds_all_clear_the_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=300, seed=5, hold_days=10)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=120, test_size=10, step=10)
+            for f in r["folds"]:
+                self.assertGreaterEqual(f["n_train"], MIN_TRAIN_AFTER_PURGE)
+
+    def test_n_train_reports_the_purged_count_not_the_requested_one(self):
+        # hold_days=10 with one trade per day means roughly the last 10 train
+        # trades are still open when the test window opens. Without a non-zero
+        # hold this assertion could never fail.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=300, seed=5, hold_days=10)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=120, test_size=10, step=10)
+            self.assertTrue(r["folds"], "expected surviving folds to assert on")
+            self.assertLess(r["folds"][0]["n_train"], 120,
+                            "purging must actually remove trades")
+            self.assertGreater(r["folds"][0]["n_train_purged"], 0)
+
+    def test_a_zero_hold_fixture_purges_nothing(self):
+        # The complement: proves the purge is driven by the interval, not by
+        # position in the fold.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=300, seed=5, hold_days=0)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=120, test_size=10, step=10)
+            for f in r["folds"]:
+                self.assertEqual(f["n_train_purged"], 0)
+
+    def test_too_few_surviving_folds_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=70, seed=9)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=44, test_size=10, step=10)
+            self.assertTrue(r["refused"])
+            self.assertIsNone(r["pooled_ic"],
+                              "a refused run must not report 0.0 as an IC")
+            self.assertIsNone(r["fold_ic_mean"])
+            self.assertIn("fold", r["refused_reason"].lower())
+
+    def test_a_successful_run_is_not_marked_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=400, ic_target=0.15, seed=7)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=120, test_size=20, step=20)
+            self.assertFalse(r["refused"])
+            self.assertIsNotNone(r["pooled_ic"])
 
 
 if __name__ == "__main__":
