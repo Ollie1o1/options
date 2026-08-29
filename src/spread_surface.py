@@ -89,21 +89,22 @@ class SpreadSurface:
                 if predicate(k)]
         return float(median(vals)) if vals else None
 
-    def relative(self, *, abs_delta: Optional[float], dte: Optional[float],
-                 open_interest: Optional[float],
-                 default: Optional[float] = None) -> Tuple[float, str]:
-        """Relative half-spread for a contract, with its provenance.
+    def _collapsed(self, d: int, t: int,
+                   default: Optional[float]) -> Tuple[float, str]:
+        """The fallback ladder below an exact cell: collapse OI, then DTE,
+        then take the global median.
 
-        Always returns (value, provenance) rather than a bare float. A fallback
-        that is indistinguishable from a measurement is how an invented number
-        gets quoted as fact.
+        Shared by `relative()` (reached only after an exact-cell miss) and
+        `oi_collapsed_relative()` (which starts here directly). The two
+        callers need different entry points: `cell_key` maps a missing open
+        interest to bucket 0, the most illiquid bucket, so `relative(...,
+        open_interest=None)` hits that exact cell whenever bucket 0 is
+        populated — as every bucket is in the real surface — and this ladder
+        never fires. That is correct when open interest is merely omitted
+        from one lookup and the caller wants the conservative (illiquid)
+        reading. It is wrong when open interest is unknown for the trade
+        itself and the caller wants the genuine marginal instead.
         """
-        d, t, o = cell_key(abs_delta, dte, open_interest)
-
-        cell = self.cells.get((d, t, o))
-        if cell is not None:
-            return cell.rel_half_spread, "cell"
-
         collapsed = self._median_over(lambda k: k[0] == d and k[1] == t)
         if collapsed is not None:
             return collapsed, "oi_collapsed"
@@ -121,6 +122,40 @@ class SpreadSurface:
                 "empty spread surface and no caller default; refusing to "
                 "report a cost of zero")
         return float(default), "caller_default"
+
+    def relative(self, *, abs_delta: Optional[float], dte: Optional[float],
+                 open_interest: Optional[float],
+                 default: Optional[float] = None) -> Tuple[float, str]:
+        """Relative half-spread for a contract, with its provenance.
+
+        Always returns (value, provenance) rather than a bare float. A fallback
+        that is indistinguishable from a measurement is how an invented number
+        gets quoted as fact.
+        """
+        d, t, o = cell_key(abs_delta, dte, open_interest)
+
+        cell = self.cells.get((d, t, o))
+        if cell is not None:
+            return cell.rel_half_spread, "cell"
+
+        return self._collapsed(d, t, default)
+
+    def oi_collapsed_relative(self, *, abs_delta: Optional[float],
+                              dte: Optional[float],
+                              default: Optional[float] = None
+                              ) -> Tuple[float, str]:
+        """The OI-collapsed marginal directly: the median relative
+        half-spread across every open-interest bucket for this (delta, DTE)
+        cell, bypassing the exact-cell rung on purpose.
+
+        Use this when open interest is unknown for the TRADE, not merely
+        omitted from a single lookup — `relative(..., open_interest=None)` is
+        NOT this: it resolves to the most illiquid bucket's own exact cell
+        whenever that cell is populated, which is the worst case, not the
+        marginal.
+        """
+        d, t, _ = cell_key(abs_delta, dte, None)
+        return self._collapsed(d, t, default)
 
     def half_spread(self, mid: float, *, abs_delta: Optional[float],
                     dte: Optional[float], open_interest: Optional[float],

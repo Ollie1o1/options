@@ -198,6 +198,90 @@ class LookupProvenanceTest(unittest.TestCase):
         self.assertIsInstance(
             s.relative(abs_delta=0.5, dte=30.0, open_interest=500.0), tuple)
 
+    def test_relative_with_open_interest_none_pins_to_the_illiquid_bucket(
+            self):
+        # cell_key maps None OI to bucket 0. If bucket 0 is populated (as
+        # every bucket is in the real surface), relative() returns that
+        # exact, most-illiquid cell rather than falling through to the
+        # oi_collapsed rung — the defect this test documents.
+        s = self._surface({
+            cell_key(0.50, 30.0, 5.0): Cell(40, 0.05, 50),    # OI bucket 0
+            cell_key(0.50, 30.0, 500.0): Cell(40, 0.01, 50),  # OI bucket 2
+        })
+        value, prov = s.relative(abs_delta=0.50, dte=30.0, open_interest=None)
+        self.assertAlmostEqual(value, 0.05)
+        self.assertEqual(prov, "cell")
+
+
+class OiCollapsedRelativeTest(unittest.TestCase):
+    """The genuine OI-collapsed marginal, reachable directly rather than only
+    as an unreachable rung of relative()'s fallback ladder."""
+
+    def _surface(self, cells):
+        return SpreadSurface(cells, {"fit_date": "2026-08-28"})
+
+    def test_it_is_the_median_across_oi_buckets_for_a_fixed_delta_dte(self):
+        s = self._surface({
+            cell_key(0.50, 30.0, 5.0): Cell(40, 0.05, 50),       # OI bucket 0
+            cell_key(0.50, 30.0, 50.0): Cell(40, 0.02, 50),      # OI bucket 1
+            cell_key(0.50, 30.0, 500.0): Cell(40, 0.01, 50),     # OI bucket 2
+        })
+        value, prov = s.oi_collapsed_relative(abs_delta=0.50, dte=30.0)
+        self.assertAlmostEqual(value, 0.02)  # median of 0.05, 0.02, 0.01
+        self.assertEqual(prov, "oi_collapsed")
+
+    def test_it_ignores_the_exact_cell_even_when_one_exists(self):
+        # Same delta/DTE/OI as the populated cell — relative() would return
+        # this cell's own value with provenance "cell". oi_collapsed_relative
+        # must not: it always collapses OI, even when the caller happens to
+        # have supplied one that matches an exact cell.
+        s = self._surface({
+            cell_key(0.50, 30.0, 5.0): Cell(40, 0.05, 50),
+            cell_key(0.50, 30.0, 50.0): Cell(40, 0.02, 50),
+            cell_key(0.50, 30.0, 500.0): Cell(40, 0.01, 50),
+        })
+        value, prov = s.oi_collapsed_relative(abs_delta=0.50, dte=30.0)
+        self.assertNotAlmostEqual(value, 0.05)
+        self.assertEqual(prov, "oi_collapsed")
+
+    def test_the_central_estimate_is_strictly_below_the_conservative_bound(
+            self):
+        # This is the test that would have caught the original defect: when
+        # OI buckets differ, collapsing across them must land strictly below
+        # the illiquid-pinned (bucket 0) figure relative() with OI=None
+        # returns — not equal to it, not above it.
+        s = self._surface({
+            cell_key(0.50, 30.0, 5.0): Cell(40, 0.05, 50),       # bucket 0
+            cell_key(0.50, 30.0, 50.0): Cell(40, 0.02, 50),      # bucket 1
+            cell_key(0.50, 30.0, 500.0): Cell(40, 0.01, 50),     # bucket 2
+        })
+        central, _ = s.oi_collapsed_relative(abs_delta=0.50, dte=30.0)
+        conservative, _ = s.relative(abs_delta=0.50, dte=30.0,
+                                     open_interest=None)
+        self.assertLess(central, conservative)
+
+    def test_it_falls_back_to_dte_collapsed_when_no_oi_match_exists(self):
+        s = self._surface({cell_key(0.50, 120.0, 5.0): Cell(40, 0.07, 50)})
+        value, prov = s.oi_collapsed_relative(abs_delta=0.50, dte=30.0)
+        self.assertAlmostEqual(value, 0.07)
+        self.assertEqual(prov, "dte_collapsed")
+
+    def test_it_falls_back_to_the_global_median(self):
+        s = self._surface({cell_key(0.05, 3.0, 5.0): Cell(40, 0.09, 50)})
+        value, prov = s.oi_collapsed_relative(abs_delta=0.50, dte=30.0)
+        self.assertAlmostEqual(value, 0.09)
+        self.assertEqual(prov, "global")
+
+    def test_an_empty_surface_returns_the_caller_default(self):
+        value, prov = self._surface({}).oi_collapsed_relative(
+            abs_delta=0.50, dte=30.0, default=0.03)
+        self.assertAlmostEqual(value, 0.03)
+        self.assertEqual(prov, "caller_default")
+
+    def test_an_empty_surface_without_a_default_refuses(self):
+        with self.assertRaises(ValueError):
+            self._surface({}).oi_collapsed_relative(abs_delta=0.5, dte=30.0)
+
 
 class HalfSpreadTest(unittest.TestCase):
     def test_dollars_are_relative_times_mid(self):

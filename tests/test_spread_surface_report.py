@@ -151,6 +151,39 @@ class TierClassificationTest(unittest.TestCase):
         # (5.0) = 1.00.
         self.assertAlmostEqual(row.new_friction, 0.20, places=6)
 
+    def test_tier_2_carries_a_central_estimate_below_its_conservative_bound(
+            self):
+        # Wiring-level version of the SpreadSurface-level test in
+        # test_spread_surface.py: classify_tiers must actually call
+        # oi_collapsed_relative for the central figure and
+        # relative(open_interest=None) for the conservative one, not both
+        # off the same number.
+        _ledger(self.led, [(2, "ZZZZ", 100.0, "2026-07-10", "2026-06-10",
+                            "CLOSED", 0.50, "Bull Put", None, 1.0)])
+        _archive(self.arc, [])
+        # dte = 30 -> bucket 2; delta 0.50 -> bucket 2. Three OI buckets
+        # populated with different values so the OI-collapsed median (0.02)
+        # differs from the bucket-0 (illiquid) pin (0.05).
+        surface = SpreadSurface({
+            cell_key(abs_delta=0.50, dte=30.0, open_interest=5.0):
+                Cell(n=40, rel_half_spread=0.05, median_depth=10),
+            cell_key(abs_delta=0.50, dte=30.0, open_interest=50.0):
+                Cell(n=40, rel_half_spread=0.02, median_depth=10),
+            cell_key(abs_delta=0.50, dte=30.0, open_interest=500.0):
+                Cell(n=40, rel_half_spread=0.01, median_depth=10),
+        }, {})
+        out = classify_tiers(self.led, self.arc, surface=surface)
+        self.assertEqual(len(out["tier2"]), 1)
+        row = out["tier2"][0]
+        self.assertEqual(row.provenance, "oi_collapsed")
+        self.assertEqual(row.conservative_provenance, "cell")
+        self.assertIsNotNone(row.conservative_friction)
+        assert row.conservative_friction is not None  # narrow for mypy
+        self.assertLess(row.new_friction, row.conservative_friction)
+        # mid = entry_price = 1.0, so friction == relative directly.
+        self.assertAlmostEqual(row.new_friction, 0.02, places=6)
+        self.assertAlmostEqual(row.conservative_friction, 0.05, places=6)
+
     def test_a_trade_with_neither_is_reported_uncovered_not_dropped(self):
         _ledger(self.led, [(3, "ZZZZ", 100.0, "2026-07-10", "2026-06-10",
                             "CLOSED", None, "Bull Put", 1.0, 1.0)])
@@ -175,7 +208,11 @@ class RenderTest(unittest.TestCase):
     def _rows(self):
         return {
             "tier1": [TierRow(1, "Bull Put", 1, 0.162, 0.240, "cell")],
-            "tier2": [TierRow(2, "Bull Put", 2, 0.162, 0.200, "oi_collapsed")],
+            # central (0.130) strictly below conservative (0.200), matching
+            # what oi_collapsed_relative vs relative(open_interest=None)
+            # actually produce when OI buckets differ.
+            "tier2": [TierRow(2, "Bull Put", 2, 0.162, 0.130, "oi_collapsed",
+                              0.200, "cell")],
             "no_leg_mid": [UnpricedRow(9, "Bull Put")],
             "uncovered": [3],
         }
@@ -191,9 +228,22 @@ class RenderTest(unittest.TestCase):
         self.assertIn("n=1", out)
         self.assertIn("not computed", out.lower())
 
-    def test_tier_2_is_labelled_a_lower_bound_on_cost(self):
+    def test_tier_2_states_open_interest_is_unknown_not_a_lower_bound(self):
+        # Tier 2's original defect: relative(..., open_interest=None) pins
+        # to the most illiquid (highest-cost) bucket, yet was labelled a
+        # LOWER bound. It is neither a lower bound nor the only number —
+        # open interest is unknown, so the report must say that and show
+        # both a central estimate and a conservative bound instead.
         out = render_report(self._rows(), {"fit_date": "2026-08-28"})
-        self.assertIn("lower bound", out.lower())
+        self.assertNotIn("lower bound", out.lower())
+        self.assertIn("open interest is unknown", out.lower())
+        self.assertIn("central", out.lower())
+        self.assertIn("conserv", out.lower())
+
+    def test_tier_2_renders_both_the_central_and_conservative_figures(self):
+        out = render_report(self._rows(), {"fit_date": "2026-08-28"})
+        self.assertIn("0.130", out)
+        self.assertIn("0.200", out)
 
     def test_uncovered_trades_are_stated_not_hidden(self):
         rows = dict(self._rows(), uncovered=[3, 7, 11])
