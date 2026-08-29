@@ -278,6 +278,19 @@ class TestPurgeOverlapping(unittest.TestCase):
         train = [_t(4, "2026-03-01", "2026-03-10")]
         self.assertEqual(purge_overlapping(train, self._test_block()), [])
 
+    def test_a_trade_entering_exactly_on_the_window_close_is_purged(self):
+        # The window's latest exit is 2026-03-20. Opening a position that day
+        # still shares that day's price path with the test block.
+        train = [_t(5, "2026-03-20", "2026-03-25")]
+        self.assertEqual(purge_overlapping(train, self._test_block()), [])
+
+    def test_a_trade_entering_the_day_after_the_window_close_is_kept(self):
+        # The complement of the above: one calendar day past the window's
+        # latest exit no longer shares any price path with the test block.
+        train = [_t(6, "2026-03-21", "2026-03-25")]
+        self.assertEqual(
+            [t.rowid for t in purge_overlapping(train, self._test_block())], [6])
+
     def test_purging_is_idempotent(self):
         train = [_t(1, "2026-03-01", "2026-03-05"), _t(2, "2026-03-05", "2026-03-12")]
         once = purge_overlapping(train, self._test_block())
@@ -305,6 +318,21 @@ class TestPurgeOverlapping(unittest.TestCase):
             spans = {(_as_date(t.exit_date) - _as_date(t.entry_date)).days
                      for t in ts}
             self.assertEqual(spans, {10})
+
+    def test_hold_days_zero_purges_nothing_through_the_real_pipeline(self):
+        # The default fixture (hold_days=0, one zero-day-hold trade per
+        # calendar day) run through the real load_trades -> purge_overlapping
+        # path must be inert, pinning the claim that hold_days=0 leaves
+        # existing behaviour byte-identical. The guard test above only shows
+        # the fixture CAN overlap at hold_days=10; nothing else exercises
+        # purge_overlapping against real loaded rows at the default.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=60, hold_days=0)
+            trades = load_trades(db, strategy="Long Call")
+            train, test = trades[:40], trades[40:]
+            purged = purge_overlapping(train, test)
+            self.assertEqual([t.rowid for t in purged], [t.rowid for t in train])
 
 
 if __name__ == "__main__":
