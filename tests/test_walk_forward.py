@@ -13,7 +13,10 @@ import unittest
 import numpy as np
 
 from src.backtest_optimizer import WEIGHT_KEYS
-from src.walk_forward import build_folds, load_trades, run_walk_forward
+from src.walk_forward import (
+    Trade, _as_date, build_folds, load_trades, purge_overlapping,
+    run_walk_forward,
+)
 from src.paper_manager import PaperManager
 
 # DB column names in insertion order (matches _COMPONENT_COLS in walk_forward)
@@ -59,6 +62,7 @@ def _seed_db(
     n_trades: int,
     ic_target: float = 0.0,
     seed: int = 42,
+    hold_days: int = 0,
 ) -> None:
     """Create a fully migrated paper_trades.db and insert n_trades closed Long Call rows.
 
@@ -69,6 +73,7 @@ def _seed_db(
         approximately ic_target between pop_score and pnl_pct.
       - paper_only = 0 for all rows (eligible for validation cohort).
       - Dates span forward from 2023-01-02 in daily steps.
+      - exit_date = entry_date + hold_days (default 0, a zero-day hold).
     """
     # Initialise schema via PaperManager (runs all migrations).
     pm = PaperManager(db_path=db_path, config_path="config.json")
@@ -89,7 +94,9 @@ def _seed_db(
             # Simpler date: just increment from a base
             from datetime import date, timedelta
             base = date(2023, 1, 2)
-            entry_date = (base + timedelta(days=i)).isoformat()
+            entry = base + timedelta(days=i)
+            entry_date = entry.isoformat()
+            exit_date = (entry + timedelta(days=hold_days)).isoformat()
 
             # Build component values: signal in pop_score, rest neutral
             comp_vals = [0.5] * len(_COMPONENT_DB_COLS)
@@ -113,7 +120,7 @@ def _seed_db(
                 "Long Call",
                 "CLOSED",
                 0.50,
-                entry_date,
+                exit_date,
                 float(pnl_vals[i]),
                 float(pnl_vals[i]) * 200.0,
                 0,
@@ -236,6 +243,68 @@ class TestWritesReportFiles(unittest.TestCase):
             )
             self.assertIn("json_path", result)
             self.assertIn("md_path", result)
+
+
+def _t(rowid: int, entry: str, exit_: str) -> Trade:
+    return Trade(rowid=rowid, entry_date=entry, exit_date=exit_,
+                 pnl_pct=0.0, components=np.zeros(len(WEIGHT_KEYS)))
+
+
+class TestPurgeOverlapping(unittest.TestCase):
+    """A training trade still open during the test window leaks its outcome."""
+
+    def _test_block(self):
+        # test window spans 2026-03-10 .. 2026-03-20
+        return [_t(100, "2026-03-10", "2026-03-15"),
+                _t(101, "2026-03-12", "2026-03-20")]
+
+    def test_a_train_trade_closing_before_the_window_is_kept(self):
+        train = [_t(1, "2026-03-01", "2026-03-05")]
+        self.assertEqual(
+            [t.rowid for t in purge_overlapping(train, self._test_block())], [1])
+
+    def test_a_train_trade_still_open_into_the_window_is_purged(self):
+        # entered before the window, exits inside it — its outcome is
+        # determined by the same price path the test block is scored on.
+        train = [_t(2, "2026-03-05", "2026-03-12")]
+        self.assertEqual(purge_overlapping(train, self._test_block()), [])
+
+    def test_a_train_trade_spanning_the_whole_window_is_purged(self):
+        train = [_t(3, "2026-03-01", "2026-03-25")]
+        self.assertEqual(purge_overlapping(train, self._test_block()), [])
+
+    def test_a_trade_closing_exactly_on_the_window_open_is_purged(self):
+        # Same day is still the same price path. Boundary must be inclusive.
+        train = [_t(4, "2026-03-01", "2026-03-10")]
+        self.assertEqual(purge_overlapping(train, self._test_block()), [])
+
+    def test_purging_is_idempotent(self):
+        train = [_t(1, "2026-03-01", "2026-03-05"), _t(2, "2026-03-05", "2026-03-12")]
+        once = purge_overlapping(train, self._test_block())
+        twice = purge_overlapping(once, self._test_block())
+        self.assertEqual([t.rowid for t in once], [t.rowid for t in twice])
+
+    def test_an_empty_test_block_purges_nothing(self):
+        train = [_t(1, "2026-03-01", "2026-03-05")]
+        self.assertEqual(len(purge_overlapping(train, [])), 1)
+
+    def test_load_trades_carries_exit_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=60)
+            for t in load_trades(db, strategy="Long Call"):
+                self.assertTrue(t.exit_date, "exit_date must be populated")
+
+    def test_the_fixture_can_produce_overlapping_holds(self):
+        # Guards the fixture change below: with hold_days=0 nothing can ever
+        # be purged, and every purge assertion in this file would be vacuous.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=40, hold_days=10)
+            ts = load_trades(db, strategy="Long Call")
+            spans = {(_as_date(t.exit_date) - _as_date(t.entry_date)).days
+                     for t in ts}
+            self.assertEqual(spans, {10})
 
 
 if __name__ == "__main__":

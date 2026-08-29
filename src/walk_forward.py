@@ -5,7 +5,7 @@ import argparse
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -56,6 +56,7 @@ _COMPONENT_COLS = [_WEIGHT_KEY_TO_COL[k] for k in WEIGHT_KEYS]
 class Trade:
     rowid: int
     entry_date: str
+    exit_date: str
     pnl_pct: float
     components: np.ndarray
 
@@ -63,8 +64,9 @@ class Trade:
 def load_trades(db_path: str, strategy: str = "Long Call") -> List[Trade]:
     cols = ", ".join(_COMPONENT_COLS)
     sql = (
-        f"SELECT rowid, date, pnl_pct, {cols} FROM trades "
+        f"SELECT rowid, date, exit_date, pnl_pct, {cols} FROM trades "
         "WHERE status='CLOSED' AND pnl_pct IS NOT NULL "
+        "AND exit_date IS NOT NULL "
         "AND COALESCE(paper_only, 0) = 0 "
         "AND strategy_name = ? "
     )
@@ -74,15 +76,16 @@ def load_trades(db_path: str, strategy: str = "Long Call") -> List[Trade]:
         # inflates the OOS IC this function feeds into the evidence banner.
         sql += exclude_ruled_duplicates(conn) + " ORDER BY date ASC, rowid ASC"
         for row in conn.execute(sql, (strategy,)).fetchall():
-            rowid, entry_date, pnl = row[0], row[1], row[2]
+            rowid, entry_date, exit_date, pnl = row[0], row[1], row[2], row[3]
             comps = np.array(
-                [(v if v is not None else 0.5) for v in row[3:]], dtype=float
+                [(v if v is not None else 0.5) for v in row[4:]], dtype=float
             )
             try:
                 out.append(
                     Trade(
                         rowid=int(rowid),
                         entry_date=str(entry_date),
+                        exit_date=str(exit_date),
                         pnl_pct=float(pnl),
                         components=comps,
                     )
@@ -90,6 +93,35 @@ def load_trades(db_path: str, strategy: str = "Long Call") -> List[Trade]:
             except (TypeError, ValueError):
                 continue
     return out
+
+
+def _as_date(value: str) -> date:
+    """Parse a stored date. Ledger dates are ISO, sometimes with a time part."""
+    return date.fromisoformat(str(value)[:10])
+
+
+def purge_overlapping(train: List[Trade], test: List[Trade]) -> List[Trade]:
+    """Drop training trades whose position was open during the test window.
+
+    A trade entered before the test block but still open inside it has its
+    outcome determined by the same price path the test block is scored on.
+    `build_folds`' rowid assertion cannot see this: the rows are distinct, the
+    information is not.
+
+    The window is the test block's own [earliest entry, latest exit], and the
+    overlap test is INCLUSIVE at both ends — a training trade closing on the
+    day the window opens shared that day's price path.
+
+    Purging uses each trade's MEASURED interval rather than an assumed holding
+    period, so there is no days-to-index conversion to get wrong. `exit_date`
+    is complete on every closed strategy in the ledger.
+    """
+    if not test:
+        return list(train)
+    lo = min(_as_date(t.entry_date) for t in test)
+    hi = max(_as_date(t.exit_date) for t in test)
+    return [t for t in train
+            if not (_as_date(t.exit_date) >= lo and _as_date(t.entry_date) <= hi)]
 
 
 def build_folds(
