@@ -402,6 +402,35 @@ class TestPurgeFloorAndRefusal(unittest.TestCase):
             self.assertIsNone(r["fold_ic_mean"])
             self.assertIn("fold", r["refused_reason"].lower())
 
+    def test_no_folds_formed_at_all_does_not_blame_purging(self):
+        # 50 trades < train_size(44) + test_size(10) = 54, so build_folds
+        # never even forms a fold — purging has nothing to act on and
+        # "widen train_size" would make the shortfall worse, not better.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=50, seed=11)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=44, test_size=10, step=10)
+            self.assertTrue(r["refused"])
+            self.assertEqual(r["n_folds_attempted"], 0)
+            reason = r["refused_reason"].lower()
+            self.assertNotIn("after purging", reason)
+            self.assertNotIn("widen", reason)
+
+    def test_folds_formed_but_all_dropped_by_the_floor_blames_purging(self):
+        # 70 trades forms folds at train=44/test=10/step=10, but every fold's
+        # 44 training trades sits below MIN_TRAIN_AFTER_PURGE (54) even
+        # before any purge — this is the branch where the purge-floor
+        # message and its "widen train_size" advice are the correct ones.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=70, seed=9)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=44, test_size=10, step=10)
+            self.assertTrue(r["refused"])
+            self.assertGreater(r["n_folds_attempted"], 0)
+            self.assertIn("after purging", r["refused_reason"].lower())
+
     def test_a_refusal_writes_its_artifacts_to_disk(self):
         # src/maintenance.py is the only production caller of
         # run_walk_forward and it always passes output_dir="reports" —

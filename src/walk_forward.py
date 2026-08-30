@@ -323,13 +323,25 @@ def run_walk_forward(
         all_test_pnls.extend(pnl_test.tolist())
 
     if len(per_fold) < MIN_FOLDS:
+        if n_attempted == 0:
+            # No fold was ever formed, so purging never ran — naming it as
+            # the cause would be wrong. Widening train_size only raises the
+            # train+test threshold this run already failed to clear, so the
+            # remedy is the opposite of the other branch's advice.
+            reason = (
+                f"no fold could be formed: {n_total} trades < "
+                f"train_size+test_size={train_size + test_size}; reduce "
+                f"train_size (floor {MIN_TRAIN_AFTER_PURGE}) or wait for "
+                f"more closed trades")
+        else:
+            reason = (f"only {len(per_fold)} of {n_attempted} folds kept "
+                      f"{MIN_TRAIN_AFTER_PURGE}+ training trades after purging "
+                      f"(minimum {MIN_FOLDS}); widen train_size or wait for more "
+                      f"closed trades")
         return _refused_summary(
             db_path, strategy, n_total, train_size, test_size, step,
             n_attempted, n_dropped,
-            reason=(f"only {len(per_fold)} of {n_attempted} folds kept "
-                    f"{MIN_TRAIN_AFTER_PURGE}+ training trades after purging "
-                    f"(minimum {MIN_FOLDS}); widen train_size or wait for more "
-                    f"closed trades"),
+            reason=reason,
             output_dir=output_dir)
 
     pooled_s = np.array(all_test_scores)
