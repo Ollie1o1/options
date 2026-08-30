@@ -145,6 +145,97 @@ class TestWalkForwardStaleness(unittest.TestCase):
         self.assertNotIn("\n", banner)
 
 
+class TestBannerSurfacesRefusal(unittest.TestCase):
+    """Tasks 1-2 added a refusal path: when purging leaves too few usable
+    folds, run_walk_forward writes an artifact with every statistic None
+    instead of an IC (see src/walk_forward.py::_refused_summary). evidence.py
+    reads the NEWEST walk_forward_*.json, so a refusal that rendered as an
+    empty slot would look like 'not computed yet' rather than 'computed and
+    refused' — worse than the pre-purge behaviour, since it also silently
+    keeps whatever older non-refused artifact off the banner."""
+
+    def _write(self, d, name, payload):
+        with open(os.path.join(d, name), "w") as fh:
+            json.dump(payload, fh)
+
+    def test_a_refused_walk_forward_is_named_not_left_blank(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "walk_forward_long_call_2026-08-29.json", {
+                "generated_at": "2026-08-29T10:00:00",
+                "strategy": "Long Call", "n_total_trades": 253,
+                "n_folds": 0, "n_folds_attempted": 15, "n_folds_dropped": 15,
+                "refused": True,
+                "refused_reason": (
+                    "only 0 of 15 folds kept 54+ training trades after "
+                    "purging (minimum 3); widen train_size or wait for more "
+                    "closed trades"
+                ),
+                "pooled_ic": None, "pooled_pvalue": None,
+                "fold_ic_mean": None, "folds_ic_positive": None,
+            })
+            ev = load_model_evidence(reports_dir=d)
+            self.assertTrue(ev["wf_refused"])
+            self.assertIsNone(ev["pooled_ic"])
+            self.assertIn("only 0 of 15 folds", ev["wf_refused_reason"])
+            text = format_evidence_banner(ev, today=date(2026, 8, 29))
+            self.assertIn("refused", text.lower())
+            for ln in text.split("\n"):
+                self.assertLessEqual(len(ln), 100,
+                                      msg=f"line too long ({len(ln)}): {ln!r}")
+
+    def test_a_normal_walk_forward_is_not_marked_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "walk_forward_long_call_2026-08-29.json", {
+                "generated_at": "2026-08-29T10:00:00",
+                "strategy": "Long Call", "n_total_trades": 253,
+                "n_folds": 12, "refused": False, "refused_reason": None,
+                "pooled_ic": 0.11, "pooled_pvalue": 0.04,
+                "fold_ic_mean": 0.09, "folds_ic_positive": 8,
+            })
+            ev = load_model_evidence(reports_dir=d)
+            self.assertFalse(ev["wf_refused"])
+            self.assertIsNone(ev["wf_refused_reason"])
+            self.assertAlmostEqual(ev["pooled_ic"], 0.11)
+            text = format_evidence_banner(ev, today=date(2026, 8, 29))
+            self.assertNotIn("refused", text.lower())
+
+    def test_refusal_line_stays_in_budget_alongside_age_and_cohort(self):
+        # The worst case: a refusal, a stale walk-forward date, AND a cohort
+        # IC all present together — the three segments cannot share one line
+        # (age + cohort alone already fill it), so this pins the refusal
+        # reason to its own line and checks it independently.
+        ev = {
+            "pooled_ic": None, "p_value": None, "n_oos": 253,
+            "cohort_n": 12, "gate_decision": "GATHERING", "as_of": "2026-05-29",
+            "wf_as_of": "2026-05-29T11:27:48",
+            "wf_refused": True,
+            "wf_refused_reason": (
+                "only 0 of 15 folds kept 54+ training trades after purging "
+                "(minimum 3); widen train_size or wait for more closed trades"
+            ),
+            "cohort_ic_pearson": 0.048, "cohort_ic_spearman": -0.020,
+        }
+        text = format_evidence_banner(ev, today=date(2026, 8, 29))
+        lines = text.split("\n")
+        self.assertEqual(len(lines), 3)
+        for ln in lines:
+            self.assertLessEqual(len(ln), 100,
+                                  msg=f"line too long ({len(ln)}): {ln!r}")
+        self.assertIn("refused", lines[-1].lower())
+
+    def test_missing_refused_key_treated_as_not_refused(self):
+        # Artifacts written before Tasks 1-2 have no "refused" key at all.
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "walk_forward_long_call_2026-05-29.json", {
+                "generated_at": "2026-05-29T11:27:48",
+                "strategy": "Long Call", "n_total_trades": 94,
+                "pooled_ic": 0.10214, "pooled_pvalue": 0.48029,
+            })
+            ev = load_model_evidence(reports_dir=d)
+            self.assertFalse(ev["wf_refused"])
+            self.assertIsNone(ev["wf_refused_reason"])
+
+
 class TestTrackRecordRender(unittest.TestCase):
     def _seed_db(self):
         conn = sqlite3.connect(":memory:")
