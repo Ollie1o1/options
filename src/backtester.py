@@ -39,6 +39,25 @@ DEFAULT_DB_PATH = str(_PROJECT_ROOT / "paper_trades.db")
 from src.ledger_filters import exclude_ruled_duplicates  # noqa: E402
 from src.paths import repo_path
 
+# The score thresholds `run_backtest` searches. It maximises a t-statistic over
+# these IN SAMPLE and publishes the winner as `optimal_threshold`, so the length
+# of this tuple is the trial count that maximum must be deflated by.
+#
+# Written as an explicit tuple rather than `np.arange(0.3, 0.9, 0.05)`, which
+# yields THIRTEEN values, not the twelve its bounds suggest: floating-point
+# accumulation lands the last one on 0.8999999999999999, just under the
+# exclusive stop. The trial count was therefore an artifact of float
+# representation. Deriving the count from the sequence means the two can never
+# disagree again.
+THRESHOLD_SWEEP = (0.30, 0.35, 0.40, 0.45, 0.50, 0.55,
+                   0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
+THRESHOLD_SWEEP_TRIALS = len(THRESHOLD_SWEEP)
+
+# `deflated_sharpe`/`effective_n` are NOT imported here: they live in
+# src.alloc.validate, which requires numpy and scipy unconditionally, and this
+# module is dependency-free by design (see the note above). They are imported
+# inside `run_backtest`, in a branch that already holds a DataFrame.
+
 try:
     import numpy as np
     HAS_NP = True
@@ -507,6 +526,7 @@ def run_backtest(
 
                     trades.append({
                         "day": i,
+                        "exit_day": i + exit_dte,
                         "direction": direction,
                         "score": score,
                         "entry_price": entry_price,
@@ -564,20 +584,39 @@ def run_backtest(
                             "avg_ret": float(qdf["pnl_pct"].mean()),
                         }
 
-            # Optimal threshold: sweep score thresholds
+            # Optimal threshold: sweep score thresholds.
+            # NOTE: this maximises IN SAMPLE over THRESHOLD_SWEEP_TRIALS
+            # thresholds. `dsr` below deflates the result by that trial count.
+            # The statistic here is mean/std*sqrt(n) — a t-statistic, not the
+            # annualised Sharpe computed at the top of this function. Same
+            # formula shape, different quantity, so it carries a different name.
             optimal_threshold = 0.5
-            best_sharpe = float("-inf")
-            for thr in np.arange(0.3, 0.9, 0.05):
+            best_tstat = float("-inf")
+            for thr in THRESHOLD_SWEEP:
                 sub = trades_df[trades_df["score"] >= thr]
                 if len(sub) < 5:
                     continue
                 s_mean = sub["pnl_pct"].mean()
                 s_std = sub["pnl_pct"].std()
                 if s_std > 0:
-                    s_sharpe = s_mean / s_std * math.sqrt(len(sub))
-                    if s_sharpe > best_sharpe:
-                        best_sharpe = s_sharpe
+                    s_tstat = s_mean / s_std * math.sqrt(len(sub))
+                    if s_tstat > best_tstat:
+                        best_tstat = s_tstat
                         optimal_threshold = float(thr)
+
+            # Backtest entries are one per day and held for weeks, so rows
+            # overlap heavily. Counting them as independent is what makes an
+            # in-sample maximum look like a finding.
+            #
+            # Imported here rather than at module scope: src.alloc.validate
+            # requires numpy and scipy, and this module is dependency-free by
+            # design. This branch already holds a DataFrame, so both are present.
+            from src.alloc.validate import deflated_sharpe, effective_n
+            n_eff = effective_n(trades_df["day"].tolist(),
+                                trades_df["exit_day"].tolist())
+            _pnl = trades_df["pnl_pct"].to_numpy()
+            dsr = deflated_sharpe(_pnl, THRESHOLD_SWEEP_TRIALS, n_eff)
+            dsr_undeflated = deflated_sharpe(_pnl, 1, n_eff)
 
             # Max drawdown (on cumulative pnl_pct)
             cum = trades_df["pnl_pct"].cumsum()
@@ -609,6 +648,10 @@ def run_backtest(
                 "ic_pvalue": ic_pvalue,
                 "by_quintile": by_quintile,
                 "optimal_threshold": optimal_threshold,
+                "n_eff": n_eff,
+                "n_trials": THRESHOLD_SWEEP_TRIALS,
+                "dsr": dsr,
+                "dsr_undeflated": dsr_undeflated,
                 "max_drawdown": max_drawdown,
                 "profit_factor": profit_factor,
                 "regime_summary": regime_summary,
