@@ -245,6 +245,92 @@ class TestMeasurementFromTheArchive(unittest.TestCase):
         self.assertNotIn("Bull Put", table)
 
 
+class FrictionReachesTheSurfaceTest(unittest.TestCase):
+    """`friction()` is the only path any consumer uses, and it could not reach
+    the surface.
+
+    `CostModel.half_spread` grew contract-context parameters, but
+    `friction()` called `self.half_spread(strategy)` with none of them. So a
+    surface could be attached and remain unreachable through the method that
+    `short_premium_gate` — the thing that refuses trades — actually calls.
+
+    Measured on 362 single-leg ledger trades, the per-strategy constant
+    undercharges the surface by 2.3x (Short Put) to 3.0x (Long Call).
+    Undercharging friction makes a trade look better than it is.
+    """
+
+    def _surface(self):
+        return SpreadSurface(
+            {cell_key(0.50, 30.0, 500.0): Cell(40, 0.02, 42)}, {})
+
+    def _model(self):
+        return CostModel(table={"Short Put": {"n": 50, "median_half_spread": 0.10}},
+                         default_half_spread=0.05, surface=self._surface(),
+                         commission_per_contract=0.0)
+
+    def test_friction_uses_the_surface_when_given_contract_context(self):
+        m = self._model()
+        flat = m.friction("Short Put", n_legs=1, entry_credit=2.50)
+        priced = m.friction("Short Put", n_legs=1, entry_credit=2.50,
+                            mid=2.50, abs_delta=0.50, dte=30.0,
+                            open_interest=500.0)
+        # rel 0.02 * mid 2.50 = 0.05/share vs the 0.10 strategy constant
+        self.assertLess(priced, flat)
+        self.assertAlmostEqual(priced, 0.05 * 2, places=6)   # round trip
+
+    def test_without_context_friction_is_exactly_as_before(self):
+        """Every existing caller passes nothing and must be unaffected."""
+        m = self._model()
+        self.assertAlmostEqual(m.friction("Short Put", n_legs=1, entry_credit=2.5),
+                               0.10 * 2, places=6)
+
+    def test_friction_fraction_also_reaches_the_surface(self):
+        m = self._model()
+        flat = m.friction_fraction("Short Put", 2.50, n_legs=1)
+        priced = m.friction_fraction("Short Put", 2.50, n_legs=1, mid=2.50,
+                                     abs_delta=0.50, dte=30.0,
+                                     open_interest=500.0)
+        self.assertLess(priced, flat)
+
+    def test_a_multi_leg_structure_refuses_surface_pricing(self):
+        """A spread's stored price is a NET CREDIT, not a leg mid.
+
+        The surface returns a RELATIVE half-spread and multiplies by the mid it
+        is handed. Feeding a net credit produces a number that is not a spread
+        cost at all — the units error this module exists to avoid. Multi-leg
+        structures must fall back to the per-strategy constant.
+        """
+        m = CostModel(table={"Bull Put": {"n": 50, "median_half_spread": 0.162}},
+                      default_half_spread=0.05, surface=self._surface(),
+                      commission_per_contract=0.0)
+        with_ctx = m.friction("Bull Put", n_legs=2, entry_credit=1.40,
+                              mid=1.40, abs_delta=0.50, dte=30.0,
+                              open_interest=500.0)
+        without = m.friction("Bull Put", n_legs=2, entry_credit=1.40)
+        self.assertAlmostEqual(with_ctx, without, places=9)
+
+    def test_the_refusal_is_reported_not_silent(self):
+        m = self._model()
+        _, prov = m.half_spread_with_provenance(
+            "Bull Put", n_legs=2, mid=1.40, abs_delta=0.50, dte=30.0,
+            open_interest=500.0)
+        self.assertEqual(prov, "unpriceable_multi_leg")
+
+    def test_single_leg_provenance_names_the_surface(self):
+        m = self._model()
+        _, prov = m.half_spread_with_provenance(
+            "Short Put", n_legs=1, mid=2.50, abs_delta=0.50, dte=30.0,
+            open_interest=500.0)
+        self.assertEqual(prov, "cell")
+
+    def test_missing_context_is_named_rather_than_guessed(self):
+        m = self._model()
+        _, prov = m.half_spread_with_provenance(
+            "Short Put", n_legs=1, mid=2.50, abs_delta=None, dte=30.0,
+            open_interest=None)
+        self.assertEqual(prov, "strategy_table")
+
+
 class SurfaceBackedCostModelTest(unittest.TestCase):
     def _surface(self):
         return SpreadSurface(

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 from statistics import median
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from src.spread_surface import SpreadSurface
 
@@ -201,13 +201,56 @@ class CostModel:
                 open_interest=open_interest, default=fallback / float(mid))
         return fallback
 
+    def half_spread_with_provenance(
+            self, strategy: str, *, n_legs: int,
+            mid: Optional[float] = None,
+            abs_delta: Optional[float] = None,
+            dte: Optional[float] = None,
+            open_interest: Optional[float] = None) -> Tuple[float, str]:
+        """Half-spread in dollars per share, with where the number came from.
+
+        A cost that cannot be told apart from a measurement is how an invented
+        number gets quoted as fact, so the provenance travels with the value.
+
+        MULTI-LEG STRUCTURES REFUSE SURFACE PRICING. The surface returns a
+        RELATIVE half-spread and multiplies by the mid it is handed. For a
+        spread the stored price is a NET CREDIT, not a leg mid — a $1.40 credit
+        on a $30-wide Bull Put is not the mid of anything — so multiplying by it
+        yields a number that is not a spread cost at all. Pricing a spread needs
+        per-leg mids, which the ledger does not record. Until it does, spreads
+        keep the per-strategy constant and say so.
+        """
+        fallback = half_spread_for(strategy, self.table, self.default_half_spread)
+        if n_legs != 1:
+            return fallback, "unpriceable_multi_leg"
+        if (self.surface is None or mid is None or float(mid) <= 0
+                or abs_delta is None or dte is None):
+            return fallback, "strategy_table"
+        rel, prov = self.surface.relative(
+            abs_delta=abs_delta, dte=dte, open_interest=open_interest,
+            default=fallback / float(mid))
+        return rel * float(mid), prov
+
     def friction(self, strategy: str, n_legs: int, entry_credit: float = 0.0,
-                 round_trip: bool = True) -> float:
+                 round_trip: bool = True, *,
+                 mid: Optional[float] = None,
+                 abs_delta: Optional[float] = None,
+                 dte: Optional[float] = None,
+                 open_interest: Optional[float] = None) -> float:
         """Friction per share: spread and commissions, plus currency conversion
-        on the premium actually moved."""
+        on the premium actually moved.
+
+        With full single-leg contract context and a fitted surface, the contract
+        prices itself. Without it — which is every existing caller — this is
+        exactly the previous per-strategy lookup, so nothing already wired
+        changes behaviour.
+        """
+        half, _prov = self.half_spread_with_provenance(
+            strategy, n_legs=n_legs, mid=mid, abs_delta=abs_delta, dte=dte,
+            open_interest=open_interest)
         cost = round_trip_friction(
             n_legs=n_legs,
-            half_spread=self.half_spread(strategy),
+            half_spread=half,
             commission_per_contract=self.commission_per_contract,
             round_trip=round_trip,
         )
@@ -217,14 +260,20 @@ class CostModel:
         return cost
 
     def friction_fraction(self, strategy: str, entry_credit: float, n_legs: int,
-                          round_trip: bool = True) -> float:
+                          round_trip: bool = True, *,
+                          mid: Optional[float] = None,
+                          abs_delta: Optional[float] = None,
+                          dte: Optional[float] = None,
+                          open_interest: Optional[float] = None) -> float:
         """Friction as a fraction of the credit taken. 0.0 when there is no credit
         to measure against — a missing credit is not a free trade, it is a row
         the caller should skip."""
         credit = float(entry_credit or 0)
         if credit <= 0:
             return 0.0
-        return self.friction(strategy, n_legs, credit, round_trip) / credit
+        return self.friction(strategy, n_legs, credit, round_trip,
+                             mid=mid, abs_delta=abs_delta, dte=dte,
+                             open_interest=open_interest) / credit
 
 
 def reprice_pnl_pct(pnl_pct: float, strategy: str, entry_credit: float, n_legs: int,
