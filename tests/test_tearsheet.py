@@ -489,6 +489,27 @@ class TestZonesThreeToFive(unittest.TestCase):
         self.assertIn("no edge", out)
         self.assertIn("pick_context blew up", out)
 
+    def test_refused_walk_forward_is_named_not_rendered_as_no_edge(self):
+        # Important-2: a walk-forward refusal (src/walk_forward.py — too few
+        # folds survived purging) used to fall through to the ordinary
+        # pooled_ic=None path and render "Scorer OOS IC unknown / no edge" —
+        # indistinguishable from "walk-forward has never run". The refusal
+        # reason must be surfaced explicitly instead.
+        d = _fixture()
+        d["evidence"] = dict(d["evidence"], pooled_ic=None, p_value=None,
+                             n_oos=108, wf_refused=True,
+                             wf_refused_reason=("only 0 of 15 folds kept 54+ "
+                                                "training trades after purging "
+                                                "(minimum 3)"))
+        out = R.render(d)
+        self.assertIn("REFUSED", out)
+        self.assertIn("only 0 of 15 folds", out)
+        self.assertNotIn("no demonstrated out-of-sample skill", out)
+
+    def test_normal_evidence_is_unaffected_by_the_refusal_branch(self):
+        out = R.render(_fixture())
+        self.assertNotIn("REFUSED", out)
+
 
 from src.tearsheet import collect  # noqa: E402
 
@@ -591,6 +612,23 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(out, {})
         self.assertEqual(panels["vol"]["status"], "unavailable")
         self.assertIn("division", panels["vol"]["reason"].lower())
+
+    def test_evidence_collector_carries_wf_refused_through(self):
+        # Important-2: _evidence() used to allowlist only
+        # (pooled_ic, p_value, n_oos, cohort_n, gate_decision, as_of) — the
+        # render's refusal check reads wf_refused/wf_refused_reason, which
+        # load_model_evidence() always returns but this collector dropped
+        # on the floor before it ever reached the sidecar or the page.
+        from unittest import mock
+        fake_ev = {"pooled_ic": None, "p_value": None, "n_oos": 0,
+                  "cohort_n": 2, "gate_decision": "GATHERING",
+                  "as_of": "2026-08-29", "wf_refused": True,
+                  "wf_refused_reason": "only 1 of 4 folds kept 54+ training "
+                                       "trades after purging (minimum 3)"}
+        with mock.patch("src.evidence.load_model_evidence", return_value=fake_ev):
+            out = collect._evidence()
+        self.assertIs(out["wf_refused"], True)
+        self.assertEqual(out["wf_refused_reason"], fake_ev["wf_refused_reason"])
 
     def test_build_output_renders(self):
         self.assertIn("<!DOCTYPE html>", R.render(collect.build(_row(), _ctx(), slow=False)))

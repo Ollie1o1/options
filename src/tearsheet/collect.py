@@ -251,7 +251,8 @@ def _evidence():
     from src.evidence import load_model_evidence
     ev = load_model_evidence()
     return {k: _jsonable(ev.get(k)) for k in
-            ("pooled_ic", "p_value", "n_oos", "cohort_n", "gate_decision", "as_of")}
+            ("pooled_ic", "p_value", "n_oos", "cohort_n", "gate_decision", "as_of",
+             "wf_refused", "wf_refused_reason")}
 
 
 def _context(row):
@@ -591,7 +592,8 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
     narrative = _safe("narrative", lambda: _narrative_block(row, ctx), panels, {})
     evidence = _safe("evidence", _evidence, panels,
                      {"pooled_ic": None, "p_value": None, "n_oos": 0,
-                      "cohort_n": 0, "gate_decision": "UNKNOWN", "as_of": None})
+                      "cohort_n": 0, "gate_decision": "UNKNOWN", "as_of": None,
+                      "wf_refused": False, "wf_refused_reason": None})
     panels.setdefault("context", {"status": "ok", "reason": ""})
 
     if slow:

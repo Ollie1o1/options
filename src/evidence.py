@@ -15,6 +15,8 @@ import os
 from datetime import date
 from typing import Any, Dict, Optional
 
+from src.formatting import truncate
+
 # Forward-cohort gate target: the checkpoint job needs >= this many closed
 # cohort trades before the validation gate can fire (see reports/checkpoint_*.md).
 GATE_TARGET_N = 50
@@ -50,6 +52,10 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
                                             # banner can flag it going stale
           "cohort_ic_pearson":  float | None,  # gate statistic, latest checkpoint
           "cohort_ic_spearman": float | None,  # rank IC beside it (None pre-2026-07)
+          "wf_refused":        bool,           # latest walk-forward run refused to
+                                                # report (too few folds survived
+                                                # purging) rather than measuring
+          "wf_refused_reason": str | None,     # why, verbatim from the artifact
         }
     """
     ev: Dict[str, Any] = {
@@ -66,6 +72,8 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
         "fold_ic_ci_95": None,
         "folds_ic_positive": None,
         "n_folds": None,
+        "wf_refused": False,
+        "wf_refused_reason": None,
     }
 
     # --- walk-forward report -------------------------------------------------
@@ -78,7 +86,11 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
                 ev["pooled_ic"] = float(wf["pooled_ic"])
             if wf.get("pooled_pvalue") is not None:
                 ev["p_value"] = float(wf["pooled_pvalue"])
-            if wf.get("n_total_trades") is not None:
+            # A refusal scores ZERO trades out of sample — n_total_trades is
+            # the strategy's whole book, not what walk-forward measured, and
+            # reporting it here on a refusal lends a trade count to a run
+            # that produced no statistic at all.
+            if wf.get("n_total_trades") is not None and not wf.get("refused"):
                 ev["n_oos"] = int(wf["n_total_trades"])
             if wf.get("generated_at"):
                 ev["as_of"] = str(wf["generated_at"])
@@ -92,6 +104,15 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
                     ev[_k] = wf[_k]
             if isinstance(wf.get("fold_ic_ci_95"), (list, tuple)):
                 ev["fold_ic_ci_95"] = list(wf["fold_ic_ci_95"])
+            # A refusal (Tasks 1-2, src/walk_forward.py::_refused_summary)
+            # writes every statistic above as None rather than 0.0, so the
+            # is-not-None guards above leave them at their safe defaults.
+            # Without this flag that reads as "not computed yet" in the
+            # banner; with it, the banner names the refusal instead.
+            if wf.get("refused"):
+                ev["wf_refused"] = True
+                if wf.get("refused_reason"):
+                    ev["wf_refused_reason"] = str(wf["refused_reason"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             pass
 
@@ -170,6 +191,15 @@ def format_evidence_banner(ev: Optional[Dict[str, Any]] = None,
     flagged past WALK_FORWARD_STALE_DAYS — reading it as fresh past that point
     would overstate how current the OOS number is.
 
+    A third line appears when the latest walk-forward run refused to report
+    (too few folds survived purging — see src/walk_forward.py) rather than
+    leaving line 1's OOS slot merely empty, which would read as "not computed
+    yet" instead of "computed and refused":
+
+      'Ranking model: EXPERIMENTAL — OOS IC REFUSED | gate: GATHERING (n=2/50)
+       OOS walk-forward as of 2026-08-29 (0d old) | cohort IC +0.048 pearson...
+       refused: only 0 of 15 folds kept 54+ training trades after purging...'
+
     Reads from load_model_evidence() when ``ev`` is not supplied. ``today``
     is injectable for deterministic tests; defaults to date.today().
     """
@@ -179,7 +209,16 @@ def format_evidence_banner(ev: Optional[Dict[str, Any]] = None,
     ic = ev.get("pooled_ic")
     p = ev.get("p_value")
     n = ev.get("n_oos") or 0
-    if ic is None or p is None:
+    if ev.get("wf_refused"):
+        # A refusal (too few folds survived purging) is a completed run that
+        # measured nothing — distinct from "no walk-forward report yet" below,
+        # which means the job has never run at all. Collapsing the two would
+        # make a refusal read as "not computed yet" instead of "computed and
+        # refused". The reason itself goes on its own line (see
+        # _wf_refusal_segment) since it can run past the line budget alone —
+        # sharing a line with the age/cohort segments already fills it.
+        oos = "OOS IC REFUSED"
+    elif ic is None or p is None:
         oos = "OOS IC n/a (no walk-forward report yet)"
     else:
         oos = f"OOS IC {ic:+.2f} (p={p:.2f}, n={n})"
@@ -195,9 +234,17 @@ def format_evidence_banner(ev: Optional[Dict[str, Any]] = None,
         _walk_forward_age_segment(ev, today),
         _cohort_ic_segment(ev).lstrip(" |"),
     ) if seg]
-    if not line2_parts:
-        return line1
-    return line1 + "\n" + " | ".join(line2_parts)
+
+    lines = [line1]
+    if line2_parts:
+        lines.append(" | ".join(line2_parts))
+    # The refusal reason gets its own line rather than folding into line2:
+    # age + cohort already fill that line's 100-char budget on their own, and
+    # a refused_reason from walk_forward can run past 100 chars by itself.
+    refusal_line = _wf_refusal_segment(ev)
+    if refusal_line:
+        lines.append(refusal_line)
+    return "\n".join(lines)
 
 
 def _fold_interval_segment(ev: Dict[str, Any]) -> str:
@@ -229,6 +276,27 @@ def _fold_interval_segment(ev: Dict[str, Any]) -> str:
     if lo <= 0.0 <= hi:
         seg += " — NOT distinguishable from zero"
     return seg
+
+
+# A refused_reason from walk_forward can run well past 100 chars on its own
+# (e.g. "only 0 of 15 folds kept 54+ training trades after purging (minimum
+# 3); widen train_size or wait for more closed trades" is 118). The segment
+# gets its own banner line (see format_evidence_banner) so it never has to
+# share the 100-char budget with the age/cohort segments, but even alone a
+# raw reason can exceed it, so it is still summarised here; the full text
+# stays in the artifact (reports/walk_forward_*.json), which has room for it.
+_REFUSED_REASON_MAX_CHARS = 85
+
+
+def _wf_refusal_segment(ev: Dict[str, Any]) -> str:
+    """'refused: only 0 of 15 folds kept 54+ training trades after purg...',
+    or '' when the latest walk-forward artifact was not a refusal."""
+    if not ev.get("wf_refused"):
+        return ""
+    reason = ev.get("wf_refused_reason")
+    if not reason:
+        return "refused (no reason recorded)"
+    return "refused: " + truncate(str(reason), _REFUSED_REASON_MAX_CHARS)
 
 
 def _walk_forward_age_days(wf_as_of: Optional[str], today: Optional[date] = None) -> Optional[int]:

@@ -139,7 +139,7 @@ class TestWalkForwardCohort(unittest.TestCase):
         from src.walk_forward import _COMPONENT_COLS
 
         conn = sqlite3.connect(path)
-        cols = ["date TEXT", "strategy_name TEXT", "status TEXT",
+        cols = ["date TEXT", "exit_date TEXT", "strategy_name TEXT", "status TEXT",
                 "paper_only INTEGER", "pnl_pct REAL"]
         cols += [f"{c} REAL" for c in _COMPONENT_COLS]
         if with_column:
@@ -151,9 +151,9 @@ class TestWalkForwardCohort(unittest.TestCase):
     def _wf_insert(self, conn, entry_id, dup=None, has_col=True):
         from src.walk_forward import _COMPONENT_COLS
 
-        names = ["entry_id", "date", "strategy_name", "status", "paper_only",
-                 "pnl_pct"] + list(_COMPONENT_COLS)
-        vals = [entry_id, "2026-06-01", "Long Call", "CLOSED", 0, 0.05]
+        names = ["entry_id", "date", "exit_date", "strategy_name", "status",
+                 "paper_only", "pnl_pct"] + list(_COMPONENT_COLS)
+        vals = [entry_id, "2026-06-01", "2026-06-01", "Long Call", "CLOSED", 0, 0.05]
         vals += [0.5] * len(_COMPONENT_COLS)
         if has_col:
             names.append("duplicate_of")

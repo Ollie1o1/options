@@ -432,13 +432,18 @@ def _run_track_record(db_path: str) -> None:
     publish(db_path=db_path, reports_dir="reports")
 
 
-def _run_walk_forward(db_path: str) -> None:
+def _run_walk_forward(db_path: str) -> dict:
     """Regenerate the walk-forward OOS artifact the evidence banner reads its
     'as of' date from. Pure local computation over ``trades`` (fits/scores
     folds, bootstraps a CI) — no network — so it runs in-process like the
-    checkpoint and track-record jobs rather than via the subprocess runner."""
+    checkpoint and track-record jobs rather than via the subprocess runner.
+
+    Returns the run's summary dict, which may report ``refused: True`` when
+    too few folds survived purging (src/walk_forward.py). A refusal is a
+    completed run, not an exception — the caller logs it as such rather than
+    treating it as a broken job."""
     from src import walk_forward
-    walk_forward.run_walk_forward(db_path=db_path, output_dir="reports")
+    return walk_forward.run_walk_forward(db_path=db_path, output_dir="reports")
 
 
 def _default_enforce_exits(db_path: str, config_path: str = "config.json") -> None:
@@ -638,9 +643,16 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     try:
         if due_walk_forward(state, today):
             fn = walk_forward_fn or _run_walk_forward
-            fn(db_path=db_path)
+            wf_summary = fn(db_path=db_path)
             state["last_walk_forward"] = today
-            ran.append("walk-forward")
+            # A refusal (too few folds survived purging, src/walk_forward.py)
+            # is a completed run that measured nothing — it must land in
+            # `ran` like any other finished job, not be swallowed by the
+            # `except Exception` below as if the job itself had broken.
+            if isinstance(wf_summary, dict) and wf_summary.get("refused"):
+                ran.append("walk-forward:refused")
+            else:
+                ran.append("walk-forward")
     except Exception:
         pass
 

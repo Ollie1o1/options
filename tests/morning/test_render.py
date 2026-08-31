@@ -100,5 +100,41 @@ class TestRender(unittest.TestCase):
         self.assertIn("class='bars'", html)   # signed ΔIV bars + IV/RV pairs
 
 
+class TestGateZoneRefusal(unittest.TestCase):
+    """Important-2: a walk-forward refusal (src/walk_forward.py — too few
+    folds survived purging) must be named, not rendered as 'not computed
+    yet' with a trade count riding along that lends it false weight."""
+
+    def test_refused_gate_names_the_refusal(self):
+        p = {"cohort_n": 2, "target_n": 50, "gate_decision": "GATHERING",
+             "pooled_ic": None, "p_value": None, "n_oos": 0, "as_of": None,
+             "wf_refused": True,
+             "wf_refused_reason": ("only 0 of 15 folds kept 54+ training "
+                                   "trades after purging (minimum 3)")}
+        html = R._zone_gate(p)
+        self.assertIn("REFUSED", html)
+        self.assertIn("only 0 of 15 folds", html)
+
+    def test_refused_gate_does_not_render_a_misleading_n_oos(self):
+        # Before the fix this rendered "Walk-forward pooled IC — (p=—,
+        # n_oos=108) — no demonstrated edge yet" — reading as "not computed
+        # yet, on 108 trades" rather than "computed and refused", with the
+        # trade count lending it false weight.
+        p = {"cohort_n": 2, "target_n": 50, "gate_decision": "GATHERING",
+             "pooled_ic": None, "p_value": None, "n_oos": 108, "as_of": None,
+             "wf_refused": True, "wf_refused_reason": "refused for testing"}
+        html = R._zone_gate(p)
+        self.assertNotIn("n_oos=108", html)
+        self.assertNotIn("no demonstrated edge yet", html)
+
+    def test_normal_gate_is_unaffected(self):
+        p = {"cohort_n": 2, "target_n": 50, "gate_decision": "GATHERING",
+             "pooled_ic": 0.10, "p_value": 0.48, "n_oos": 30,
+             "as_of": "2026-07-01", "wf_refused": False}
+        html = R._zone_gate(p)
+        self.assertNotIn("REFUSED", html)
+        self.assertIn("n_oos=30", html)
+
+
 if __name__ == "__main__":
     unittest.main()

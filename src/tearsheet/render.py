@@ -571,16 +571,30 @@ def _name_section(data) -> str:
 
 def _evidence_body(data) -> str:
     e = data.get("evidence", {})
-    ic_txt, ic_badge = _ic_badge(e.get("pooled_ic"), e.get("p_value"))
+    refused = bool(e.get("wf_refused"))
     gate = _esc(e.get("gate_decision") or "UNKNOWN")
-    p_txt = _num(e.get("p_value"), "{:.3f}")
     cohort_n = _finite_or_none(e.get("cohort_n")) or 0
+    if refused:
+        # A refusal (src/walk_forward.py — too few folds survived purging) is
+        # a completed run that measured nothing to pool an IC from.
+        # `_ic_badge` reading pooled_ic=None would render "unknown" / "no
+        # edge", which is indistinguishable from "walk-forward has never run"
+        # — exactly the misreading the wf_refused flag exists to prevent, and
+        # showing n_oos would lend a trade count to a run that scored zero
+        # trades out of sample.
+        ic_txt, ic_badge = "REFUSED", _badge("refused", "bad")
+        p_txt = "n/a"
+        p_note = "refused"
+    else:
+        ic_txt, ic_badge = _ic_badge(e.get("pooled_ic"), e.get("p_value"))
+        p_txt = _num(e.get("p_value"), "{:.3f}")
+        p_note = ("significant" if _has_scorer_edge(e.get("pooled_ic"), e.get("p_value"))
+                  else "not significant")
     rows = (
         '<tr><td>Scorer OOS IC</td><td class="n m">{}</td><td class="n">{}</td></tr>'.format(
             ic_txt, ic_badge),
         '<tr><td>p-value</td><td class="n m">{}</td><td class="n mut">{}</td></tr>'.format(
-            p_txt, "significant" if _has_scorer_edge(e.get("pooled_ic"), e.get("p_value"))
-            else "not significant"),
+            p_txt, p_note),
         '<tr><td>Walk-forward n</td><td class="n m">{}</td><td class="n mut">{}</td></tr>'.format(
             _num(e.get("n_oos"), "{:,.0f}"), _esc(e.get("as_of") or "n/a")),
         '<tr><td>Cohort gate</td><td class="n m">{} / 50</td><td class="n">{}</td></tr>'.format(
@@ -589,7 +603,12 @@ def _evidence_body(data) -> str:
             _badge("validated", "ok")),
     )
     # Conditional, not hardcoded — and gated on significance, not magnitude alone.
-    if _has_scorer_edge(e.get("pooled_ic"), e.get("p_value")):
+    if refused:
+        reason = e.get("wf_refused_reason") or "too few folds survived purging"
+        caption = ("Walk-forward validation REFUSED to report: {}. The cost "
+                   "and Greeks arithmetic above does not depend on it."
+                   ).format(reason)
+    elif _has_scorer_edge(e.get("pooled_ic"), e.get("p_value")):
         caption = ("The ranking that surfaced this pick has statistically significant "
                    "out-of-sample skill. The cost and Greeks arithmetic above is "
                    "independent of it.")

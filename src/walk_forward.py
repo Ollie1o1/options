@@ -5,17 +5,39 @@ import argparse
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
+from src.alloc.validate import expected_max_sharpe
 from src.backtest_optimizer import (
     BacktestResult, CURRENT_WEIGHTS, WEIGHT_KEYS, optimize_weights,
 )
 from src.ledger_filters import exclude_ruled_duplicates
+
+# Weights fitted per fold. Below twice the number of fitted weights
+# (2 * len(WEIGHT_KEYS)) the fit is underdetermined and its OOS IC is noise
+# with a decimal point.
+MIN_TRAIN_AFTER_PURGE = 2 * len(WEIGHT_KEYS)
+
+# Fewer surviving folds than this and the run reports nothing rather than an
+# average of two numbers.
+MIN_FOLDS = 3
+
+# Trials per fold inside `optimize_weights` — the size of the weight search,
+# needed to state the bar a result has to clear. `_fit_weights_on_fold` passes
+# this straight to `optimize_weights(n_trials=...)`, so this is the ONLY
+# place the search size is written down.
+TRIALS_PER_FOLD = 200
+
+# Default train_size for both `run_walk_forward` and the CLI. A module-level
+# constant so the two cannot drift the way they did before: the CLI's
+# argparse default was left at the pre-purge value of 44 while the function
+# default moved to 100, silently making every unflagged CLI run refuse.
+DEFAULT_TRAIN_SIZE = 100
 
 # Map WEIGHT_KEYS names to their actual column names in paper_trades.db.
 # Most follow the pattern "<key>_score", but a few deviate.
@@ -56,6 +78,7 @@ _COMPONENT_COLS = [_WEIGHT_KEY_TO_COL[k] for k in WEIGHT_KEYS]
 class Trade:
     rowid: int
     entry_date: str
+    exit_date: str
     pnl_pct: float
     components: np.ndarray
 
@@ -63,8 +86,9 @@ class Trade:
 def load_trades(db_path: str, strategy: str = "Long Call") -> List[Trade]:
     cols = ", ".join(_COMPONENT_COLS)
     sql = (
-        f"SELECT rowid, date, pnl_pct, {cols} FROM trades "
+        f"SELECT rowid, date, exit_date, pnl_pct, {cols} FROM trades "
         "WHERE status='CLOSED' AND pnl_pct IS NOT NULL "
+        "AND exit_date IS NOT NULL "
         "AND COALESCE(paper_only, 0) = 0 "
         "AND strategy_name = ? "
     )
@@ -74,15 +98,16 @@ def load_trades(db_path: str, strategy: str = "Long Call") -> List[Trade]:
         # inflates the OOS IC this function feeds into the evidence banner.
         sql += exclude_ruled_duplicates(conn) + " ORDER BY date ASC, rowid ASC"
         for row in conn.execute(sql, (strategy,)).fetchall():
-            rowid, entry_date, pnl = row[0], row[1], row[2]
+            rowid, entry_date, exit_date, pnl = row[0], row[1], row[2], row[3]
             comps = np.array(
-                [(v if v is not None else 0.5) for v in row[3:]], dtype=float
+                [(v if v is not None else 0.5) for v in row[4:]], dtype=float
             )
             try:
                 out.append(
                     Trade(
                         rowid=int(rowid),
                         entry_date=str(entry_date),
+                        exit_date=str(exit_date),
                         pnl_pct=float(pnl),
                         components=comps,
                     )
@@ -90,6 +115,35 @@ def load_trades(db_path: str, strategy: str = "Long Call") -> List[Trade]:
             except (TypeError, ValueError):
                 continue
     return out
+
+
+def _as_date(value: str) -> date:
+    """Parse a stored date. Ledger dates are ISO, sometimes with a time part."""
+    return date.fromisoformat(str(value)[:10])
+
+
+def purge_overlapping(train: List[Trade], test: List[Trade]) -> List[Trade]:
+    """Drop training trades whose position was open during the test window.
+
+    A trade entered before the test block but still open inside it has its
+    outcome determined by the same price path the test block is scored on.
+    `build_folds`' rowid assertion cannot see this: the rows are distinct, the
+    information is not.
+
+    The window is the test block's own [earliest entry, latest exit], and the
+    overlap test is INCLUSIVE at both ends — a training trade closing on the
+    day the window opens shared that day's price path.
+
+    Purging uses each trade's MEASURED interval rather than an assumed holding
+    period, so there is no days-to-index conversion to get wrong. `exit_date`
+    is complete on every closed strategy in the ledger.
+    """
+    if not test:
+        return list(train)
+    lo = min(_as_date(t.entry_date) for t in test)
+    hi = max(_as_date(t.exit_date) for t in test)
+    return [t for t in train
+            if not (_as_date(t.exit_date) >= lo and _as_date(t.entry_date) <= hi)]
 
 
 def build_folds(
@@ -123,7 +177,7 @@ def _fit_weights_on_fold(train_trades: List[Trade]) -> np.ndarray:
     w_dict = optimize_weights(
         bt,
         method="minimize",
-        n_trials=200,
+        n_trials=TRIALS_PER_FOLD,
         l2_lambda=0.10,
         verbose=False,
         current_weights=CURRENT_WEIGHTS,
@@ -154,10 +208,82 @@ def _bootstrap_ci(
     return float(lo), float(hi)
 
 
+def _write_artifacts(summary: dict, output_dir: Optional[str]) -> None:
+    """Write the JSON/markdown report pair, if an output_dir was given.
+
+    Called from both the success and refusal paths in `run_walk_forward` so
+    a refusal still leaves a fresh artifact behind — otherwise the evidence
+    banner (which always reads the newest `walk_forward_*.json`) would keep
+    quoting a stale, pre-purge run as current.
+    """
+    if not output_dir:
+        return
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    strategy = summary["strategy"]
+    json_name = (
+        f"walk_forward_{strategy.lower().replace(' ', '_')}_{stamp}.json"
+    )
+    md_name = json_name.replace(".json", ".md")
+    (out_path / json_name).write_text(json.dumps(summary, indent=2))
+    (out_path / md_name).write_text(_format_markdown(summary))
+    summary["json_path"] = json_name
+    summary["md_path"] = md_name
+
+
+def _refused_summary(db_path: str, strategy: str, n_total: int,
+                     train_size: int, test_size: int, step: int,
+                     n_attempted: int, n_dropped: int, n_measured: int,
+                     reason: str,
+                     output_dir: Optional[str] = None) -> dict:
+    """A run that measured `n_measured` folds (possibly zero) but refused to
+    report because that is fewer than MIN_FOLDS.
+
+    `n_measured` is the same count that would have become `n_folds` on a
+    successful run: folds that cleared MIN_TRAIN_AFTER_PURGE and were
+    actually fit and scored. Reporting it here — rather than hardcoding 0 —
+    is what lets `n_folds + n_folds_dropped == n_folds_attempted` hold on
+    EVERY run, refused or not: every attempted fold is either dropped by the
+    purge floor (`n_folds_dropped`) or measured (`n_folds`), with nothing
+    lost to the accounting in between.
+
+    Every OTHER statistic is None, never 0.0: a zero here would render in the
+    evidence banner as a measured zero IC rather than an absence. Only the
+    counts (n_folds, n_folds_attempted, n_folds_dropped, n_trials) describe
+    what was actually done; the refusal is about whether there was ENOUGH of
+    it to report, not whether anything happened at all.
+    """
+    summary = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "db_path": db_path,
+        "strategy": strategy,
+        "n_total_trades": n_total,
+        "n_folds": n_measured,
+        "n_folds_attempted": n_attempted,
+        "n_folds_dropped": n_dropped,
+        "train_size": train_size,
+        "test_size": test_size,
+        "step": step,
+        "refused": True,
+        "refused_reason": reason,
+        "pooled_ic": None,
+        "pooled_pvalue": None,
+        "fold_ic_mean": None,
+        "fold_ic_ci_95": None,
+        "folds_ic_positive": None,
+        "n_trials": TRIALS_PER_FOLD * n_measured,
+        "search_bar_sharpe": None,
+        "folds": [],
+    }
+    _write_artifacts(summary, output_dir)
+    return summary
+
+
 def run_walk_forward(
     db_path: str,
     strategy: str = "Long Call",
-    train_size: int = 44,
+    train_size: int = DEFAULT_TRAIN_SIZE,
     test_size: int = 10,
     step: int = 10,
     output_dir: Optional[str] = None,
@@ -169,12 +295,19 @@ def run_walk_forward(
     per_fold: List[dict] = []
     all_test_scores: List[float] = []
     all_test_pnls: List[float] = []
+    n_dropped = 0
+    n_attempted = len(folds)
 
     for fold_idx, (train_ids, test_ids) in enumerate(folds):
         train_set = set(train_ids)
         test_set = set(test_ids)
         train_trades = [t for t in trades if t.rowid in train_set]
         test_trades = [t for t in trades if t.rowid in test_set]
+        n_requested = len(train_trades)
+        train_trades = purge_overlapping(train_trades, test_trades)
+        if len(train_trades) < MIN_TRAIN_AFTER_PURGE:
+            n_dropped += 1
+            continue
         weights = _fit_weights_on_fold(train_trades)
         composite_test = _score_test_fold(test_trades, weights)
         pnl_test = np.array([t.pnl_pct for t in test_trades])
@@ -192,6 +325,7 @@ def run_walk_forward(
             {
                 "fold": fold_idx,
                 "n_train": len(train_trades),
+                "n_train_purged": n_requested - len(train_trades),
                 "n_test": len(test_trades),
                 "ic_pearson": ic_p,
                 "p_pearson": ic_p_pval,
@@ -201,6 +335,38 @@ def run_walk_forward(
         )
         all_test_scores.extend(composite_test.tolist())
         all_test_pnls.extend(pnl_test.tolist())
+
+    if len(per_fold) < MIN_FOLDS:
+        if n_attempted == 0:
+            # No fold was ever formed, so purging never ran — naming it as
+            # the cause would be wrong. Widening train_size only raises the
+            # train+test threshold this run already failed to clear, so the
+            # remedy is the opposite of the other branch's advice.
+            # MIN_TRAIN_AFTER_PURGE bounds training rows AFTER purging, not
+            # train_size itself — setting train_size to that floor guarantees
+            # every fold with any overlap drops. The advice also has to clear
+            # MIN_FOLDS, not just form one fold: the smallest n that yields
+            # MIN_FOLDS folds at these settings is computed below rather than
+            # naming a single-fold threshold that then silently refuses again.
+            n_for_min_folds = train_size + test_size + (MIN_FOLDS - 1) * step
+            reason = (
+                f"no fold could be formed: {n_total} trades < "
+                f"train_size+test_size={train_size + test_size}; "
+                f"{MIN_TRAIN_AFTER_PURGE} is a post-purge training-row floor, "
+                f"not a safe train_size to set directly — reaching "
+                f"{MIN_FOLDS} folds at these settings needs >= "
+                f"{n_for_min_folds} closed trades; shrink train_size/"
+                f"test_size/step together or wait for more closed trades")
+        else:
+            reason = (f"only {len(per_fold)} of {n_attempted} folds kept "
+                      f"{MIN_TRAIN_AFTER_PURGE}+ training trades after purging "
+                      f"(minimum {MIN_FOLDS}); widen train_size or wait for more "
+                      f"closed trades")
+        return _refused_summary(
+            db_path, strategy, n_total, train_size, test_size, step,
+            n_attempted, n_dropped, len(per_fold),
+            reason=reason,
+            output_dir=output_dir)
 
     pooled_s = np.array(all_test_scores)
     pooled_p = np.array(all_test_pnls)
@@ -223,46 +389,61 @@ def run_walk_forward(
         "db_path": db_path,
         "strategy": strategy,
         "n_total_trades": n_total,
-        "n_folds": len(folds),
+        "n_folds": len(per_fold),
+        "n_folds_attempted": n_attempted,
+        "n_folds_dropped": n_dropped,
         "train_size": train_size,
         "test_size": test_size,
         "step": step,
+        "refused": False,
+        "refused_reason": None,
         "pooled_ic": pooled_ic,
         "pooled_pvalue": pooled_pval,
         "fold_ic_mean": float(fold_ics.mean()) if fold_ics.size else 0.0,
         "fold_ic_ci_95": [ci_lo, ci_hi],
         "folds_ic_positive": int((fold_ics >= 0).sum()),
+        "n_trials": TRIALS_PER_FOLD * len(per_fold),
+        "search_bar_sharpe": expected_max_sharpe(
+            TRIALS_PER_FOLD * len(per_fold),
+            trial_variance=1.0 / max(len(pooled_p), 1)),
         "folds": per_fold,
     }
 
-    if output_dir:
-        out_path = Path(output_dir)
-        out_path.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y-%m-%d")
-        json_name = (
-            f"walk_forward_{strategy.lower().replace(' ', '_')}_{stamp}.json"
-        )
-        md_name = json_name.replace(".json", ".md")
-        (out_path / json_name).write_text(json.dumps(summary, indent=2))
-        (out_path / md_name).write_text(_format_markdown(summary))
-        summary["json_path"] = json_name
-        summary["md_path"] = md_name
+    _write_artifacts(summary, output_dir)
 
     return summary
 
 
 def _format_markdown(s: dict) -> str:
-    lines = [
+    # "kept" means kept AND reported — true only on a successful run. A
+    # refusal still measures s['n_folds'] folds (they cleared the purge
+    # floor and were fit and scored), but MIN_FOLDS was not met, so nothing
+    # from them is reported; "measured" says that without implying the
+    # numbers below were used for anything.
+    folds_verb = "measured" if s.get("refused") else "kept"
+    header = [
         f"# Walk-Forward OOS IC — {s['strategy']}",
         "",
         f"- Generated: {s['generated_at']}",
         f"- DB: `{s['db_path']}`",
         f"- Total trades: {s['n_total_trades']}",
         (
-            f"- Folds: {s['n_folds']}  "
-            f"(train={s['train_size']}, test={s['test_size']}, step={s['step']})"
+            f"- Folds: {s['n_folds']} {folds_verb} of {s['n_folds_attempted']} "
+            f"attempted ({s['n_folds_dropped']} dropped below the training "
+            f"floor)  (train={s['train_size']}, test={s['test_size']}, "
+            f"step={s['step']})"
         ),
         "",
+    ]
+    if s.get("refused"):
+        header += [
+            "## Refused",
+            "",
+            f"This run reports no statistics: {s['refused_reason']}",
+            "",
+        ]
+        return "\n".join(header) + "\n"
+    lines = header + [
         "## Aggregate",
         f"- **Pooled OOS IC:** {s['pooled_ic']:+.3f}  (p={s['pooled_pvalue']:.3f})",
         f"- Per-fold IC mean: {s['fold_ic_mean']:+.3f}",
@@ -273,13 +454,13 @@ def _format_markdown(s: dict) -> str:
         f"- Folds with IC >= 0: {s['folds_ic_positive']} / {s['n_folds']}",
         "",
         "## Per-fold",
-        "| Fold | n_train | n_test | IC (Pearson) | p | IC (Spearman) | p |",
-        "|------|---------|--------|--------------|---|---------------|---|",
+        "| Fold | n_train | n_train_purged | n_test | IC (Pearson) | p | IC (Spearman) | p |",
+        "|------|---------|----------------|--------|--------------|---|---------------|---|",
     ]
     for f in s["folds"]:
         lines.append(
-            f"| {f['fold']} | {f['n_train']} | {f['n_test']} | "
-            f"{f['ic_pearson']:+.3f} | {f['p_pearson']:.3f} | "
+            f"| {f['fold']} | {f['n_train']} | {f['n_train_purged']} | "
+            f"{f['n_test']} | {f['ic_pearson']:+.3f} | {f['p_pearson']:.3f} | "
             f"{f['ic_spearman']:+.3f} | {f['p_spearman']:.3f} |"
         )
     return "\n".join(lines) + "\n"
@@ -289,7 +470,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Walk-forward OOS IC validation")
     ap.add_argument("--db", default="paper_trades.db")
     ap.add_argument("--strategy", default="Long Call")
-    ap.add_argument("--train", type=int, default=44)
+    ap.add_argument("--train", type=int, default=DEFAULT_TRAIN_SIZE)
     ap.add_argument("--test", type=int, default=10)
     ap.add_argument("--step", type=int, default=10)
     ap.add_argument("--output", default="reports")

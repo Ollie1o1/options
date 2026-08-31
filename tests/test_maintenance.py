@@ -346,6 +346,30 @@ class TestOrchestrator(unittest.TestCase):
             self.assertNotIn("walk-forward", summary["ran"])
             self.assertEqual(m.load_state(sp)["last_walk_forward"], "2026-06-01")
 
+    def test_walk_forward_refusal_is_logged_as_completed_not_dropped(self):
+        # A refusal (src/walk_forward.py: too few folds survive purging) is a
+        # completed run that measured nothing, not a broken job. It must
+        # still update last_walk_forward and be named in `ran` — silently
+        # dropping it would look identical to the exception-swallowing path
+        # below, and an operator could not tell "job broke" from "job ran and
+        # correctly declined to report".
+        refused_summary = {
+            "refused": True,
+            "refused_reason": "only 0 of 15 folds kept 54+ training trades",
+        }
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=sp,
+                now=datetime(2026, 6, 7, 9, 0), runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: 0, watch_fn=lambda db: None,
+                walk_forward_fn=lambda **k: refused_summary)
+            self.assertIn("walk-forward:refused", summary["ran"])
+            self.assertNotIn("walk-forward", summary["ran"])
+            self.assertEqual(m.load_state(sp)["last_walk_forward"], "2026-06-07")
+
     def test_walk_forward_failure_does_not_propagate(self):
         def boom(**k):
             raise RuntimeError("scipy blew up")
