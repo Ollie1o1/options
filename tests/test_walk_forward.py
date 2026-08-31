@@ -14,8 +14,9 @@ import numpy as np
 
 from src.backtest_optimizer import WEIGHT_KEYS
 from src.walk_forward import (
-    MIN_TRAIN_AFTER_PURGE, Trade, _as_date, build_folds, load_trades,
-    purge_overlapping, run_walk_forward,
+    MIN_FOLDS, MIN_TRAIN_AFTER_PURGE, TRIALS_PER_FOLD, Trade, _as_date,
+    _format_markdown, build_folds, load_trades, purge_overlapping,
+    run_walk_forward,
 )
 from src.paper_manager import PaperManager
 
@@ -254,10 +255,66 @@ class TestWritesReportFiles(unittest.TestCase):
             self.assertIn("json_path", result)
             self.assertIn("md_path", result)
 
+    def test_per_fold_markdown_table_carries_n_train_purged(self):
+        # Minor-5 regression: the per-fold table used to omit n_train_purged
+        # — this branch's headline number — even though the JSON carried it
+        # per fold. hold_days=10 guarantees a nonzero purge to check the
+        # value actually lands in the right column, not just the header.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=300, seed=5, hold_days=10)
+            result = run_walk_forward(db_path=db, strategy="Long Call",
+                                      train_size=120, test_size=10, step=10)
+            self.assertFalse(result["refused"])
+            md = _format_markdown(result)
+            self.assertIn("n_train_purged", md)
+            first_fold = result["folds"][0]
+            self.assertGreater(first_fold["n_train_purged"], 0)
+            self.assertIn(
+                f"| {first_fold['fold']} | {first_fold['n_train']} | "
+                f"{first_fold['n_train_purged']} | {first_fold['n_test']} | ",
+                md)
+
 
 def _t(rowid: int, entry: str, exit_: str) -> Trade:
     return Trade(rowid=rowid, entry_date=entry, exit_date=exit_,
                  pnl_pct=0.0, components=np.zeros(len(WEIGHT_KEYS)))
+
+
+# _seed_db's fixture inserts exactly one trade per calendar day starting
+# 2023-01-02 (see its docstring), so trade index i (0-based, matching
+# build_folds' slice position) sits on this date and at this rowid.
+def _seed_base_date():
+    from datetime import date
+    return date(2023, 1, 2)
+
+
+def _day(i: int) -> str:
+    from datetime import timedelta
+    return (_seed_base_date() + timedelta(days=i)).isoformat()
+
+
+def _rowid_of(i: int) -> int:
+    return i + 1
+
+
+def _force_purge(db_path: str, lo_i: int, hi_i: int, new_exit_i: int) -> None:
+    """Push exit_date for trade indices [lo_i, hi_i] out to day `new_exit_i`.
+
+    A single global `hold_days` in `_seed_db` purges every fold identically
+    (or none of them): with one trade per calendar day and contiguous
+    train/test slices, the purge count for fold k only depends on
+    `min(hold_days, train_size)`, which is the same for every k. There is no
+    way to make a global `hold_days` drop SOME folds but not others through
+    that fixture, so tests that need a mixed outcome patch specific rows'
+    exit_date directly instead, targeted so only the ONE fold whose test
+    window starts at day `new_exit_i` sees the overlap (see call sites).
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE trades SET exit_date = ? WHERE rowid BETWEEN ? AND ?",
+            (_day(new_exit_i), _rowid_of(lo_i), _rowid_of(hi_i)))
+        conn.commit()
 
 
 class TestPurgeOverlapping(unittest.TestCase):
@@ -350,8 +407,23 @@ class TestPurgeFloorAndRefusal(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "trades.db")
             _seed_db(db, n_trades=200, seed=3)
+            # Push fold 5's last 7 training trades (i=103..109) into its own
+            # test window (i=110..119) so ONLY fold 5 drops below
+            # MIN_TRAIN_AFTER_PURGE (60 - 7 = 53 < 54); every other fold's
+            # test window starts on a different day so this patch leaves
+            # them untouched (see _force_purge's docstring for why a single
+            # global hold_days cannot produce this mixed outcome). Without
+            # a genuine drop, "kept + dropped == attempted" is trivially
+            # true at dropped=0 and this test cannot fail no matter what
+            # n_folds is set to — which is exactly how it missed Important
+            # 1's n_folds=0 hardcoding.
+            _force_purge(db, lo_i=103, hi_i=109, new_exit_i=110)
             r = run_walk_forward(db_path=db, strategy="Long Call",
                                  train_size=60, test_size=10, step=10)
+            self.assertEqual(r["n_folds_attempted"], 14)
+            self.assertEqual(r["n_folds_dropped"], 1,
+                             "exactly fold 5 should drop below the training floor")
+            self.assertEqual(r["n_folds"], 13)
             self.assertEqual(
                 r["n_folds"] + r["n_folds_dropped"], r["n_folds_attempted"],
                 "every attempted fold must be either kept or counted as dropped")
@@ -430,6 +502,68 @@ class TestPurgeFloorAndRefusal(unittest.TestCase):
             self.assertTrue(r["refused"])
             self.assertGreater(r["n_folds_attempted"], 0)
             self.assertIn("after purging", r["refused_reason"].lower())
+
+    def test_refusal_still_reports_the_folds_it_measured(self):
+        # Important-1 regression: a refusal used to hardcode n_folds=0 and
+        # n_trials=0 even when some folds WERE measured (fit and scored)
+        # before the run refused for having fewer surviving folds than
+        # MIN_FOLDS. That made the JSON disagree with its own
+        # refused_reason ("only 1 of 4 folds kept..." next to a "n_folds":
+        # 0" field) and silently dropped the 200 trials genuinely spent
+        # fitting the one measured fold from n_trials.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=104, seed=13)
+            # Push folds 0, 1, 2's last 7 training trades into their own
+            # test windows so each drops below the 54-trade floor; fold 3
+            # (i=30..89 train, i=90..99 test) is left untouched and
+            # survives, giving exactly the "1 of 4" split the refused
+            # message names.
+            _force_purge(db, lo_i=53, hi_i=59, new_exit_i=60)   # drops fold 0
+            _force_purge(db, lo_i=63, hi_i=69, new_exit_i=70)   # drops fold 1
+            _force_purge(db, lo_i=73, hi_i=79, new_exit_i=80)   # drops fold 2
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=60, test_size=10, step=10)
+
+            self.assertTrue(r["refused"])
+            self.assertEqual(r["n_folds_attempted"], 4)
+            self.assertEqual(r["n_folds_dropped"], 3)
+            self.assertEqual(
+                r["n_folds"], 1,
+                "the one fold that cleared the purge floor must be "
+                "counted, not hardcoded to 0")
+            self.assertEqual(
+                r["n_folds"] + r["n_folds_dropped"], r["n_folds_attempted"],
+                "measured + dropped must reconcile to attempted even on a refusal")
+            self.assertEqual(
+                r["n_trials"], TRIALS_PER_FOLD * 1,
+                "trials genuinely spent fitting the measured fold must be reported")
+            self.assertIn("1 of 4 folds", r["refused_reason"])
+            # Refusal still means no statistic is reported, regardless of
+            # how many folds were measured along the way.
+            self.assertIsNone(r["pooled_ic"])
+            self.assertIsNone(r["fold_ic_mean"])
+            self.assertIsNone(r["folds_ic_positive"])
+
+    def test_refused_markdown_does_not_claim_zero_kept(self):
+        # Same fixture as above, checked through _format_markdown rather
+        # than the raw dict: the header line is what an operator actually
+        # reads, and "0 kept of 4 attempted" next to a reason saying "1 of 4
+        # folds kept" is the two-numbers-one-label defect this branch exists
+        # to close.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=104, seed=13)
+            _force_purge(db, lo_i=53, hi_i=59, new_exit_i=60)
+            _force_purge(db, lo_i=63, hi_i=69, new_exit_i=70)
+            _force_purge(db, lo_i=73, hi_i=79, new_exit_i=80)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=60, test_size=10, step=10)
+            md = _format_markdown(r)
+            self.assertIn(
+                "1 measured of 4 attempted (3 dropped below the training floor)",
+                md)
+            self.assertNotIn("0 kept", md)
 
     def test_a_refusal_writes_its_artifacts_to_disk(self):
         # src/maintenance.py is the only production caller of

@@ -436,17 +436,28 @@ def _zone_portfolio(p) -> str:
 
 def _zone_gate(p) -> str:
     n, target = p.get("cohort_n") or 0, p.get("target_n") or 50
-    ic, pv = p.get("pooled_ic"), p.get("p_value")
-    ic_read = "no demonstrated edge yet"
-    if _f(ic) is not None and _f(pv) is not None:
-        ic_read = ("statistically supported" if abs(_f(ic)) >= 0.05 and _f(pv) < 0.05
-                   else "not statistically distinguishable from zero")
+    if p.get("wf_refused"):
+        # A refusal (src/walk_forward.py — too few folds survived purging)
+        # measured nothing to pool an IC from. Rendering the normal line
+        # would show "pooled IC — (p=—, n_oos=0)" which reads as "not
+        # computed yet" instead of "computed and refused" — the exact
+        # misreading load_model_evidence's wf_refused flag exists to name.
+        reason = p.get("wf_refused_reason") or "too few folds survived purging"
+        wf_line = (f"<p class='warn'>Walk-forward: <b>REFUSED</b> — "
+                   f"{_esc(reason)}</p>")
+    else:
+        ic, pv = p.get("pooled_ic"), p.get("p_value")
+        ic_read = "no demonstrated edge yet"
+        if _f(ic) is not None and _f(pv) is not None:
+            ic_read = ("statistically supported" if abs(_f(ic)) >= 0.05 and _f(pv) < 0.05
+                       else "not statistically distinguishable from zero")
+        wf_line = (f"<p class='muted'>Walk-forward pooled IC "
+                   f"<b>{_num(ic, '{:+.2f}')}</b> (p={_num(pv)}, "
+                   f"n_oos={_esc(p.get('n_oos'))}) — {ic_read} · "
+                   f"as of {_esc(p.get('as_of') or '—')}</p>")
     return (f"<p>Gate: <span class='pill'>{_esc(p.get('gate_decision', '?'))}</span>"
             f" · cohort <b>{n}/{target}</b></p>{CH.meter(n, target)}"
-            f"<p class='muted'>Walk-forward pooled IC "
-            f"<b>{_num(ic, '{:+.2f}')}</b> (p={_num(pv)}, "
-            f"n_oos={_esc(p.get('n_oos'))}) — {ic_read} · "
-            f"as of {_esc(p.get('as_of') or '—')}</p>"
+            f"{wf_line}"
             f"<p><b>Real money is OFF</b> until the gate fires.</p>")
 
 

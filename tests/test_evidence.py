@@ -183,6 +183,31 @@ class TestBannerSurfacesRefusal(unittest.TestCase):
                 self.assertLessEqual(len(ln), 100,
                                       msg=f"line too long ({len(ln)}): {ln!r}")
 
+    def test_a_refused_walk_forward_reports_zero_n_oos(self):
+        # Important-2 regression: n_oos used to be set unconditionally from
+        # n_total_trades, so a refusal (which scores ZERO trades out of
+        # sample) reported the strategy's whole book size as if it were the
+        # walk-forward's own trade count — lending a refusal false weight
+        # in any consumer that renders n_oos without also checking
+        # wf_refused (see src/morning/render.py, src/tearsheet/render.py).
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "walk_forward_short_put_2026-08-29.json", {
+                "generated_at": "2026-08-29T10:00:00",
+                "strategy": "Short Put", "n_total_trades": 108,
+                "n_folds": 0, "n_folds_attempted": 0, "n_folds_dropped": 0,
+                "refused": True,
+                "refused_reason": (
+                    "no fold could be formed: 108 trades < "
+                    "train_size+test_size=110"
+                ),
+                "pooled_ic": None, "pooled_pvalue": None,
+                "fold_ic_mean": None, "folds_ic_positive": None,
+            })
+            ev = load_model_evidence(reports_dir=d)
+            self.assertTrue(ev["wf_refused"])
+            self.assertEqual(ev["n_oos"], 0,
+                             "a refusal scored nothing out of sample")
+
     def test_a_normal_walk_forward_is_not_marked_refused(self):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, "walk_forward_long_call_2026-08-29.json", {

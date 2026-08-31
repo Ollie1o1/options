@@ -86,7 +86,11 @@ def load_model_evidence(reports_dir: str = "reports") -> Dict[str, Any]:
                 ev["pooled_ic"] = float(wf["pooled_ic"])
             if wf.get("pooled_pvalue") is not None:
                 ev["p_value"] = float(wf["pooled_pvalue"])
-            if wf.get("n_total_trades") is not None:
+            # A refusal scores ZERO trades out of sample — n_total_trades is
+            # the strategy's whole book, not what walk-forward measured, and
+            # reporting it here on a refusal lends a trade count to a run
+            # that produced no statistic at all.
+            if wf.get("n_total_trades") is not None and not wf.get("refused"):
                 ev["n_oos"] = int(wf["n_total_trades"])
             if wf.get("generated_at"):
                 ev["as_of"] = str(wf["generated_at"])
@@ -276,7 +280,7 @@ def _fold_interval_segment(ev: Dict[str, Any]) -> str:
 
 # A refused_reason from walk_forward can run well past 100 chars on its own
 # (e.g. "only 0 of 15 folds kept 54+ training trades after purging (minimum
-# 3); widen train_size or wait for more closed trades" is 117). The segment
+# 3); widen train_size or wait for more closed trades" is 118). The segment
 # gets its own banner line (see format_evidence_banner) so it never has to
 # share the 100-char budget with the age/cohort segments, but even alone a
 # raw reason can exceed it, so it is still summarised here; the full text

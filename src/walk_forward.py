@@ -18,8 +18,9 @@ from src.backtest_optimizer import (
 )
 from src.ledger_filters import exclude_ruled_duplicates
 
-# Weights fitted per fold. Below twice this many observations the fit is
-# underdetermined and its OOS IC is noise with a decimal point.
+# Weights fitted per fold. Below twice the number of fitted weights
+# (2 * len(WEIGHT_KEYS)) the fit is underdetermined and its OOS IC is noise
+# with a decimal point.
 MIN_TRAIN_AFTER_PURGE = 2 * len(WEIGHT_KEYS)
 
 # Fewer surviving folds than this and the run reports nothing rather than an
@@ -233,19 +234,32 @@ def _write_artifacts(summary: dict, output_dir: Optional[str]) -> None:
 
 def _refused_summary(db_path: str, strategy: str, n_total: int,
                      train_size: int, test_size: int, step: int,
-                     n_attempted: int, n_dropped: int, reason: str,
+                     n_attempted: int, n_dropped: int, n_measured: int,
+                     reason: str,
                      output_dir: Optional[str] = None) -> dict:
-    """A run that could not measure anything.
+    """A run that measured `n_measured` folds (possibly zero) but refused to
+    report because that is fewer than MIN_FOLDS.
 
-    Every statistic is None, never 0.0: a zero here would render in the
-    evidence banner as a measured zero IC rather than an absence.
+    `n_measured` is the same count that would have become `n_folds` on a
+    successful run: folds that cleared MIN_TRAIN_AFTER_PURGE and were
+    actually fit and scored. Reporting it here — rather than hardcoding 0 —
+    is what lets `n_folds + n_folds_dropped == n_folds_attempted` hold on
+    EVERY run, refused or not: every attempted fold is either dropped by the
+    purge floor (`n_folds_dropped`) or measured (`n_folds`), with nothing
+    lost to the accounting in between.
+
+    Every OTHER statistic is None, never 0.0: a zero here would render in the
+    evidence banner as a measured zero IC rather than an absence. Only the
+    counts (n_folds, n_folds_attempted, n_folds_dropped, n_trials) describe
+    what was actually done; the refusal is about whether there was ENOUGH of
+    it to report, not whether anything happened at all.
     """
     summary = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "db_path": db_path,
         "strategy": strategy,
         "n_total_trades": n_total,
-        "n_folds": 0,
+        "n_folds": n_measured,
         "n_folds_attempted": n_attempted,
         "n_folds_dropped": n_dropped,
         "train_size": train_size,
@@ -258,7 +272,7 @@ def _refused_summary(db_path: str, strategy: str, n_total: int,
         "fold_ic_mean": None,
         "fold_ic_ci_95": None,
         "folds_ic_positive": None,
-        "n_trials": 0,
+        "n_trials": TRIALS_PER_FOLD * n_measured,
         "search_bar_sharpe": None,
         "folds": [],
     }
@@ -328,11 +342,21 @@ def run_walk_forward(
             # the cause would be wrong. Widening train_size only raises the
             # train+test threshold this run already failed to clear, so the
             # remedy is the opposite of the other branch's advice.
+            # MIN_TRAIN_AFTER_PURGE bounds training rows AFTER purging, not
+            # train_size itself — setting train_size to that floor guarantees
+            # every fold with any overlap drops. The advice also has to clear
+            # MIN_FOLDS, not just form one fold: the smallest n that yields
+            # MIN_FOLDS folds at these settings is computed below rather than
+            # naming a single-fold threshold that then silently refuses again.
+            n_for_min_folds = train_size + test_size + (MIN_FOLDS - 1) * step
             reason = (
                 f"no fold could be formed: {n_total} trades < "
-                f"train_size+test_size={train_size + test_size}; reduce "
-                f"train_size (floor {MIN_TRAIN_AFTER_PURGE}) or wait for "
-                f"more closed trades")
+                f"train_size+test_size={train_size + test_size}; "
+                f"{MIN_TRAIN_AFTER_PURGE} is a post-purge training-row floor, "
+                f"not a safe train_size to set directly — reaching "
+                f"{MIN_FOLDS} folds at these settings needs >= "
+                f"{n_for_min_folds} closed trades; shrink train_size/"
+                f"test_size/step together or wait for more closed trades")
         else:
             reason = (f"only {len(per_fold)} of {n_attempted} folds kept "
                       f"{MIN_TRAIN_AFTER_PURGE}+ training trades after purging "
@@ -340,7 +364,7 @@ def run_walk_forward(
                       f"closed trades")
         return _refused_summary(
             db_path, strategy, n_total, train_size, test_size, step,
-            n_attempted, n_dropped,
+            n_attempted, n_dropped, len(per_fold),
             reason=reason,
             output_dir=output_dir)
 
@@ -391,6 +415,12 @@ def run_walk_forward(
 
 
 def _format_markdown(s: dict) -> str:
+    # "kept" means kept AND reported — true only on a successful run. A
+    # refusal still measures s['n_folds'] folds (they cleared the purge
+    # floor and were fit and scored), but MIN_FOLDS was not met, so nothing
+    # from them is reported; "measured" says that without implying the
+    # numbers below were used for anything.
+    folds_verb = "measured" if s.get("refused") else "kept"
     header = [
         f"# Walk-Forward OOS IC — {s['strategy']}",
         "",
@@ -398,7 +428,7 @@ def _format_markdown(s: dict) -> str:
         f"- DB: `{s['db_path']}`",
         f"- Total trades: {s['n_total_trades']}",
         (
-            f"- Folds: {s['n_folds']} kept of {s['n_folds_attempted']} "
+            f"- Folds: {s['n_folds']} {folds_verb} of {s['n_folds_attempted']} "
             f"attempted ({s['n_folds_dropped']} dropped below the training "
             f"floor)  (train={s['train_size']}, test={s['test_size']}, "
             f"step={s['step']})"
@@ -424,13 +454,13 @@ def _format_markdown(s: dict) -> str:
         f"- Folds with IC >= 0: {s['folds_ic_positive']} / {s['n_folds']}",
         "",
         "## Per-fold",
-        "| Fold | n_train | n_test | IC (Pearson) | p | IC (Spearman) | p |",
-        "|------|---------|--------|--------------|---|---------------|---|",
+        "| Fold | n_train | n_train_purged | n_test | IC (Pearson) | p | IC (Spearman) | p |",
+        "|------|---------|----------------|--------|--------------|---|---------------|---|",
     ]
     for f in s["folds"]:
         lines.append(
-            f"| {f['fold']} | {f['n_train']} | {f['n_test']} | "
-            f"{f['ic_pearson']:+.3f} | {f['p_pearson']:.3f} | "
+            f"| {f['fold']} | {f['n_train']} | {f['n_train_purged']} | "
+            f"{f['n_test']} | {f['ic_pearson']:+.3f} | {f['p_pearson']:.3f} | "
             f"{f['ic_spearman']:+.3f} | {f['p_spearman']:.3f} |"
         )
     return "\n".join(lines) + "\n"
