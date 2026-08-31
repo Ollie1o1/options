@@ -58,6 +58,22 @@ def _is_missing(v: Optional[float]) -> bool:
     return v is None or v != v
 
 
+def _present_or_zero(v: Optional[float]) -> float:
+    """`v` as a float, or 0.0 when it is not recorded.
+
+    Does the `_is_missing` check inline rather than calling it, because a
+    helper returning plain `bool` cannot narrow `Optional[float]` to `float`
+    for a type checker — the caller was left passing `float | None` into
+    `float()`. Writing the None test in the same expression that consumes the
+    value lets the narrowing happen naturally.
+
+    A TypeGuard on `_is_missing` would not fix this: the narrowing is needed
+    in the NEGATIVE branch, and `_is_missing` is also True for NaN, which is
+    itself a float — so its True branch carries no type information.
+    """
+    return 0.0 if v is None or v != v else float(v)
+
+
 def cell_key(abs_delta: Optional[float], dte: Optional[float],
              open_interest: Optional[float]) -> Tuple[int, int, int]:
     """Grid coordinates for a contract.
@@ -68,11 +84,9 @@ def cell_key(abs_delta: Optional[float], dte: Optional[float],
     the direction that flatters a book.
     """
     return (
-        bucket_index(abs(float(abs_delta)) if not _is_missing(abs_delta) else 0.0,
-                     DELTA_EDGES),
-        bucket_index(float(dte) if not _is_missing(dte) else 0.0, DTE_EDGES),
-        bucket_index(float(open_interest) if not _is_missing(open_interest) else 0.0,
-                     OI_EDGES),
+        bucket_index(abs(_present_or_zero(abs_delta)), DELTA_EDGES),
+        bucket_index(_present_or_zero(dte), DTE_EDGES),
+        bucket_index(_present_or_zero(open_interest), OI_EDGES),
     )
 
 
