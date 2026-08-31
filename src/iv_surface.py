@@ -79,7 +79,10 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
     or None if fitting fails, and fit_quality is in [0, 1].
     """
     market_var = market_iv ** 2 * T
-    mean_var = np.mean(market_var)
+    # float(), not the bare numpy scalar: `budget` below divides a float by
+    # this, and an untyped reduction makes that expression Any/Any — which is
+    # how the loose typing here went unnoticed until `sse` was made explicit.
+    mean_var = float(np.mean(market_var))
 
     x0 = np.array([mean_var, 0.1, -0.3, 0.3, 0.0])
 
@@ -102,13 +105,32 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
         res = minimize(penalised, x0, method="Nelder-Mead",
                        options={"maxiter": 5000, "xatol": 1e-8,
                                 "fatol": 1e-10, "adaptive": True})
-        # Reject the fit if either the optimizer didn't converge OR residual is too high.
-        # (Was `and` — a converged-but-garbage fit slipped through, polluting the
-        # iv_surface_residual signal that drives the iv_mispricing scoring component.)
-        if (not res.success) or res.fun > mean_var * len(k):
+        if not res.success:
             return None, 0.0
+
+        # Both the accept/reject decision and the reported quality are measured
+        # on the parameters this function RETURNS, not on `res.x`.
+        #
+        # They are different points. `_enforce_constraints` projects `res.x`
+        # onto the feasible set, and it moves it in ~60% of fitted slices.
+        # `res.fun` is also the PENALISED objective, not the fit error. Judging
+        # on `res.fun` while returning the projected params let a degenerate
+        # corner through: on a realistic skew the search escaped to b -> 0,
+        # rho -> -1, sigma -> 5.4e6, which flattens w(k) to a constant. That
+        # was reported as fit_quality 0.9905 while the returned parameters
+        # scored 0.0000 against the same data — and it flowed on as a confident
+        # `iv_surface_residual` computed from a surface that described nothing.
         params = _enforce_constraints(res.x)
-        fit_quality = max(0.0, 1.0 - res.fun / max(mean_var * len(k), 1e-10))
+        budget = max(mean_var * len(k), 1e-10)
+        sse = float(_svi_objective(params, k, market_var))
+
+        # Reject the fit if the returned parameters miss the data by more than
+        # the whole variance budget. (The convergence test was once `and`, which
+        # let a converged-but-garbage fit slip through; it is now a separate
+        # early return above.)
+        if not np.isfinite(sse) or sse > budget:
+            return None, 0.0
+        fit_quality = max(0.0, 1.0 - sse / budget)
         return params, fit_quality
     except Exception:
         return None, 0.0
