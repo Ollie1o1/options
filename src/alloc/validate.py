@@ -80,6 +80,35 @@ def sharpe(returns: Union[Sequence[float], Any]) -> float:
     return float(r.mean() / sd)
 
 
+def effective_n(starts: Sequence[Any], ends: Sequence[Any]) -> int:
+    """How many mutually non-overlapping holding intervals the sample carries.
+
+    This is the sample size a deflated Sharpe is entitled to use. The row count
+    is not: trades whose holding periods overlap are scored on the same price
+    path, so they are not independent observations. On this ledger the two
+    differ by 3-5x, which is the difference between DSR 0.997 and DSR 0.474 on
+    the same returns.
+
+    Computed by the standard greedy interval selection: sort by end, take an
+    interval whenever it starts strictly after the last one taken ended.
+    Intervals that merely touch are treated as overlapping — a trade closing on
+    the day another opens shared that day's move.
+
+    Returns 0 for empty input. `starts` and `ends` are zipped, so a length
+    mismatch silently uses the shorter, matching `zip` semantics.
+    """
+    pairs = sorted(zip(starts, ends), key=lambda p: (p[1], p[0]))
+    if not pairs:
+        return 0
+    count = 0
+    last_end: Optional[Any] = None
+    for start, end in pairs:
+        if last_end is None or start > last_end:
+            count += 1
+            last_end = end
+    return count
+
+
 def expected_max_sharpe(n_trials: int, trial_variance: float = 1.0) -> float:
     """Highest Sharpe a search of `n_trials` zero-skill strategies would produce.
 

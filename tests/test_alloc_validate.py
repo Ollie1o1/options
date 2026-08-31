@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 
-from src.alloc.validate import (cpcv_splits, deflated_sharpe,
+from src.alloc.validate import (cpcv_splits, deflated_sharpe, effective_n,
                                 expected_max_sharpe, pbo_from_pairs,
                                 purge_embargo, sharpe)
 
@@ -117,6 +117,59 @@ class DeflatedSharpeTest(unittest.TestCase):
     def test_default_trial_variance_branch(self):
         self.assertIsInstance(
             deflated_sharpe(self._returns(0.002), n_trials=10), float)
+
+
+class EffectiveNTest(unittest.TestCase):
+    """How many INDEPENDENT observations a set of overlapping trades carries.
+
+    Row count is not it. Trades whose holding periods overlap are scored on the
+    same price path, and counting them as independent is what inflates a
+    deflated Sharpe into a promotion.
+    """
+
+    def test_disjoint_intervals_each_count(self):
+        n = effective_n(["2024-01-01", "2024-02-01", "2024-03-01"],
+                        ["2024-01-05", "2024-02-05", "2024-03-05"])
+        self.assertEqual(n, 3)
+
+    def test_identical_intervals_count_once(self):
+        n = effective_n(["2024-01-01"] * 10, ["2024-01-05"] * 10)
+        self.assertEqual(n, 1)
+
+    def test_same_entry_day_collapses(self):
+        """Ten trades opened the same morning share that day's move."""
+        n = effective_n(["2024-01-01"] * 10, ["2024-01-03"] * 10)
+        self.assertEqual(n, 1)
+
+    def test_overlapping_holds_collapse_even_on_distinct_entry_days(self):
+        """The case entry-day clustering misses entirely."""
+        starts = ["2024-01-01", "2024-01-02", "2024-01-03"]
+        ends = ["2024-01-30", "2024-01-31", "2024-02-01"]
+        self.assertEqual(effective_n(starts, ends), 1)
+
+    def test_touching_intervals_are_treated_as_overlapping(self):
+        """A trade closing the day another opens shared that day's path."""
+        self.assertEqual(
+            effective_n(["2024-01-01", "2024-01-05"],
+                        ["2024-01-05", "2024-01-09"]), 1)
+
+    def test_integer_days_work_as_well_as_dates(self):
+        self.assertEqual(effective_n([0, 40], [30, 70]), 2)
+
+    def test_empty_is_zero(self):
+        self.assertEqual(effective_n([], []), 0)
+
+    def test_mismatched_lengths_use_the_shorter(self):
+        self.assertEqual(effective_n([0, 40, 80], [30, 70]), 2)
+
+    def test_never_exceeds_distinct_starts_or_row_count(self):
+        """The invariant the whole change rests on."""
+        starts = ["2024-01-01", "2024-01-01", "2024-01-02", "2024-03-01"]
+        ends = ["2024-01-10", "2024-01-10", "2024-01-11", "2024-03-10"]
+        n = effective_n(starts, ends)
+        self.assertLessEqual(n, len(set(starts)))
+        self.assertLessEqual(len(set(starts)), len(starts))
+        self.assertEqual(n, 2)
 
 
 class SharpeTest(unittest.TestCase):
