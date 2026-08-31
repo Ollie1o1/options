@@ -54,6 +54,60 @@ class Density:
         mask = (fn(self.K) > thr).astype(float)
         return float(np.clip(np.trapezoid(mask * self.pdf, self.K), 0.0, 1.0))
 
+    def moments(self, basis: str) -> dict:
+        """Risk-neutral mean, variance, skewness and kurtosis.
+
+        `basis` is REQUIRED and has no default, because the two conventions
+        give different numbers from the same density and either could
+        reasonably be called "the risk-neutral skew":
+
+          "price"  — moments of S_T itself. A flat 30% smile at T=0.25 gives
+                     skewness +0.456, positive purely from the lognormal shape.
+          "logret" — moments of ln(S_T / S_0). The same flat smile gives 0.0,
+                     so a non-zero reading is the volatility smile talking
+                     rather than the baseline.
+
+        Quoting one as the other misstates both the sign and the magnitude, so
+        the caller names it. Kurtosis is RAW, not excess: a Gaussian reads 3.0.
+
+        Skewness and kurtosis are undefined for a degenerate density; variance
+        at or below zero yields NaN for both rather than a divide-by-zero.
+        """
+        if basis not in ("price", "logret"):
+            raise ValueError(
+                f"basis must be 'price' or 'logret', got {basis!r} — "
+                "the two give different numbers and cannot be guessed")
+
+        K, pdf = self.K, self.pdf
+        if basis == "logret":
+            # ln(K) needs K > 0, and the grid starts at 0.40*S so this only
+            # trims a numerically empty left edge.
+            keep = K > 1e-12
+            K, pdf = K[keep], pdf[keep]
+            x = np.log(K)
+        else:
+            x = K
+
+        area = float(np.trapezoid(pdf, K))
+        if not np.isfinite(area) or area <= 0:
+            return {"mean": float("nan"), "variance": float("nan"),
+                    "skewness": float("nan"), "kurtosis": float("nan")}
+        pdf = pdf / area
+
+        mean = float(np.trapezoid(x * pdf, K))
+        var = float(np.trapezoid((x - mean) ** 2 * pdf, K))
+        if not np.isfinite(var) or var <= 0:
+            return {"mean": mean, "variance": var,
+                    "skewness": float("nan"), "kurtosis": float("nan")}
+        m3 = float(np.trapezoid((x - mean) ** 3 * pdf, K))
+        m4 = float(np.trapezoid((x - mean) ** 4 * pdf, K))
+        return {
+            "mean": mean,
+            "variance": var,
+            "skewness": m3 / var ** 1.5,
+            "kurtosis": m4 / var ** 2,
+        }
+
 
 def _normalize(K: np.ndarray, raw: np.ndarray) -> np.ndarray:
     raw = np.where(np.isfinite(raw), raw, 0.0)

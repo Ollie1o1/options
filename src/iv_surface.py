@@ -9,7 +9,7 @@ Positive = expensive vs fair surface, negative = cheap.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -58,13 +58,33 @@ def _svi_objective(params: np.ndarray, k: np.ndarray,
     return np.sum((market_var - fitted) ** 2)
 
 
+# Asymptotic-slope ceiling on total variance. w(k)/|k| -> b(1 +/- rho) as
+# k -> +/-inf, so b(1+|rho|) bounds how steeply the wings may rise. Past this
+# the wings are steeper than any arbitrage-free surface permits and the implied
+# density goes negative out there.
+#
+# NECESSARY, NOT SUFFICIENT. This bounds the WINGS. It does not certify the
+# whole slice free of butterfly arbitrage — that requires Gatheral's g(k) >= 0
+# across the strip, which is not computed here. Naming it "no butterfly
+# arbitrage" would claim more than it checks.
+MAX_WING_SLOPE = 4.0
+
+
 def _enforce_constraints(params: np.ndarray) -> np.ndarray:
     """Project parameters onto the feasible set for no-arbitrage."""
     a, b, rho, sigma, m = params
     b = max(b, 1e-6)
     rho = np.clip(rho, -0.999, 0.999)
     sigma = max(sigma, 0.001)
-    # No-arbitrage: a + b*sigma*sqrt(1 - rho^2) >= 0
+    # Wing slope: b(1+|rho|) < MAX_WING_SLOPE. Capping b rather than rho keeps
+    # the smile's asymmetry, which carries the skew signal, and gives up only
+    # the wing steepness that was unattainable anyway. Strictly below the
+    # ceiling, not at it, so the returned params satisfy a strict inequality.
+    wing = b * (1.0 + abs(rho))
+    if wing >= MAX_WING_SLOPE:
+        b = (MAX_WING_SLOPE / (1.0 + abs(rho))) * (1.0 - 1e-9)
+    # No-arbitrage: a + b*sigma*sqrt(1 - rho^2) >= 0. Computed AFTER the wing
+    # cap, since that changes b and therefore the floor.
     floor = -b * sigma * np.sqrt(1.0 - rho ** 2)
     a = max(a, floor)
     return np.array([a, b, rho, sigma, m])
@@ -99,6 +119,11 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
         arb_floor = -b * max(sigma, 0.001) * np.sqrt(1.0 - min(rho ** 2, 0.998))
         if a < arb_floor:
             penalty += 1e6 * (arb_floor - a) ** 2
+        # Steer the search away from arbitrageable wings, so the projection in
+        # `_enforce_constraints` is a rounding rather than a rescue.
+        wing = b * (1.0 + abs(rho))
+        if wing >= MAX_WING_SLOPE:
+            penalty += 1e6 * (wing - MAX_WING_SLOPE) ** 2
         return _svi_objective(params, k, market_var) + penalty
 
     try:
@@ -255,4 +280,64 @@ def fit_svi_surface(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-__all__ = ["fit_svi_surface", "fit_svi_slice", "SVIParams"]
+def calendar_arbitrage(slices: Sequence[SVIParams],
+                       k_grid: Optional[np.ndarray] = None,
+                       tol: float = 1e-12) -> dict:
+    """Check that total variance never decreases with maturity.
+
+    w(k, T2) >= w(k, T1) for every T2 > T1 and every k. A dip means a calendar
+    spread is priced below zero: the longer-dated option would be cheaper in
+    total variance than the shorter one covering the same strike.
+
+    Slices are sorted by T here, so an unordered input is not mistaken for a
+    violation — the caller's list order carries no meaning.
+
+    Returns a dict with `arbitrage_free`, `n_violations`, `worst_drop` (the
+    largest w decrease found, 0.0 when clean) and `violations`, each naming the
+    maturity pair and log-moneyness where the surface dipped.
+
+    This is a REPORT, not a filter. It does not modify or reject any slice:
+    calendar arbitrage is a property of a surface, while fitting happens one
+    expiry at a time, so the only honest place to act on it is a caller that
+    holds every slice at once.
+    """
+    ordered = sorted((s for s in slices if s.T > 0), key=lambda s: s.T)
+    if len(ordered) < 2:
+        return {"arbitrage_free": True, "n_violations": 0,
+                "worst_drop": 0.0, "violations": []}
+
+    if k_grid is None:
+        k_grid = np.linspace(-1.0, 1.0, 81)
+    k_grid = np.asarray(k_grid, dtype=float)
+
+    violations = []
+    worst = 0.0
+    for lo, hi in zip(ordered, ordered[1:]):
+        w_lo = _svi_total_variance(k_grid, lo.a, lo.b, lo.rho, lo.m, lo.sigma)
+        w_hi = _svi_total_variance(k_grid, hi.a, hi.b, hi.rho, hi.m, hi.sigma)
+        drop = w_lo - w_hi                      # positive => w fell with T
+        bad = drop > tol
+        if not bad.any():
+            continue
+        j = int(np.argmax(drop))
+        worst = max(worst, float(drop[j]))
+        violations.append({
+            "T_lo": float(lo.T),
+            "T_hi": float(hi.T),
+            "k": float(k_grid[j]),
+            "w_lo": float(w_lo[j]),
+            "w_hi": float(w_hi[j]),
+            "drop": float(drop[j]),
+            "n_points": int(bad.sum()),
+        })
+
+    return {
+        "arbitrage_free": not violations,
+        "n_violations": len(violations),
+        "worst_drop": worst,
+        "violations": violations,
+    }
+
+
+__all__ = ["fit_svi_surface", "fit_svi_slice", "SVIParams",
+           "calendar_arbitrage", "MAX_WING_SLOPE"]
