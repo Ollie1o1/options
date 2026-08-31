@@ -1,7 +1,9 @@
 # Cluster-Aware Deflated Sharpe and an Honest Promotion Gate
 
 Date: 2026-08-31
-Status: approved, not yet implemented
+Status: IMPLEMENTED and merged 2026-08-31 (PR #80). See "Measured outcome"
+below for what actually changed on real data — including one claim in this
+document that the implementation proved wrong.
 
 ## Why this exists
 
