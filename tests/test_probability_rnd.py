@@ -25,6 +25,77 @@ def lognormal_prob_above(S, x, sigma, T, r):
     return float(norm.cdf(d2))
 
 
+class RiskNeutralMomentsTest(unittest.TestCase):
+    """Q-skew and Q-kurtosis, validated against a lognormal's closed form.
+
+    The basis is a REQUIRED argument. Skewness of the price distribution and
+    skewness of log-returns are different numbers from the same density — for
+    a flat smile the first is +0.456 and the second is 0.0 — and a default
+    would let one be quoted as the other.
+    """
+
+    def setUp(self):
+        self.S, self.T, self.r, self.sig = 100.0, 0.25, 0.04, 0.30
+        strikes = np.linspace(40, 260, 111)
+        ivs = np.full_like(strikes, self.sig)
+        self.d = rnd_from_smile(strikes, ivs, self.T, self.S, self.r)
+
+    def _lognormal_price_moments(self):
+        s2 = self.sig ** 2 * self.T
+        e = np.exp(s2)
+        skew = (e + 2.0) * np.sqrt(e - 1.0)
+        kurt = np.exp(4 * s2) + 2 * np.exp(3 * s2) + 3 * np.exp(2 * s2) - 3.0
+        return float(skew), float(kurt)
+
+    def test_the_basis_must_be_named(self):
+        with self.assertRaises(TypeError):
+            self.d.moments()          # type: ignore[call-arg]
+
+    def test_an_unknown_basis_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.d.moments("returns")
+
+    def test_price_skew_and_kurtosis_match_the_lognormal(self):
+        exp_skew, exp_kurt = self._lognormal_price_moments()
+        got = self.d.moments("price")
+        self.assertAlmostEqual(got["skewness"], exp_skew, delta=0.05)
+        self.assertAlmostEqual(got["kurtosis"], exp_kurt, delta=0.20)
+
+    def test_log_return_moments_are_gaussian_for_a_flat_smile(self):
+        got = self.d.moments("logret")
+        self.assertAlmostEqual(got["skewness"], 0.0, delta=0.05)
+        self.assertAlmostEqual(got["kurtosis"], 3.0, delta=0.20)
+
+    def test_the_two_bases_genuinely_differ(self):
+        """If these ever coincide the basis argument is pointless."""
+        self.assertGreater(
+            abs(self.d.moments("price")["skewness"]
+                - self.d.moments("logret")["skewness"]), 0.2)
+
+    def test_variance_is_consistent_with_the_mean(self):
+        got = self.d.moments("price")
+        self.assertGreater(got["variance"], 0.0)
+        self.assertAlmostEqual(got["mean"], self.d.mean(), delta=1e-6)
+        fwd = self.S * np.exp(self.r * self.T)
+        self.assertAlmostEqual(got["mean"], fwd, delta=fwd * 0.02)
+
+    def test_put_skew_makes_log_return_skew_negative(self):
+        """The sign must track the smile, not just the lognormal baseline."""
+        strikes = np.linspace(50, 180, 51)
+        k = np.log(strikes / self.S)
+        ivs = _svi_iv(k, self.T, 0.02, 0.10, -0.6, 0.0, 0.20)
+        d = rnd_from_smile(strikes, ivs, self.T, self.S, self.r)
+        self.assertLess(d.moments("logret")["skewness"], -0.2)
+
+    def test_a_fat_tailed_smile_lifts_kurtosis_above_the_flat_case(self):
+        strikes = np.linspace(50, 180, 51)
+        k = np.log(strikes / self.S)
+        ivs = _svi_iv(k, self.T, 0.02, 0.30, 0.0, 0.0, 0.10)   # strong curvature
+        d = rnd_from_smile(strikes, ivs, self.T, self.S, self.r)
+        self.assertGreater(d.moments("logret")["kurtosis"],
+                           self.d.moments("logret")["kurtosis"])
+
+
 class TestRND(unittest.TestCase):
     def setUp(self):
         self.S, self.T, self.r, self.sig = 100.0, 0.25, 0.04, 0.30

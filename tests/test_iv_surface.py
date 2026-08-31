@@ -10,7 +10,8 @@ import unittest
 
 import numpy as np
 
-from src.iv_surface import _fit_single_expiry, _svi_objective
+from src.iv_surface import (SVIParams, _fit_single_expiry, _svi_objective,
+                            calendar_arbitrage)
 
 # A realistic skew (IV 0.15 -> 0.49 across k in [-0.78, 0.52]) on which the
 # Nelder-Mead search escapes to a degenerate corner: b -> 0, rho -> -1,
@@ -161,6 +162,100 @@ class ConvergenceFlagIsNotFitQualityTest(unittest.TestCase):
                 quality, _quality_of(params, k, iv ** 2 * _DEGENERATE_T),
                 places=6)
             self.assertGreater(quality, 0.0)
+
+
+class ButterflyWingBoundTest(unittest.TestCase):
+    """`b(1+|rho|) < 4` bounds the asymptotic slope of total variance.
+
+    w(k)/|k| -> b(1 +/- rho) as k -> +/-inf, so an unbounded b drives the wings
+    steeper than any arbitrage-free surface allows. Measured before enforcing:
+    6% of realistic equity smiles violated it, 42% across a wider sweep, with a
+    worst case of 419 — so this is a live constraint, not a decorative one.
+    """
+
+    def _fits(self, slope_r, curv_r, base_r, n_trials=200, seed=11):
+        rng = np.random.default_rng(seed)
+        for _ in range(n_trials):
+            m = int(rng.integers(8, 25))
+            k = np.sort(rng.uniform(-0.5, 0.5, m))
+            T = float(rng.choice([0.02, 0.05, 0.1, 0.25, 0.5, 1.0]))
+            iv = np.clip(np.abs(rng.uniform(*base_r)
+                                + rng.uniform(*slope_r) * k
+                                + rng.uniform(*curv_r) * k ** 2)
+                         + rng.normal(0, 0.015, m), 1e-3, None)
+            params, quality = _fit_single_expiry(k, iv, T)
+            if params is not None:
+                yield params, quality, k, iv, T
+
+    def test_no_accepted_fit_violates_the_wing_bound(self):
+        checked = 0
+        for params, _q, _k, _iv, _T in self._fits((-0.6, -0.1), (0.1, 1.0),
+                                                  (0.12, 0.60)):
+            checked += 1
+            _a, b, rho, _sigma, _m = params
+            self.assertLess(
+                b * (1 + abs(rho)), 4.0,
+                "an accepted fit has arbitrageable wings")
+        self.assertGreater(checked, 50, "too few fits to be a test")
+
+    def test_enforcing_the_bound_does_not_gut_realistic_fits(self):
+        """The constraint must bind on pathology, not on ordinary smiles."""
+        fits = list(self._fits((-0.30, -0.15), (0.3, 0.6), (0.18, 0.35)))
+        self.assertGreater(len(fits), 150,
+                           f"only {len(fits)}/200 realistic smiles survived the "
+                           f"wing bound — it is rejecting ordinary data")
+
+    def test_quality_still_describes_the_returned_params(self):
+        """The new projection must not reintroduce the #83 defect."""
+        for params, quality, k, iv, T in self._fits((-0.6, -0.1), (0.1, 1.0),
+                                                    (0.12, 0.60), n_trials=80):
+            self.assertAlmostEqual(quality, _quality_of(params, k, iv ** 2 * T),
+                                   places=6)
+
+
+class CalendarArbitrageTest(unittest.TestCase):
+    """Total variance must not decrease with maturity at any log-moneyness.
+
+    w(k, T2) >= w(k, T1) for T2 > T1. A dip means a calendar spread prices
+    below zero.
+    """
+
+    def _slice(self, T, a, b=0.1, rho=-0.3, sigma=0.3, m=0.0):
+        return SVIParams(a=a, b=b, rho=rho, sigma=sigma, m=m, T=T,
+                         fit_quality=1.0)
+
+    def test_a_rising_surface_is_arbitrage_free(self):
+        rep = calendar_arbitrage([self._slice(0.25, 0.02),
+                                  self._slice(0.50, 0.04),
+                                  self._slice(1.00, 0.08)])
+        self.assertTrue(rep["arbitrage_free"])
+        self.assertEqual(rep["n_violations"], 0)
+
+    def test_a_dipping_surface_is_caught(self):
+        rep = calendar_arbitrage([self._slice(0.25, 0.08),
+                                  self._slice(0.50, 0.02)])
+        self.assertFalse(rep["arbitrage_free"])
+        self.assertGreater(rep["n_violations"], 0)
+        self.assertGreater(rep["worst_drop"], 0.0)
+
+    def test_slices_are_ordered_by_maturity_not_by_input_order(self):
+        """An unsorted input must not read as a violation."""
+        rep = calendar_arbitrage([self._slice(1.00, 0.08),
+                                  self._slice(0.25, 0.02),
+                                  self._slice(0.50, 0.04)])
+        self.assertTrue(rep["arbitrage_free"])
+
+    def test_fewer_than_two_slices_cannot_violate(self):
+        self.assertTrue(calendar_arbitrage([])["arbitrage_free"])
+        self.assertTrue(
+            calendar_arbitrage([self._slice(0.25, 0.02)])["arbitrage_free"])
+        self.assertEqual(calendar_arbitrage([])["n_violations"], 0)
+
+    def test_the_report_names_which_pair_dipped(self):
+        rep = calendar_arbitrage([self._slice(0.25, 0.08),
+                                  self._slice(0.50, 0.02)])
+        self.assertEqual(rep["violations"][0]["T_lo"], 0.25)
+        self.assertEqual(rep["violations"][0]["T_hi"], 0.50)
 
 
 class GoodFitsStillFitTest(unittest.TestCase):
