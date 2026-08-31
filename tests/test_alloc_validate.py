@@ -1,4 +1,4 @@
-"""Cross-validation that does not leak, and statistics that account for search.
+"""Statistics that account for the size of the search that produced them.
 
 Run:
     PYTHONPATH=$PWD ~/.venvs/options/bin/python -m unittest \
@@ -6,65 +6,12 @@ Run:
 """
 from __future__ import annotations
 
-import math
 import unittest
 
 import numpy as np
 
-from src.alloc.validate import (cpcv_splits, deflated_sharpe, effective_n,
-                                expected_max_sharpe, pbo_from_pairs,
-                                purge_embargo, sharpe)
-
-
-class CpcvSplitTest(unittest.TestCase):
-    def test_number_of_paths_is_n_choose_k(self):
-        self.assertEqual(len(cpcv_splits(80, n_blocks=8, k=2)), math.comb(8, 2))
-
-    def test_train_and_test_never_overlap(self):
-        for train, test in cpcv_splits(80, n_blocks=8, k=2):
-            self.assertEqual(set(train) & set(test), set())
-
-    def test_every_index_is_used(self):
-        seen = set()
-        for train, test in cpcv_splits(80, n_blocks=8, k=2):
-            seen |= set(train) | set(test)
-        self.assertEqual(seen, set(range(80)))
-
-    def test_default_arguments_work(self):
-        self.assertTrue(cpcv_splits(80))
-
-    def test_degenerate_inputs_return_nothing(self):
-        self.assertEqual(cpcv_splits(0), [])
-        self.assertEqual(cpcv_splits(80, n_blocks=2, k=2), [])
-
-
-class PurgeEmbargoTest(unittest.TestCase):
-    def test_samples_overlapping_the_test_label_are_purged(self):
-        kept = purge_embargo(list(range(50)), list(range(50, 60)),
-                             holding_days=5, embargo_days=0)
-        self.assertNotIn(49, kept)
-        self.assertNotIn(45, kept)
-        self.assertIn(44, kept)
-
-    def test_embargo_removes_samples_after_the_test_block(self):
-        kept = purge_embargo(list(range(100)), list(range(50, 60)),
-                             holding_days=0, embargo_days=5)
-        for i in range(60, 65):
-            self.assertNotIn(i, kept)
-        self.assertIn(66, kept)
-
-    def test_longer_holding_purges_more(self):
-        few = purge_embargo(list(range(50)), list(range(50, 60)), 2, 0)
-        many = purge_embargo(list(range(50)), list(range(50, 60)), 20, 0)
-        self.assertGreater(len(few), len(many))
-
-    def test_default_embargo_applies(self):
-        kept = purge_embargo(list(range(100)), list(range(50, 60)),
-                             holding_days=0)
-        self.assertNotIn(61, kept)
-
-    def test_empty_test_set_keeps_everything(self):
-        self.assertEqual(purge_embargo([1, 2, 3], [], 5), [1, 2, 3])
+from src.alloc.validate import (deflated_sharpe, effective_n,
+                                expected_max_sharpe, pbo_from_pairs, sharpe)
 
 
 class ExpectedMaxSharpeTest(unittest.TestCase):

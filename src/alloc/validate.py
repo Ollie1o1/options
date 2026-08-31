@@ -3,10 +3,14 @@
 Two jobs, both aimed at the same failure: believing a number that a large enough
 search would have produced from noise.
 
-CPCV builds many purged, embargoed train/test paths instead of one walk-forward
-split, so the out-of-sample estimate has a distribution rather than a point.
+Purged, embargoed cross-validation lived here and has been removed. Its purge
+subtracted a DAY count from a SAMPLE INDEX, which under-purges by the data's
+rows-per-day density — 3.0-5.5x on this ledger. Nothing called it. The correct
+interval-based purge is `walk_forward.purge_overlapping`, which uses each
+trade's measured [entry_date, exit_date] and needs no days-to-index conversion.
+Build any future CPCV on that, not on a resurrection of this.
 
-Deflated Sharpe then discounts the result by how many configurations were tried,
+Deflated Sharpe discounts a result by how many configurations were tried,
 and by skew and kurtosis — short premium's many-small-wins/rare-large-loss shape
 inflates a naive Sharpe badly, which is exactly the shape that looks best right
 before it fails.
@@ -17,49 +21,13 @@ found the noise rather than the signal.
 """
 from __future__ import annotations
 
-import itertools
 import math
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy import stats
 
-DEFAULT_BLOCKS = 8
-DEFAULT_K = 2
-DEFAULT_EMBARGO = 5
 _EULER = 0.5772156649015329
-
-
-def cpcv_splits(n_samples: int, n_blocks: int = DEFAULT_BLOCKS,
-                k: int = DEFAULT_K) -> List[Tuple[List[int], List[int]]]:
-    """All C(n_blocks, k) train/test partitions over contiguous time blocks."""
-    if n_samples <= 0 or n_blocks <= 0 or k <= 0 or k >= n_blocks:
-        return []
-    edges = np.linspace(0, n_samples, n_blocks + 1).astype(int)
-    blocks = [list(range(edges[i], edges[i + 1])) for i in range(n_blocks)]
-    out = []
-    for combo in itertools.combinations(range(n_blocks), k):
-        test = [i for b in combo for i in blocks[b]]
-        train = [i for b in range(n_blocks) if b not in combo for i in blocks[b]]
-        out.append((train, test))
-    return out
-
-
-def purge_embargo(train_idx: Sequence[int], test_idx: Sequence[int],
-                  holding_days: int,
-                  embargo_days: int = DEFAULT_EMBARGO) -> List[int]:
-    """Drop training samples that leak into the test block.
-
-    Purge: a sample entered `holding_days` before the test block still has its
-    outcome determined inside it.
-    Embargo: samples just after the test block are correlated with its tail.
-    """
-    if not test_idx:
-        return list(train_idx)
-    lo, hi = min(test_idx), max(test_idx)
-    purge_from = lo - max(0, holding_days)
-    embargo_to = hi + max(0, embargo_days)
-    return [i for i in train_idx if not (purge_from <= i <= embargo_to)]
 
 
 def sharpe(returns: Union[Sequence[float], Any]) -> float:
