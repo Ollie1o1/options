@@ -12,6 +12,8 @@ version of it:
               correcting for it roughly halves every t-statistic
   BROAD > 0   an edge that lives only in the famous names is an attention
               artifact, not a premium
+
+  (PBO is not measured — see `promotion_verdict`.)
 """
 from __future__ import annotations
 
@@ -25,7 +27,6 @@ from src.alloc.portfolio import apply_capacity, capacity_stats
 from src.alloc.validate import deflated_sharpe, effective_n, sharpe
 
 MIN_DSR = 0.5
-MAX_PBO = 0.5
 MIN_TSTAT = 3.0
 
 # Below this many closed trades a verdict is refused outright, whatever the
@@ -119,6 +120,12 @@ def promotion_verdict(result: Dict[str, Any]) -> str:
     `insufficient` is deliberately NOT `reject`: "we could not measure this" and
     "we measured this and it failed" are different claims, and collapsing them
     loses the one that tells you to go and get more data.
+
+    PBO is deliberately NOT among these conditions. It gated here for a long
+    time via `result.get("pbo", 0.0)`, but `summarise` never set that key, so
+    the check always read 0.0 and never once fired. Measuring it for real needs
+    in-sample/out-of-sample pairs across CPCV paths, which this system does not
+    build. Three conditions that run beat four where one is decorative.
     """
     if result.get("insufficient"):
         return "reject"
@@ -126,7 +133,6 @@ def promotion_verdict(result: Dict[str, Any]) -> str:
     if n is not None and int(n) < MIN_N:
         return "insufficient"
     if (result.get("dsr", 0.0) < MIN_DSR
-            or result.get("pbo", 0.0) >= MAX_PBO
             or abs(result.get("tstat_clustered", 0.0)) < MIN_TSTAT
             or result.get("tstat_clustered", 0.0) < 0):
         return "reject"
