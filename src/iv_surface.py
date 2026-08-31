@@ -79,7 +79,10 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
     or None if fitting fails, and fit_quality is in [0, 1].
     """
     market_var = market_iv ** 2 * T
-    mean_var = np.mean(market_var)
+    # float(), not the bare numpy scalar: `budget` below divides a float by
+    # this, and an untyped reduction makes that expression Any/Any — which is
+    # how the loose typing here went unnoticed until `sse` was made explicit.
+    mean_var = float(np.mean(market_var))
 
     x0 = np.array([mean_var, 0.1, -0.3, 0.3, 0.0])
 
