@@ -105,6 +105,64 @@ class FitQualityDescribesTheReturnedParamsTest(unittest.TestCase):
                 "an accepted fit scores zero against its own data")
 
 
+class ConvergenceFlagIsNotFitQualityTest(unittest.TestCase):
+    """`res.success` was a hard gate. It measures the wrong thing.
+
+    Nelder-Mead reports success only if it meets xatol=1e-8 AND fatol=1e-10 on
+    a 5-parameter, badly-scaled problem. It usually cannot, so it exhausts
+    maxiter and reports failure — while sitting on an excellent fit. Measured
+    over 120 realistic slices: 62% reported failure, and 100% of those scored
+    above 0.95 against their own data (median 0.9999).
+
+    The flag is uninformative in BOTH directions. The degenerate corner in
+    `FitQualityDescribesTheReturnedParamsTest` converged with success=True.
+    Fit adequacy is what the SSE budget check measures; the flag adds only
+    false refusals.
+    """
+
+    def _realistic_slices(self, n_slices=120):
+        rng = np.random.default_rng(11)
+        for _ in range(n_slices):
+            n = int(rng.integers(8, 25))
+            k = np.sort(rng.uniform(-0.5, 0.5, n))
+            T = float(rng.choice([0.02, 0.05, 0.1, 0.25, 0.5, 1.0]))
+            iv = np.clip(0.25 - 0.25 * k + 0.45 * k ** 2
+                         + rng.normal(0, 0.015, n), 1e-3, None)
+            yield k, iv, T
+
+    def test_most_realistic_slices_now_produce_a_fit(self):
+        """Before: 38% fitted. A signal NaN on most expiries is not a signal."""
+        fitted = sum(1 for k, iv, T in self._realistic_slices()
+                     if _fit_single_expiry(k, iv, T)[0] is not None)
+        self.assertGreater(
+            fitted, 100,
+            f"only {fitted}/120 realistic slices fitted — the convergence flag "
+            f"is discarding good fits again")
+
+    def test_every_accepted_fit_still_tracks_its_data(self):
+        """Recovering fits must not mean accepting bad ones."""
+        for k, iv, T in self._realistic_slices():
+            params, quality = _fit_single_expiry(k, iv, T)
+            if params is None:
+                continue
+            self.assertGreater(
+                quality, 0.90,
+                "a recovered fit does not actually track its data")
+            self.assertAlmostEqual(
+                quality, _quality_of(params, k, iv ** 2 * T), places=6)
+
+    def test_the_degenerate_corner_is_still_refused(self):
+        """Dropping the flag must not readmit the fit that started all this."""
+        k = np.array(_DEGENERATE_K)
+        iv = np.array(_DEGENERATE_IV)
+        params, quality = _fit_single_expiry(k, iv, _DEGENERATE_T)
+        if params is not None:
+            self.assertAlmostEqual(
+                quality, _quality_of(params, k, iv ** 2 * _DEGENERATE_T),
+                places=6)
+            self.assertGreater(quality, 0.0)
+
+
 class GoodFitsStillFitTest(unittest.TestCase):
     """The correction must not start refusing fits that were always fine."""
 

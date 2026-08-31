@@ -105,8 +105,19 @@ def _fit_single_expiry(k: np.ndarray, market_iv: np.ndarray,
         res = minimize(penalised, x0, method="Nelder-Mead",
                        options={"maxiter": 5000, "xatol": 1e-8,
                                 "fatol": 1e-10, "adaptive": True})
-        if not res.success:
-            return None, 0.0
+        # `res.success` is deliberately NOT a gate. Nelder-Mead reports success
+        # only on meeting xatol=1e-8 AND fatol=1e-10 over five badly-scaled
+        # parameters, which it usually cannot; it exhausts maxiter and reports
+        # failure while sitting on an excellent fit. Over 120 realistic slices
+        # 62% reported failure, and EVERY ONE of those scored above 0.95
+        # against its own data (median 0.9999) — so the flag was discarding
+        # nearly two thirds of good fits and leaving `iv_surface_residual` NaN
+        # on most expiries.
+        #
+        # It is uninformative in the other direction too: the degenerate corner
+        # described below converged with success=True. Fit adequacy is measured
+        # by the SSE budget check, which is the thing that actually looks at
+        # the data.
 
         # Both the accept/reject decision and the reported quality are measured
         # on the parameters this function RETURNS, not on `res.x`.
