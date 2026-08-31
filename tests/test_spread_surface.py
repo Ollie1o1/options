@@ -15,8 +15,8 @@ from statistics import median
 
 from src.spread_surface import (DEFAULT_SURFACE_PATH, DELTA_EDGES, DTE_EDGES,
                                 MIN_CELL_OBS, OI_EDGES, Cell, SpreadSurface,
-                                bucket_index, cell_key, fit_surface,
-                                load_surface, save_surface)
+                                _present_or_zero, bucket_index, cell_key,
+                                fit_surface, load_surface, save_surface)
 
 
 class BucketIndexTest(unittest.TestCase):
@@ -57,6 +57,35 @@ class CellKeyTest(unittest.TestCase):
         # illiquid bucket is the conservative reading; treating it as liquid
         # would understate cost.
         self.assertEqual(cell_key(0.50, 30.0, None)[2], 0)
+
+    def test_a_missing_value_never_reaches_float(self):
+        """The typing defect this helper exists to close.
+
+        `_is_missing` returns plain `bool`, so it cannot narrow
+        `Optional[float]` to `float` for a type checker — mypy flagged three
+        `float(x)` calls taking `float | None`. `_present_or_zero` does the
+        None test in the expression that consumes the value, so the narrowing
+        is native. This asserts the runtime contract that makes that safe.
+        """
+        self.assertEqual(_present_or_zero(None), 0.0)
+        self.assertEqual(_present_or_zero(float("nan")), 0.0)
+        self.assertEqual(_present_or_zero(0.0), 0.0)
+        self.assertEqual(_present_or_zero(-0.5), -0.5)
+        self.assertEqual(_present_or_zero(30.0), 30.0)
+        self.assertIsInstance(_present_or_zero(None), float)
+
+    def test_missing_resolves_to_the_worst_case_bucket_everywhere(self):
+        """Pins the full None/NaN matrix, not one dimension at a time.
+
+        Guards a refactor of this helper against silently moving a missing
+        value into a cheaper bucket — the direction that flatters a book.
+        """
+        nan = float("nan")
+        for missing in (None, nan):
+            self.assertEqual(cell_key(missing, 30.0, 500.0)[0], 0)
+            self.assertEqual(cell_key(0.50, missing, 500.0)[1], 0)
+            self.assertEqual(cell_key(0.50, 30.0, missing)[2], 0)
+            self.assertEqual(cell_key(missing, missing, missing), (0, 0, 0))
 
     def test_nan_resolves_identically_to_none_in_every_dimension(self):
         # `v < edge` is False for every edge when v is NaN, so before the
