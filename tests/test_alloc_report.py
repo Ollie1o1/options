@@ -28,8 +28,8 @@ def _t(entry, pnl, car=400.0, stratum="broad", exit_="2024-03-15",
                  exit_reason=reason, stratum=stratum)
 
 
-def _res(dsr=0.9, tc=3.5, broad_pnl=50.0, pbo=0.2, n=200):
-    return {"n": n, "dsr": dsr, "pbo": pbo, "tstat_clustered": tc,
+def _res(dsr=0.9, tc=3.5, broad_pnl=50.0, n=200):
+    return {"n": n, "dsr": dsr, "tstat_clustered": tc,
             "by_stratum": {"legacy": {"pnl": 100.0},
                            "liquid": {"pnl": 80.0},
                            "broad": {"pnl": broad_pnl}},
@@ -76,9 +76,6 @@ class VerdictTest(unittest.TestCase):
     def test_low_dsr_rejects(self):
         self.assertEqual(promotion_verdict(_res(dsr=0.1)), "reject")
 
-    def test_high_pbo_rejects(self):
-        self.assertEqual(promotion_verdict(_res(pbo=0.7)), "reject")
-
     def test_low_clustered_tstat_rejects(self):
         """The naive t may look fine; the clustered one is what counts."""
         self.assertEqual(promotion_verdict(_res(tc=1.9)), "reject")
@@ -117,6 +114,69 @@ class ClusteredTstatTest(unittest.TestCase):
         self.assertEqual(clustered_tstat([_t("2024-01-05", 10.0)]), 0.0)
 
 
+class _RecordingDict(dict):
+    """A dict that remembers which keys were actually read."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.accessed: set = set()
+
+    def get(self, key, *default):
+        self.accessed.add(key)
+        return super().get(key, *default)
+
+    def __getitem__(self, key):
+        self.accessed.add(key)
+        return super().__getitem__(key)
+
+
+class GateReadsOnlyRealKeysTest(unittest.TestCase):
+    """Every key the gate reads must be a key `summarise` actually produces.
+
+    `promotion_verdict` gated on `result.get("pbo", 0.0)` for its whole life
+    while `summarise` never set a "pbo" key, so the condition could never fire.
+    It stayed green because the gate tests built their own fixture. This test
+    asserts against the real output so the same defect cannot recur in any of
+    the conditions.
+    """
+
+    def _strong_trades(self, n=60):
+        """Disjoint intervals, steady gains, enough spread to carry a t-stat.
+
+        Must be strong enough to PASS the gate, otherwise `or` short-circuits
+        and the later conditions are never read — which is exactly how the dead
+        one hid. Entry and exit share one distinct day per trade, so no two
+        intervals overlap and `n_eff` equals the row count.
+        """
+        out = []
+        for i in range(n):
+            day = f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}"
+            out.append(_t(day, 60.0 + (i % 5) * 5.0, exit_=day))
+        return out
+
+    def test_the_fixture_actually_passes_the_gate(self):
+        """Guards the guard: a rejected fixture short-circuits the `or`."""
+        self.assertEqual(
+            promotion_verdict(summarise(self._strong_trades(), n_trials=5)),
+            "promote")
+
+    def test_gate_reads_no_key_that_summarise_omits(self):
+        real = summarise(self._strong_trades(), n_trials=5)
+        probe = _RecordingDict(real)
+        promotion_verdict(probe)
+        missing = probe.accessed - set(real.keys())
+        self.assertEqual(
+            missing, set(),
+            f"promotion_verdict reads keys summarise never sets: {missing}")
+
+    def test_the_probe_actually_reaches_the_statistical_conditions(self):
+        real = summarise(self._strong_trades(), n_trials=5)
+        probe = _RecordingDict(real)
+        promotion_verdict(probe)
+        self.assertIn("dsr", probe.accessed)
+        self.assertIn("tstat_clustered", probe.accessed)
+
+
 class SummariseTest(unittest.TestCase):
     def _trades(self, n=40):
         return [_t(f"2024-01-{(i % 28)+1:02d}", 40.0 if i % 4 else -100.0)
@@ -136,6 +196,39 @@ class SummariseTest(unittest.TestCase):
         few = summarise(self._trades(), n_trials=1)["dsr"]
         many = summarise(self._trades(), n_trials=5000)["dsr"]
         self.assertGreaterEqual(few, many)
+
+    def _staggered(self, n=30):
+        """Trades whose holding intervals do not overlap at all.
+
+        `_t` defaults every exit to 2024-03-15, which makes every interval
+        overlap and collapses the sample to one observation. These enter and
+        exit on the same distinct day, so each one genuinely stands alone.
+        """
+        return [_t(f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}", 40.0,
+                   exit_=f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}")
+                for i in range(n)]
+
+    def test_effective_n_is_reported_and_never_exceeds_n(self):
+        s = summarise(self._trades(), n_trials=10)
+        self.assertIn("n_eff", s)
+        self.assertLessEqual(s["n_eff"], s["n"])
+
+    def test_shared_exit_dates_collapse_the_sample(self):
+        """40 trades all closing on one day are not 40 observations."""
+        s = summarise(self._trades(n=40), n_trials=10)
+        self.assertLess(s["n_eff"], 40)
+
+    def test_disjoint_trades_keep_their_observations(self):
+        """The correction must not flatten a genuinely independent sample."""
+        s = summarise(self._staggered(30), n_trials=10)
+        self.assertEqual(s["n_eff"], 30)
+
+    def test_effective_n_never_exceeds_the_distinct_entry_days(self):
+        """Or `dsr` would be more permissive than `tstat_clustered`."""
+        trades = self._trades()
+        s = summarise(trades, n_trials=10)
+        self.assertLessEqual(s["n_eff"],
+                             len({t.entry_date for t in trades}))
 
     def test_ticker_ended_trades_are_excluded(self):
         """Forced closes are an artifact of the data ending, not a result."""

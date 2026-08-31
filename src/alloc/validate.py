@@ -3,10 +3,14 @@
 Two jobs, both aimed at the same failure: believing a number that a large enough
 search would have produced from noise.
 
-CPCV builds many purged, embargoed train/test paths instead of one walk-forward
-split, so the out-of-sample estimate has a distribution rather than a point.
+Purged, embargoed cross-validation lived here and has been removed. Its purge
+subtracted a DAY count from a SAMPLE INDEX, which under-purges by the data's
+rows-per-day density — 3.0-5.5x on this ledger. Nothing called it. The correct
+interval-based purge is `walk_forward.purge_overlapping`, which uses each
+trade's measured [entry_date, exit_date] and needs no days-to-index conversion.
+Build any future CPCV on that, not on a resurrection of this.
 
-Deflated Sharpe then discounts the result by how many configurations were tried,
+Deflated Sharpe discounts a result by how many configurations were tried,
 and by skew and kurtosis — short premium's many-small-wins/rare-large-loss shape
 inflates a naive Sharpe badly, which is exactly the shape that looks best right
 before it fails.
@@ -17,49 +21,13 @@ found the noise rather than the signal.
 """
 from __future__ import annotations
 
-import itertools
 import math
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy import stats
 
-DEFAULT_BLOCKS = 8
-DEFAULT_K = 2
-DEFAULT_EMBARGO = 5
 _EULER = 0.5772156649015329
-
-
-def cpcv_splits(n_samples: int, n_blocks: int = DEFAULT_BLOCKS,
-                k: int = DEFAULT_K) -> List[Tuple[List[int], List[int]]]:
-    """All C(n_blocks, k) train/test partitions over contiguous time blocks."""
-    if n_samples <= 0 or n_blocks <= 0 or k <= 0 or k >= n_blocks:
-        return []
-    edges = np.linspace(0, n_samples, n_blocks + 1).astype(int)
-    blocks = [list(range(edges[i], edges[i + 1])) for i in range(n_blocks)]
-    out = []
-    for combo in itertools.combinations(range(n_blocks), k):
-        test = [i for b in combo for i in blocks[b]]
-        train = [i for b in range(n_blocks) if b not in combo for i in blocks[b]]
-        out.append((train, test))
-    return out
-
-
-def purge_embargo(train_idx: Sequence[int], test_idx: Sequence[int],
-                  holding_days: int,
-                  embargo_days: int = DEFAULT_EMBARGO) -> List[int]:
-    """Drop training samples that leak into the test block.
-
-    Purge: a sample entered `holding_days` before the test block still has its
-    outcome determined inside it.
-    Embargo: samples just after the test block are correlated with its tail.
-    """
-    if not test_idx:
-        return list(train_idx)
-    lo, hi = min(test_idx), max(test_idx)
-    purge_from = lo - max(0, holding_days)
-    embargo_to = hi + max(0, embargo_days)
-    return [i for i in train_idx if not (purge_from <= i <= embargo_to)]
 
 
 def sharpe(returns: Union[Sequence[float], Any]) -> float:
@@ -80,6 +48,35 @@ def sharpe(returns: Union[Sequence[float], Any]) -> float:
     return float(r.mean() / sd)
 
 
+def effective_n(starts: Sequence[Any], ends: Sequence[Any]) -> int:
+    """How many mutually non-overlapping holding intervals the sample carries.
+
+    This is the sample size a deflated Sharpe is entitled to use. The row count
+    is not: trades whose holding periods overlap are scored on the same price
+    path, so they are not independent observations. On this ledger the two
+    differ by 3-5x, which is the difference between DSR 0.997 and DSR 0.474 on
+    the same returns.
+
+    Computed by the standard greedy interval selection: sort by end, take an
+    interval whenever it starts strictly after the last one taken ended.
+    Intervals that merely touch are treated as overlapping — a trade closing on
+    the day another opens shared that day's move.
+
+    Returns 0 for empty input. `starts` and `ends` are zipped, so a length
+    mismatch silently uses the shorter, matching `zip` semantics.
+    """
+    pairs = sorted(zip(starts, ends), key=lambda p: (p[1], p[0]))
+    if not pairs:
+        return 0
+    count = 0
+    last_end: Optional[Any] = None
+    for start, end in pairs:
+        if last_end is None or start > last_end:
+            count += 1
+            last_end = end
+    return count
+
+
 def expected_max_sharpe(n_trials: int, trial_variance: float = 1.0) -> float:
     """Highest Sharpe a search of `n_trials` zero-skill strategies would produce.
 
@@ -96,11 +93,18 @@ def expected_max_sharpe(n_trials: int, trial_variance: float = 1.0) -> float:
 
 
 def deflated_sharpe(returns: Union[Sequence[float], Any], n_trials: int,
+                    n_eff: int,
                     trial_variance: Optional[float] = None) -> float:
     """P(true Sharpe > 0) given the size of the search, plus skew and kurtosis.
 
     Returns a probability. Above 0.95 is a strong result; below 0.5 says the
     search alone could plausibly have produced this.
+
+    `n_eff` is the number of INDEPENDENT observations — see `effective_n`. It is
+    required and has no default on purpose: passing the row count silently
+    inflates this statistic by sqrt(n_rows / n_eff), which on this ledger is
+    enough to turn a coin flip into a promotion. A default argument is
+    invisible to AST guards, so the only reliable guard is the absence of one.
 
     `trial_variance` is the variance of the SHARPE ESTIMATES across trials, not
     of the returns. Defaulting it to 1.0 is a units error that makes the bar
@@ -108,14 +112,13 @@ def deflated_sharpe(returns: Union[Sequence[float], Any], n_trials: int,
     per-observation Sharpe over n observations the sampling variance is ~1/n.
     """
     r = np.asarray(returns, dtype=float)
-    n = r.size
-    if n < 3:
+    if r.size < 3 or n_eff < 3:
         return 0.0
     sr = sharpe(r)
     if sr == 0.0:
         return 0.0
     if trial_variance is None:
-        trial_variance = 1.0 / n
+        trial_variance = 1.0 / n_eff
     g3 = float(stats.skew(r))
     g4 = float(stats.kurtosis(r, fisher=False))
     sr0 = expected_max_sharpe(n_trials, trial_variance)
@@ -123,7 +126,7 @@ def deflated_sharpe(returns: Union[Sequence[float], Any], n_trials: int,
     denom = 1.0 - g3 * sr + ((g4 - 1.0) / 4.0) * sr * sr
     if denom <= 0:
         return 0.0
-    z = (sr - sr0) * math.sqrt(n - 1) / math.sqrt(denom)
+    z = (sr - sr0) * math.sqrt(n_eff - 1) / math.sqrt(denom)
     return float(stats.norm.cdf(z))
 
 

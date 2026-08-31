@@ -12,6 +12,8 @@ version of it:
               correcting for it roughly halves every t-statistic
   BROAD > 0   an edge that lives only in the famous names is an attention
               artifact, not a premium
+
+  (PBO is not measured — see `promotion_verdict`.)
 """
 from __future__ import annotations
 
@@ -22,10 +24,9 @@ import numpy as np
 from scipy import stats as _sps
 
 from src.alloc.portfolio import apply_capacity, capacity_stats
-from src.alloc.validate import deflated_sharpe, sharpe
+from src.alloc.validate import deflated_sharpe, effective_n, sharpe
 
 MIN_DSR = 0.5
-MAX_PBO = 0.5
 MIN_TSTAT = 3.0
 
 # Below this many closed trades a verdict is refused outright, whatever the
@@ -69,6 +70,13 @@ def summarise(trades: Sequence[Any], n_trials: int,
         return {"n": len(closed), "insufficient": True}
 
     r = _returns(closed)
+    # `_returns` drops trades with no capital_at_risk, so the cluster count
+    # must be taken over the SAME subset that formed `r` — counting clusters
+    # of rows that are not in the return series is the identical defect one
+    # level down.
+    priced = [t for t in closed if t.capital_at_risk]
+    n_eff = effective_n([t.entry_date for t in priced],
+                        [t.exit_date for t in priced])
     wins = [t for t in closed if (t.pnl or 0) > 0]
     naive_t = (float(r.mean() / (r.std(ddof=1) / np.sqrt(r.size)))
                if r.std(ddof=1) > 0 else 0.0)
@@ -89,8 +97,9 @@ def summarise(trades: Sequence[Any], n_trials: int,
         "tstat_clustered": round(clustered_tstat(closed), 3),
         "skew": round(float(_sps.skew(r)), 3),
         "n_trials": n_trials,
-        "dsr": round(deflated_sharpe(r, n_trials), 4),
-        "dsr_undeflated": round(deflated_sharpe(r, 1), 4),
+        "n_eff": n_eff,
+        "dsr": round(deflated_sharpe(r, n_trials, n_eff), 4),
+        "dsr_undeflated": round(deflated_sharpe(r, 1, n_eff), 4),
         "by_stratum": by_stratum,
         # Capacity is measured on the trades an account of this size could
         # ACTUALLY have held, not on every signal the engine generated.
@@ -111,6 +120,12 @@ def promotion_verdict(result: Dict[str, Any]) -> str:
     `insufficient` is deliberately NOT `reject`: "we could not measure this" and
     "we measured this and it failed" are different claims, and collapsing them
     loses the one that tells you to go and get more data.
+
+    PBO is deliberately NOT among these conditions. It gated here for a long
+    time via `result.get("pbo", 0.0)`, but `summarise` never set that key, so
+    the check always read 0.0 and never once fired. Measuring it for real needs
+    in-sample/out-of-sample pairs across CPCV paths, which this system does not
+    build. Three conditions that run beat four where one is decorative.
     """
     if result.get("insufficient"):
         return "reject"
@@ -118,7 +133,6 @@ def promotion_verdict(result: Dict[str, Any]) -> str:
     if n is not None and int(n) < MIN_N:
         return "insufficient"
     if (result.get("dsr", 0.0) < MIN_DSR
-            or result.get("pbo", 0.0) >= MAX_PBO
             or abs(result.get("tstat_clustered", 0.0)) < MIN_TSTAT
             or result.get("tstat_clustered", 0.0) < 0):
         return "reject"
