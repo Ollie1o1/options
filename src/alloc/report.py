@@ -22,7 +22,7 @@ import numpy as np
 from scipy import stats as _sps
 
 from src.alloc.portfolio import apply_capacity, capacity_stats
-from src.alloc.validate import deflated_sharpe, sharpe
+from src.alloc.validate import deflated_sharpe, effective_n, sharpe
 
 MIN_DSR = 0.5
 MAX_PBO = 0.5
@@ -69,6 +69,13 @@ def summarise(trades: Sequence[Any], n_trials: int,
         return {"n": len(closed), "insufficient": True}
 
     r = _returns(closed)
+    # `_returns` drops trades with no capital_at_risk, so the cluster count
+    # must be taken over the SAME subset that formed `r` — counting clusters
+    # of rows that are not in the return series is the identical defect one
+    # level down.
+    priced = [t for t in closed if t.capital_at_risk]
+    n_eff = effective_n([t.entry_date for t in priced],
+                        [t.exit_date for t in priced])
     wins = [t for t in closed if (t.pnl or 0) > 0]
     naive_t = (float(r.mean() / (r.std(ddof=1) / np.sqrt(r.size)))
                if r.std(ddof=1) > 0 else 0.0)
@@ -89,8 +96,9 @@ def summarise(trades: Sequence[Any], n_trials: int,
         "tstat_clustered": round(clustered_tstat(closed), 3),
         "skew": round(float(_sps.skew(r)), 3),
         "n_trials": n_trials,
-        "dsr": round(deflated_sharpe(r, n_trials), 4),
-        "dsr_undeflated": round(deflated_sharpe(r, 1), 4),
+        "n_eff": n_eff,
+        "dsr": round(deflated_sharpe(r, n_trials, n_eff), 4),
+        "dsr_undeflated": round(deflated_sharpe(r, 1, n_eff), 4),
         "by_stratum": by_stratum,
         # Capacity is measured on the trades an account of this size could
         # ACTUALLY have held, not on every signal the engine generated.

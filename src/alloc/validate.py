@@ -125,11 +125,18 @@ def expected_max_sharpe(n_trials: int, trial_variance: float = 1.0) -> float:
 
 
 def deflated_sharpe(returns: Union[Sequence[float], Any], n_trials: int,
+                    n_eff: int,
                     trial_variance: Optional[float] = None) -> float:
     """P(true Sharpe > 0) given the size of the search, plus skew and kurtosis.
 
     Returns a probability. Above 0.95 is a strong result; below 0.5 says the
     search alone could plausibly have produced this.
+
+    `n_eff` is the number of INDEPENDENT observations — see `effective_n`. It is
+    required and has no default on purpose: passing the row count silently
+    inflates this statistic by sqrt(n_rows / n_eff), which on this ledger is
+    enough to turn a coin flip into a promotion. A default argument is
+    invisible to AST guards, so the only reliable guard is the absence of one.
 
     `trial_variance` is the variance of the SHARPE ESTIMATES across trials, not
     of the returns. Defaulting it to 1.0 is a units error that makes the bar
@@ -137,14 +144,13 @@ def deflated_sharpe(returns: Union[Sequence[float], Any], n_trials: int,
     per-observation Sharpe over n observations the sampling variance is ~1/n.
     """
     r = np.asarray(returns, dtype=float)
-    n = r.size
-    if n < 3:
+    if r.size < 3 or n_eff < 3:
         return 0.0
     sr = sharpe(r)
     if sr == 0.0:
         return 0.0
     if trial_variance is None:
-        trial_variance = 1.0 / n
+        trial_variance = 1.0 / n_eff
     g3 = float(stats.skew(r))
     g4 = float(stats.kurtosis(r, fisher=False))
     sr0 = expected_max_sharpe(n_trials, trial_variance)
@@ -152,7 +158,7 @@ def deflated_sharpe(returns: Union[Sequence[float], Any], n_trials: int,
     denom = 1.0 - g3 * sr + ((g4 - 1.0) / 4.0) * sr * sr
     if denom <= 0:
         return 0.0
-    z = (sr - sr0) * math.sqrt(n - 1) / math.sqrt(denom)
+    z = (sr - sr0) * math.sqrt(n_eff - 1) / math.sqrt(denom)
     return float(stats.norm.cdf(z))
 
 

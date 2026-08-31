@@ -87,23 +87,22 @@ class DeflatedSharpeTest(unittest.TestCase):
 
     def test_more_trials_lowers_the_deflated_sharpe(self):
         r = self._returns(0.001)
-        self.assertGreater(deflated_sharpe(r, n_trials=1),
-                           deflated_sharpe(r, n_trials=1000))
+        self.assertGreater(deflated_sharpe(r, 1, len(r)),
+                           deflated_sharpe(r, 1000, len(r)))
 
     def test_a_strong_strategy_survives_a_small_search(self):
-        self.assertGreater(deflated_sharpe(self._returns(0.004), n_trials=5),
-                           0.95)
+        r = self._returns(0.004)
+        self.assertGreater(deflated_sharpe(r, 5, len(r)), 0.95)
 
     def test_a_marginal_strategy_dies_under_a_large_search(self):
-        self.assertLess(deflated_sharpe(self._returns(0.0002), n_trials=5000),
-                        0.5)
+        r = self._returns(0.0002)
+        self.assertLess(deflated_sharpe(r, 5000, len(r)), 0.5)
 
     def test_flat_returns_do_not_raise(self):
-        self.assertIsInstance(deflated_sharpe(np.zeros(100), n_trials=10),
-                              float)
+        self.assertIsInstance(deflated_sharpe(np.zeros(100), 10, 100), float)
 
     def test_too_few_returns_is_zero_not_a_crash(self):
-        self.assertEqual(deflated_sharpe([0.01, 0.02], n_trials=10), 0.0)
+        self.assertEqual(deflated_sharpe([0.01, 0.02], 10, 2), 0.0)
 
     def test_negative_skew_is_penalised(self):
         """Short premium's shape must not be flattered."""
@@ -111,12 +110,43 @@ class DeflatedSharpeTest(unittest.TestCase):
         base = rng.normal(0.002, 0.01, 300)
         skewed = base.copy()
         skewed[:5] = -0.15                      # rare large losses
-        self.assertLess(deflated_sharpe(skewed, n_trials=10),
-                        deflated_sharpe(base, n_trials=10))
+        self.assertLess(deflated_sharpe(skewed, 10, len(skewed)),
+                        deflated_sharpe(base, 10, len(base)))
 
     def test_default_trial_variance_branch(self):
-        self.assertIsInstance(
-            deflated_sharpe(self._returns(0.002), n_trials=10), float)
+        r = self._returns(0.002)
+        self.assertIsInstance(deflated_sharpe(r, 10, len(r)), float)
+
+
+class DeflatedSharpeSampleSizeTest(unittest.TestCase):
+    def _returns(self, mean, n=200, seed=1):
+        rng = np.random.default_rng(seed)
+        return rng.normal(mean, 0.05, n)
+
+    def test_n_eff_is_required(self):
+        """A default here is how the wrong number ships unnoticed."""
+        with self.assertRaises(TypeError):
+            deflated_sharpe(self._returns(0.01), 10)   # type: ignore[call-arg]
+
+    def test_fewer_effective_observations_lower_the_dsr(self):
+        r = self._returns(0.012)
+        self.assertGreater(deflated_sharpe(r, 200, 200),
+                           deflated_sharpe(r, 200, 46))
+
+    def test_more_trials_still_lower_the_dsr(self):
+        r = self._returns(0.012)
+        self.assertGreater(deflated_sharpe(r, 1, 200),
+                           deflated_sharpe(r, 1000, 200))
+
+    def test_row_count_can_promote_where_clusters_reject(self):
+        """The measured defect: same returns, two verdicts, gate bar 0.5."""
+        rng = np.random.default_rng(3)
+        r = rng.normal(0.0135, 0.05, 253)
+        self.assertGreaterEqual(deflated_sharpe(r, 200, 253), 0.5)
+        self.assertLess(deflated_sharpe(r, 200, 58), 0.5)
+
+    def test_too_few_effective_observations_returns_zero(self):
+        self.assertEqual(deflated_sharpe(self._returns(0.01), 10, 2), 0.0)
 
 
 class EffectiveNTest(unittest.TestCase):

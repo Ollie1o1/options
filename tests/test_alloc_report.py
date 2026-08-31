@@ -137,6 +137,39 @@ class SummariseTest(unittest.TestCase):
         many = summarise(self._trades(), n_trials=5000)["dsr"]
         self.assertGreaterEqual(few, many)
 
+    def _staggered(self, n=30):
+        """Trades whose holding intervals do not overlap at all.
+
+        `_t` defaults every exit to 2024-03-15, which makes every interval
+        overlap and collapses the sample to one observation. These enter and
+        exit on the same distinct day, so each one genuinely stands alone.
+        """
+        return [_t(f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}", 40.0,
+                   exit_=f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}")
+                for i in range(n)]
+
+    def test_effective_n_is_reported_and_never_exceeds_n(self):
+        s = summarise(self._trades(), n_trials=10)
+        self.assertIn("n_eff", s)
+        self.assertLessEqual(s["n_eff"], s["n"])
+
+    def test_shared_exit_dates_collapse_the_sample(self):
+        """40 trades all closing on one day are not 40 observations."""
+        s = summarise(self._trades(n=40), n_trials=10)
+        self.assertLess(s["n_eff"], 40)
+
+    def test_disjoint_trades_keep_their_observations(self):
+        """The correction must not flatten a genuinely independent sample."""
+        s = summarise(self._staggered(30), n_trials=10)
+        self.assertEqual(s["n_eff"], 30)
+
+    def test_effective_n_never_exceeds_the_distinct_entry_days(self):
+        """Or `dsr` would be more permissive than `tstat_clustered`."""
+        trades = self._trades()
+        s = summarise(trades, n_trials=10)
+        self.assertLessEqual(s["n_eff"],
+                             len({t.entry_date for t in trades}))
+
     def test_ticker_ended_trades_are_excluded(self):
         """Forced closes are an artifact of the data ending, not a result."""
         t = self._trades()
