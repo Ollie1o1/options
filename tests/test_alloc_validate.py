@@ -95,6 +95,41 @@ class DeflatedSharpeSampleSizeTest(unittest.TestCase):
     def test_too_few_effective_observations_returns_zero(self):
         self.assertEqual(deflated_sharpe(self._returns(0.01), 10, 2), 0.0)
 
+    def test_correcting_the_sample_can_never_create_a_promotion(self):
+        """The safety property the whole change rests on.
+
+        DSR = Phi(z) with z = (sr - sr0) * sqrt(n_eff - 1) / sqrt(denom). The
+        scale factor is always positive, so it cannot flip the sign of z. `sr`
+        does not depend on n_eff, while sr0 RISES as n_eff falls. So sr - sr0
+        only ever shrinks, and a result below the 0.5 bar cannot be lifted
+        above it by counting the sample more honestly.
+        """
+        gate = 0.5
+        rng = np.random.default_rng(17)
+        for mean in (0.0, 0.002, 0.005, 0.01, 0.02, 0.05):
+            r = rng.normal(mean, 0.05, 250)
+            for n_trials in (1, 12, 34, 200, 5000):
+                honest = deflated_sharpe(r, n_trials, 50)
+                inflated = deflated_sharpe(r, n_trials, 250)
+                if honest >= gate:
+                    self.assertGreaterEqual(
+                        inflated, gate,
+                        f"n_eff=50 promoted where n_eff=250 did not "
+                        f"(mean={mean}, n_trials={n_trials})")
+
+    def test_a_failing_result_may_rise_toward_the_bar_without_reaching_it(self):
+        """DSR is not monotone in n_eff, and saying otherwise would be wrong.
+
+        For a strategy already below the bar, fewer independent observations
+        mean less confidence it is BAD, so its DSR rises toward 0.5. It cannot
+        reach it: that needs sr > sr0, which falling n_eff makes harder.
+        """
+        rng = np.random.default_rng(5)
+        r = rng.normal(-0.001, 0.05, 250)
+        self.assertGreater(deflated_sharpe(r, 34, 40),
+                           deflated_sharpe(r, 34, 250))
+        self.assertLess(deflated_sharpe(r, 34, 40), 0.5)
+
 
 class EffectiveNTest(unittest.TestCase):
     """How many INDEPENDENT observations a set of overlapping trades carries.

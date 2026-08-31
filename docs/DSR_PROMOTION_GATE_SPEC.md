@@ -260,8 +260,73 @@ Strategies currently promoted may flip to rejected. That is the finding, not a
 side effect: the gate has been reading a DSR built on 4.4x more independent
 observations than exist, while a dead condition sat beside it.
 
-No number gets better as a result of this work. What improves is that the
-numbers stop overstating their own confidence.
+## Measured outcome
+
+Implemented 2026-08-31. Suite green at 5409 tests, exit code 0.
+
+### Real verdicts, `python -m src.alloc --structures`
+
+| Strategy | n | DSR before | DSR after | verdict before | verdict after |
+| --- | ---: | ---: | ---: | --- | --- |
+| bull_put | 169 | 0.154 | 0.069 | reject | reject |
+| bear_call | 170 | 0.000 | 0.000 | reject | reject |
+| iron_condor | 171 | 0.005 | 0.010 | reject | reject |
+| long_call (control) | 166 | 0.022 | 0.020 | reject | reject |
+
+**No verdict changed.** Every structure was already rejected and remains so, so
+nothing promoted was lost. The correction changes what the numbers claim, not
+what the system currently does.
+
+### Correction to this spec's own claim
+
+This document previously asserted "no number gets better as a result of this
+work." That is wrong, and iron_condor shows it: its DSR **rose**, 0.005 to
+0.010.
+
+DSR is not monotone in `n_eff`. Writing `DSR = Phi(z)` with
+`z = (sr - sr0) * sqrt(n_eff - 1) / sqrt(denom)`, the scale factor is always
+positive and so cannot flip the sign of `z`. For a strategy already below the
+bar (`sr < sr0`), shrinking `n_eff` shrinks `|z|`, and DSR rises **toward** 0.5
+from below. That is correct behaviour: with fewer independent observations there
+is less evidence the strategy is bad, too.
+
+What does hold — and what the gate actually depends on — is the sign:
+
+> Crossing the 0.5 bar requires `sr > sr0`. `sr` does not depend on `n_eff`,
+> while `sr0` **rises** as `n_eff` falls. So `sr - sr0` only ever shrinks, and
+> **a rejected result can never be lifted into a promotion by counting the
+> sample more honestly.**
+
+Pinned by `test_correcting_the_sample_can_never_create_a_promotion`, which
+sweeps means and trial counts, and by
+`test_a_failing_result_may_rise_toward_the_bar_without_reaching_it`.
+
+### Backtester, real run
+
+| Ticker | rows | n_eff | n_trials | dsr | dsr_undeflated |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SPY | 200 | 10 | 13 | 0.000006 | 0.004634 |
+| AAPL | 200 | 10 | 13 | 0.000035 | 0.011793 |
+
+**200 rows carry 10 independent observations** — entries are daily and held
+about 30 days, so row counting inflated the sample 20x here. This is the case
+entry-day clustering would have missed entirely: every entry day is distinct, so
+an entry-day count would have returned 200 and deflated nothing.
+
+### The trial count was 13, not 12
+
+Both this spec and the implementation plan said the threshold sweep was 12
+trials. It is 13. `np.arange(0.3, 0.9, 0.05)` reads as twelve steps but yields
+thirteen: floating-point accumulation lands the last on 0.8999999999999999,
+just under the exclusive stop.
+
+It is not academic — AAPL's run selected `optimal_threshold = 0.9`, so the
+thirteenth threshold is genuinely reachable and was being searched while going
+uncounted. The sweep is now an explicit tuple with the count derived from it,
+so the published trial count cannot drift from the loop that produced it.
+
+Caught by `test_the_published_count_is_derived_from_the_sequence`, which was
+written to check exactly this and failed on first run.
 
 ## Out of scope
 
