@@ -12,7 +12,6 @@ from typing import Iterator, List, Optional, Tuple
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
-from src.alloc.validate import expected_max_sharpe
 from src.backtest_optimizer import (
     BacktestResult, CURRENT_WEIGHTS, WEIGHT_KEYS, optimize_weights,
 )
@@ -31,6 +30,11 @@ MIN_FOLDS = 3
 # needed to state the bar a result has to clear. `_fit_weights_on_fold` passes
 # this straight to `optimize_weights(n_trials=...)`, so this is the ONLY
 # place the search size is written down.
+#
+# This count is reported as `n_trials` so a reader can judge the size of the
+# search. It is NOT converted into a Sharpe bar here: this module measures IC,
+# produces no Sharpe anywhere, and a bar with nothing to compare against is
+# noise that reads as rigour.
 TRIALS_PER_FOLD = 200
 
 # Default train_size for both `run_walk_forward` and the CLI. A module-level
@@ -273,7 +277,6 @@ def _refused_summary(db_path: str, strategy: str, n_total: int,
         "fold_ic_ci_95": None,
         "folds_ic_positive": None,
         "n_trials": TRIALS_PER_FOLD * n_measured,
-        "search_bar_sharpe": None,
         "folds": [],
     }
     _write_artifacts(summary, output_dir)
@@ -403,9 +406,6 @@ def run_walk_forward(
         "fold_ic_ci_95": [ci_lo, ci_hi],
         "folds_ic_positive": int((fold_ics >= 0).sum()),
         "n_trials": TRIALS_PER_FOLD * len(per_fold),
-        "search_bar_sharpe": expected_max_sharpe(
-            TRIALS_PER_FOLD * len(per_fold),
-            trial_variance=1.0 / max(len(pooled_p), 1)),
         "folds": per_fold,
     }
 

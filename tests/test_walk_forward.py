@@ -605,5 +605,47 @@ class TestPurgeFloorAndRefusal(unittest.TestCase):
             self.assertIsNotNone(r["pooled_ic"])
 
 
+class SummaryReportsNoSharpeBarTest(unittest.TestCase):
+    """Walk-forward measures IC, not Sharpe.
+
+    A `search_bar_sharpe` sat in both summary shapes with nothing to compare
+    against: this module produces no Sharpe anywhere. A bar with no counterpart
+    cannot inform a decision, only suggest a rigour that was never applied.
+
+    Asserted on real output from both paths rather than on a constructed dict —
+    the two shapes are built in different places and drifted apart before.
+    """
+
+    def test_the_refusal_shape_carries_no_sharpe_bar(self):
+        from src.walk_forward import _refused_summary
+        refused = _refused_summary(
+            "unused.db", "Long Call", n_total=5,
+            train_size=100, test_size=10, step=10,
+            n_attempted=0, n_dropped=0, n_measured=0,
+            reason="too few trades")
+        self.assertNotIn("search_bar_sharpe", refused)
+        self.assertIn("n_trials", refused)
+        self.assertTrue(refused["refused"])
+
+    def test_the_success_shape_carries_no_sharpe_bar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=400, ic_target=0.15, seed=7)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=120, test_size=20, step=20)
+            self.assertFalse(r["refused"])
+            self.assertNotIn("search_bar_sharpe", r)
+            self.assertIn("n_trials", r)
+
+    def test_no_summary_key_mentions_sharpe_at_all(self):
+        """This module has no Sharpe to report, so none should be named."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "trades.db")
+            _seed_db(db, n_trades=400, ic_target=0.15, seed=7)
+            r = run_walk_forward(db_path=db, strategy="Long Call",
+                                 train_size=120, test_size=20, step=20)
+            self.assertEqual([k for k in r if "sharpe" in k.lower()], [])
+
+
 if __name__ == "__main__":
     unittest.main()
