@@ -87,3 +87,102 @@ def relative_spread(row: dict) -> Optional[float]:
     if mid <= 0:
         return None
     return (ask - bid) / mid
+
+
+_MULTILEG_SQL = """
+    SELECT rowid AS row_id, contract_key, symbol, ts, date(ts) AS day,
+           expiration, strategy_name, round_trip_pct, features_json,
+           julianday(expiration) - julianday(ts) AS dte
+    FROM candidates
+    WHERE strategy_name IN ('Bull Put', 'Bear Call', 'Iron Condor')
+"""
+
+
+def fetch_band_rows(candidates_db: str, bandwidth: float) -> list:
+    """Every multi-leg candidate within `bandwidth` of the friction cutoff,
+    excluding credit_gone and unpriceable rows. No outcome attached yet.
+
+    `x` is round_trip_pct - CUTOFF, centered so a local-linear fit's
+    intercept at x=0 is the fitted value exactly at the cutoff."""
+    import sqlite3
+
+    from src.candidate_marks import entry_price_for
+
+    con = sqlite3.connect(candidates_db)
+    con.row_factory = sqlite3.Row
+    try:
+        raw = con.execute(_MULTILEG_SQL).fetchall()
+    finally:
+        con.close()
+
+    out = []
+    for r in raw:
+        row = dict(r)
+        rtp, status = running_variable(row)
+        if status in ("credit_gone", "unpriceable"):
+            continue
+        x = rtp - CUTOFF
+        if abs(x) > bandwidth:
+            continue
+        blob = _blob(row)
+        abs_delta = blob.get("entry_delta")
+        if abs_delta is None:
+            continue
+        entry_signed = entry_price_for(row)
+        if entry_signed is None:
+            continue
+        out.append({
+            "row_id": row["row_id"], "contract_key": row["contract_key"],
+            "symbol": row["symbol"], "day": row["day"],
+            "strategy_name": row["strategy_name"], "x": x,
+            "round_trip_pct": rtp, "status": status,
+            "abs_delta": abs(float(abs_delta)), "dte": float(row["dte"]),
+            "entry_signed": entry_signed,
+            "rel_spread": relative_spread(row),
+        })
+    return out
+
+
+def attach_outcome(rows: list, candidates_db: str, horizon_days: int) -> list:
+    """Add `outcome`: the forward return to the FIRST candidate_marks row
+    for this contract_key dated at or after day + horizon_days, or None if
+    no such mark exists. Never uses a mark dated before `day` (no lookahead
+    the other way either - this only ever looks forward)."""
+    import sqlite3
+    from datetime import date, timedelta
+
+    from src.candidate_marks import pnl_pct as _pnl_pct
+
+    if not rows:
+        return []
+
+    con = sqlite3.connect(candidates_db)
+    try:
+        keys = sorted({r["contract_key"] for r in rows})
+        placeholders = ",".join("?" for _ in keys)
+        marks = con.execute(
+            f"SELECT contract_key, mark_date, mid FROM candidate_marks "
+            f"WHERE contract_key IN ({placeholders}) ORDER BY mark_date",
+            keys,
+        ).fetchall()
+    finally:
+        con.close()
+
+    by_key: dict = {}
+    for ck, md, mid in marks:
+        by_key.setdefault(ck, []).append((md, mid))
+
+    out = []
+    for row in rows:
+        r = dict(row)
+        target = date.fromisoformat(r["day"]) + timedelta(days=horizon_days)
+        qualifying = [(md, mid) for md, mid in by_key.get(r["contract_key"], [])
+                     if date.fromisoformat(md[:10]) >= target and mid is not None]
+        if not qualifying:
+            r["outcome"] = None
+        else:
+            qualifying.sort(key=lambda t: t[0])
+            _, mark_mid = qualifying[0]
+            r["outcome"] = _pnl_pct(r["entry_signed"], float(mark_mid))
+        out.append(r)
+    return out

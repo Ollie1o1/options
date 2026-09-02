@@ -81,5 +81,122 @@ class RelativeSpreadTests(unittest.TestCase):
         self.assertIsNone(relative_spread(row))
 
 
+import sqlite3
+import tempfile
+
+from scripts.gate_rd_test import attach_outcome, fetch_band_rows
+
+
+def _make_candidates_db(path, rows):
+    """rows: list of dicts with keys rowid(implicit), contract_key, symbol,
+    ts, expiration, strategy_name, round_trip_pct, features_json."""
+    con = sqlite3.connect(path)
+    con.execute("""CREATE TABLE candidates (
+        contract_key TEXT, symbol TEXT, ts TEXT, expiration TEXT,
+        strategy_name TEXT, round_trip_pct REAL, features_json TEXT)""")
+    for r in rows:
+        con.execute(
+            "INSERT INTO candidates (contract_key, symbol, ts, expiration, "
+            "strategy_name, round_trip_pct, features_json) VALUES "
+            "(:contract_key,:symbol,:ts,:expiration,:strategy_name,"
+            ":round_trip_pct,:features_json)", r)
+    con.execute("CREATE TABLE candidate_marks (contract_key TEXT, "
+               "mark_date TEXT, bid REAL, ask REAL, mid REAL, source TEXT)")
+    con.commit()
+    con.close()
+
+
+def _bull_put(contract_key, symbol, ts, expiration, short_bid, short_ask,
+              long_bid, long_ask, entry_delta=-0.20, round_trip_pct=None):
+    import json as _json
+    blob = {"short_bid": short_bid, "short_ask": short_ask,
+           "long_bid": long_bid, "long_ask": long_ask,
+           "entry_delta": entry_delta}
+    return dict(contract_key=contract_key, symbol=symbol, ts=ts,
+               expiration=expiration, strategy_name="Bull Put",
+               round_trip_pct=round_trip_pct, features_json=_json.dumps(blob))
+
+
+class FetchBandRowsTests(unittest.TestCase):
+    def test_restricts_to_bandwidth_and_excludes_credit_gone(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = f"{d}/candidates.db"
+            # Verified against the real verdict_for: for a 2-leg spread the
+            # cross-vs-mid slippage is always short_half + long_half, so
+            # round_trip_pct = 2*(short_half+long_half)/credit regardless of
+            # price level. near: credit=1.00, halves 0.05+0.05 -> 0.20 (in
+            # the +/-0.10 band, x=-0.05). far: credit=1.00, halves
+            # 0.50+0.50 -> 2.00 (nowhere near the band).
+            near = _bull_put("k1", "AAPL", "2026-08-19T10:00:00Z",
+                             "2026-09-05", 1.45, 1.55, 0.45, 0.55)
+            far = _bull_put("k2", "MSFT", "2026-08-19T10:00:00Z",
+                            "2026-09-05", 1.00, 2.00, 0.00, 1.00)
+            # credit_gone: mid credit 1.00-0.90=0.10 (is_credit), but the
+            # limit fill concedes 0.35*(0.50+0.40)=0.315 > 0.10 of it.
+            gone = _bull_put("k3", "NVDA", "2026-08-19T10:00:00Z",
+                             "2026-09-05", 0.50, 1.50, 0.50, 1.30)
+            _make_candidates_db(db, [near, far, gone])
+            rows = fetch_band_rows(db, bandwidth=0.10)
+            keys = {r["contract_key"] for r in rows}
+            self.assertEqual(keys, {"k1"})  # far is out of band, gone is excluded
+            self.assertAlmostEqual(rows[0]["x"], -0.05, places=6)
+
+    def test_row_carries_symbol_day_delta_dte_entry_signed(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = f"{d}/candidates.db"
+            # ts at midnight so dte is a clean whole number (SQLite's
+            # julianday() keeps the time-of-day component: a 10:00:00 ts
+            # against a bare-date expiration gives 9.58d, not 10.0d).
+            row = _bull_put("k1", "AAPL", "2026-08-19T00:00:00Z",
+                            "2026-08-29", 1.00, 1.10, 0.40, 0.50,
+                            entry_delta=-0.22)
+            _make_candidates_db(db, [row])
+            rows = fetch_band_rows(db, bandwidth=1.0)
+            self.assertEqual(len(rows), 1)
+            r = rows[0]
+            self.assertEqual(r["symbol"], "AAPL")
+            self.assertEqual(r["day"], "2026-08-19")
+            self.assertAlmostEqual(r["abs_delta"], 0.22)
+            self.assertAlmostEqual(r["dte"], 10.0)
+            self.assertIsNotNone(r["entry_signed"])
+            self.assertAlmostEqual(r["rel_spread"], 0.10 / 1.05, places=6)
+
+
+class AttachOutcomeTests(unittest.TestCase):
+    def test_uses_first_mark_at_or_after_horizon(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = f"{d}/candidates.db"
+            row = _bull_put("k1", "AAPL", "2026-08-19T10:00:00Z",
+                            "2026-09-05", 1.00, 1.10, 0.40, 0.50)
+            _make_candidates_db(db, [row])
+            con = sqlite3.connect(db)
+            # marks at day+3 (too early for 5d horizon) and day+6 (qualifies)
+            con.execute("INSERT INTO candidate_marks VALUES "
+                       "('k1','2026-08-22',0.5,0.6,0.55,'chain')")
+            con.execute("INSERT INTO candidate_marks VALUES "
+                       "('k1','2026-08-25',0.3,0.4,0.35,'chain')")
+            con.commit(); con.close()
+
+            rows = fetch_band_rows(db, bandwidth=1.0)
+            out = attach_outcome(rows, db, horizon_days=5)
+            self.assertEqual(len(out), 1)
+            self.assertIsNotNone(out[0]["outcome"])
+
+    def test_no_qualifying_mark_gives_none_outcome(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = f"{d}/candidates.db"
+            row = _bull_put("k1", "AAPL", "2026-08-19T10:00:00Z",
+                            "2026-09-05", 1.00, 1.10, 0.40, 0.50)
+            _make_candidates_db(db, [row])
+            con = sqlite3.connect(db)
+            con.execute("INSERT INTO candidate_marks VALUES "
+                       "('k1','2026-08-21',0.5,0.6,0.55,'chain')")  # only 2d out
+            con.commit(); con.close()
+
+            rows = fetch_band_rows(db, bandwidth=1.0)
+            out = attach_outcome(rows, db, horizon_days=5)
+            self.assertIsNone(out[0]["outcome"])
+
+
 if __name__ == "__main__":
     unittest.main()
