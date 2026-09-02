@@ -19,7 +19,7 @@ from src import execution_truth as et
 
 
 def _days_ago(n: int) -> str:
-    """A date `n` days before TODAY.
+    """A date `n` days before today IN UTC.
 
     `health_lines` is the one function here that measures from the real clock:
     it counts marks with `mark_date >= now_utc - days`. A fixture pinned to a
@@ -28,10 +28,22 @@ def _days_ago(n: int) -> str:
     on 2026-08-26 and 8 days old on 2026-08-27, falling outside the 7-day
     window and turning a green suite red with no code change.
 
+    THE CLOCK MUST BE UTC, not local. `health_lines` derives its `today` from
+    `datetime.now(timezone.utc)`; this helper used `date.today()`, which is
+    local. West of UTC the two name different days for part of every evening,
+    so a mark written "today" by a test was dated a day behind the "today"
+    `health_lines` searched for. Every open contract then looked unmarked and
+    the pair was reported as having gone dark — five failures at 23:37 local
+    on 2026-08-31, which was already 2026-09-01 in UTC, with no code change.
+
+    Anchoring to a real clock is not enough. It has to be the SAME clock the
+    code under test reads.
+
     Every other function in this module takes an explicit `today`, so only the
     `health_lines` fixtures need anchoring.
     """
-    return (_dt.date.today() - _dt.timedelta(days=n)).isoformat()
+    today_utc = _dt.datetime.now(_dt.timezone.utc).date()
+    return (today_utc - _dt.timedelta(days=n)).isoformat()
 
 
 def _insert_candidate(path, **over):
@@ -931,6 +943,33 @@ class TestHealthLines(unittest.TestCase):
     def test_a_missing_database_does_not_raise(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertTrue(cm.health_lines(db_path=os.path.join(d, "absent.db")))
+
+
+class TestFixtureClockMatchesProductionClock(unittest.TestCase):
+    """The fixture clock must be the clock the code under test reads.
+
+    `_days_ago` anchored to `date.today()` (local) while `health_lines` reads
+    `datetime.now(timezone.utc)`. West of UTC those name different days for
+    part of every evening, so a mark written "today" landed a day behind the
+    "today" being searched for, every open contract looked unmarked, and five
+    tests failed at 23:37 local on 2026-08-31 — already 2026-09-01 in UTC.
+
+    Asserting the two agree catches the mismatch directly, instead of leaving
+    it to surface as an unrelated-looking failure on whichever evening the
+    suite happens to run late.
+    """
+
+    def test_days_ago_zero_is_the_utc_date_health_lines_uses(self):
+        from datetime import datetime, timezone
+        self.assertEqual(
+            _days_ago(0),
+            datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "_days_ago is not on the same clock as health_lines")
+
+    def test_days_ago_counts_back_in_whole_days(self):
+        d0 = _dt.date.fromisoformat(_days_ago(0))
+        self.assertEqual(_dt.date.fromisoformat(_days_ago(3)),
+                         d0 - _dt.timedelta(days=3))
 
 
 class TestHealthCatchesPartialSilence(unittest.TestCase):
