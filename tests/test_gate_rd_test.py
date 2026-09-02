@@ -198,5 +198,85 @@ class AttachOutcomeTests(unittest.TestCase):
             self.assertIsNone(out[0]["outcome"])
 
 
+import random
+
+from scripts.gate_rd_test import (
+    cluster_bootstrap_rd,
+    collapse_to_clusters,
+    local_linear_intercept,
+    rd_estimate,
+)
+
+
+class CollapseToClustersTests(unittest.TestCase):
+    def test_one_point_per_symbol_day_per_side(self):
+        rows = [
+            {"symbol": "AAPL", "day": "2026-08-19", "x": -0.02, "outcome": 0.10},
+            {"symbol": "AAPL", "day": "2026-08-19", "x": -0.03, "outcome": 0.20},
+            {"symbol": "AAPL", "day": "2026-08-19", "x": 0.01, "outcome": -0.05},
+            {"symbol": "MSFT", "day": "2026-08-19", "x": -0.01, "outcome": 0.30},
+        ]
+        below, above = collapse_to_clusters(rows, "outcome")
+        self.assertEqual(len(below), 2)  # (AAPL, 2026-08-19) and (MSFT, 2026-08-19)
+        self.assertEqual(len(above), 1)  # (AAPL, 2026-08-19) above side
+        aapl_below = [p for p in below if abs(p[0] - (-0.025)) < 1e-9]
+        self.assertEqual(len(aapl_below), 1)
+        self.assertAlmostEqual(aapl_below[0][1], 0.15)  # mean of 0.10, 0.20
+
+    def test_none_outcomes_are_dropped(self):
+        rows = [
+            {"symbol": "AAPL", "day": "2026-08-19", "x": -0.02, "outcome": None},
+            {"symbol": "AAPL", "day": "2026-08-19", "x": -0.02, "outcome": 0.10},
+        ]
+        below, above = collapse_to_clusters(rows, "outcome")
+        self.assertEqual(len(below), 1)
+        self.assertAlmostEqual(below[0][1], 0.10)
+
+
+class LocalLinearInterceptTests(unittest.TestCase):
+    def test_recovers_known_line(self):
+        points = [(x, 2.0 + 3.0 * x) for x in (-0.05, -0.03, -0.01, 0.0, 0.02)]
+        self.assertAlmostEqual(local_linear_intercept(points), 2.0, places=6)
+
+    def test_single_point_returns_its_own_value(self):
+        self.assertAlmostEqual(local_linear_intercept([(-0.02, 0.5)]), 0.5)
+
+
+class RdEstimateTests(unittest.TestCase):
+    def test_recovers_a_known_jump(self):
+        below = [(x, 0.10 + 2.0 * x) for x in (-0.05, -0.03, -0.01)]
+        above = [(x, -0.05 + 2.0 * x) for x in (0.01, 0.03, 0.05)]  # jump = -0.15
+        self.assertAlmostEqual(rd_estimate(below, above), -0.15, places=6)
+
+    def test_no_jump_gives_zero(self):
+        below = [(x, 0.10 + 2.0 * x) for x in (-0.05, -0.03, -0.01)]
+        above = [(x, 0.10 + 2.0 * x) for x in (0.01, 0.03, 0.05)]
+        self.assertAlmostEqual(rd_estimate(below, above), 0.0, places=6)
+
+
+class ClusterBootstrapRdTests(unittest.TestCase):
+    def test_confident_jump_clears_the_hurdle(self):
+        # Many clusters, a real jump, WITH jitter (constant/noiseless y would
+        # make every bootstrap resample fit the same exact line, giving zero
+        # resampling variance and therefore se=0 -> t=None instead of a
+        # clearly-significant t; verified empirically before writing this).
+        gen = random.Random(7)
+        below = [(-0.05 + 0.001 * i, 0.20 + gen.uniform(-0.03, 0.03))
+                for i in range(60)]
+        above = [(0.001 * i, -0.10 + gen.uniform(-0.03, 0.03))
+                for i in range(60)]
+        point, lo, hi, t = cluster_bootstrap_rd(below, above, n_boot=500, seed=1)
+        self.assertAlmostEqual(point, -0.30, places=1)
+        self.assertIsNotNone(t)
+        self.assertLess(t, -3.0)
+        self.assertLess(hi, 0.0)  # CI excludes zero, same direction as point
+
+    def test_too_few_clusters_returns_no_tstat(self):
+        below = [(-0.02, 0.1)]
+        above = [(0.02, 0.1)]
+        point, lo, hi, t = cluster_bootstrap_rd(below, above, n_boot=100, seed=1)
+        self.assertIsNone(t)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -186,3 +186,91 @@ def attach_outcome(rows: list, candidates_db: str, horizon_days: int) -> list:
             r["outcome"] = _pnl_pct(r["entry_signed"], float(mark_mid))
         out.append(r)
     return out
+
+
+def collapse_to_clusters(rows: list, value_key: str) -> tuple:
+    """One (x_mean, value_mean) point per (symbol, day) per side of the
+    cutoff. Rows whose `value_key` is None are dropped before averaging -
+    this is where a row with no qualifying forward mark leaves the analysis,
+    never as a zero.
+
+    This is the literal reading of "one observation = one symbol-day": the
+    regressions in rd_estimate never see a raw candidate row, only a
+    per-cluster mean, so a symbol-day that happened to contribute five
+    candidates cannot outweigh one that contributed one."""
+    import collections
+
+    below: dict = collections.defaultdict(lambda: {"x": [], "v": []})
+    above: dict = collections.defaultdict(lambda: {"x": [], "v": []})
+    for r in rows:
+        v = r.get(value_key)
+        if v is None:
+            continue
+        bucket = below if r["x"] < 0 else above
+        key = (r["symbol"], r["day"])
+        bucket[key]["x"].append(r["x"])
+        bucket[key]["v"].append(v)
+
+    def _means(bucket: dict) -> list:
+        out = []
+        for vals in bucket.values():
+            xs, vs = vals["x"], vals["v"]
+            out.append((sum(xs) / len(xs), sum(vs) / len(vs)))
+        return out
+
+    return _means(below), _means(above)
+
+
+def local_linear_intercept(points: list) -> float:
+    """The fitted value at x=0 of a line through `points` (uniform kernel:
+    every point counted equally). A single point is its own intercept - a
+    degenerate but well-defined 0-slope fit."""
+    import numpy as np
+
+    if len(points) == 1:
+        return float(points[0][1])
+    xs = np.array([p[0] for p in points], dtype=float)
+    vs = np.array([p[1] for p in points], dtype=float)
+    if np.all(xs == xs[0]):
+        return float(vs.mean())
+    slope, intercept = np.polyfit(xs, vs, 1)
+    return float(intercept)
+
+
+def rd_estimate(below: list, above: list) -> float:
+    """ITT = intercept(above) - intercept(below) at the cutoff. Negative
+    means the refused (above-cutoff) side measures worse - the sign that
+    supports the gate, per the prereg's own convention."""
+    return local_linear_intercept(above) - local_linear_intercept(below)
+
+
+def cluster_bootstrap_rd(below: list, above: list, n_boot: int = 4000,
+                         seed: int = 20260902, alpha: float = 0.05) -> tuple:
+    """Point ITT, percentile 95% CI, and Harvey's-hurdle t-statistic.
+
+    Resamples symbol-day clusters with replacement, independently on each
+    side (the two sides are different populations - a below-cutoff cluster
+    resampling should never contribute to the above-cutoff fit), refits
+    both local-linear regressions, and recomputes ITT each time. `t` is
+    None when either side has fewer than 2 clusters - there is no
+    resampling variance to measure, so no t-statistic is reported rather
+    than one computed from a single point."""
+    import random
+
+    point = rd_estimate(below, above)
+    if len(below) < 2 or len(above) < 2:
+        return point, None, None, None
+
+    rng = random.Random(seed)
+    draws = []
+    for _ in range(n_boot):
+        b = [below[rng.randrange(len(below))] for _ in below]
+        a = [above[rng.randrange(len(above))] for _ in above]
+        draws.append(rd_estimate(b, a))
+
+    draws.sort()
+    lo = draws[int(alpha / 2 * len(draws))]
+    hi = draws[int((1 - alpha / 2) * len(draws)) - 1]
+    se = (sum((d - point) ** 2 for d in draws) / (len(draws) - 1)) ** 0.5
+    t = (point / se) if se > 0 else None
+    return point, lo, hi, t
