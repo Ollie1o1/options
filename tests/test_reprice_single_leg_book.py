@@ -324,5 +324,30 @@ class RepriceRowTests(unittest.TestCase):
                              out["repriced_pct_central"])
 
 
+from scripts.reprice_single_leg_book import render_report
+
+
+class RenderReportTests(unittest.TestCase):
+    def test_report_states_denominators_and_refusal(self):
+        surface = SpreadSurface(
+            {(0, 1, 2): Cell(n=50, rel_half_spread=0.03, median_depth=20)},
+            {"fit_date": "2026-09-01"},
+        )
+        row = dict(_SHORT_PUT, open_interest=500.0, dte=19.0, abs_delta=0.20)
+        priced = reprice_row(row, surface)
+        text = render_report([priced], n_multi_leg_refused=338)
+
+        self.assertIn("entry premium", text)
+        self.assertIn("capital at risk", text)
+        self.assertIn("338", text)
+        self.assertIn("refus", text.lower())
+        self.assertIn("open interest", text.lower())
+
+    def test_refuses_to_render_on_empty_surface(self):
+        empty = SpreadSurface({}, {})
+        text = render_report([], n_multi_leg_refused=0, surface=empty)
+        self.assertIn("REFUSING", text)
+
+
 if __name__ == "__main__":
     unittest.main()

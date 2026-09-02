@@ -311,3 +311,119 @@ def reprice_row(row: dict, surface: SpreadSurface) -> dict:
     out["pnl_usd_repriced_conservative"] = (
         float(row["entry_price"]) * out["repriced_pct_conservative"] * scale)
     return out
+
+
+def _fmt_pf(v: Optional[float]) -> str:
+    return f"{v:.3f}" if v is not None else "n/a"
+
+
+def _fmt_ci(lo: Optional[float], hi: Optional[float]) -> str:
+    if lo is None or hi is None:
+        return "underpowered (fewer than 2 entry-day clusters, or too many " \
+               "resamples had no losing trade)"
+    return f"[{lo:.3f}, {hi:.3f}]"
+
+
+def render_report(rows: List[dict], n_multi_leg_refused: int, *,
+                  surface: Optional[SpreadSurface] = None) -> str:
+    """The reprice report. `surface` is accepted only so a caller can pass an
+    empty one and exercise the refusal path in a test without also faking
+    every row's provenance."""
+    if surface is not None and not surface.cells:
+        return ("\n  REFUSING TO RENDER: the surface has 0 cells (unfitted).\n"
+                "  Fit it first: PYTHONPATH=$PWD ~/.venvs/options/bin/python "
+                "-m src.spread_surface --fit\n")
+
+    n_single = len(rows)
+    n_total = n_single + n_multi_leg_refused
+    n_known_oi = sum(1 for r in rows if r["oi_known"])
+
+    lines = ["", "  SINGLE-LEG CLOSED BOOK — REPRICED UNDER THE MEASURED SURFACE", ""]
+    lines.append(f"    single-leg priced: {n_single}   multi-leg refused: "
+                 f"{n_multi_leg_refused}   ({100.0 * n_multi_leg_refused / n_total:.0f}% "
+                 f"of the closed book this script can see)")
+    lines.append(f"    refused because entry_price on a multi-leg row is a "
+                 f"NET CREDIT across legs, not a leg mid — pricing it on a "
+                 f"leg-calibrated surface would report a number that is not "
+                 f"a spread cost.")
+    lines.append(f"    open interest: {n_known_oi}/{n_single} rows join a "
+                 f"real archived quote on their own entry date; the rest "
+                 f"report a central estimate (OI-collapsed marginal) and a "
+                 f"conservative bound (most-illiquid-bucket pin) rather than "
+                 f"one invented number.")
+    lines.append("")
+
+    if not rows:
+        lines.append("    no single-leg rows to price")
+        return "\n".join(lines)
+
+    for basis, pct_key, usd_key in (
+        ("central", "repriced_pct_central", "pnl_usd_repriced_central"),
+        ("conservative", "repriced_pct_conservative", "pnl_usd_repriced_conservative"),
+    ):
+        gross_rows = [{"date": r["date"], "v": r["gross_pct"]} for r in rows]
+        gross_pf, gross_lo, gross_hi = cluster_bootstrap_pf(gross_rows, "v")
+
+        prem_rows = [{"date": r["date"], "v": r[pct_key]} for r in rows]
+        prem_pf, prem_lo, prem_hi = cluster_bootstrap_pf(prem_rows, "v")
+
+        risk_rows = [{"date": r["date"], "v": r[usd_key] / r["capital_at_risk"]}
+                    for r in rows if r.get("capital_at_risk")]
+        risk_pf, risk_lo, risk_hi = cluster_bootstrap_pf(risk_rows, "v")
+
+        lines.append(f"  {basis.upper()} open-interest estimate "
+                     f"(n={len(rows) if basis == 'central' else n_single - n_known_oi} "
+                     f"unknown-OI rows use this rung; known-OI rows are identical "
+                     f"in both bases):")
+        lines.append(f"    gross (as booked, pre-repricing) PF: "
+                     f"{_fmt_pf(gross_pf)}  CI {_fmt_ci(gross_lo, gross_hi)}")
+        lines.append(f"    repriced PF, on entry premium:       "
+                     f"{_fmt_pf(prem_pf)}  CI {_fmt_ci(prem_lo, prem_hi)}  "
+                     f"(n={len(prem_rows)})")
+        lines.append(f"    repriced PF, on capital at risk:     "
+                     f"{_fmt_pf(risk_pf)}  CI {_fmt_ci(risk_lo, risk_hi)}  "
+                     f"(n={len(risk_rows)})")
+        lines.append("    both CIs are bootstrapped 95%, clustered on entry day "
+                     "(4,000 resamples, seeded)")
+        lines.append("")
+
+    by_strategy: Dict[str, List[dict]] = {}
+    for r in rows:
+        by_strategy.setdefault(r["strategy_name"], []).append(r)
+    lines.append(f"  {'strategy':<12}{'n':>5}{'avg drag $':>12}"
+                 f"{'avg drag % of credit':>22}")
+    for strat, rs in sorted(by_strategy.items()):
+        avg_drag_usd = sum(r["pnl_usd_repriced_central"] - r["pnl_usd"]
+                           for r in rs if r.get("pnl_usd") is not None) / len(rs)
+        avg_drag_pct = sum(r["friction_fraction_central"] for r in rs) / len(rs)
+        lines.append(f"  {strat:<12}{len(rs):>5}{avg_drag_usd:>12.2f}"
+                     f"{avg_drag_pct:>21.1%}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    import argparse
+
+    from src.spread_surface import DEFAULT_SURFACE_PATH, load_surface
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--ledger", default="paper_trades.db")
+    ap.add_argument("--archive", default="data/chain_archive.db")
+    ap.add_argument("--surface", default=DEFAULT_SURFACE_PATH)
+    args = ap.parse_args()
+
+    surface = load_surface(args.surface)
+    if not surface.cells:
+        print(render_report([], 0, surface=surface))
+        return 1
+
+    n_refused = count_multi_leg_refused(args.ledger)
+    raw_rows = fetch_single_leg_rows(args.ledger, args.archive)
+    priced = [reprice_row(r, surface) for r in raw_rows]
+    print(render_report(priced, n_refused))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
