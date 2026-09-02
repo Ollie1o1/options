@@ -328,5 +328,50 @@ coverage_at_registration:
 
 ## Result
 
-Not yet run. `scripts/gate_rd_test.py` (not yet written) will append here,
-once, after the primary design is computed.
+Run 2026-09-02, `scripts/gate_rd_test.py`, one look as registered.
+
+```
+PRIMARY (5d horizon, +/-0.05 bandwidth): n=13599 candidates (7364 below / 6235 above), 292/299 symbol-day clusters
+  ITT = +0.0209   95% CI [-0.2124, +0.2380]   t = 0.18
+  Harvey's hurdle |t| >= 3.0 -> NULL
+
+SECONDARY (10d horizon, +/-0.05): ITT = -0.1832   95% CI [-0.8719, +0.4115]   (NULL, no decision authority)
+
+ROBUSTNESS (5d horizon, +/-0.10 bandwidth): ITT = +0.0346   95% CI [-0.1508, +0.2313]   (NULL, no decision authority)
+
+GUARDS
+  density: 7364 below / 6235 above (ratio 1.18)
+  covariate smoothness (abs_delta): jump = +0.0093   95% CI [-0.0025, +0.0214]
+  covariate smoothness (dte): jump = -1.2233   95% CI [-3.1248, +0.6541]
+  negative control (outcome shuffled within symbol-day): ITT = +0.0145   95% CI [-0.1685, +0.1984]
+  sign consistency: first half ITT = -0.1377   second half ITT = +0.3341
+
+SECONDARY DESIGN — stratified matching (1056 pairs): mean(refused - matched passed) = +0.0233   95% CI [-0.0582, +0.1042]
+```
+
+**Decision: NULL.** `t = 0.18`, nowhere near Harvey's hurdle in either
+direction. The CI is wide and straddles zero on both sides by a large
+margin. Per SS7, this is recorded as **non-predictive complexity**: at its
+current 0.25 threshold, the friction gate does not measurably separate
+5-day-forward-return quality between candidates just above and just below
+the cutoff.
+
+This matches the honest prior stated in SS11 before the run: a single
+friction percentage is closer in kind to an absolute per-contract ranker
+than to a conditioner, and this system's history is that absolute rankers
+die. NULL was the expected outcome, not a surprising one, and is reported as
+this design's own finding.
+
+Guards: density is balanced (1.18 ratio, no manipulation signal); both
+covariate-smoothness checks have CIs containing zero (no confound jumping at
+the cutoff, though `abs_delta`'s CI sits close to the boundary); the
+negative control is small and near zero as expected; sign consistency flips
+between the two halves of the window (-0.14 then +0.34), consistent with
+noise around a true null rather than a stable directional effect either
+half would show if a real effect existed. Nothing here raises a validity
+concern about the NULL verdict.
+
+The secondary design (stratified matching, 1056 pairs) agrees: CI
+[-0.0582, +0.1042] also contains zero.
+
+Full interpretation in `docs/GATE_RD_RESULT_20260902.md`.
