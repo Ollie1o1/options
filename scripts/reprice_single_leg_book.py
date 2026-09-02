@@ -167,3 +167,147 @@ def cluster_bootstrap_pf(rows: Sequence[dict], value_key: str,
     lo = draws[int(alpha / 2 * len(draws))]
     hi = draws[int((1 - alpha / 2) * len(draws)) - 1]
     return point, lo, hi
+
+
+_SINGLE_LEG_SQL = """
+    SELECT tr.entry_id, tr.ticker, tr.strike, tr.expiration, tr.date,
+           tr.type, tr.strategy_name, tr.entry_price, tr.exit_price,
+           tr.exit_reason, tr.pnl_pct, tr.pnl_usd, tr.capital_at_risk,
+           tr.quantity, tr.entry_delta,
+           julianday(tr.expiration) - julianday(tr.date) AS dte
+    FROM trades tr
+    WHERE tr.status = 'CLOSED' AND tr.net_credit IS NULL
+      AND tr.entry_price IS NOT NULL AND tr.entry_price > 0
+      AND tr.exit_price IS NOT NULL
+      AND tr.entry_delta IS NOT NULL
+      AND tr.expiration IS NOT NULL{dup_filter}
+"""
+
+_OI_SQL = """
+    SELECT open_interest FROM chain_snapshots
+    WHERE symbol = ? AND strike = ? AND expiration = ?
+      AND substr(type, 1, 1) = substr(?, 1, 1)
+      AND snap_date = substr(?, 1, 10)
+      AND bid > 0 AND ask > bid
+    LIMIT 1
+"""
+
+
+def count_multi_leg_refused(ledger_db: str) -> int:
+    """Closed multi-leg trades (net_credit IS NOT NULL — the structural
+    test, not the strategy name), counted but never priced here: entry_price
+    on a spread is a net credit, not a leg mid."""
+    import sqlite3
+
+    from src.ledger_filters import exclude_ruled_duplicates
+
+    con = sqlite3.connect(ledger_db)
+    try:
+        dup_filter = exclude_ruled_duplicates(con)
+        return con.execute(
+            "SELECT COUNT(*) FROM trades WHERE status='CLOSED' "
+            f"AND net_credit IS NOT NULL{dup_filter}"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+
+def fetch_single_leg_rows(ledger_db: str, archive_db: str) -> List[dict]:
+    """Every closed single-leg row, with real open_interest joined in from
+    the archive where a two-sided quote exists for that exact contract on
+    its own entry date. `open_interest` is None (genuinely unknown, not
+    zero) when no such quote exists."""
+    import sqlite3
+
+    from src.ledger_filters import exclude_ruled_duplicates
+
+    con = sqlite3.connect(ledger_db)
+    con.row_factory = sqlite3.Row
+    try:
+        dup_filter = exclude_ruled_duplicates(con)
+        raw = con.execute(
+            _SINGLE_LEG_SQL.format(dup_filter=dup_filter)).fetchall()
+    finally:
+        con.close()
+
+    arch = sqlite3.connect(archive_db)
+    try:
+        out = []
+        for r in raw:
+            row = dict(r)
+            oi = arch.execute(
+                _OI_SQL, (row["ticker"], row["strike"], row["expiration"],
+                         row["type"], row["date"])
+            ).fetchone()
+            row["open_interest"] = float(oi[0]) if oi and oi[0] is not None else None
+            row["abs_delta"] = abs(float(row["entry_delta"]))
+            out.append(row)
+        return out
+    finally:
+        arch.close()
+
+
+def dollar_scale_factor(entry_price: float, booked_pct: float,
+                        booked_pnl_usd: Optional[float],
+                        quantity: Optional[float]) -> float:
+    """The multiplier*lots factor implicit in the ledger's own booked row:
+    pnl_usd = entry_price * pnl_pct * factor (paper_manager._sanitize_close_
+    values). Deriving it from the booked row rather than reimporting
+    paper_manager's private _get_multiplier/_lots keeps this script decoupled
+    from exit-path internals — and the basis audit already verified pnl_usd
+    reconciles against pnl_pct * entry_price * quantity on the real ledger.
+
+    Falls back to quantity * 100.0 (the standard equity-option multiplier)
+    when booked_pct is ~0, where the division is undefined rather than merely
+    small."""
+    if abs(booked_pct) > 1e-9 and booked_pnl_usd is not None:
+        return booked_pnl_usd / (entry_price * booked_pct)
+    return float(quantity or 1.0) * 100.0
+
+
+def reprice_row(row: dict, surface: SpreadSurface) -> dict:
+    """Add gross/repriced return figures to one cohort row. Mutates a copy;
+    the input row is unchanged."""
+    from src.utils import is_short_position
+
+    out = dict(row)
+    short = is_short_position(row["strategy_name"] or "")
+    out["short"] = short
+    out["gross_pct"] = gross_pct(float(row["entry_price"]), float(row["exit_price"]), short)
+    round_trip = not is_expired(row.get("exit_reason"))
+    oi = row.get("open_interest")
+    out["oi_known"] = oi is not None
+
+    if oi is not None:
+        frac, prov = new_friction_fraction(
+            surface, mid=float(row["entry_price"]), abs_delta=row["abs_delta"],
+            dte=float(row["dte"]), open_interest=oi, round_trip=round_trip)
+        out["friction_fraction_central"] = frac
+        out["friction_fraction_conservative"] = frac
+        out["provenance_central"] = prov
+        out["provenance_conservative"] = prov
+    else:
+        c_frac, c_prov = new_friction_fraction(
+            surface, mid=float(row["entry_price"]), abs_delta=row["abs_delta"],
+            dte=float(row["dte"]), open_interest=None, round_trip=round_trip,
+            central=True)
+        v_frac, v_prov = new_friction_fraction(
+            surface, mid=float(row["entry_price"]), abs_delta=row["abs_delta"],
+            dte=float(row["dte"]), open_interest=None, round_trip=round_trip,
+            central=False)
+        out["friction_fraction_central"] = c_frac
+        out["friction_fraction_conservative"] = v_frac
+        out["provenance_central"] = c_prov
+        out["provenance_conservative"] = v_prov
+
+    out["repriced_pct_central"] = out["gross_pct"] - out["friction_fraction_central"]
+    out["repriced_pct_conservative"] = out["gross_pct"] - out["friction_fraction_conservative"]
+
+    scale = dollar_scale_factor(float(row["entry_price"]), float(row["pnl_pct"]),
+                                row.get("pnl_usd"), row.get("quantity"))
+    out["dollar_scale"] = scale
+    out["pnl_usd_repriced_central"] = (
+        float(row["entry_price"]) * out["repriced_pct_central"] * scale)
+    out["pnl_usd_repriced_conservative"] = (
+        float(row["entry_price"]) * out["repriced_pct_conservative"] * scale)
+    return out
