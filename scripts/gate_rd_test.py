@@ -422,3 +422,118 @@ def matched_pair_estimate(pairs: list) -> tuple:
     se = (sum((d - point) ** 2 for d in draws) / (len(draws) - 1)) ** 0.5
     t = (point / se) if se > 0 else None
     return point, lo, hi, t
+
+
+MIN_CLUSTERS_PER_SIDE = 30
+
+
+def _verdict(t: Optional[float]) -> str:
+    if t is None:
+        return "UNDERPOWERED"
+    if t <= -3.0:
+        return "REAL"
+    if t >= 3.0:
+        return "INVERTED"
+    return "NULL"
+
+
+def _fmt(v: Optional[float]) -> str:
+    return f"{v:+.4f}" if v is not None else "n/a"
+
+
+def render_report(rows_5d: list, rows_10d: list) -> str:
+    """`rows_5d`/`rows_10d` are fetch_band_rows() output with an `outcome`
+    key already attached for that horizon (attach_outcome's `outcome`,
+    renamed by the caller) - both restricted to +/-0.10 so this function can
+    slice the primary (+/-0.05) band itself without a second DB round trip."""
+    lines = ["", "  GATE-VS-REFUSED REGRESSION DISCONTINUITY", "",
+            "  design frozen in docs/PREREG_GATE_RD_20260902.md", ""]
+
+    primary = [r for r in rows_5d if abs(r["x"]) <= 0.05]
+    below, above = collapse_to_clusters(primary, "outcome")
+    n_below, n_above = density_check(primary)
+
+    if len(below) < MIN_CLUSTERS_PER_SIDE or len(above) < MIN_CLUSTERS_PER_SIDE:
+        lines.append(f"  UNDERPOWERED: {len(below)} clusters below / "
+                     f"{len(above)} above, need >= {MIN_CLUSTERS_PER_SIDE} "
+                     f"on each side. Stopping — no verdict drawn.")
+        return "\n".join(lines)
+
+    point, lo, hi, t = cluster_bootstrap_rd(below, above)
+    verdict = _verdict(t)
+    lines.append(f"  PRIMARY (5d horizon, +/-0.05 bandwidth): n={n_below+n_above} "
+                f"candidates ({n_below} below / {n_above} above), "
+                f"{len(below)}/{len(above)} symbol-day clusters")
+    lines.append(f"    ITT = {_fmt(point)}   95% CI [{_fmt(lo)}, {_fmt(hi)}]   "
+                f"t = {t:.2f}" if t is not None else f"    ITT = {_fmt(point)}")
+    lines.append(f"    Harvey's hurdle |t| >= 3.0 -> {verdict}")
+    lines.append("")
+
+    # Secondary horizon
+    primary10 = [r for r in rows_10d if abs(r["x"]) <= 0.05]
+    below10, above10 = collapse_to_clusters(primary10, "outcome")
+    if len(below10) >= MIN_CLUSTERS_PER_SIDE and len(above10) >= MIN_CLUSTERS_PER_SIDE:
+        p10, lo10, hi10, t10 = cluster_bootstrap_rd(below10, above10)
+        lines.append(f"  SECONDARY (10d horizon, +/-0.05): ITT = {_fmt(p10)}   "
+                    f"95% CI [{_fmt(lo10)}, {_fmt(hi10)}]   "
+                    f"({_verdict(t10)}, no decision authority)")
+    else:
+        lines.append(f"  SECONDARY (10d horizon): UNDERPOWERED "
+                    f"({len(below10)}/{len(above10)} clusters)")
+    lines.append("")
+
+    # Robustness bandwidth
+    below_wide, above_wide = collapse_to_clusters(rows_5d, "outcome")
+    if len(below_wide) >= MIN_CLUSTERS_PER_SIDE and len(above_wide) >= MIN_CLUSTERS_PER_SIDE:
+        pw, low, hiw, tw = cluster_bootstrap_rd(below_wide, above_wide)
+        lines.append(f"  ROBUSTNESS (5d horizon, +/-0.10 bandwidth): ITT = {_fmt(pw)}   "
+                    f"95% CI [{_fmt(low)}, {_fmt(hiw)}]   "
+                    f"({_verdict(tw)}, no decision authority)")
+        lines.append("")
+
+    # Guards
+    lines.append("  GUARDS")
+    lines.append(f"    density: {n_below} below / {n_above} above "
+                f"(ratio {n_below / n_above:.2f})" if n_above else
+                f"    density: {n_below} below / {n_above} above")
+    for cov in ("abs_delta", "dte"):
+        cp, clo, chi, ct = covariate_check(primary, cov)
+        lines.append(f"    covariate smoothness ({cov}): jump = {_fmt(cp)}   "
+                    f"95% CI [{_fmt(clo)}, {_fmt(chi)}]")
+    ncp, nclo, nchi, nct = negative_control(primary)
+    lines.append(f"    negative control (outcome shuffled within symbol-day): "
+                f"ITT = {_fmt(ncp)}   95% CI [{_fmt(nclo)}, {_fmt(nchi)}]   "
+                f"(should be near zero / straddle it)")
+    first_half, second_half = sign_consistency(primary)
+    lines.append(f"    sign consistency: first half ITT = {_fmt(first_half)}   "
+                f"second half ITT = {_fmt(second_half)}")
+    lines.append("")
+
+    # Secondary design
+    pairs = match_refused_to_passed(primary)
+    mp, mlo, mhi, mt = matched_pair_estimate(pairs)
+    lines.append(f"  SECONDARY DESIGN — stratified matching ({len(pairs)} pairs, "
+                f"weaker identification, no decision authority):")
+    lines.append(f"    mean(refused - matched passed) = {_fmt(mp)}   "
+                f"95% CI [{_fmt(mlo)}, {_fmt(mhi)}]")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def main() -> int:
+    # attach_outcome and fetch_band_rows are already in this module's own
+    # scope (Task 2) - no import needed, and a self-import here would depend
+    # on how the script was invoked (python -m vs a bare script run) for
+    # whether "scripts.gate_rd_test" is even the name this module is
+    # registered under in sys.modules.
+    candidates_db = "data/candidates.db"
+    rows = fetch_band_rows(candidates_db, bandwidth=0.10)
+    rows5 = attach_outcome(rows, candidates_db, horizon_days=5)
+    rows10 = attach_outcome(rows, candidates_db, horizon_days=10)
+    print(render_report(rows5, rows10))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -376,5 +376,40 @@ class MatchedPairEstimateTests(unittest.TestCase):
         self.assertLess(point, 0)
 
 
+from scripts.gate_rd_test import render_report
+
+
+class RenderReportTests(unittest.TestCase):
+    def test_report_states_decision_and_guards(self):
+        # 35 distinct symbols (one candidate pair each) so below/above each
+        # get 35 distinct symbol-day clusters, clearing MIN_CLUSTERS_PER_SIDE
+        # (=30). A single shared "AAPL" symbol across all 35 iterations was
+        # tried first and produces only ~10 distinct (symbol, day) pairs —
+        # verified empirically to fall straight into the UNDERPOWERED branch
+        # regardless of any other fixture detail, since the report's primary
+        # slice keys on (symbol, day), not on row count.
+        gen = random.Random(3)
+        rows = []
+        for i in range(35):
+            day = f"2026-08-{19 + (i % 10):02d}"
+            rows.append({"symbol": f"SYM{i}", "day": day, "x": -0.02,
+                        "outcome": 0.20 + gen.uniform(-0.03, 0.03),
+                        "abs_delta": 0.20, "dte": 20.0, "rel_spread": 0.05,
+                        "contract_key": f"b{i}"})
+            rows.append({"symbol": f"SYM{i}", "day": day, "x": 0.02,
+                        "outcome": -0.10 + gen.uniform(-0.03, 0.03),
+                        "abs_delta": 0.20, "dte": 20.0, "rel_spread": 0.05,
+                        "contract_key": f"a{i}"})
+        # Both horizon arguments reuse the same rows (each already carries a
+        # generic "outcome" key, matching what attach_outcome() produces for
+        # whichever single horizon it was called with) — sufficient to
+        # exercise every branch of render_report without a second fixture.
+        text = render_report(rows, rows)
+        self.assertIn("Harvey", text)
+        self.assertIn("REAL", text)  # a strong, clean jump should clear the hurdle here
+        self.assertIn("negative control", text.lower())
+        self.assertIn("symbol-day", text.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
