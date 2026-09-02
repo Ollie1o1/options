@@ -278,5 +278,61 @@ class ClusterBootstrapRdTests(unittest.TestCase):
         self.assertIsNone(t)
 
 
+from scripts.gate_rd_test import (
+    covariate_check,
+    density_check,
+    negative_control,
+    sign_consistency,
+)
+
+
+class DensityCheckTests(unittest.TestCase):
+    def test_counts_raw_rows_each_side(self):
+        rows = [{"x": -0.01}, {"x": -0.02}, {"x": 0.01}]
+        below, above = density_check(rows)
+        self.assertEqual((below, above), (2, 1))
+
+
+class CovariateCheckTests(unittest.TestCase):
+    def test_reuses_the_rd_machinery_on_a_covariate(self):
+        rows = [
+            {"symbol": "AAPL", "day": "2026-08-19", "x": -0.02, "abs_delta": 0.20},
+            {"symbol": "MSFT", "day": "2026-08-19", "x": -0.01, "abs_delta": 0.22},
+            {"symbol": "AAPL", "day": "2026-08-20", "x": 0.01, "abs_delta": 0.21},
+            {"symbol": "MSFT", "day": "2026-08-20", "x": 0.02, "abs_delta": 0.19},
+        ]
+        point, lo, hi, t = covariate_check(rows, "abs_delta")
+        self.assertIsInstance(point, float)  # smooth-ish, no crash on a tiny sample
+
+
+class NegativeControlTests(unittest.TestCase):
+    def test_shuffling_outcomes_within_a_day_nulls_a_real_jump(self):
+        rows = []
+        for i in range(20):
+            rows.append({"symbol": "AAPL", "day": f"2026-08-{19+i%5:02d}",
+                        "x": -0.02, "outcome": 0.20})
+            rows.append({"symbol": "AAPL", "day": f"2026-08-{19+i%5:02d}",
+                        "x": 0.02, "outcome": -0.20})
+        real_below, real_above = collapse_to_clusters(rows, "outcome")
+        real_itt = rd_estimate(real_below, real_above)
+        point, lo, hi, t = negative_control(rows, seed=1)
+        # The shuffle need not be exactly zero, but it must not reproduce the
+        # full-strength real effect.
+        self.assertLess(abs(point), abs(real_itt))
+
+
+class SignConsistencyTests(unittest.TestCase):
+    def test_splits_at_the_median_day(self):
+        rows = [
+            {"symbol": "AAPL", "day": "2026-08-19", "x": -0.02, "outcome": 0.30},
+            {"symbol": "AAPL", "day": "2026-08-19", "x": 0.02, "outcome": -0.30},
+            {"symbol": "AAPL", "day": "2026-08-25", "x": -0.02, "outcome": 0.10},
+            {"symbol": "AAPL", "day": "2026-08-25", "x": 0.02, "outcome": -0.10},
+        ]
+        first_half, second_half = sign_consistency(rows)
+        self.assertLess(first_half, 0)
+        self.assertLess(second_half, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

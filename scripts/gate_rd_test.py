@@ -274,3 +274,74 @@ def cluster_bootstrap_rd(below: list, above: list, n_boot: int = 4000,
     se = (sum((d - point) ** 2 for d in draws) / (len(draws) - 1)) ** 0.5
     t = (point / se) if se > 0 else None
     return point, lo, hi, t
+
+
+def density_check(rows: list) -> tuple:
+    """Raw candidate counts each side of the cutoff, within the bandwidth
+    already applied by fetch_band_rows. A large asymmetry would suggest the
+    running variable is mismeasured or gamed right at the threshold - a
+    deterministic arithmetic gate should not exhibit one."""
+    below = sum(1 for r in rows if r["x"] < 0)
+    above = sum(1 for r in rows if r["x"] >= 0)
+    return below, above
+
+
+def covariate_check(rows: list, covariate_key: str) -> tuple:
+    """The same RD machinery applied to a covariate instead of the outcome.
+    A jump here means the two sides differ in more than friction, which
+    would undermine the "otherwise similar" premise the whole design relies
+    on. Reported beside the primary result, never gates running it."""
+    below, above = collapse_to_clusters(rows, covariate_key)
+    return cluster_bootstrap_rd(below, above)
+
+
+def negative_control(rows: list, seed: int = 20260902) -> tuple:
+    """Shuffle `outcome` across sides WITHIN each symbol-day cell, breaking
+    the link between round_trip_pct and outcome while holding the day/
+    cluster structure fixed, then recompute the RD estimate. A real effect
+    must not survive this - if it does, something other than the
+    discontinuity is producing it."""
+    import collections
+    import random
+
+    rng = random.Random(seed)
+    by_day: dict = collections.defaultdict(list)
+    for r in rows:
+        by_day[(r["symbol"], r["day"])].append(r)
+
+    shuffled = []
+    for cell_rows in by_day.values():
+        outcomes = [r.get("outcome") for r in cell_rows]
+        rng.shuffle(outcomes)
+        for r, new_outcome in zip(cell_rows, outcomes):
+            shuffled.append({**r, "outcome": new_outcome})
+
+    below, above = collapse_to_clusters(shuffled, "outcome")
+    return cluster_bootstrap_rd(below, above)
+
+
+def sign_consistency(rows: list) -> tuple:
+    """ITT computed separately on the first half and second half of the
+    window, split at the median entry day. Reported, not a gate.
+
+    Split is `< median_day` / `>= median_day`, not `<=`/`>`: with an EVEN
+    number of distinct days (days[len//2] lands on the day that starts the
+    second half), a `<=` split would put every day in the first half and
+    leave the second half empty. `<`/`>=` gives a real split for any day
+    count >= 2. Returns (None, None) when fewer than 2 distinct days exist,
+    and None for either half specifically if that half ends up with no
+    cluster on one side of the cutoff - never a crash on an empty fit."""
+    days = sorted({r["day"] for r in rows})
+    if len(days) < 2:
+        return None, None
+    median_day = days[len(days) // 2]
+    first = [r for r in rows if r["day"] < median_day]
+    second = [r for r in rows if r["day"] >= median_day]
+
+    def _itt(subset: list) -> Optional[float]:
+        below, above = collapse_to_clusters(subset, "outcome")
+        if not below or not above:
+            return None
+        return rd_estimate(below, above)
+
+    return _itt(first), _itt(second)
