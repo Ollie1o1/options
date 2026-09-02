@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import importlib.util
 import unittest
+import unittest.mock as mock
 
 import numpy as np
 import pandas as pd
@@ -203,6 +204,60 @@ class TestLedgerRecordsTheFlags(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScoringFixtureIgnoresTheLiveMacroCalendar(unittest.TestCase):
+    """These tests must not depend on what week it is.
+
+    The scorer applies `get_macro_penalty()` to every row, and that reads the
+    REAL macro calendar. With NFP on 2026-09-04 it returned -0.15 on every
+    contract from 2026-09-01, swamping the +0.05 Trend_Aligned bonus so no row
+    had a net-positive adjustment. `test_bonus_scale_is_a_net_per_row_gate`
+    then failed on the calendar rather than on the code — and it fails in CI
+    only, because `scripts/test.sh` does not run this module.
+
+    `_config()` pins `macro_penalty` to 0.0. This asserts the pin holds and,
+    more importantly, that the scores really are invariant to macro state.
+    """
+
+    def test_the_fixture_config_pins_the_macro_penalty(self):
+        self.assertEqual(_fx._config().get("macro_penalty"), 0.0)
+
+    def test_scores_do_not_move_when_a_macro_event_is_active(self):
+        """The real assertion: live calendar state must not reach the scores.
+
+        Patches the CALENDAR LOOKUP, not `get_macro_penalty` itself. Replacing
+        the penalty function bypasses the `macro_penalty` config pin entirely
+        and forces the -0.15 in regardless — an earlier version of this guard
+        did that, and "failed" against correct code while proving nothing.
+        Forcing the event window instead leaves the pin in the path, which is
+        the thing under test.
+
+        Patched on `src.macro_analyzer` because `get_macro_penalty` resolves
+        `check_macro_event_window` from its own module namespace.
+        """
+        import src.macro_analyzer as _macro
+
+        chain = _fx._make_chain(n=40)
+
+        with mock.patch.object(_macro, "check_macro_event_window",
+                               lambda *a, **k: (False, None, None)):
+            quiet = _fx._run(chain.copy(), _fx._config())
+
+        with mock.patch.object(_macro, "check_macro_event_window",
+                               lambda *a, **k: (True, "NFP", "2026-09-04")):
+            loud = _fx._run(chain.copy(), _fx._config())
+
+        self.assertEqual(len(quiet), len(loud))
+        # Tolerance sits between the two effects, not at zero. Two runs seconds
+        # apart already differ by ~1e-7 because the scorer prices on wall-clock
+        # `T_years` — the same drift this module's docstring records. A macro
+        # leak would be the full -0.15, so 1e-4 separates them by three orders
+        # of magnitude and cannot mistake one for the other.
+        np.testing.assert_allclose(
+            quiet["quality_score"].to_numpy(), loud["quality_score"].to_numpy(),
+            rtol=0, atol=1e-4,
+            err_msg="scores moved with the live macro calendar")
 
 
 class TestBonusSuppression(unittest.TestCase):
