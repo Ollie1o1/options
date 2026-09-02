@@ -345,3 +345,80 @@ def sign_consistency(rows: list) -> tuple:
         return rd_estimate(below, above)
 
     return _itt(first), _itt(second)
+
+
+# Match tolerances - operationalising the prereg's SS9 ("|DTE| <= 5,
+# |delta| <= 0.05, comparable relative spread"). "Comparable relative
+# spread" was left directional in the frozen doc; fixed here as within a
+# factor of 2x, stated explicitly because this is the secondary,
+# weaker-identification design and has no decision authority (SS9).
+_MATCH_MAX_DTE_DIFF = 5.0
+_MATCH_MAX_DELTA_DIFF = 0.05
+_MATCH_MAX_SPREAD_RATIO = 2.0
+
+
+def match_refused_to_passed(rows: list) -> list:
+    """Greedy nearest-neighbour match (by |Delta DTE|, no replacement on the
+    passed side): each refused candidate (x >= 0) is matched to the closest
+    eligible passed candidate (x < 0) on the same (symbol, day) within
+    tolerance, or dropped if none qualifies."""
+    refused = [r for r in rows if r["x"] >= 0]
+    passed = [r for r in rows if r["x"] < 0]
+    used = set()
+    pairs = []
+    for ref in refused:
+        candidates = [
+            p for p in passed
+            if p["contract_key"] not in used
+            and p["symbol"] == ref["symbol"] and p["day"] == ref["day"]
+            and abs(p["dte"] - ref["dte"]) <= _MATCH_MAX_DTE_DIFF
+            and abs(p["abs_delta"] - ref["abs_delta"]) <= _MATCH_MAX_DELTA_DIFF
+            and ref.get("rel_spread") is not None
+            and p.get("rel_spread") is not None
+            and p["rel_spread"] > 0 and ref["rel_spread"] > 0
+            and (1.0 / _MATCH_MAX_SPREAD_RATIO
+                 <= p["rel_spread"] / ref["rel_spread"]
+                 <= _MATCH_MAX_SPREAD_RATIO)
+        ]
+        if not candidates:
+            continue
+        best = min(candidates, key=lambda p: abs(p["dte"] - ref["dte"]))
+        used.add(best["contract_key"])
+        pairs.append((ref, best))
+    return pairs
+
+
+def matched_pair_estimate(pairs: list) -> tuple:
+    """Mean(refused outcome - matched passed outcome) over pairs, with a
+    symbol-day cluster bootstrap CI and t-stat - same construction as the
+    primary design's cluster_bootstrap_rd, applied to paired differences
+    instead of a local-linear intercept difference."""
+    import collections
+    import random
+
+    diffs_by_cluster: dict = collections.defaultdict(list)
+    for ref, matched in pairs:
+        if ref.get("outcome") is None or matched.get("outcome") is None:
+            continue
+        key = (ref["symbol"], ref["day"])
+        diffs_by_cluster[key].append(ref["outcome"] - matched["outcome"])
+
+    cluster_means = [sum(v) / len(v) for v in diffs_by_cluster.values()]
+    if not cluster_means:
+        return 0.0, None, None, None
+    point = sum(cluster_means) / len(cluster_means)
+    if len(cluster_means) < 2:
+        return point, None, None, None
+
+    rng = random.Random(20260902)
+    draws = []
+    for _ in range(4000):
+        sample = [cluster_means[rng.randrange(len(cluster_means))]
+                 for _ in cluster_means]
+        draws.append(sum(sample) / len(sample))
+    draws.sort()
+    lo = draws[int(0.025 * len(draws))]
+    hi = draws[int(0.975 * len(draws)) - 1]
+    se = (sum((d - point) ** 2 for d in draws) / (len(draws) - 1)) ** 0.5
+    t = (point / se) if se > 0 else None
+    return point, lo, hi, t

@@ -334,5 +334,47 @@ class SignConsistencyTests(unittest.TestCase):
         self.assertLess(second_half, 0)
 
 
+from scripts.gate_rd_test import match_refused_to_passed, matched_pair_estimate
+
+
+class MatchRefusedToPassedTests(unittest.TestCase):
+    def test_matches_within_tolerance_same_symbol_day(self):
+        refused = {"contract_key": "r1", "symbol": "AAPL", "day": "2026-08-19",
+                  "x": 0.03, "dte": 20.0, "abs_delta": 0.22,
+                  "rel_spread": 0.05, "outcome": -0.1}
+        close_pass = {"contract_key": "p1", "symbol": "AAPL", "day": "2026-08-19",
+                      "x": -0.01, "dte": 22.0, "abs_delta": 0.20,
+                      "rel_spread": 0.06, "outcome": 0.1}
+        far_pass = {"contract_key": "p2", "symbol": "AAPL", "day": "2026-08-19",
+                   "x": -0.02, "dte": 40.0, "abs_delta": 0.05,
+                   "rel_spread": 0.30, "outcome": 0.5}
+        pairs = match_refused_to_passed([refused, close_pass, far_pass])
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][0]["contract_key"], "r1")
+        self.assertEqual(pairs[0][1]["contract_key"], "p1")
+
+    def test_no_match_within_tolerance_is_dropped(self):
+        refused = {"contract_key": "r1", "symbol": "AAPL", "day": "2026-08-19",
+                  "x": 0.03, "dte": 20.0, "abs_delta": 0.22,
+                  "rel_spread": 0.05, "outcome": -0.1}
+        far_pass = {"contract_key": "p2", "symbol": "AAPL", "day": "2026-08-19",
+                   "x": -0.02, "dte": 40.0, "abs_delta": 0.05,
+                   "rel_spread": 0.30, "outcome": 0.5}
+        pairs = match_refused_to_passed([refused, far_pass])
+        self.assertEqual(pairs, [])
+
+
+class MatchedPairEstimateTests(unittest.TestCase):
+    def test_mean_difference_over_pairs(self):
+        pairs = [
+            ({"day": "2026-08-19", "symbol": "AAPL", "outcome": -0.2},
+             {"day": "2026-08-19", "symbol": "AAPL", "outcome": 0.1}),
+            ({"day": "2026-08-20", "symbol": "MSFT", "outcome": -0.1},
+             {"day": "2026-08-20", "symbol": "MSFT", "outcome": 0.05}),
+        ]
+        point, lo, hi, t = matched_pair_estimate(pairs)
+        self.assertLess(point, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
