@@ -98,6 +98,21 @@ def _config(**overrides) -> dict:
         "min_pop": 0.0, "max_delta": 1.0,
         "iv_outlier_threshold": 0.50, "iv_outlier_min_volume": 5,
         "moneyness_band": 0.50,
+        # The scorer applies `get_macro_penalty()` to EVERY row
+        # (options_screener.py, "Macro event penalty"), and that function reads
+        # the REAL macro calendar. With NFP on 2026-09-04 it returned -0.15 on
+        # every contract from 2026-09-01 onward, which swamped the +0.05
+        # Trend_Aligned bonus and left no row with a net-positive adjustment —
+        # failing `test_bonus_scale_is_a_net_per_row_gate` on the calendar
+        # rather than on the code.
+        #
+        # Pinned to 0.0 because no unit test of the scorer should depend on
+        # whether payrolls happen to land this week. It removes a uniform
+        # constant from every row, so it cannot mask a per-row defect: the
+        # adjustment tests measure differences BETWEEN rows and between runs,
+        # and a term added identically to all of them cancels out of both.
+        # Any test that wants the macro penalty should set it explicitly.
+        "macro_penalty": 0.0,
     }
     base.update(overrides)
     return base
