@@ -43,9 +43,11 @@ decision that cannot be replayed cannot be audited.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import sqlite3
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -366,3 +368,151 @@ def describe(alloc: Allocation, df: pd.DataFrame) -> List[str]:
         lines.append(f"  {s:<14}{w:>8.1%}{alloc.posterior.get(s, 0.0):>9.1%}"
                      f"{alloc.n_eff.get(s, 0.0):>8.0f}{mean:>10}")
     return lines
+
+
+#: Below this many eligible entries in the window, a Clopper-Pearson interval
+#: is so wide it cannot distinguish drift from ordinary sampling noise — the
+#: check would either always pass or flap on every recomputation. Silence
+#: instead of a manufactured verdict.
+MIN_WINDOW_FOR_DRIFT = 10
+
+
+def _entered_mix(db_path: str, eligible: Sequence[str],
+                 window: int) -> Dict[str, int]:
+    """Strategy counts over the most recent `window` allocation-eligible
+    entries, open or closed — a still-open position was still a pick, and
+    excluding it would make the check blind to the days closest to now."""
+    eligible = [str(s) for s in eligible]
+    if not eligible:
+        return {}
+    placeholders = ",".join("?" * len(eligible))
+    sql = (f"SELECT strategy_name FROM trades "
+          f"WHERE strategy_name IN ({placeholders}) "
+          f"ORDER BY entry_id DESC LIMIT ?")
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(sql, (*eligible, window)).fetchall()
+    except Exception:
+        log.warning("strategy allocation drift: ledger unreadable at %s",
+                   db_path, exc_info=True)
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+    counts: Dict[str, int] = {}
+    for (name,) in rows:
+        counts[str(name)] = counts.get(str(name), 0) + 1
+    return counts
+
+
+def drift_severity(weights: Dict[str, float], counts: Dict[str, int],
+                   confidence: float = 0.95) -> Tuple[str, List[str]]:
+    """Has the entered mix actually tracked the allocation's target weights?
+
+    `allocate` sets a SHARE per eligible structure and `admits` gates each
+    candidate independently against it — a per-candidate mechanism, with
+    nothing that enforces the target over any particular stretch of real
+    entries. A downstream defect (the per-symbol dedup picking a structure by
+    raw ROW COUNT before the weight was ever checked — many strikes on a few
+    tickers beat few strikes on many, regardless of weight) went unnoticed
+    for two weeks because nothing compared the entered mix to what it was
+    supposed to track. Fixed 2026-09-03; this is the comparison that should
+    make the next such drift show up in days, not a manual audit.
+
+    A 95% Clopper-Pearson interval on each structure's OBSERVED share, not a
+    point comparison, so a small window does not flare on ordinary sampling
+    noise. The severity is deliberately asymmetric, because the two
+    directions are not equally bad:
+
+    - CRITICAL only when the SINGLE highest-weighted structure's interval
+      sits entirely below its target — the book is under-taking the one
+      thing with a measured edge, which is the failure that motivated this.
+    - WARN when any OTHER (lower-weighted) structure's interval sits
+      entirely above its target — a structure being explored, not exploited,
+      is taking more of the book than its own evidence earned it.
+
+    Being UNDER its target on a low-weight structure, or OVER on the
+    dominant one, is not flagged: the exploration budget existing to buy
+    information means low-weight structures are EXPECTED to come up short
+    most of the time, and taking more than intended of the structure with
+    the actual edge is not the failure this check exists to catch.
+    """
+    n = sum(counts.values())
+    if not weights or n == 0:
+        return "OK", []
+    from scipy.stats import binomtest
+
+    dominant = max(weights, key=weights.get)
+    sev = "OK"
+    lines: List[str] = []
+    for strat, target in sorted(weights.items(), key=lambda kv: -kv[1]):
+        k = counts.get(strat, 0)
+        lo, hi = binomtest(k, n, target).proportion_ci(
+            confidence_level=confidence)
+        share = k / n
+        pct = f"{int(round(confidence * 100))}%"
+        if strat == dominant and hi < target:
+            sev = "CRITICAL"
+            lines.append(
+                f"     {strat}: {k}/{n} = {share:.0%} entered vs "
+                f"{target:.0%} target, {pct} CI [{lo:.0%}, {hi:.0%}] sits "
+                "BELOW target — the one measured-edge structure is "
+                "under-represented")
+        elif strat != dominant and lo > target:
+            if sev == "OK":
+                sev = "WARN"
+            lines.append(
+                f"     {strat}: {k}/{n} = {share:.0%} entered vs "
+                f"{target:.0%} target, {pct} CI [{lo:.0%}, {hi:.0%}] sits "
+                "ABOVE target — over-represented against its own evidence")
+    return sev, lines
+
+
+def drift_health_lines(db_path: str = "paper_trades.db",
+                       cfg_path: str = "config.json",
+                       window: int = 30) -> List[str]:
+    """`--health` line: has the entered mix tracked the allocation's target?
+
+    Same pattern as `candidate_marks.health_lines` — one summary line plus
+    detail lines on drift. Failure-safe throughout: a missing config, a
+    missing ledger, or a disabled allocation all report OK rather than
+    raising, because this is a smoke alarm running inside a health check,
+    not a gate that should ever stop a scan.
+    """
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    alloc_cfg = (cfg.get("auto_log") or {}).get("allocation") or {}
+    label = "alloc drift"
+    if not alloc_cfg.get("enabled"):
+        return [f"  {label:<14} allocation disabled — allowlist rules"
+               f"{'':<10}[OK]"]
+
+    eligible = [str(s) for s in (alloc_cfg.get("eligible_strategies") or [])]
+    if not eligible:
+        return [f"  {label:<14} no eligible structures configured"
+               f"{'':<10}[OK]"]
+
+    from . import pop_calibration as _pc
+    book = _pc.load_training_set(db_path)
+    book = book.dropna(subset=["ret_on_risk"]) if len(book) else book
+    alloc = allocate(book, eligible,
+                     explore_rate=float(alloc_cfg.get("explore_rate", 0.25)),
+                     half_life_days=float(alloc_cfg.get("half_life_days", 45.0)))
+    if not alloc.weights:
+        return [f"  {label:<14} no posterior yet — allowlist stands"
+               f"{'':<10}[OK]"]
+
+    counts = _entered_mix(db_path, eligible, window)
+    n = sum(counts.values())
+    if n < MIN_WINDOW_FOR_DRIFT:
+        return [f"  {label:<14} only {n} of the last {window} entries are "
+               f"allocation-eligible — too few to read{'':<3}[OK]"]
+
+    sev, detail = drift_severity(alloc.weights, counts)
+    header = (f"  {label:<14} {n} of last {window} eligible entries vs "
+             f"target weights{'':<5}[{sev}]")
+    return [header] + detail
