@@ -1599,7 +1599,13 @@ class PaperManager:
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
             paper_only, era, lottery_edge, capital_at_risk, budget_at_entry,
-            quantity
+            quantity,
+            short_bid_entry, short_ask_entry, long_bid_entry, long_ask_entry,
+            short_bid_exit, short_ask_exit, long_bid_exit, long_ask_exit,
+            short_put_bid_entry, short_put_ask_entry, long_put_bid_entry, long_put_ask_entry,
+            short_call_bid_entry, short_call_ask_entry, long_call_bid_entry, long_call_ask_entry,
+            short_put_bid_exit, short_put_ask_exit, long_put_bid_exit, long_put_ask_exit,
+            short_call_bid_exit, short_call_ask_exit, long_call_bid_exit, long_call_ask_exit
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1610,7 +1616,13 @@ class PaperManager:
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?
+            ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?
         )
         """
 
@@ -1702,6 +1714,21 @@ class PaperManager:
             # the option premium and the book's headline P&L was a sizing
             # artifact. See src/book_sizing.py.
             _qty,
+            # Per-leg bid/ask, entry and exit (schema v23). _exit columns are
+            # always None here — a trade is always OPEN when first logged;
+            # the exit-enforcement loop fills those in via UPDATE on close.
+            _float_or_none("short_bid_entry"), _float_or_none("short_ask_entry"),
+            _float_or_none("long_bid_entry"), _float_or_none("long_ask_entry"),
+            _float_or_none("short_bid_exit"), _float_or_none("short_ask_exit"),
+            _float_or_none("long_bid_exit"), _float_or_none("long_ask_exit"),
+            _float_or_none("short_put_bid_entry"), _float_or_none("short_put_ask_entry"),
+            _float_or_none("long_put_bid_entry"), _float_or_none("long_put_ask_entry"),
+            _float_or_none("short_call_bid_entry"), _float_or_none("short_call_ask_entry"),
+            _float_or_none("long_call_bid_entry"), _float_or_none("long_call_ask_entry"),
+            _float_or_none("short_put_bid_exit"), _float_or_none("short_put_ask_exit"),
+            _float_or_none("long_put_bid_exit"), _float_or_none("long_put_ask_exit"),
+            _float_or_none("short_call_bid_exit"), _float_or_none("short_call_ask_exit"),
+            _float_or_none("long_call_bid_exit"), _float_or_none("long_call_ask_exit"),
         )
 
         with self._get_connection() as conn:
@@ -1797,6 +1824,15 @@ class PaperManager:
         trade_dict["long_strike"] = long_strike
         trade_dict["spread_width"] = abs(short_strike - long_strike)
         trade_dict["net_credit"] = net_credit
+        # Per-leg entry quotes, when the caller supplied them (schema v23).
+        # Absent keys must stay absent here too — trade_dict.get() at
+        # log_trade's INSERT layer is what turns "key missing" into NULL
+        # rather than 0, and inserting an explicit None here would do the
+        # same thing, so this is deliberately a straight pass-through, not
+        # a coalesce.
+        for _key in ("short_bid", "short_ask", "long_bid", "long_ask"):
+            if _key in spread_dict:
+                trade_dict[f"{_key}_entry"] = spread_dict[_key]
         if max_profit is not None:
             trade_dict["max_profit_usd"] = float(max_profit)
         if max_loss is not None:
@@ -1841,6 +1877,12 @@ class PaperManager:
         trade_dict["long_call_strike"] = lc_strike
         trade_dict["spread_width"] = spread_width
         trade_dict["net_credit"] = total_credit
+        # Per-leg entry quotes, when the caller supplied them (schema v23).
+        for _key in ("short_put_bid", "short_put_ask", "long_put_bid",
+                    "long_put_ask", "short_call_bid", "short_call_ask",
+                    "long_call_bid", "long_call_ask"):
+            if _key in condor_dict:
+                trade_dict[f"{_key}_entry"] = condor_dict[_key]
         if max_risk is not None:
             trade_dict["max_loss_usd"] = float(max_risk)
         if condor_dict.get("max_profit") is not None:
