@@ -456,7 +456,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 22
+_SCHEMA_VERSION = 23
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -713,6 +713,37 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN budget_at_entry REAL",
         "UPDATE trades SET budget_at_entry = 4000.0 "
         "WHERE date >= '2026-07-29' AND budget_at_entry IS NULL",
+    ],
+    23: [
+        # Per-leg bid/ask at entry and exit, for multi-leg structures only.
+        # Unblocks repricing the 46% of the closed book that is multi-leg
+        # (docs/SINGLE_LEG_REPRICE_20260902.md refused it: entry_price on a
+        # spread is a net credit across legs, not any single leg's mid).
+        # NULL on every legacy row and on every single-leg row — never zero.
+        "ALTER TABLE trades ADD COLUMN short_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_ask_exit REAL",
     ],
 }
 
