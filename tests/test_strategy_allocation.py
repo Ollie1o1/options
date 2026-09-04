@@ -458,5 +458,178 @@ class TestAutoLogIntegration(unittest.TestCase):
             self.assertEqual(first, again)
 
 
+class TestDriftSeverity(unittest.TestCase):
+    """Does the entered mix over some recent window actually track the
+    allocation's target weights? `admits` gates each candidate independently
+    — nothing enforces the target over any particular stretch of real
+    entries, which is exactly how a downstream defect (per-symbol dedup
+    picking a structure by raw row count, ahead of the weight check, fixed
+    2026-09-03) went unnoticed for two weeks. This pure function is the
+    comparison that should have caught it.
+    """
+
+    WEIGHTS = {"Bull Put": 0.85, "Long Call": 0.05, "Long Put": 0.05,
+              "Short Put": 0.05}
+
+    def test_a_mix_matching_target_is_ok(self):
+        counts = {"Bull Put": 170, "Long Call": 10, "Long Put": 10,
+                  "Short Put": 10}
+        sev, lines = sa.drift_severity(self.WEIGHTS, counts)
+        self.assertEqual(sev, "OK")
+        self.assertEqual(lines, [])
+
+    def test_the_dominant_structure_under_represented_is_critical(self):
+        # Bull Put target 85%, entered at 25% — the failure mode this exists
+        # to catch: the one measured-edge structure being crowded out.
+        counts = {"Bull Put": 50, "Long Call": 50, "Long Put": 50,
+                  "Short Put": 50}
+        sev, lines = sa.drift_severity(self.WEIGHTS, counts)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertTrue(any("Bull Put" in ln and "BELOW target" in ln
+                            for ln in lines))
+
+    def test_a_non_dominant_structure_over_represented_is_warn(self):
+        # Bull Put exactly hits its target (its CI trivially contains it);
+        # Long Call is entered at 2.5x its target share.
+        counts = {"Bull Put": 170, "Long Call": 25, "Long Put": 3,
+                  "Short Put": 2}
+        sev, lines = sa.drift_severity(self.WEIGHTS, counts)
+        self.assertEqual(sev, "WARN")
+        self.assertTrue(any("Long Call" in ln and "ABOVE target" in ln
+                            for ln in lines))
+        self.assertFalse(any("Bull Put" in ln for ln in lines))
+
+    def test_critical_is_not_downgraded_by_a_simultaneous_warn(self):
+        counts = {"Bull Put": 50, "Long Call": 100, "Long Put": 25,
+                  "Short Put": 25}
+        sev, lines = sa.drift_severity(self.WEIGHTS, counts)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertTrue(any("Bull Put" in ln for ln in lines))
+        self.assertTrue(any("Long Call" in ln for ln in lines))
+
+    def test_a_structure_absent_from_the_window_counts_as_zero(self):
+        # Long Put and Short Put never appear in `counts` at all — must
+        # default to 0 rather than raise, and Bull Put's real shortfall
+        # (18% entered against an 85% target) must still be caught.
+        counts = {"Bull Put": 20, "Long Call": 90}
+        sev, lines = sa.drift_severity(self.WEIGHTS, counts)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertTrue(any("Bull Put" in ln for ln in lines))
+
+    def test_no_weights_is_ok_with_no_lines(self):
+        sev, lines = sa.drift_severity({}, {"Bull Put": 10})
+        self.assertEqual((sev, lines), ("OK", []))
+
+    def test_zero_entries_is_ok_with_no_lines(self):
+        sev, lines = sa.drift_severity(self.WEIGHTS, {})
+        self.assertEqual((sev, lines), ("OK", []))
+
+
+class TestDriftHealthLines(unittest.TestCase):
+    """The I/O wrapper: read the live allocation and the recent entered mix
+    from a real ledger, and report on them the way the other `--health`
+    checks do (see `candidate_marks.health_lines` for the pattern)."""
+
+    def _ledger(self, d, recent):
+        """A book with a clear posterior (Bull Put best, as in the real
+        book), plus `recent` extra rows at the END — highest entry_id, so
+        `drift_health_lines` sees them as the most recent entries — carrying
+        whatever mix the test wants to check.
+        """
+        import sqlite3, os
+        path = os.path.join(d, "ledger.db")
+        conn = sqlite3.connect(path)
+        conn.execute("""CREATE TABLE trades (
+            entry_id INTEGER PRIMARY KEY, date TEXT, expiration TEXT,
+            strategy_name TEXT, status TEXT, pnl_usd REAL, entry_delta REAL,
+            entry_iv REAL, iv_rank_score REAL, net_credit REAL,
+            spread_width REAL, capital_at_risk REAL)""")
+        rng = np.random.default_rng(3)
+        means = {"Bull Put": 60.0, "Long Call": -5.0, "Long Put": -20.0,
+                 "Short Put": 2.0}
+        i = 0
+        for strat, m in means.items():
+            for k in range(40):
+                i += 1
+                conn.execute(
+                    "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (i, f"2026-06-{1 + (k % 28):02d}", "2026-12-31", strat,
+                     "CLOSED", float(rng.normal(m, 40.0)), -0.3, 0.3, 0.5,
+                     1.2, 5.0, 400.0))
+        for strat in recent:
+            i += 1
+            conn.execute(
+                "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (i, "2026-09-01", "2026-12-31", strat, "OPEN", None,
+                 -0.3, 0.3, 0.5, 1.2, 5.0, 400.0))
+        conn.commit(); conn.close()
+        return path
+
+    def _cfg(self, d, ledger_path, window=None, **allocation):
+        import json, os
+        allocation.setdefault("enabled", True)
+        allocation.setdefault("eligible_strategies",
+                              ["Bull Put", "Long Call", "Long Put", "Short Put"])
+        allocation.setdefault("ledger_path", ledger_path)
+        cfg = {"auto_log": {"allocation": allocation}}
+        path = os.path.join(d, "config.json")
+        with open(path, "w") as fh:
+            json.dump(cfg, fh)
+        return path
+
+    def test_a_healthy_recent_mix_reports_ok(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            recent = ["Bull Put"] * 26 + ["Long Call"] * 2 + \
+                     ["Long Put"] * 1 + ["Short Put"] * 1
+            ledger = self._ledger(d, recent)
+            cfg = self._cfg(d, ledger)
+            lines = sa.drift_health_lines(ledger, cfg, window=30)
+            self.assertIn("[OK]", lines[0])
+
+    def test_a_starved_dominant_structure_reports_critical(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            recent = ["Long Call"] * 15 + ["Long Put"] * 10 + \
+                     ["Bull Put"] * 3 + ["Short Put"] * 2
+            ledger = self._ledger(d, recent)
+            cfg = self._cfg(d, ledger)
+            lines = sa.drift_health_lines(ledger, cfg, window=30)
+            self.assertIn("[CRITICAL]", lines[0])
+            self.assertTrue(any("Bull Put" in ln for ln in lines[1:]))
+
+    def test_disabled_allocation_reports_ok_and_says_why(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ledger = self._ledger(d, ["Bull Put"] * 5)
+            cfg = self._cfg(d, ledger, enabled=False)
+            lines = sa.drift_health_lines(ledger, cfg, window=30)
+            self.assertIn("[OK]", lines[0])
+            self.assertIn("allowlist", lines[0].lower())
+
+    def test_a_missing_ledger_does_not_raise(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._cfg(d, os.path.join(d, "nope.db"))
+            lines = sa.drift_health_lines(os.path.join(d, "nope.db"), cfg,
+                                          window=30)
+            self.assertTrue(lines)
+            self.assertIn("[OK]", lines[0])
+
+    def test_too_few_recent_entries_reports_ok_rather_than_alarming(self):
+        # `window` itself smaller than MIN_WINDOW_FOR_DRIFT — a caller-chosen
+        # tight window, independent of how much closed history exists for
+        # the posterior. Below the floor, a Clopper-Pearson interval is too
+        # wide to tell drift from noise, so this must stay quiet rather than
+        # manufacture a verdict.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ledger = self._ledger(d, ["Long Call"] * 3)
+            cfg = self._cfg(d, ledger)
+            lines = sa.drift_health_lines(ledger, cfg, window=5)
+            self.assertIn("[OK]", lines[0])
+            self.assertIn("too few", lines[0].lower())
+
+
 if __name__ == "__main__":
     unittest.main()
