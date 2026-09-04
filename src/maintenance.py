@@ -737,6 +737,13 @@ def main() -> None:
         print("\n".join(_candidate_health()))
         from src.candidate_marks import health_lines as _marks_health
         print("\n".join(_marks_health()))
+        # Has the entered mix actually tracked the allocation's target
+        # weights? `admits` gates each candidate independently, so nothing
+        # enforces the target over any stretch of real entries — a
+        # downstream defect drifted the mix for two weeks before anyone
+        # noticed. This is the automated version of that manual check.
+        from src.strategy_allocation import drift_health_lines as _drift_health
+        print("\n".join(_drift_health()))
         banner = health_banner(rep, launchd_jobs=read_launchd_status(),
                                silence_days=launchd_silence_days())
         if banner:

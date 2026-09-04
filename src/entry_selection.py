@@ -59,6 +59,46 @@ def entry_seed(scan_id: str) -> int:
     return int(digest[:16], 16)
 
 
+def dedup_by_symbol(df: Any, strategy_of_row: Any, *, alloc: Any = None) -> Any:
+    """One row per symbol: the highest-weighted eligible structure wins.
+
+    Without `alloc` this is exactly `drop_duplicates(subset=["symbol"],
+    keep="first")` on whatever order the frame already carries — plain
+    first-wins, and what still runs when no strategy allocation is
+    configured (the name allowlist rules instead, and every candidate here
+    is already the same structure it would have been under that list).
+
+    With `alloc`, rows are stable-sorted by `alloc.share(strategy)` before
+    the same drop_duplicates, so ties within one structure still resolve by
+    the caller's own draw order (e.g. `draw_entry_queue`), but which
+    STRUCTURE wins a symbol's one shot follows the allocation's weight
+    rather than which structure happened to have more raw candidate rows
+    for that symbol.
+
+    That distinction is not academic. `strategy_allocation.allocate` targets
+    a SHARE per structure (Bull Put ~88%, Long Call/Long Put/Short Put ~4%
+    each) and gates each candidate independently against it — but a
+    structure that is constructible on many strikes of a few names produces
+    far more raw rows per symbol than one constructible on only a handful of
+    strikes across many names. Deduping by plain shuffle order rewards row
+    COUNT, not weight, and a symbol's one shot went to the low-weight
+    structure about as often as the high-weight one. Measured 2026-09-03:
+    entered mix 40% Bull Put / 40% Long Call+Put against an 88%/8% target.
+    Sorting by weight first fixes the ORDER of operations; it does not
+    remove the randomness — the winning row still has to clear its own
+    structure's admission probability afterward, same as always.
+    """
+    if df is None or len(df) == 0 or "symbol" not in getattr(df, "columns", ()):
+        return df
+    weights = getattr(alloc, "weights", None)
+    if alloc is not None and weights:
+        weight = df.apply(lambda r: alloc.share(strategy_of_row(r)), axis=1)
+        df = (df.assign(_alloc_weight=weight)
+                .sort_values("_alloc_weight", ascending=False, kind="mergesort")
+                .drop(columns="_alloc_weight"))
+    return df.drop_duplicates(subset=["symbol"], keep="first")
+
+
 def draw_entry_queue(df: Any, *, scan_id: str) -> Any:
     """Shuffle survivors into the order the top-N cut will consume.
 
