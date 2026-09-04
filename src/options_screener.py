@@ -954,6 +954,35 @@ def _draw_entry_queue(df):
     return _es.draw_entry_queue(df, scan_id=_cr.current_scan_id())
 
 
+def _current_allocation(cfg_path: str = "config.json"):
+    """The live strategy allocation, read straight from `cfg_path`.
+
+    Thin wrapper so a caller outside `apply_auto_log_allowlist` — the
+    per-symbol dedup, specifically — can see the same weights that will
+    later gate each candidate, instead of collapsing a symbol to whichever
+    structure happened to have the most raw rows for it.
+    """
+    import json
+    try:
+        with open(_repo_path(cfg_path)) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    return _allocation_for(cfg, cfg_path)
+
+
+def _dedup_by_symbol(df, strategy_of_row):
+    """One row per symbol, letting the live allocation pick the structure.
+
+    See `entry_selection.dedup_by_symbol` for why this has to run with the
+    allocation in hand rather than as a plain `drop_duplicates`: a symbol's
+    one shot must go to its highest-weighted eligible structure, not to
+    whichever structure the shuffle happened to give more raw rows to.
+    """
+    from . import entry_selection as _es
+    return _es.dedup_by_symbol(df, strategy_of_row, alloc=_current_allocation())
+
+
 def record_autolog_rank(df, *, board: str):
     """Record the order the top-N cut actually sees.
 
@@ -6956,9 +6985,10 @@ def main():
                         # is still called above because it LABELS the structures
                         # and prices their legs; only its ordering is discarded.
                         _spreads = _draw_entry_queue(_spreads)
-                        # One row per ticker — the draw above decides which structure per symbol
-                        if "symbol" in _spreads.columns:
-                            _spreads = _spreads.drop_duplicates(subset=["symbol"], keep="first")
+                        # One row per ticker — the live allocation decides which
+                        # structure per symbol, not whichever the shuffle gave
+                        # more raw rows to. See _dedup_by_symbol.
+                        _spreads = _dedup_by_symbol(_spreads, structure_strategy_name)
                         _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
 
                         # Record the queue BEFORE the pre-cut filters, so every
@@ -7169,10 +7199,13 @@ def main():
                         # restore an ordering no evidence supports, take none.
                         # See src/entry_selection.py for the three reasons.
                         _single_legs = _draw_entry_queue(_single_legs)
-                        # One row per ticker — keep the highest-scored leg per symbol to avoid
-                        # concentration (e.g. ORCL×6 from a single scan).
-                        if "symbol" in _single_legs.columns:
-                            _single_legs = _single_legs.drop_duplicates(subset=["symbol"], keep="first")
+                        # One row per ticker — the live allocation decides which
+                        # structure per symbol (avoiding concentration, e.g.
+                        # ORCL×6 from a single scan, without letting row COUNT
+                        # override the allocation's weight). See _dedup_by_symbol.
+                        _single_legs = _dedup_by_symbol(
+                            _single_legs,
+                            lambda r: _strategy_label_for_mode(mode, r.get("type")))
                         _today_str = datetime.now().strftime("%Y-%m-%d")
                         # Record the queue BEFORE the pre-cut filters, so every
                         # candidate carries its position and the filters below
