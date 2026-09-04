@@ -443,7 +443,7 @@ def drift_severity(weights: Dict[str, float], counts: Dict[str, int],
         return "OK", []
     from scipy.stats import binomtest
 
-    dominant = max(weights, key=weights.get)
+    dominant = max(weights, key=lambda strat: weights[strat])
     sev = "OK"
     lines: List[str] = []
     for strat, target in sorted(weights.items(), key=lambda kv: -kv[1]):
