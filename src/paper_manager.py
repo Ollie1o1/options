@@ -344,7 +344,7 @@ def _leg_exit_columns(row, leg_quotes: Dict[Tuple[float, str], Tuple[Optional[fl
     def _q(strike_key: str, opt_type: Optional[str] = None) -> Tuple[Optional[float], Optional[float]]:
         try:
             raw = row[strike_key] if strike_key in row.keys() else None
-            strike = float(raw) if raw not in (None, "", 0) else None
+            strike = float(raw) if raw is not None and raw not in ("", 0) else None
         except (TypeError, ValueError, KeyError):
             strike = None
         if strike is None or opt_type is None:
