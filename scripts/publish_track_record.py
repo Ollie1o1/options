@@ -62,7 +62,7 @@ import random
 import sqlite3
 import statistics
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Allow running as a plain script (python scripts/publish_track_record.py).
@@ -149,6 +149,33 @@ def _f(v: Any) -> Optional[float]:
 def _median(values: Sequence[float]) -> Optional[float]:
     vals = [v for v in values if v is not None]
     return statistics.median(vals) if vals else None
+
+
+def recent_window(rows: Sequence[Dict[str, Any]], days: int = 14,
+                  as_of: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Rows entered in the last `days` days, for "how's it going lately".
+
+    The all-time sections describe the book's whole life; a bad recent
+    stretch is invisible inside a headline built over 900+ trades. This is
+    the trailing cut that answers it, using the SAME statistics functions
+    (`summarize_book`, `equal_weighted`) as the all-time sections so the two
+    are never computed two different ways.
+
+    Anchored to the LATEST `date` among `rows` when `as_of` is not given,
+    never wall-clock time: a regenerated report must depend only on its own
+    data, and a book that has gone quiet should not be silently read as "no
+    recent trades" just because the file was regenerated late.
+    """
+    dates = [str(r["date"])[:10] for r in rows if r.get("date")]
+    if not dates:
+        return []
+    cutoff_ref = as_of or max(dates)
+    try:
+        cutoff = (datetime.strptime(cutoff_ref, "%Y-%m-%d")
+                 - timedelta(days=days)).strftime("%Y-%m-%d")
+    except ValueError:
+        return []
+    return [r for r in rows if r.get("date") and str(r["date"])[:10] >= cutoff]
 
 
 def _risked(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -645,6 +672,73 @@ def _fmt_ci(low: Optional[float], high: Optional[float]) -> str:
     return f"[{low:.2f}, {high:.2f}]"
 
 
+#: Below this many closed trades, a profit-factor interval is too wide to
+#: read as anything but noise — the point estimate is still shown, flagged.
+_RECENT_MIN_FOR_INTERVAL = 20
+
+RECENT_WINDOW_DAYS = 14
+
+
+def _render_recent(rows: Sequence[Dict[str, Any]],
+                   days: int = RECENT_WINDOW_DAYS) -> List[str]:
+    """How the book has done lately, cut from the same rows as everything
+    else in this document — never a separate query someone has to remember
+    to run by hand."""
+    recent = recent_window(rows, days=days)
+    out: List[str] = [f"## Recent — last {days} days", ""]
+    if not recent:
+        out.append(f"_No closed trade entered in the last {days} days._")
+        out.append("")
+        return out
+
+    through = max(str(r["date"])[:10] for r in recent if r.get("date"))
+    book = summarize_book(recent)
+    eq = equal_weighted(recent)
+    out.append(f"{_plural(book['n_closed'], 'closed trade')} entered in the "
+              f"last {days} days, through {through}.")
+    out.append("")
+    out.append(f"- Net P&L: **{_fmt_signed_money(book['net_pnl'])}**")
+    out.append(
+        f"- Return on capital risked: **{_fmt_pct(book['return_on_risk'])}** "
+        f"({_fmt_signed_money(book['net_pnl_risked'])} of "
+        f"{_fmt_dollars(book['capital_at_risk'])} risked, "
+        f"{book['n_risked']} trades)")
+    wr = book["win_rate"]
+    wr_txt = f"{wr * 100:.1f}%" if wr is not None else "n/a"
+    out.append(f"- Win rate: **{wr_txt}**")
+    size = _fmt_dollars(eq["risk_per_trade"])
+    out.append(
+        f"- Profit factor, equal-weighted at {size} a trade: "
+        f"**{_fmt_pf(eq['profit_factor'])}** (95% bootstrap CI "
+        f"{_fmt_ci(eq['ci_low'], eq['ci_high'])})")
+    if eq["n"] < _RECENT_MIN_FOR_INTERVAL:
+        out.append(
+            f"  - Only {eq['n']} trades in this window — too few for the "
+            "interval to mean much either way; read the point estimate as a "
+            "rough signal, not a verdict.")
+    elif eq["ci_low"] is not None and eq["ci_high"] is not None:
+        if eq["ci_low"] <= 1.0 <= eq["ci_high"]:
+            out.append("  - The interval contains 1.")
+        elif eq["ci_low"] > 1.0:
+            out.append("  - The interval sits entirely above 1.")
+        else:
+            out.append("  - The interval sits entirely below 1.")
+    out.append("")
+
+    per_strategy = summarize_equal_weighted_strategies(recent)
+    if len(per_strategy) > 1:
+        n_total = len(recent)
+        out.append("| Strategy | Closed | Share of window | Profit factor "
+                   "(equal-weighted) |")
+        out.append("|----------|-------:|------:|------:|")
+        for s in per_strategy:
+            out.append(f"| {s['strategy']} | {s['n_closed']} | "
+                       f"{s['n_closed'] / n_total:.0%} | "
+                       f"{_fmt_pf(s['profit_factor'])} |")
+        out.append("")
+    return out
+
+
 def _render_equal_weighted(rows: Sequence[Dict[str, Any]]) -> List[str]:
     """The same book with every trade given the same capital at risk."""
     eq = equal_weighted(rows)
@@ -788,6 +882,9 @@ def render_track_record(rows: List[Dict[str, Any]],
     out.append(f"- Median return per trade: **{_fmt_pct(book['median_return_on_risk'])}** "
                "of capital risked (typical trade, size-blind)")
     out.append("")
+
+    # --- Recent: how it's going lately, not over the book's whole life -------
+    out.extend(_render_recent(rows))
 
     # --- Equal-weighted: the headline with size taken out --------------------
     out.extend(_render_equal_weighted(rows))
