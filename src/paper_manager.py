@@ -456,7 +456,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 22
+_SCHEMA_VERSION = 23
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -713,6 +713,19 @@ _MIGRATIONS = {
         "ALTER TABLE trades ADD COLUMN budget_at_entry REAL",
         "UPDATE trades SET budget_at_entry = 4000.0 "
         "WHERE date >= '2026-07-29' AND budget_at_entry IS NULL",
+    ],
+    23: [
+        # The earnings-gate verdict (src/earnings_gate.py) computed at log_trade
+        # time, kept instead of discarded. Reachable values: clear_of_earnings,
+        # earnings_unknown, projected_through_earnings (report mode only —
+        # refuse mode refuses the trade before the insert, same as an announced
+        # through_earnings always does, so that value never lands here). NULL
+        # means the check never ran at all — the gate was disabled, or
+        # allow_through_earnings bypassed it, or the trade predates this column
+        # — never read NULL as "clear". This is instrumentation only: nothing
+        # reads this column yet. It exists so a future test of "does clear beat
+        # unknown" going forward has data to run on.
+        "ALTER TABLE trades ADD COLUMN earnings_state TEXT",
     ],
 }
 
@@ -1499,6 +1512,11 @@ class PaperManager:
                 time_exit_dte=self._time_exit_dte,
                 cfg=self._earnings_cfg,
             )
+            # Kept for analysis even when it doesn't refuse — see migration 23
+            # in _MIGRATIONS. None here (also reachable when the config leaves
+            # the gate disabled, or allow_through_earnings bypassed this whole
+            # branch) means the check never ran — never read it as "clear".
+            trade_dict["earnings_state"] = _earn
             if _earn == PROJECTED_THROUGH:
                 # An estimate, so it is COUNTED whether or not it refuses —
                 # the point of the report-only default is to see how often it
@@ -1568,7 +1586,7 @@ class PaperManager:
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
             paper_only, era, lottery_edge, capital_at_risk, budget_at_entry,
-            quantity
+            quantity, earnings_state
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1579,7 +1597,7 @@ class PaperManager:
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?
+            ?, ?
         )
         """
 
@@ -1671,6 +1689,7 @@ class PaperManager:
             # the option premium and the book's headline P&L was a sizing
             # artifact. See src/book_sizing.py.
             _qty,
+            trade_dict.get("earnings_state"),
         )
 
         with self._get_connection() as conn:

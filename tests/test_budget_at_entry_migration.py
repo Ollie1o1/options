@@ -19,7 +19,9 @@ from src import paper_manager as pm
 class TestMigration22(unittest.TestCase):
 
     def test_schema_version_is_22(self):
-        self.assertEqual(pm._SCHEMA_VERSION, 22)
+        # Bumped for migration 23 (earnings_state) — this asserted "22 is
+        # current" only because 22 was the tip when this file was written.
+        self.assertEqual(pm._SCHEMA_VERSION, 23)
 
     def test_migration_22_is_registered(self):
         self.assertIn(22, pm._MIGRATIONS)
@@ -65,7 +67,7 @@ class TestMigration22(unittest.TestCase):
                 cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
                 ver = conn.execute("PRAGMA user_version").fetchone()[0]
         self.assertIn("budget_at_entry", cols)
-        self.assertEqual(ver, 22)
+        self.assertEqual(ver, 23)
 
 
 if __name__ == "__main__":

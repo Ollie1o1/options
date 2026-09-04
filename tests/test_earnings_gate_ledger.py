@@ -203,6 +203,38 @@ class EarningsRefusal(unittest.TestCase):
         self.assertIn(_DURING, out)
         self.assertIn("WMT", out)
 
+    def test_a_spread_clear_of_earnings_records_its_state(self):
+        # The verdict is computed and then thrown away today — nothing
+        # persists it, so a future test of "does clear beat unknown" has no
+        # data to run on. This records it.
+        _seed_cache(self.cache, [("WMT", _BEFORE, "amc"), ("WMT", _AFTER, "amc")])
+        pm = self._pm()
+        self.assertTrue(pm.log_trade(_bull_put()))
+        self.assertEqual(self._rows()[0]["earnings_state"], "clear_of_earnings")
+
+    def test_an_uncovered_symbol_records_unknown_state(self):
+        pm = self._pm()
+        self.assertTrue(pm.log_trade(_bull_put()))
+        self.assertEqual(self._rows()[0]["earnings_state"], "earnings_unknown")
+
+    def test_allow_through_earnings_records_that_the_check_was_bypassed(self):
+        # The escape hatch skips verdict_for_trade entirely — this must not
+        # read as "clear", or a bypassed trade would look like evidence for
+        # the gate.
+        _seed_cache(self.cache, [("WMT", _DURING, "amc")])
+        pm = self._pm()
+        self.assertTrue(pm.log_trade(_bull_put(allow_through_earnings=True)))
+        self.assertIsNone(self._rows()[0]["earnings_state"])
+
+    def test_the_gate_off_records_no_state(self):
+        # refuse_through_earnings is the gate's enable switch (cfg["enabled"]),
+        # not just a refuse/report toggle — off means verdict_for_trade never
+        # runs at all, so there is nothing honest to record but None.
+        _seed_cache(self.cache, [("WMT", _DURING, "amc")])
+        pm = self._pm(refuse_through_earnings=False)
+        self.assertTrue(pm.log_trade(_bull_put()))
+        self.assertIsNone(self._rows()[0]["earnings_state"])
+
 
 class ProjectedEarnings(unittest.TestCase):
     """A projected report counts, and only refuses when told to.
@@ -242,6 +274,14 @@ class ProjectedEarnings(unittest.TestCase):
         finally:
             conn.close()
 
+    def _rows(self):
+        conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in conn.execute("SELECT * FROM trades")]
+        finally:
+            conn.close()
+
     def test_report_mode_flags_it_and_still_logs(self):
         pm = self._pm()
         self.assertTrue(pm.log_trade(_bull_put(ticker="AAA")))
@@ -261,6 +301,12 @@ class ProjectedEarnings(unittest.TestCase):
         self.assertTrue(pm.log_trade(_bull_put(ticker="AAA")))
         self.assertEqual(pm.projected_earnings_flagged, 0)
         self.assertEqual(pm.earnings_unknown, 1)
+
+    def test_report_mode_records_the_projected_state(self):
+        pm = self._pm()
+        self.assertTrue(pm.log_trade(_bull_put(ticker="AAA")))
+        self.assertEqual(self._rows()[0]["earnings_state"],
+                         "projected_through_earnings")
 
     def test_the_flag_names_the_projected_date(self):
         import contextlib
