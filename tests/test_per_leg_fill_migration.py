@@ -33,7 +33,9 @@ _CONDOR_COLS = ("short_put_bid_entry", "short_put_ask_entry",
 
 class TestMigration23(unittest.TestCase):
     def test_schema_version_is_23(self):
-        self.assertEqual(pm._SCHEMA_VERSION, 23)
+        # Scoped to migration 23's own correctness, not to it being the tip —
+        # see the equivalent note in test_budget_at_entry_migration.py.
+        self.assertGreaterEqual(pm._SCHEMA_VERSION, 23)
 
     def test_migration_23_is_registered(self):
         self.assertIn(23, pm._MIGRATIONS)

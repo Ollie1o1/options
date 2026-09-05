@@ -20,9 +20,9 @@ class TestMigration22(unittest.TestCase):
 
     def test_schema_version_is_22(self):
         # This file is scoped to migration 22's own correctness; the global
-        # "current" schema version has since moved to 23 (per-leg fill
-        # recording, migration 23) — updated here rather than renamed, to
-        # keep this diff about the version bump and nothing else.
+        # "current" schema version has since moved on (23: per-leg fill
+        # recording, 24: earnings_state) — updated here rather than renamed,
+        # to keep this diff about the version bump and nothing else.
         self.assertGreaterEqual(pm._SCHEMA_VERSION, 22)
 
     def test_migration_22_is_registered(self):
