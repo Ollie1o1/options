@@ -429,11 +429,19 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
            terminal: Optional[Dict[str, str]] = None,
            splits: Optional[Dict[str, Any]] = None,
            stratum_of: Optional[Dict[str, str]] = None,
+           outlook_lookup: Optional[Dict[Tuple[str, str], float]] = None,
            seed: int = 20260806) -> Tuple[List[Trade], Dict[str, int]]:
     """Walk the calendar forward, opening and managing positions.
 
     `terminal` maps symbol -> last date with data, so a position whose ticker
     stops existing is closed rather than lost.
+
+    `outlook_lookup` is {(symbol, date): composite_score} from
+    `src.outlook.cross_sectional.composite_lookup` — see
+    `docs/PREREG_OUTLOOK_FEATURE_20260905.md`. Optional and additive: a
+    symbol/date missing from it (or the argument omitted entirely) leaves
+    `outlook_composite` absent from that trade's features, same as any other
+    unmeasurable feature — never zero-filled.
     """
     rng = random.Random(seed)
     signals = SignalHistory()
@@ -558,12 +566,16 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
                 continue
 
             exp = _pick_expiry(chain, date, *spec.entry.get("dte", [25, 60]))
+            feats = _entry_features(signals.features(sym), legs, chain,
+                                    quotes, float(price), car, date,
+                                    exp or date)
+            if outlook_lookup is not None:
+                score = outlook_lookup.get((sym, date))
+                if score is not None:
+                    feats["outlook_composite"] = score
             t = Trade(symbol=sym, entry_date=date, entry_price=float(price),
                       capital_at_risk=car, legs=legs, expiration=exp or date,
-                      stratum=stratum_of.get(sym),
-                      features=_entry_features(signals.features(sym), legs,
-                                               chain, quotes, float(price),
-                                               car, date, exp or date))
+                      stratum=stratum_of.get(sym), features=feats)
             trades.append(t)
             live.append(t)
             stats["opened"] += 1
