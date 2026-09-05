@@ -7094,6 +7094,18 @@ def main():
                                         "net_delta":    row.get("net_delta"),
                                         "quality_score": row.get("quality_score", 0.5),
                                         "paper_only": _paper_only_flag,
+                                        # Per-leg entry quotes (schema v23) — already
+                                        # computed above so the structure can be priced
+                                        # at what it would actually fill for; threaded
+                                        # through here so they reach the ledger too.
+                                        "short_put_bid": row.get("short_put_bid"),
+                                        "short_put_ask": row.get("short_put_ask"),
+                                        "long_put_bid": row.get("long_put_bid"),
+                                        "long_put_ask": row.get("long_put_ask"),
+                                        "short_call_bid": row.get("short_call_bid"),
+                                        "short_call_ask": row.get("short_call_ask"),
+                                        "long_call_bid": row.get("long_call_bid"),
+                                        "long_call_ask": row.get("long_call_ask"),
                                     })
                                     if pm.log_iron_condor_if_new(_payload, auto_log=True):
                                         _inserted += 1
@@ -7115,6 +7127,12 @@ def main():
                                         "max_loss":   row.get("max_loss", 0),
                                         "quality_score": row.get("quality_score", 0.5),
                                         "paper_only": _paper_only_flag,
+                                        # Per-leg entry quotes (schema v23) — see the
+                                        # matching comment in the condor branch above.
+                                        "short_bid": row.get("short_bid"),
+                                        "short_ask": row.get("short_ask"),
+                                        "long_bid": row.get("long_bid"),
+                                        "long_ask": row.get("long_ask"),
                                     })
                                     if pm.log_spread_if_new(_payload, auto_log=True):
                                         _inserted += 1

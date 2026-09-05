@@ -19,7 +19,11 @@ from src import paper_manager as pm
 class TestMigration22(unittest.TestCase):
 
     def test_schema_version_is_22(self):
-        self.assertEqual(pm._SCHEMA_VERSION, 22)
+        # This file is scoped to migration 22's own correctness; the global
+        # "current" schema version has since moved to 23 (per-leg fill
+        # recording, migration 23) — updated here rather than renamed, to
+        # keep this diff about the version bump and nothing else.
+        self.assertGreaterEqual(pm._SCHEMA_VERSION, 22)
 
     def test_migration_22_is_registered(self):
         self.assertIn(22, pm._MIGRATIONS)
@@ -65,7 +69,10 @@ class TestMigration22(unittest.TestCase):
                 cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
                 ver = conn.execute("PRAGMA user_version").fetchone()[0]
         self.assertIn("budget_at_entry", cols)
-        self.assertEqual(ver, 22)
+        # A fresh ledger runs every migration up to whatever the CURRENT
+        # schema version is, not frozen at 22 — see the note on
+        # test_schema_version_is_22 above.
+        self.assertGreaterEqual(ver, 22)
 
 
 if __name__ == "__main__":

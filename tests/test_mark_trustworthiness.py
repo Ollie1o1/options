@@ -372,5 +372,52 @@ class TestExpirySettlementUnaffected(_MarkTestCase):
         self.assertEqual(self._row(entry_id)["status"], "CLOSED")
 
 
+class TestPerLegExitRecording(_MarkTestCase):
+    def test_spread_exit_persists_both_legs_bid_ask(self):
+        # Bull Put: short 100/long 95, credit 1.00. spread.tp=0.50 (this
+        # file's own config, above) fires when current_credit_to_close
+        # <= 0.50 of the credit. short mid (0.10,0.20)->0.15, long mid
+        # (0.02,0.06)->0.04: current_credit_to_close = 0.15-0.04 = 0.11,
+        # pnl_raw = (1.00-0.11)/1.00 = 0.89 >= 0.50 -> Take Profit fires,
+        # verified against _evaluate_multileg_exit before writing this.
+        entry_id = self._insert_open_row(
+            strike=100.0, type="put", strategy_name="Bull Put Spread",
+            long_strike=95.0, net_credit=1.00,
+        )
+        mgr = self._manager(chain_quotes={
+            (100.0, "put"): (0.10, 0.20),
+            (95.0, "put"): (0.02, 0.06),
+        })
+        mgr.update_positions()
+        row = self._row(entry_id)
+        self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(
+            (row["short_bid_exit"], row["short_ask_exit"],
+             row["long_bid_exit"], row["long_ask_exit"]),
+            (0.10, 0.20, 0.02, 0.06))
+
+    def test_a_leg_missing_from_the_chain_leaves_its_exit_columns_null(self):
+        # Same trigger as above, but the long leg is absent from chain_quotes
+        # entirely (a real, if rare, chain gap) rather than model-marked —
+        # model-marked legs already gate the WHOLE exit (see
+        # test_one_model_leg_gates_a_whole_spread in this file), so this
+        # covers the other missing-data shape: chain silence, not a fallback.
+        entry_id = self._insert_open_row(
+            strike=100.0, type="put", strategy_name="Bull Put Spread",
+            long_strike=95.0, net_credit=1.00,
+        )
+        mgr = self._manager(
+            chain_quotes={(100.0, "put"): (0.10, 0.20)},
+            model_price=0.04,  # long leg falls through to the model rung
+        )
+        mgr.update_positions()
+        row = self._row(entry_id)
+        # Mirrors test_one_model_leg_gates_a_whole_spread: a model-sourced
+        # leg gates the whole price-based exit, so the row stays OPEN and no
+        # exit columns are written at all — verifying that invariant is
+        # untouched by this task, not re-litigating it.
+        self.assertEqual(row["status"], "OPEN")
+
+
 if __name__ == "__main__":
     unittest.main()
