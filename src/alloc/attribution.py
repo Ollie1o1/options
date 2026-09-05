@@ -169,6 +169,90 @@ RESIDUAL_CONTROLS = ("credit_pct_width", "atm_iv")
 MIN_CONTROL_COVERAGE = 0.80
 
 
+def _control_value(t: Any, name: str) -> Optional[float]:
+    v = (getattr(t, "features", None) or {}).get(name)
+    if v is None:
+        return None
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if fv != fv else fv         # NaN is not a value
+
+
+def _residual_values(trades: Sequence[Any], feature: str,
+                     controls: Sequence[str] = RESIDUAL_CONTROLS
+                     ) -> Optional[Dict[str, Any]]:
+    """The rank-residual of `feature` against `controls`, and the machinery
+    both `residual_ic` (one feature) and the ensemble (many, combined) need.
+
+    Returns None when nothing is measurable (see `residual_ic` for why each
+    guard exists — this function IS that logic, unchanged, just returning the
+    residual array instead of collapsing it straight to a scalar IC).
+    Otherwise a dict of {keep, resid, ys, controls} — `keep`/`ys` already
+    filtered to the rows the residual covers.
+    """
+    keep, xs, ys = paired(trades, feature)
+    if len(xs) < MIN_TRADES or _sps is None:
+        return None
+
+    # A control is kept if it is known for MOST of the sample, and the trades
+    # where it is unknown are then dropped from the residual.
+    #
+    # The first version dropped the CONTROL whenever any single trade lacked it,
+    # which on real output meant one absent value silently disabled the control
+    # across a 3,000-trade table while the column went on printing a number.
+    # Dropping the affected trades instead keeps the control, and keeps the
+    # residualised and non-residualised trades from being mixed into one figure
+    # — which was the original worry and is still the right one.
+    usable: List[str] = []
+    for name in controls:
+        if name == feature:
+            continue
+        have = [t for t in keep if _control_value(t, name) is not None]
+        # If honouring the control would cost most of the evidence, the control
+        # goes rather than the sample.
+        if len(have) < max(MIN_TRADES, MIN_CONTROL_COVERAGE * len(keep)):
+            continue
+        if len({_control_value(t, name) for t in have}) < 2:
+            continue                    # constant, so a no-op
+        usable.append(name)
+
+    if usable:
+        rows_ok = [i for i, t in enumerate(keep)
+                   if all(_control_value(t, n) is not None for n in usable)]
+        keep = [keep[i] for i in rows_ok]
+        xs = [xs[i] for i in rows_ok]
+        ys = [ys[i] for i in rows_ok]
+        cols = [[float(_control_value(t, n)) for t in keep] for n in usable]  # type: ignore[arg-type]
+    else:
+        cols = []
+
+    if len(set(xs)) < 2 or len(set(ys)) < 2:
+        return None                     # constant: no ranking to correlate
+    rx = _sps.rankdata(xs)
+    if not usable:
+        # No control could be applied, so there is no controlled residual. The
+        # first version returned the RAW rank here, which puts an uncontrolled
+        # value under a heading that says otherwise — and it reads as "the
+        # control made no difference" when it means "no control ran".
+        return None
+
+    design = np.column_stack([_sps.rankdata(c) for c in cols]
+                             + [np.ones(len(rx))])
+    beta, *_ = np.linalg.lstsq(design, rx, rcond=None)
+    resid = rx - design @ beta
+    # A feature that is a RENAMED control leaves a residual of pure
+    # floating-point noise, and ranking that noise yields a large spurious
+    # correlation — 0.97 in the test that caught this — because the arithmetic
+    # error pattern still follows the data. Anything this far below the
+    # feature's own scale is collinear, and the honest report is "not
+    # measurable", not a number.
+    if float(np.std(resid)) <= 1e-8 * (float(np.std(rx)) or 1.0):
+        return None                     # the feature IS the controls
+    return {"keep": keep, "resid": resid, "ys": ys, "controls": usable}
+
+
 def residual_ic(trades: Sequence[Any], feature: str,
                 controls: Sequence[str] = RESIDUAL_CONTROLS) -> Dict[str, Any]:
     """Spearman IC of the feature against RoC, with the controls regressed out.
@@ -197,79 +281,15 @@ def residual_ic(trades: Sequence[Any], feature: str,
     """
     out: Dict[str, Any] = {"feature": feature, "n": 0, "ic": None, "p": None,
                            "controls": []}
-    keep, xs, ys = paired(trades, feature)
-    if len(xs) < MIN_TRADES or _sps is None:
+    r = _residual_values(trades, feature, controls)
+    if r is None:
+        # n still reflects what was available, for readers of the table —
+        # matches the pre-refactor behaviour of reporting n before bailing.
+        keep, xs, _ = paired(trades, feature)
+        out["n"] = len(xs) if len(xs) >= MIN_TRADES and _sps is not None else 0
         return out
-
-    def _value(t: Any, name: str) -> Optional[float]:
-        v = (getattr(t, "features", None) or {}).get(name)
-        if v is None:
-            return None
-        try:
-            fv = float(v)
-        except (TypeError, ValueError):
-            return None
-        return None if fv != fv else fv     # NaN is not a value
-
-    # A control is kept if it is known for MOST of the sample, and the trades
-    # where it is unknown are then dropped from the residual.
-    #
-    # The first version dropped the CONTROL whenever any single trade lacked it,
-    # which on real output meant one absent value silently disabled the control
-    # across a 3,000-trade table while the column went on printing a number.
-    # Dropping the affected trades instead keeps the control, and keeps the
-    # residualised and non-residualised trades from being mixed into one figure
-    # — which was the original worry and is still the right one.
-    usable: List[str] = []
-    for name in controls:
-        if name == feature:
-            continue
-        have = [t for t in keep if _value(t, name) is not None]
-        # If honouring the control would cost most of the evidence, the control
-        # goes rather than the sample.
-        if len(have) < max(MIN_TRADES, MIN_CONTROL_COVERAGE * len(keep)):
-            continue
-        if len({_value(t, name) for t in have}) < 2:
-            continue                    # constant, so a no-op
-        usable.append(name)
-
-    if usable:
-        rows_ok = [i for i, t in enumerate(keep)
-                   if all(_value(t, n) is not None for n in usable)]
-        keep = [keep[i] for i in rows_ok]
-        xs = [xs[i] for i in rows_ok]
-        ys = [ys[i] for i in rows_ok]
-        cols = [[float(_value(t, n)) for t in keep] for n in usable]  # type: ignore[arg-type]
-    else:
-        cols = []
-    out["controls"] = usable
-    out["n"] = len(xs)
-
-    if len(set(xs)) < 2 or len(set(ys)) < 2:
-        return out                      # constant: no ranking to correlate
-    rx = _sps.rankdata(xs)
-    if not usable:
-        # No control could be applied, so there is no controlled IC. The first
-        # version returned the RAW one here, which puts an uncontrolled number
-        # under a heading that says otherwise — and it reads as "the control
-        # made no difference" when it means "no control ran". `n` stays at the
-        # trades available and `ic` stays None, matching `feature_ic`: "could
-        # not measure" is a different claim from "measured, no effect".
-        return out
-
-    design = np.column_stack([_sps.rankdata(c) for c in cols]
-                             + [np.ones(len(rx))])
-    beta, *_ = np.linalg.lstsq(design, rx, rcond=None)
-    resid = rx - design @ beta
-    # A feature that is a RENAMED control leaves a residual of pure
-    # floating-point noise, and ranking that noise yields a large spurious
-    # correlation — 0.97 in the test that caught this — because the arithmetic
-    # error pattern still follows the data. Anything this far below the
-    # feature's own scale is collinear, and the honest report is "not
-    # measurable", not a number.
-    if float(np.std(resid)) <= 1e-8 * (float(np.std(rx)) or 1.0):
-        return out                      # the feature IS the controls
-    ic, p = _sps.spearmanr(resid, ys)
+    out["controls"], out["n"] = r["controls"], len(r["keep"])
+    ic, p = _sps.spearmanr(r["resid"], r["ys"])
     if ic != ic:
         return out
     out["ic"], out["p"] = round(float(ic), 4), round(float(p), 4)
