@@ -335,6 +335,48 @@ def _legs_for_row(row) -> List[Tuple[float, str, int]]:
     )]
 
 
+def _leg_exit_columns(row, leg_quotes: Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]],
+                      structure: str) -> Dict[str, Optional[float]]:
+    """Per-leg exit bid/ask, keyed by the schema v23 column name for this
+    leg's role. A role whose strike is not in `leg_quotes` (missing chain
+    data for that leg) contributes (None, None) for its two columns —
+    never a fabricated value."""
+    def _q(strike_key: str, opt_type: Optional[str] = None) -> Tuple[Optional[float], Optional[float]]:
+        try:
+            raw = row[strike_key] if strike_key in row.keys() else None
+            strike = float(raw) if raw is not None and raw not in ("", 0) else None
+        except (TypeError, ValueError, KeyError):
+            strike = None
+        if strike is None or opt_type is None:
+            return None, None
+        return leg_quotes.get((strike, opt_type), (None, None))
+
+    if structure == "iron_condor":
+        sp_b, sp_a = _q("short_put_strike", "put")
+        lp_b, lp_a = _q("long_put_strike", "put")
+        sc_b, sc_a = _q("short_call_strike", "call")
+        lc_b, lc_a = _q("long_call_strike", "call")
+        return {
+            "short_put_bid_exit": sp_b, "short_put_ask_exit": sp_a,
+            "long_put_bid_exit": lp_b, "long_put_ask_exit": lp_a,
+            "short_call_bid_exit": sc_b, "short_call_ask_exit": sc_a,
+            "long_call_bid_exit": lc_b, "long_call_ask_exit": lc_a,
+        }
+
+    opt_t = str(row["type"] or "").lower()
+    try:
+        short_strike = float(row["strike"])
+    except (TypeError, ValueError, KeyError):
+        short_strike = None
+    s_b, s_a = (leg_quotes.get((short_strike, opt_t), (None, None))
+               if short_strike is not None else (None, None))
+    l_b, l_a = _q("long_strike", opt_t)
+    return {
+        "short_bid_exit": s_b, "short_ask_exit": s_a,
+        "long_bid_exit": l_b, "long_ask_exit": l_a,
+    }
+
+
 def _legs_intrinsic_close_value(legs: List[Tuple[float, str, int]], spot: float) -> float:
     """Debit required to flatten a multi-leg structure at expiry.
 
@@ -456,7 +498,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 23
+_SCHEMA_VERSION = 24
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -715,6 +757,37 @@ _MIGRATIONS = {
         "WHERE date >= '2026-07-29' AND budget_at_entry IS NULL",
     ],
     23: [
+        # Per-leg bid/ask at entry and exit, for multi-leg structures only.
+        # Unblocks repricing the 46% of the closed book that is multi-leg
+        # (docs/SINGLE_LEG_REPRICE_20260902.md refused it: entry_price on a
+        # spread is a net credit across legs, not any single leg's mid).
+        # NULL on every legacy row and on every single-leg row — never zero.
+        "ALTER TABLE trades ADD COLUMN short_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_bid_entry REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_ask_entry REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_put_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_put_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN short_call_ask_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_bid_exit REAL",
+        "ALTER TABLE trades ADD COLUMN long_call_ask_exit REAL",
+    ],
+    24: [
         # The earnings-gate verdict (src/earnings_gate.py) computed at log_trade
         # time, kept instead of discarded. Reachable values: clear_of_earnings,
         # earnings_unknown, projected_through_earnings (report mode only —
@@ -1586,7 +1659,14 @@ class PaperManager:
             long_strike, spread_width, net_credit, max_profit_usd, max_loss_usd,
             short_call_strike, long_call_strike, short_put_strike, long_put_strike, net_delta,
             paper_only, era, lottery_edge, capital_at_risk, budget_at_entry,
-            quantity, earnings_state
+            quantity,
+            short_bid_entry, short_ask_entry, long_bid_entry, long_ask_entry,
+            short_bid_exit, short_ask_exit, long_bid_exit, long_ask_exit,
+            short_put_bid_entry, short_put_ask_entry, long_put_bid_entry, long_put_ask_entry,
+            short_call_bid_entry, short_call_ask_entry, long_call_bid_entry, long_call_ask_entry,
+            short_put_bid_exit, short_put_ask_exit, long_put_bid_exit, long_put_ask_exit,
+            short_call_bid_exit, short_call_ask_exit, long_call_bid_exit, long_call_ask_exit,
+            earnings_state
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1597,7 +1677,14 @@ class PaperManager:
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?
+            ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?
         )
         """
 
@@ -1689,6 +1776,21 @@ class PaperManager:
             # the option premium and the book's headline P&L was a sizing
             # artifact. See src/book_sizing.py.
             _qty,
+            # Per-leg bid/ask, entry and exit (schema v23). _exit columns are
+            # always None here — a trade is always OPEN when first logged;
+            # the exit-enforcement loop fills those in via UPDATE on close.
+            _float_or_none("short_bid_entry"), _float_or_none("short_ask_entry"),
+            _float_or_none("long_bid_entry"), _float_or_none("long_ask_entry"),
+            _float_or_none("short_bid_exit"), _float_or_none("short_ask_exit"),
+            _float_or_none("long_bid_exit"), _float_or_none("long_ask_exit"),
+            _float_or_none("short_put_bid_entry"), _float_or_none("short_put_ask_entry"),
+            _float_or_none("long_put_bid_entry"), _float_or_none("long_put_ask_entry"),
+            _float_or_none("short_call_bid_entry"), _float_or_none("short_call_ask_entry"),
+            _float_or_none("long_call_bid_entry"), _float_or_none("long_call_ask_entry"),
+            _float_or_none("short_put_bid_exit"), _float_or_none("short_put_ask_exit"),
+            _float_or_none("long_put_bid_exit"), _float_or_none("long_put_ask_exit"),
+            _float_or_none("short_call_bid_exit"), _float_or_none("short_call_ask_exit"),
+            _float_or_none("long_call_bid_exit"), _float_or_none("long_call_ask_exit"),
             trade_dict.get("earnings_state"),
         )
 
@@ -1785,6 +1887,15 @@ class PaperManager:
         trade_dict["long_strike"] = long_strike
         trade_dict["spread_width"] = abs(short_strike - long_strike)
         trade_dict["net_credit"] = net_credit
+        # Per-leg entry quotes, when the caller supplied them (schema v23).
+        # Absent keys must stay absent here too — trade_dict.get() at
+        # log_trade's INSERT layer is what turns "key missing" into NULL
+        # rather than 0, and inserting an explicit None here would do the
+        # same thing, so this is deliberately a straight pass-through, not
+        # a coalesce.
+        for _key in ("short_bid", "short_ask", "long_bid", "long_ask"):
+            if _key in spread_dict:
+                trade_dict[f"{_key}_entry"] = spread_dict[_key]
         if max_profit is not None:
             trade_dict["max_profit_usd"] = float(max_profit)
         if max_loss is not None:
@@ -1829,6 +1940,12 @@ class PaperManager:
         trade_dict["long_call_strike"] = lc_strike
         trade_dict["spread_width"] = spread_width
         trade_dict["net_credit"] = total_credit
+        # Per-leg entry quotes, when the caller supplied them (schema v23).
+        for _key in ("short_put_bid", "short_put_ask", "long_put_bid",
+                    "long_put_ask", "short_call_bid", "short_call_ask",
+                    "long_call_bid", "long_call_ask"):
+            if _key in condor_dict:
+                trade_dict[f"{_key}_entry"] = condor_dict[_key]
         if max_risk is not None:
             trade_dict["max_loss_usd"] = float(max_risk)
         if condor_dict.get("max_profit") is not None:
@@ -2373,6 +2490,7 @@ class PaperManager:
                 if not legs:
                     continue
                 leg_marks: List[Tuple[int, float]] = []
+                leg_quotes: Dict[Tuple[float, str], Tuple[Optional[float], Optional[float]]] = {}
                 model_legs: List[str] = []
                 missing = False
                 for strike_v, opt_t, qty in legs:
@@ -2385,6 +2503,16 @@ class PaperManager:
                     if lp_source == MARK_MODEL:
                         model_legs.append(f"{opt_t} ${float(strike_v):g}")
                     leg_marks.append((qty, lp))
+                    # Raw bid/ask, independent of the mid/model collapse
+                    # above — already fetched into _chain_quotes by the
+                    # batched chain call earlier in this method; no new
+                    # network call. A leg _chain_quotes has no entry for
+                    # (model-marked, or the chain call failed for this
+                    # pair) leaves this a (None, None) pair, which is
+                    # exactly "not recorded" for this leg.
+                    leg_quotes[(float(strike_v), opt_t)] = (
+                        _chain_quotes.get((ticker, expiration), {})
+                        .get((float(strike_v), opt_t), (None, None)))
                 if missing:
                     continue
 
@@ -2484,10 +2612,15 @@ class PaperManager:
                         multiplier=_get_multiplier(ticker),
                         quantity=_row_lots(row),
                     )
+                    exit_cols = _leg_exit_columns(row, leg_quotes, structure)
                     with self._get_connection() as conn:
                         conn.execute(
-                            "UPDATE trades SET status='CLOSED', exit_price=?, exit_date=?, pnl_pct=?, pnl_usd=?, exit_reason=? WHERE entry_id=?",
-                            (safe_exit, now, clamped_pct, pnl_usd, reason, entry_id),
+                            "UPDATE trades SET status='CLOSED', exit_price=?, "
+                            "exit_date=?, pnl_pct=?, pnl_usd=?, exit_reason=?, "
+                            + ", ".join(f"{k}=?" for k in exit_cols) +
+                            " WHERE entry_id=?",
+                            (safe_exit, now, clamped_pct, pnl_usd, reason,
+                             *exit_cols.values(), entry_id),
                         )
                     # Keep marking a stopped-out or time-exited trade to its
                     # original expiry, so "should I have held?" becomes data
