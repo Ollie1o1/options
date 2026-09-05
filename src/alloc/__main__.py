@@ -50,7 +50,13 @@ ATTRIBUTION_FEATURES = ["iv_rank", "atm_iv", "rv", "iv_minus_rv", "trend",
                         # H2. None on the Dolt cache, which has no size
                         # columns, so it reports "not measurable" there rather
                         # than joining the search.
-                        "entry_depth"]
+                        "entry_depth",
+                        # docs/PREREG_OUTLOOK_FEATURE_20260905.md. Only present
+                        # on a `replay()` call given an explicit
+                        # `outlook_lookup` (src.outlook.cross_sectional) — a
+                        # run without one reports "not measurable" the same
+                        # way `entry_depth` does on the Dolt cache.
+                        "outlook_composite"]
 
 # Tight-spread names: 3.6% median bid-ask against 16-21% elsewhere. The largest
 # single driver of results found anywhere in this study. Defined in

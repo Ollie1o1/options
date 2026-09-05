@@ -389,6 +389,28 @@ class StratumTest(unittest.TestCase):
         self.assertIn("opened", stats)
 
 
+class OutlookLookupTest(unittest.TestCase):
+    """docs/PREREG_OUTLOOK_FEATURE_20260905.md's feature: additive, never
+    invented when the lookup has nothing for this (symbol, date)."""
+
+    def test_a_looked_up_score_is_attached_to_the_trade(self):
+        src = FakeSource({("AAA", "2024-01-05"): _bull_put_chain()})
+        trades, _ = replay(_spec(), ["AAA"], ["2024-01-05"], src,
+                           outlook_lookup={("AAA", "2024-01-05"): 0.42})
+        self.assertEqual(trades[0].features["outlook_composite"], 0.42)
+
+    def test_a_symbol_date_missing_from_the_lookup_is_absent_not_zero(self):
+        src = FakeSource({("AAA", "2024-01-05"): _bull_put_chain()})
+        trades, _ = replay(_spec(), ["AAA"], ["2024-01-05"], src,
+                           outlook_lookup={("BBB", "2024-01-05"): 0.42})
+        self.assertNotIn("outlook_composite", trades[0].features)
+
+    def test_omitting_the_lookup_entirely_still_replays_normally(self):
+        src = FakeSource({("AAA", "2024-01-05"): _bull_put_chain()})
+        trades, _ = replay(_spec(), ["AAA"], ["2024-01-05"], src)
+        self.assertNotIn("outlook_composite", trades[0].features)
+
+
 if __name__ == "__main__":
     unittest.main()
 
