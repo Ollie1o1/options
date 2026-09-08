@@ -1263,8 +1263,18 @@ class PaperManager:
                 for sql in _MIGRATIONS.get(ver, []):
                     try:
                         cur.execute(sql)
-                    except sqlite3.OperationalError:
-                        pass  # column may already exist
+                    except sqlite3.OperationalError as exc:
+                        # Only "column already exists" is safe to ignore — a
+                        # migration re-run hitting its own prior work. Anything
+                        # else (e.g. "database is locked") must not be
+                        # swallowed here: doing so stamps user_version as
+                        # complete while the column was never actually added,
+                        # which is exactly what left the real paper_trades.db
+                        # at version 24 without any of migration 23's columns
+                        # (discovered 2026-09-08 via enforce_exits.sh crashing
+                        # on "no such column: short_bid_exit").
+                        if "duplicate column" not in str(exc).lower():
+                            raise
                 cur.execute(f"PRAGMA user_version = {int(ver)}")
 
     def _load_config(self) -> Dict[str, Any]:

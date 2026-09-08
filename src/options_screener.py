@@ -287,7 +287,13 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None,
             except Exception:
                 pass
         except Exception:
-            pass
+            # Swallowed by design so the UI never crashes on this, but log
+            # it — a bare `pass` here is what let the 2026-09-07 schema-drift
+            # crash (update_positions failing on a missing column) hide
+            # completely: the cron path's traceback was the only reason it
+            # was ever noticed.
+            logging.getLogger(__name__).error(
+                "inline exit enforcement failed", exc_info=True)
 
     text = ""
     try:
