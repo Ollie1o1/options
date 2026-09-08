@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -165,6 +166,22 @@ class NegativeEvGateTest(unittest.TestCase):
 
     def test_a_nan_ev_is_not_treated_as_negative(self):
         r = _board([_leg(ev_per_contract=float("nan"))])
+        self.assertEqual(len(r.kept), 1)
+
+    def test_an_ev_inside_its_own_noise_band_is_refused_as_marginal(self):
+        """MARGINAL means positive on paper but not distinguishable from zero
+        given this contract's own stated vol uncertainty. Measured 2026-09-07:
+        of 2,795 Long Call/Put candidates passing this gate in one week, 2,690
+        (96%) were MARGINAL, not a genuine TAKE — the gate was letting noise
+        through on equal footing with a real edge."""
+        with mock.patch("src.cli_display._ev_noise_for_row", return_value=50.0):
+            r = _board([_leg(ev_per_contract=25.0)])  # inside the ±50 band
+        self.assertTrue(r.empty)
+        self.assertEqual(r.reasons["negative_ev"], 1)
+
+    def test_an_ev_clear_of_its_noise_band_still_passes(self):
+        with mock.patch("src.cli_display._ev_noise_for_row", return_value=10.0):
+            r = _board([_leg(ev_per_contract=25.0)])  # clear of the ±10 band
         self.assertEqual(len(r.kept), 1)
 
 
