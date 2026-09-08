@@ -242,7 +242,15 @@ def _refusal_for(row: Dict[str, Any], cutoff: float,
             None,
             noise=_ev_noise_for_row(row),
         )
-        if decision == "SKIP":
+        # MARGINAL is refused alongside SKIP, not just admitted as "not
+        # negative". Measured 2026-09-07: of 2,795 Long Call/Put candidates
+        # this gate passed in one week, 2,690 (96%) were MARGINAL — positive
+        # on paper but inside this contract's own vega-implied noise band,
+        # not distinguishable from zero. Bull Put's much smaller surviving
+        # pool (already thinned by the friction gate) was 66% genuine TAKE;
+        # letting noise through on equal footing with a real edge is what
+        # this line was doing for every strategy with no upstream cost gate.
+        if decision in ("SKIP", "MARGINAL"):
             failed.add("negative_ev")
     except Exception:
         log.debug("EV verdict unavailable; not refused on that basis",
