@@ -346,12 +346,54 @@ def _annotate(rec: StrategyRecord) -> StrategyRecord:
                      date="2026-08-06")
 
 
+# ── Evidence landed 2026-09-08 — csp_index_only, the one PROBE-tier setup
+# that was never actually measured ──────────────────────────────────────────
+#
+# Registered spec run EXACTLY ONCE (SPY, $5-wide, short_delta 0.25, DTE
+# 25-60, IV rank >= 50) on real bid/ask crossing throughout — short sold at
+# its own bid, wing bought at its own ask, no modeled mid-fill assumption at
+# all. scripts/csp_index_only_backtest.py, fully reproducible.
+#
+# n=19 clears none of this library's own signal criteria: MIN_N is 20
+# (src.alloc.report — the exact guard a starved 3-trade run with a
+# flattering DSR was found to need before it could be promoted). This is one
+# trade short of it, and tstat_clustered is 0.021 regardless — not "one
+# trade from a result," the clustered signal is flat.
+#
+# It DOES beat the matched unselected control (identical width/delta/DTE
+# window, no IV-rank filter): +0.18% mean return on capital vs -1.23%,
+# Sharpe 0.0047 vs -0.0308 — the direction the original index-VRP hypothesis
+# predicted. It is just not enough trades to say so.
+#
+# Supersedes the unverified "n=52, +3.20% RoC, DSR 0.090" figure quoted
+# inline in index_put_spread_w25's own comparison field below: that number's
+# exact construction (same DTE bound? a real trailing IV-rank filter, or
+# none?) could not be reproduced from anything checked into this repo, so it
+# is superseded by this measurement rather than reconciled against it.
+_REPLAY_20260908 = {
+    "csp_index_only": {
+        "n": 19, "win_rate": 84.21, "mean_return_on_capital": 0.001834,
+        "sharpe": 0.0047, "tstat_clustered": 0.021, "skew": -2.033,
+        "dsr": 0.5053, "dsr_undeflated": 0.5053, "pbo": None,
+        "n_trials": 1, "n_eff": 9,
+        "window": ["2022-01-01", "2026-06-12"],
+        "sample": "SPY only, weekly Fridays, real bid/ask crossing throughout",
+        "comparison": ("unselected control, identical width/delta/DTE, no "
+                      "IV-rank filter: n=195, -1.23% RoC, DSR 0.415, "
+                      "tstat_clustered -0.43 — csp_index_only beats it, but "
+                      "n=19 is below this library's own MIN_N=20"),
+        "verdict": "insufficient",
+    },
+}
+
+
 def _land_evidence(rec: StrategyRecord) -> StrategyRecord:
-    result = _REPLAY_2026_08_06.get(rec.spec.id)
+    result = _REPLAY_2026_08_06.get(rec.spec.id) or _REPLAY_20260908.get(rec.spec.id)
     if result is None:
         return rec
     from .evidence import apply_result
-    return apply_result(rec, result, date="2026-08-06")
+    date = "2026-08-06" if rec.spec.id in _REPLAY_2026_08_06 else "2026-09-08"
+    return apply_result(rec, result, date=date)
 
 
 LIBRARY = [_land_evidence(_annotate(_retire(r))) for r in LIBRARY]
