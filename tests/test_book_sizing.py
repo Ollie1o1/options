@@ -15,8 +15,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.book_sizing import (SizingDecision, book_equity, load_sizing_config,
-                             open_risk, size)
+from src.book_sizing import (ExposureBreakdown, SizingDecision, book_equity,
+                             load_sizing_config, open_risk,
+                             open_risk_breakdown, size)
 from src.capital_risk import capital_at_risk
 
 CFG = {
@@ -100,6 +101,79 @@ class PureDecision(unittest.TestCase):
         self.assertIsInstance(d, SizingDecision)
         with self.assertRaises(Exception):
             d.contracts = 5  # type: ignore[misc]
+
+
+class ClusterCaps(unittest.TestCase):
+    """Same-ticker / same-sector concentration caps, narrower than the
+    book-wide concurrent cap. `cluster_cap_mode` "off" (the default) must
+    reproduce today's behaviour exactly; "report" must compute the tighter
+    answer without touching `contracts`/`reason`; "refuse" must actually bind.
+    """
+
+    def test_default_mode_off_leaves_decision_unchanged(self):
+        # Same inputs as test_floor_of_budget_over_risk, but with a ticker
+        # already carrying more exposure than any sane cap would allow. Mode
+        # "off" must ignore it completely — cluster fields stay None.
+        d = size(392.0, equity=40_110.0, open_risk=0.0, cfg=_cfg(),
+                 ticker_open_risk=999_999.0, sector_open_risk=999_999.0)
+        self.assertEqual(d.contracts, 2)
+        self.assertEqual(d.reason, "risk_capped")
+        self.assertIsNone(d.cluster_reason)
+        self.assertIsNone(d.cluster_contracts)
+
+    def test_ticker_cap_binds_in_refuse_mode(self):
+        # 4% ticker cap = $1,604.40. $1,200 already at risk in this ticker
+        # leaves $404.40 of headroom -> floor(404.40/392) = 1, tighter than
+        # the trade-level floor of 2.
+        cfg = _cfg(cluster_cap_mode="refuse", max_ticker_risk_pct=0.04)
+        d = size(392.0, equity=40_110.0, open_risk=0.0, cfg=cfg,
+                 ticker_open_risk=1_200.0)
+        self.assertEqual(d.contracts, 1)
+        self.assertEqual(d.reason, "ticker_capped")
+        self.assertEqual(d.cluster_reason, "ticker_capped")
+        self.assertEqual(d.cluster_contracts, 1)
+
+    def test_report_mode_computes_without_binding(self):
+        # Identical inputs to the refuse-mode test above, but "report" must
+        # leave contracts/reason at what the trade-level caps alone would
+        # give (2, risk_capped) while still surfacing what WOULD happen.
+        cfg = _cfg(cluster_cap_mode="report", max_ticker_risk_pct=0.04)
+        d = size(392.0, equity=40_110.0, open_risk=0.0, cfg=cfg,
+                 ticker_open_risk=1_200.0)
+        self.assertEqual(d.contracts, 2)
+        self.assertEqual(d.reason, "risk_capped")
+        self.assertEqual(d.cluster_reason, "ticker_capped")
+        self.assertEqual(d.cluster_contracts, 1)
+
+    def test_sector_cap_binds_when_ticker_cap_does_not(self):
+        # 6% sector cap = $2,406.60. $2,200 already at risk in this sector
+        # (no exposure yet in THIS ticker) leaves $206.60 -> floor = 0.
+        cfg = _cfg(cluster_cap_mode="refuse", max_sector_risk_pct=0.06)
+        d = size(392.0, equity=40_110.0, open_risk=0.0, cfg=cfg,
+                 ticker_open_risk=0.0, sector_open_risk=2_200.0)
+        self.assertEqual(d.contracts, 0)
+        self.assertEqual(d.reason, "sector_capped")
+
+    def test_unmapped_ticker_skips_sector_cap(self):
+        # sector_open_risk=None means "this ticker has no sector mapping" —
+        # never treated as zero exposure, and never blocks the trade on a
+        # cap that does not apply to it. Only the ticker cap can still bind.
+        cfg = _cfg(cluster_cap_mode="refuse", max_ticker_risk_pct=0.04)
+        d = size(392.0, equity=40_110.0, open_risk=0.0, cfg=cfg,
+                 ticker_open_risk=1_200.0, sector_open_risk=None)
+        self.assertEqual(d.contracts, 1)
+        self.assertEqual(d.reason, "ticker_capped")
+
+    def test_cluster_cap_never_widens_the_trade_level_result(self):
+        # Cluster headroom is generous; the ordinary caps still govern.
+        cfg = _cfg(cluster_cap_mode="refuse", max_ticker_risk_pct=0.04,
+                   max_sector_risk_pct=0.06)
+        d = size(392.0, equity=40_110.0, open_risk=0.0, cfg=cfg,
+                 ticker_open_risk=0.0, sector_open_risk=0.0)
+        self.assertEqual(d.contracts, 2)
+        self.assertEqual(d.reason, "risk_capped")
+        self.assertIsNone(d.cluster_reason)
+        self.assertEqual(d.cluster_contracts, 2)
 
 
 class BullPutSizesFromWidthMinusCredit(unittest.TestCase):
@@ -233,6 +307,61 @@ class OpenRisk(unittest.TestCase):
             open_risk(self.conn, _cfg(sizing_start_date=None)), 0.0)
 
 
+class OpenRiskBreakdown(unittest.TestCase):
+    """`open_risk_breakdown` — the same population as `open_risk`, split by
+    ticker and by sector so a cluster cap has something to check against.
+    """
+
+    def setUp(self):
+        self.conn = _ledger(":memory:")
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_total_matches_open_risk(self):
+        _row(self.conn, date="2026-08-20 09:00:00", ticker="NVDA", capital_at_risk=500.0)
+        _row(self.conn, date="2026-08-20 09:00:00", ticker="AMD", capital_at_risk=300.0)
+        b = open_risk_breakdown(self.conn, CFG)
+        self.assertIsInstance(b, ExposureBreakdown)
+        self.assertAlmostEqual(b.total, open_risk(self.conn, CFG))
+        self.assertAlmostEqual(b.total, 800.0)
+
+    def test_groups_by_ticker_and_by_sector(self):
+        # NVDA and AMD are both XLK (data_fetching.SECTOR_MAP); WMT is XLP.
+        _row(self.conn, date="2026-08-20 09:00:00", ticker="NVDA", capital_at_risk=500.0)
+        _row(self.conn, date="2026-08-20 09:00:00", ticker="AMD", capital_at_risk=300.0)
+        _row(self.conn, date="2026-08-20 09:00:00", ticker="WMT", capital_at_risk=200.0)
+        b = open_risk_breakdown(self.conn, CFG)
+        self.assertAlmostEqual(b.by_ticker["NVDA"], 500.0)
+        self.assertAlmostEqual(b.by_ticker["AMD"], 300.0)
+        self.assertAlmostEqual(b.by_ticker["WMT"], 200.0)
+        self.assertAlmostEqual(b.by_sector["XLK"], 800.0)
+        self.assertAlmostEqual(b.by_sector["XLP"], 200.0)
+
+    def test_same_ticker_positions_accumulate(self):
+        _row(self.conn, date="2026-08-20 09:00:00", ticker="NVDA", capital_at_risk=500.0)
+        _row(self.conn, date="2026-08-21 09:00:00", ticker="NVDA", capital_at_risk=300.0)
+        b = open_risk_breakdown(self.conn, CFG)
+        self.assertAlmostEqual(b.by_ticker["NVDA"], 800.0)
+
+    def test_unmapped_ticker_counted_in_total_and_ticker_but_not_sector(self):
+        # No entry in SECTOR_MAP for this symbol — it must still count toward
+        # the total and its own ticker bucket, never toward a sector bucket
+        # (there is no such thing as an "unknown sector" cluster of unrelated
+        # names — see the sector cap's own null-means-skip contract).
+        _row(self.conn, date="2026-08-20 09:00:00", ticker="ZZZFAKE", capital_at_risk=150.0)
+        b = open_risk_breakdown(self.conn, CFG)
+        self.assertAlmostEqual(b.total, 150.0)
+        self.assertAlmostEqual(b.by_ticker["ZZZFAKE"], 150.0)
+        self.assertAlmostEqual(sum(b.by_sector.values()), 0.0)
+
+    def test_excludes_positions_opened_before_the_sized_era(self):
+        _row(self.conn, date="2026-08-18 09:00:00", ticker="NVDA", capital_at_risk=176_323.0)
+        _row(self.conn, date="2026-08-19 09:00:00", ticker="NVDA", capital_at_risk=800.0)
+        b = open_risk_breakdown(self.conn, CFG)
+        self.assertAlmostEqual(b.by_ticker["NVDA"], 800.0)
+
+
 class ConfigLoading(unittest.TestCase):
 
     def test_missing_block_is_disabled(self):
@@ -241,6 +370,21 @@ class ConfigLoading(unittest.TestCase):
         cfg = load_sizing_config({})
         self.assertFalse(cfg["enabled"])
         self.assertEqual(size(392.0, 40_110.0, 0.0, cfg).contracts, 1)
+
+    def test_cluster_cap_defaults_to_off(self):
+        # Absent config must not silently start refusing trades on a cap
+        # nobody configured — same discipline as every other gate here.
+        cfg = load_sizing_config({})
+        self.assertEqual(cfg["cluster_cap_mode"], "off")
+        self.assertEqual(cfg["max_ticker_risk_pct"], 0.04)
+        self.assertEqual(cfg["max_sector_risk_pct"], 0.06)
+
+    def test_unrecognised_cluster_cap_mode_falls_back_to_off(self):
+        # A typo must not silently start turning trades away — same
+        # convention as earnings_projection's off/report/refuse.
+        cfg = load_sizing_config(
+            {"position_sizing": {"enabled": True, "cluster_cap_mode": "yolo"}})
+        self.assertEqual(cfg["cluster_cap_mode"], "off")
 
     def test_real_config_is_loadable_and_enabled(self):
         import json
@@ -259,6 +403,11 @@ class ConfigLoading(unittest.TestCase):
         self.assertEqual(cfg["max_risk_pct"], 0.02)
         self.assertEqual(cfg["max_open_risk_pct"], 0.10)
         self.assertEqual(cfg["equity_basis_date"], "2026-08-05")
+        # Shipped 2026-09-07 in "report" mode, matching how earnings_projection
+        # was rolled out: watch it on the live board before it starts refusing.
+        self.assertEqual(cfg["cluster_cap_mode"], "report")
+        self.assertEqual(cfg["max_ticker_risk_pct"], 0.04)
+        self.assertEqual(cfg["max_sector_risk_pct"], 0.06)
 
     def test_garbage_values_fall_back_rather_than_crashing_the_ledger(self):
         cfg = load_sizing_config(
