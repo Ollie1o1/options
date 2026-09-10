@@ -78,12 +78,18 @@ fi
 MODE=""
 if   (( HMN >= 1015 && HMN <= 1130 )); then MODE="-ds"
 elif (( HMN >= 1215 && HMN <= 1330 )); then MODE="-sps"
-# 14:15 was -ics until 2026-08-25. Iron Condor is excluded from
-# auto_log.allocation.eligible_strategies (it fails its own measured breakeven:
-# needs 60.1%, delivers 50.0% over 142 closed), so that window could log NOTHING
-# - a third of the daily entry budget spent on a structurally dead scan. The
-# 12:30 -sps window was the only one that could enter at all. Pointed here too.
-elif (( HMN >= 1400 && HMN <= 1500 )); then MODE="-sps"
+# 14:15 was -ics until 2026-08-25 (repointed to -sps: Iron Condor is excluded
+# from auto_log.allocation.eligible_strategies, so -ics could log NOTHING),
+# then -sps until 2026-09-10. Repointed to -ss because no scheduled window
+# ever called it: -ds and -sps only ever generate Long Call/Long Put and
+# Bull Put/Bear Call/Iron Condor, never Short Put, which is the "sell" mode's
+# board. Short Put carries a real ~3.8% allocation weight (all exploration
+# share — its posterior P(best) is near zero) and clears every upstream gate
+# at volume (hundreds/day), but with no window ever invoking -ss it could
+# never actually be entered — its last real trade was 2026-07-31, before it
+# even had a weight. Never -ss under stress (see run.py's quick reference);
+# harmless here since the stress gate above already skips the whole run.
+elif (( HMN >= 1400 && HMN <= 1500 )); then MODE="-ss"
 fi
 if [[ -z "$MODE" ]]; then
   echo "[auto-log-eq] skipped: no mode window for clock $HM"
