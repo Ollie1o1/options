@@ -50,14 +50,23 @@ _DEFAULTS: Dict[str, Any] = {
     "sizing_start_date": None,
     "max_risk_pct": 0.02,
     "max_open_risk_pct": 0.10,
+    "cluster_cap_mode": "off",
+    "max_ticker_risk_pct": 0.04,
+    "max_sector_risk_pct": 0.06,
 }
 
 #: Every value ``SizingDecision.reason`` can take. Refusals are diagnostic:
 #: "the cap on simultaneous exposure bound" and "this one position is too big
 #: for the account" are different facts and a quiet book must be able to say
 #: which one it hit.
-REASONS = ("risk_capped", "concurrent_capped", "below_one_contract",
-           "unbounded_risk", "disabled", "no_equity")
+REASONS = ("risk_capped", "concurrent_capped", "ticker_capped", "sector_capped",
+           "below_one_contract", "unbounded_risk", "disabled", "no_equity")
+
+#: `cluster_cap_mode` values, in the same off/report/refuse shape
+#: `earnings_gate`'s projection uses: "report" counts and surfaces what a cap
+#: would do without binding, so it can be watched on the live book before it
+#: starts refusing anything.
+_CLUSTER_MODES = ("off", "report", "refuse")
 
 
 @dataclass(frozen=True)
@@ -68,11 +77,19 @@ class SizingDecision:
     risk fraction is one the account cannot afford, and rounding it up to a
     single contract would place a bet larger than the rule permits — sizing is a
     gate as well as a scale.
+
+    ``cluster_reason``/``cluster_contracts`` describe what the same-ticker /
+    same-sector caps would decide, independent of ``cluster_cap_mode``:
+    ``None`` for ``cluster_reason`` means those caps did not tighten the
+    result. In ``"report"`` mode ``contracts``/``reason`` never reflect them —
+    only ``"refuse"`` mode lets a cluster cap bind the trade itself.
     """
     contracts: int
     reason: str
     risk_per_contract: Optional[float]
     equity: float
+    cluster_reason: Optional[str] = None
+    cluster_contracts: Optional[int] = None
 
 
 def _num(value) -> Optional[float]:
@@ -99,23 +116,37 @@ def load_sizing_config(config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
 
     out = dict(_DEFAULTS)
     out["enabled"] = bool(block.get("enabled", _DEFAULTS["enabled"]))
-    for key in ("opening_balance", "max_risk_pct", "max_open_risk_pct"):
+    for key in ("opening_balance", "max_risk_pct", "max_open_risk_pct",
+                "max_ticker_risk_pct", "max_sector_risk_pct"):
         value = _num(block.get(key))
         if value is not None and value > 0:
             out[key] = value
     for key in ("equity_basis_date", "sizing_start_date"):
         value = block.get(key, _DEFAULTS[key])
         out[key] = str(value)[:10] if value else None
+    # An unrecognised mode falls back to OFF, never to REFUSE: a typo must
+    # not silently start turning trades away — same convention as
+    # earnings_gate's projection mode.
+    mode = str(block.get("cluster_cap_mode", _DEFAULTS["cluster_cap_mode"])).strip().lower()
+    out["cluster_cap_mode"] = mode if mode in _CLUSTER_MODES else "off"
     return out
 
 
 def size(risk_per_contract: Optional[float], equity: float, open_risk: float,
-         cfg: Mapping[str, Any]) -> SizingDecision:
+         cfg: Mapping[str, Any], *,
+         ticker_open_risk: float = 0.0,
+         sector_open_risk: Optional[float] = None) -> SizingDecision:
     """Contracts to trade, or 0 to refuse. Pure — no database, no clock.
 
     ``risk_per_contract`` must come from ``capital_at_risk`` at quantity 1.
     ``None`` there means the loss cannot be bounded (a naked call), which is
     unsizable rather than free.
+
+    ``ticker_open_risk``/``sector_open_risk`` are dollars already at risk in
+    this position's own ticker/sector (from ``open_risk_breakdown``), for the
+    cluster caps below. ``sector_open_risk=None`` means the ticker has no
+    sector mapping — that cap does not apply, rather than being read as zero
+    exposure. This function stays pure — the caller resolves both numbers.
     """
     equity_f = _num(equity) or 0.0
     risk = _num(risk_per_contract)
@@ -142,10 +173,43 @@ def size(risk_per_contract: Optional[float], equity: float, open_risk: float,
     capped_by_book = by_book < by_trade
     if contracts < 1:
         reason = "concurrent_capped" if capped_by_book else "below_one_contract"
-        return SizingDecision(0, reason, risk, equity_f)
-    return SizingDecision(contracts,
-                          "concurrent_capped" if capped_by_book else "risk_capped",
-                          risk, equity_f)
+    else:
+        reason = "concurrent_capped" if capped_by_book else "risk_capped"
+
+    # Cluster caps: narrower than the book-wide concurrent cap, aimed at the
+    # concentration the flat cap cannot see — several positions in one name,
+    # or one sector, that co-move on the days that matter. "report" computes
+    # the tighter answer without touching contracts/reason, the same phased
+    # rollout earnings_projection used; only "refuse" lets it bind.
+    cluster_mode = str(cfg.get("cluster_cap_mode", _DEFAULTS["cluster_cap_mode"]))
+    cluster_reason: Optional[str] = None
+    cluster_contracts: Optional[int] = None
+    if cluster_mode in ("report", "refuse"):
+        cluster_contracts = contracts
+        max_ticker_pct = (_num(cfg.get("max_ticker_risk_pct"))
+                         or _DEFAULTS["max_ticker_risk_pct"])
+        ticker_headroom = equity_f * max_ticker_pct - (_num(ticker_open_risk) or 0.0)
+        by_ticker = int(math.floor(ticker_headroom / risk)) if ticker_headroom > 0 else 0
+        bounds = [("ticker_capped", by_ticker)]
+
+        if sector_open_risk is not None:
+            max_sector_pct = (_num(cfg.get("max_sector_risk_pct"))
+                             or _DEFAULTS["max_sector_risk_pct"])
+            sector_headroom = (equity_f * max_sector_pct
+                               - (_num(sector_open_risk) or 0.0))
+            by_sector = int(math.floor(sector_headroom / risk)) if sector_headroom > 0 else 0
+            bounds.append(("sector_capped", by_sector))
+
+        tight_reason, tight_value = min(bounds, key=lambda kv: kv[1])
+        if tight_value < contracts:
+            cluster_reason, cluster_contracts = tight_reason, tight_value
+
+        if cluster_mode == "refuse" and cluster_reason is not None:
+            contracts = cluster_contracts
+            reason = cluster_reason
+
+    return SizingDecision(contracts, reason, risk, equity_f,
+                          cluster_reason, cluster_contracts)
 
 
 def book_equity(conn: sqlite3.Connection, cfg: Mapping[str, Any]) -> float:
@@ -173,8 +237,25 @@ def book_equity(conn: sqlite3.Connection, cfg: Mapping[str, Any]) -> float:
     return float(opening) + float((row[0] if row and row[0] is not None else 0.0))
 
 
-def open_risk(conn: sqlite3.Connection, cfg: Mapping[str, Any]) -> float:
-    """Dollars at risk across positions opened in the SIZED era.
+@dataclass(frozen=True)
+class ExposureBreakdown:
+    """Open risk across the sized-era book, split by ticker and by sector.
+
+    ``by_sector`` keys are ``data_fetching.SECTOR_MAP`` values (SPDR sector
+    ETF tickers). A traded symbol absent from that map — mostly broad
+    index/commodity ETFs like SPY or GLD — still contributes to ``total`` and
+    ``by_ticker``, but to no ``by_sector`` bucket: there is no such thing as an
+    "unknown sector" cluster of otherwise-unrelated names, so the sector cap
+    simply does not apply to it rather than lumping it in with one.
+    """
+    total: float
+    by_ticker: Dict[str, float]
+    by_sector: Dict[str, float]
+
+
+def open_risk_breakdown(conn: sqlite3.Connection,
+                        cfg: Mapping[str, Any]) -> ExposureBreakdown:
+    """Dollars at risk across positions opened in the SIZED era, and how.
 
     The 122 positions open when sizing shipped are grandfathered out: they were
     opened unsized, they carry $176,323 of risk against a $4,011 ceiling — 117x
@@ -188,12 +269,16 @@ def open_risk(conn: sqlite3.Connection, cfg: Mapping[str, Any]) -> float:
     cannot be bounded is logged and skipped — one unbounded legacy position
     must not deadlock the whole book.
     """
+    from .data_fetching import SECTOR_MAP
+
     start = cfg.get("sizing_start_date")
     if not start:
-        return 0.0
+        return ExposureBreakdown(0.0, {}, {})
     cols = ("entry_id, strategy_name, entry_price, strike, max_loss_usd, "
             "spread_width, net_credit, quantity, ticker, capital_at_risk")
     total = 0.0
+    by_ticker: Dict[str, float] = {}
+    by_sector: Dict[str, float] = {}
     for row in conn.execute(
             f"SELECT {cols} FROM trades WHERE status = 'OPEN' AND date >= ?",
             (start,)):
@@ -210,4 +295,37 @@ def open_risk(conn: sqlite3.Connection, cfg: Mapping[str, Any]) -> float:
                 record.get("ticker"))
             continue
         total += stored
-    return total
+        ticker = str(record.get("ticker") or "").upper()
+        if ticker:
+            by_ticker[ticker] = by_ticker.get(ticker, 0.0) + stored
+            sector = SECTOR_MAP.get(ticker)
+            if sector:
+                by_sector[sector] = by_sector.get(sector, 0.0) + stored
+    return ExposureBreakdown(total, by_ticker, by_sector)
+
+
+def open_risk(conn: sqlite3.Connection, cfg: Mapping[str, Any]) -> float:
+    """Dollars at risk across positions opened in the SIZED era.
+
+    Thin wrapper around ``open_risk_breakdown`` for callers that only need
+    the book-wide total.
+    """
+    return open_risk_breakdown(conn, cfg).total
+
+
+def sector_open_risk_for(breakdown: ExposureBreakdown,
+                        ticker: Optional[str]) -> Optional[float]:
+    """The sector bucket's open risk for ``ticker``'s sector, or ``None``.
+
+    ``None`` means ``ticker`` has no entry in ``data_fetching.SECTOR_MAP`` —
+    the caller passes this straight to ``size()``'s ``sector_open_risk``,
+    where ``None`` skips the sector cap rather than reading it as zero.
+    """
+    from .data_fetching import SECTOR_MAP
+
+    if not ticker:
+        return None
+    sector = SECTOR_MAP.get(str(ticker).upper())
+    if not sector:
+        return None
+    return breakdown.by_sector.get(sector, 0.0)
