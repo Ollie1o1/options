@@ -557,6 +557,59 @@ from .paths import PROJECT_ROOT as _PROJECT_ROOT
 from .paths import repo_path as _repo_path
 
 
+def spread_negative_ev_mode(cfg_path: str = "config.json") -> str:
+    """``auto_log.spread_negative_ev_mode``: off / report / refuse.
+
+    Same staged rollout as `earnings_gate`'s projection mode: an
+    unrecognised value falls back to off, never refuse, so a typo cannot
+    silently start turning trades away. Governs ONLY the negative_ev/noise
+    consistency check on the spread/condor auto-log path — see
+    `apply_spread_negative_ev_gate` and the "DELIBERATELY NOT GATED" comment
+    at its call site for what this deliberately still does not cover
+    (condor_universe, top_quintile).
+    """
+    import json
+    try:
+        with open(_repo_path(cfg_path)) as f:
+            cfg = json.load(f)
+        mode = str((cfg.get("auto_log") or {}).get(
+            "spread_negative_ev_mode", "off")).strip().lower()
+        return mode if mode in ("off", "report", "refuse") else "off"
+    except Exception:
+        return "off"
+
+
+def apply_spread_negative_ev_gate(df: pd.DataFrame, mode: str):
+    """Filter or measure spread/condor auto-log candidates against
+    `pick_ranking.is_negative_ev`.
+
+    Deliberately narrower than `gate_and_report`: checks ONLY the EV/noise
+    consistency rule, never `condor_universe` or `top_quintile` — those are
+    measured research rules whose sample must keep growing (see the
+    "DELIBERATELY NOT GATED" comment at the call site). `is_negative_ev` is a
+    consistency check, not a discovered pattern, so it carries none of that
+    freezing risk.
+
+    mode ``"off"``: ``df`` unchanged, nothing counted.
+    mode ``"report"``: ``df`` unchanged, but the count of rows that WOULD be
+    refused is still returned, so it can be watched before enforcing.
+    mode ``"refuse"``: matching rows are actually removed.
+
+    Returns ``(kept_df, refused_records, would_refuse_count)``.
+    ``refused_records`` is only non-empty in ``"refuse"`` mode —
+    `record_autolog_refusals` marks a row as actually refused, and a row
+    "report" mode did not touch was never refused, only measured.
+    """
+    if mode == "off" or df is None or len(df) == 0:
+        return df, [], 0
+    from . import pick_ranking as _pr
+    mask = df.apply(_pr.is_negative_ev, axis=1)
+    would_refuse = int(mask.sum())
+    if mode != "refuse":
+        return df, [], would_refuse
+    return df[~mask].copy(), df[mask].to_dict("records"), would_refuse
+
+
 def auto_log_budget_cap(cfg_path: str = "config.json"):
     """The per-position budget the auto-log feeder must respect, or None.
 
@@ -7065,7 +7118,8 @@ def main():
                         # rather than refused wholesale. See
                         # rank_structures_by_verdict.
                         #
-                        # DELIBERATELY NOT GATED, and this asymmetry is the point.
+                        # DELIBERATELY NOT GATED on condor_universe or
+                        # top_quintile, and this asymmetry is the point.
                         # `pick_ranking` refuses off-index condors on the BOARD
                         # (G5: +9.5% mean return on capital on broad index against
                         # -11.8% elsewhere, n=139, p < 1e-5). The auto-logger keeps
@@ -7078,6 +7132,18 @@ def main():
                         # finding. Logging continues so the sample grows and
                         # `scripts/validate_gates.py` can overturn G5 if the edge
                         # was a three-month artifact. Ruled 2026-08-10.
+                        #
+                        # negative_ev IS applied below (apply_spread_negative_ev_gate),
+                        # added 2026-09-08. It carries none of the freezing risk
+                        # above — it is a CONSISTENCY check (the system must not
+                        # buy what it computed as negative-EV/noise), not a
+                        # discovered pattern that needs a growing sample to stay
+                        # falsifiable. Measured the same day: 89.5% of candidates
+                        # that clear the friction-to-credit ratio below were still
+                        # SKIP or MARGINAL by this check — the same defect #100
+                        # fixed for Long Call/Put, sitting unchecked here the
+                        # whole time because this path never called the gate at
+                        # all. Staged report-only until it can be watched.
                         _spreads = rank_structures_by_verdict(_spreads)
                         # Draw the entry queue at random among survivors — same
                         # reasoning as the single-leg path. `rank_structures_by_verdict`
@@ -7120,6 +7186,17 @@ def main():
                                 _spreads[~_afford_mask].to_dict("records"),
                                 "budget_displaced", board="autolog_structures")
                             _spreads = _spreads[_afford_mask]
+
+                        # negative_ev pre-filter — see the comment above this
+                        # branch for why this ONE check is applied here despite
+                        # the surrounding "deliberately not gated" policy.
+                        _neg_ev_mode = spread_negative_ev_mode("config.json")
+                        _spreads, _neg_ev_refused_rows, _neg_ev_count = (
+                            apply_spread_negative_ev_gate(_spreads, _neg_ev_mode))
+                        if _neg_ev_refused_rows:
+                            record_autolog_refusals(
+                                _neg_ev_refused_rows, "negative_ev",
+                                board="autolog_structures")
                         _candidates = _spreads.head(_top_n)
                         _today_str = datetime.now().strftime("%Y-%m-%d")
                         _inserted = 0
@@ -7291,6 +7368,17 @@ def main():
                                 f", {_displaced} of the top {_top_n} exceeded the "
                                 f"${_budget_cap:,.0f} budget"
                             )
+                        if _neg_ev_count:
+                            if _neg_ev_mode == "refuse":
+                                _summary += (f", refused {_neg_ev_count} for "
+                                            f"negative EV/noise")
+                            else:
+                                # Counted whether or not it refused, same
+                                # convention as _earn_proj above: report mode's
+                                # whole output is this count, watched before
+                                # the mode is ever flipped to refuse.
+                                _summary += (f", {_neg_ev_count} would be refused "
+                                            f"for negative EV/noise (report mode)")
                         print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
                         _print_entry_disclosure()
                         _has_results = False
