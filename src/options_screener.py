@@ -287,7 +287,13 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None,
             except Exception:
                 pass
         except Exception:
-            pass
+            # Swallowed by design so the UI never crashes on this, but log
+            # it — a bare `pass` here is what let the 2026-09-07 schema-drift
+            # crash (update_positions failing on a missing column) hide
+            # completely: the cron path's traceback was the only reason it
+            # was ever noticed.
+            logging.getLogger(__name__).error(
+                "inline exit enforcement failed", exc_info=True)
 
     text = ""
     try:
@@ -1034,6 +1040,99 @@ def _dedup_by_symbol(df, strategy_of_row):
     """
     from . import entry_selection as _es
     return _es.dedup_by_symbol(df, strategy_of_row, alloc=_current_allocation())
+
+
+# Which board a strategy is constructed on. `-ds` (discover) and `-sps`
+# (spreads) run as SEPARATE scheduled processes (scripts/auto_log_equity.sh),
+# never in the same one — so the spread board and the single-leg board each
+# used to draw their own full `--log-top` every run, independent of what the
+# OTHER board already logged that day. The allocation's shares (Bull Put
+# ~89%, everything else ~4% each) could then only ever govern the mix WITHIN
+# one board, never the split BETWEEN them, which is what
+# `src.maintenance_health`'s "alloc drift" check actually measures. Found
+# 2026-09-08: last 30 eligible entries ran 47% Bull Put against an 89%
+# target, with Long Call and Long Put each at 27% against a 4% target.
+_SPREAD_FAMILY = frozenset({"Bull Put", "Bear Call", "Iron Condor"})
+_SINGLE_LEG_FAMILY = frozenset({"Long Call", "Long Put", "Short Call", "Short Put"})
+
+
+def _today_family_counts(ledger_path: str, today: str) -> Dict[frozenset, int]:
+    """Eligible (paper_only=0) entries logged today, keyed by family.
+
+    Read-only, fails to all-zero — the caller's fallback is the old fixed
+    `log_top`, so a broken count must never shrink what the book can take.
+    """
+    import sqlite3 as _sqlite3
+    counts = {_SPREAD_FAMILY: 0, _SINGLE_LEG_FAMILY: 0}
+    conn = None
+    try:
+        conn = _sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT strategy_name, COUNT(*) FROM trades "
+            "WHERE paper_only=0 AND date(date)=date(?) "
+            "GROUP BY strategy_name", (today,)).fetchall()
+    except Exception:
+        logging.warning("alloc family counts unavailable; falling back to "
+                        "the fixed per-board log_top", exc_info=True)
+        return counts
+    finally:
+        if conn is not None:
+            conn.close()
+    for name, n in rows:
+        if name in _SPREAD_FAMILY:
+            counts[_SPREAD_FAMILY] += n
+        elif name in _SINGLE_LEG_FAMILY:
+            counts[_SINGLE_LEG_FAMILY] += n
+    return counts
+
+
+def _family_top_n(family: frozenset, other_family: frozenset,
+                  log_top: int, cfg_path: str = "config.json") -> int:
+    """How many of this scan's `log_top` slots this family may still use.
+
+    Two boards run as separate scheduled processes and neither can see the
+    other while it runs, so the only shared state available is the ledger
+    itself: count what each family has ALREADY logged today, and give this
+    family only the slots it still needs to reach its allocation share of
+    (what's logged so far + this scan's own ceiling). A family already over
+    its share for the day can legitimately get 0 — that is the fix, not a
+    bug — and one still short of it keeps its full `log_top`.
+
+    Falls back to the unchanged `log_top` whenever the allocation is off or
+    has no weights, so a fresh checkout or a disabled allocation behaves
+    exactly as before this existed.
+    """
+    alloc = _current_allocation(cfg_path)
+    if alloc is None or not alloc.weights:
+        return log_top
+    family_weight = sum(alloc.weights.get(s, 0.0) for s in family)
+    other_weight = sum(alloc.weights.get(s, 0.0) for s in other_family)
+    total_weight = family_weight + other_weight
+    if total_weight <= 0.0:
+        return log_top
+    if family_weight <= 0.0:
+        return 0
+
+    import json as _json
+    try:
+        with open(_repo_path(cfg_path)) as f:
+            cfg = _json.load(f)
+        ledger_path = _repo_path(
+            ((cfg.get("auto_log") or {}).get("allocation") or {})
+            .get("ledger_path") or "paper_trades.db")
+    except Exception:
+        ledger_path = _repo_path("paper_trades.db")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    counts = _today_family_counts(ledger_path, today)
+    family_so_far = counts.get(family, 0)
+    other_so_far = counts.get(other_family, 0)
+    total_so_far = family_so_far + other_so_far
+
+    share = family_weight / total_weight
+    deserved = round(share * (total_so_far + log_top))
+    remaining = max(0, deserved - family_so_far)
+    return min(log_top, remaining)
 
 
 def record_autolog_rank(df, *, board: str):
@@ -7055,7 +7154,13 @@ def main():
                         # structure per symbol, not whichever the shuffle gave
                         # more raw rows to. See _dedup_by_symbol.
                         _spreads = _dedup_by_symbol(_spreads, structure_strategy_name)
-                        _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                        # Shared across the spread and single-leg boards —
+                        # they run as separate scheduled processes and each
+                        # used to draw a full `log_top` regardless of what
+                        # the other already logged today. See _family_top_n.
+                        _log_top_ceiling = max(1, int(getattr(args, "log_top", 5) or 5))
+                        _top_n = _family_top_n(_SPREAD_FAMILY, _SINGLE_LEG_FAMILY,
+                                               _log_top_ceiling)
 
                         # Record the queue BEFORE the pre-cut filters, so every
                         # candidate carries its position and the filters below
@@ -7343,7 +7448,11 @@ def main():
                                 _single_legs[~_allow_mask].to_dict("records"),
                                 "allowlist_drop", board="AUTO-LOG")
                             _single_legs = _single_legs[_allow_mask]
-                        _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                        # Shared across the spread and single-leg boards — see
+                        # the spread path's identical call for why.
+                        _log_top_ceiling = max(1, int(getattr(args, "log_top", 5) or 5))
+                        _top_n = _family_top_n(_SINGLE_LEG_FAMILY, _SPREAD_FAMILY,
+                                               _log_top_ceiling)
                         # Budget pre-filter — same reasoning as the allowlist filter above.
                         # An unaffordable pick IS refused by the ledger, but only after it has
                         # already consumed a top-N slot. On 2026-07-30 the short-premium window
