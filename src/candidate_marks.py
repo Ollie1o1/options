@@ -450,7 +450,14 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
                 bid = ask = None
                 mid = abs(fill.price)
                 source = "live_quote_structure"
-            if not mid:
+            # `mid` is never actually unset by either branch above — this
+            # guards the Optional[float] type only. `if not mid` treated a
+            # structure priced at exactly $0.00 net credit the same as an
+            # unpriceable one, silently and permanently suppressing its mark
+            # every day (found 2026-09-09: a CMCSA Bear Call whose legs had
+            # converged to the same mid, net credit exactly 0.0, never marked
+            # once since entry despite both legs quoting fine daily).
+            if mid is None:
                 continue
 
             conn.execute(
