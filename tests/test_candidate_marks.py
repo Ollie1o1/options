@@ -894,6 +894,29 @@ class TestResolve(unittest.TestCase):
             self.assertEqual(cm.resolve(db_path=path, today="2026-08-10",
                                         cfg_path=cfg), 0)
 
+    def test_expiry_with_no_mark_ever_closes_as_a_full_loss(self):
+        """A leg whose strike drops out of the chain after entry (a real Yahoo
+        chain-snapshot instability, observed 2026-09-17/18: strikes present at
+        scan time gone from the chain by mark time) never gets a mark, so it
+        can never resolve through the normal mark-driven exits above. Left
+        alone it sits OPEN forever, past its own expiration, and the "never
+        marked" health alarm becomes a one-way ratchet. Expiration must close
+        it out even with zero marks; -1.0 (full loss) is the convention since
+        there is no real price to exit at."""
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-09-19",
+                                        cfg_path=cfg), 1)
+            with sqlite3.connect(path) as conn:
+                status, reason, pnl, price = conn.execute(
+                    "select status, exit_reason, pnl_pct, exit_price "
+                    "from candidate_positions").fetchone()
+            self.assertEqual(status, "CLOSED")
+            self.assertEqual(reason, "expired_unmarked")
+            self.assertEqual(pnl, -1.0)
+            self.assertIsNone(price)
+
     def test_a_future_mark_is_not_used(self):
         # Resolving on day N must not see a mark from day N+1.
         with tempfile.TemporaryDirectory() as d:
