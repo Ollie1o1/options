@@ -105,13 +105,21 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
     by `quality_score` because `sort_by` defaulted to it where nothing
     could see. It also makes the module untestable without touching the
     real database.
+
+    `timeout=` and WAL mode match every other sqlite writer in this repo
+    (paper_manager.py, catalyst/store.py, predmarkets/archive.py, ...).
+    Without them this was the one module still using sqlite's bare 5s
+    rollback-journal default, which turned routine overlap — a scheduled
+    scan's writer still running when another scan started — into
+    'database is locked' (2026-09-17).
     """
     import os
     db_path = _resolve_db_path(db_path)
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60.0)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn)
     conn.commit()
@@ -237,7 +245,7 @@ def _record_error(where: str, tb: str, db_path: str) -> None:
     why `health_lines` reads the counter and not only this table.
     """
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=60.0)
         try:
             conn.executescript(_ERROR_SCHEMA)
             conn.execute(

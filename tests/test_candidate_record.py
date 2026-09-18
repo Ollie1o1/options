@@ -62,6 +62,37 @@ class TestSchema(unittest.TestCase):
             self.assertNotIn("friction_pct", cols)
 
 
+class TestConnectionResilience(unittest.TestCase):
+    """`connect` was the one sqlite writer in this codebase with no busy
+    timeout or WAL mode — every other module has one (paper_manager.py,
+    data_fetching.py, catalyst/store.py, predmarkets/archive.py,
+    crypto/cache.py). The bare 5s rollback-journal default is what turned a
+    routine overlap (a scheduled scan's writer still running when the user
+    started another) into 'database is locked' (2026-09-17)."""
+
+    def test_opens_with_a_busy_timeout_longer_than_sqlite_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "candidates.db")
+            real_connect = sqlite3.connect
+            calls = []
+
+            def spy(*a, **k):
+                calls.append(k)
+                return real_connect(*a, **k)
+
+            with unittest.mock.patch.object(cr.sqlite3, "connect", side_effect=spy):
+                cr.connect(path).close()
+            self.assertTrue(calls)
+            self.assertGreaterEqual(calls[0].get("timeout", 0), 30.0)
+
+    def test_uses_wal_so_a_slow_writer_does_not_block_a_reader(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "candidates.db")
+            cr.connect(path).close()
+            mode = sqlite3.connect(path).execute("PRAGMA journal_mode").fetchone()[0]
+            self.assertEqual(mode.lower(), "wal")
+
+
 class TestContractKey(unittest.TestCase):
     def test_single_leg_key_is_stable(self):
         self.assertEqual(cr.contract_key(_leg()), cr.contract_key(_leg()))
