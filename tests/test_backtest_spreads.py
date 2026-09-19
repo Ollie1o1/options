@@ -13,11 +13,13 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 
 from src.backtest_optimizer import bs_call_price, bs_put_price
-from src.backtest_spreads import load_default_surface, simulate_vertical_pnl
+from src.backtest_spreads import load_default_surface, simulate_vertical_pnl, SpreadTrade, WING_DELTA, backtest_ticker_vertical
 from src.spread_surface import Cell, SpreadSurface, save_surface
 
 
@@ -139,6 +141,75 @@ class LoadDefaultSurfaceTest(unittest.TestCase):
             surface, provenance = load_default_surface(path)
         self.assertIsNone(surface)
         self.assertEqual(provenance, "fallback_flat")
+
+
+def _fake_price_frame(n_days: int = 1300, start_price: float = 100.0,
+                      seed: int = 0) -> pd.DataFrame:
+    """A deterministic, mildly-trending synthetic daily OHLCV frame long
+    enough (>300 rows plus warmup plus one full entry_dte window) to drive
+    backtest_ticker_vertical's roll-forward loop."""
+    rng = np.random.default_rng(seed)
+    rets = rng.normal(0.0002, 0.015, n_days)
+    closes = start_price * np.cumprod(1 + rets)
+    idx = pd.bdate_range("2020-01-02", periods=n_days)
+    return pd.DataFrame({
+        "Close": closes,
+        "Volume": rng.integers(1_000_000, 5_000_000, n_days),
+    }, index=idx)
+
+
+class BacktestTickerVerticalTest(unittest.TestCase):
+    def setUp(self):
+        self.frame = _fake_price_frame()
+        patcher = patch("src.backtest_spreads._get_yf")
+        self.mock_get_yf = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_yf = MagicMock()
+        mock_yf.download.return_value = self.frame
+        self.mock_get_yf.return_value = mock_yf
+
+    def test_returns_a_nonempty_list_of_spread_trades(self):
+        trades = backtest_ticker_vertical("FAKE", option_type="put")
+        self.assertIsNotNone(trades)
+        self.assertGreater(len(trades), 0)
+        self.assertIsInstance(trades[0], SpreadTrade)
+
+    def test_every_trade_has_exit_strictly_after_entry(self):
+        trades = backtest_ticker_vertical("FAKE", option_type="put")
+        for t in trades:
+            self.assertLess(t.entry_date, t.exit_date)
+
+    def test_components_length_matches_weight_keys_and_spread_overridden(self):
+        from src.backtest_optimizer import WEIGHT_KEYS
+        trades = backtest_ticker_vertical("FAKE", option_type="put")
+        spread_idx = WEIGHT_KEYS.index("spread")
+        for t in trades:
+            self.assertEqual(len(t.components), len(WEIGHT_KEYS))
+            # Neutral (0.5) is compute_component_scores' own hardcoded
+            # placeholder — this asserts backtest_ticker_vertical actually
+            # overwrote it, not merely that it's some finite number.
+            self.assertNotEqual(t.components[spread_idx], 0.5)
+
+    def test_credit_to_width_is_positive_for_well_formed_bull_put_trades(self):
+        trades = backtest_ticker_vertical("FAKE", option_type="put")
+        for t in trades:
+            self.assertGreater(t.credit_to_width, 0.0)
+
+    def test_bear_call_short_strike_is_below_long_strike(self):
+        """Sanity check on the wing direction for a call vertical — this
+        would silently produce backwards spreads if option_type='call'
+        picked deltas with the wrong sign."""
+        trades = backtest_ticker_vertical("FAKE", option_type="call")
+        self.assertIsNotNone(trades)
+        self.assertGreater(len(trades), 0)
+
+    def test_too_short_a_price_history_returns_none(self):
+        short_frame = self.frame.iloc[:100]
+        mock_yf = MagicMock()
+        mock_yf.download.return_value = short_frame
+        self.mock_get_yf.return_value = mock_yf
+        trades = backtest_ticker_vertical("FAKE", option_type="put")
+        self.assertIsNone(trades)
 
 
 if __name__ == "__main__":

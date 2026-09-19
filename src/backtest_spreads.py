@@ -8,18 +8,37 @@ docs/superpowers/specs/2026-09-19-hypothesis-sweep-design.md.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
-from src.backtest_optimizer import bs_call_price, bs_put_price
+from src.backtest_optimizer import (
+    ENTRY_DTE, ROLL_STEP_DAYS, RISK_FREE_RATE, SLIPPAGE_PCT, TARGET_DELTA,
+    WEIGHT_KEYS, _get_yf, _hv_30, bs_call_price, bs_put_price,
+    compute_component_scores, strike_for_call_delta, strike_for_delta,
+)
 from src.spread_surface import DEFAULT_SURFACE_PATH, SpreadSurface, load_surface
 
 PROFIT_TARGET = 0.50
 STOP_LOSS_MULT = 2.0
 EXIT_DTE_MIN = 21
+WING_DELTA = 0.10
+
+_SPREAD_IDX = WEIGHT_KEYS.index("spread")
+
+
+@dataclass
+class SpreadTrade:
+    symbol: str
+    entry_date: Any
+    exit_date: Any
+    pnl_pct: float
+    components: np.ndarray
+    credit_to_width: float
 
 
 def load_default_surface(path: str = DEFAULT_SURFACE_PATH) -> Tuple[Optional[SpreadSurface], str]:
@@ -89,3 +108,136 @@ def simulate_vertical_pnl(
             pnl_pct = (received - exit_cost) / max(entry_mid_credit, 1e-8)
             return float(pnl_pct), i
     return 0.0, 0
+
+
+def backtest_ticker_vertical(
+    symbol: str,
+    period: str = "5y",
+    r: float = RISK_FREE_RATE,
+    entry_dte: int = ENTRY_DTE,
+    roll_step: int = ROLL_STEP_DAYS,
+    target_delta: float = TARGET_DELTA,
+    wing_delta: float = WING_DELTA,
+    option_type: str = "put",
+    stop_mult: float = STOP_LOSS_MULT,
+    profit_target: float = PROFIT_TARGET,
+    surface: Optional[SpreadSurface] = None,
+) -> Optional[List[SpreadTrade]]:
+    """Roll a credit vertical forward over one ticker's price history.
+
+    Mirrors backtest_optimizer.backtest_ticker's loop structure (same
+    warmup, same roll step, same component-score inputs) but prices two
+    legs instead of one and tracks real calendar dates natively.
+    """
+    try:
+        raw = _get_yf().download(symbol, period=period, interval="1d",
+                                 auto_adjust=True, progress=False)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        closes = raw["Close"].dropna().squeeze()
+        if not isinstance(closes, pd.Series) or len(closes) < 300:
+            return None
+        vols = raw.get("Volume", pd.Series(0, index=raw.index))
+        if isinstance(vols, pd.DataFrame):
+            vols = vols.iloc[:, 0]
+        vols = vols.reindex(closes.index).fillna(0)
+
+        warmup = 260
+        step_indices = range(warmup, len(closes) - entry_dte - 5, roll_step)
+        strike_fn = strike_for_delta if option_type == "put" else strike_for_call_delta
+        price_fn = bs_put_price if option_type == "put" else bs_call_price
+        short_target = -target_delta if option_type == "put" else target_delta
+        wing_target = -wing_delta if option_type == "put" else wing_delta
+
+        trades: List[SpreadTrade] = []
+        for idx in step_indices:
+            S0 = float(closes.iloc[idx])
+            if S0 <= 0:
+                continue
+            sigma = _hv_30(closes, idx)
+            if sigma is None:
+                continue
+
+            T = entry_dte / 365.0
+            try:
+                K_short = strike_fn(S0, T, r, sigma, target_delta=short_target)
+                K_long = strike_fn(S0, T, r, sigma, target_delta=wing_target)
+            except Exception:
+                continue
+            if option_type == "put":
+                if not (0 < K_long < K_short < S0):
+                    continue
+            else:
+                if not (S0 < K_short < K_long):
+                    continue
+
+            if surface is not None:
+                rel_short, _ = surface.oi_collapsed_relative(
+                    abs_delta=target_delta, dte=float(entry_dte))
+                rel_long, _ = surface.oi_collapsed_relative(
+                    abs_delta=wing_delta, dte=float(entry_dte))
+            else:
+                rel_short = SLIPPAGE_PCT / 2.0
+                rel_long = SLIPPAGE_PCT / 2.0
+
+            future = closes.iloc[idx + 1: idx + entry_dte + 1].values
+            if len(future) < entry_dte // 2:
+                continue
+
+            pnl, exit_offset = simulate_vertical_pnl(
+                S0, future, K_short, K_long, sigma, r, entry_dte, option_type,
+                rel_short, rel_long, profit_target=profit_target,
+                stop_mult=stop_mult)
+            if not np.isfinite(pnl):
+                continue
+
+            hv_history = [_hv_30(closes, i)
+                         for i in range(max(idx - 252, 30), idx, 5)]
+            hv_history = [v for v in hv_history if v is not None]
+            hv_pct_rank = (float(np.mean(np.array(hv_history) < sigma))
+                          if hv_history else 0.5)
+            hv_6m = [_hv_30(closes, i) for i in range(max(idx - 130, 30), idx, 5)]
+            hv_6m = [v for v in hv_6m if v is not None]
+            hv_ratio = sigma / max(float(np.mean(hv_6m)), 0.01) if hv_6m else 1.0
+            rsi_window = closes.iloc[max(0, idx - 20):idx].diff().dropna()
+            gains = rsi_window.clip(lower=0).rolling(14).mean()
+            losses = (-rsi_window).clip(lower=0).rolling(14).mean()
+            raw_g = float(gains.iloc[-1]) if len(gains) > 0 else 0
+            raw_l = float(losses.iloc[-1]) if len(losses) > 0 else 1e-8
+            avg_g = raw_g if math.isfinite(raw_g) else 0
+            avg_l = raw_l if math.isfinite(raw_l) else 1e-8
+            rsi = 100 - 100 / (1 + avg_g / max(avg_l, 1e-8))
+            rsi_score = float(np.clip(rsi / 100.0, 0, 1))
+            vol_window = vols.iloc[max(0, idx - 252):idx]
+            vol_rank = (float(np.mean(vol_window < vols.iloc[idx]))
+                       if len(vol_window) else 0.5)
+
+            comp = compute_component_scores(
+                S0, K_short, T, r, sigma,
+                hv_pct_rank=hv_pct_rank,
+                hv_ratio=float(np.clip(hv_ratio, 0.1, 5.0)),
+                rsi_score=rsi_score, vol_rank=vol_rank,
+                mode="short_put" if option_type == "put" else "long_call",
+            ).copy()
+            avg_rel = (rel_short + rel_long) / 2.0
+            comp[_SPREAD_IDX] = float(np.clip(1.0 - avg_rel / 0.10, 0.0, 1.0))
+
+            entry_prem = price_fn(S0, K_short, T, r, sigma) - price_fn(S0, K_long, T, r, sigma)
+            received = (price_fn(S0, K_short, T, r, sigma) * (1 - rel_short)
+                       - price_fn(S0, K_long, T, r, sigma) * (1 + rel_long))
+            width = abs(K_short - K_long)
+            credit_to_width = received / width if width > 0 else 0.0
+
+            entry_date = closes.index[idx]
+            exit_date = closes.index[idx + 1 + exit_offset]
+
+            trades.append(SpreadTrade(
+                symbol=symbol, entry_date=entry_date, exit_date=exit_date,
+                pnl_pct=pnl, components=comp, credit_to_width=credit_to_width,
+            ))
+
+        return trades if len(trades) >= 5 else None
+    except Exception:
+        return None
