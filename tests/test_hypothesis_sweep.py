@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, timedelta
+from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 
 from src.backtest_spreads import SpreadTrade
 from src.hypothesis_sweep import (
     MIN_EFFECTIVE_N, MIN_RAW_TRADES, N_TRIALS, HypothesisResult,
-    _dsr_from_trades,
+    _dsr_from_trades, run_h1_bull_put, run_h2_bear_call,
 )
 
 
@@ -102,3 +104,49 @@ class HypothesisResultTest(unittest.TestCase):
         )
         self.assertEqual(r.reason, None)
         self.assertEqual(r.notes, "")
+
+
+def _fake_price_frame(n_days: int = 1300, start_price: float = 100.0,
+                      seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    rets = rng.normal(0.0002, 0.015, n_days)
+    closes = start_price * np.cumprod(1 + rets)
+    idx = pd.bdate_range("2020-01-02", periods=n_days)
+    return pd.DataFrame({
+        "Close": closes,
+        "Volume": rng.integers(1_000_000, 5_000_000, n_days),
+    }, index=idx)
+
+
+class H1H2RunnerTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("src.backtest_spreads._get_yf")
+        self.mock_get_yf = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_yf = MagicMock()
+
+        def fake_download(symbol, **kwargs):
+            seed = sum(ord(c) for c in symbol)
+            return _fake_price_frame(seed=seed)
+
+        mock_yf.download.side_effect = fake_download
+        self.mock_get_yf.return_value = mock_yf
+        self.tickers = ["FAKE1", "FAKE2", "FAKE3", "FAKE4", "FAKE5"]
+
+    def test_h1_returns_a_hypothesis_result_tagged_h1_strategy(self):
+        result = run_h1_bull_put(tickers=self.tickers)
+        self.assertEqual(result.id, "H1")
+        self.assertEqual(result.category, "strategy")
+        self.assertEqual(result.statistic_type, "dsr")
+
+    def test_h2_returns_a_hypothesis_result_tagged_h2_strategy(self):
+        result = run_h2_bear_call(tickers=self.tickers)
+        self.assertEqual(result.id, "H2")
+        self.assertEqual(result.category, "strategy")
+
+    def test_survives_requires_both_not_refused_and_dsr_at_or_above_bar(self):
+        result = run_h1_bull_put(tickers=self.tickers)
+        if result.refused:
+            self.assertFalse(result.survives)
+        else:
+            self.assertEqual(result.survives, result.value >= 0.95)

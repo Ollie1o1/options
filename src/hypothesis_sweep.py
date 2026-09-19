@@ -13,7 +13,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from src.alloc.validate import deflated_sharpe, effective_n
-from src.backtest_spreads import SpreadTrade
+from src.backtest_optimizer import DEFAULT_UNIVERSE
+from src.backtest_spreads import SpreadTrade, load_default_surface, run_vertical_backtest
 
 # The size of the preregistered family. Every deflated_sharpe call in this
 # module passes this literal value — never a computed count, never adjusted
@@ -69,3 +70,25 @@ def _dsr_from_trades(
     pnl = np.array([t.pnl_pct for t in trades], dtype=float)
     dsr = deflated_sharpe(pnl, N_TRIALS, n_eff)
     return dsr, n_eff, False, None
+
+
+def run_h1_bull_put(tickers: Optional[List[str]] = None) -> HypothesisResult:
+    """H1: Bull Put spread DSR across the full ticker universe."""
+    universe = tickers if tickers is not None else DEFAULT_UNIVERSE
+    surface, _ = load_default_surface()
+    trades = run_vertical_backtest(universe, option_type="put", surface=surface)
+    dsr, n_eff, refused, reason = _dsr_from_trades(trades)
+    survives = (not refused) and dsr is not None and dsr >= DSR_SURVIVAL_BAR
+    return HypothesisResult("H1", "strategy", "dsr", dsr, n_eff, len(trades),
+                            survives, refused, reason)
+
+
+def run_h2_bear_call(tickers: Optional[List[str]] = None) -> HypothesisResult:
+    """H2: Bear Call spread DSR across the full ticker universe."""
+    universe = tickers if tickers is not None else DEFAULT_UNIVERSE
+    surface, _ = load_default_surface()
+    trades = run_vertical_backtest(universe, option_type="call", surface=surface)
+    dsr, n_eff, refused, reason = _dsr_from_trades(trades)
+    survives = (not refused) and dsr is not None and dsr >= DSR_SURVIVAL_BAR
+    return HypothesisResult("H2", "strategy", "dsr", dsr, n_eff, len(trades),
+                            survives, refused, reason)
