@@ -150,3 +150,43 @@ class H1H2RunnerTest(unittest.TestCase):
             self.assertFalse(result.survives)
         else:
             self.assertEqual(result.survives, result.value >= 0.95)
+
+    def test_h1_passes_option_type_put_to_run_vertical_backtest(self):
+        """Verify that H1 (Bull Put) passes option_type='put' to backtest.
+
+        This guards against silent swaps that would be invisible to the other
+        tests (which only check result tags, not the backtest path taken).
+        """
+        patcher = patch("src.hypothesis_sweep.run_vertical_backtest")
+        mock_run_backtest = patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Return a minimal trade list so _dsr_from_trades refuses gracefully
+        mock_run_backtest.return_value = []
+
+        run_h1_bull_put(tickers=self.tickers)
+
+        # Verify the mock was called with option_type="put"
+        mock_run_backtest.assert_called_once()
+        call_kwargs = mock_run_backtest.call_args.kwargs
+        self.assertEqual(call_kwargs["option_type"], "put")
+
+    def test_h2_passes_option_type_call_to_run_vertical_backtest(self):
+        """Verify that H2 (Bear Call) passes option_type='call' to backtest.
+
+        This guards against silent swaps that would be invisible to the other
+        tests (which only check result tags, not the backtest path taken).
+        """
+        patcher = patch("src.hypothesis_sweep.run_vertical_backtest")
+        mock_run_backtest = patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Return a minimal trade list so _dsr_from_trades refuses gracefully
+        mock_run_backtest.return_value = []
+
+        run_h2_bear_call(tickers=self.tickers)
+
+        # Verify the mock was called with option_type="call"
+        mock_run_backtest.assert_called_once()
+        call_kwargs = mock_run_backtest.call_args.kwargs
+        self.assertEqual(call_kwargs["option_type"], "call")
