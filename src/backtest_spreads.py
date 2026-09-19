@@ -241,3 +241,27 @@ def backtest_ticker_vertical(
         return trades if len(trades) >= 5 else None
     except Exception:
         return None
+
+
+def run_vertical_backtest(
+    tickers: List[str],
+    period: str = "5y",
+    option_type: str = "put",
+    entry_dte: int = ENTRY_DTE,
+    stop_mult: float = STOP_LOSS_MULT,
+    profit_target: float = PROFIT_TARGET,
+    target_delta: float = TARGET_DELTA,
+    wing_delta: float = WING_DELTA,
+    surface: Optional[SpreadSurface] = None,
+) -> List[SpreadTrade]:
+    """Run backtest_ticker_vertical over every ticker and pool the trades."""
+    all_trades: List[SpreadTrade] = []
+    for sym in tickers:
+        result = backtest_ticker_vertical(
+            sym, period=period, entry_dte=entry_dte, target_delta=target_delta,
+            wing_delta=wing_delta, option_type=option_type, stop_mult=stop_mult,
+            profit_target=profit_target, surface=surface,
+        )
+        if result:
+            all_trades.extend(result)
+    return all_trades

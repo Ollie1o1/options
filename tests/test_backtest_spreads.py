@@ -21,7 +21,7 @@ import pandas as pd
 from src.backtest_optimizer import bs_call_price, bs_put_price
 from src.backtest_spreads import (
     _SPREAD_IDX, load_default_surface, simulate_vertical_pnl, SpreadTrade,
-    WING_DELTA, backtest_ticker_vertical,
+    WING_DELTA, backtest_ticker_vertical, run_vertical_backtest,
 )
 from src.spread_surface import Cell, SpreadSurface, save_surface
 
@@ -268,6 +268,35 @@ class BacktestTickerVerticalTest(unittest.TestCase):
             self.assertLess(surf_t.credit_to_width, flat_t.credit_to_width)
             self.assertNotEqual(surf_t.components[_SPREAD_IDX],
                                 flat_t.components[_SPREAD_IDX])
+
+
+class RunVerticalBacktestTest(unittest.TestCase):
+    def setUp(self):
+        self.frame = _fake_price_frame()
+        patcher = patch("src.backtest_spreads._get_yf")
+        self.mock_get_yf = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_yf = MagicMock()
+        mock_yf.download.return_value = self.frame
+        self.mock_get_yf.return_value = mock_yf
+
+    def test_pools_trades_across_tickers(self):
+        trades = run_vertical_backtest(["FAKE1", "FAKE2", "FAKE3"], option_type="put")
+        symbols = {t.symbol for t in trades}
+        self.assertEqual(symbols, {"FAKE1", "FAKE2", "FAKE3"})
+        self.assertGreater(len(trades), 0)
+
+    def test_a_ticker_that_returns_none_is_skipped_not_fatal(self):
+        def fake_download(symbol, **kwargs):
+            if symbol == "BADTICKER":
+                return pd.DataFrame()
+            return self.frame
+        mock_yf = MagicMock()
+        mock_yf.download.side_effect = fake_download
+        self.mock_get_yf.return_value = mock_yf
+        trades = run_vertical_backtest(["FAKE1", "BADTICKER"], option_type="put")
+        symbols = {t.symbol for t in trades}
+        self.assertEqual(symbols, {"FAKE1"})
 
 
 if __name__ == "__main__":
