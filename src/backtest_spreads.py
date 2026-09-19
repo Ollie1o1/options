@@ -8,16 +8,33 @@ docs/superpowers/specs/2026-09-19-hypothesis-sweep-design.md.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 import numpy as np
 
 from src.backtest_optimizer import bs_call_price, bs_put_price
+from src.spread_surface import DEFAULT_SURFACE_PATH, SpreadSurface, load_surface
 
 PROFIT_TARGET = 0.50
 STOP_LOSS_MULT = 2.0
 EXIT_DTE_MIN = 21
+
+
+def load_default_surface(path: str = DEFAULT_SURFACE_PATH) -> Tuple[Optional[SpreadSurface], str]:
+    """Load the fitted spread surface, or report the flat-friction fallback.
+
+    Returns (None, "fallback_flat") both when the file is absent and when it
+    exists but carries no cells — either way there is no real measurement to
+    use, and a caller must not blend a guess with real data unlabeled.
+    """
+    if not os.path.exists(path):
+        return None, "fallback_flat"
+    surface = load_surface(path)
+    if not surface.cells:
+        return None, "fallback_flat"
+    return surface, "surface"
 
 
 def simulate_vertical_pnl(

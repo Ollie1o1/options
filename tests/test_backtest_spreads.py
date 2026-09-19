@@ -10,12 +10,15 @@ Run:
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
 import numpy as np
 
 from src.backtest_optimizer import bs_call_price, bs_put_price
-from src.backtest_spreads import simulate_vertical_pnl
+from src.backtest_spreads import load_default_surface, simulate_vertical_pnl
+from src.spread_surface import Cell, SpreadSurface, save_surface
 
 
 class SimulateVerticalPnlBullPutTest(unittest.TestCase):
@@ -108,6 +111,34 @@ class SimulateVerticalPnlBearCallTest(unittest.TestCase):
             self.DTE, "call", rel_short=0.01, rel_long=0.01)
         self.assertLess(pnl, 0.0)
         self.assertLess(exit_offset, self.DTE - 1)
+
+
+class LoadDefaultSurfaceTest(unittest.TestCase):
+    def test_missing_file_returns_none_and_fallback_provenance(self):
+        surface, provenance = load_default_surface("/nonexistent/path.json")
+        self.assertIsNone(surface)
+        self.assertEqual(provenance, "fallback_flat")
+
+    def test_present_file_returns_surface_and_surface_provenance(self):
+        cells = {(1, 1, 1): Cell(n=50, rel_half_spread=0.02, median_depth=10)}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "surface.json")
+            save_surface(SpreadSurface(cells, {"fit_date": "2026-09-19"}), path)
+            surface, provenance = load_default_surface(path)
+        self.assertIsNotNone(surface)
+        self.assertEqual(provenance, "surface")
+
+    def test_empty_cells_still_counts_as_fallback(self):
+        """A surface file with no cells (e.g. an empty archive) must not be
+        treated as real data — that would silently fall through to
+        `_collapsed`'s `caller_default`/ValueError path deep inside a
+        roll-forward loop instead of failing predictably here."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "surface.json")
+            save_surface(SpreadSurface({}, {}), path)
+            surface, provenance = load_default_surface(path)
+        self.assertIsNone(surface)
+        self.assertEqual(provenance, "fallback_flat")
 
 
 if __name__ == "__main__":
