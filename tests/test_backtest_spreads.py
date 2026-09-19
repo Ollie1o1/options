@@ -19,7 +19,10 @@ import numpy as np
 import pandas as pd
 
 from src.backtest_optimizer import bs_call_price, bs_put_price
-from src.backtest_spreads import load_default_surface, simulate_vertical_pnl, SpreadTrade, WING_DELTA, backtest_ticker_vertical
+from src.backtest_spreads import (
+    _SPREAD_IDX, load_default_surface, simulate_vertical_pnl, SpreadTrade,
+    WING_DELTA, backtest_ticker_vertical,
+)
 from src.spread_surface import Cell, SpreadSurface, save_surface
 
 
@@ -210,6 +213,61 @@ class BacktestTickerVerticalTest(unittest.TestCase):
         self.mock_get_yf.return_value = mock_yf
         trades = backtest_ticker_vertical("FAKE", option_type="put")
         self.assertIsNone(trades)
+
+    def test_surface_friction_path_actually_runs_and_changes_the_economics(self):
+        """The whole point of this module (per its own docstring) is per-leg
+        friction from the fitted spread surface instead of the flat
+        SLIPPAGE_PCT/2.0 fallback. Every other test in this class calls
+        backtest_ticker_vertical with the default surface=None, so the
+        `if surface is not None:` branch — and the real
+        SpreadSurface.oi_collapsed_relative signature it depends on — is
+        otherwise never exercised. A single cell with rel_half_spread=0.08
+        (deliberately far from SLIPPAGE_PCT/2.0 == 0.01) is enough: no
+        (delta, dte) bucket in this run will hit it as an exact cell, so
+        every lookup falls through _collapsed's ladder all the way to the
+        "global" median — which is this one cell's value regardless of
+        which bucket asked for it. That keeps the fixture simple while still
+        proving the kwargs (`abs_delta=`, `dte=`) and the (value, provenance)
+        tuple-unpack are wired correctly: a mismatch there raises inside
+        backtest_ticker_vertical's try/except and silently degrades to
+        `trades is None`, which this test would also catch.
+        """
+        distinctive_rel_half_spread = 0.08
+        surface = SpreadSurface(
+            {(0, 0, 0): Cell(n=50, rel_half_spread=distinctive_rel_half_spread,
+                             median_depth=10)},
+            {"fit_date": "2026-09-19"},
+        )
+
+        # Sanity-check the fixture directly against the real signature before
+        # trusting it inside the roll-forward loop.
+        rel, provenance = surface.oi_collapsed_relative(abs_delta=0.30, dte=45.0)
+        self.assertEqual(rel, distinctive_rel_half_spread)
+        self.assertEqual(provenance, "global")
+
+        flat_trades = backtest_ticker_vertical("FAKE", option_type="put")
+        surface_trades = backtest_ticker_vertical(
+            "FAKE", option_type="put", surface=surface)
+
+        self.assertIsNotNone(flat_trades)
+        self.assertIsNotNone(surface_trades)
+        self.assertGreater(len(surface_trades), 0)
+        # Same price history, same strike-selection inputs (friction never
+        # feeds the entry/exit-timing decision) -> identical trade count and
+        # entry/exit dates, differing only in the friction-driven economics.
+        self.assertEqual(len(flat_trades), len(surface_trades))
+
+        for flat_t, surf_t in zip(flat_trades, surface_trades):
+            self.assertEqual(flat_t.entry_date, surf_t.entry_date)
+            self.assertEqual(flat_t.exit_date, surf_t.exit_date)
+            # The surface's friction (0.08/leg) is far above the flat
+            # fallback's (0.01/leg), so the received credit -- and therefore
+            # credit_to_width -- must come out strictly lower under the
+            # surface path. Equality here would mean the surface's
+            # oi_collapsed_relative value never made it into the trade.
+            self.assertLess(surf_t.credit_to_width, flat_t.credit_to_width)
+            self.assertNotEqual(surf_t.components[_SPREAD_IDX],
+                                flat_t.components[_SPREAD_IDX])
 
 
 if __name__ == "__main__":
