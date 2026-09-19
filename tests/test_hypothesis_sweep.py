@@ -21,7 +21,7 @@ import pandas as pd
 from src.backtest_spreads import SpreadTrade
 from src.hypothesis_sweep import (
     MIN_EFFECTIVE_N, MIN_RAW_TRADES, N_TRIALS, HypothesisResult,
-    _dsr_from_trades, run_h1_bull_put, run_h2_bear_call,
+    _dsr_from_trades, run_h1_bull_put, run_h2_bear_call, run_h5_stop_loss,
 )
 
 
@@ -190,3 +190,39 @@ class H1H2RunnerTest(unittest.TestCase):
         mock_run_backtest.assert_called_once()
         call_kwargs = mock_run_backtest.call_args.kwargs
         self.assertEqual(call_kwargs["option_type"], "call")
+
+
+class H5RunnerTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("src.backtest_spreads._get_yf")
+        self.mock_get_yf = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_yf = MagicMock()
+
+        def fake_download(symbol, **kwargs):
+            seed = sum(ord(c) for c in symbol)
+            return _fake_price_frame(seed=seed)
+
+        mock_yf.download.side_effect = fake_download
+        self.mock_get_yf.return_value = mock_yf
+        self.tickers = ["FAKE1", "FAKE2", "FAKE3", "FAKE4", "FAKE5"]
+
+    def test_returns_a_hypothesis_result_tagged_h5_entry_exit(self):
+        result = run_h5_stop_loss(tickers=self.tickers)
+        self.assertEqual(result.id, "H5")
+        self.assertEqual(result.category, "entry_exit")
+        self.assertEqual(result.statistic_type, "dsr")
+
+    def test_matched_trades_are_paired_by_symbol_and_entry_date(self):
+        """A regression guard on the pairing key: with the same deterministic
+        roll-forward calendar under both stop multiples, n_raw_trades for the
+        matched-difference series should not exceed either individual run's
+        trade count."""
+        from src.backtest_spreads import load_default_surface, run_vertical_backtest
+        surface, _ = load_default_surface()
+        current = run_vertical_backtest(self.tickers, option_type="put",
+                                        stop_mult=2.0, surface=surface)
+        variant = run_vertical_backtest(self.tickers, option_type="put",
+                                        stop_mult=1.5, surface=surface)
+        result = run_h5_stop_loss(tickers=self.tickers)
+        self.assertLessEqual(result.n_raw_trades, min(len(current), len(variant)))

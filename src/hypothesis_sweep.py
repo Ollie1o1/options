@@ -14,7 +14,7 @@ import numpy as np
 
 from src.alloc.validate import deflated_sharpe, effective_n
 from src.backtest_optimizer import DEFAULT_UNIVERSE
-from src.backtest_spreads import SpreadTrade, load_default_surface, run_vertical_backtest
+from src.backtest_spreads import STOP_LOSS_MULT as _CURRENT_STOP_MULT, SpreadTrade, load_default_surface, run_vertical_backtest
 
 # The size of the preregistered family. Every deflated_sharpe call in this
 # module passes this literal value — never a computed count, never adjusted
@@ -30,6 +30,9 @@ MIN_RAW_TRADES = 30
 MIN_EFFECTIVE_N = 3
 
 DSR_SURVIVAL_BAR = 0.95
+
+# H5 (stop-loss multiple) comparison: variant tested at 1.5x, current at 2.0x
+H5_VARIANT_STOP_MULT = 1.5
 
 
 @dataclass
@@ -92,3 +95,44 @@ def run_h2_bear_call(tickers: Optional[List[str]] = None) -> HypothesisResult:
     survives = (not refused) and dsr is not None and dsr >= DSR_SURVIVAL_BAR
     return HypothesisResult("H2", "strategy", "dsr", dsr, n_eff, len(trades),
                             survives, refused, reason)
+
+
+def run_h5_stop_loss(tickers: Optional[List[str]] = None) -> HypothesisResult:
+    """H5: Stop-loss multiple (2.0x current vs 1.5x variant) matched-pair DSR.
+
+    Runs the same roll-forward calendar twice at different stop-loss multiples,
+    matches trades by (symbol, entry_date) key, computes per-trade P&L
+    difference (variant - current), and runs DSR on the difference series.
+    """
+    universe = tickers if tickers is not None else DEFAULT_UNIVERSE
+    surface, _ = load_default_surface()
+    current = run_vertical_backtest(universe, option_type="put",
+                                    stop_mult=_CURRENT_STOP_MULT, surface=surface)
+    variant = run_vertical_backtest(universe, option_type="put",
+                                    stop_mult=H5_VARIANT_STOP_MULT, surface=surface)
+    current_by_key = {(t.symbol, t.entry_date): t.pnl_pct for t in current}
+
+    diffs: List[float] = []
+    entries = []
+    exits = []
+    for t in variant:
+        key = (t.symbol, t.entry_date)
+        if key in current_by_key:
+            diffs.append(t.pnl_pct - current_by_key[key])
+            entries.append(t.entry_date)
+            exits.append(t.exit_date)
+
+    n_raw = len(diffs)
+    if n_raw < MIN_RAW_TRADES:
+        return HypothesisResult("H5", "entry_exit", "dsr", None, None, n_raw,
+                                False, True, "insufficient_raw_trades")
+
+    n_eff = effective_n(entries, exits)
+    if n_eff < MIN_EFFECTIVE_N:
+        return HypothesisResult("H5", "entry_exit", "dsr", None, n_eff, n_raw,
+                                False, True, "insufficient_effective_n")
+
+    dsr = deflated_sharpe(np.array(diffs, dtype=float), N_TRIALS, n_eff)
+    survives = dsr >= DSR_SURVIVAL_BAR
+    return HypothesisResult("H5", "entry_exit", "dsr", dsr, n_eff, n_raw,
+                            survives, False, None)
