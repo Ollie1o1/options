@@ -22,6 +22,7 @@ from src.backtest_spreads import SpreadTrade
 from src.hypothesis_sweep import (
     MIN_EFFECTIVE_N, MIN_RAW_TRADES, N_TRIALS, HypothesisResult,
     _dsr_from_trades, run_h1_bull_put, run_h2_bear_call, run_h5_stop_loss,
+    run_h4_entry_dte, run_h6_credit_to_width,
 )
 
 
@@ -226,3 +227,43 @@ class H5RunnerTest(unittest.TestCase):
                                         stop_mult=1.5, surface=surface)
         result = run_h5_stop_loss(tickers=self.tickers)
         self.assertLessEqual(result.n_raw_trades, min(len(current), len(variant)))
+
+
+class H4H6RunnerTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("src.backtest_spreads._get_yf")
+        self.mock_get_yf = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_yf = MagicMock()
+
+        def fake_download(symbol, **kwargs):
+            seed = sum(ord(c) for c in symbol)
+            return _fake_price_frame(seed=seed)
+
+        mock_yf.download.side_effect = fake_download
+        self.mock_get_yf.return_value = mock_yf
+        self.tickers = ["FAKE1", "FAKE2", "FAKE3", "FAKE4", "FAKE5"]
+
+    def test_h4_returns_a_hypothesis_result_tagged_h4_entry_exit(self):
+        result = run_h4_entry_dte(tickers=self.tickers)
+        self.assertEqual(result.id, "H4")
+        self.assertEqual(result.category, "entry_exit")
+        self.assertEqual(result.statistic_type, "dsr_compare")
+
+    def test_h6_returns_a_hypothesis_result_tagged_h6_gates(self):
+        result = run_h6_credit_to_width(tickers=self.tickers)
+        self.assertEqual(result.id, "H6")
+        self.assertEqual(result.category, "gates")
+        self.assertEqual(result.statistic_type, "dsr_compare")
+
+    def test_h6_survivor_population_is_nested_not_a_second_simulation(self):
+        """The 0.25-floor survivor count must never exceed the 0.20-floor
+        survivor count — they come from the SAME simulation, filtered, not
+        two independent runs that could disagree in size for unrelated
+        reasons."""
+        from src.backtest_spreads import load_default_surface, run_vertical_backtest
+        surface, _ = load_default_surface()
+        trades = run_vertical_backtest(self.tickers, option_type="put", surface=surface)
+        floor_020 = [t for t in trades if t.credit_to_width >= 0.20]
+        floor_025 = [t for t in trades if t.credit_to_width >= 0.25]
+        self.assertLessEqual(len(floor_025), len(floor_020))

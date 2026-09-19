@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from src.alloc.validate import deflated_sharpe, effective_n
-from src.backtest_optimizer import DEFAULT_UNIVERSE
+from src.backtest_optimizer import DEFAULT_UNIVERSE, ENTRY_DTE as _CURRENT_ENTRY_DTE
 from src.backtest_spreads import STOP_LOSS_MULT as _CURRENT_STOP_MULT, SpreadTrade, load_default_surface, run_vertical_backtest
 
 # The size of the preregistered family. Every deflated_sharpe call in this
@@ -33,6 +33,13 @@ DSR_SURVIVAL_BAR = 0.95
 
 # H5 (stop-loss multiple) comparison: variant tested at 1.5x, current at 2.0x
 H5_VARIANT_STOP_MULT = 1.5
+
+# H4 (entry DTE) comparison: variant tested at 30 DTE, current at 45 DTE
+H4_VARIANT_ENTRY_DTE = 30
+
+# H6 (credit-to-width floor) comparison: current floor at 0.20, variant at 0.25
+H6_CURRENT_FLOOR = 0.20
+H6_VARIANT_FLOOR = 0.25
 
 
 @dataclass
@@ -136,3 +143,62 @@ def run_h5_stop_loss(tickers: Optional[List[str]] = None) -> HypothesisResult:
     survives = dsr >= DSR_SURVIVAL_BAR
     return HypothesisResult("H5", "entry_exit", "dsr", dsr, n_eff, n_raw,
                             survives, False, None)
+
+
+def run_h4_entry_dte(tickers: Optional[List[str]] = None) -> HypothesisResult:
+    """H4: Entry DTE (45 current vs 30 variant) independent simulation DSR compare.
+
+    Runs two independent simulations at different entry_dte values — these visit
+    different roll-forward points since the DTE itself changes the calendar, so
+    trades do NOT correspond 1:1. Computes DSR independently for each, then
+    compares: survives only if variant's DSR clears the bar AND exceeds current's.
+    """
+    universe = tickers if tickers is not None else DEFAULT_UNIVERSE
+    surface, _ = load_default_surface()
+    current = run_vertical_backtest(universe, option_type="put",
+                                    entry_dte=_CURRENT_ENTRY_DTE, surface=surface)
+    variant = run_vertical_backtest(universe, option_type="put",
+                                    entry_dte=H4_VARIANT_ENTRY_DTE, surface=surface)
+    dsr_cur, n_eff_cur, refused_cur, reason_cur = _dsr_from_trades(current)
+    dsr_var, n_eff_var, refused_var, reason_var = _dsr_from_trades(variant)
+
+    if refused_cur or refused_var:
+        reason = reason_var if refused_var else reason_cur
+        n_eff = n_eff_var if not refused_var else n_eff_cur
+        return HypothesisResult("H4", "entry_exit", "dsr_compare", None,
+                                n_eff, len(variant), False, True, reason)
+
+    survives = dsr_var >= DSR_SURVIVAL_BAR and dsr_var > dsr_cur
+    notes = f"dsr_current(dte={_CURRENT_ENTRY_DTE})={dsr_cur:.4f}"
+    return HypothesisResult("H4", "entry_exit", "dsr_compare", dsr_var - dsr_cur,
+                            n_eff_var, len(variant), survives, False, None, notes)
+
+
+def run_h6_credit_to_width(tickers: Optional[List[str]] = None) -> HypothesisResult:
+    """H6: Credit-to-width floor (0.20 current vs 0.25 variant) subset DSR compare.
+
+    Runs one simulation and splits it into two NESTED subsets by filtering
+    credit_to_width thresholds. Computes DSR independently for each subset,
+    then compares: survives only if variant's DSR clears the bar AND exceeds
+    current's.
+    """
+    universe = tickers if tickers is not None else DEFAULT_UNIVERSE
+    surface, _ = load_default_surface()
+    trades = run_vertical_backtest(universe, option_type="put", surface=surface)
+    floor_020 = [t for t in trades if t.credit_to_width >= H6_CURRENT_FLOOR]
+    floor_025 = [t for t in trades if t.credit_to_width >= H6_VARIANT_FLOOR]
+    dsr_020, n_eff_020, refused_020, reason_020 = _dsr_from_trades(floor_020)
+    dsr_025, n_eff_025, refused_025, reason_025 = _dsr_from_trades(floor_025)
+
+    if refused_020 or refused_025:
+        reason = reason_025 if refused_025 else reason_020
+        n_eff = n_eff_025 if not refused_025 else n_eff_020
+        return HypothesisResult("H6", "gates", "dsr_compare", None, n_eff,
+                                len(floor_025), False, True, reason)
+
+    survives = dsr_025 >= DSR_SURVIVAL_BAR and dsr_025 > dsr_020
+    notes = (f"n_survivors_floor_{H6_CURRENT_FLOOR}={len(floor_020)} "
+            f"n_survivors_floor_{H6_VARIANT_FLOOR}={len(floor_025)} "
+            f"dsr_floor_{H6_CURRENT_FLOOR}={dsr_020:.4f}")
+    return HypothesisResult("H6", "gates", "dsr_compare", dsr_025 - dsr_020,
+                            n_eff_025, len(floor_025), survives, False, None, notes)
