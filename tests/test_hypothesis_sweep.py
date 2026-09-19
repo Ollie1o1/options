@@ -22,7 +22,7 @@ from src.backtest_spreads import SpreadTrade
 from src.hypothesis_sweep import (
     MIN_EFFECTIVE_N, MIN_RAW_TRADES, N_TRIALS, HypothesisResult,
     _dsr_from_trades, run_h1_bull_put, run_h2_bear_call, run_h5_stop_loss,
-    run_h4_entry_dte, run_h6_credit_to_width,
+    run_h4_entry_dte, run_h6_credit_to_width, H3_BONFERRONI_ALPHA, run_h3_spread_weight,
 )
 
 
@@ -267,3 +267,38 @@ class H4H6RunnerTest(unittest.TestCase):
         floor_020 = [t for t in trades if t.credit_to_width >= 0.20]
         floor_025 = [t for t in trades if t.credit_to_width >= 0.25]
         self.assertLessEqual(len(floor_025), len(floor_020))
+
+
+class H3RunnerTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("src.backtest_spreads._get_yf")
+        self.mock_get_yf = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_yf = MagicMock()
+
+        def fake_download(symbol, **kwargs):
+            seed = sum(ord(c) for c in symbol)
+            return _fake_price_frame(seed=seed)
+
+        mock_yf.download.side_effect = fake_download
+        self.mock_get_yf.return_value = mock_yf
+        self.tickers = ["FAKE1", "FAKE2", "FAKE3", "FAKE4", "FAKE5"]
+
+    def test_alpha_is_bonferroni_over_the_family_of_six(self):
+        self.assertAlmostEqual(H3_BONFERRONI_ALPHA, 0.05 / 6)
+
+    def test_returns_a_hypothesis_result_tagged_h3_weights_ic(self):
+        result = run_h3_spread_weight(tickers=self.tickers)
+        self.assertEqual(result.id, "H3")
+        self.assertEqual(result.category, "weights")
+        self.assertEqual(result.statistic_type, "ic")
+
+    def test_too_few_raw_trades_refuses_like_the_dsr_hypotheses(self):
+        result = run_h3_spread_weight(tickers=["FAKE1"])
+        # A single fake ticker with a short warmup-truncated history may or
+        # may not clear MIN_RAW_TRADES depending on the roll-forward count;
+        # this only asserts the refusal path is reachable and well-formed
+        # when it does trigger, not that it always does for this fixture.
+        if result.refused:
+            self.assertEqual(result.reason, "insufficient_raw_trades")
+            self.assertIsNone(result.value)

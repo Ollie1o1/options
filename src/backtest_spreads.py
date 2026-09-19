@@ -28,7 +28,7 @@ STOP_LOSS_MULT = 2.0
 EXIT_DTE_MIN = 21
 WING_DELTA = 0.10
 
-_SPREAD_IDX = WEIGHT_KEYS.index("spread")
+SPREAD_IDX = WEIGHT_KEYS.index("spread")
 
 
 @dataclass
@@ -222,7 +222,7 @@ def backtest_ticker_vertical(
                 mode="short_put" if option_type == "put" else "long_call",
             ).copy()
             avg_rel = (rel_short + rel_long) / 2.0
-            comp[_SPREAD_IDX] = float(np.clip(1.0 - avg_rel / 0.10, 0.0, 1.0))
+            comp[SPREAD_IDX] = float(np.clip(1.0 - avg_rel / 0.10, 0.0, 1.0))
 
             entry_prem = price_fn(S0, K_short, T, r, sigma) - price_fn(S0, K_long, T, r, sigma)
             received = (price_fn(S0, K_short, T, r, sigma) * (1 - rel_short)

@@ -11,10 +11,12 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 from src.alloc.validate import deflated_sharpe, effective_n
 from src.backtest_optimizer import DEFAULT_UNIVERSE, ENTRY_DTE as _CURRENT_ENTRY_DTE
-from src.backtest_spreads import STOP_LOSS_MULT as _CURRENT_STOP_MULT, SpreadTrade, load_default_surface, run_vertical_backtest
+from src.backtest_spreads import STOP_LOSS_MULT as _CURRENT_STOP_MULT, SPREAD_IDX, SpreadTrade, load_default_surface, run_vertical_backtest
+from src.prereg_ranker import cluster_bootstrap_ci, rank_ic
 
 # The size of the preregistered family. Every deflated_sharpe call in this
 # module passes this literal value — never a computed count, never adjusted
@@ -40,6 +42,9 @@ H4_VARIANT_ENTRY_DTE = 30
 # H6 (credit-to-width floor) comparison: current floor at 0.20, variant at 0.25
 H6_CURRENT_FLOOR = 0.20
 H6_VARIANT_FLOOR = 0.25
+
+# H3 (spread-score IC) Bonferroni-adjusted alpha across the family of 6 hypotheses
+H3_BONFERRONI_ALPHA = 0.05 / N_TRIALS
 
 
 @dataclass
@@ -202,3 +207,43 @@ def run_h6_credit_to_width(tickers: Optional[List[str]] = None) -> HypothesisRes
             f"dsr_floor_{H6_CURRENT_FLOOR}={dsr_020:.4f}")
     return HypothesisResult("H6", "gates", "dsr_compare", dsr_025 - dsr_020,
                             n_eff_025, len(floor_025), survives, False, None, notes)
+
+
+def run_h3_spread_weight(tickers: Optional[List[str]] = None) -> HypothesisResult:
+    """H3: Spread-score IC (within-quarter rank correlation) test.
+
+    Does the spread-score component order outcomes within each quarter?
+    Uses demeaned ranks to eliminate between-quarter differences (strategy
+    context). Tests via cluster bootstrap CI on whole symbols, comparing to
+    Bonferroni-adjusted alpha across the family of 6.
+    """
+    universe = tickers if tickers is not None else DEFAULT_UNIVERSE
+    surface, _ = load_default_surface()
+    trades = run_vertical_backtest(universe, option_type="put", surface=surface)
+
+    n_raw = len(trades)
+    if n_raw < MIN_RAW_TRADES:
+        return HypothesisResult("H3", "weights", "ic", None, None, n_raw,
+                                False, True, "insufficient_raw_trades")
+
+    rows = []
+    for t in trades:
+        entry_ts = pd.Timestamp(t.entry_date)
+        quarter = f"{entry_ts.year}Q{(entry_ts.month - 1) // 3 + 1}"
+        rows.append({
+            "symbol": t.symbol,
+            "entry_quarter": quarter,
+            "spread_score": float(t.components[SPREAD_IDX]),
+            "pnl_pct": t.pnl_pct,
+        })
+    df = pd.DataFrame(rows)
+    n_clusters = int(df["symbol"].nunique())
+
+    ic = rank_ic(df, "spread_score", "pnl_pct", ["entry_quarter"])
+    lo, hi = cluster_bootstrap_ci(df, "spread_score", "pnl_pct",
+                                  ["entry_quarter"], "symbol",
+                                  alpha=H3_BONFERRONI_ALPHA)
+    survives = lo is not None and hi is not None and (lo > 0 or hi < 0)
+    notes = f"ci=({lo}, {hi}) alpha={H3_BONFERRONI_ALPHA:.5f}"
+    return HypothesisResult("H3", "weights", "ic", ic, n_clusters, n_raw,
+                            survives, False, None, notes)

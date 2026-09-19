@@ -20,7 +20,7 @@ import pandas as pd
 
 from src.backtest_optimizer import bs_call_price, bs_put_price
 from src.backtest_spreads import (
-    _SPREAD_IDX, load_default_surface, simulate_vertical_pnl, SpreadTrade,
+    SPREAD_IDX, load_default_surface, simulate_vertical_pnl, SpreadTrade,
     WING_DELTA, backtest_ticker_vertical, run_vertical_backtest,
 )
 from src.spread_surface import Cell, SpreadSurface, save_surface
@@ -266,8 +266,8 @@ class BacktestTickerVerticalTest(unittest.TestCase):
             # surface path. Equality here would mean the surface's
             # oi_collapsed_relative value never made it into the trade.
             self.assertLess(surf_t.credit_to_width, flat_t.credit_to_width)
-            self.assertNotEqual(surf_t.components[_SPREAD_IDX],
-                                flat_t.components[_SPREAD_IDX])
+            self.assertNotEqual(surf_t.components[SPREAD_IDX],
+                                flat_t.components[SPREAD_IDX])
 
 
 class RunVerticalBacktestTest(unittest.TestCase):
