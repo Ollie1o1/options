@@ -23,6 +23,7 @@ from src.hypothesis_sweep import (
     MIN_EFFECTIVE_N, MIN_RAW_TRADES, N_TRIALS, HypothesisResult,
     _dsr_from_trades, run_h1_bull_put, run_h2_bear_call, run_h5_stop_loss,
     run_h4_entry_dte, run_h6_credit_to_width, H3_BONFERRONI_ALPHA, run_h3_spread_weight,
+    format_report, run_all,
 )
 
 
@@ -302,3 +303,38 @@ class H3RunnerTest(unittest.TestCase):
         if result.refused:
             self.assertEqual(result.reason, "insufficient_raw_trades")
             self.assertIsNone(result.value)
+
+
+class RunAllTest(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("src.backtest_spreads._get_yf")
+        self.mock_get_yf = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_yf = MagicMock()
+
+        def fake_download(symbol, **kwargs):
+            seed = sum(ord(c) for c in symbol)
+            return _fake_price_frame(seed=seed)
+
+        mock_yf.download.side_effect = fake_download
+        self.mock_get_yf.return_value = mock_yf
+        self.tickers = ["FAKE1", "FAKE2", "FAKE3", "FAKE4", "FAKE5"]
+
+    def test_runs_all_six_hypotheses_in_order(self):
+        results = run_all(tickers=self.tickers)
+        self.assertEqual([r.id for r in results], ["H1", "H2", "H3", "H4", "H5", "H6"])
+
+    def test_a_refused_hypothesis_does_not_stop_the_batch(self):
+        """Even with a universe too small for some hypotheses to clear
+        MIN_RAW_TRADES, run_all must still return exactly 6 rows — refusal
+        is a per-hypothesis outcome, not a batch abort."""
+        results = run_all(tickers=["FAKE1"])
+        self.assertEqual(len(results), 6)
+
+    def test_format_report_includes_every_hypothesis_id_and_verdict(self):
+        results = run_all(tickers=self.tickers)
+        report = format_report(results)
+        for r in results:
+            self.assertIn(r.id, report)
+            verdict = "REFUSED" if r.refused else ("SURVIVES" if r.survives else "null")
+            self.assertIn(verdict, report)

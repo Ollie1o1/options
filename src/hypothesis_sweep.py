@@ -7,6 +7,8 @@ must never add, remove, or retune a hypothesis after seeing a result.
 """
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -247,3 +249,61 @@ def run_h3_spread_weight(tickers: Optional[List[str]] = None) -> HypothesisResul
     notes = f"ci=({lo}, {hi}) alpha={H3_BONFERRONI_ALPHA:.5f}"
     return HypothesisResult("H3", "weights", "ic", ic, n_clusters, n_raw,
                             survives, False, None, notes)
+
+
+def run_all(tickers: Optional[List[str]] = None) -> List[HypothesisResult]:
+    """Run every preregistered hypothesis, in H1..H6 order. A refusal on
+    one hypothesis never stops or shrinks the batch, and N_TRIALS stays 6
+    for every hypothesis that does run."""
+    return [
+        run_h1_bull_put(tickers=tickers),
+        run_h2_bear_call(tickers=tickers),
+        run_h3_spread_weight(tickers=tickers),
+        run_h4_entry_dte(tickers=tickers),
+        run_h5_stop_loss(tickers=tickers),
+        run_h6_credit_to_width(tickers=tickers),
+    ]
+
+
+def format_report(results: List[HypothesisResult]) -> str:
+    """Format hypothesis results into a readable table."""
+    lines = [
+        f"Hypothesis sweep — family size N_TRIALS={N_TRIALS}",
+        "-" * 72,
+    ]
+    for r in results:
+        if r.refused:
+            verdict = "REFUSED"
+            detail = f"reason={r.reason}"
+        else:
+            verdict = "SURVIVES" if r.survives else "null"
+            detail = f"{r.statistic_type}={r.value}"
+        lines.append(
+            f"{r.id:<3} {r.category:<10} {verdict:<9} n_raw={r.n_raw_trades:<5} "
+            f"n_eff={r.n_eff} {detail} {r.notes}"
+        )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    """CLI entry point for the hypothesis sweep."""
+    ap = argparse.ArgumentParser(description="Preregistered hypothesis sweep")
+    ap.add_argument("--out", default=None, help="write results as JSON to this path")
+    ap.add_argument("--only", nargs="*", default=None,
+                    help="debug subset, e.g. --only H3 H4 (N_TRIALS still reports 6)")
+    args = ap.parse_args()
+
+    results = run_all()
+    if args.only:
+        results = [r for r in results if r.id in args.only]
+
+    print(format_report(results))
+
+    if args.out:
+        with open(args.out, "w") as fh:
+            json.dump([r.__dict__ for r in results], fh, indent=2, default=str)
+        print(f"\nWrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
