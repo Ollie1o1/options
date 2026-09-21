@@ -186,6 +186,9 @@ def run_h4_entry_dte(tickers: Optional[List[str]] = None) -> HypothesisResult:
         return HypothesisResult("H4", "entry_exit", "dsr_compare", None,
                                 n_eff, len(variant), False, True, reason)
 
+    # Neither side refused, so _dsr_from_trades guarantees both are floats —
+    # narrows Optional[float] for mypy past this point.
+    assert dsr_cur is not None and dsr_var is not None
     survives = dsr_var >= DSR_SURVIVAL_BAR and dsr_var > dsr_cur
     notes = f"dsr_current(dte={_CURRENT_ENTRY_DTE})={dsr_cur:.4f}"
     return HypothesisResult("H4", "entry_exit", "dsr_compare", dsr_var - dsr_cur,
@@ -214,6 +217,9 @@ def run_h6_credit_to_width(tickers: Optional[List[str]] = None) -> HypothesisRes
         return HypothesisResult("H6", "gates", "dsr_compare", None, n_eff,
                                 len(floor_025), False, True, reason)
 
+    # Neither side refused, so _dsr_from_trades guarantees both are floats —
+    # narrows Optional[float] for mypy past this point.
+    assert dsr_020 is not None and dsr_025 is not None
     survives = dsr_025 >= DSR_SURVIVAL_BAR and dsr_025 > dsr_020
     notes = (f"n_survivors_floor_{H6_CURRENT_FLOOR}={len(floor_020)} "
             f"n_survivors_floor_{H6_VARIANT_FLOOR}={len(floor_025)} "
