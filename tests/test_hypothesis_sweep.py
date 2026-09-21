@@ -229,6 +229,72 @@ class H5RunnerTest(unittest.TestCase):
         result = run_h5_stop_loss(tickers=self.tickers)
         self.assertLessEqual(result.n_raw_trades, min(len(current), len(variant)))
 
+    def test_matched_pair_records_the_later_of_the_two_exit_dates(self):
+        """Fix 4 regression guard: a paired difference's true interval spans
+        until whichever side exits LATER. Using only the variant's exit date
+        (the tighter 1.5x stop, which tends to exit earlier than 2.0x)
+        systematically understates the interval, inflating effective_n's
+        greedy non-overlap count and, through it, the DSR itself."""
+        import src.hypothesis_sweep as hs
+        base = date(2021, 1, 4)
+        current = [
+            _make_trade(f"SYM{i % 5}", base + timedelta(days=i * 20), 30, 0.10)
+            for i in range(35)
+        ]
+        variant = [
+            _make_trade(f"SYM{i % 5}", base + timedelta(days=i * 20), 5, 0.20)
+            for i in range(35)
+        ]
+
+        def fake_run(*args, **kwargs):
+            return current if kwargs.get("stop_mult") == hs._CURRENT_STOP_MULT else variant
+
+        captured = {}
+        real_effective_n = hs.effective_n
+
+        def spy(starts, ends):
+            captured["ends"] = list(ends)
+            return real_effective_n(starts, ends)
+
+        with patch("src.hypothesis_sweep.run_vertical_backtest", side_effect=fake_run), \
+             patch("src.hypothesis_sweep.effective_n", side_effect=spy):
+            run_h5_stop_loss(tickers=self.tickers)
+
+        # current's exit_date (entry + 30d) is later than variant's
+        # (entry + 5d) for every pair, so the recorded exit must be
+        # current's, not variant's.
+        expected_ends = [c.exit_date for c in current]
+        self.assertEqual(captured["ends"], expected_ends)
+
+    def test_h5_notes_report_mean_diff_and_pair_count_on_success(self):
+        """Fix 5 regression guard: since DSR is one-sided, a variant that is
+        dramatically worse produces the same 'null' report as a genuine
+        no-effect result unless the effect size/direction is surfaced in
+        notes."""
+        import src.hypothesis_sweep as hs
+        base = date(2021, 1, 4)
+        rng = np.random.default_rng(3)
+        current = []
+        variant = []
+        for i in range(40):
+            entry = base + timedelta(days=i * 20)
+            cur_pnl = float(rng.normal(0.10, 0.02))
+            var_pnl = cur_pnl + 0.05
+            current.append(_make_trade(f"SYM{i % 5}", entry, 10, cur_pnl))
+            variant.append(_make_trade(f"SYM{i % 5}", entry, 8, var_pnl))
+
+        def fake_run(*args, **kwargs):
+            return current if kwargs.get("stop_mult") == hs._CURRENT_STOP_MULT else variant
+
+        with patch("src.hypothesis_sweep.run_vertical_backtest", side_effect=fake_run):
+            result = run_h5_stop_loss(tickers=self.tickers)
+
+        self.assertFalse(result.refused)
+        diffs = [v.pnl_pct - c.pnl_pct for v, c in zip(variant, current)]
+        expected_mean = float(np.mean(diffs))
+        self.assertIn(f"mean_diff={expected_mean:.4f}", result.notes)
+        self.assertIn(f"n_pairs={len(diffs)}", result.notes)
+
 
 class H4H6RunnerTest(unittest.TestCase):
     def setUp(self):
@@ -269,6 +335,88 @@ class H4H6RunnerTest(unittest.TestCase):
         floor_025 = [t for t in trades if t.credit_to_width >= 0.25]
         self.assertLessEqual(len(floor_025), len(floor_020))
 
+    def _healthy_trades(self, n=40, seed=0):
+        rng = np.random.default_rng(seed)
+        base = date(2021, 1, 4)
+        return [
+            _make_trade(f"SYM{i % 5}", base + timedelta(days=i * 20), 10,
+                       float(rng.normal(0.15, 0.05)))
+            for i in range(n)
+        ]
+
+    def _overlapping_trades(self, n=35):
+        base = date(2021, 1, 4)
+        return [_make_trade(f"SYM{i}", base, 400, 0.1) for i in range(n)]
+
+    def test_h4_reports_the_variants_own_n_eff_when_the_variant_refuses(self):
+        """Fix 3 regression guard: when the variant arm is the one that
+        refuses on insufficient_effective_n, the reported n_eff must be the
+        variant's own n_eff, not the healthy current arm's — a swapped
+        pairing produces a self-contradictory row (e.g. reason from one arm,
+        n_eff from the other)."""
+        import src.hypothesis_sweep as hs
+        healthy = self._healthy_trades()
+        overlapping = self._overlapping_trades()
+
+        def fake_run(*args, **kwargs):
+            if kwargs.get("entry_dte") == hs._CURRENT_ENTRY_DTE:
+                return healthy
+            return overlapping
+
+        with patch("src.hypothesis_sweep.run_vertical_backtest", side_effect=fake_run):
+            result = run_h4_entry_dte(tickers=self.tickers)
+
+        self.assertTrue(result.refused)
+        self.assertEqual(result.reason, "insufficient_effective_n")
+        _, expected_n_eff, _, _ = _dsr_from_trades(overlapping)
+        self.assertEqual(result.n_eff, expected_n_eff)
+        # Sanity: the healthy arm's n_eff is not what got reported.
+        _, healthy_n_eff, _, _ = _dsr_from_trades(healthy)
+        self.assertNotEqual(result.n_eff, healthy_n_eff)
+
+    def test_h6_reports_the_variants_own_n_eff_when_the_variant_refuses(self):
+        """Fix 3 regression guard, H6 side: the 0.25-floor (variant) subset
+        collapses to n_eff < 3 (all same entry date) while the 0.20-floor
+        (current) superset — which also includes a well-spread population
+        below the 0.25 floor — stays healthy. The reported n_eff must be the
+        0.25 subset's own n_eff."""
+        base = date(2021, 1, 4)
+        # Clustered, high-credit_to_width trades: all same entry date, long
+        # holds, so they collapse to n_eff < 3 once isolated by the 0.25
+        # floor.
+        clustered = [
+            SpreadTrade(symbol=f"SYM{i}", entry_date=base,
+                       exit_date=base + timedelta(days=400), pnl_pct=0.1,
+                       components=np.full(27, 0.5), credit_to_width=0.30)
+            for i in range(35)
+        ]
+        # Well-spread, low-credit_to_width trades: only clear the 0.20
+        # floor, keep the superset healthy.
+        rng = np.random.default_rng(2)
+        spread = [
+            SpreadTrade(symbol=f"SYM{i % 5}", entry_date=base + timedelta(days=i * 20),
+                       exit_date=base + timedelta(days=i * 20 + 10),
+                       pnl_pct=float(rng.normal(0.1, 0.03)),
+                       components=np.full(27, 0.5), credit_to_width=0.22)
+            for i in range(40)
+        ]
+        trades = clustered + spread
+        with patch("src.hypothesis_sweep.run_vertical_backtest", return_value=trades):
+            result = run_h6_credit_to_width(tickers=self.tickers)
+
+        floor_025 = [t for t in trades if t.credit_to_width >= 0.25]
+        floor_020 = [t for t in trades if t.credit_to_width >= 0.20]
+        _, expected_n_eff, refused_025, reason_025 = _dsr_from_trades(floor_025)
+        _, healthy_n_eff, refused_020, _ = _dsr_from_trades(floor_020)
+        self.assertTrue(refused_025)
+        self.assertEqual(reason_025, "insufficient_effective_n")
+        self.assertFalse(refused_020)
+
+        self.assertTrue(result.refused)
+        self.assertEqual(result.reason, "insufficient_effective_n")
+        self.assertEqual(result.n_eff, expected_n_eff)
+        self.assertNotEqual(result.n_eff, healthy_n_eff)
+
 
 class H3RunnerTest(unittest.TestCase):
     def setUp(self):
@@ -300,9 +448,39 @@ class H3RunnerTest(unittest.TestCase):
         # may not clear MIN_RAW_TRADES depending on the roll-forward count;
         # this only asserts the refusal path is reachable and well-formed
         # when it does trigger, not that it always does for this fixture.
+        # Whenever it does clear MIN_RAW_TRADES, the known engine limitation
+        # (backtest_ticker_vertical's friction lookup is keyed on the fixed
+        # target_delta/wing_delta/entry_dte, not per-trade values, so
+        # spread_score never varies) means it refuses on
+        # "ic_undefined_constant_feature" instead — see H3ConstantFeatureTest.
         if result.refused:
-            self.assertEqual(result.reason, "insufficient_raw_trades")
+            self.assertIn(result.reason,
+                          ("insufficient_raw_trades", "ic_undefined_constant_feature"))
             self.assertIsNone(result.value)
+
+    def test_constant_spread_score_refuses_ic_undefined_not_null(self):
+        """Fix 1 regression guard: backtest_ticker_vertical's friction lookup
+        is keyed on target_delta/wing_delta/entry_dte — its own fixed
+        parameters, constant across every trade in a run — so
+        components[SPREAD_IDX] is identical for every SpreadTrade. rank_ic
+        and cluster_bootstrap_ci both then return None (zero variance), and
+        H3 must report that as a refusal, not fall through to a
+        survives=False/refused=False "null" result — a refused hypothesis
+        and a measured null must stay distinguishable."""
+        base = date(2021, 1, 4)
+        trades = [
+            _make_trade(f"SYM{i % 5}", base + timedelta(days=i * 20), 10,
+                       float((i % 3) * 0.05 - 0.02))
+            for i in range(40)
+        ]
+        # _make_trade already sets components=np.full(27, 0.5) uniformly, so
+        # SPREAD_IDX is constant across every trade by construction.
+        with patch("src.hypothesis_sweep.run_vertical_backtest", return_value=trades):
+            result = run_h3_spread_weight(tickers=self.tickers)
+        self.assertTrue(result.refused)
+        self.assertEqual(result.reason, "ic_undefined_constant_feature")
+        self.assertIsNone(result.value)
+        self.assertFalse(result.survives)
 
 
 class RunAllTest(unittest.TestCase):
@@ -338,3 +516,26 @@ class RunAllTest(unittest.TestCase):
             self.assertIn(r.id, report)
             verdict = "REFUSED" if r.refused else ("SURVIVES" if r.survives else "null")
             self.assertIn(verdict, report)
+
+    def test_format_report_omits_friction_line_when_provenance_not_given(self):
+        """Backward-compat: format_report(results) with no provenance arg
+        must not print a friction line (existing callers/tests rely on this)."""
+        results = run_all(tickers=self.tickers)
+        report = format_report(results)
+        self.assertNotIn("friction=", report)
+
+    def test_format_report_surfaces_fallback_flat_provenance(self):
+        """Fix 2 regression guard: a reader must not mistake a flat-fallback
+        run for the real fitted surface — the provenance string must be
+        visible in the report header."""
+        results = run_all(tickers=self.tickers)
+        report = format_report(results, provenance="fallback_flat")
+        self.assertIn("friction=fallback_flat", report)
+        self.assertIn("data/spread_surface.json", report)
+        # It must appear before the per-hypothesis rows, i.e. in the header.
+        self.assertLess(report.index("friction=fallback_flat"), report.index("H1"))
+
+    def test_format_report_surfaces_real_surface_provenance(self):
+        results = run_all(tickers=self.tickers)
+        report = format_report(results, provenance="surface")
+        self.assertIn("friction=surface", report)

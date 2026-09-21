@@ -17,7 +17,10 @@ import pandas as pd
 
 from src.alloc.validate import deflated_sharpe, effective_n
 from src.backtest_optimizer import DEFAULT_UNIVERSE, ENTRY_DTE as _CURRENT_ENTRY_DTE
-from src.backtest_spreads import STOP_LOSS_MULT as _CURRENT_STOP_MULT, SPREAD_IDX, SpreadTrade, load_default_surface, run_vertical_backtest
+from src.backtest_spreads import (
+    DEFAULT_SURFACE_PATH, STOP_LOSS_MULT as _CURRENT_STOP_MULT, SPREAD_IDX,
+    SpreadTrade, load_default_surface, run_vertical_backtest,
+)
 from src.prereg_ranker import cluster_bootstrap_ci, rank_ic
 
 # The size of the preregistered family. Every deflated_sharpe call in this
@@ -124,7 +127,8 @@ def run_h5_stop_loss(tickers: Optional[List[str]] = None) -> HypothesisResult:
                                     stop_mult=_CURRENT_STOP_MULT, surface=surface)
     variant = run_vertical_backtest(universe, option_type="put",
                                     stop_mult=H5_VARIANT_STOP_MULT, surface=surface)
-    current_by_key = {(t.symbol, t.entry_date): t.pnl_pct for t in current}
+    current_by_key = {(t.symbol, t.entry_date): (t.pnl_pct, t.exit_date)
+                      for t in current}
 
     diffs: List[float] = []
     entries = []
@@ -132,9 +136,15 @@ def run_h5_stop_loss(tickers: Optional[List[str]] = None) -> HypothesisResult:
     for t in variant:
         key = (t.symbol, t.entry_date)
         if key in current_by_key:
-            diffs.append(t.pnl_pct - current_by_key[key])
+            cur_pnl, cur_exit = current_by_key[key]
+            diffs.append(t.pnl_pct - cur_pnl)
             entries.append(t.entry_date)
-            exits.append(t.exit_date)
+            # A paired difference's true interval spans until whichever
+            # side exits later — using only the variant's exit date would
+            # systematically understate the interval (the tighter 1.5x
+            # stop tends to exit earlier than 2.0x), inflating n_eff and,
+            # through it, deflated_sharpe's z-score.
+            exits.append(max(t.exit_date, cur_exit))
 
     n_raw = len(diffs)
     if n_raw < MIN_RAW_TRADES:
@@ -148,8 +158,9 @@ def run_h5_stop_loss(tickers: Optional[List[str]] = None) -> HypothesisResult:
 
     dsr = deflated_sharpe(np.array(diffs, dtype=float), N_TRIALS, n_eff)
     survives = dsr >= DSR_SURVIVAL_BAR
+    notes = f"mean_diff={float(np.mean(diffs)):.4f} n_pairs={n_raw}"
     return HypothesisResult("H5", "entry_exit", "dsr", dsr, n_eff, n_raw,
-                            survives, False, None)
+                            survives, False, None, notes)
 
 
 def run_h4_entry_dte(tickers: Optional[List[str]] = None) -> HypothesisResult:
@@ -171,7 +182,7 @@ def run_h4_entry_dte(tickers: Optional[List[str]] = None) -> HypothesisResult:
 
     if refused_cur or refused_var:
         reason = reason_var if refused_var else reason_cur
-        n_eff = n_eff_var if not refused_var else n_eff_cur
+        n_eff = n_eff_var if refused_var else n_eff_cur
         return HypothesisResult("H4", "entry_exit", "dsr_compare", None,
                                 n_eff, len(variant), False, True, reason)
 
@@ -199,7 +210,7 @@ def run_h6_credit_to_width(tickers: Optional[List[str]] = None) -> HypothesisRes
 
     if refused_020 or refused_025:
         reason = reason_025 if refused_025 else reason_020
-        n_eff = n_eff_025 if not refused_025 else n_eff_020
+        n_eff = n_eff_025 if refused_025 else n_eff_020
         return HypothesisResult("H6", "gates", "dsr_compare", None, n_eff,
                                 len(floor_025), False, True, reason)
 
@@ -245,6 +256,16 @@ def run_h3_spread_weight(tickers: Optional[List[str]] = None) -> HypothesisResul
     lo, hi = cluster_bootstrap_ci(df, "spread_score", "pnl_pct",
                                   ["entry_quarter"], "symbol",
                                   alpha=H3_BONFERRONI_ALPHA)
+    if ic is None or (lo is None and hi is None):
+        # rank_ic's own signal for "the feature or outcome has zero
+        # variance" (src/prereg_ranker.py:67) — currently hit every run
+        # because backtest_ticker_vertical's friction lookup is keyed on
+        # target_delta/wing_delta/entry_dte (fixed params), never the
+        # per-trade realized delta/DTE, so spread_score is constant across
+        # every trade. A refused hypothesis must stay distinguishable from
+        # a measured null — see docs/HYPOTHESIS_SWEEP_PREREG.md.
+        return HypothesisResult("H3", "weights", "ic", None, n_clusters, n_raw,
+                                False, True, "ic_undefined_constant_feature")
     survives = lo is not None and hi is not None and (lo > 0 or hi < 0)
     notes = f"ci=({lo}, {hi}) alpha={H3_BONFERRONI_ALPHA:.5f}"
     return HypothesisResult("H3", "weights", "ic", ic, n_clusters, n_raw,
@@ -265,12 +286,24 @@ def run_all(tickers: Optional[List[str]] = None) -> List[HypothesisResult]:
     ]
 
 
-def format_report(results: List[HypothesisResult]) -> str:
-    """Format hypothesis results into a readable table."""
+def format_report(results: List[HypothesisResult],
+                  provenance: Optional[str] = None) -> str:
+    """Format hypothesis results into a readable table.
+
+    `provenance` is the friction source string from `load_default_surface`
+    ("surface" or "fallback_flat"). When given, it is printed in the header
+    so a reader can't mistake a flat-fallback run for the real fitted
+    surface — see the design spec's "Missing data/spread_surface.json" note.
+    """
     lines = [
         f"Hypothesis sweep — family size N_TRIALS={N_TRIALS}",
-        "-" * 72,
     ]
+    if provenance is not None:
+        if provenance == "surface":
+            lines.append(f"friction=surface ({DEFAULT_SURFACE_PATH})")
+        else:
+            lines.append(f"friction={provenance} ({DEFAULT_SURFACE_PATH} absent)")
+    lines.append("-" * 72)
     for r in results:
         if r.refused:
             verdict = "REFUSED"
@@ -297,11 +330,19 @@ def main() -> None:
     if args.only:
         results = [r for r in results if r.id in args.only]
 
-    print(format_report(results))
+    # Cheap local-file re-read purely to surface the friction provenance in
+    # the report/JSON header — the six runners already loaded the surface
+    # themselves for the actual backtest; this does not change any result.
+    _, provenance = load_default_surface()
+
+    print(format_report(results, provenance))
 
     if args.out:
         with open(args.out, "w") as fh:
-            json.dump([r.__dict__ for r in results], fh, indent=2, default=str)
+            json.dump({
+                "friction_provenance": provenance,
+                "results": [r.__dict__ for r in results],
+            }, fh, indent=2, default=str)
         print(f"\nWrote {args.out}")
 
 
