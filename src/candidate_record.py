@@ -535,7 +535,7 @@ def mark_refused(rows: List[Dict[str, Any]], reason: str, *, board: str,
             f"{len(rows) - matched} of {len(rows)} refusals for reason "
             f"{reason!r} on board {board!r} matched no existing row under "
             f"scan_id {scan_id!r}",
-            db_path)
+            _resolve_db_path(db_path))
     return matched
 
 
