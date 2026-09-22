@@ -542,6 +542,21 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
         for row in rows:
             mark = cr._num(row.get("mark"))
             if mark is None:
+                # No mark ever arrived — a leg's strike can vanish from the
+                # chain between scan and mark time (observed 2026-09-17/18,
+                # a Yahoo chain-snapshot inconsistency, not a fetch bug) and
+                # this position would otherwise sit OPEN forever, past its
+                # own expiration, since every exit below is mark-driven.
+                # Expiration must still close it; -1.0 (full loss) is the
+                # convention since there is no real price to exit at.
+                dte = _days_between(today, row.get("expiration") or "")
+                if dte is not None and dte <= 0:
+                    conn.execute(
+                        "UPDATE candidate_positions SET status=?, exit_date=?, "
+                        "exit_price=?, exit_reason=?, pnl_pct=? WHERE rowid=?",
+                        (CLOSED, today, None, "expired_unmarked", -1.0,
+                         row["rid"]))
+                    closed += 1
                 continue
             pnl = pnl_pct(row.get("entry_price"), mark)
             if pnl is None:

@@ -572,6 +572,57 @@ class TestChainArchiveJob(unittest.TestCase):
                 watch_fn=lambda db: None)
             self.assertEqual(hits, [])
 
+    def test_fires_when_a_long_autolog_run_crosses_into_the_afternoon(self):
+        """Regression for 2026-09-11/09-14: entry-time `now` was 10:2x (autolog
+        windows due), but the blocking autolog loop (step 1) ran for hours —
+        real wall-clock was well past 14:00 by the time step 4 checked. Since
+        launchd never fires a second instance while the first is still alive,
+        a stale entry-time snapshot meant chain-archive silently never got a
+        chance that day. now_fn lets step 4 re-sample the clock instead."""
+        hits = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27",
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 9, 11, 10, 20),  # Fri, autolog window due
+                now_fn=lambda: datetime(2026, 9, 11, 18, 14),  # hours later
+                runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: hits.append(1) or 7,
+                walk_forward_fn=lambda **k: None,
+                watch_fn=lambda db: None)
+            self.assertEqual(len(hits), 1)
+            self.assertIn("chain-archive:7rows", summary["ran"])
+            self.assertEqual(m.load_state(os.path.join(d, "state.json"))
+                             ["last_chain_archive"], "2026-09-11")
+
+    def test_dedup_key_matches_the_day_it_actually_ran_across_midnight(self):
+        """now_fn fixed the weekday/hhmm gate but `today`, used both for the
+        dedup check and the value written to state, stayed pinned to the
+        entry-time day. A block long enough to cross midnight (entry Thu
+        23:50, resumes Fri 14:05) would then record last_chain_archive as
+        Thursday even though the archive ran, and was due, on Friday —
+        silently re-firing every subsequent Friday check for a day already
+        covered under the wrong key."""
+        hits = []
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            summary = m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27",
+                state_path=os.path.join(d, "state.json"),
+                now=datetime(2026, 9, 10, 23, 50),   # Thu, entry
+                now_fn=lambda: datetime(2026, 9, 11, 14, 5),  # Fri afternoon
+                runner=lambda cmd: 0,
+                checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+                chain_archive_fn=lambda: hits.append(1) or 3,
+                walk_forward_fn=lambda **k: None,
+                watch_fn=lambda db: None)
+            self.assertEqual(len(hits), 1)
+            self.assertIn("chain-archive:3rows", summary["ran"])
+            self.assertEqual(m.load_state(os.path.join(d, "state.json"))
+                             ["last_chain_archive"], "2026-09-11")
+
 
 class TestHeadless(unittest.TestCase):
     """run_headless: the LaunchAgent entry point. Same orchestrator, but it
