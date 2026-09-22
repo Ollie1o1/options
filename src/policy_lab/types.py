@@ -18,6 +18,10 @@ class PathPoint:
     mid: float
     spot: Optional[float]
     dte: int
+    spread_imputed: bool = False
+    """True when bid/ask were synthesized from mid because the source
+    recorded no two-sided quote (the corpus stores bid/ask as 100% NULL for
+    a large share of marks). False means bid/ask are a real observed quote."""
 
 
 @dataclass(frozen=True)
