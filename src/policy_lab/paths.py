@@ -193,3 +193,104 @@ def load_corpus_a(db_path: str, strategy: str,
     finally:
         con.close()
     return out, rep
+
+
+def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
+                  max_gap_days: int = 5) -> Tuple[List[PricePath], LoadReport]:
+    """Live ledger trades joined to archived chain snapshots of their short leg.
+
+    Small — only trades with two or more archived snapshots of their short
+    leg between entry and exit survive — but every point carries a real
+    two-sided quote, so this is the corpus that checks a cost assumption
+    instead of believing it. Its role is validation: a policy winning in
+    Corpus A and reversing here is not promoted.
+
+    The short-leg strike to join on is `trades.short_put_strike` ONLY for
+    Iron Condor (the only strategy where that column is populated); every
+    other strategy — including Bull Put, whose 163 closed rows are 100% NULL
+    in `short_put_strike` — carries its short leg in the generic `strike`
+    column instead. `COALESCE(short_put_strike, strike)` picks the right one
+    for every strategy, since `short_put_strike` is NULL exactly where
+    `strike` is the column to use. Joining on `short_put_strike` alone
+    returns zero rows for every non-Iron-Condor strategy.
+
+    `chain_snapshots` carries zero NULL and zero both-zero bid/ask across the
+    whole archive, so every `PathPoint` built here keeps the default
+    `spread_imputed=False` — unlike Corpus A, there is nothing to impute.
+
+    `capital_at_risk` comes straight from the ledger's own column (dropped as
+    `no_capital_at_risk` when NULL or <= 0). `actual_pnl_frac` is
+    `pnl_usd / capital_at_risk` with NO rescale — the ledger already records
+    both in dollars, unlike Corpus A's premium-fraction `pnl_pct`.
+    """
+    rep = LoadReport()
+    out: List[PricePath] = []
+    con = _ro(ledger_path)
+    try:
+        con.execute("ATTACH ? AS ca", (f"file:{archive_path}?mode=ro",))
+    except sqlite3.OperationalError:
+        con.close()
+        con = _ro(ledger_path)
+        con.execute(f"ATTACH 'file:{archive_path}?mode=ro' AS ca")
+    try:
+        rows = con.execute(
+            """SELECT entry_id, date, ticker, expiration, strategy_name,
+                      exit_date, pnl_usd, capital_at_risk, net_credit,
+                      spread_width, COALESCE(short_put_strike, strike)
+                 FROM trades
+                WHERE status = 'CLOSED' AND strategy_name = ?
+                  AND exit_date IS NOT NULL""", (strategy,)).fetchall()
+
+        for (eid, entry_date, ticker, expiration, strat, exit_date, pnl_usd,
+             car, credit, width, short_leg_strike) in rows:
+            if car is None or car <= 0:
+                rep.drop("no_capital_at_risk")
+                continue
+            if (credit is None or width is None or short_leg_strike is None
+                    or expiration is None or entry_date is None):
+                rep.drop("missing_structure_fields")
+                continue
+            if pnl_usd is None:
+                rep.drop("no_pnl_recorded")
+                continue
+
+            snaps = con.execute(
+                """SELECT snap_date, bid, ask, spot FROM ca.chain_snapshots
+                    WHERE symbol = ? AND expiration = ? AND strike = ?
+                      AND snap_date >= ? AND snap_date <= ?
+                    ORDER BY snap_date""",
+                (ticker, expiration[:10], float(short_leg_strike),
+                 entry_date[:10], exit_date[:10])).fetchall()
+            if len(snaps) < 2:
+                rep.drop("fewer_than_two_snapshots")
+                continue
+            if not _gap_ok([s[0] for s in snaps], max_gap_days):
+                rep.drop("gap_too_large")
+                continue
+
+            exp_day = date.fromisoformat(expiration[:10])
+            points = tuple(
+                PathPoint(date=sd, bid=float(bid), ask=float(ask),
+                          mid=(float(bid) + float(ask)) / 2.0,
+                          spot=(float(spot) if spot is not None else None),
+                          dte=(exp_day - date.fromisoformat(sd[:10])).days)
+                for sd, bid, ask, spot in snaps
+                if bid is not None and ask is not None
+            )
+            if len(points) < 2:
+                rep.drop("snapshots_without_quotes")
+                continue
+
+            out.append(PricePath(
+                position_id=f"ledger:{eid}", symbol=ticker, strategy=strat,
+                entry_date=entry_date[:10], entry_price=abs(float(credit)),
+                capital_at_risk=float(car),
+                is_credit=strat in _CREDIT_STRATEGIES,
+                points=points, actual_exit_date=exit_date[:10],
+                actual_pnl_frac=float(pnl_usd) / float(car),
+                corpus="B",
+            ))
+            rep.loaded += 1
+    finally:
+        con.close()
+    return out, rep
