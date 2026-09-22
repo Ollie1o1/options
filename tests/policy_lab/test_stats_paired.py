@@ -84,6 +84,35 @@ class TestPairedStats(unittest.TestCase):
         self.assertAlmostEqual(lo, 0.1, places=6)
         self.assertAlmostEqual(hi, 0.1, places=6)
 
+    def test_cluster_bootstrap_is_wider_than_a_row_bootstrap(self):
+        """A row bootstrap would report a far tighter interval — and be wrong.
+
+        Five clusters of twenty identical rows each. Resampling CLUSTERS draws
+        five values, so the interval reflects n=5. Resampling ROWS would draw a
+        hundred, reporting an interval about sqrt(20) times too narrow. This is
+        the error this repo has made three times; the earlier bootstrap tests
+        cannot detect it because their clusters hold one row each, where the two
+        implementations coincide exactly.
+        """
+        import numpy as np
+        rows = []
+        for i, mean in enumerate([0.0, 1.0, 2.0, 3.0, 4.0]):
+            rows.extend({"cluster": f"c{i}", "d": mean} for _ in range(20))
+        df = pd.DataFrame(rows)
+
+        lo, hi = cluster_bootstrap_mean_ci(df, "d", "cluster", n_boot=4000, seed=3)
+        cluster_width = hi - lo
+
+        # What a row-level bootstrap would have produced on the same frame.
+        rng = np.random.default_rng(3)
+        vals = df["d"].to_numpy(dtype="float64")
+        row_means = [float(rng.choice(vals, size=vals.size, replace=True).mean())
+                     for _ in range(4000)]
+        row_width = float(np.percentile(row_means, 97.5)
+                          - np.percentile(row_means, 2.5))
+
+        self.assertGreater(cluster_width, 2.0 * row_width)
+
     def test_empty_frame_returns_none(self):
         df = pd.DataFrame({"cluster": [], "d": []})
         self.assertEqual(cluster_bootstrap_mean_ci(df, "d", "cluster"),
