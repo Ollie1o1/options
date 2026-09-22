@@ -450,17 +450,22 @@ def record_board(result: Any, *, board: str,
 
 @_safe(default=0)
 def mark_ranked(rows: List[Dict[str, Any]], *, board: str,
-                db_path: Optional[str] = None) -> int:
+                db_path: Optional[str] = None,
+                scan_id: Optional[str] = None) -> int:
     """Write rank position across a ranked frame, 1-based, in frame order.
 
     Rows with no gate record are inserted AND counted. That count is the
     board/auto-log divergence — the same structural split that produced the
     "cleared the gates showed ungated rows" defect, measured rather than
     assumed absent.
+
+    `scan_id`, when passed, overrides `current_scan_id()`. Required by any
+    caller that isn't inside a `with scan(...):` block and makes more than
+    one recorder call for the same candidates — see `mark_refused` for why.
     """
     if not rows:
         return 0
-    scan_id = current_scan_id()
+    scan_id = scan_id or current_scan_id()
     keys = [contract_key(r) for r in rows]
 
     with connect(db_path) as conn:
@@ -488,30 +493,63 @@ def mark_ranked(rows: List[Dict[str, Any]], *, board: str,
 
 @_safe(default=0)
 def mark_refused(rows: List[Dict[str, Any]], reason: str, *, board: str,
-                 db_path: Optional[str] = None) -> int:
+                 db_path: Optional[str] = None,
+                 scan_id: Optional[str] = None) -> int:
     """Record why a ranked candidate never reached the top-N cut.
 
     The auto-log allowlist and the per-scan budget cap both filter BEFORE the
     cut, so without this a candidate that was never eligible looks identical
     to one that competed and lost.
+
+    `scan_id`, when passed, overrides `current_scan_id()`. Without an open
+    `with scan(...):` block, `current_scan_id()` mints a fresh orphan id on
+    every call — a caller that already inserted these rows under its own id
+    (via `mark_ranked`) and then calls this as a separate statement, with no
+    scan open around either, would get a DIFFERENT id here and this UPDATE
+    would match nothing. That happened for a month in `autolog_structures`
+    (found 2026-09-22): 5,353 rows, 0 ever had `refused_by` set. The caller
+    must mint one id itself and pass it to every recorder call it makes for
+    the same batch — see `run_top_scan`'s auto-log block.
+
+    Returns the number of rows actually matched, not `len(rows)` — the old
+    unconditional `len(rows)` return was itself part of the bug: it reported
+    success on every one of those silent misses.
     """
     if not rows:
         return 0
-    scan_id = current_scan_id()
+    scan_id = scan_id or current_scan_id()
     with connect(db_path) as conn:
-        conn.executemany(
+        cur = conn.executemany(
             "UPDATE candidates SET refused_by=?, gate_passed=0 "
             "WHERE scan_id=? AND board=? AND contract_key=?",
             [(reason, scan_id, board, contract_key(r)) for r in rows])
+        matched = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
         conn.commit()
-    return len(rows)
+    if matched < len(rows):
+        log.warning(
+            "mark_refused: only %d/%d rows matched an existing candidate "
+            "(board=%r, scan_id=%r, reason=%r) — the rest were never marked",
+            matched, len(rows), board, scan_id, reason)
+        _record_error(
+            "mark_refused",
+            f"{len(rows) - matched} of {len(rows)} refusals for reason "
+            f"{reason!r} on board {board!r} matched no existing row under "
+            f"scan_id {scan_id!r}",
+            db_path)
+    return matched
 
 
 @_safe(default=None)
 def mark_logged(row: Dict[str, Any], *, board: str, entry_id: Optional[int],
-                db_path: Optional[str] = None) -> None:
-    """Flag one candidate as actually entered, with its ledger entry_id."""
-    scan_id = current_scan_id()
+                db_path: Optional[str] = None,
+                scan_id: Optional[str] = None) -> None:
+    """Flag one candidate as actually entered, with its ledger entry_id.
+
+    `scan_id`, when passed, overrides `current_scan_id()` — pass the same id
+    used for `mark_ranked` on this row so the UPDATE below finds it instead
+    of falling through to the duplicate-insert path.
+    """
+    scan_id = scan_id or current_scan_id()
     key = contract_key(row)
     with connect(db_path) as conn:
         cur = conn.execute(
