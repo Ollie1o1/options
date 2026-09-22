@@ -25,8 +25,9 @@ class TestCorpusBLoader(unittest.TestCase):
                 entry_id INTEGER PRIMARY KEY, date TEXT, ticker TEXT,
                 expiration TEXT, strategy_name TEXT, status TEXT,
                 exit_date TEXT, pnl_usd REAL, capital_at_risk REAL,
-                net_credit REAL, spread_width REAL, strike REAL,
-                short_put_strike REAL, long_put_strike REAL);
+                net_credit REAL, spread_width REAL, entry_price REAL,
+                type TEXT, strike REAL, short_put_strike REAL,
+                long_put_strike REAL);
         """)
         # Matches the real ledger's shape for every one of its 163 closed
         # Bull Put rows: short_put_strike is NULL, the short leg lives in
@@ -35,10 +36,10 @@ class TestCorpusBLoader(unittest.TestCase):
         con.execute(
             "INSERT INTO trades (entry_id, date, ticker, expiration, "
             "strategy_name, status, exit_date, pnl_usd, capital_at_risk, "
-            "net_credit, spread_width, strike, short_put_strike, "
+            "net_credit, spread_width, type, strike, short_put_strike, "
             "long_put_strike) VALUES "
             "(1,'2026-06-10','AMD','2026-07-17','Bull Put','CLOSED',"
-            "'2026-06-18',120.0,400.0,1.0,5.0,100.0,NULL,95.0)")
+            "'2026-06-18',120.0,400.0,1.0,5.0,'put',100.0,NULL,95.0)")
         con.commit(); con.close()
 
         con = sqlite3.connect(self.archive)
@@ -51,8 +52,8 @@ class TestCorpusBLoader(unittest.TestCase):
         for d, b, a in (("2026-06-10", 0.95, 1.05), ("2026-06-12", 0.65, 0.75),
                         ("2026-06-16", 0.45, 0.55), ("2026-06-18", 0.35, 0.45)):
             con.execute("INSERT INTO chain_snapshots VALUES "
-                        "('AMD',?,'c','put',100.0,'2026-07-17',?,?,150.0)",
-                        (d, b, a))
+                        "('AMD',?,'p',?,100.0,'2026-07-17',?,?,150.0)",
+                        (d, "put", b, a))
         con.commit(); con.close()
 
     def tearDown(self):
@@ -94,15 +95,92 @@ class TestCorpusBLoader(unittest.TestCase):
         con.execute(
             "INSERT INTO trades (entry_id, date, ticker, expiration, "
             "strategy_name, status, exit_date, pnl_usd, capital_at_risk, "
-            "net_credit, spread_width, strike, short_put_strike, "
+            "net_credit, spread_width, type, strike, short_put_strike, "
             "long_put_strike) VALUES "
             "(2,'2026-06-10','AMD','2026-07-17','Iron Condor','CLOSED',"
-            "'2026-06-18',80.0,400.0,1.0,5.0,NULL,100.0,95.0)")
+            "'2026-06-18',80.0,400.0,1.0,5.0,'call,put',NULL,100.0,95.0)")
         con.commit(); con.close()
 
         paths, rep = load_corpus_b(self.ledger, self.archive, "Iron Condor")
         self.assertEqual(len(paths), 1)
         self.assertEqual(paths[0].symbol, "AMD")
+
+    def test_long_call_with_null_net_credit_and_entry_price_set_loads(self):
+        """The exact shape of all 316 real closed Long Call rows: net_credit
+        and spread_width are NULL (populated only for the three spread
+        strategies) and the opening price lives in entry_price instead.
+        Requiring net_credit unconditionally silently drops every
+        single-leg trade -- this is the regression test for that."""
+        con = sqlite3.connect(self.ledger)
+        con.execute(
+            "INSERT INTO trades (entry_id, date, ticker, expiration, "
+            "strategy_name, status, exit_date, pnl_usd, capital_at_risk, "
+            "net_credit, spread_width, entry_price, type, strike, "
+            "short_put_strike, long_put_strike) VALUES "
+            "(3,'2026-06-10','AMD','2026-07-17','Long Call','CLOSED',"
+            "'2026-06-18',-40.0,300.0,NULL,NULL,3.00,'call',110.0,NULL,NULL)")
+        con.commit()
+        row = con.execute(
+            "SELECT net_credit, spread_width, entry_price FROM trades "
+            "WHERE entry_id = 3").fetchone()
+        con.close()
+        self.assertIsNone(row[0])
+        self.assertIsNone(row[1])
+        self.assertEqual(row[2], 3.00)
+
+        con = sqlite3.connect(self.archive)
+        for d, b, a in (("2026-06-10", 2.90, 3.10),
+                        ("2026-06-14", 2.60, 2.80),
+                        ("2026-06-18", 2.40, 2.60)):
+            con.execute("INSERT INTO chain_snapshots VALUES "
+                        "('AMD',?,'c',?,110.0,'2026-07-17',?,?,150.0)",
+                        (d, "call", b, a))
+        con.commit(); con.close()
+
+        paths, rep = load_corpus_b(self.ledger, self.archive, "Long Call")
+        self.assertEqual(len(paths), 1)
+        self.assertAlmostEqual(paths[0].entry_price, 3.00)
+        self.assertEqual(rep.dropped.get("missing_structure_fields", 0), 0)
+
+    def test_type_filter_excludes_the_call_leg_at_the_same_strike(self):
+        """chain_snapshots stores one row per (symbol, expiration, strike,
+        snap_date, TYPE), and the large majority of strike-days carry both a
+        call and a put row at the same strike. Without a type filter, a Bull
+        Put's join interleaves call quotes with put quotes at the same
+        strike -- meaningless prices, and the extra rows let a position pass
+        the two-snapshot floor on an inflated, wrong count."""
+        con = sqlite3.connect(self.archive)
+        for d, b, a in (("2026-06-10", 9.00, 9.50), ("2026-06-12", 8.50, 9.00),
+                        ("2026-06-16", 8.00, 8.50), ("2026-06-18", 7.50, 8.00)):
+            con.execute("INSERT INTO chain_snapshots VALUES "
+                        "('AMD',?,'c',?,100.0,'2026-07-17',?,?,150.0)",
+                        (d, "call", b, a))
+        con.commit(); con.close()
+
+        paths, _ = load_corpus_b(self.ledger, self.archive, "Bull Put")
+        self.assertEqual(len(paths), 1)
+        p = paths[0]
+        # 4 distinct snap_dates, not 8 (one per row across both legs).
+        self.assertEqual(len(p.points), 4)
+        # The put's quotes, not the call's.
+        self.assertAlmostEqual(p.points[0].bid, 0.95)
+        self.assertAlmostEqual(p.points[0].ask, 1.05)
+        self.assertAlmostEqual(p.points[-1].bid, 0.35)
+        self.assertAlmostEqual(p.points[-1].ask, 0.45)
+
+    def test_duplicate_row_on_same_snap_date_counts_once(self):
+        """A second guard against inflated counts: even a genuine duplicate
+        row for the same (symbol, expiration, strike, type, snap_date) must
+        contribute one point, not two."""
+        con = sqlite3.connect(self.archive)
+        con.execute("INSERT INTO chain_snapshots VALUES "
+                    "('AMD','2026-06-10','p2','put',100.0,'2026-07-17',"
+                    "0.96,1.06,150.0)")
+        con.commit(); con.close()
+
+        paths, _ = load_corpus_b(self.ledger, self.archive, "Bull Put")
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(len(paths[0].points), 4)
 
     def test_capital_at_risk_comes_from_the_ledger(self):
         paths, _ = load_corpus_b(self.ledger, self.archive, "Bull Put")

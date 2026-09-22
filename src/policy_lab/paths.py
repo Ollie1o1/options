@@ -195,15 +195,23 @@ def load_corpus_a(db_path: str, strategy: str,
     return out, rep
 
 
+# Strategies whose opening price lives in `net_credit`, not `entry_price`.
+# `net_credit` is NULL for every closed Long Call/Long Put/Short Put row
+# (single-leg structures record their price in `entry_price` instead); the
+# three spread strategies below are the only ones where `net_credit` is
+# populated (163/163, 135/135, 148/148 respectively).
+_SPREAD_STRATEGIES = {"Bull Put", "Bear Call", "Iron Condor"}
+
+
 def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
                   max_gap_days: int = 5) -> Tuple[List[PricePath], LoadReport]:
     """Live ledger trades joined to archived chain snapshots of their short leg.
 
-    Small — only trades with two or more archived snapshots of their short
-    leg between entry and exit survive — but every point carries a real
-    two-sided quote, so this is the corpus that checks a cost assumption
-    instead of believing it. Its role is validation: a policy winning in
-    Corpus A and reversing here is not promoted.
+    Small — only trades with two or more distinct archived snapshot dates of
+    their short leg between entry and exit survive — but every point carries
+    a real two-sided quote, so this is the corpus that checks a cost
+    assumption instead of believing it. Its role is validation: a policy
+    winning in Corpus A and reversing here is not promoted.
 
     The short-leg strike to join on is `trades.short_put_strike` ONLY for
     Iron Condor (the only strategy where that column is populated); every
@@ -213,6 +221,24 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
     for every strategy, since `short_put_strike` is NULL exactly where
     `strike` is the column to use. Joining on `short_put_strike` alone
     returns zero rows for every non-Iron-Condor strategy.
+
+    The structure's opening price is `net_credit` for the three spread
+    strategies (`_SPREAD_STRATEGIES`) and `entry_price` for the three
+    single-leg ones (Long Call, Long Put, Short Put), where `net_credit` is
+    100% NULL. Requiring `net_credit` unconditionally silently drops every
+    single-leg trade. `spread_width` is likewise NULL for all single-leg
+    rows, so it is only required (alongside `net_credit`) for spreads.
+
+    `chain_snapshots` stores one row per (symbol, expiration, strike,
+    snap_date, TYPE) and 345,064 of 456,343 strike-days carry both a call and
+    a put row at the same strike. The join MUST filter on option type or it
+    silently interleaves the wrong leg's quotes with the right one's and
+    inflates the snapshot count. The type to filter on is `'put'` for Iron
+    Condor (its short leg, via `short_put_strike`, is the put) and the
+    ledger's own `trades.type` column otherwise (verified non-null on every
+    closed row). Snapshots are additionally deduplicated to one point per
+    `snap_date` as a second guard against a strike/date pair ever returning
+    more than one row.
 
     `chain_snapshots` carries zero NULL and zero both-zero bid/ask across the
     whole archive, so every `PathPoint` built here keeps the default
@@ -236,17 +262,32 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
         rows = con.execute(
             """SELECT entry_id, date, ticker, expiration, strategy_name,
                       exit_date, pnl_usd, capital_at_risk, net_credit,
-                      spread_width, COALESCE(short_put_strike, strike)
+                      spread_width, entry_price, type,
+                      COALESCE(short_put_strike, strike)
                  FROM trades
                 WHERE status = 'CLOSED' AND strategy_name = ?
                   AND exit_date IS NOT NULL""", (strategy,)).fetchall()
 
         for (eid, entry_date, ticker, expiration, strat, exit_date, pnl_usd,
-             car, credit, width, short_leg_strike) in rows:
+             car, credit, width, entry_price, leg_type,
+             short_leg_strike) in rows:
             if car is None or car <= 0:
                 rep.drop("no_capital_at_risk")
                 continue
-            if (credit is None or width is None or short_leg_strike is None
+
+            if strat in _SPREAD_STRATEGIES:
+                price = credit
+                if price is None or width is None:
+                    rep.drop("missing_structure_fields")
+                    continue
+            else:
+                price = entry_price
+                if price is None:
+                    rep.drop("missing_structure_fields")
+                    continue
+
+            opt_type = "put" if strat == "Iron Condor" else leg_type
+            if (opt_type is None or short_leg_strike is None
                     or expiration is None or entry_date is None):
                 rep.drop("missing_structure_fields")
                 continue
@@ -257,14 +298,25 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
             snaps = con.execute(
                 """SELECT snap_date, bid, ask, spot FROM ca.chain_snapshots
                     WHERE symbol = ? AND expiration = ? AND strike = ?
+                      AND type = ?
                       AND snap_date >= ? AND snap_date <= ?
                     ORDER BY snap_date""",
-                (ticker, expiration[:10], float(short_leg_strike),
+                (ticker, expiration[:10], float(short_leg_strike), opt_type,
                  entry_date[:10], exit_date[:10])).fetchall()
-            if len(snaps) < 2:
+
+            # One point per snap_date: keep the first row seen for a date
+            # (rows already arrive ordered by snap_date), so a strike/date
+            # pair can never contribute more than one observation.
+            by_date: Dict[str, Tuple] = {}
+            for sd, bid, ask, spot in snaps:
+                if sd not in by_date:
+                    by_date[sd] = (bid, ask, spot)
+            dedup_snaps = [(sd, *by_date[sd]) for sd in sorted(by_date)]
+
+            if len(dedup_snaps) < 2:
                 rep.drop("fewer_than_two_snapshots")
                 continue
-            if not _gap_ok([s[0] for s in snaps], max_gap_days):
+            if not _gap_ok([s[0] for s in dedup_snaps], max_gap_days):
                 rep.drop("gap_too_large")
                 continue
 
@@ -274,7 +326,7 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
                           mid=(float(bid) + float(ask)) / 2.0,
                           spot=(float(spot) if spot is not None else None),
                           dte=(exp_day - date.fromisoformat(sd[:10])).days)
-                for sd, bid, ask, spot in snaps
+                for sd, bid, ask, spot in dedup_snaps
                 if bid is not None and ask is not None
             )
             if len(points) < 2:
@@ -283,7 +335,7 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
 
             out.append(PricePath(
                 position_id=f"ledger:{eid}", symbol=ticker, strategy=strat,
-                entry_date=entry_date[:10], entry_price=abs(float(credit)),
+                entry_date=entry_date[:10], entry_price=abs(float(price)),
                 capital_at_risk=float(car),
                 is_credit=strat in _CREDIT_STRATEGIES,
                 points=points, actual_exit_date=exit_date[:10],
