@@ -455,6 +455,54 @@ class TestMarkRanked(unittest.TestCase):
             self.assertEqual(got[195.0], "budget_displaced")
             self.assertEqual(rank, 2)     # rank survives the refusal mark
 
+    def test_mark_refused_works_outside_any_open_scan(self):
+        """The exact shape of the auto-log bug found 2026-09-22.
+
+        `main()`'s auto-log block calls `mark_ranked` then `mark_refused`
+        as separate top-level calls with no `with cr.scan(...)` open around
+        either of them — unlike every test above, which wraps both inside one
+        scan. With no open scan, `current_scan_id()` mints a fresh orphan id
+        on EVERY call, so the insert and the later refusal UPDATE land under
+        different ids and the UPDATE matches nothing — while `mark_refused`
+        still reports success, because it returns `len(rows)` unconditionally
+        rather than the actual match count. Confirmed live: `autolog_structures`
+        in the real `data/candidates.db` had 5,353 rows and 0 with `refused_by`
+        set, going back to 2026-08-19. Passing the SAME scan_id explicitly to
+        both calls (what the auto-log block now does) is the fix.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            row = _leg()
+            scan_id = cr.current_scan_id()
+            cr.mark_ranked([row], board="autolog_structures", db_path=path,
+                           scan_id=scan_id)
+            n_matched = cr.mark_refused([row], "negative_ev",
+                                        board="autolog_structures",
+                                        db_path=path, scan_id=scan_id)
+            with sqlite3.connect(path) as conn:
+                got = conn.execute(
+                    "select refused_by from candidates").fetchone()
+            self.assertEqual(got[0], "negative_ev")
+            self.assertEqual(n_matched, 1)
+
+    def test_mark_refused_reports_a_real_miss_instead_of_a_fake_success(self):
+        """Without a shared scan_id, the old behavior is the bug itself —
+        pin the honest failure mode so a future change can't quietly bring
+        the fake-success return value back."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            row = _leg()
+            cr.mark_ranked([row], board="autolog_structures", db_path=path,
+                           scan_id="scan-A")
+            n_matched = cr.mark_refused([row], "negative_ev",
+                                        board="autolog_structures",
+                                        db_path=path, scan_id="scan-B")
+            with sqlite3.connect(path) as conn:
+                got = conn.execute(
+                    "select refused_by from candidates").fetchone()
+            self.assertIsNone(got[0])       # the write really did miss
+            self.assertEqual(n_matched, 0)  # and the return value says so
+
 
 class TestModeColumn(unittest.TestCase):
     """The exit-rule family is derived from the mode. strategy_name is NULL on

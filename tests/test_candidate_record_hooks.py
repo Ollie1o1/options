@@ -178,6 +178,34 @@ class TestAutoLogRefusalReasons(_TempDB):
         self.assertEqual(got[190.0], 1)
         self.assertEqual(got[195.0], 0)
 
+    def test_the_real_call_pattern_has_no_open_scan_around_it(self):
+        """`main()`'s auto-log block calls these three functions with NO
+        `cr.scan(...)` open — `run_scan` already returned (and its own
+        context already closed) by the time that block runs. Every test
+        above wraps the same calls in `with cr.scan("test"):`, which never
+        exercises that shape and is why the 2026-09-22 bug (found in the
+        real `data/candidates.db`: 5,353 `autolog_structures` rows, 0 with
+        `refused_by` set, dating to 2026-08-19) went undetected. Without an
+        explicit `scan_id` threaded through — what `main()` now does — each
+        call would mint its own orphan id and the refusal/logged UPDATEs
+        below would silently match nothing."""
+        rows = [_leg(strike=190.0), _leg(strike=195.0), _leg(strike=200.0)]
+        # No open `cr.scan()` here either — `current_scan_id()` mints its own
+        # orphan id, same as `main()`'s auto-log block does. That's fine: the
+        # fix is reusing ONE id across every call below, not avoiding "orphan".
+        scan_id = cr.current_scan_id()
+        osx.record_autolog_rank(pd.DataFrame(rows), board="autolog_structures",
+                                scan_id=scan_id)
+        osx.record_autolog_refusals([rows[1]], "negative_ev",
+                                    board="autolog_structures", scan_id=scan_id)
+        osx.record_autolog_logged(rows[2], board="autolog_structures",
+                                  entry_id=77, scan_id=scan_id)
+        got = {r[0]: (r[1], r[2]) for r in
+               self.rows("strike, refused_by, auto_logged")}
+        self.assertIsNone(got[190.0][0])
+        self.assertEqual(got[195.0][0], "negative_ev")
+        self.assertEqual(got[200.0][1], 1)
+
 
 class TestTheOperativeOrderIsCarryNotEV(_TempDB):
     """The single-leg auto-log path ranks EV-descending, then gate_and_report
