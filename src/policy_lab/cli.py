@@ -10,7 +10,7 @@ import argparse
 import sys
 from typing import List, Optional
 
-from src.policy_lab.calibrate import CorpusUnusable, calibration_report
+from src.policy_lab.calibrate import CorpusUnusable
 from src.policy_lab.costs import CostModel
 from src.policy_lab.paths import load_corpus_a, load_corpus_b
 from src.policy_lab.policies import (
@@ -18,8 +18,9 @@ from src.policy_lab.policies import (
     SHORT_PREMIUM_GRID,
 )
 from src.policy_lab.report import (
-    bounded_walk_benchmark, calibration_max_fail_rate, corpus_a_baseline,
-    render_markdown, run_manifest, spread_imputed_fraction, sweep,
+    bounded_walk_benchmark, calibrate_for_run, calibration_max_fail_rate,
+    corpus_a_baseline, render_markdown, run_manifest,
+    spread_imputed_fraction, sweep,
 )
 from src.policy_lab.stats import policy_verdict
 
@@ -66,9 +67,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     max_fail_rate = calibration_max_fail_rate(args.corpus)
+    # `calibrate_for_run` always checks reproduction at MID, never at `costs`
+    # (this run's own cost setting) — see its docstring in report.py for why
+    # (the recorder priced its exits at mid, so a mid replay is the only
+    # like-for-like comparison; a cross/surface calibration measures the
+    # crossing cost, not the harness).
     try:
-        cal = calibration_report(paths, baseline, costs,
-                                 max_fail_rate=max_fail_rate)
+        cal = calibrate_for_run(paths, baseline, costs, max_fail_rate)
     except CorpusUnusable as exc:
         print(f"corpus refused: {exc}", file=sys.stderr)
         return 3

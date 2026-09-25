@@ -17,9 +17,9 @@ from src.policy_lab.policies import (
     LIVE_BASELINE_LONG, LIVE_BASELINE_SHORT, SHORT_PREMIUM_GRID, ExitPolicy,
 )
 from src.policy_lab.report import (
-    CORPUS_A_RECORDER_SHORT, bounded_walk_benchmark, calibration_max_fail_rate,
-    corpus_a_baseline, is_degenerate_dte_cell, render_markdown, run_manifest,
-    spread_imputed_fraction, sweep,
+    CORPUS_A_RECORDER_SHORT, bounded_walk_benchmark, calibrate_for_run,
+    calibration_max_fail_rate, corpus_a_baseline, is_degenerate_dte_cell,
+    render_markdown, run_manifest, spread_imputed_fraction, sweep,
 )
 from src.policy_lab.stats import MAX_FWER_P, PolicyResult, policy_verdict
 from src.policy_lab.types import PathPoint, PricePath
@@ -238,6 +238,56 @@ class TestBoundedWalkBenchmark(unittest.TestCase):
         a = bounded_walk_benchmark(paths, null, tp, CostModel.cross(), seed=5)
         b = bounded_walk_benchmark(paths, null, tp, CostModel.cross(), seed=5)
         self.assertEqual(a, b)
+
+
+class TestCalibrationCostIndependence(unittest.TestCase):
+    """LOAD-BEARING: the recorder priced its exits at MID (89.6% of cases),
+    so calibration must always replay at mid, never at the sweep's own
+    `--costs` setting — measured on the real Corpus A: 79.7% reproduction at
+    mid vs. 48.8% at cross, same baseline, same positions. A calibration
+    that silently tracked `--costs` would refuse a correctly-behaving
+    harness. This pins that `calibrate_for_run`'s outcome cannot be moved by
+    the `sweep_costs` argument at all.
+    """
+
+    def _paths(self):
+        # `null` (hold-to-end) baseline: replaying at cross vs mid moves
+        # `pnl_frac_car`, so if calibration ever used `sweep_costs` for real
+        # this fixture would show different pass/fail counts between the two
+        # calls below.
+        paths = []
+        for i in range(25):
+            p = _make_path(f"p{i}", f"S{i}", [1.00, 0.80, 0.70, 0.60])
+            # actual_pnl_frac recorded as if realised at MID on the last mark
+            # (0.60), matching the null baseline replayed at mid.
+            paths.append(PricePath(
+                p.position_id, p.symbol, p.strategy, p.entry_date,
+                p.entry_price, p.capital_at_risk, p.is_credit, p.points,
+                p.actual_exit_date, (1.00 - 0.60) * 100.0 / p.capital_at_risk,
+                p.corpus))
+        return paths
+
+    def test_cross_and_mid_sweep_costs_give_identical_calibration(self):
+        paths = self._paths()
+        null = ExitPolicy("null", None, None, None, None)
+        cal_cross = calibrate_for_run(paths, null, CostModel.cross(), 0.30)
+        cal_mid = calibrate_for_run(paths, null, CostModel.mid(), 0.30)
+        self.assertEqual(cal_cross.checked, cal_mid.checked)
+        self.assertEqual(cal_cross.passed, cal_mid.passed)
+        self.assertEqual(cal_cross.failed, cal_mid.failed)
+        self.assertEqual(cal_cross.by_reason, cal_mid.by_reason)
+
+    def test_calibration_actually_replays_at_mid_not_cross(self):
+        # Sanity: prove the two cost settings WOULD disagree if calibration
+        # used `sweep_costs` for real, so the identity above is not
+        # vacuously true because cross==mid on this fixture.
+        paths = self._paths()
+        null = ExitPolicy("null", None, None, None, None)
+        cal_at_mid_directly = calibrate_for_run(
+            paths, null, CostModel.surface(), 0.30)
+        self.assertEqual(cal_at_mid_directly.failed, 0,
+                         "fixture is recorded at mid, so a mid replay "
+                         "should reproduce every position")
 
 
 class TestSweep(unittest.TestCase):

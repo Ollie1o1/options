@@ -43,7 +43,9 @@ from scipy.stats import skew as _scipy_skew
 
 from src.alloc.validate import deflated_sharpe, effective_n, pbo_from_pairs
 from src.policy_lab.costs import CostModel
+from src.policy_lab.calibrate import CalibrationReport
 from src.policy_lab.calibrate import MAX_FAIL_RATE as CORPUS_B_MAX_FAIL_RATE
+from src.policy_lab.calibrate import calibration_report
 from src.policy_lab.policies import (
     ExitPolicy, LIVE_BASELINE_LONG, LIVE_BASELINE_SHORT, NULL_POLICIES,
     grid_cardinality,
@@ -119,6 +121,36 @@ def calibration_max_fail_rate(corpus: str) -> float:
     """0.30 for Corpus A, the strict 0.10 default for Corpus B."""
     return CORPUS_A_MAX_FAIL_RATE if corpus.strip().upper() == "A" \
         else CORPUS_B_MAX_FAIL_RATE
+
+
+def calibrate_for_run(paths: Sequence[PricePath], baseline: ExitPolicy,
+                      sweep_costs: CostModel,
+                      max_fail_rate: float) -> CalibrationReport:
+    """Calibration checks the harness against the RECORDED policy, always at
+    MID — never at `sweep_costs` (the sweep's own cost setting, `--costs` on
+    the CLI, default `cross`).
+
+    The recorder priced its exits at MID (`candidate_positions.exit_price`
+    equals the exit-day mark mid in 89.6% of cases), so a mid replay is the
+    only like-for-like comparison to what was actually recorded. Replaying
+    at `cross`/`surface` instead measures the crossing cost, not whether the
+    harness reproduces the record — measured on the real Corpus A: 79.7%
+    reproduction at mid vs. 48.8% at cross, using the identical baseline and
+    positions. `sweep_costs` is accepted (and intentionally ignored) so the
+    call site is explicit about the two settings' independence rather than
+    silently dropping the argument — do not "simplify" this by passing
+    `sweep_costs` through; that is the exact regression this function exists
+    to prevent (see `tests/policy_lab/test_report.py::
+    TestCalibrationCostIndependence`).
+
+    This is a different concern from `render_markdown`'s refusal to render a
+    report built from `mid` costs: that guards the RESEARCH answer (must be
+    `cross`); this guards the MACHINERY check against a mid-priced record
+    (must be `mid`). Neither should be made to match the other.
+    """
+    del sweep_costs  # deliberately unused — see docstring
+    return calibration_report(paths, baseline, CostModel.mid(),
+                              max_fail_rate=max_fail_rate)
 
 
 # ---------------------------------------------------------------------------
