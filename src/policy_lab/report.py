@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 import re
 import subprocess
+import sys
 from datetime import date, timedelta, datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -52,7 +53,7 @@ from src.policy_lab.policies import (
 )
 from src.policy_lab.replay import replay
 from src.policy_lab.stats import (
-    CLUSTER_COL, MAX_FWER_P, PolicyResult, cluster_bootstrap_mean_ci,
+    CLUSTER_COL, MAX_FWER_P, PolicyResult, cluster_bootstrap_mean_ci_many,
     family_wise_p, leave_one_symbol_out_stable, paired_frame, policy_verdict,
     variance_reduction,
 )
@@ -364,11 +365,14 @@ def sweep(paths: Sequence[PricePath], grid: Sequence[ExitPolicy],
 
     policies = [pol for pol in grid if pol != baseline]
     per_policy_df: Dict[str, pd.DataFrame] = {}
-    for policy in policies:
+    for i, policy in enumerate(policies):
         df = _paired(paths, base_out, policy, costs)
         if len(df) == 0:
             continue
         per_policy_df[policy.name] = df
+        if (i + 1) % 100 == 0:
+            print(f"[policy_lab] replay sweep: {i + 1}/{len(policies)} "
+                  "policies", file=sys.stderr)
 
     if not per_policy_df:
         return []
@@ -439,13 +443,41 @@ def sweep(paths: Sequence[PricePath], grid: Sequence[ExitPolicy],
 
     survivors = {name for name, p in p_by_policy.items() if p < MAX_FWER_P}
     ci_needed = survivors | set(null_means)
+    print(f"[policy_lab] permutation test done: {len(survivors)}/"
+          f"{len(policy_names)} policies survive fwer_p<{MAX_FWER_P}",
+          file=sys.stderr)
+
+    # Vectorized bootstrap (2026-09-25): the single-policy
+    # `cluster_bootstrap_mean_ci` costs ~4s each at n_boot=10000, and nearly
+    # every policy in `ci_needed` survives the family-wise screen (the grid's
+    # cells are heavily correlated), so a per-policy loop here is the 48
+    # minutes measured on the real 750-policy grid. `cluster_bootstrap_mean_
+    # ci_many` resamples cluster weights ONCE and scores every policy against
+    # them, but requires every policy's `d` vector to share one row-aligned
+    # `cluster_ids` array — so policies are batched by their exact
+    # position_id sequence first. In practice every `ci_needed` policy shares
+    # one alignment (all are paired against the same `base_out`), so this
+    # is a single batched call; the only way two policies diverge is a path
+    # opened at `entry_price == 0.0` combined with only one policy arming a
+    # take-profit/stop (see `replay.py`), which is handled correctly but
+    # would cost a second, smaller batch rather than the full vectorization.
     ci_cache: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+    batches: Dict[Tuple[str, ...], List[str]] = {}
     for name in ci_needed:
         df = per_policy_df.get(name)
         if df is None:
             continue
-        ci_cache[name] = cluster_bootstrap_mean_ci(
-            df, "d", n_boot=n_boot, seed=seed)
+        sig = tuple(df["position_id"])
+        batches.setdefault(sig, []).append(name)
+    for names in batches.values():
+        rep_df = per_policy_df[names[0]]
+        batch_cluster_ids = rep_df[CLUSTER_COL].to_numpy()
+        batch_d = {name: per_policy_df[name]["d"].to_numpy(dtype="float64")
+                  for name in names}
+        ci_cache.update(cluster_bootstrap_mean_ci_many(
+            batch_d, batch_cluster_ids, n_boot=n_boot, seed=seed))
+    print(f"[policy_lab] bootstrap done: {len(ci_cache)} policies",
+          file=sys.stderr)
 
     results: List[PolicyResult] = []
     for policy in policies:

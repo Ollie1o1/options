@@ -65,6 +65,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"no usable paths for {args.strategy}: {load.dropped}",
               file=sys.stderr)
         return 2
+    print(f"[policy_lab] paths loaded: {load.loaded} usable "
+          f"(corpus {args.corpus.upper()}, {args.strategy})", file=sys.stderr)
 
     max_fail_rate = calibration_max_fail_rate(args.corpus)
     # `calibrate_for_run` always checks reproduction at MID, never at `costs`
@@ -77,6 +79,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except CorpusUnusable as exc:
         print(f"corpus refused: {exc}", file=sys.stderr)
         return 3
+    print(f"[policy_lab] calibration: {cal.passed}/{cal.checked} reproduce "
+          f"({100 * cal.fail_rate:.1f}% fail, max {100 * max_fail_rate:.1f}%)",
+          file=sys.stderr)
 
     # Corpus B is loaded as an INDEPENDENT check regardless of which corpus
     # is primary — a promotion from Corpus A alone, or from Corpus B alone
@@ -105,6 +110,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                          seed=args.seed)
         diff = (r.mean_d_cross - synth_d)
         benchmark[r.policy_name] = (r.mean_d_cross, synth_d, diff)
+    print(f"[policy_lab] benchmark done: {len(benchmark)} promoted policies",
+          file=sys.stderr)
 
     row_counts = {
         "loaded": load.loaded,

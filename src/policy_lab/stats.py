@@ -96,6 +96,118 @@ def cluster_bootstrap_mean_ci(df: pd.DataFrame, value_col: str,
             float(np.percentile(stats, 100 * (1 - alpha / 2))))
 
 
+def cluster_bootstrap_mean_ci_many(
+        per_policy_d: Dict[str, Sequence[float]],
+        cluster_ids: Sequence[str],
+        n_boot: int = 10000, alpha: float = 0.05, seed: int = 0,
+        ) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+    """`cluster_bootstrap_mean_ci`, vectorized across many policies at once.
+
+    PERFORMANCE (2026-09-25): the real sweep scores a ~750-policy grid, and
+    the family-wise screen at `report.py:440` lets nearly all of them through
+    to bootstrapping (the grid's cells are heavily correlated, so once the
+    best clears, most others do). At `n_boot=10000` the single-policy
+    `cluster_bootstrap_mean_ci` costs ~4s each in a per-boot Python loop —
+    750 * 4s = 48 minutes, measured as the whole cost of a 105,392-path,
+    1,870-cluster run. This function computes every policy's CI from ONE set
+    of resampled cluster weights instead of resampling once per policy.
+
+    Every `d` vector in `per_policy_d` must be row-aligned to the single
+    shared `cluster_ids` array (same length, same order) — this is a
+    stricter contract than the single-policy function, which groups each
+    policy's own frame independently, and callers with ragged per-policy row
+    sets must batch policies that share an alignment before calling this
+    (see `report.py::sweep`, which batches by row signature for exactly this
+    reason: two grid policies can drop different positions when a path
+    opened at `entry_price == 0.0` and only one of the two arms a
+    take-profit/stop — see `replay.py`).
+
+    Size-weighted resampling (`cluster_bootstrap_mean_ci`'s docstring): a
+    resampled mean is `sum(selected clusters' sums) / sum(selected
+    clusters' counts)`. Precompute, once, a sums matrix `S` (n_policies x
+    n_clusters) and a shared counts vector `c` (n_clusters); for `n_boot`
+    draws, a multinomial weight matrix `W` (n_clusters x n_boot) counts how
+    many times each cluster was drawn per replicate (matching the
+    single-policy function's `rng.integers(0, n_clusters, size=n_clusters)`
+    draw of n_clusters cluster-picks per boot in distribution, though NOT in
+    RNG call sequence — the two do not produce bit-identical resamples for
+    the same seed; see `test_cluster_bootstrap_many_matches_single_
+    statistically` in `tests/policy_lab/test_stats_paired.py`, which is why
+    this repo asserts statistical rather than exact numerical equivalence).
+    `M = (S @ W) / (c @ W)` gives every policy's resampled means at once.
+
+    `W` at realistic scale (1,870 clusters x 10,000 boots, float64) is
+    ~150MB, so the `n_boot` dimension is chunked rather than materialized
+    whole.
+    """
+    if not per_policy_d:
+        return {}
+    ids = np.asarray(cluster_ids)
+    n_rows = ids.shape[0]
+    names = list(per_policy_d)
+    if n_rows == 0:
+        return {name: (None, None) for name in names}
+
+    d_matrix = np.empty((len(names), n_rows), dtype="float64")
+    for i, name in enumerate(names):
+        d = np.asarray(per_policy_d[name], dtype="float64")
+        if d.shape[0] != n_rows:
+            raise ValueError(
+                f"policy {name!r} has {d.shape[0]} d-values but cluster_ids "
+                f"has {n_rows}; every policy must be aligned to the same "
+                "cluster_ids row order")
+        d_matrix[i] = d
+
+    uniq_clusters, inverse = np.unique(ids, return_inverse=True)
+    n_clusters = int(uniq_clusters.shape[0])
+    if n_clusters == 0:
+        return {name: (None, None) for name in names}
+
+    # S[i, k]: policy i's sum of d over rows in cluster k.
+    inverse = inverse.astype(np.intp, copy=False)
+    S = np.zeros((len(names), n_clusters), dtype="float64")
+    for i in range(len(names)):
+        np.add.at(S[i], inverse, d_matrix[i])
+    # c[k]: row count of cluster k — shared, because every policy's d vector
+    # is aligned to the same `cluster_ids`.
+    c = np.bincount(inverse, minlength=n_clusters).astype("float64")
+
+    n_boot = int(n_boot)
+    if n_boot < 1:
+        return {name: (None, None) for name in names}
+    rng = np.random.default_rng(seed)
+    probs = np.full(n_clusters, 1.0 / n_clusters)
+    lo_q = 100 * alpha / 2
+    hi_q = 100 * (1 - alpha / 2)
+
+    chunk_size = 1000
+    replicate_chunks: List[np.ndarray] = []
+    remaining = n_boot
+    while remaining > 0:
+        take = min(chunk_size, remaining)
+        # (n_clusters, take): how many times each cluster was drawn, per
+        # bootstrap replicate in this chunk.
+        W = rng.multinomial(n_clusters, probs, size=take).T
+        num = S @ W                 # (n_policies, take)
+        den = c @ W                 # (take,) — never zero: every column of
+                                     # W sums to n_clusters (>=1) over
+                                     # clusters that each have count >= 1.
+        replicate_chunks.append(num / den)
+        remaining -= take
+    replicates = np.concatenate(replicate_chunks, axis=1)  # (n_policies, n_boot)
+
+    result: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+    for i, name in enumerate(names):
+        row = replicates[i]
+        row = row[np.isfinite(row)]
+        if row.size < 2:
+            result[name] = (None, None)
+            continue
+        result[name] = (float(np.percentile(row, lo_q)),
+                        float(np.percentile(row, hi_q)))
+    return result
+
+
 def variance_reduction(df: pd.DataFrame) -> float:
     """sd(d) / sd(r_base) — how much of the common factor the pairing removed.
 
