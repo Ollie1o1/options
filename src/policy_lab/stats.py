@@ -179,22 +179,35 @@ def leave_one_symbol_out_stable(df: pd.DataFrame) -> bool:
     Bull Put looked significant at t=3.48 until MU and AMD — 68% of its dollars
     during a semiconductor melt-up — were removed, at which point it fell to
     t=1.61. A result one ticker can overturn is a result about that ticker.
+
+    PERFORMANCE (2026-09-25): rewritten to compute every symbol's leave-one-out
+    mean from one groupby, instead of re-filtering the whole `df` per symbol.
+    The original `for sym in symbols: df[df["symbol"] != sym]` is
+    O(n_symbols * n_rows); on the real Corpus A Bull Put frame (105,392 rows,
+    hundreds of distinct symbols) that took 70.9s of a 118s profiled 60-policy
+    sweep (cProfile-measured) — extrapolated across the full 750-policy grid
+    this alone made the CLI's smoke test fail to finish inside an hour. This
+    version is mathematically identical (leave-one-out mean recovered as
+    `(total_sum - symbol_sum) / (total_n - symbol_n)`, verified against the
+    row-filtering version — see `tests/policy_lab/test_stats_verdict.py`'s
+    `TestLeaveOneSymbolOut`, unchanged and still passing) but is
+    O(n_rows + n_symbols).
     """
     if df is None or len(df) == 0 or "symbol" not in df.columns:
         return False
-    symbols = list(df["symbol"].unique())
-    if len(symbols) < 2:
+    grp = df.groupby("symbol")["d"].agg(["sum", "count"])
+    if len(grp) < 2:
         return False
-    full = float(df["d"].mean())
+    total_sum = float(df["d"].sum())
+    total_n = len(df)
+    full = total_sum / total_n
     if full == 0.0:
         return False
-    for sym in symbols:
-        rest = df[df["symbol"] != sym]
-        if len(rest) == 0:
-            return False
-        if np.sign(float(rest["d"].mean())) != np.sign(full):
-            return False
-    return True
+    rest_n = total_n - grp["count"]
+    if (rest_n <= 0).any():
+        return False
+    rest_mean = (total_sum - grp["sum"]) / rest_n
+    return bool((np.sign(rest_mean.to_numpy()) == np.sign(full)).all())
 
 
 @dataclass(frozen=True)
