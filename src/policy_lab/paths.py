@@ -240,6 +240,24 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
     `snap_date` as a second guard against a strike/date pair ever returning
     more than one row.
 
+    For the three spread strategies (`_SPREAD_STRATEGIES`), `entry_price` is
+    `net_credit` — the TWO-LEG spread's price — so the path must be built
+    from both legs, not the short leg alone. The short leg alone trades at a
+    different (larger) magnitude than the net credit, which used to trip
+    `stop_mult` on the first interior point of nearly every path. The long
+    leg's strike is `trades.long_strike` (or `long_put_strike` for Iron
+    Condor, mirroring the short leg's `COALESCE(short_put_strike, strike)`).
+    Both legs' snapshots are joined on the SAME `snap_date` (same symbol,
+    expiration, option type); a date missing on either leg is dropped and
+    counted as `leg_snapshot_missing` rather than pairing a stale leg with a
+    fresh one. Closing a credit spread means buying back the short leg
+    (paying its ask) and selling the long leg (taking its bid), so
+    `ask = short_ask - long_bid` (expensive way to close) and
+    `bid = short_bid - long_ask` (cheap way); `mid = short_mid - long_mid`.
+    Single-leg strategies (Long Call, Long Put, Short Put) are unchanged —
+    they genuinely are one leg and their `entry_price` comes from
+    `trades.entry_price`, never `net_credit`.
+
     `chain_snapshots` carries zero NULL and zero both-zero bid/ask across the
     whole archive, so every `PathPoint` built here keeps the default
     `spread_imputed=False` — unlike Corpus A, there is nothing to impute.
@@ -263,19 +281,21 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
             """SELECT entry_id, date, ticker, expiration, strategy_name,
                       exit_date, pnl_usd, capital_at_risk, net_credit,
                       spread_width, entry_price, type,
-                      COALESCE(short_put_strike, strike)
+                      COALESCE(short_put_strike, strike),
+                      COALESCE(long_put_strike, long_strike)
                  FROM trades
                 WHERE status = 'CLOSED' AND strategy_name = ?
                   AND exit_date IS NOT NULL""", (strategy,)).fetchall()
 
         for (eid, entry_date, ticker, expiration, strat, exit_date, pnl_usd,
              car, credit, width, entry_price, leg_type,
-             short_leg_strike) in rows:
+             short_leg_strike, long_leg_strike) in rows:
             if car is None or car <= 0:
                 rep.drop("no_capital_at_risk")
                 continue
 
-            if strat in _SPREAD_STRATEGIES:
+            is_spread = strat in _SPREAD_STRATEGIES
+            if is_spread:
                 price = credit
                 if price is None or width is None:
                     rep.drop("missing_structure_fields")
@@ -291,44 +311,97 @@ def load_corpus_b(ledger_path: str, archive_path: str, strategy: str,
                     or expiration is None or entry_date is None):
                 rep.drop("missing_structure_fields")
                 continue
+            if is_spread and long_leg_strike is None:
+                rep.drop("missing_structure_fields")
+                continue
             if pnl_usd is None:
                 rep.drop("no_pnl_recorded")
                 continue
 
-            snaps = con.execute(
-                """SELECT snap_date, bid, ask, spot FROM ca.chain_snapshots
-                    WHERE symbol = ? AND expiration = ? AND strike = ?
-                      AND type = ?
-                      AND snap_date >= ? AND snap_date <= ?
-                    ORDER BY snap_date""",
-                (ticker, expiration[:10], float(short_leg_strike), opt_type,
-                 entry_date[:10], exit_date[:10])).fetchall()
+            def _snap_by_date(strike: float) -> Dict[str, Tuple]:
+                """One (bid, ask, spot) per snap_date for one leg's strike.
 
-            # One point per snap_date: keep the first row seen for a date
-            # (rows already arrive ordered by snap_date), so a strike/date
-            # pair can never contribute more than one observation.
-            by_date: Dict[str, Tuple] = {}
-            for sd, bid, ask, spot in snaps:
-                if sd not in by_date:
-                    by_date[sd] = (bid, ask, spot)
-            dedup_snaps = [(sd, *by_date[sd]) for sd in sorted(by_date)]
+                Keeps the first row seen for a date (rows arrive ordered by
+                snap_date), so a strike/date pair can never contribute more
+                than one observation. A row with a NULL bid or ask never
+                becomes a usable snapshot for that date.
+                """
+                snaps = con.execute(
+                    """SELECT snap_date, bid, ask, spot
+                         FROM ca.chain_snapshots
+                        WHERE symbol = ? AND expiration = ? AND strike = ?
+                          AND type = ?
+                          AND snap_date >= ? AND snap_date <= ?
+                        ORDER BY snap_date""",
+                    (ticker, expiration[:10], strike, opt_type,
+                     entry_date[:10], exit_date[:10])).fetchall()
+                out_by_date: Dict[str, Tuple] = {}
+                for sd, bid, ask, spot in snaps:
+                    if sd in out_by_date:
+                        continue
+                    if bid is None or ask is None:
+                        continue
+                    out_by_date[sd] = (float(bid), float(ask), spot)
+                return out_by_date
 
-            if len(dedup_snaps) < 2:
-                rep.drop("fewer_than_two_snapshots")
-                continue
-            if not _gap_ok([s[0] for s in dedup_snaps], max_gap_days):
-                rep.drop("gap_too_large")
-                continue
+            short_by_date = _snap_by_date(float(short_leg_strike))
 
-            exp_day = date.fromisoformat(expiration[:10])
-            points = tuple(
-                PathPoint(date=sd, bid=float(bid), ask=float(ask),
-                          mid=(float(bid) + float(ask)) / 2.0,
-                          spot=(float(spot) if spot is not None else None),
-                          dte=(exp_day - date.fromisoformat(sd[:10])).days)
-                for sd, bid, ask, spot in dedup_snaps
-                if bid is not None and ask is not None
-            )
+            if is_spread:
+                long_by_date = _snap_by_date(float(long_leg_strike))
+
+                # Both legs must carry a real quote on the SAME snap_date —
+                # the two-leg join `load_corpus_b`'s docstring describes. A
+                # date present on only one leg is dropped and counted rather
+                # than pairing a stale leg with a fresh one.
+                common_dates = []
+                for sd in sorted(set(short_by_date) | set(long_by_date)):
+                    if sd in short_by_date and sd in long_by_date:
+                        common_dates.append(sd)
+                    else:
+                        rep.drop("leg_snapshot_missing")
+
+                if len(common_dates) < 2:
+                    rep.drop("fewer_than_two_snapshots")
+                    continue
+                if not _gap_ok(common_dates, max_gap_days):
+                    rep.drop("gap_too_large")
+                    continue
+
+                exp_day = date.fromisoformat(expiration[:10])
+                points = tuple(
+                    PathPoint(
+                        date=sd,
+                        bid=short_by_date[sd][0] - long_by_date[sd][1],
+                        ask=short_by_date[sd][1] - long_by_date[sd][0],
+                        mid=((short_by_date[sd][0] + short_by_date[sd][1]) / 2.0
+                             - (long_by_date[sd][0] + long_by_date[sd][1]) / 2.0),
+                        spot=(float(short_by_date[sd][2])
+                              if short_by_date[sd][2] is not None else None),
+                        dte=(exp_day - date.fromisoformat(sd[:10])).days,
+                        spread_imputed=False,
+                    )
+                    for sd in common_dates
+                )
+            else:
+                dedup_dates = sorted(short_by_date)
+                if len(dedup_dates) < 2:
+                    rep.drop("fewer_than_two_snapshots")
+                    continue
+                if not _gap_ok(dedup_dates, max_gap_days):
+                    rep.drop("gap_too_large")
+                    continue
+
+                exp_day = date.fromisoformat(expiration[:10])
+                points = tuple(
+                    PathPoint(date=sd, bid=short_by_date[sd][0],
+                              ask=short_by_date[sd][1],
+                              mid=(short_by_date[sd][0] + short_by_date[sd][1]) / 2.0,
+                              spot=(float(short_by_date[sd][2])
+                                    if short_by_date[sd][2] is not None else None),
+                              dte=(exp_day - date.fromisoformat(sd[:10])).days)
+                    for sd in dedup_dates
+                )
+
             if len(points) < 2:
                 rep.drop("snapshots_without_quotes")
                 continue

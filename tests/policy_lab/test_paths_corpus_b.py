@@ -27,19 +27,21 @@ class TestCorpusBLoader(unittest.TestCase):
                 exit_date TEXT, pnl_usd REAL, capital_at_risk REAL,
                 net_credit REAL, spread_width REAL, entry_price REAL,
                 type TEXT, strike REAL, short_put_strike REAL,
-                long_put_strike REAL);
+                long_put_strike REAL, long_strike REAL);
         """)
-        # Matches the real ledger's shape for every one of its 163 closed
-        # Bull Put rows: short_put_strike is NULL, the short leg lives in
-        # the generic `strike` column instead. A loader that joins on
-        # short_put_strike alone returns zero rows for this fixture.
+        # Matches the real ledger's shape for every one of its 171 closed
+        # Bull Put rows: short_put_strike AND long_put_strike are NULL, the
+        # short leg lives in the generic `strike` column and the long leg in
+        # `long_strike` instead. A loader that joins on short_put_strike /
+        # long_put_strike alone returns zero rows for this fixture.
         con.execute(
             "INSERT INTO trades (entry_id, date, ticker, expiration, "
             "strategy_name, status, exit_date, pnl_usd, capital_at_risk, "
             "net_credit, spread_width, type, strike, short_put_strike, "
-            "long_put_strike) VALUES "
+            "long_put_strike, long_strike) VALUES "
             "(1,'2026-06-10','AMD','2026-07-17','Bull Put','CLOSED',"
-            "'2026-06-18',120.0,400.0,1.0,5.0,'put',100.0,NULL,95.0)")
+            "'2026-06-18',120.0,400.0,1.0,5.0,'put',100.0,NULL,"
+            "NULL,95.0)")
         con.commit(); con.close()
 
         con = sqlite3.connect(self.archive)
@@ -54,6 +56,17 @@ class TestCorpusBLoader(unittest.TestCase):
             con.execute("INSERT INTO chain_snapshots VALUES "
                         "('AMD',?,'p',?,100.0,'2026-07-17',?,?,150.0)",
                         (d, "put", b, a))
+        # The long leg (strike 95, put): bid=ask=0.0 at every date the short
+        # leg has a snapshot for -- a worthless, deep-OTM long wing. Because
+        # `short - 0.0 == short`, this keeps every OLD assertion in this file
+        # (written when Corpus B read the short leg alone) correct under the
+        # new two-leg join, while still exercising the join, the dedup and
+        # the crossing-direction arithmetic for real (see the dedicated
+        # two-leg tests below for a long leg with a non-zero price).
+        for d in ("2026-06-10", "2026-06-12", "2026-06-16", "2026-06-18"):
+            con.execute("INSERT INTO chain_snapshots VALUES "
+                        "('AMD',?,'p2',?,95.0,'2026-07-17',0.0,0.0,150.0)",
+                        (d, "put"))
         con.commit(); con.close()
 
     def tearDown(self):
@@ -260,6 +273,168 @@ class TestCorpusBLoader(unittest.TestCase):
         paths, rep = load_corpus_b(self.ledger, self.archive, "Bear Call")
         self.assertEqual(paths, [])
         self.assertEqual(rep.loaded, 0)
+
+
+class TestCorpusBTwoLegSpread(unittest.TestCase):
+    """The defect fix: Corpus B's path must come from the SPREAD (both
+    legs), not the short leg alone. `entry_price` for the three spread
+    strategies is `net_credit` -- the two-leg price -- so a path built from
+    one leg describes a different instrument than the price it is checked
+    against, and trips `stop_mult` on noise. See paths.py::load_corpus_b.
+    """
+
+    def setUp(self):
+        fd, self.ledger = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        fd, self.archive = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+
+        con = sqlite3.connect(self.ledger)
+        con.executescript("""
+            CREATE TABLE trades (
+                entry_id INTEGER PRIMARY KEY, date TEXT, ticker TEXT,
+                expiration TEXT, strategy_name TEXT, status TEXT,
+                exit_date TEXT, pnl_usd REAL, capital_at_risk REAL,
+                net_credit REAL, spread_width REAL, entry_price REAL,
+                type TEXT, strike REAL, short_put_strike REAL,
+                long_put_strike REAL, long_strike REAL);
+        """)
+        con.commit(); con.close()
+
+        con = sqlite3.connect(self.archive)
+        con.executescript("""
+            CREATE TABLE chain_snapshots (
+                symbol TEXT, snap_date TEXT, contract TEXT, type TEXT,
+                strike REAL, expiration TEXT, bid REAL, ask REAL,
+                spot REAL);
+        """)
+        con.commit(); con.close()
+
+    def tearDown(self):
+        os.unlink(self.ledger)
+        os.unlink(self.archive)
+
+    def _insert_trade(self, entry_id, ticker, entry_date, exit_date,
+                       short_strike, long_strike, net_credit=1.5,
+                       spread_width=5.0, capital_at_risk=350.0,
+                       pnl_usd=50.0, strategy="Bull Put", opt_type="put"):
+        con = sqlite3.connect(self.ledger)
+        con.execute(
+            "INSERT INTO trades (entry_id, date, ticker, expiration, "
+            "strategy_name, status, exit_date, pnl_usd, capital_at_risk, "
+            "net_credit, spread_width, type, strike, short_put_strike, "
+            "long_put_strike, long_strike) VALUES "
+            "(?,?,?,'2026-08-21',?,'CLOSED',?,?,?,?,?,?,?,NULL,NULL,?)",
+            (entry_id, entry_date, ticker, strategy, exit_date, pnl_usd,
+             capital_at_risk, net_credit, spread_width, opt_type,
+             short_strike, long_strike))
+        con.commit(); con.close()
+
+    def _insert_snap(self, ticker, snap_date, strike, bid, ask,
+                      opt_type="put"):
+        con = sqlite3.connect(self.archive)
+        con.execute(
+            "INSERT INTO chain_snapshots VALUES (?,?,'x',?,?,"
+            "'2026-08-21',?,?,150.0)",
+            (ticker, snap_date, opt_type, strike, bid, ask))
+        con.commit(); con.close()
+
+    def test_mid_is_short_minus_long_and_crossing_uses_the_right_legs(self):
+        """Both legs present at the same symbol/expiration/date: `mid` must
+        equal `short_mid - long_mid`, and `ask`/`bid` must use the crossing
+        combination that matches closing a credit spread (buy back the
+        short at its ask, sell the long at its bid) -- NOT
+        `short_ask - long_ask`, which is a different, wrong number here."""
+        self._insert_trade(1, "NVDA", "2026-07-01", "2026-07-05",
+                            short_strike=50.0, long_strike=45.0)
+        self._insert_snap("NVDA", "2026-07-01", 50.0, 2.00, 2.20)
+        self._insert_snap("NVDA", "2026-07-01", 45.0, 0.80, 1.00)
+        self._insert_snap("NVDA", "2026-07-05", 50.0, 1.50, 1.70)
+        self._insert_snap("NVDA", "2026-07-05", 45.0, 0.50, 0.70)
+
+        paths, rep = load_corpus_b(self.ledger, self.archive, "Bull Put")
+        self.assertEqual(len(paths), 1)
+        p0 = paths[0].points[0]
+
+        self.assertAlmostEqual(p0.mid, 2.10 - 0.90)          # 1.20
+        self.assertAlmostEqual(p0.ask, 2.20 - 0.80)           # 1.40: pay the
+        # short's ask, take the long's bid.
+        self.assertAlmostEqual(p0.bid, 2.00 - 1.00)           # 1.00: take
+        # the short's bid, pay the long's ask.
+
+        # Reject the wrong (same-side) combination explicitly: it would
+        # produce different, incorrect numbers on this fixture.
+        self.assertNotAlmostEqual(p0.ask, 2.20 - 1.00)        # short_ask - long_ask
+        self.assertNotAlmostEqual(p0.bid, 2.00 - 0.80)        # short_bid - long_bid
+        self.assertFalse(p0.spread_imputed)
+
+    def test_long_leg_missing_on_one_date_is_dropped_and_counted(self):
+        """A date present on the short leg but absent on the long leg must
+        be dropped from the path and counted, not paired with a stale long
+        quote from a different date. A trade left with fewer than two
+        surviving common dates is dropped entirely."""
+        # MSFT: short leg has 3 dates, long leg is missing the middle one.
+        # Two common dates survive, so the trade still loads.
+        self._insert_trade(2, "MSFT", "2026-07-01", "2026-07-05",
+                            short_strike=50.0, long_strike=45.0)
+        self._insert_snap("MSFT", "2026-07-01", 50.0, 2.00, 2.20)
+        self._insert_snap("MSFT", "2026-07-03", 50.0, 1.80, 2.00)
+        self._insert_snap("MSFT", "2026-07-05", 50.0, 1.50, 1.70)
+        self._insert_snap("MSFT", "2026-07-01", 45.0, 0.80, 1.00)
+        # (no long-leg snapshot for 2026-07-03 -- the gap under test)
+        self._insert_snap("MSFT", "2026-07-05", 45.0, 0.50, 0.70)
+
+        # TSLA: short leg has 2 dates, long leg only has 1 of them. Only one
+        # common date survives, so the whole trade is dropped.
+        self._insert_trade(3, "TSLA", "2026-07-01", "2026-07-03",
+                            short_strike=50.0, long_strike=45.0)
+        self._insert_snap("TSLA", "2026-07-01", 50.0, 2.00, 2.20)
+        self._insert_snap("TSLA", "2026-07-03", 50.0, 1.80, 2.00)
+        self._insert_snap("TSLA", "2026-07-01", 45.0, 0.80, 1.00)
+        # (no long-leg snapshot for 2026-07-03 -- TSLA is left with 1 date)
+
+        paths, rep = load_corpus_b(self.ledger, self.archive, "Bull Put")
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0].symbol, "MSFT")
+        self.assertEqual(len(paths[0].points), 2)
+        self.assertEqual({pt.date for pt in paths[0].points},
+                          {"2026-07-01", "2026-07-05"})
+
+        # 2 dropped dates counted: MSFT's 07-03 and TSLA's 07-03.
+        self.assertGreaterEqual(rep.dropped.get("leg_snapshot_missing", 0), 2)
+        # TSLA never made it into a path at all.
+        self.assertGreaterEqual(rep.dropped.get("fewer_than_two_snapshots", 0), 1)
+
+    def test_single_leg_strategy_still_loads_from_one_leg_unnetted(self):
+        """Long Call, Long Put and Short Put are genuinely one leg. Their
+        `entry_price` must still come from `trades.entry_price` (never
+        `net_credit`, which is NULL for them), and their path points must be
+        the leg's own mid -- NOT netted against any other strike."""
+        con = sqlite3.connect(self.ledger)
+        con.execute(
+            "INSERT INTO trades (entry_id, date, ticker, expiration, "
+            "strategy_name, status, exit_date, pnl_usd, capital_at_risk, "
+            "net_credit, spread_width, entry_price, type, strike, "
+            "short_put_strike, long_put_strike, long_strike) VALUES "
+            "(4,'2026-07-01','AAPL','2026-08-21','Long Call','CLOSED',"
+            "'2026-07-05',-30.0,300.0,NULL,NULL,3.20,'call',110.0,NULL,"
+            "NULL,NULL)")
+        con.commit(); con.close()
+        self._insert_snap("AAPL", "2026-07-01", 110.0, 3.00, 3.20, "call")
+        self._insert_snap("AAPL", "2026-07-05", 110.0, 2.60, 2.80, "call")
+
+        paths, rep = load_corpus_b(self.ledger, self.archive, "Long Call")
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(rep.dropped.get("missing_structure_fields", 0), 0)
+        self.assertEqual(rep.dropped.get("leg_snapshot_missing", 0), 0)
+        p = paths[0]
+        self.assertAlmostEqual(p.entry_price, 3.20)   # from entry_price,
+        # not net_credit (which is NULL here).
+        self.assertEqual(len(p.points), 2)
+        self.assertAlmostEqual(p.points[0].mid, (3.00 + 3.20) / 2.0)
+        self.assertAlmostEqual(p.points[1].mid, (2.60 + 2.80) / 2.0)
 
 
 if __name__ == "__main__":
