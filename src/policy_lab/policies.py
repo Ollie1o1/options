@@ -7,6 +7,17 @@ grows quietly makes every past verdict too generous.
 Short and long premium sweep different knobs — the live -50% stop is a
 long-premium rule (n=117, -$67,488) while short premium stops at 2.0x credit —
 so they are swept and reported separately and never pooled.
+
+`NOSTOP_GRID` is preregistered in
+`docs/PREREG_POLICY_LAB_NOSTOP_20260928.md`. It is a frozen, 6-cell
+confirmatory grid testing whether removing the stop from the Corpus A
+recorder baseline (`ExitPolicy(0.50, 2.0, None, None)`, not itself a grid
+member) produces a real edge on held-out Bear Call data. Expanding it after
+seeing results invalidates the run and requires a new preregistration — its
+cardinality (6, via `grid_cardinality`) is exactly what feeds the
+family-wise correction, so a grid that grows quietly makes that correction
+too generous, the same trap the module docstring above warns about for the
+750-cell grids.
 """
 from __future__ import annotations
 
@@ -69,6 +80,23 @@ LONG_PREMIUM_GRID: Tuple[ExitPolicy, ...] = _build(
     sls=(0.25, 0.50, 0.75, None),
     dtes=(7, 14, 21, None),
     holds=(3, 7, 14, 30, None),
+)
+
+# Frozen 6-cell confirmatory grid — see the module docstring and
+# docs/PREREG_POLICY_LAB_NOSTOP_20260928.md. All six cells hold
+# `time_exit_dte=None` and `max_hold_days=None`: the 750-cell run showed DTE
+# 21 and 28 are degenerate on this corpus (median entry DTE 17), and leaving
+# both knobs unarmed keeps the grid honest and small. The baseline,
+# `ExitPolicy(0.50, 2.0, None, None)` (== `CORPUS_A_RECORDER_SHORT` in
+# report.py), is deliberately NOT a member: it is the comparison point, not
+# a candidate.
+NOSTOP_GRID: Tuple[ExitPolicy, ...] = (
+    ExitPolicy("nostop_tp050_slnone", 0.50, None, None, None),
+    ExitPolicy("nostop_tp050_sl3.0", 0.50, 3.0, None, None),
+    ExitPolicy("nostop_tp050_sl1.5", 0.50, 1.5, None, None),
+    ExitPolicy("nostop_tp065_slnone", 0.65, None, None, None),
+    ExitPolicy("nostop_tp065_sl2.0", 0.65, 2.0, None, None),
+    ExitPolicy("nostop_tp035_slnone", 0.35, None, None, None),
 )
 
 LIVE_BASELINE_SHORT = ExitPolicy(

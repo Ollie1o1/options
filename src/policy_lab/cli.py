@@ -13,7 +13,9 @@ from typing import List, Optional
 from src.policy_lab.calibrate import CorpusUnusable
 from src.policy_lab.costs import CostModel
 from src.policy_lab.paths import load_corpus_a, load_corpus_b
-from src.policy_lab.policies import LONG_PREMIUM_GRID, SHORT_PREMIUM_GRID
+from src.policy_lab.policies import (
+    LONG_PREMIUM_GRID, NOSTOP_GRID, SHORT_PREMIUM_GRID,
+)
 from src.policy_lab.report import (
     bounded_walk_benchmark, calibrate_for_run, calibration_max_fail_rate,
     corpus_a_baseline, corpus_b_baseline, render_markdown, run_manifest,
@@ -28,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m src.policy_lab")
     p.add_argument("--corpus", choices=("a", "b"), default="a")
     p.add_argument("--strategy", default="Bull Put")
+    p.add_argument("--grid", choices=("full", "nostop"), default="full",
+                   help="'full' sweeps SHORT_PREMIUM_GRID/LONG_PREMIUM_GRID "
+                        "(750 cells, exploratory); 'nostop' sweeps the "
+                        "preregistered 6-cell NOSTOP_GRID (see "
+                        "docs/PREREG_POLICY_LAB_NOSTOP_20260928.md)")
     p.add_argument("--costs", choices=CostModel.SETTINGS, default="cross")
     p.add_argument("--candidates-db", default="data/candidates.db")
     p.add_argument("--ledger-db", default="paper_trades.db")
@@ -48,7 +55,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     costs = CostModel(args.costs)
     is_long = args.strategy in _LONG
-    grid = LONG_PREMIUM_GRID if is_long else SHORT_PREMIUM_GRID
+    if args.grid == "nostop":
+        grid = NOSTOP_GRID
+    else:
+        grid = LONG_PREMIUM_GRID if is_long else SHORT_PREMIUM_GRID
 
     if args.corpus == "a":
         paths, load = load_corpus_a(args.candidates_db, args.strategy)
