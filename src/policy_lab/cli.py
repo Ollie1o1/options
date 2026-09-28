@@ -13,13 +13,10 @@ from typing import List, Optional
 from src.policy_lab.calibrate import CorpusUnusable
 from src.policy_lab.costs import CostModel
 from src.policy_lab.paths import load_corpus_a, load_corpus_b
-from src.policy_lab.policies import (
-    LIVE_BASELINE_LONG, LIVE_BASELINE_SHORT, LONG_PREMIUM_GRID,
-    SHORT_PREMIUM_GRID,
-)
+from src.policy_lab.policies import LONG_PREMIUM_GRID, SHORT_PREMIUM_GRID
 from src.policy_lab.report import (
     bounded_walk_benchmark, calibrate_for_run, calibration_max_fail_rate,
-    corpus_a_baseline, render_markdown, run_manifest,
+    corpus_a_baseline, corpus_b_baseline, render_markdown, run_manifest,
     spread_imputed_fraction, sweep,
 )
 from src.policy_lab.stats import policy_verdict
@@ -59,7 +56,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         paths, load = load_corpus_b(args.ledger_db, args.archive_db,
                                     args.strategy)
-        baseline = LIVE_BASELINE_LONG if is_long else LIVE_BASELINE_SHORT
+        baseline = corpus_b_baseline(is_long)
 
     if not paths:
         print(f"no usable paths for {args.strategy}: {load.dropped}",

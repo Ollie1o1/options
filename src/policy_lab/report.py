@@ -48,8 +48,7 @@ from src.policy_lab.calibrate import CalibrationReport
 from src.policy_lab.calibrate import MAX_FAIL_RATE as CORPUS_B_MAX_FAIL_RATE
 from src.policy_lab.calibrate import calibration_report
 from src.policy_lab.policies import (
-    ExitPolicy, LIVE_BASELINE_LONG, LIVE_BASELINE_SHORT, NULL_POLICIES,
-    grid_cardinality,
+    ExitPolicy, LIVE_BASELINE_LONG, NULL_POLICIES, grid_cardinality,
 )
 from src.policy_lab.replay import replay
 from src.policy_lab.stats import (
@@ -116,6 +115,35 @@ def corpus_a_baseline(is_long: bool) -> ExitPolicy:
     called out again in `_LIMITS`.
     """
     return LIVE_BASELINE_LONG if is_long else CORPUS_A_RECORDER_SHORT
+
+
+# Recovered from the ledger's own recorded exits on the 45 real Corpus B
+# Bull Put positions (2026-09-25, after the loader's short-leg/spread fix):
+# 30 Take Profit exits at exit/credit median 0.346, max 0.498 -> threshold
+# 0.50; 9 Stop Loss exits at exit/credit min 2.021, median 2.274 -> 2.0x.
+# The 26 `Time Exit (Nd to expiry)` labels record the DTE the exit
+# HAPPENED at (4, 7, 8, 11, 14, 15, 18, 21 -- heterogeneous), not a fixed
+# rule, so they cannot be expressed as one `time_exit_dte` threshold;
+# `hold_to_end` already covers them. NOT `LIVE_BASELINE_SHORT`: Corpus B's
+# entry DTE is p5=8, median=16, p95=30, with 71% entering at DTE <= 21, so
+# a `dte=21` knob exits on the first interior point for most of this
+# corpus too -- the same degenerate-baseline defect `CORPUS_A_RECORDER_SHORT`
+# exists to avoid for Corpus A, just recovered here for Corpus B from the
+# ledger instead of assumed.
+CORPUS_B_LEDGER_SHORT = ExitPolicy("corpusB_ledger", 0.50, 2.0, None, None)
+
+
+def corpus_b_baseline(is_long: bool) -> ExitPolicy:
+    """The baseline to replay Corpus B against.
+
+    Mirrors `corpus_a_baseline`: only the short-premium policy was
+    recovered from the real ledger (see `CORPUS_B_LEDGER_SHORT`'s docstring
+    above) — no equivalent measurement exists for Long Call/Long Put. For
+    long premium this falls back to `LIVE_BASELINE_LONG`, which carries the
+    same `time_exit_dte=21` risk the correction above exists to avoid; that
+    gap is unresolved, mirroring `corpus_a_baseline`'s.
+    """
+    return LIVE_BASELINE_LONG if is_long else CORPUS_B_LEDGER_SHORT
 
 
 def calibration_max_fail_rate(corpus: str) -> float:
@@ -262,17 +290,21 @@ def bounded_walk_benchmark(paths: Sequence[PricePath], base_policy: ExitPolicy,
 def _infer_corpus_b_baseline(baseline: ExitPolicy) -> ExitPolicy:
     """Which live baseline Corpus B should be replayed against.
 
-    Corpus B always keeps `LIVE_BASELINE_SHORT`/`LIVE_BASELINE_LONG` (never
-    the Corpus-A-only recorder policy). `sweep` is not told the strategy
-    family directly, so this infers it from the sweep's own `baseline`
-    argument: every baseline this lab uses (`LIVE_BASELINE_SHORT`,
-    `LIVE_BASELINE_LONG`, `CORPUS_A_RECORDER_SHORT`) sets `stop_mult`, and
+    Corpus B always keeps its OWN recovered baseline
+    (`CORPUS_B_LEDGER_SHORT`/`LIVE_BASELINE_LONG`), mirroring
+    `corpus_b_baseline` — never `LIVE_BASELINE_SHORT`, which is a
+    degenerate `time_exit_dte=21` baseline on this corpus (see
+    `CORPUS_B_LEDGER_SHORT`'s docstring) and is never selected as a replay
+    baseline for any corpus. `sweep` is not told the strategy family
+    directly, so this infers it from the sweep's own `baseline` argument:
+    every baseline this lab uses (`CORPUS_A_RECORDER_SHORT`,
+    `CORPUS_B_LEDGER_SHORT`, `LIVE_BASELINE_LONG`) sets `stop_mult`, and
     only the long-premium convention expresses it as a fraction below 1.0
     (a multiple-of-credit stop is always >= 1.0).
     """
     if baseline.stop_mult is not None and baseline.stop_mult < 1.0:
         return LIVE_BASELINE_LONG
-    return LIVE_BASELINE_SHORT
+    return CORPUS_B_LEDGER_SHORT
 
 
 def _maxT_pvalues(matrix: np.ndarray, n_perm: int, seed: int) -> np.ndarray:

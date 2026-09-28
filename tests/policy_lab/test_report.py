@@ -17,9 +17,10 @@ from src.policy_lab.policies import (
     LIVE_BASELINE_LONG, LIVE_BASELINE_SHORT, SHORT_PREMIUM_GRID, ExitPolicy,
 )
 from src.policy_lab.report import (
-    CORPUS_A_RECORDER_SHORT, bounded_walk_benchmark, calibrate_for_run,
-    calibration_max_fail_rate, corpus_a_baseline, is_degenerate_dte_cell,
-    render_markdown, run_manifest, spread_imputed_fraction, sweep,
+    CORPUS_A_RECORDER_SHORT, CORPUS_B_LEDGER_SHORT, bounded_walk_benchmark,
+    calibrate_for_run, calibration_max_fail_rate, corpus_a_baseline,
+    corpus_b_baseline, is_degenerate_dte_cell, render_markdown, run_manifest,
+    spread_imputed_fraction, sweep,
 )
 from src.policy_lab.stats import MAX_FWER_P, PolicyResult, policy_verdict
 from src.policy_lab.types import PathPoint, PricePath
