@@ -12,7 +12,9 @@ from typing import List, Optional
 
 from src.policy_lab.calibrate import CorpusUnusable
 from src.policy_lab.costs import CostModel
-from src.policy_lab.paths import load_corpus_a, load_corpus_b
+from src.policy_lab.paths import (
+    corpus_a_fingerprint, corpus_b_fingerprint, load_corpus_a, load_corpus_b,
+)
 from src.policy_lab.policies import (
     LONG_PREMIUM_GRID, NOSTOP_GRID, SHORT_PREMIUM_GRID,
 )
@@ -63,10 +65,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.corpus == "a":
         paths, load = load_corpus_a(args.candidates_db, args.strategy)
         baseline = corpus_a_baseline(is_long)
+        fingerprint = corpus_a_fingerprint(args.candidates_db, args.strategy)
     else:
         paths, load = load_corpus_b(args.ledger_db, args.archive_db,
                                     args.strategy)
         baseline = corpus_b_baseline(is_long)
+        fingerprint = corpus_b_fingerprint(args.ledger_db, args.archive_db,
+                                           args.strategy)
 
     if not paths:
         print(f"no usable paths for {args.strategy}: {load.dropped}",
@@ -126,7 +131,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "spread_imputed_frac": spread_imputed_fraction(paths),
     }
     manifest = run_manifest(args.corpus.upper(), grid, args.costs, args.seed,
-                            row_counts)
+                            row_counts, corpus_fingerprint=fingerprint)
     body = render_markdown(results, manifest, cal, benchmark=benchmark)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

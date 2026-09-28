@@ -19,8 +19,8 @@ from src.policy_lab.policies import (
 from src.policy_lab.report import (
     CORPUS_A_RECORDER_SHORT, CORPUS_B_LEDGER_SHORT, bounded_walk_benchmark,
     calibrate_for_run, calibration_max_fail_rate, corpus_a_baseline,
-    corpus_b_baseline, is_degenerate_dte_cell, render_markdown, run_manifest,
-    spread_imputed_fraction, sweep,
+    corpus_b_baseline, is_degenerate_dte_cell, manifests_comparable,
+    render_markdown, run_manifest, spread_imputed_fraction, sweep,
 )
 from src.policy_lab.stats import MAX_FWER_P, PolicyResult, policy_verdict
 from src.policy_lab.types import PathPoint, PricePath
@@ -346,6 +346,147 @@ class TestSweep(unittest.TestCase):
         null = ExitPolicy("null", None, None, None, None)
         tp = ExitPolicy("tp50", 0.50, None, None, None)
         self.assertEqual(sweep([], (null, tp), null, CostModel.mid()), [])
+
+
+class TestCorpusFingerprintInManifest(unittest.TestCase):
+    """The corpus fingerprint closes the reproducibility gap the module
+    docstring describes: `data/candidates.db` is written continuously by a
+    live scheduler while the lab reads it, so `rows: {'loaded': N}` alone
+    cannot say whether two runs saw the same corpus. These tests never
+    open a real database — see `TestManifestsComparable` below and its
+    class docstring.
+    """
+
+    def test_includes_corpus_fingerprint_with_all_three_keys(self):
+        fp = {"strategy": "Bull Put", "max_ts": "2026-09-22T16:35:41Z",
+              "terminal_count": 113442}
+        m = run_manifest(corpus="A", grid=SHORT_PREMIUM_GRID, costs="cross",
+                         seed=0, row_counts={"loaded": 105392},
+                         corpus_fingerprint=fp)
+        self.assertIn("corpus_fingerprint", m)
+        for key in ("max_ts", "terminal_count", "loaded"):
+            self.assertIn(key, m["corpus_fingerprint"])
+        self.assertEqual(m["corpus_fingerprint"]["max_ts"],
+                         "2026-09-22T16:35:41Z")
+        self.assertEqual(m["corpus_fingerprint"]["terminal_count"], 113442)
+        self.assertEqual(m["corpus_fingerprint"]["loaded"], 105392)
+
+    def test_missing_fingerprint_still_has_all_three_keys(self):
+        """A call site that has not computed a fingerprint (every call
+        before this feature existed) must not lose the `corpus_fingerprint`
+        key — `max_ts`/`terminal_count` are `None`, never absent.
+        """
+        m = run_manifest(corpus="A", grid=SHORT_PREMIUM_GRID, costs="cross",
+                         seed=0, row_counts={"loaded": 100})
+        for key in ("max_ts", "terminal_count", "loaded"):
+            self.assertIn(key, m["corpus_fingerprint"])
+        self.assertIsNone(m["corpus_fingerprint"]["max_ts"])
+        self.assertIsNone(m["corpus_fingerprint"]["terminal_count"])
+
+    def test_terminal_count_zero_is_a_real_value_not_missing(self):
+        fp = {"strategy": "Short Put", "max_ts": "2026-09-22T16:00:00Z",
+              "terminal_count": 0}
+        m = run_manifest(corpus="A", grid=SHORT_PREMIUM_GRID, costs="cross",
+                         seed=0, row_counts={"loaded": 0},
+                         corpus_fingerprint=fp)
+        self.assertEqual(m["corpus_fingerprint"]["terminal_count"], 0)
+        self.assertIsNotNone(m["corpus_fingerprint"]["terminal_count"])
+
+
+class TestRenderIncludesFingerprint(unittest.TestCase):
+    def test_fingerprint_values_appear_in_rendered_output(self):
+        fp = {"strategy": "Bull Put", "max_ts": "2026-09-22T16:35:41Z",
+              "terminal_count": 113442}
+        m = run_manifest(corpus="A", grid=SHORT_PREMIUM_GRID, costs="cross",
+                         seed=0, row_counts={"loaded": 105392},
+                         corpus_fingerprint=fp)
+        out = render_markdown([_result("sp_x")], m, calibration=None)
+        self.assertIn("2026-09-22T16:35:41Z", out)
+        self.assertIn("113442", out)
+        self.assertIn("105392", out)
+
+
+def _fabricated_manifest(**over):
+    """A fabricated manifest dict for `manifests_comparable` tests. NEVER
+    names or opens a real database — the comparability logic operates
+    purely on the manifest dict, which is exactly what makes it testable
+    without one.
+    """
+    base = dict(
+        git_sha="abc1234", generated_at="2026-09-28T00:00:00+00:00",
+        corpus="A", n_trials=750, costs="cross", seed=0,
+        cluster_unit="(symbol, entry_date)",
+        row_counts={"loaded": 113442},
+        corpus_fingerprint={
+            "strategy": "Bull Put",
+            "max_ts": "2026-09-22T16:35:41Z",
+            "terminal_count": 113442,
+            "loaded": 113442,
+        })
+    base.update(over)
+    return base
+
+
+class TestManifestsComparable(unittest.TestCase):
+    """No test in this class names or opens `data/candidates.db`,
+    `paper_trades.db` or `data/chain_archive.db` — every manifest here is
+    fabricated in `_fabricated_manifest`.
+    """
+
+    def test_two_identical_manifests_are_comparable(self):
+        a = _fabricated_manifest()
+        b = _fabricated_manifest()
+        ok, reason = manifests_comparable(a, b)
+        self.assertTrue(ok, reason)
+
+    def test_differing_terminal_count_is_incomparable(self):
+        a = _fabricated_manifest()
+        b = _fabricated_manifest(corpus_fingerprint={
+            **a["corpus_fingerprint"], "terminal_count": 105392})
+        ok, reason = manifests_comparable(a, b)
+        self.assertFalse(ok)
+        self.assertIn("terminal_count", reason)
+        self.assertIn("105392", reason)
+
+    def test_differing_max_ts_is_incomparable(self):
+        a = _fabricated_manifest()
+        b = _fabricated_manifest(corpus_fingerprint={
+            **a["corpus_fingerprint"], "max_ts": "2026-09-25T00:00:00Z"})
+        ok, reason = manifests_comparable(a, b)
+        self.assertFalse(ok)
+        self.assertIn("max_ts", reason)
+
+    def test_differing_git_sha_is_incomparable_even_with_matching_corpus(self):
+        a = _fabricated_manifest()
+        b = _fabricated_manifest(git_sha="def5678")
+        ok, reason = manifests_comparable(a, b)
+        self.assertFalse(ok)
+        self.assertIn("git sha", reason)
+
+    def test_zero_terminal_count_matching_zero_is_still_comparable(self):
+        """A `terminal_count` of 0 on both sides must not be mistaken for
+        a missing value on either side (bare truthiness would treat both
+        as falsy and coincidentally agree for the wrong reason, or a naive
+        `None`-default comparison could treat a real 0 as unset) — pin the
+        real comparison path with two genuinely zero, genuinely equal
+        counts.
+        """
+        a = _fabricated_manifest(corpus_fingerprint={
+            "strategy": "Short Put", "max_ts": "2026-09-22T16:00:00Z",
+            "terminal_count": 0, "loaded": 0})
+        b = _fabricated_manifest(corpus_fingerprint={
+            "strategy": "Short Put", "max_ts": "2026-09-22T16:00:00Z",
+            "terminal_count": 0, "loaded": 0})
+        ok, reason = manifests_comparable(a, b)
+        self.assertTrue(ok, reason)
+
+    def test_differing_strategy_is_incomparable(self):
+        a = _fabricated_manifest()
+        b = _fabricated_manifest(corpus_fingerprint={
+            **a["corpus_fingerprint"], "strategy": "Short Put"})
+        ok, reason = manifests_comparable(a, b)
+        self.assertFalse(ok)
+        self.assertIn("strategy", reason)
 
 
 if __name__ == "__main__":

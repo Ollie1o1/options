@@ -72,8 +72,27 @@ def _git_sha() -> str:
 
 
 def run_manifest(corpus: str, grid: Sequence[ExitPolicy], costs: str,
-                 seed: int, row_counts: Dict[str, Any]) -> Dict[str, Any]:
-    """Everything needed to reproduce or challenge this run."""
+                 seed: int, row_counts: Dict[str, Any],
+                 corpus_fingerprint: Optional[Dict[str, Any]] = None
+                 ) -> Dict[str, Any]:
+    """Everything needed to reproduce or challenge this run.
+
+    `corpus_fingerprint` records what the corpus looked like AT READ TIME —
+    `max_ts` and `terminal_count` from `paths.corpus_a_fingerprint`/
+    `corpus_b_fingerprint` — alongside `loaded`, the count that actually
+    survived the loader's invariants (see `row_counts['loaded']`), so both
+    the offered and the used counts are visible on the same manifest. The
+    live scheduler writes `data/candidates.db` continuously while the lab
+    reads it, so two runs' `rows: {'loaded': N}` alone cannot say whether
+    they read the same corpus — this can. When the caller has not computed
+    one (every pre-existing call site before this fingerprint existed),
+    `max_ts`/`terminal_count` are `None` rather than absent, so the key is
+    always present and always has all three sub-keys.
+    """
+    fp: Dict[str, Any] = dict(corpus_fingerprint) if corpus_fingerprint else {}
+    fp.setdefault("max_ts", None)
+    fp.setdefault("terminal_count", None)
+    fp.setdefault("loaded", row_counts.get("loaded"))
     return {
         "git_sha": _git_sha(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -83,7 +102,51 @@ def run_manifest(corpus: str, grid: Sequence[ExitPolicy], costs: str,
         "seed": seed,
         "cluster_unit": "(symbol, entry_date)",
         "row_counts": dict(row_counts),
+        "corpus_fingerprint": fp,
     }
+
+
+def manifests_comparable(a: Dict[str, Any], b: Dict[str, Any]
+                         ) -> Tuple[bool, str]:
+    """Whether two manifests' numbers may be compared, and why not if not.
+
+    A differing git SHA disqualifies on its own, even when the corpus lines
+    up exactly, because the code that produced the two sets of numbers is
+    different — see the module docstring's account of a real error this
+    caused (a corpus-drift difference attributed to a policy knob). Beyond
+    that, two runs are comparable only when their `corpus_fingerprint`s
+    agree on `strategy`, `max_ts` and `terminal_count` for the same
+    `corpus` (`"A"`/`"B"`) — anything else means the corpus moved between,
+    or during, the two runs. `terminal_count` is compared with `!=`, never
+    bare truthiness, so a corpus that legitimately offers zero terminal
+    rows for a strategy is never confused with a missing count.
+    """
+    sha_a, sha_b = a.get("git_sha"), b.get("git_sha")
+    if sha_a != sha_b:
+        return False, f"different git sha: {sha_a} vs {sha_b}"
+
+    corpus_a, corpus_b = a.get("corpus"), b.get("corpus")
+    if corpus_a != corpus_b:
+        return False, f"different corpus: {corpus_a} vs {corpus_b}"
+
+    fp_a = a.get("corpus_fingerprint") or {}
+    fp_b = b.get("corpus_fingerprint") or {}
+
+    strat_a, strat_b = fp_a.get("strategy"), fp_b.get("strategy")
+    if strat_a != strat_b:
+        return False, f"different strategy: {strat_a} vs {strat_b}"
+
+    ts_a, ts_b = fp_a.get("max_ts"), fp_b.get("max_ts")
+    if ts_a != ts_b:
+        return False, f"corpus drifted: max_ts {ts_a} -> {ts_b}"
+
+    tc_a, tc_b = fp_a.get("terminal_count"), fp_b.get("terminal_count")
+    if tc_a != tc_b:
+        grew = tc_a is not None and tc_b is not None and tc_b > tc_a
+        verb = "grew" if grew else "changed"
+        return False, f"corpus {verb}: terminal_count {tc_a} -> {tc_b}"
+
+    return True, "same git sha, same corpus fingerprint"
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +703,7 @@ def render_markdown(results: Sequence[PolicyResult], manifest: Dict[str, Any],
         f"- trials in grid (n_trials for DSR): **{manifest['n_trials']}**",
         f"- clustering unit: {manifest['cluster_unit']}",
         f"- rows: {manifest['row_counts']}",
+        f"- corpus fingerprint: {manifest.get('corpus_fingerprint', {})}",
         "",
     ]
 

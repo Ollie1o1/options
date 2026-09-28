@@ -11,7 +11,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.policy_lab.types import PathPoint, PricePath
 
@@ -193,6 +193,84 @@ def load_corpus_a(db_path: str, strategy: str,
     finally:
         con.close()
     return out, rep
+
+
+def corpus_a_fingerprint(db_path: str, strategy: str) -> Dict[str, Any]:
+    """Read-only snapshot of what Corpus A could offer `strategy` right now.
+
+    `data/candidates.db` is written continuously by a live scheduler while
+    the lab reads it (closed Bull Put count observed moving 98,003 ->
+    105,392 -> 113,442 -> 115,381 within a single session), so a run's
+    manifest must record what the corpus looked like AT READ TIME, not just
+    how many rows the loader happened to keep.
+
+    `max_ts` is `MAX(candidates.ts)` — the newest row the scheduler has
+    written, independent of strategy or status. `terminal_count` is the
+    number of CLOSED `candidate_positions` joined to `candidates` for this
+    strategy — the same join `load_corpus_a` uses, but counting every
+    terminal row the corpus could offer, not just the ones that survived
+    the loader's own invariants (missing marks, gaps, unsizable rows, ...).
+    A fingerprint built from the loaded count alone would call two runs
+    "the same" when the corpus grew but the loader happened to drop the
+    same number of new rows it kept — this counts the corpus itself.
+    """
+    con = _ro(db_path)
+    try:
+        max_ts = con.execute("SELECT MAX(ts) FROM candidates").fetchone()[0]
+        terminal_count = con.execute(
+            """SELECT COUNT(*)
+                 FROM candidate_positions p
+                 JOIN candidates c
+                   ON c.scan_id = p.scan_id AND c.board = p.board
+                  AND c.contract_key = p.contract_key
+                WHERE c.strategy_name = ? AND p.status = 'CLOSED'""",
+            (strategy,)).fetchone()[0]
+    finally:
+        con.close()
+    return {
+        "strategy": strategy,
+        "max_ts": max_ts,
+        "terminal_count": int(terminal_count),
+    }
+
+
+def corpus_b_fingerprint(ledger_path: str, archive_path: str,
+                         strategy: str) -> Dict[str, Any]:
+    """Read-only snapshot of what Corpus B could offer `strategy` right now.
+
+    Mirrors `corpus_a_fingerprint`. `max_ts` has no single column here: the
+    ledger (`trades`) and the archive (`chain_snapshots`) are separate
+    databases with separate write cadences, so this reports both — the
+    newest closed trade's `exit_date` and the newest archived
+    `chain_snapshots.snap_date` — rather than collapsing them into one
+    number that would hide which side moved. `terminal_count` is the count
+    of CLOSED `trades` for this strategy, independent of how many of those
+    survived `load_corpus_b`'s two-leg snapshot join.
+    """
+    con = _ro(ledger_path)
+    try:
+        try:
+            con.execute("ATTACH ? AS ca", (f"file:{archive_path}?mode=ro",))
+        except sqlite3.OperationalError:
+            con.close()
+            con = _ro(ledger_path)
+            con.execute(f"ATTACH 'file:{archive_path}?mode=ro' AS ca")
+        max_snap_date = con.execute(
+            "SELECT MAX(snap_date) FROM ca.chain_snapshots").fetchone()[0]
+        max_exit_date = con.execute(
+            "SELECT MAX(exit_date) FROM trades WHERE status = 'CLOSED'"
+        ).fetchone()[0]
+        terminal_count = con.execute(
+            """SELECT COUNT(*) FROM trades
+                WHERE status = 'CLOSED' AND strategy_name = ?""",
+            (strategy,)).fetchone()[0]
+    finally:
+        con.close()
+    return {
+        "strategy": strategy,
+        "max_ts": {"snap_date": max_snap_date, "exit_date": max_exit_date},
+        "terminal_count": int(terminal_count),
+    }
 
 
 # Strategies whose opening price lives in `net_credit`, not `entry_price`.
