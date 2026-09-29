@@ -87,25 +87,35 @@ clean sample is scans recorded after 2026-09-29.
    a 2-symbol sign flip leaves its |mean| at its observed value 49% of the time
    — measured, see Amendment 1.
 
-## Two defects found on the way
+## One defect found on the way — fixed
 
-**1. `strategy_name` is never written for single-leg boards.** ~100,000 closed
-rows. Premium Selling and Discovery candidates carry a blank name. Repaired on
-the read side by Amendment 2; the write side is still broken and should be
-fixed in `candidate_record`.
+`candidate_marks.legs_for` and `marking_legs` decided a single leg's side by
+`strategy.startswith("Short")`, reading `strategy_name` alone. That column is
+NULL on every single-leg row **by design** — `candidate_record` says discovery
+boards carry `type='call'|'put'`, an option type and not a strategy, and `mode`
+exists in the schema precisely so the strategy can be derived. `family_for`
+already derives it; these two functions did not.
 
-**2. A latent sign inversion behind that gap.** `candidate_marks.legs_for`
-decides side by `strategy.startswith("Short")`. With the name blank, a Premium
-Selling short put is classified `side: 'buy'` and `entry_price_for` returns a
-**negative** price — a debit paid, for a position that receives a credit.
-`pnl_pct` branches on exactly that sign.
+So a Premium Selling short put fell through to the `buy` default and
+`entry_price_for` returned a **negative** price — a debit paid, for a position
+that receives a credit. `pnl_pct` branches on exactly that sign, so it would
+have been scored as a long put. Measured on real rows: `DIA side=buy
+entry=-5.585` before, `side=sell entry=+5.515` after.
 
-It is **latent, not active**: `open_positions` routes `family ==
-"short_premium"` to `UNSUPPORTED` with reason `needs_spot_and_delta` before
-anything is priced, so no corrupted row exists today. It becomes real the
-moment short-premium marking is enabled without fixing defect 1 first. This is
-the same shape as the inverted `pop_score` for sellers and the bear calls named
-"Bull Put".
+**Latent, not active**: `open_positions` routes `family == "short_premium"` to
+`UNSUPPORTED` with reason `needs_spot_and_delta` before anything is priced, so
+no corrupted row exists today. It becomes real the moment short-premium marking
+is enabled. Same shape as the inverted `pop_score` for sellers and the bear
+calls named "Bull Put" — a label and a geometry that disagree, with nothing
+comparing them.
+
+Fixed on `fix/candidate-marks-side-from-mode`, which makes both call sites
+follow `family_for`'s discipline. Behaviour-preserving for every row currently
+simulated.
+
+**An earlier draft of this document called the blank `strategy_name` itself a
+write-side defect. It is not — it is the recorder's intended design, and
+Amendment 2's derivation is the recovery the schema was built for.**
 
 ## Short Put is completely dark
 

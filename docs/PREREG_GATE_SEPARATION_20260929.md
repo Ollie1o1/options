@@ -202,9 +202,19 @@ derivable from recorded columns — it does not move a threshold, change a
 statistic, or select a subset. It notably gives **Short Put** a measurable arm
 for the first time.
 
-**Separately: this is a live recording defect, not only an analysis one.**
-`candidate_record` should write `strategy_name` for these boards. Filed as a
-follow-up; the derivation here is a read-side repair of a write-side gap.
+**Correction, same day.** An earlier draft of this amendment called the blank
+column a write-side defect and said `candidate_record` should be changed to
+fill it. That was wrong. The blank is **deliberate**: `candidate_record`'s own
+comment records that discovery boards carry `type='call'|'put'`, an option type
+and not a strategy, and that `mode` was added to the schema precisely so the
+strategy could be derived later. `family_for` already does exactly that.
+
+The real defect was narrower and lived elsewhere: `candidate_marks.legs_for`
+and `marking_legs` decided a leg's SIDE from `strategy_name` alone, without the
+mode fallback `family_for` applies, so a nameless short put was priced as a
+buy. Fixed separately on `fix/candidate-marks-side-from-mode`. The derivation
+in this amendment is not a repair of a gap — it is the same recovery the schema
+was designed for.
 
 ## Held-out replication
 
