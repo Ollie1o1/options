@@ -195,6 +195,63 @@ class TestEntryPricing(unittest.TestCase):
         self.assertIsNone(cm.entry_price_for(self._single(bid=10.5, ask=9.5)))
 
 
+class TestSideFromMode(unittest.TestCase):
+    """A nameless single leg must take its SIDE from the mode.
+
+    `candidates.strategy_name` is NULL on every single-leg row by design — the
+    recorder says so, and `family_for` already derives the strategy from `mode`
+    for exactly that reason. `legs_for`/`marking_legs` read `strategy_name`
+    alone, so a Premium Selling short put fell through to the `buy` default and
+    priced as a DEBIT: `entry_price_for` returned -5.585 for a position that
+    receives a credit, and `pnl_pct` branches on that sign.
+
+    Found 2026-09-29 against 37,788 real rows. Latent only because
+    `open_positions` routes `short_premium` to UNSUPPORTED before pricing.
+    """
+    def _row(self, **over):
+        row = {"strategy_name": None, "opt_type": "put", "strike": 100.0,
+               "bid": 5.45, "ask": 5.65, "features_json": None}
+        row.update(over)
+        return row
+
+    def test_a_nameless_premium_selling_leg_is_sold(self):
+        row = self._row(mode="Premium Selling")
+        self.assertEqual([leg["side"] for leg in cm.legs_for(row)], ["sell"])
+
+    def test_a_nameless_premium_selling_leg_prices_as_a_credit(self):
+        row = self._row(mode="Premium Selling")
+        self.assertGreater(cm.entry_price_for(row), 0)
+
+    def test_marking_legs_sells_it_too(self):
+        # Entry and marking must agree on side, or a position is opened on one
+        # description of its legs and closed on another.
+        row = self._row(mode="Premium Selling")
+        self.assertEqual(cm.marking_legs(row)[0]["side"], "sell")
+        self.assertEqual(cm.legs_for(row)[0]["side"],
+                         cm.marking_legs(row)[0]["side"])
+
+    def test_a_nameless_discovery_leg_is_still_bought(self):
+        row = self._row(mode="Discovery scan")
+        self.assertEqual([leg["side"] for leg in cm.legs_for(row)], ["buy"])
+        self.assertLess(cm.entry_price_for(row), 0)
+
+    def test_a_recorded_name_still_wins_over_the_mode(self):
+        row = self._row(mode="Premium Selling", strategy_name="Long Put")
+        self.assertEqual(cm.legs_for(row)[0]["side"], "buy")
+
+    def test_a_row_with_no_mode_is_never_simulated(self):
+        """The invariant that makes the remaining `buy` default safe.
+
+        A row carrying neither a name nor a mode cannot have its side
+        determined. It also cannot reach pricing: `open_positions` skips any
+        candidate whose `family_for` is None, so no such row is ever given a
+        position. If that ever stops being true, the default becomes a live
+        sign bug and this test is the one that should fail.
+        """
+        self.assertIsNone(cm.family_for(None, "put"))
+        self.assertIsNone(cm.family_for("", "put"))
+
+
 class TestLegSpec(unittest.TestCase):
     """The leg spec is the single description of a structure's legs."""
 
