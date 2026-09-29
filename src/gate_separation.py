@@ -250,7 +250,7 @@ def family_wise_p_masked(cluster_means_matrix: np.ndarray,
         return 1.0
 
     rng = np.random.default_rng(seed)
-    null = np.empty(int(n_perm), dtype="float64")
+    null: np.ndarray = np.empty(int(n_perm), dtype="float64")
     for i in range(int(n_perm)):
         s = rng.choice(np.array([-1.0, 1.0]), size=n_clusters)
         null[i] = float(np.nanmax(np.abs(masked_row_means(arr * s))))
