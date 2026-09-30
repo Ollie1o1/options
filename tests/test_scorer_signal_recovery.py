@@ -134,7 +134,32 @@ def _pinned_ic_weights(config: dict, cache_path: str | None = None) -> dict:
     return dict(config.get("composite_weights", {}) or {})
 
 
-def _run(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def _run(df: pd.DataFrame, config: dict, as_of=None) -> pd.DataFrame:
+    """Score `df`. `as_of` pins the pricing instant.
+
+    Defaulting to None keeps the live wall clock, which is right for every
+    test that scores a chain ONCE. Any test that scores twice and compares the
+    two element-wise must pass the SAME `as_of` to both, because the scorer is
+    not reproducible across instants and the size of that irreproducibility is
+    NOT the ~7e-8 that `enrich_and_score` documents.
+
+    `T_years` carries sub-second resolution, so two runs a tenth of a second
+    apart differ in T by ~1.5e-7 relative. Through Black-Scholes that is the
+    documented 1e-8. Through the SVI surface fit it is not: `_fit_single_expiry`
+    runs Nelder-Mead on five badly-scaled parameters over a slice that does not
+    identify them, and a 1.5e-7 nudge in T is enough to land it in a different
+    basin — measured (a=-4.357, b=3.147, rho=0.271, sigma=1.440, m=0.438)
+    against (a=-0.011, b=2.002, rho=0.998, sigma=0.091, m=0.397), both fitting
+    the same data about equally well (quality 0.937 vs 0.939). The two describe
+    different smiles, so `iv_surface_residual` moves ~0.25, `iv_mispricing_score`
+    ~2.3e-3, and at its 0.05 weight that is a UNIFORM ~1.2e-4 shift in every
+    row's `quality_score`.
+
+    Measured 2026-09-30: 6 of 40 back-to-back identical pairs exceeded 1e-4,
+    max 1.16e-4. That is what made `test_scores_do_not_move_when_a_macro_event
+    _is_active` fail ~15% of runs against its atol=1e-4 — it was reading the
+    optimizer, not the macro calendar.
+    """
     from src.options_screener import enrich_and_score, _invalidate_ic_weights_cache
     _invalidate_ic_weights_cache()  # tests run in same process
     with patch("src.options_screener.monte_carlo_pop", return_value=(0.6, 0.4)), \
@@ -150,9 +175,56 @@ def _run(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             macro_risk_active=False, sector_perf={},
             tnx_change_pct=0.0, short_interest=None,
             next_ex_div=None, earnings_move_data=None,
-            hv_ewma=None, news_data=None,
+            hv_ewma=None, news_data=None, as_of=as_of,
         )
     return out
+
+
+class TestPinnedClockMakesTheScorerReproducible(unittest.TestCase):
+    """`_run(as_of=...)` must reach the scorer, or every element-wise
+    comparison built on it is measuring the clock.
+
+    This is deterministic in both directions. Two runs at one pinned instant
+    agree exactly; two runs at the live clock NEVER do, because `T_years`
+    always advances between them — the smallest gap measured back-to-back was
+    4.4e-9 and the largest 1.16e-4, both far above the 1e-12 asserted here. So
+    dropping the `as_of` passthrough fails this test on the first run rather
+    than one run in seven, which is how the underlying defect hid for weeks.
+    """
+
+    def test_two_runs_at_one_instant_are_identical(self):
+        from datetime import timezone
+        as_of = datetime.now(timezone.utc)
+        chain = _make_chain(n=40)
+        a = _run(chain.copy(), _config(), as_of=as_of)
+        b = _run(chain.copy(), _config(), as_of=as_of)
+        self.assertFalse(a.empty, "fixture scored nothing — assertion vacuous")
+        self.assertEqual(len(a), len(b))
+        np.testing.assert_allclose(
+            a["quality_score"].to_numpy(dtype=float),
+            b["quality_score"].to_numpy(dtype=float),
+            rtol=0, atol=1e-12,
+            err_msg="`as_of` is not reaching enrich_and_score")
+
+    def test_the_surface_fit_is_what_moves(self):
+        """Pins the mechanism, so the pin above is not mistaken for pedantry.
+
+        `iv_surface_residual` is the column that jumps when the clock moves;
+        it is deterministic under a pinned instant. If a later change makes the
+        SVI fit stable in T this test still passes — it asserts determinism,
+        not instability.
+        """
+        from datetime import timezone
+        as_of = datetime.now(timezone.utc)
+        chain = _make_chain(n=40)
+        a = _run(chain.copy(), _config(), as_of=as_of)
+        b = _run(chain.copy(), _config(), as_of=as_of)
+        self.assertIn("iv_surface_residual", a.columns)
+        np.testing.assert_allclose(
+            pd.to_numeric(a["iv_surface_residual"], errors="coerce").to_numpy(float),
+            pd.to_numeric(b["iv_surface_residual"], errors="coerce").to_numpy(float),
+            rtol=0, atol=1e-12,
+            err_msg="surface residual moved at a pinned instant")
 
 
 class VarianceZeroRecovery(unittest.TestCase):
