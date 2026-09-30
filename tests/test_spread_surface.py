@@ -386,8 +386,68 @@ class PersistenceTest(unittest.TestCase):
         self.assertEqual(s.cells, {})
 
 
-@unittest.skipUnless(os.path.exists("data/chain_archive.db"),
-                     "archive not present")
+def _archive_is_usable(path: str = "data/chain_archive.db") -> bool:
+    """True only if the archive exists AND holds the table `fit_surface` reads.
+
+    `os.path.exists` is the wrong precondition, and the difference is not
+    theoretical: a git worktree of this repo carried a 0-byte
+    `data/chain_archive.db`, so `exists()` was True, the class did NOT skip,
+    and `setUpClass` died on `sqlite3.OperationalError: no such table:
+    chain_snapshots`. The main checkout (real 232MB archive) passed and CI (no
+    file at all) skipped, so the break appeared only in the worktree.
+
+    That is the same absent-versus-empty confusion that has bitten `mark_open`
+    three times (#54, #71, #106): a check that cannot tell "missing" from
+    "present but carrying nothing". Here the honest question is not whether a
+    path exists but whether the data the test needs is behind it, so that is
+    what this asks.
+    """
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return False
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            found = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'chain_snapshots'").fetchone()
+        return found is not None
+    except sqlite3.Error:
+        return False
+
+
+class ArchiveGuardTest(unittest.TestCase):
+    """The guard itself, because it is what decides whether a test runs."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.dir = self._dir.name
+
+    def test_an_absent_file_is_not_usable(self):
+        self.assertFalse(
+            _archive_is_usable(os.path.join(self.dir, "absent.db")))
+
+    def test_a_zero_byte_file_is_not_usable(self):
+        # The worktree case. `os.path.exists` says True here.
+        path = os.path.join(self.dir, "empty.db")
+        open(path, "w").close()
+        self.assertTrue(os.path.exists(path))
+        self.assertFalse(_archive_is_usable(path))
+
+    def test_a_database_without_the_table_is_not_usable(self):
+        path = os.path.join(self.dir, "other.db")
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE something_else (x INTEGER)")
+        self.assertFalse(_archive_is_usable(path))
+
+    def test_a_database_with_the_table_is_usable(self):
+        path = os.path.join(self.dir, "good.db")
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE chain_snapshots (x INTEGER)")
+        self.assertTrue(_archive_is_usable(path))
+
+
+@unittest.skipUnless(_archive_is_usable(),
+                     "archive absent, empty, or missing chain_snapshots")
 class RealArchivePropertyTest(unittest.TestCase):
     """Properties the measured surface must hold. These are the claims the
     design rests on; if the archive stops supporting them, that is a finding."""
