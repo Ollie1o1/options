@@ -48,6 +48,11 @@ paper_trades.db-shm
 paper_trades.db-wal
 paper_trades.db.bak-*
 paper_trades.db.bak.*
+# Underscore separator too. `paper_trades.db.bak_schema_fix_20260908` sat
+# untracked for three weeks because the two patterns above only cover `-` and
+# `.`, and a stray ledger backup in `git status` is exactly the noise that
+# trains you to stop reading it.
+paper_trades.db.bak_*
 paper_trades_crypto.db.bak.*
 paper_trades.db.calibration_marker.json
 config.bak.*.json
