@@ -88,6 +88,39 @@ def check_market_hours(now_et: Optional[datetime] = None) -> Tuple[bool, str]:
     return True, f"Market open ({time_str}){cal_warn}"
 
 
+def holiday_calendar_covers(year: int) -> bool:
+    """Whether `_US_MARKET_HOLIDAYS_BY_YEAR` has been maintained for `year`.
+
+    Exposed so a caller that reasons about *which days should have had data*
+    can qualify its own claim. `is_trading_day` cannot distinguish "not a
+    holiday" from "no calendar", and a caller that alarms on a missing session
+    would otherwise cry wolf on every holiday of an unmaintained year.
+    """
+    return year in _US_MARKET_HOLIDAYS_BY_YEAR
+
+
+def is_trading_day(day) -> bool:
+    """True when `day` is a US equity/options session day.
+
+    Weekdays minus the holidays in `_US_MARKET_HOLIDAYS_BY_YEAR`. `day` may be
+    a `date`, a `datetime`, or an ISO `YYYY-MM-DD` string.
+
+    Half sessions (the 1pm closes around Thanksgiving and Christmas) count as
+    trading days, because they are: quotes exist and a marker should run.
+
+    A year missing from the calendar is treated as having no holidays, which
+    is the same degradation `check_market_hours` makes. Pair this with
+    `holiday_calendar_covers` when the answer drives an alarm.
+    """
+    if isinstance(day, str):
+        day = datetime.strptime(day[:10], "%Y-%m-%d").date()
+    elif isinstance(day, datetime):
+        day = day.date()
+    if day.weekday() >= 5:
+        return False
+    return day.isoformat() not in _US_MARKET_HOLIDAYS_BY_YEAR.get(day.year, set())
+
+
 def classify_quote_freshness(quote_age_min, market_open: bool) -> str:
     """
     Classify how much to trust a quote given its age and market state.
