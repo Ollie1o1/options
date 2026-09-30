@@ -235,25 +235,47 @@ class TestScoringFixtureIgnoresTheLiveMacroCalendar(unittest.TestCase):
 
         Patched on `src.macro_analyzer` because `get_macro_penalty` resolves
         `check_macro_event_window` from its own module namespace.
+
+        BOTH RUNS ARE PRICED AT THE SAME INSTANT. Without a pinned `as_of` the
+        two runs differ in `T_years` by the wall-clock time between them, and
+        that is not a negligible difference: a ~1.5e-7 relative nudge in T can
+        flip the SVI fit into a different basin, moving every row's score by a
+        uniform ~1.2e-4 — measured 2026-09-30 on 6 of 40 back-to-back pairs
+        with NO macro patch involved at all. Against atol=1e-4 that failed this
+        test roughly one run in seven, on the optimizer rather than on the
+        calendar. `tests/test_scorer_signal_recovery._run` carries the numbers.
+
+        The pin does not weaken the assertion. The macro penalty is a constant
+        added to every row (`options_screener.py`, "Macro event penalty"), so
+        pinning the clock removes a term that varies BETWEEN RUNS while leaving
+        the term that varies between MACRO STATES entirely in the path — which
+        is the thing under test. The tolerance is unchanged; widening it is
+        what would delete the assertion.
         """
         import src.macro_analyzer as _macro
 
         chain = _fx._make_chain(n=40)
+        as_of = _dt.datetime.now(_dt.timezone.utc)
 
         with mock.patch.object(_macro, "check_macro_event_window",
                                lambda *a, **k: (False, None, None)):
-            quiet = _fx._run(chain.copy(), _fx._config())
+            quiet = _fx._run(chain.copy(), _fx._config(), as_of=as_of)
 
         with mock.patch.object(_macro, "check_macro_event_window",
                                lambda *a, **k: (True, "NFP", "2026-09-04")):
-            loud = _fx._run(chain.copy(), _fx._config())
+            loud = _fx._run(chain.copy(), _fx._config(), as_of=as_of)
 
         self.assertEqual(len(quiet), len(loud))
-        # Tolerance sits between the two effects, not at zero. Two runs seconds
-        # apart already differ by ~1e-7 because the scorer prices on wall-clock
-        # `T_years` — the same drift this module's docstring records. A macro
-        # leak would be the full -0.15, so 1e-4 separates them by three orders
-        # of magnitude and cannot mistake one for the other.
+        # Tolerance sits between the two effects, not at zero. A macro leak
+        # would be the full -0.15, so 1e-4 is three orders of magnitude below
+        # the thing being detected and cannot mistake one for the other.
+        #
+        # The margin on the OTHER side used to be stated as ~1e-7 (the
+        # wall-clock `T_years` drift) and that was wrong by three orders of
+        # magnitude: unpinned, the surface fit can move the score 1.2e-4, i.e.
+        # PAST this tolerance. The `as_of` pin above is what buys the margin
+        # back — with it the two runs agree to ~1e-12. Do not remove the pin
+        # and restore this number.
         np.testing.assert_allclose(
             quiet["quality_score"].to_numpy(), loud["quality_score"].to_numpy(),
             rtol=0, atol=1e-4,
