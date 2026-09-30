@@ -29,6 +29,38 @@ class PickSpreadTest(unittest.TestCase):
         chain = [_put(95, 2.0, 2.2, -0.25)]   # no wing below
         self.assertIsNone(sp._pick_put_spread(chain, "2024-03-01", 0.25, 0.10, min_dte=7))
 
+    def test_width_picks_wing_nearest_target_strike_not_delta(self):
+        # Short at 95. Wing nearest 0.10 delta would be 80 (delta -0.08 is
+        # closer to 0.10 than -0.12 at 85); a fixed $10 width must pick 85
+        # (95 - 10) regardless of what its delta happens to be.
+        chain = [_put(95, 2.0, 2.2, -0.25), _put(85, 1.0, 1.1, -0.12),
+                _put(80, 0.4, 0.5, -0.08)]
+        short, long = sp._pick_credit_spread(
+            chain, "2024-03-01", 0.25, 0.10, min_dte=7, side="put", width=10.0)
+        self.assertEqual(short["strike"], 95)
+        self.assertEqual(long["strike"], 85)
+
+    def test_width_none_falls_back_to_delta_selection(self):
+        # Unchanged default behaviour when width is not given.
+        chain = [_put(95, 2.0, 2.2, -0.25), _put(90, 1.0, 1.1, -0.15),
+                _put(85, 0.4, 0.5, -0.10)]
+        short, long = sp._pick_credit_spread(
+            chain, "2024-03-01", 0.25, 0.10, min_dte=7, side="put")
+        self.assertEqual(long["strike"], 85)
+
+    def test_width_call_side_picks_wing_above_short(self):
+        call = lambda strike, bid, ask, delta: {
+            "symbol": "X", "date": "2024-03-01", "expiration": "2024-04-19",
+            "strike": strike, "type": "call", "bid": bid, "ask": ask,
+            "mid": (bid + ask) / 2, "iv": 0.3, "delta": delta,
+            "gamma": 0.01, "theta": -0.03, "vega": 0.1, "rho": -0.02}
+        chain = [call(95, 2.0, 2.2, 0.25), call(105, 1.0, 1.1, 0.12),
+                call(110, 0.4, 0.5, 0.08)]
+        short, long = sp._pick_credit_spread(
+            chain, "2024-03-01", 0.25, 0.10, min_dte=7, side="call", width=10.0)
+        self.assertEqual(short["strike"], 95)
+        self.assertEqual(long["strike"], 105)
+
 
 class SimulateSpreadTest(unittest.TestCase):
     def setUp(self):
@@ -69,6 +101,27 @@ class SimulateSpreadTest(unittest.TestCase):
         res = self._run(day)
         # closed near max profit: net_pnl ≈ (1.5 - ~0.19) - comm; ret = net/8.5
         self.assertLess(abs(res["ret"]) , 1.0)   # bounded by definition on max-risk
+
+    def test_fixed_width_selects_a_different_wing_than_delta(self):
+        # Entry chain offers a 90-strike wing (delta -0.15) closer to the
+        # default 0.10-delta target than 85 is, but a $10 fixed width must
+        # still pick 85 (95 - 10), which changes max_risk from what a
+        # delta-based pick would have given (95-90=5 vs 95-85=10).
+        chains = {"2024-03-01": [_put(95, 2.0, 2.2, -0.25),
+                                 _put(90, 1.2, 1.3, -0.15),
+                                 _put(85, 0.4, 0.5, -0.10)]}
+        for d in self.sdates[1:]:
+            chains[d] = [_put(95, 0.1, 0.2, -0.25, date=d),
+                        _put(90, 0.05, 0.1, -0.15, date=d),
+                        _put(85, 0.01, 0.05, -0.10, date=d)]
+
+        def fake(sym, date, db_path=None):
+            return date, chains.get(date, [])
+        with mock.patch("src.dolt_options.get_chain_near", side_effect=fake):
+            res = sp.simulate_spread("X", "2024-03-01", 100.0, self.sdates,
+                                     self.spots, RULES, short_delta=0.25,
+                                     long_delta=0.10, width=10.0)
+        self.assertAlmostEqual(res["max_risk"], 10.0 - res["credit"])
 
 
 if __name__ == "__main__":
