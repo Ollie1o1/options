@@ -666,7 +666,58 @@ def mark_candidates(*, db_path: Optional[str] = None,
     }
 
 
-def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
+def missing_trading_days(mark_dates, today: str) -> List[str]:
+    """Trading days between the first mark and `today` that carry no mark.
+
+    2026-09-23 was a silent whole-day outage — 0 marks against 7 scans and 0
+    auto-logs — and nothing fired. The staleness guard could not catch it: it
+    asks how many business days old the NEWEST mark is, so a day missed in the
+    middle, or a single missed day followed by a normal one, is invisible to
+    it. This asks the other question — which sessions have no data at all.
+
+    `today` is EXCLUDED. The day's mark run may simply not have fired yet, and
+    an alarm that is red every morning before the open is one nobody reads —
+    the same mistake `stopped_n` and `dark_n` each had to have taken out of
+    them.
+
+    Weekends and the holidays in `data_quality` are not gaps. Pure and clock-
+    free: the caller supplies `today`, so this is testable on literal dates
+    rather than against whatever day the suite runs on.
+
+    THE SCAN STARTS AT THE FIRST MARK, NOT AT THE WINDOW EDGE, and that is
+    deliberate. A day before any mark exists is not evidence of an outage —
+    on a fresh database it is evidence of a fresh database, and reporting
+    every session since the epoch as missing would make this red on day one.
+    The cost is that an outage on the OLDEST day of the caller's window is
+    invisible: at `days=7` on 2026-09-30 the 09-23 outage does not show,
+    because 09-23 is the window edge and the first mark in the window is
+    09-24. It showed on each of the six days before that, which is what an
+    alarm is for. Widen `days` to look further back.
+    """
+    from datetime import date, timedelta as _td
+    from .data_quality import is_trading_day
+
+    seen = {str(d)[:10] for d in mark_dates if d}
+    if not seen:
+        # "No marks at all while positions are open" is a different and louder
+        # line. Reporting every session since the epoch would drown it.
+        return []
+
+    def _d(s: str) -> date:
+        return date(int(s[:4]), int(s[5:7]), int(s[8:10]))
+
+    cur, end = _d(min(seen)), _d(today[:10])
+    out: List[str] = []
+    while cur < end:
+        iso = cur.isoformat()
+        if iso not in seen and is_trading_day(cur):
+            out.append(iso)
+        cur += _td(days=1)
+    return out
+
+
+def health_lines(db_path: Optional[str] = None, days: int = 7,
+                 today: Optional[str] = None) -> List[str]:
     """Marks and simulated positions over the last `days`.
 
     Silence is only alarming when there is something to mark. No open positions
@@ -687,7 +738,13 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
     outage; a health line that is always red is a health line nobody reads.
     """
     from datetime import datetime, timedelta, timezone
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    # `today` is injectable so the alarms below can be tested on literal dates.
+    # It must be the UTC day, which is the clock the marks are written on —
+    # anchoring to a real clock is not enough, it has to be the SAME clock.
+    if today is None:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    since = (datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+             - timedelta(days=days)).strftime("%Y-%m-%d")
     try:
         with connect(db_path) as conn:
             marks, = conn.execute(
@@ -705,14 +762,14 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
             # was entered that morning, while every earlier entry date showed
             # zero. An alarm that is red daily carries the same information as
             # one that is never red.
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             dark_n, = conn.execute(
                 "SELECT COUNT(*) FROM candidate_positions p "
                 "WHERE p.status = ? AND p.entry_date < ? AND NOT EXISTS ("
                 "  SELECT 1 FROM candidate_marks m "
                 "   WHERE m.contract_key = p.contract_key)",
                 (OPEN, today)).fetchone()
-            # A pair every one of whose open contracts missed today's mark.
+            # A pair every one of whose open contracts missed THE LAST MARK
+            # RUN THAT EXISTS.
             #
             # The count above asks "ever marked" and is deliberately blind to a
             # chain that priced for weeks and then stopped — which is how 14
@@ -720,6 +777,21 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
             # The unit is the PAIR, not the contract: one unquoted strike is
             # ordinary illiquidity, whereas every contract on one expiration
             # falling silent at once is a failed fetch.
+            #
+            # This asked for a mark dated TODAY until 2026-09-30. Before the
+            # day's run has fired — every morning pre-open, which is when a
+            # person actually reads this line — no pair carries one, so the
+            # whole book was reported dark and the alarm was red daily. `dark_n`
+            # had the same defect taken out of it on 2026-08-24 and this one was
+            # missed. Measuring against the newest `mark_date` in the table asks
+            # the question that was always meant: did this pair price on the
+            # last run? The calendar does not enter into it.
+            #
+            # `last_run` is NULL only when the table is empty, and then this
+            # whole check is moot: "no marks while positions are open" is
+            # already CRITICAL above, and comparing against NULL yields no rows.
+            last_run, = conn.execute(
+                "SELECT MAX(mark_date) FROM candidate_marks").fetchone()
             stopped_n, = conn.execute(
                 "SELECT COUNT(*) FROM ("
                 "  SELECT c.symbol, c.expiration FROM candidate_positions p "
@@ -731,11 +803,16 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
                 "     SELECT 1 FROM candidate_marks m "
                 "      WHERE m.contract_key = p.contract_key "
                 "        AND m.mark_date = ?) THEN 1 ELSE 0 END) = 0)",
-                (OPEN, today, today)).fetchone()
+                (OPEN, last_run, last_run)).fetchone()
+            # Marked days in the window, for the gap check below.
+            mark_days = [r[0] for r in conn.execute(
+                "SELECT DISTINCT mark_date FROM candidate_marks "
+                "WHERE mark_date >= ?", (since,))]
     except Exception:
         return ["  cand marks     unreadable                        [CRITICAL]"]
 
-    sev = "CRITICAL" if ((open_n and not marks) or dark_n) else (
+    gaps = missing_trading_days(mark_days, today)
+    sev = "CRITICAL" if ((open_n and not marks) or dark_n or gaps) else (
         "WARN" if stopped_n else "OK")
     out = [f"  {'cand marks':<14} {marks} marks / {open_n} open / "
            f"{closed_n} closed in {days}d{'':<3}[{sev}]"]
@@ -746,6 +823,18 @@ def health_lines(db_path: Optional[str] = None, days: int = 7) -> List[str]:
         out.append(f"     {dark_n} OPEN POSITIONS HAVE NEVER BEEN MARKED — "
                    "they cannot resolve")
     if stopped_n:
-        out.append(f"     {stopped_n} SYMBOL/EXPIRY PAIRS WENT DARK TODAY — "
-                   "every open contract on them missed today's mark")
+        out.append(f"     {stopped_n} SYMBOL/EXPIRY PAIRS WENT DARK — "
+                   f"every open contract on them missed the {last_run} run")
+    if gaps:
+        from .data_quality import holiday_calendar_covers
+        shown = ", ".join(gaps[:5]) + (f" (+{len(gaps) - 5} more)"
+                                       if len(gaps) > 5 else "")
+        out.append(f"     NO MARKS ON {len(gaps)} TRADING DAY(S) — {shown}")
+        uncovered = sorted({int(g[:4]) for g in gaps
+                            if not holiday_calendar_covers(int(g[:4]))})
+        if uncovered:
+            out.append(f"     (holiday calendar not maintained for "
+                       f"{', '.join(str(y) for y in uncovered)} — some of "
+                       f"those may be closures; update "
+                       f"_US_MARKET_HOLIDAYS_BY_YEAR)")
     return out

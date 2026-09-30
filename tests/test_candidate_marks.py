@@ -1234,7 +1234,7 @@ class TestAnEmptyChainIsNotPinnedForTheRun(unittest.TestCase):
             self.assertEqual(n, 2)
 
 
-class TestHealthCatchesAPairGoingDarkToday(unittest.TestCase):
+class TestHealthCatchesAPairGoingDark(unittest.TestCase):
     """"Never marked" and "stopped being marked" are different failures.
 
     The never-marked count is deliberately blind to the second one, so a whole
@@ -1263,7 +1263,7 @@ class TestHealthCatchesAPairGoingDarkToday(unittest.TestCase):
             cm.mark_open(db_path=path, today=_days_ago(0),
                          fetch=lambda t, e: self.CHAIN if t == "AAPL" else {})
             text = " ".join(cm.health_lines(db_path=path))
-            self.assertIn("WENT DARK TODAY", text.upper())
+            self.assertIn("WENT DARK", text.upper())
             self.assertIn("1 ", text)
             # Never-marked stays green: both contracts have a mark.
             self.assertNotIn("NEVER BEEN MARKED", text.upper())
@@ -1276,7 +1276,7 @@ class TestHealthCatchesAPairGoingDarkToday(unittest.TestCase):
             cm.mark_open(db_path=path, today=_days_ago(0),
                          fetch=lambda t, e: self.CHAIN)
             text = " ".join(cm.health_lines(db_path=path))
-            self.assertNotIn("WENT DARK TODAY", text.upper())
+            self.assertNotIn("WENT DARK", text.upper())
 
     def test_one_unquoted_strike_beside_a_quoted_one_is_not_a_dark_pair(self):
         # Ordinary illiquidity on one strike must not raise the alarm, or the
@@ -1293,7 +1293,7 @@ class TestHealthCatchesAPairGoingDarkToday(unittest.TestCase):
             cm.mark_open(db_path=path, today=_days_ago(0),
                          fetch=lambda t, e: self.CHAIN)
             text = " ".join(cm.health_lines(db_path=path))
-            self.assertNotIn("WENT DARK TODAY", text.upper())
+            self.assertNotIn("WENT DARK", text.upper())
 
     def test_a_position_entered_today_cannot_make_a_pair_dark(self):
         # It has not missed a run; it is waiting for its first.
@@ -1302,7 +1302,128 @@ class TestHealthCatchesAPairGoingDarkToday(unittest.TestCase):
             _insert_candidate(path)
             cm.open_positions(db_path=path, today=_days_ago(0))
             text = " ".join(cm.health_lines(db_path=path))
-            self.assertNotIn("WENT DARK TODAY", text.upper())
+            self.assertNotIn("WENT DARK", text.upper())
+
+
+class TestStoppedPairsMeasureTheLastRunNotTheCalendarDay(unittest.TestCase):
+    """`stopped_n` asked whether each pair carried a mark dated TODAY.
+
+    Before the day's mark run has fired — i.e. every morning pre-open, which is
+    when a person actually reads this — no pair carries one, so every pair in
+    the book was reported dark and the line was red daily. `dark_n` was fixed
+    for the same reason on 2026-08-24 (positions entered today have not missed
+    a run); `stopped_n` never got the equivalent.
+
+    The fix is to measure against the LAST MARK RUN THAT EXISTS rather than
+    against the calendar. A pair that priced on the most recent run is not
+    dark, whatever time of day it is now.
+    """
+
+    CHAIN = {(190.0, "call"): (11.0, 11.4)}
+
+    def test_pairs_marked_on_the_last_run_are_not_dark_before_todays_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today=_days_ago(3))
+            # Marked yesterday. Today's run has not happened yet.
+            cm.mark_open(db_path=path, today=_days_ago(1),
+                         fetch=lambda t, e: self.CHAIN)
+            text = " ".join(cm.health_lines(db_path=path, today=_days_ago(0)))
+            self.assertNotIn("WENT DARK", text.upper())
+            self.assertNotIn("[WARN]", text.upper())
+
+    def test_a_pair_that_missed_the_last_run_is_still_reported(self):
+        # The alarm must keep working: AAPL priced on the last run, MSFT did
+        # not, and no run has happened today.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, scan_id="OK")
+            _insert_candidate(path, scan_id="DARK", symbol="MSFT", strike=500.0,
+                              contract_key="MSFT|2026-09-18|call|500")
+            cm.open_positions(db_path=path, today=_days_ago(4))
+            cm.mark_open(db_path=path, today=_days_ago(3),
+                         fetch=lambda t, e: self.CHAIN if t == "AAPL"
+                         else {(500.0, "call"): (4.0, 4.2)})
+            cm.mark_open(db_path=path, today=_days_ago(1),
+                         fetch=lambda t, e: self.CHAIN if t == "AAPL" else {})
+            text = " ".join(cm.health_lines(db_path=path, today=_days_ago(0)))
+            self.assertIn("WENT DARK", text.upper())
+
+
+class TestMissingTradingDays(unittest.TestCase):
+    """2026-09-23 was a silent whole-day outage — 0 marks, 7 scans, 0 auto-logs
+    — and nothing fired. The staleness guard counts business days ago, so one
+    missed day never trips it.
+
+    These pin the pure function, with literal dates, so the rule is not tested
+    against whatever day the suite happens to run on.
+    """
+
+    def test_a_skipped_trading_day_is_reported(self):
+        got = cm.missing_trading_days(
+            ["2026-09-21", "2026-09-22", "2026-09-24"], today="2026-09-25")
+        self.assertEqual(got, ["2026-09-23"])
+
+    def test_a_weekend_is_not_a_gap(self):
+        got = cm.missing_trading_days(
+            ["2026-09-25", "2026-09-28"], today="2026-09-29")
+        self.assertEqual(got, [])
+
+    def test_a_market_holiday_is_not_a_gap(self):
+        # 2026-09-07 is Labor Day. Without the holiday calendar this reports a
+        # missing day and the alarm cries wolf every holiday.
+        got = cm.missing_trading_days(
+            ["2026-09-04", "2026-09-08"], today="2026-09-09")
+        self.assertEqual(got, [])
+
+    def test_today_is_not_counted_as_missing(self):
+        # Today's run may simply not have fired yet — the same mistake that
+        # made `stopped_n` red every morning.
+        got = cm.missing_trading_days(["2026-09-28"], today="2026-09-29")
+        self.assertEqual(got, [])
+
+    def test_no_marks_at_all_reports_nothing(self):
+        # "No marks while positions are open" is a different, louder line.
+        self.assertEqual(cm.missing_trading_days([], today="2026-09-29"), [])
+
+    def test_the_gap_is_measured_from_the_first_mark_not_from_epoch(self):
+        got = cm.missing_trading_days(["2026-09-28"], today="2026-09-30")
+        self.assertEqual(got, ["2026-09-29"])
+
+    def test_several_missed_days_are_all_named(self):
+        got = cm.missing_trading_days(
+            ["2026-09-21", "2026-09-25"], today="2026-09-28")
+        self.assertEqual(got, ["2026-09-22", "2026-09-23", "2026-09-24"])
+
+
+class TestMarkGapAlarm(unittest.TestCase):
+    """The gap has to reach the health line, not just the helper."""
+
+    CHAIN = {(190.0, "call"): (11.0, 11.4)}
+
+    def test_a_missed_trading_day_is_critical(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-09-21")
+            _mark(path, "AAPL|2026-09-18|call|190", "2026-09-22", 10.0)
+            _mark(path, "AAPL|2026-09-18|call|190", "2026-09-24", 10.0)
+            text = " ".join(cm.health_lines(db_path=path, days=14,
+                                            today="2026-09-25"))
+            self.assertIn("2026-09-23", text)
+            self.assertIn("CRITICAL", text)
+
+    def test_an_unbroken_run_of_trading_days_says_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-09-21")
+            for day in ("2026-09-22", "2026-09-23", "2026-09-24"):
+                _mark(path, "AAPL|2026-09-18|call|190", day, 10.0)
+            text = " ".join(cm.health_lines(db_path=path, days=14,
+                                            today="2026-09-25"))
+            self.assertNotIn("NO MARKS ON", text.upper())
 
 
 if __name__ == "__main__":
