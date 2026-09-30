@@ -9,6 +9,12 @@ never top_quintile — staged off/report/refuse the same way earnings_gate's
 projection mode was, because a live measurement on 2026-09-08 found it would
 refuse 89.5% of what currently gets logged.
 
+Now at `refuse` (2026-09-30). Report mode's three weeks measured the real
+entry queue rather than the scan board: 95.1% of it would be refused, and all
+43 trades the path had actually logged were SKIP with ev_net < 0 — so the rows
+this drops are negative-EV by multiples of their own noise band, and MARGINAL
+(1.9% of the queue, 0 of the 43) is not what carries the decision.
+
 Run:
     PYTHONPATH=$PWD ~/.venvs/options/bin/python -m unittest tests.test_spread_negative_ev_autolog -v
 """
@@ -109,9 +115,14 @@ class SpreadNegativeEvModeConfigTest(unittest.TestCase):
     def test_missing_file_defaults_to_off(self):
         self.assertEqual(spread_negative_ev_mode("/nonexistent/config.json"), "off")
 
-    def test_real_config_is_in_report_mode(self):
-        # Shipped 2026-09-08: watch it against real scans before enforcing.
-        self.assertEqual(spread_negative_ev_mode("config.json"), "report")
+    def test_real_config_is_in_refuse_mode(self):
+        # Shipped report-only 2026-09-08, flipped to refuse 2026-09-30 once
+        # three weeks of report mode had a number: all 43 trades the
+        # spread/condor auto-log path ever logged were SKIP with ev_net < 0.
+        # This pins the live value deliberately — the flip is the finding, and
+        # a silent revert to report would restore the defect without a failing
+        # test. See the config note for the measurement and its limits.
+        self.assertEqual(spread_negative_ev_mode("config.json"), "refuse")
 
 
 if __name__ == "__main__":

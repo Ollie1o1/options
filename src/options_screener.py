@@ -7198,7 +7198,16 @@ def main():
                         # SKIP or MARGINAL by this check — the same defect #100
                         # fixed for Long Call/Put, sitting unchecked here the
                         # whole time because this path never called the gate at
-                        # all. Staged report-only until it can be watched.
+                        # all. Staged report-only until it could be watched;
+                        # ENFORCING since 2026-09-30. What report mode saw, on
+                        # the queue this very call filters (6,438 rows, 165
+                        # scans): 95.1% would be refused, and all 43 trades the
+                        # path had logged were SKIP with ev_net < 0 — negative
+                        # by multiples of their own noise band, not marginal.
+                        # The cut is real (entries ~5/run -> ~1-3, zero on 28%
+                        # of scans) and accepted: a forward sample made only of
+                        # self-declared negative-EV entries cannot test the EV
+                        # model it came from. See config.json's note.
                         _spreads = rank_structures_by_verdict(_spreads)
                         # Draw the entry queue at random among survivors — same
                         # reasoning as the single-leg path. `rank_structures_by_verdict`
