@@ -66,6 +66,33 @@ class TestMarkCandidates(unittest.TestCase):
                     "select exit_reason from candidate_positions").fetchone()
             self.assertEqual(reason, "take_profit")
 
+    def test_a_structure_priced_at_exactly_zero_net_credit_still_gets_marked(self):
+        # Found 2026-09-09: a live CMCSA Bear Call whose short and long legs
+        # had converged to the same mid (both 0.075) priced at net credit
+        # exactly $0.00 — a real, meaningful value — and `if not mid: continue`
+        # silently and permanently dropped it, identical to an unpriceable
+        # structure. Reproduced with both legs quoting bid=0.05/ask=0.10.
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_candidate(
+                path, contract_key="AAPL|2026-09-18|Bear Call|190/195",
+                strategy_name="Bear Call", opt_type=None, bid=None, ask=None,
+                features_json='{"short_strike": 190.0, "long_strike": 195.0, '
+                              '"short_bid": 0.05, "short_ask": 0.10, '
+                              '"long_bid": 0.05, "long_ask": 0.10}')
+            out = cm.mark_candidates(
+                db_path=path, today="2026-08-19", cfg_path=cfg,
+                fetch=lambda t, e: {(190.0, "call"): (0.05, 0.10),
+                                    (195.0, "call"): (0.05, 0.10)})
+            self.assertEqual(out["marked"], 1)
+            with sqlite3.connect(path) as conn:
+                mid, source = conn.execute(
+                    "select mid, source from candidate_marks "
+                    "where contract_key = ?",
+                    ("AAPL|2026-09-18|Bear Call|190/195",)).fetchone()
+            self.assertEqual(mid, 0.0)
+            self.assertEqual(source, "live_quote_structure")
+
     def test_a_broken_fetch_never_raises(self):
         with tempfile.TemporaryDirectory() as d:
             path, cfg = os.path.join(d, "c.db"), _write_config(d)

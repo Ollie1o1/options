@@ -181,6 +181,57 @@ def top_quintile_cutoff(db_path: str = "paper_trades.db") -> float:
     return _top_quintile_cutoff(db_path, mtime)
 
 
+def is_negative_ev(row: Any) -> bool:
+    """True when this candidate's own EV verdict is SKIP or MARGINAL.
+
+    Not a prediction and not claimed as one. If the system computes a
+    negative expected value it must not also print BUY; this gate exists so
+    the board cannot contradict itself, which is the failure that made the
+    old cards unreadable (7 of 9 detail cards read NEGATIVE EV and all 9
+    printed a DO BUY line).
+
+    Defers to `decide_verdict`, the same rule the top-N table and the
+    tearsheet render, rather than testing `ev < 0` directly. Net EV is
+    Black-Scholes over an implied vol this repo corrects on most scans, so a
+    raw sign test refuses -$1 while admitting +$9 — two numbers inside the
+    same error bar. A consistency gate that disagrees with the number
+    printed beside it would be the very defect it exists to remove.
+
+    MARGINAL is refused alongside SKIP, not just admitted as "not negative".
+    Measured 2026-09-07: of 2,795 Long Call/Put candidates this gate passed
+    in one week, 2,690 (96%) were MARGINAL — positive on paper but inside
+    this contract's own vega-implied noise band, not distinguishable from
+    zero.
+
+    Extracted 2026-09-08 (previously inlined in `_refusal_for`) so the
+    spread/condor auto-log path — which never called `_refusal_for` at all,
+    see options_screener.py's "DELIBERATELY NOT GATED" comment — could reuse
+    the exact rule instead of a second copy. Measured the same day: 89.5% of
+    Bull Put/Bear Call candidates that clear the friction-to-credit ratio
+    (the auto-logger's only cost filter) were still SKIP or MARGINAL here.
+
+    Returns False (never refused) when the verdict machinery raises — a
+    board that renders everything is a bug, but a board that renders nothing
+    because of an unrelated import failure is worse.
+    """
+    try:
+        from .tearsheet.render import decide_verdict
+        from .cli_display import _ev_noise_for_row
+
+        decision, _ = decide_verdict(
+            row.get("ev_per_contract"),
+            row.get("ev_gross_per_contract"),
+            row.get("ev_cost_per_contract"),
+            None,
+            noise=_ev_noise_for_row(row),
+        )
+        return decision in ("SKIP", "MARGINAL")
+    except Exception:
+        log.debug("EV verdict unavailable; not refused on that basis",
+                  exc_info=True)
+        return False
+
+
 def _refusal_for(row: Dict[str, Any], cutoff: float,
                  win_rates: Optional[Dict[str, float]] = None) -> Optional[str]:
     """The first gate this candidate fails, or None if it clears them all."""
@@ -219,42 +270,9 @@ def _refusal_for(row: Dict[str, Any], cutoff: float,
         if score is not None and score >= cutoff:
             failed.add("top_quintile")
 
-    # G4 — not a prediction and not claimed as one. If the system computes a
-    # negative expected value it must not also print BUY; this gate exists so
-    # the board cannot contradict itself, which is the failure that made the
-    # old cards unreadable (7 of 9 detail cards read NEGATIVE EV and all 9
-    # printed a DO BUY line).
-    #
-    # It defers to `decide_verdict`, the same rule the top-N table and the
-    # tearsheet render, rather than testing `ev < 0` directly. Net EV is
-    # Black-Scholes over an implied vol this repo corrects on most scans, so a
-    # raw sign test refuses -$1 while admitting +$9 — two numbers inside the
-    # same error bar. A consistency gate that disagrees with the number printed
-    # beside it would be the very defect it exists to remove.
-    try:
-        from .tearsheet.render import decide_verdict
-        from .cli_display import _ev_noise_for_row
-
-        decision, _ = decide_verdict(
-            row.get("ev_per_contract"),
-            row.get("ev_gross_per_contract"),
-            row.get("ev_cost_per_contract"),
-            None,
-            noise=_ev_noise_for_row(row),
-        )
-        # MARGINAL is refused alongside SKIP, not just admitted as "not
-        # negative". Measured 2026-09-07: of 2,795 Long Call/Put candidates
-        # this gate passed in one week, 2,690 (96%) were MARGINAL — positive
-        # on paper but inside this contract's own vega-implied noise band,
-        # not distinguishable from zero. Bull Put's much smaller surviving
-        # pool (already thinned by the friction gate) was 66% genuine TAKE;
-        # letting noise through on equal footing with a real edge is what
-        # this line was doing for every strategy with no upstream cost gate.
-        if decision in ("SKIP", "MARGINAL"):
-            failed.add("negative_ev")
-    except Exception:
-        log.debug("EV verdict unavailable; not refused on that basis",
-                  exc_info=True)
+    # G4 — see `is_negative_ev`.
+    if is_negative_ev(row):
+        failed.add("negative_ev")
 
     for key in _GATE_ORDER:
         if key in failed:

@@ -185,6 +185,37 @@ class NegativeEvGateTest(unittest.TestCase):
         self.assertEqual(len(r.kept), 1)
 
 
+class IsNegativeEvStandaloneTest(unittest.TestCase):
+    """Extracted 2026-09-08 so the spread/condor auto-log path (which never
+    called `_refusal_for` at all) can reuse the exact rule instead of a
+    second copy. `_refusal_for`'s own behaviour (NegativeEvGateTest above)
+    must stay unchanged — this is a pure refactor."""
+
+    def test_a_skip_verdict_is_negative(self):
+        self.assertTrue(pr.is_negative_ev(_leg(ev_per_contract=-18.0)))
+
+    def test_a_marginal_verdict_is_negative(self):
+        with mock.patch("src.cli_display._ev_noise_for_row", return_value=50.0):
+            self.assertTrue(pr.is_negative_ev(_leg(ev_per_contract=25.0)))
+
+    def test_a_clear_take_is_not_negative(self):
+        with mock.patch("src.cli_display._ev_noise_for_row", return_value=10.0):
+            self.assertFalse(pr.is_negative_ev(_leg(ev_per_contract=25.0)))
+
+    def test_missing_ev_is_not_negative(self):
+        self.assertFalse(pr.is_negative_ev(_leg(ev_per_contract=None)))
+
+    def test_a_raising_verdict_is_not_negative(self):
+        with mock.patch("src.tearsheet.render.decide_verdict",
+                        side_effect=RuntimeError("boom")):
+            self.assertFalse(pr.is_negative_ev(_leg(ev_per_contract=25.0)))
+
+    def test_works_on_a_condor_row_too(self):
+        """The board's own G4 check never restricted itself to single legs;
+        neither should the extracted function."""
+        self.assertTrue(pr.is_negative_ev(_condor(ev_per_contract=-5.0)))
+
+
 class CostGateTest(unittest.TestCase):
     """G1-G3 delegate to the existing cost work."""
 

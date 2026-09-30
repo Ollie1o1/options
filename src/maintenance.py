@@ -502,7 +502,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             chain_archive_fn: Optional[Callable] = None,
                             morning_fn: Optional[Callable] = None,
                             walk_forward_fn: Optional[Callable] = None,
-                            watch_fn: Optional[Callable] = None) -> dict:
+                            watch_fn: Optional[Callable] = None,
+                            now_fn: Optional[Callable[[], datetime]] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -515,8 +516,16 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     if os.environ.get(CHILD_ENV_MARKER):
         return {"cohort": "", "ran": []}
 
+    # An explicit `now` means a caller (a test) pinned the clock for the whole
+    # run and expects it to stay pinned; only a real (unset) invocation should
+    # fall back to sampling the live clock again later. Otherwise every test
+    # that fixes `now` without also thinking about `now_fn` would silently
+    # pick up the real wall clock in step 4 below.
+    _explicit_now = now is not None
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
+    if now_fn is None:
+        now_fn = (lambda: now) if _explicit_now else datetime.now
     runner = runner or _default_runner
     state = load_state(state_path)
     ran = []
@@ -570,14 +579,27 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
         pass
 
     # 4. Daily chain archive (weekday afternoons, once/day) — free CBOE
-    #    snapshots that compound into a real backtest dataset.
+    #    snapshots that compound into a real backtest dataset. Re-sample the
+    #    clock here rather than reusing the entry-time `now`: step 1's autolog
+    #    loop blocks for the full duration of 1-4 scans (hours, when slow),
+    #    and launchd won't fire a fresh invocation while this one is still
+    #    running — so an entry-time snapshot taken before 14:00 would keep
+    #    this job "not yet due" even after real wall-clock time has passed
+    #    14:00, silently skipping the whole day (observed 2026-09-11, 09-14).
     try:
         from src import chain_archive as _ca
-        if _ca.due_chain_archive(state, today, now.isoweekday(),
-                                 now.hour * 100 + now.minute):
+        _cur = now_fn()
+        # The dedup key must move with the same clock as the gate: entry-time
+        # `today` paired with a re-sampled weekday/hhmm let a block crossing
+        # midnight record the archive under the day it started rather than
+        # the day it (and the gate) actually ran, re-firing every subsequent
+        # afternoon check for a day already covered.
+        _cur_today = _cur.strftime("%Y-%m-%d")
+        if _ca.due_chain_archive(state, _cur_today, _cur.isoweekday(),
+                                 _cur.hour * 100 + _cur.minute):
             fn = chain_archive_fn or _run_chain_archive
             n = fn()
-            state["last_chain_archive"] = today
+            state["last_chain_archive"] = _cur_today
             if n:
                 ran.append(f"chain-archive:{n}rows")
     except Exception:

@@ -35,7 +35,7 @@ from .utils import is_short_position as _is_short_position
 from .utils import bs_delta as _bs_delta
 from .capital_risk import capital_at_risk, within_budget
 from .book_sizing import (SizingDecision, book_equity, load_sizing_config,
-                          open_risk, size)
+                          open_risk_breakdown, sector_open_risk_for, size)
 from .earnings_gate import (PROJECTED_THROUGH, THROUGH, UNKNOWN,
                             cached_earnings_dates, load_earnings_gate_config,
                             project_next_earnings, refuses, verdict_for_trade)
@@ -1263,8 +1263,18 @@ class PaperManager:
                 for sql in _MIGRATIONS.get(ver, []):
                     try:
                         cur.execute(sql)
-                    except sqlite3.OperationalError:
-                        pass  # column may already exist
+                    except sqlite3.OperationalError as exc:
+                        # Only "column already exists" is safe to ignore — a
+                        # migration re-run hitting its own prior work. Anything
+                        # else (e.g. "database is locked") must not be
+                        # swallowed here: doing so stamps user_version as
+                        # complete while the column was never actually added,
+                        # which is exactly what left the real paper_trades.db
+                        # at version 24 without any of migration 23's columns
+                        # (discovered 2026-09-08 via enforce_exits.sh crashing
+                        # on "no such column: short_bid_exit").
+                        if "duplicate column" not in str(exc).lower():
+                            raise
                 cur.execute(f"PRAGMA user_version = {int(ver)}")
 
     def _load_config(self) -> Dict[str, Any]:
@@ -1438,9 +1448,26 @@ class PaperManager:
         per_contract = _risk_at(1.0)
         with self._get_connection() as conn:
             equity = book_equity(conn, self._sizing_cfg)
-            exposure = open_risk(conn, self._sizing_cfg)
-        decision = size(per_contract, equity, exposure, self._sizing_cfg)
+            breakdown = open_risk_breakdown(conn, self._sizing_cfg)
+        exposure = breakdown.total
+        decision = size(
+            per_contract, equity, exposure, self._sizing_cfg,
+            ticker_open_risk=breakdown.by_ticker.get(ticker, 0.0),
+            sector_open_risk=sector_open_risk_for(breakdown, ticker),
+        )
         self.last_sizing_decision = decision
+
+        # Cluster caps in "report" mode never change contracts/reason above —
+        # this is the only place that would-have-happened answer surfaces, so
+        # it can be watched on the live board before cluster_cap_mode flips to
+        # "refuse". See src/book_sizing.py.
+        if (decision.cluster_reason is not None
+                and decision.cluster_contracts != decision.contracts):
+            print(
+                f"  ! {trade_dict['strategy_name']} on {trade_dict.get('ticker')}: "
+                f"cluster cap ({decision.cluster_reason}) would size this to "
+                f"{decision.cluster_contracts} contracts — report mode only"
+            )
 
         if decision.contracts < 1:
             self.unsized_rejected += 1

@@ -287,7 +287,13 @@ def _render_regime_with_exit_enforcement(pm, width, spinner_factory=None,
             except Exception:
                 pass
         except Exception:
-            pass
+            # Swallowed by design so the UI never crashes on this, but log
+            # it — a bare `pass` here is what let the 2026-09-07 schema-drift
+            # crash (update_positions failing on a missing column) hide
+            # completely: the cron path's traceback was the only reason it
+            # was ever noticed.
+            logging.getLogger(__name__).error(
+                "inline exit enforcement failed", exc_info=True)
 
     text = ""
     try:
@@ -549,6 +555,59 @@ def _trade_dte(trade: dict):
 
 from .paths import PROJECT_ROOT as _PROJECT_ROOT
 from .paths import repo_path as _repo_path
+
+
+def spread_negative_ev_mode(cfg_path: str = "config.json") -> str:
+    """``auto_log.spread_negative_ev_mode``: off / report / refuse.
+
+    Same staged rollout as `earnings_gate`'s projection mode: an
+    unrecognised value falls back to off, never refuse, so a typo cannot
+    silently start turning trades away. Governs ONLY the negative_ev/noise
+    consistency check on the spread/condor auto-log path — see
+    `apply_spread_negative_ev_gate` and the "DELIBERATELY NOT GATED" comment
+    at its call site for what this deliberately still does not cover
+    (condor_universe, top_quintile).
+    """
+    import json
+    try:
+        with open(_repo_path(cfg_path)) as f:
+            cfg = json.load(f)
+        mode = str((cfg.get("auto_log") or {}).get(
+            "spread_negative_ev_mode", "off")).strip().lower()
+        return mode if mode in ("off", "report", "refuse") else "off"
+    except Exception:
+        return "off"
+
+
+def apply_spread_negative_ev_gate(df: pd.DataFrame, mode: str):
+    """Filter or measure spread/condor auto-log candidates against
+    `pick_ranking.is_negative_ev`.
+
+    Deliberately narrower than `gate_and_report`: checks ONLY the EV/noise
+    consistency rule, never `condor_universe` or `top_quintile` — those are
+    measured research rules whose sample must keep growing (see the
+    "DELIBERATELY NOT GATED" comment at the call site). `is_negative_ev` is a
+    consistency check, not a discovered pattern, so it carries none of that
+    freezing risk.
+
+    mode ``"off"``: ``df`` unchanged, nothing counted.
+    mode ``"report"``: ``df`` unchanged, but the count of rows that WOULD be
+    refused is still returned, so it can be watched before enforcing.
+    mode ``"refuse"``: matching rows are actually removed.
+
+    Returns ``(kept_df, refused_records, would_refuse_count)``.
+    ``refused_records`` is only non-empty in ``"refuse"`` mode —
+    `record_autolog_refusals` marks a row as actually refused, and a row
+    "report" mode did not touch was never refused, only measured.
+    """
+    if mode == "off" or df is None or len(df) == 0:
+        return df, [], 0
+    from . import pick_ranking as _pr
+    mask = df.apply(_pr.is_negative_ev, axis=1)
+    would_refuse = int(mask.sum())
+    if mode != "refuse":
+        return df, [], would_refuse
+    return df[~mask].copy(), df[mask].to_dict("records"), would_refuse
 
 
 def auto_log_budget_cap(cfg_path: str = "config.json"):
@@ -983,7 +1042,100 @@ def _dedup_by_symbol(df, strategy_of_row):
     return _es.dedup_by_symbol(df, strategy_of_row, alloc=_current_allocation())
 
 
-def record_autolog_rank(df, *, board: str):
+# Which board a strategy is constructed on. `-ds` (discover) and `-sps`
+# (spreads) run as SEPARATE scheduled processes (scripts/auto_log_equity.sh),
+# never in the same one — so the spread board and the single-leg board each
+# used to draw their own full `--log-top` every run, independent of what the
+# OTHER board already logged that day. The allocation's shares (Bull Put
+# ~89%, everything else ~4% each) could then only ever govern the mix WITHIN
+# one board, never the split BETWEEN them, which is what
+# `src.maintenance_health`'s "alloc drift" check actually measures. Found
+# 2026-09-08: last 30 eligible entries ran 47% Bull Put against an 89%
+# target, with Long Call and Long Put each at 27% against a 4% target.
+_SPREAD_FAMILY = frozenset({"Bull Put", "Bear Call", "Iron Condor"})
+_SINGLE_LEG_FAMILY = frozenset({"Long Call", "Long Put", "Short Call", "Short Put"})
+
+
+def _today_family_counts(ledger_path: str, today: str) -> Dict[frozenset, int]:
+    """Eligible (paper_only=0) entries logged today, keyed by family.
+
+    Read-only, fails to all-zero — the caller's fallback is the old fixed
+    `log_top`, so a broken count must never shrink what the book can take.
+    """
+    import sqlite3 as _sqlite3
+    counts = {_SPREAD_FAMILY: 0, _SINGLE_LEG_FAMILY: 0}
+    conn = None
+    try:
+        conn = _sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT strategy_name, COUNT(*) FROM trades "
+            "WHERE paper_only=0 AND date(date)=date(?) "
+            "GROUP BY strategy_name", (today,)).fetchall()
+    except Exception:
+        logging.warning("alloc family counts unavailable; falling back to "
+                        "the fixed per-board log_top", exc_info=True)
+        return counts
+    finally:
+        if conn is not None:
+            conn.close()
+    for name, n in rows:
+        if name in _SPREAD_FAMILY:
+            counts[_SPREAD_FAMILY] += n
+        elif name in _SINGLE_LEG_FAMILY:
+            counts[_SINGLE_LEG_FAMILY] += n
+    return counts
+
+
+def _family_top_n(family: frozenset, other_family: frozenset,
+                  log_top: int, cfg_path: str = "config.json") -> int:
+    """How many of this scan's `log_top` slots this family may still use.
+
+    Two boards run as separate scheduled processes and neither can see the
+    other while it runs, so the only shared state available is the ledger
+    itself: count what each family has ALREADY logged today, and give this
+    family only the slots it still needs to reach its allocation share of
+    (what's logged so far + this scan's own ceiling). A family already over
+    its share for the day can legitimately get 0 — that is the fix, not a
+    bug — and one still short of it keeps its full `log_top`.
+
+    Falls back to the unchanged `log_top` whenever the allocation is off or
+    has no weights, so a fresh checkout or a disabled allocation behaves
+    exactly as before this existed.
+    """
+    alloc = _current_allocation(cfg_path)
+    if alloc is None or not alloc.weights:
+        return log_top
+    family_weight = sum(alloc.weights.get(s, 0.0) for s in family)
+    other_weight = sum(alloc.weights.get(s, 0.0) for s in other_family)
+    total_weight = family_weight + other_weight
+    if total_weight <= 0.0:
+        return log_top
+    if family_weight <= 0.0:
+        return 0
+
+    import json as _json
+    try:
+        with open(_repo_path(cfg_path)) as f:
+            cfg = _json.load(f)
+        ledger_path = _repo_path(
+            ((cfg.get("auto_log") or {}).get("allocation") or {})
+            .get("ledger_path") or "paper_trades.db")
+    except Exception:
+        ledger_path = _repo_path("paper_trades.db")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    counts = _today_family_counts(ledger_path, today)
+    family_so_far = counts.get(family, 0)
+    other_so_far = counts.get(other_family, 0)
+    total_so_far = family_so_far + other_so_far
+
+    share = family_weight / total_weight
+    deserved = round(share * (total_so_far + log_top))
+    remaining = max(0, deserved - family_so_far)
+    return min(log_top, remaining)
+
+
+def record_autolog_rank(df, *, board: str, scan_id: Optional[str] = None):
     """Record the order the top-N cut actually sees.
 
     `rank_pos` means "position in the queue that decided entry", not "position
@@ -992,36 +1144,48 @@ def record_autolog_rank(df, *, board: str):
     carry, so the cut consumes the carry order. Recording the intended order
     instead of the operative one would put a number in the table describing
     something other than its label — call this immediately before `.head(N)`.
+
+    `scan_id`: pass the SAME id to this, `record_autolog_refusals` and
+    `record_autolog_logged` for one auto-log batch. Called from `main()`'s
+    auto-log block, outside any open `_cr.scan()` (`run_scan`'s own context
+    already closed by then), so leaving this to `current_scan_id()`'s
+    default gives each call its own fresh orphan id — the insert here and a
+    later refusal UPDATE would then never match. That silently dropped every
+    refusal on `autolog_structures` for a month (found 2026-09-22, see the
+    caller for how the id is minted once).
     """
     from . import candidate_record as _cr
     if df is None or len(df) == 0:
         return 0
-    return _cr.mark_ranked(df.to_dict("records"), board=board)
+    return _cr.mark_ranked(df.to_dict("records"), board=board,
+                           scan_id=scan_id)
 
 
-def record_autolog_refusals(rows, reason: str, *, board: str):
+def record_autolog_refusals(rows, reason: str, *, board: str,
+                            scan_id: Optional[str] = None):
     """Mark ranked candidates removed before the top-N cut, with the reason.
 
     The allowlist and the per-scan budget cap both filter BEFORE the cut, so
     without this a candidate that was never eligible is indistinguishable from
-    one that competed and lost.
+    one that competed and lost. `scan_id`: see `record_autolog_rank`.
     """
     from . import candidate_record as _cr
-    return _cr.mark_refused(list(rows), reason, board=board)
+    return _cr.mark_refused(list(rows), reason, board=board, scan_id=scan_id)
 
 
-def record_autolog_logged(row, *, board: str, entry_id=None, db_path=None):
+def record_autolog_logged(row, *, board: str, entry_id=None, db_path=None,
+                          scan_id: Optional[str] = None):
     """Flag a candidate as actually entered.
 
     Call this on every successful insert. Without it `auto_logged` stays 0 and
     the table cannot answer which of the candidates it offered the book
     actually took — which is what measuring the strategy allocation needs.
     Failure-safe like the rest of the recorder: it can neither stop a scan nor
-    change a pick.
+    change a pick. `scan_id`: see `record_autolog_rank`.
     """
     from . import candidate_record as _cr
     return _cr.mark_logged(dict(row), board=board, entry_id=entry_id,
-                           db_path=db_path)
+                           db_path=db_path, scan_id=scan_id)
 
 
 def _with_candidate_scan(fn):
@@ -6947,6 +7111,20 @@ def main():
 
                 # ── Auto-log mode: bypass interactive save menu ──────────────────
                 if _has_results and getattr(args, "auto_log", False) and mode not in ("Lottery Ticket", "Squeeze Hunt"):
+                    # One id for every recorder call this block makes. Unlike
+                    # `run_scan` (called earlier in `main()`, and decorated
+                    # with `_with_candidate_scan`), `main()` itself isn't
+                    # wrapped, and `run_scan`'s own context already closed by
+                    # the time this block runs — so `current_scan_id()`'s
+                    # default, a fresh orphan id per call, would make the
+                    # insert below and every later refusal/logged UPDATE
+                    # target different ids and silently match nothing. Minted
+                    # once here and threaded through explicitly instead.
+                    # Found 2026-09-22: this is why `autolog_structures` had
+                    # 5,353 rows and 0 with `refused_by` set, going back to
+                    # 2026-08-19.
+                    from . import candidate_record as _cr
+                    _autolog_scan_id = _cr.current_scan_id()
                     # Pick exactly one result source — prefer single-leg picks, otherwise
                     # the first non-empty spread/condor DF that the scan produced.
                     _log_src = picks if not picks.empty else (
@@ -6966,7 +7144,8 @@ def main():
                         # rather than refused wholesale. See
                         # rank_structures_by_verdict.
                         #
-                        # DELIBERATELY NOT GATED, and this asymmetry is the point.
+                        # DELIBERATELY NOT GATED on condor_universe or
+                        # top_quintile, and this asymmetry is the point.
                         # `pick_ranking` refuses off-index condors on the BOARD
                         # (G5: +9.5% mean return on capital on broad index against
                         # -11.8% elsewhere, n=139, p < 1e-5). The auto-logger keeps
@@ -6979,6 +7158,18 @@ def main():
                         # finding. Logging continues so the sample grows and
                         # `scripts/validate_gates.py` can overturn G5 if the edge
                         # was a three-month artifact. Ruled 2026-08-10.
+                        #
+                        # negative_ev IS applied below (apply_spread_negative_ev_gate),
+                        # added 2026-09-08. It carries none of the freezing risk
+                        # above — it is a CONSISTENCY check (the system must not
+                        # buy what it computed as negative-EV/noise), not a
+                        # discovered pattern that needs a growing sample to stay
+                        # falsifiable. Measured the same day: 89.5% of candidates
+                        # that clear the friction-to-credit ratio below were still
+                        # SKIP or MARGINAL by this check — the same defect #100
+                        # fixed for Long Call/Put, sitting unchecked here the
+                        # whole time because this path never called the gate at
+                        # all. Staged report-only until it can be watched.
                         _spreads = rank_structures_by_verdict(_spreads)
                         # Draw the entry queue at random among survivors — same
                         # reasoning as the single-leg path. `rank_structures_by_verdict`
@@ -6989,7 +7180,13 @@ def main():
                         # structure per symbol, not whichever the shuffle gave
                         # more raw rows to. See _dedup_by_symbol.
                         _spreads = _dedup_by_symbol(_spreads, structure_strategy_name)
-                        _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                        # Shared across the spread and single-leg boards —
+                        # they run as separate scheduled processes and each
+                        # used to draw a full `log_top` regardless of what
+                        # the other already logged today. See _family_top_n.
+                        _log_top_ceiling = max(1, int(getattr(args, "log_top", 5) or 5))
+                        _top_n = _family_top_n(_SPREAD_FAMILY, _SINGLE_LEG_FAMILY,
+                                               _log_top_ceiling)
 
                         # Record the queue BEFORE the pre-cut filters, so every
                         # candidate carries its position and the filters below
@@ -6997,7 +7194,8 @@ def main():
                         # on this board, which is deliberately never gated, no
                         # row exists until this call, so a refusal recorded
                         # first would match nothing and be lost.
-                        record_autolog_rank(_spreads, board="autolog_structures")
+                        record_autolog_rank(_spreads, board="autolog_structures",
+                                           scan_id=_autolog_scan_id)
 
                         # Budget pre-filter — see the single-leg path for why this must run
                         # BEFORE the top-N cut rather than at the ledger door.
@@ -7013,8 +7211,21 @@ def main():
                             _displaced = int((~_afford_mask).head(_top_n).sum())
                             record_autolog_refusals(
                                 _spreads[~_afford_mask].to_dict("records"),
-                                "budget_displaced", board="autolog_structures")
+                                "budget_displaced", board="autolog_structures",
+                                scan_id=_autolog_scan_id)
                             _spreads = _spreads[_afford_mask]
+
+                        # negative_ev pre-filter — see the comment above this
+                        # branch for why this ONE check is applied here despite
+                        # the surrounding "deliberately not gated" policy.
+                        _neg_ev_mode = spread_negative_ev_mode("config.json")
+                        _spreads, _neg_ev_refused_rows, _neg_ev_count = (
+                            apply_spread_negative_ev_gate(_spreads, _neg_ev_mode))
+                        if _neg_ev_refused_rows:
+                            record_autolog_refusals(
+                                _neg_ev_refused_rows, "negative_ev",
+                                board="autolog_structures",
+                                scan_id=_autolog_scan_id)
                         _candidates = _spreads.head(_top_n)
                         _today_str = datetime.now().strftime("%Y-%m-%d")
                         _inserted = 0
@@ -7110,7 +7321,8 @@ def main():
                                     if pm.log_iron_condor_if_new(_payload, auto_log=True):
                                         _inserted += 1
                                         record_autolog_logged(
-                                            row, board="autolog_structures")
+                                            row, board="autolog_structures",
+                                            scan_id=_autolog_scan_id)
                                     else:
                                         _skipped += 1
                                 else:
@@ -7137,7 +7349,8 @@ def main():
                                     if pm.log_spread_if_new(_payload, auto_log=True):
                                         _inserted += 1
                                         record_autolog_logged(
-                                            row, board="autolog_structures")
+                                            row, board="autolog_structures",
+                                            scan_id=_autolog_scan_id)
                                     else:
                                         _skipped += 1
                             except Exception as _log_exc:
@@ -7186,6 +7399,17 @@ def main():
                                 f", {_displaced} of the top {_top_n} exceeded the "
                                 f"${_budget_cap:,.0f} budget"
                             )
+                        if _neg_ev_count:
+                            if _neg_ev_mode == "refuse":
+                                _summary += (f", refused {_neg_ev_count} for "
+                                            f"negative EV/noise")
+                            else:
+                                # Counted whether or not it refused, same
+                                # convention as _earn_proj above: report mode's
+                                # whole output is this count, watched before
+                                # the mode is ever flipped to refuse.
+                                _summary += (f", {_neg_ev_count} would be refused "
+                                            f"for negative EV/noise (report mode)")
                         print(fmt.format_success(_summary) if HAS_ENHANCED_CLI else f"  ✓ {_summary}")
                         _print_entry_disclosure()
                         _has_results = False
@@ -7231,7 +7455,8 @@ def main():
                         # the frame was ranked EV-descending above and then
                         # re-sorted by carry inside gate_and_report, so this is
                         # the carry order — which is what the cut consumes.
-                        record_autolog_rank(_single_legs, board="AUTO-LOG")
+                        record_autolog_rank(_single_legs, board="AUTO-LOG",
+                                           scan_id=_autolog_scan_id)
                         # Drop rows the allowlist would reject entirely (e.g. Long Puts once
                         # removed from paper_only_strategies) BEFORE taking the top-N. Without
                         # this, a scan whose top-scored legs are Long Puts logs almost nothing
@@ -7253,9 +7478,14 @@ def main():
                             _allow_mask = _single_legs.apply(_allowlist_keeps, axis=1)
                             record_autolog_refusals(
                                 _single_legs[~_allow_mask].to_dict("records"),
-                                "allowlist_drop", board="AUTO-LOG")
+                                "allowlist_drop", board="AUTO-LOG",
+                                scan_id=_autolog_scan_id)
                             _single_legs = _single_legs[_allow_mask]
-                        _top_n = max(1, int(getattr(args, "log_top", 5) or 5))
+                        # Shared across the spread and single-leg boards — see
+                        # the spread path's identical call for why.
+                        _log_top_ceiling = max(1, int(getattr(args, "log_top", 5) or 5))
+                        _top_n = _family_top_n(_SINGLE_LEG_FAMILY, _SPREAD_FAMILY,
+                                               _log_top_ceiling)
                         # Budget pre-filter — same reasoning as the allowlist filter above.
                         # An unaffordable pick IS refused by the ledger, but only after it has
                         # already consumed a top-N slot. On 2026-07-30 the short-premium window
@@ -7276,7 +7506,8 @@ def main():
                             _displaced = int((~_afford_mask).head(_top_n).sum())
                             record_autolog_refusals(
                                 _single_legs[~_afford_mask].to_dict("records"),
-                                "budget_displaced", board="AUTO-LOG")
+                                "budget_displaced", board="AUTO-LOG",
+                                scan_id=_autolog_scan_id)
                             _single_legs = _single_legs[_afford_mask]
                         _candidates = _single_legs.head(_top_n)
 
@@ -7403,7 +7634,9 @@ def main():
                             try:
                                 if pm.log_trade_if_new(_trade, auto_log=True):
                                     _inserted += 1
-                                    record_autolog_logged(row, board="AUTO-LOG")
+                                    record_autolog_logged(
+                                        row, board="AUTO-LOG",
+                                        scan_id=_autolog_scan_id)
                                 else:
                                     _skipped += 1
                             except Exception as _log_exc:
