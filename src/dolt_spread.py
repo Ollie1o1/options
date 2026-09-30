@@ -64,12 +64,19 @@ def _expiry_close_cost(short_strike: float, long_strike: float, side: str,
 
 
 def _pick_credit_spread(chain, asof, short_delta, long_delta, min_dte,
-                        side: str = "put") -> Optional[Tuple[dict, dict]]:
+                        side: str = "put",
+                        width: Optional[float] = None) -> Optional[Tuple[dict, dict]]:
     """Pick (short ~short_delta, long ~long_delta) in the SAME expiry.
 
     ``side="put"`` is a bull put (long wing below the short strike);
     ``side="call"`` is a bear call (long wing above). Deltas are compared on
     absolute value so the same target works for both.
+
+    ``width``, when given, selects the wing by nearest strike to
+    ``short_strike -+ width`` instead of by ``long_delta`` — a setup specified
+    as "$N wide" (e.g. csp_index_only) is a claim about the STRIKE distance,
+    and picking the wing by delta instead would silently test a different
+    spread than the one that was pre-registered.
     """
     legs = [c for c in chain if c.get("type") == side and c.get("delta") is not None
             and c.get("strike") is not None and _dte(asof, c["expiration"]) >= min_dte]
@@ -83,7 +90,11 @@ def _pick_credit_spread(chain, asof, short_delta, long_delta, min_dte,
         wings = [c for c in legs if c["expiration"] == exp and c["strike"] < short["strike"]]
     if not wings:
         return None
-    long = min(wings, key=lambda c: abs(abs(c["delta"]) - long_delta))
+    if width is not None:
+        target = short["strike"] + width if side == "call" else short["strike"] - width
+        long = min(wings, key=lambda c: abs(c["strike"] - target))
+    else:
+        long = min(wings, key=lambda c: abs(abs(c["delta"]) - long_delta))
     return short, long
 
 
@@ -101,7 +112,8 @@ def _leg(chain, strike, expiration, side: str = "put"):
 def simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
                     short_delta=0.25, long_delta=0.10, target_dte=35, db_path=None,
                     commission_per_contract=FALLBACK_COMMISSION_PER_CONTRACT, contract_multiplier=100,
-                    entry_filter=None, side: str = "put") -> Optional[Dict[str, Any]]:
+                    entry_filter=None, side: str = "put",
+                    width: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """Sell one credit spread, manage via canonical spread exits.
 
     ``side="put"`` is a bull put, ``side="call"`` a bear call. Return dict ret
@@ -115,7 +127,8 @@ def simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
     if not chain or ed_actual not in sdates:
         return None
     floor_dte = rules["time_exit_dte"] + 7
-    pick = _pick_credit_spread(chain, ed_actual, short_delta, long_delta, floor_dte, side)
+    pick = _pick_credit_spread(chain, ed_actual, short_delta, long_delta, floor_dte,
+                               side, width=width)
     if not pick:
         return None
     short, long = pick
@@ -206,7 +219,8 @@ def _bucket(reason: str) -> str:
 
 def run_spread_backtest(symbols, dates, short_delta=0.25, long_delta=0.10,
                         db_path=None, config_path="config.json", entry_filter=None,
-                        side: str = "put") -> Dict[str, Any]:
+                        side: str = "put",
+                        width: Optional[float] = None) -> Dict[str, Any]:
     """Backtest credit spreads on real marks. ``side`` selects bull put or bear call."""
     from src import dolt_options as _do
     from src.dolt_stocks import close_history
@@ -235,7 +249,7 @@ def run_spread_backtest(symbols, dates, short_delta=0.25, long_delta=0.10,
                 t = simulate_spread(symbol, entry_date, spot, sdates, spots, rules,
                                     short_delta=short_delta, long_delta=long_delta,
                                     db_path=db_path, commission_per_contract=commission,
-                                    entry_filter=entry_filter, side=side)
+                                    entry_filter=entry_filter, side=side, width=width)
             except _do.DoltRateLimited:
                 return _summarize(trades, partial=True)
             except _do.DoltQueryError:
