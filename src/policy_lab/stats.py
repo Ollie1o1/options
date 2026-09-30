@@ -165,7 +165,7 @@ def cluster_bootstrap_mean_ci_many(
 
     # S[i, k]: policy i's sum of d over rows in cluster k.
     inverse = inverse.astype(np.intp, copy=False)
-    S = np.zeros((len(names), n_clusters), dtype="float64")
+    S: np.ndarray = np.zeros((len(names), n_clusters), dtype="float64")
     for i in range(len(names)):
         np.add.at(S[i], inverse, d_matrix[i])
     # c[k]: row count of cluster k — shared, because every policy's d vector
@@ -255,7 +255,7 @@ def family_wise_p(cluster_means: np.ndarray, n_perm: int = 2000,
     n_clusters = arr.shape[1]
     obs = float(np.abs(arr.mean(axis=1)).max())
     rng = np.random.default_rng(seed)
-    null = np.empty(int(n_perm), dtype="float64")
+    null: np.ndarray = np.empty(int(n_perm), dtype="float64")
     for i in range(int(n_perm)):
         s = rng.choice(np.array([-1.0, 1.0]), size=n_clusters)
         null[i] = np.abs((arr * s).mean(axis=1)).max()

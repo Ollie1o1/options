@@ -389,7 +389,7 @@ def _maxT_pvalues(matrix: np.ndarray, n_perm: int, seed: int) -> np.ndarray:
     n_clusters = matrix.shape[1]
     obs = np.abs(matrix.mean(axis=1))
     rng = np.random.default_rng(seed)
-    null_max = np.empty(int(n_perm), dtype="float64")
+    null_max: np.ndarray = np.empty(int(n_perm), dtype="float64")
     for i in range(int(n_perm)):
         s = rng.choice(np.array([-1.0, 1.0]), size=n_clusters)
         null_max[i] = np.abs((matrix * s).mean(axis=1)).max()

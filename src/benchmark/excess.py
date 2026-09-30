@@ -303,7 +303,7 @@ def concurrent_exposure_daily(trades: Sequence[Trade]) -> "pd.Series":
     min_d = min(date.fromisoformat(t.entry_date) for t in trades)
     max_d = max(date.fromisoformat(t.exit_date) for t in trades)
     n_days = (max_d - min_d).days + 1
-    arr = np.zeros(n_days, dtype="float64")
+    arr: np.ndarray = np.zeros(n_days, dtype="float64")
     for t in trades:
         start = (date.fromisoformat(t.entry_date) - min_d).days
         end = (date.fromisoformat(t.exit_date) - min_d).days  # exclusive
