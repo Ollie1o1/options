@@ -138,6 +138,43 @@ def _quote(bid: Any, ask: Any) -> Optional[Tuple[float, float]]:
     return b, a
 
 
+def _side_strategy(row: Dict[str, Any]) -> str:
+    """The strategy name to decide a single leg's SIDE from.
+
+    A recorded name wins; otherwise it is derived from `mode` by the same
+    `strategy_label_for_mode` that `family_for` uses. This is not a
+    convenience: `candidates.strategy_name` is NULL on every single-leg row by
+    design — the recorder's own comment says discovery boards carry
+    `type='call'|'put'`, an option type and not a strategy, which is precisely
+    why `mode` was added to the schema.
+
+    `legs_for` and `marking_legs` read `strategy_name` alone, so a Premium
+    Selling short put matched no `startswith("Short")` and fell through to the
+    `buy` default: `entry_price_for` returned a NEGATIVE price, a debit paid,
+    for a position that receives a credit. `pnl_pct` branches on exactly that
+    sign, so the position would have been scored as a long put — inverted.
+    Measured against 37,788 real rows on 2026-09-29.
+
+    Returns "" when neither a name nor a mode can decide it. Callers keep the
+    long default there, which is safe only because such a row is never
+    simulated at all: `open_positions` skips any candidate whose `family_for`
+    is None, and `family_for` needs the same mode this does. That invariant is
+    asserted in `tests/test_candidate_marks.py::TestSideFromMode`.
+    """
+    name = (row.get("strategy_name") or "").strip()
+    if name:
+        return name
+    mode, opt_type = row.get("mode"), row.get("opt_type")
+    if not mode or not opt_type:
+        return ""
+    from .trade_analysis import strategy_label_for_mode
+    try:
+        return strategy_label_for_mode(str(mode), opt_type)
+    except Exception:
+        log.debug("side labelling failed", exc_info=True)
+        return ""
+
+
 def legs_for(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """Quoted legs for one recorded candidate, or None if it cannot be priced.
 
@@ -164,7 +201,7 @@ def legs_for(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     q = _quote(row.get("bid"), row.get("ask"))
     if q is None:
         return None
-    side = "sell" if strategy.startswith("Short") else "buy"
+    side = "sell" if _side_strategy(row).startswith("Short") else "buy"
     return [{"bid": q[0], "ask": q[1], "side": side}]
 
 
@@ -198,7 +235,7 @@ def marking_legs(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     raw_type = row.get("opt_type")
     if single is None or not raw_type:
         return None
-    side = "sell" if strategy.startswith("Short") else "buy"
+    side = "sell" if _side_strategy(row).startswith("Short") else "buy"
     return [{"strike": single, "opt_type": str(raw_type).lower(), "side": side}]
 
 
@@ -542,6 +579,21 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
         for row in rows:
             mark = cr._num(row.get("mark"))
             if mark is None:
+                # No mark ever arrived — a leg's strike can vanish from the
+                # chain between scan and mark time (observed 2026-09-17/18,
+                # a Yahoo chain-snapshot inconsistency, not a fetch bug) and
+                # this position would otherwise sit OPEN forever, past its
+                # own expiration, since every exit below is mark-driven.
+                # Expiration must still close it; -1.0 (full loss) is the
+                # convention since there is no real price to exit at.
+                dte = _days_between(today, row.get("expiration") or "")
+                if dte is not None and dte <= 0:
+                    conn.execute(
+                        "UPDATE candidate_positions SET status=?, exit_date=?, "
+                        "exit_price=?, exit_reason=?, pnl_pct=? WHERE rowid=?",
+                        (CLOSED, today, None, "expired_unmarked", -1.0,
+                         row["rid"]))
+                    closed += 1
                 continue
             pnl = pnl_pct(row.get("entry_price"), mark)
             if pnl is None:
