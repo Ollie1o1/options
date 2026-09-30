@@ -3479,6 +3479,35 @@ def enrich_and_score(
     # cannot re-run a scan and get the scan back, and it made two tests compare
     # floats that were never going to be equal.
     #
+    # ~7e-8 IS THE FLOOR, NOT THE SIZE (re-measured 2026-09-30). That figure is
+    # the smooth Black-Scholes path. The SVI surface fit is not smooth in T:
+    # `iv_surface._fit_single_expiry` runs Nelder-Mead on five badly-scaled
+    # parameters over a slice that does not identify them, so a nudge in T of
+    # 1.5e-7 relative — a TENTH OF A SECOND of wall clock on a 9-day expiry —
+    # can land it in a different basin. Measured on one such pair:
+    # (a=-4.357, b=3.147, rho=0.271, sigma=1.440, m=0.438) against
+    # (a=-0.011, b=2.002, rho=0.998, sigma=0.091, m=0.397), fit quality 0.937
+    # vs 0.939 — two different smiles fitting the same data about equally well.
+    # Per-row `iv_surface_residual` then moves by as much as 0.29 — but what
+    # reaches the composite is `iv_mispricing_score`, which IS the slice's
+    # `iv_surface_confidence` (the SVI fit quality), one number for the whole
+    # expiry. It moved ~2.3e-3, and at its 0.05 weight that shifted every row
+    # in the slice by the same ~1.2e-4. Six of forty back-to-back identical
+    # pairs exceeded 1e-4; three flips inspected row by row spread only 5.9e-9
+    # across rows and left the ranking untouched.
+    #
+    # WITHIN one expiry slice, then, this is a uniform shift and cannot
+    # reorder anything. Do NOT read that as harmless board-wide: each slice is
+    # fitted separately, so on a multi-expiry board one slice can flip while
+    # its neighbours do not, and a 1.2e-4 shift applied to some expiries and
+    # not others CAN reorder contracts across them. That case is unmeasured —
+    # the fixture behind these numbers is a single slice.
+    #
+    # So re-scoring the same chain a second later can move a slice by 1.2e-4,
+    # four orders of magnitude above the figure above. It is not the 7e-8
+    # anyone reading this line would have assumed, and it is a property of the
+    # fit, not of the clock. Pin `as_of` whenever two runs are compared.
+    #
     # Not to be confused with the seed bug fixed in 4bceef5, which was worth
     # 2.0e-02 — 2% of the score's range — and was a genuine defect. This one is
     # correct behaviour with an escape hatch for reproducing a result.
