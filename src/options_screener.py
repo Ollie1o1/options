@@ -3488,25 +3488,83 @@ def enrich_and_score(
     # (a=-4.357, b=3.147, rho=0.271, sigma=1.440, m=0.438) against
     # (a=-0.011, b=2.002, rho=0.998, sigma=0.091, m=0.397), fit quality 0.937
     # vs 0.939 — two different smiles fitting the same data about equally well.
-    # Per-row `iv_surface_residual` then moves by as much as 0.29 — but what
-    # reaches the composite is `iv_mispricing_score`, which IS the slice's
-    # `iv_surface_confidence` (the SVI fit quality), one number for the whole
-    # expiry. It moved ~2.3e-3, and at its 0.05 weight that shifted every row
-    # in the slice by the same ~1.2e-4. Six of forty back-to-back identical
-    # pairs exceeded 1e-4; three flips inspected row by row spread only 5.9e-9
-    # across rows and left the ranking untouched.
+    # Per-row `iv_surface_residual` then moves by as much as 0.29.
     #
-    # WITHIN one expiry slice, then, this is a uniform shift and cannot
-    # reorder anything. Do NOT read that as harmless board-wide: each slice is
-    # fitted separately, so on a multi-expiry board one slice can flip while
-    # its neighbours do not, and a 1.2e-4 shift applied to some expiries and
-    # not others CAN reorder contracts across them. That case is unmeasured —
-    # the fixture behind these numbers is a single slice.
+    # THIS COMMENT USED TO SAY the composite only sees that through
+    # `iv_mispricing_score`, "which IS the slice's `iv_surface_confidence`, one
+    # number for the whole expiry", making the shift a UNIFORM ~1.2e-4 that
+    # "cannot reorder anything" within a slice. THAT WAS WRONG, and corrected
+    # 2026-09-30 by reading the call site: see the `iv_mispricing_score` block
+    # above (search "IV surface mispricing score"), which computes
     #
-    # So re-scoring the same chain a second later can move a slice by 1.2e-4,
-    # four orders of magnitude above the figure above. It is not the 7e-8
-    # anyone reading this line would have assumed, and it is a property of the
-    # fit, not of the clock. Pin `as_of` whenever two runs are compared.
+    #     clip(-resid*5, 0, 1) * surf_conf      # buyer
+    #     clip( resid*5, 0, 1) * surf_conf      # Premium Selling
+    #
+    # — a PER-ROW function of the per-row residual, merely SCALED by the
+    # per-slice confidence. A basin flip changes the fitted smile SHAPE, so
+    # every row's residual moves by a different amount.
+    #
+    # Measured on 15 real boards (`data/chain_archive.db`, 2026-09-30) through
+    # this function, scoring one frame at `as_of` and `as_of` + 0.1s:
+    #
+    #   per-slice `iv_surface_confidence` moves  2.6e-5   <- the old model
+    #   per-ROW   `iv_surface_residual`  moves   1.15e-1  <- what actually moves
+    #   WITHIN-slice residual spread             1.79e-1  <- so NOT uniform
+    #
+    # `iv_mispricing_score` swung 62% of its whole [0,1] range on one IWM draw.
+    # 11 of 15 boards reordered. At the LIVE weight (config.json
+    # composite_weights.iv_mispricing = 0.0104, NOT the 0.05 in the scorer
+    # fixture) IWM still drifted 36x its own median adjacent rank gap, with 286
+    # of 645 rows changing rank. Controls: identical `as_of` reproduces exactly
+    # 0.0; zeroing the iv_mispricing weight drops the drift to ~8e-9 (the
+    # Black-Scholes floor), so this term is the cause; row sets are identical
+    # between runs, so it is not a DTE/filter-boundary effect.
+    #
+    # Magnitude is DRAW-DEPENDENT (|d resid| was 2.9e-1 on one draw and 2.9e-3
+    # on the next for the same board) because basin flips are discrete. Never
+    # quote a single draw as the size of this.
+    #
+    # ACCEPTED, NOT FIXED — ruled 2026-09-30, on the one statistic that governs
+    # it. Over 14 independent draws per board at the LIVE weight, deep-rank
+    # churn happened in 38 of 42 draws but TOP-5 and TOP-10 board membership
+    # changed in ZERO of 42. The head of the board — the only part anything acts
+    # on — is stable, and nothing orders the board anyway: every ranking key's
+    # CI contains zero and the board exists to REFUSE, not to rank. Churn in an
+    # order nobody trusts is not worth destabilising every score in the system.
+    #
+    # TWO FIXES WERE BUILT, MEASURED AND REJECTED. Do not retry either without
+    # reading these numbers first.
+    #
+    # 1. MULTI-START — implemented in full (5 fixed starts, deterministic
+    #    lowest-SSE pick) and REVERTED. It does not stabilise the fit at any
+    #    switch margin; it redistributes the instability at 5.2x the runtime:
+    #      bare argmin        max |d resid| 1.149e-01 -> 4.756e-01  (4x WORSE)
+    #      best margin (0.10)                        -> 9.161e-02  (1.25x, noise)
+    #      margin 0.90                               -> 1.149e-01  (= single)
+    #    Mean fit quality barely moved (0.999928 -> 0.999938), which is the
+    #    tell: the five optima are near-equivalent, several reach an EXACTLY
+    #    tied SSE, and an argmin over near-ties is itself discontinuous in the
+    #    data. At the best margin the previously-stable boards got much worse
+    #    (COIN 3.0e-04 -> 2.2e-02, AAPL 2.2e-03 -> 8.8e-02) while GOOGL
+    #    improved — a reshuffle, not a fix. The implementation is NOT in the
+    #    tree; rebuild it from this note if ever needed.
+    #
+    # 2. QUANTIZING the T handed to `_fit_single_expiry` onto a 1-day grid.
+    #    Closes this by ~5 orders of magnitude when `fit_svi_surface` is called
+    #    directly, but only ~32x through this function, and the row sets are
+    #    identical between runs so the gap is NOT a DTE/filter-boundary effect.
+    #    Unexplained — do NOT ship it believing it solves this.
+    #
+    # Guarded by tests/test_svi_drift_board_stability.py, which pins the
+    # per-row model above AND fails if `composite_weights.iv_mispricing` is
+    # raised past 0.02 — at 0.05 a real board's top-10 DID move, so that weight
+    # is the condition under which this ruling must be re-measured.
+    #
+    # So re-scoring the same chain a second later can REORDER THE BOARD, not
+    # merely shift it. It is a property of the fit, not of the clock: SVI over
+    # one slice does not identify five parameters, which is why two very
+    # different parameter vectors score 0.937 vs 0.939 on the same data. Pin
+    # `as_of` whenever two runs are compared.
     #
     # Not to be confused with the seed bug fixed in 4bceef5, which was worth
     # 2.0e-02 — 2% of the score's range — and was a genuine defect. This one is
