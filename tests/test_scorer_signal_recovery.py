@@ -151,9 +151,16 @@ def _run(df: pd.DataFrame, config: dict, as_of=None) -> pd.DataFrame:
     basin — measured (a=-4.357, b=3.147, rho=0.271, sigma=1.440, m=0.438)
     against (a=-0.011, b=2.002, rho=0.998, sigma=0.091, m=0.397), both fitting
     the same data about equally well (quality 0.937 vs 0.939). The two describe
-    different smiles, so `iv_surface_residual` moves ~0.25, `iv_mispricing_score`
-    ~2.3e-3, and at its 0.05 weight that is a UNIFORM ~1.2e-4 shift in every
-    row's `quality_score`.
+    different smiles, so `iv_surface_residual` moves ~0.25.
+
+    This docstring used to add that `iv_mispricing_score` then moves ~2.3e-3 and
+    that at its 0.05 weight the result is a UNIFORM ~1.2e-4 shift in every row.
+    That was WRONG — corrected 2026-09-30. `iv_mispricing_score` is a PER-ROW
+    function of the per-row residual (`clip(±resid*5, 0, 1) * surf_conf`), not
+    the per-slice confidence, so the shift is not uniform even within one slice:
+    measured within-slice residual spread reaches 0.179 on real boards, and 11
+    of 15 real boards REORDER. See `options_screener.py`'s comment at the
+    `as_of` injection point for the full measurement.
 
     Measured 2026-09-30: 6 of 40 back-to-back identical pairs exceeded 1e-4,
     max 1.16e-4. That is what made `test_scores_do_not_move_when_a_macro_event
