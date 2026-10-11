@@ -190,10 +190,44 @@ def _fetch_pulse():
     return panel.pulse_line(agg), headlines
 
 
+def _briefing_symbols(_personal_fn=None, _config_fn=None) -> list:
+    """Single names for the watchlist-earnings panel.
+
+    The personal watchlist wins when it has anything in it. It is a file the
+    user builds from the screener menu and it starts out absent, so on its own
+    the panel was permanently empty; the fallback is the configured watchlists
+    in their declared order. Index and sector ETFs are dropped from the
+    fallback: they have no earnings date, and each would spend one of a
+    handful of per-symbol lookups on a guaranteed blank.
+    """
+    if _personal_fn is None:
+        from src.watchlist import load_watchlist
+        _personal_fn = load_watchlist
+    personal = list(_personal_fn() or [])
+    if personal:
+        return personal
+    lists = (_config_fn or _fetch_config_watchlists)() or {}
+    etfs = set(_TAPE_SYMBOLS) | {str(s).upper() for s in lists.get("sector_etfs") or []}
+    out = []
+    for name, symbols in lists.items():
+        if name == "sector_etfs" or not isinstance(symbols, list):
+            continue
+        for sym in symbols:
+            sym = str(sym).upper()
+            if sym not in etfs and sym not in out:
+                out.append(sym)
+    return out
+
+
+def _fetch_config_watchlists() -> dict:
+    import json as _json
+    with open("config.json") as f:
+        return _json.load(f).get("watchlists") or {}
+
+
 def _fetch_watchlist_earnings(limit=10, horizon_days=7):
     import json as _json
     from datetime import timedelta
-    from src.watchlist import load_watchlist
     from src.earnings_provider import next_earnings_date, resolve_api_key
     try:
         with open("config.json") as f:
@@ -203,7 +237,7 @@ def _fetch_watchlist_earnings(limit=10, horizon_days=7):
     key = resolve_api_key(cfg)
     today = _now_eastern().date()
     out = []
-    for sym in load_watchlist()[:limit]:
+    for sym in _briefing_symbols()[:limit]:
         try:
             dt = next_earnings_date(sym, api_key=key)
         except Exception:
@@ -296,6 +330,10 @@ def _fetch_insider(limit=6):
     from src.pick_context import insider_summary
     from src.watchlist import load_watchlist
     out = []
+    # Personal watchlist only, deliberately NOT _briefing_symbols(): a cold
+    # insider lookup is up to ten EDGAR fetches per name (measured 20s for six
+    # on 2026-10-11), which is the whole build budget and would take the UOA
+    # and outlook halves of this panel down with it every morning.
     for sym in load_watchlist()[:limit]:
         try:
             s = insider_summary(sym, fetch=True)
