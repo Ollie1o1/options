@@ -498,7 +498,7 @@ def _leg_strike(value: Any) -> Optional[float]:
         return None
     return f
 
-_SCHEMA_VERSION = 24
+_SCHEMA_VERSION = 25
 _MIGRATIONS = {
     1: [],
     2: ["ALTER TABLE trades ADD COLUMN pnl_usd REAL"],
@@ -799,6 +799,17 @@ _MIGRATIONS = {
         # reads this column yet. It exists so a future test of "does clear beat
         # unknown" going forward has data to run on.
         "ALTER TABLE trades ADD COLUMN earnings_state TEXT",
+    ],
+    25: [
+        # Who opened the trade: 'auto' when an automated feeder wrote it (the
+        # caller passed auto_log=True), 'manual' when the operator logged it
+        # from an interactive menu. Nothing separated the two before, so the
+        # operator's own picks could not be measured apart from the
+        # auto-logger's. NULL means the row predates this column and the
+        # answer was never recorded — it is NOT 'manual', and there is no
+        # honest backfill: the flag was discarded at insert time. This is
+        # instrumentation only; nothing gates or sizes on it.
+        "ALTER TABLE trades ADD COLUMN origin TEXT",
     ],
 }
 
@@ -1693,7 +1704,7 @@ class PaperManager:
             short_call_bid_entry, short_call_ask_entry, long_call_bid_entry, long_call_ask_entry,
             short_put_bid_exit, short_put_ask_exit, long_put_bid_exit, long_put_ask_exit,
             short_call_bid_exit, short_call_ask_exit, long_call_bid_exit, long_call_ask_exit,
-            earnings_state
+            earnings_state, origin
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1711,7 +1722,7 @@ class PaperManager:
             ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?,
-            ?
+            ?, ?
         )
         """
 
@@ -1819,6 +1830,7 @@ class PaperManager:
             _float_or_none("short_call_bid_exit"), _float_or_none("short_call_ask_exit"),
             _float_or_none("long_call_bid_exit"), _float_or_none("long_call_ask_exit"),
             trade_dict.get("earnings_state"),
+            "auto" if trade_dict.get("auto_log") else "manual",
         )
 
         with self._get_connection() as conn:
