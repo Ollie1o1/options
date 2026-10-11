@@ -138,3 +138,51 @@ class TestGateZoneRefusal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMoversZone(unittest.TestCase):
+    def _with_movers(self):
+        d = _fixture()
+        d["panels"]["movers"] = {
+            "scan_date": "2026-10-09", "n_symbols": 90, "n_priced": 88,
+            "base_rate": "Base rate: 558 shocks, 51% higher 20 sessions later.",
+            "rows": [
+                {"sym": "MRNA", "last": 225.0, "chg_1d_pct": 14.2, "chg_20d_pct": 56.5,
+                 "vol_mult": 1.6, "flag": "20d high", "shock": None,
+                 "passing": [{"strategy": "Long Call", "n": 2}]},
+                {"sym": "XYZ", "last": 40.0, "chg_1d_pct": -1.0, "chg_20d_pct": -22.0,
+                 "vol_mult": 0.9, "flag": "shock",
+                 "shock": {"days_ago": 2, "move_pct": -21.5, "vol_mult": 7.2},
+                 "passing": []},
+            ]}
+        return d
+
+    def test_rows_base_rate_and_passers_render(self):
+        html = R.render(self._with_movers())
+        self.assertIn("Movers", html)
+        self.assertIn("MRNA", html)
+        self.assertIn("Long Call ×2", html)
+        self.assertIn("-21.5%", html)
+        self.assertIn("7.2×", html)
+        self.assertIn("558 shocks", html)
+
+    def test_shock_with_a_passer_reaches_the_callout_but_a_high_does_not(self):
+        d = self._with_movers()
+        self.assertNotIn("<b>Shock:</b>", R.render(d))  # XYZ has no passer; MRNA is only a high
+        d["panels"]["movers"]["rows"][1]["passing"] = [{"strategy": "Bull Put", "n": 1}]
+        self.assertIn("<b>Shock:</b> XYZ", R.render(d))
+
+    def test_empty_movers_says_so(self):
+        d = self._with_movers()
+        d["panels"]["movers"]["rows"] = []
+        self.assertIn("No shocks or new 20-day highs", R.render(d))
+
+    def test_sidecar_without_the_panel_renders_exactly_as_before(self):
+        # Sidecars written before this panel existed must rebuild byte-identical.
+        html = R.render(_fixture())
+        self.assertNotIn("Movers", html)
+
+    def test_failed_panel_renders_placeholder(self):
+        d = _fixture()
+        d["panels"]["movers"] = None
+        self.assertIn("Movers unavailable this morning", R.render(d))

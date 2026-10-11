@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover
 
 SCHEMA_VERSION = 1
 PANEL_IDS = ("health", "market", "vol", "macro_events", "signals",
-             "portfolio", "gate", "notes")
+             "portfolio", "gate", "movers", "notes")
 
 # Static caveats that must appear on every page: the honesty footer.
 _STANDING_NOTES = [
@@ -368,12 +368,134 @@ def _panel_macro_events(_calendar_fn=None, _pulse_fn=None, _earnings_fn=None) ->
     return out
 
 
+# A shock is the event the 2026-10-10 post-shock study measured: a close-to-close
+# move of at least 15% on at least 5x the prior 20 sessions' mean volume. The
+# thresholds are that study's, so the base rate printed beside the panel
+# describes exactly the rows it flags; change one and the note stops being true.
+_SHOCK_MOVE = 0.15
+_SHOCK_VOL_MULT = 5.0
+_SHOCK_LOOKBACK = 20      # sessions in the volume mean and in the "20d high"
+_SHOCK_LISTED_FOR = 5     # sessions a shock stays on the panel
+_MOVERS_MAX_ROWS = 10
+_SCAN_WINDOW_DAYS = 7     # symbols the scans reached this recently are priced
+
+# Static for the same reason as _CRYPTO_NOTE: it restates a finished measurement.
+_SHOCK_BASE_RATE = (
+    "Base rate: 558 up-shocks of this size (S&P 1500, 2019-2026) — 51% were "
+    "higher 20 sessions later; mean return against SPY and the stock's own "
+    "drift -0.4% (95% CI -2.2 to +1.2). A mover is not a signal.")
+
+
+def _fetch_recent_scan(db_path=None) -> dict:
+    """Symbols the scans reached lately, and what passed the gate on the latest
+    scan day. Read-only: the briefing must never create or migrate this DB."""
+    import sqlite3
+    from datetime import timedelta
+    from src.candidate_record import _resolve_db_path
+    conn = sqlite3.connect(f"file:{_resolve_db_path(db_path)}?mode=ro", uri=True,
+                           timeout=5.0)
+    try:
+        latest = conn.execute("SELECT MAX(ts) FROM candidates").fetchone()[0]
+        if not latest:
+            return {"scan_date": None, "symbols": [], "passing": {}}
+        scan_date = latest[:10]
+        since = (datetime.strptime(scan_date, "%Y-%m-%d")
+                 - timedelta(days=_SCAN_WINDOW_DAYS)).strftime("%Y-%m-%d")
+        symbols = [r[0] for r in conn.execute(
+            "SELECT DISTINCT symbol FROM candidates WHERE ts >= ? AND symbol <> '' "
+            "ORDER BY symbol", (since,))]
+        # One contract appears on several boards; count it once. Rows with a
+        # blank strategy_name are the single-leg boards' copies of the same
+        # contracts, so they are skipped rather than shown as unnamed.
+        passing = {}
+        for sym, strat, n in conn.execute(
+                "SELECT symbol, strategy_name, COUNT(DISTINCT contract_key) "
+                "FROM candidates WHERE substr(ts, 1, 10) = ? AND gate_passed = 1 "
+                "AND strategy_name <> '' GROUP BY symbol, strategy_name "
+                "ORDER BY symbol, strategy_name", (scan_date,)):
+            passing.setdefault(sym, []).append({"strategy": strat, "n": n})
+        return {"scan_date": scan_date, "symbols": symbols, "passing": passing}
+    finally:
+        conn.close()
+
+
+def _fetch_mover_bars(symbols) -> dict:
+    """{sym: [(close, volume), ...]} oldest first, one batched download."""
+    import warnings
+    import yfinance as yf
+    symbols = list(symbols)
+    if not symbols:
+        return {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        data = yf.download(symbols, period="3mo", auto_adjust=True, progress=False,
+                           threads=True, group_by="ticker")
+    out = {}
+    for sym in symbols:
+        try:
+            df = data[sym][["Close", "Volume"]].dropna()
+        except KeyError:
+            continue
+        if len(df):
+            out[sym] = [(float(c), float(v)) for c, v in
+                        zip(df["Close"].tolist(), df["Volume"].tolist())]
+    return out
+
+
+def _mover_rows(bars_by_sym, passing) -> list:
+    """Names with a recent shock or a new 20-day closing high, shocks first."""
+    rows = []
+    for sym, bars in bars_by_sym.items():
+        if len(bars) < _SHOCK_LOOKBACK + 2:
+            continue
+        closes = [b[0] for b in bars]
+        vols = [b[1] for b in bars]
+        last = len(bars) - 1
+
+        def vol_mult(i):
+            base = sum(vols[i - _SHOCK_LOOKBACK:i]) / _SHOCK_LOOKBACK
+            return vols[i] / base if base > 0 else None
+
+        shock = None
+        for i in range(last, max(last - _SHOCK_LISTED_FOR, _SHOCK_LOOKBACK), -1):
+            move, mult = closes[i] / closes[i - 1] - 1.0, vol_mult(i)
+            if abs(move) >= _SHOCK_MOVE and mult is not None and mult >= _SHOCK_VOL_MULT:
+                shock = {"days_ago": last - i, "move_pct": move * 100.0, "vol_mult": mult}
+                break
+        is_high = closes[last] > max(closes[last - _SHOCK_LOOKBACK:last])
+        if shock is None and not is_high:
+            continue
+        rows.append({
+            "sym": sym, "last": closes[last],
+            "chg_1d_pct": (closes[last] / closes[last - 1] - 1.0) * 100.0,
+            "chg_20d_pct": (closes[last] / closes[last - _SHOCK_LOOKBACK] - 1.0) * 100.0,
+            "vol_mult": vol_mult(last),
+            "flag": "shock" if shock else "20d high",
+            "shock": shock,
+            "passing": list(passing.get(sym) or []),
+        })
+    rows.sort(key=lambda r: (
+        (0, r["shock"]["days_ago"], -abs(r["shock"]["move_pct"])) if r["shock"]
+        else (1, -r["chg_20d_pct"], 0.0), r["sym"]))
+    return rows[:_MOVERS_MAX_ROWS]
+
+
+def _panel_movers(_scan_fn=None, _bars_fn=None) -> dict:
+    scan = (_scan_fn or _fetch_recent_scan)()
+    symbols = list(scan.get("symbols") or [])
+    bars = (_bars_fn or _fetch_mover_bars)(symbols)
+    return {"rows": _mover_rows(bars, scan.get("passing") or {}),
+            "scan_date": scan.get("scan_date"),
+            "n_symbols": len(symbols), "n_priced": len(bars),
+            "base_rate": _SHOCK_BASE_RATE}
+
+
 def _default_fetchers():
     # Each entry is (panel_id, zero-arg callable); grown panel by panel.
     return [("health", _panel_health), ("market", _panel_market),
             ("vol", _panel_vol), ("macro_events", _panel_macro_events),
             ("signals", _panel_signals), ("portfolio", _panel_portfolio),
-            ("gate", _panel_gate)]
+            ("gate", _panel_gate), ("movers", _panel_movers)]
 
 
 def build(now=None, slow=True, budget_s=20.0, _fetchers=None) -> dict:
