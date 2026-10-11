@@ -193,3 +193,92 @@ class TestPortfolioPanel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _bars(closes, vols=None):
+    vols = vols or [1_000_000] * len(closes)
+    return list(zip(closes, vols))
+
+
+class TestMoversPanel(unittest.TestCase):
+    def test_shock_needs_both_the_move_and_the_volume(self):
+        flat = [100.0] * 24
+        # +20% on 6x volume: a shock
+        shock = _bars(flat + [120.0], [1_000_000] * 24 + [6_000_000])
+        # +20% on ordinary volume: a new 20-day high, but NOT a shock
+        quiet = _bars(flat + [120.0])
+        rows = {r["sym"]: r for r in collect._mover_rows({"AAA": shock, "BBB": quiet}, {})}
+        self.assertEqual(rows["AAA"]["flag"], "shock")
+        self.assertEqual(rows["AAA"]["shock"]["days_ago"], 0)
+        self.assertAlmostEqual(rows["AAA"]["shock"]["move_pct"], 20.0)
+        self.assertAlmostEqual(rows["AAA"]["shock"]["vol_mult"], 6.0)
+        self.assertEqual(rows["BBB"]["flag"], "20d high")
+        self.assertIsNone(rows["BBB"]["shock"])
+
+    def test_shock_stays_listed_for_five_sessions_then_drops(self):
+        base, v = [100.0] * 24, [1_000_000] * 24
+        recent = _bars(base + [80.0] + [80.0] * 4, v + [6_000_000] + [1_000_000] * 4)
+        stale = _bars(base + [80.0] + [80.0] * 5, v + [6_000_000] + [1_000_000] * 5)
+        rows = {r["sym"]: r for r in collect._mover_rows({"NEW": recent, "OLD": stale}, {})}
+        self.assertEqual(rows["NEW"]["shock"]["days_ago"], 4)
+        self.assertAlmostEqual(rows["NEW"]["shock"]["move_pct"], -20.0)
+        self.assertNotIn("OLD", rows)  # down 20% and flat since: neither shock nor high
+
+    def test_quiet_names_and_short_histories_are_left_out(self):
+        rows = collect._mover_rows({"FLAT": _bars([100.0] * 30),
+                                    "THIN": _bars([100.0, 130.0])}, {})
+        self.assertEqual(rows, [])
+
+    def test_shocks_sort_ahead_of_highs_and_rows_are_capped(self):
+        bars = {f"H{i:02d}": _bars([100.0] * 24 + [101.0 + i]) for i in range(15)}
+        bars["SHK"] = _bars([100.0] * 24 + [118.0], [1_000_000] * 24 + [9_000_000])
+        rows = collect._mover_rows(bars, {})
+        self.assertEqual(rows[0]["sym"], "SHK")
+        self.assertEqual(len(rows), collect._MOVERS_MAX_ROWS)
+        self.assertEqual(rows[1]["sym"], "H14")  # biggest 20-day gain among the highs
+
+    def test_passing_candidates_ride_along(self):
+        bars = {"AAA": _bars([100.0] * 24 + [120.0], [1_000_000] * 24 + [6_000_000])}
+        rows = collect._mover_rows(bars, {"AAA": [{"strategy": "Long Call", "n": 2}]})
+        self.assertEqual(rows[0]["passing"], [{"strategy": "Long Call", "n": 2}])
+
+    def test_panel_shapes_injected_and_carries_the_base_rate(self):
+        scan = {"scan_date": "2026-10-09", "symbols": ["AAA", "ZZZ"],
+                "passing": {"AAA": [{"strategy": "Bull Put", "n": 1}]}}
+        seen = {}
+
+        def bars_fn(symbols):
+            seen["symbols"] = list(symbols)
+            return {"AAA": _bars([100.0] * 24 + [120.0], [1_000_000] * 24 + [6_000_000])}
+
+        p = collect._panel_movers(_scan_fn=lambda: scan, _bars_fn=bars_fn)
+        self.assertEqual(seen["symbols"], ["AAA", "ZZZ"])
+        self.assertEqual(p["scan_date"], "2026-10-09")
+        self.assertEqual(p["n_priced"], 1)
+        self.assertEqual(p["n_symbols"], 2)
+        self.assertEqual(p["rows"][0]["sym"], "AAA")
+        self.assertIn("558", p["base_rate"])
+
+    def test_recent_scan_reads_passers_from_a_candidate_db(self):
+        import sqlite3
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "candidates.db")
+            conn = sqlite3.connect(path)
+            conn.execute("create table candidates (ts text, symbol text, strategy_name text,"
+                         " contract_key text, gate_passed integer)")
+            conn.executemany("insert into candidates values (?,?,?,?,?)", [
+                ("2026-10-09T15:00:00", "AAA", "Long Call", "k1", 1),
+                ("2026-10-09T15:00:00", "AAA", "Long Call", "k1", 1),   # same contract, second board
+                ("2026-10-09T15:00:00", "AAA", "Long Call", "k2", 1),
+                ("2026-10-09T15:00:00", "AAA", "Bull Put", "k3", 0),    # refused
+                ("2026-10-09T15:00:00", "AAA", "", "k4", 1),            # unnamed single-leg board
+                ("2026-10-08T15:00:00", "BBB", "Bull Put", "k5", 1),    # passed, but not latest day
+                ("2026-09-01T15:00:00", "OLD", "Bull Put", "k6", 1),    # outside the window
+            ])
+            conn.commit()
+            conn.close()
+            scan = collect._fetch_recent_scan(db_path=path)
+        self.assertEqual(scan["scan_date"], "2026-10-09")
+        self.assertEqual(scan["symbols"], ["AAA", "BBB"])
+        self.assertEqual(scan["passing"], {"AAA": [{"strategy": "Long Call", "n": 2}]})

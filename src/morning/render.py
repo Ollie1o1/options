@@ -17,7 +17,7 @@ _ZONE_TITLES = {
     "health": "Automation Health", "market": "Market State",
     "vol": "Vol Intelligence", "macro_events": "Macro & Events",
     "signals": "Signals", "portfolio": "Portfolio",
-    "gate": "Gate & Evidence", "notes": "Desk Notes",
+    "gate": "Gate & Evidence", "movers": "Movers", "notes": "Desk Notes",
 }
 
 # Morning-only styling on top of the kit sheet. The zone markup keeps its
@@ -211,12 +211,27 @@ def _takeaways(panels) -> list:
     s = panels.get("signals") or {}
     for i in (s.get("insider") or [])[:1]:
         out.append(f"<b>Insider:</b> {_esc(i.get('sym'))} {_esc(i.get('summary'))}.")
+    for r in (panels.get("movers") or {}).get("rows") or []:
+        # Only a shock the system also has a passing contract on earns a line:
+        # a move alone has no measured edge, and a 20-day high is routine.
+        sh = r.get("shock")
+        if sh and r.get("passing"):
+            out.append(f"<b>Shock:</b> {_esc(r.get('sym'))} "
+                       f"<span class='{_sign_cls(sh.get('move_pct'))}'>"
+                       f"{_num(sh.get('move_pct'), '{:+.1f}%')}</span> on "
+                       f"{_num(sh.get('vol_mult'), '{:.1f}×')} volume — "
+                       f"{_esc(_passing_text(r))} passing the gate.")
     g = panels.get("gate") or {}
     if g:
         out.append(f"<b>Gate:</b> {_esc(g.get('gate_decision', '?'))} at "
                    f"{_esc(g.get('cohort_n') or 0)}/{_esc(g.get('target_n') or 50)} "
                    "cohort trades — <b>real money stays OFF</b>.")
     return out
+
+
+def _passing_text(row) -> str:
+    return ", ".join(f"{p.get('strategy')} ×{p.get('n')}"
+                     for p in row.get("passing") or [])
 
 
 # ── KPI strip ────────────────────────────────────────────────────────────────
@@ -461,6 +476,38 @@ def _zone_gate(p) -> str:
             f"<p><b>Real money is OFF</b> until the gate fires.</p>")
 
 
+def _zone_movers(p) -> str:
+    rows = []
+    for r in p.get("rows") or []:
+        sh = r.get("shock")
+        if sh:
+            ago = sh.get("days_ago") or 0
+            when = "last session" if ago == 0 else f"{ago} session(s) ago"
+            flag = (f"<span class='warn'>shock</span> "
+                    f"<span class='{_sign_cls(sh.get('move_pct'))}'>"
+                    f"{_num(sh.get('move_pct'), '{:+.1f}%')}</span> on "
+                    f"{_num(sh.get('vol_mult'), '{:.1f}×')} vol, {when}")
+        else:
+            flag = "<span class='muted'>new 20d high</span>"
+        rows.append([(f"<b>{_esc(r.get('sym'))}</b>", ""),
+                     (_num(r.get("last")), ""),
+                     _heat_td(r.get("chg_1d_pct"), 10.0,
+                              _num(r.get("chg_1d_pct"), "{:+.1f}%")),
+                     _heat_td(r.get("chg_20d_pct"), 40.0,
+                              _num(r.get("chg_20d_pct"), "{:+.1f}%")),
+                     (_num(r.get("vol_mult"), "{:.1f}×"), "muted"),
+                     (flag, ""),
+                     (_esc(_passing_text(r)) or "—", "" if r.get("passing") else "muted")])
+    scope = (f"<p class='muted'>{_esc(p.get('n_priced'))} of "
+             f"{_esc(p.get('n_symbols'))} recently scanned symbols priced · "
+             f"gate column is the {_esc(p.get('scan_date') or '—')} scan · "
+             "passing the gate is not the same as being auto-logged</p>")
+    table = (_table(("symbol", "last", "1d", "20d", "vol vs 20d", "why listed",
+                     "passing the gate"), rows)
+             if rows else "<p class='muted'>No shocks or new 20-day highs.</p>")
+    return f"{table}{scope}<p class='note'>{_esc(p.get('base_rate'))}</p>"
+
+
 def _zone_notes(p) -> str:
     return "".join(f"<p class='note'>• {_esc(n)}</p>" for n in (p or []))
 
@@ -511,6 +558,10 @@ def render(data: dict) -> str:
                 + _zone("vol", panels.get("vol"), _zone_vol, anchor="vol")
                 + _zone("macro_events", panels.get("macro_events"), _zone_macro,
                         anchor="macro")
+                # Absent (not None) on sidecars written before the panel existed:
+                # those must keep rebuilding to identical bytes.
+                + (_zone("movers", panels.get("movers"), _zone_movers, span=12,
+                         anchor="movers") if "movers" in panels else "")
                 + _zone("gate", panels.get("gate"), _zone_gate, span=12,
                         anchor="gate")
                 + "</div>")
