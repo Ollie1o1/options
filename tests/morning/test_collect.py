@@ -282,3 +282,25 @@ class TestMoversPanel(unittest.TestCase):
         self.assertEqual(scan["scan_date"], "2026-10-09")
         self.assertEqual(scan["symbols"], ["AAA", "BBB"])
         self.assertEqual(scan["passing"], {"AAA": [{"strategy": "Long Call", "n": 2}]})
+
+
+class TestBriefingSymbols(unittest.TestCase):
+    _CONFIG = {"liquid_large_cap": ["SPY", "QQQ", "aapl", "MSFT"],
+               "sector_etfs": ["XLK", "XLF"],
+               "high_iv": ["TSLA", "MSFT", "XLK"],
+               "_note": "not a list"}
+
+    def test_personal_watchlist_wins_when_present(self):
+        out = collect._briefing_symbols(_personal_fn=lambda: ["GME", "SPY"],
+                                        _config_fn=lambda: self._CONFIG)
+        self.assertEqual(out, ["GME", "SPY"])  # the user's own list is taken as written
+
+    def test_empty_personal_watchlist_falls_back_to_config_single_names(self):
+        out = collect._briefing_symbols(_personal_fn=lambda: [],
+                                        _config_fn=lambda: self._CONFIG)
+        # declared order, deduped, upper-cased; index and sector ETFs dropped
+        self.assertEqual(out, ["AAPL", "MSFT", "TSLA"])
+
+    def test_no_config_watchlists_is_empty_not_fatal(self):
+        self.assertEqual(collect._briefing_symbols(_personal_fn=lambda: [],
+                                                   _config_fn=lambda: {}), [])
