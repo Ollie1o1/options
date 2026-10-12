@@ -94,6 +94,11 @@ class ThrottleTest(unittest.TestCase):
         self.assertFalse(ca.due_chain_archive({}, "2026-06-10", weekday=3, hhmm=1000))
         self.assertFalse(ca.due_chain_archive({}, "2026-06-13", weekday=6, hhmm=1405))
 
+    def test_not_due_on_a_market_holiday(self):
+        # Labor Day 2026 was a Monday: the archive ran and stored closed-market
+        # quotes as a session (528 of 13,549 contracts matched Friday's).
+        self.assertFalse(ca.due_chain_archive({}, "2026-09-07", weekday=1, hhmm=1405))
+
 
 if __name__ == "__main__":
     unittest.main()

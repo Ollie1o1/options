@@ -129,3 +129,22 @@ class HealthLinesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOverallSeverity(unittest.TestCase):
+    """`--health` prints several sections; the summary must cover all of them."""
+
+    def test_the_worst_tag_on_any_line_wins(self):
+        from src.maintenance_health import overall_severity
+        lines = ["  auto-log   last 2026-10-12   [OK]",
+                 "  cand marks 10 marks / 4 open   [CRITICAL]",
+                 "  alloc drift 30 of 30   [WARN]"]
+        self.assertEqual(overall_severity(lines), "CRITICAL")
+
+    def test_all_ok_is_ok(self):
+        from src.maintenance_health import overall_severity
+        self.assertEqual(overall_severity(["  a [OK]", "  detail line"]), "OK")
+
+    def test_an_unknown_tag_is_ignored(self):
+        from src.maintenance_health import overall_severity
+        self.assertEqual(overall_severity(["  a [OK]", "  b [n/a]"]), "OK")
