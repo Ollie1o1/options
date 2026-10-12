@@ -976,3 +976,39 @@ class TestWatchIsInjectableFromHeadless(unittest.TestCase):
                 walk_forward_fn=lambda **k: None,
                 watch_fn=lambda db: calls.append(db) or {"open": 0})
         self.assertEqual(len(calls), 1)
+
+
+class TestPickMarksHook(unittest.TestCase):
+    """The daily run quotes the operator's own picks, once per day."""
+
+    def _run(self, d, **kw):
+        db = os.path.join(d, "t.db")
+        if not os.path.exists(db):
+            TestOrchestrator()._db(db)
+        return db, m.run_startup_maintenance(
+            db_path=db, phase1_start="2026-05-27",
+            state_path=os.path.join(d, "state.json"),
+            now=datetime(2026, 6, 4, 14, 30), runner=lambda cmd: 0,
+            checkpoint_fn=lambda **k: None, track_record_fn=lambda **k: None,
+            chain_archive_fn=lambda: 0, walk_forward_fn=lambda **k: None,
+            watch_fn=lambda db: None, **kw)
+
+    def test_marks_the_picks_in_the_ledger_it_was_given(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("src.candidate_marks.mark_candidates",
+                           return_value={}), \
+                mock.patch("src.own_picks.record_pick_marks",
+                           return_value=2) as rec:
+            db, summary = self._run(d)
+            rec.assert_called_once_with(ledger_path=db)
+            self.assertIn("pick-marks:2", summary["ran"])
+
+    def test_runs_once_per_day(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("src.candidate_marks.mark_candidates",
+                           return_value={}), \
+                mock.patch("src.own_picks.record_pick_marks",
+                           return_value=0) as rec:
+            self._run(d)
+            self._run(d)
+            self.assertEqual(rec.call_count, 1)

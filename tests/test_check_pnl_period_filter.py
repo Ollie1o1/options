@@ -164,3 +164,22 @@ class EmptyResultPathTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOwnPicksPanel(unittest.TestCase):
+    """The portfolio view prints the own-picks panel for the ledger it shows."""
+
+    COLUMNS = EmptyResultPathTest.COLUMNS
+    _db = EmptyResultPathTest._db
+
+    def test_the_panel_is_rendered_from_the_viewed_ledger(self):
+        path = self._db([(1, "2026-09-01", "OPEN")])
+        out = io.StringIO()
+        with mock.patch.object(check_pnl, "DB_PATH", path), \
+                mock.patch("src.paper_manager.PaperManager"), \
+                mock.patch("src.own_picks.panel_lines",
+                           return_value=["OWN-PICKS-SENTINEL"]) as panel, \
+                redirect_stdout(out):
+            check_pnl.view_portfolio(period=None)
+        panel.assert_called_once_with(ledger_path=path)
+        self.assertIn("OWN-PICKS-SENTINEL", out.getvalue())
