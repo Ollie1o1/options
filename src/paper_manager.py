@@ -1071,8 +1071,14 @@ class PaperManager:
         chains: Dict[Tuple[str, str], dict] = {}
         for r in rows:
             ticker, expiration = r.get("ticker"), r.get("expiration")
-            strike, opt_type = r.get("strike"), str(r.get("type") or "").lower()
-            if not ticker or not expiration or strike is None or not opt_type:
+            if not ticker or not expiration:
+                continue
+            # Every leg, not the row's own strike/type. On a spread row those
+            # two columns are the SHORT leg, so quoting them alone recorded the
+            # short option's price as the spread's: a $10-wide Bull Put showed
+            # a post-exit price of 18.80.
+            legs = _legs_for_row(r)
+            if not legs:
                 continue
             key = (ticker, expiration)
             if key not in chains:
@@ -1080,8 +1086,22 @@ class PaperManager:
                     chains[key] = self._fetch_chain_quotes(ticker, expiration)
                 except Exception:
                     chains[key] = {}
-            bid, ask = chains[key].get((round(float(strike), 4), opt_type), (None, None))
-            mid = _mid_from_quote(bid, ask)
+            # Every leg or none: a structure priced from one real quote and
+            # one missing one is not a price.
+            net: Optional[float] = 0.0
+            for leg_strike, leg_type, qty in legs:
+                bid, ask = chains[key].get(
+                    (round(float(leg_strike), 4), leg_type), (None, None))
+                leg_mid = _mid_from_quote(bid, ask)
+                if leg_mid is None or net is None:
+                    net = None
+                    break
+                net += qty * leg_mid
+            if net is None:
+                continue
+            # A credit structure nets negative (it is closed by paying); the
+            # ledger stores every price as a positive magnitude.
+            mid = abs(net)
             if mid and self.shadow_mark(r["entry_id"], mid, today):
                 marked += 1
         return marked

@@ -203,3 +203,74 @@ class ShadowedMarksAccrueTest(unittest.TestCase):
         # Stopped out at 2.50 from a 5.00 entry (-50%); later worth 12.50 (+150%).
         self.assertAlmostEqual(r["exit_price"], 2.50)
         self.assertAlmostEqual(r["post_exit_max_price"] / r["entry_price"] - 1, 1.50)
+
+
+class StructureShadowMarkTest(unittest.TestCase):
+    """A spread's post-exit mark is the price of the spread, not of one leg.
+
+    The updater quoted only the row's `strike`/`type`, which on a spread row is
+    the short leg. Every Bull Put in the live ledger carried its short put's
+    price as its post-exit price: entry 1038, a $10-wide spread, shows 18.80.
+    """
+
+    TODAY = "2026-09-01"
+
+    def setUp(self):
+        self.db = os.path.join(tempfile.mkdtemp(), "pm.db")
+        self.pm = PaperManager(db_path=self.db)
+
+    def _insert(self, sql_cols, sql_vals):
+        conn = sqlite3.connect(self.db)
+        conn.execute(f"INSERT INTO trades ({sql_cols}) VALUES ({sql_vals})")
+        conn.commit(); conn.close()
+
+    def _last(self, entry_id=1):
+        conn = sqlite3.connect(self.db)
+        v = conn.execute("SELECT post_exit_last_price FROM trades WHERE "
+                         "entry_id=?", (entry_id,)).fetchone()[0]
+        conn.close(); return v
+
+    def _bull_put(self):
+        self._insert(
+            "entry_id, ticker, expiration, strike, type, entry_price, "
+            "strategy_name, status, exit_price, exit_reason, shadow_until, "
+            "long_strike, spread_width, net_credit",
+            "1,'AAPL','2026-12-18',100.0,'put',1.50,'Bull Put','CLOSED',1.20,"
+            "'Time Exit (18d to expiry)','2026-12-18',95.0,5.0,1.50")
+
+    def test_a_spread_is_marked_at_its_net_price(self):
+        self._bull_put()
+        self.pm._fetch_chain_quotes = lambda t, e: {
+            (100.0, "put"): (3.00, 3.20), (95.0, "put"): (1.00, 1.20)}
+        self.assertEqual(self.pm.update_shadow_marks(today=self.TODAY), 1)
+        self.assertAlmostEqual(self._last(), 2.00)
+
+    def test_a_spread_missing_one_leg_is_not_marked(self):
+        self._bull_put()
+        self.pm._fetch_chain_quotes = lambda t, e: {(100.0, "put"): (3.00, 3.20)}
+        self.assertEqual(self.pm.update_shadow_marks(today=self.TODAY), 0)
+        self.assertIsNone(self._last())
+
+    def test_an_iron_condor_is_marked_across_all_four_legs(self):
+        self._insert(
+            "entry_id, ticker, expiration, strike, type, entry_price, "
+            "strategy_name, status, exit_price, exit_reason, shadow_until, "
+            "short_put_strike, long_put_strike, short_call_strike, "
+            "long_call_strike",
+            "1,'AAPL','2026-12-18',100.0,'put',2.00,'Iron Condor','CLOSED',"
+            "1.00,'Take Profit','2026-12-18',100.0,95.0,120.0,125.0")
+        self.pm._fetch_chain_quotes = lambda t, e: {
+            (100.0, "put"): (1.40, 1.60), (95.0, "put"): (0.40, 0.60),
+            (120.0, "call"): (1.10, 1.30), (125.0, "call"): (0.30, 0.50)}
+        self.assertEqual(self.pm.update_shadow_marks(today=self.TODAY), 1)
+        self.assertAlmostEqual(self._last(), 1.80)
+
+    def test_a_single_leg_is_still_marked_at_its_own_mid(self):
+        self._insert(
+            "entry_id, ticker, expiration, strike, type, entry_price, "
+            "strategy_name, status, exit_price, exit_reason, shadow_until",
+            "1,'AAPL','2026-12-18',200.0,'call',5.00,'Long Call','CLOSED',"
+            "2.50,'Stop Loss (-50%)','2026-12-18'")
+        self.pm._fetch_chain_quotes = lambda t, e: {(200.0, "call"): (4.00, 4.40)}
+        self.assertEqual(self.pm.update_shadow_marks(today=self.TODAY), 1)
+        self.assertAlmostEqual(self._last(), 4.20)
