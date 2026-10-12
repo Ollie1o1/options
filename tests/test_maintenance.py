@@ -558,6 +558,29 @@ class TestChainArchiveJob(unittest.TestCase):
             m.run_startup_maintenance(**kw)     # same day: throttled
             self.assertEqual(len(hits), 1)
 
+    def test_a_run_that_archives_nothing_is_retried_the_same_day(self):
+        # 2026-10-09: the feed failed for every symbol, the job returned 0
+        # rows, the day was stamped done, and that session was never archived.
+        results = [0, 7]
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "t.db"); self._db(db)
+            sp = os.path.join(d, "state.json")
+            kw = dict(db_path=db, phase1_start="2026-05-27", state_path=sp,
+                      now=datetime(2026, 6, 4, 16, 0),
+                      runner=lambda cmd: 0,
+                      checkpoint_fn=lambda **k: None,
+                      track_record_fn=lambda **k: None,
+                      chain_archive_fn=lambda: results.pop(0),
+                      walk_forward_fn=lambda **k: None,
+                      watch_fn=lambda db: None)
+            m.run_startup_maintenance(**kw)
+            self.assertNotEqual(
+                m.load_state(sp).get("last_chain_archive"), "2026-06-04")
+            summary = m.run_startup_maintenance(**kw)
+            self.assertIn("chain-archive:7rows", summary["ran"])
+            self.assertEqual(m.load_state(sp)["last_chain_archive"], "2026-06-04")
+            self.assertEqual(results, [])
+
     def test_does_not_fire_in_the_morning(self):
         hits = []
         with tempfile.TemporaryDirectory() as d:
