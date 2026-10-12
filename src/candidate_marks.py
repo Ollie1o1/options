@@ -418,6 +418,23 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
             "  ON c.scan_id = p.scan_id AND c.board = p.board "
             " AND c.contract_key = p.contract_key "
             "WHERE p.status = ?", (OPEN,))]
+        # Gate-passed spreads are followed past their simulated exit, to
+        # expiration. The position is closed by the same time exit the live
+        # book uses, so without this the marks end where that rule fires and
+        # "what if it had been held?" cannot be asked: 59% of no-time-exit
+        # replays ran out of marks after a mean 4.4 days (2026-10-12). Limited
+        # to what the book could have entered, which keeps it to a few
+        # hundred contracts; `resolve` reads OPEN rows only, so nothing here
+        # can reopen or re-close a position.
+        rows += [dict(r) for r in conn.execute(
+            "SELECT c.symbol, c.expiration, c.strike, c.opt_type,"
+            "       c.strategy_name, c.features_json, c.contract_key "
+            "FROM candidate_positions p JOIN candidates c "
+            "  ON c.scan_id = p.scan_id AND c.board = p.board "
+            " AND c.contract_key = p.contract_key "
+            "WHERE p.status = ? AND p.family = 'spread' "
+            "  AND p.exit_reason IN ('time_exit', 'take_profit', 'stop_loss') "
+            "  AND c.gate_passed = 1 AND c.expiration >= ?", (CLOSED, today))]
 
         chains: Dict[Tuple[str, str], dict] = {}
         seen: set = set()
