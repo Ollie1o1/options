@@ -642,7 +642,17 @@ def due_candidate_marks(state: Optional[dict], today: str) -> bool:
 
     Unlike the chain archive this is not time-of-day gated: a mark taken at any
     hour is a mark, and a day skipped is a day lost forever.
+
+    Never on a weekend or market holiday. There is no session to mark, and the
+    quotes a closed market serves are not Friday's close: on 2026-10-11 only
+    748 of 6,294 contracts quoted within 2% of their Friday mid and the mean
+    relative spread doubled (13.9% against 6.8%). `resolve` then exits on
+    them — the scheduler did exactly that on 2026-08-29/30, closing 33,286
+    simulated positions against weekend quotes.
     """
+    from .data_quality import is_trading_day
+    if not is_trading_day(today):
+        return False
     return (state or {}).get("last_candidate_marks") != today
 
 
