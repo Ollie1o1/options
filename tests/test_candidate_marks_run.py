@@ -22,6 +22,20 @@ class TestDue(unittest.TestCase):
         self.assertTrue(cm.due_candidate_marks(
             {"last_candidate_marks": "2026-08-18"}, "2026-08-19"))
 
+    def test_a_weekend_is_never_due(self):
+        # 2026-08-29/30: the scheduler marked on a Saturday and a Sunday and
+        # resolved 33,286 simulated exits against weekend quotes.
+        self.assertFalse(cm.due_candidate_marks({}, "2026-08-29"))
+        self.assertFalse(cm.due_candidate_marks(
+            {"last_candidate_marks": "2026-08-28"}, "2026-08-30"))
+
+    def test_a_market_holiday_is_never_due(self):
+        self.assertFalse(cm.due_candidate_marks({}, "2026-09-07"))
+
+    def test_the_session_after_a_weekend_is_due(self):
+        self.assertTrue(cm.due_candidate_marks(
+            {"last_candidate_marks": "2026-08-28"}, "2026-08-31"))
+
     def test_a_missing_state_is_due(self):
         self.assertTrue(cm.due_candidate_marks(None, "2026-08-19"))
 
