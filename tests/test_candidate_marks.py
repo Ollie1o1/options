@@ -1449,3 +1449,90 @@ class TestHealthClosedCountIsWindowed(unittest.TestCase):
             conn.close()
             line = cm.health_lines(db_path=path, today="2026-08-19")[0]
             self.assertIn("1 closed in 7d", line)
+
+
+class TestClosedSpreadsAreMarkedToExpiry(unittest.TestCase):
+    """A gate-passed spread keeps its marks after the simulated exit.
+
+    The marker quoted OPEN positions only, and the simulated position is closed
+    by the same 21-DTE rule the live book uses. So "what if it had been held?"
+    could not be asked of this data: 59% of no-time-exit replays ran out of
+    marks after a mean 4.4 days (measured 2026-10-12).
+    """
+
+    CHAIN = TestMarkStructures.CHAIN
+    KEY = "AAPL|2026-09-18|Bull Put|blob"
+
+    def _closed_spread(self, path, reason="time_exit", **over):
+        _insert_structure(path, **over)
+        cm.open_positions(db_path=path, today="2026-08-19")
+        with cm.connect(path) as conn:
+            conn.execute(
+                "UPDATE candidate_positions SET status='CLOSED', "
+                "exit_date='2026-08-24', exit_price=0.9, exit_reason=?, "
+                "pnl_pct=0.1", (reason,))
+            conn.commit()
+
+    def _mark_dates(self, path, key=None):
+        with cm.connect(path) as conn:
+            return [r[0] for r in conn.execute(
+                "SELECT mark_date FROM candidate_marks WHERE contract_key=? "
+                "ORDER BY mark_date", (key or self.KEY,))]
+
+    def _run(self, path, today="2026-08-25"):
+        return cm.mark_open(db_path=path, today=today,
+                            fetch=lambda t, e: self.CHAIN)
+
+    def test_a_gate_passed_spread_is_marked_after_its_exit(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._closed_spread(path)
+            self.assertEqual(self._run(path), 1)
+            self.assertEqual(self._mark_dates(path), ["2026-08-25"])
+
+    def test_a_refused_spread_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._closed_spread(path, gate_passed=0)
+            self.assertEqual(self._run(path), 0)
+
+    def test_following_stops_at_expiration(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._closed_spread(path)
+            self.assertEqual(self._run(path, today="2026-09-18"), 1)
+            self.assertEqual(self._run(path, today="2026-09-21"), 0)
+
+    def test_a_position_that_expired_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            self._closed_spread(path, reason="expired")
+            self.assertEqual(self._run(path), 0)
+
+    def test_a_closed_long_option_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today="2026-08-19")
+            with cm.connect(path) as conn:
+                conn.execute(
+                    "UPDATE candidate_positions SET status='CLOSED', "
+                    "exit_date='2026-08-24', exit_price=5.0, "
+                    "exit_reason='stop_loss', pnl_pct=-0.5")
+                conn.commit()
+            n = cm.mark_open(db_path=path, today="2026-08-25",
+                             fetch=lambda t, e: {(190.0, "call"): (5.0, 5.2)})
+            self.assertEqual(n, 0)
+
+    def test_a_followed_position_stays_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._closed_spread(path)
+            self._run(path)
+            self.assertEqual(
+                cm.resolve(db_path=path, today="2026-08-25", cfg_path=cfg), 0)
+            with cm.connect(path) as conn:
+                row = conn.execute(
+                    "SELECT status, exit_date, exit_reason FROM "
+                    "candidate_positions").fetchone()
+            self.assertEqual(tuple(row), ("CLOSED", "2026-08-24", "time_exit"))
