@@ -143,6 +143,11 @@ def due_chain_archive(state: dict, today: str, weekday: int, hhmm: int) -> bool:
     delayed feed). weekday: 1=Mon..7=Sun."""
     if weekday > 5 or hhmm < 1400:
         return False
+    # A weekday holiday is not a session. The archive ran on Labor Day 2026
+    # and stored closed-market quotes under that date.
+    from .data_quality import is_trading_day
+    if not is_trading_day(today):
+        return False
     return (state or {}).get("last_chain_archive") != today
 
 
