@@ -599,8 +599,14 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                                  _cur.hour * 100 + _cur.minute):
             fn = chain_archive_fn or _run_chain_archive
             n = fn()
-            state["last_chain_archive"] = _cur_today
+            # Stamp the day only when something was archived. The archiver
+            # isolates per-symbol failures and returns 0 when the feed fails
+            # for all of them; stamping regardless marked that day done and
+            # it was never retried (2026-10-09: stamped, zero rows on disk).
+            # Left unstamped, the next invocation tries again, and a day that
+            # never succeeds shows as stale in the health report.
             if n:
+                state["last_chain_archive"] = _cur_today
                 ran.append(f"chain-archive:{n}rows")
     except Exception:
         pass
