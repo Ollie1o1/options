@@ -1606,6 +1606,19 @@ def view_portfolio(period: Optional[str] = None):
             except Exception:
                 pass
 
+    # ── Own picks ──────────────────────────────────────────────────────────────
+    # The operator's manual long options at a 1-3 session horizon. Read-only.
+    try:
+        try:
+            from . import own_picks as _own_picks
+        except (ImportError, ValueError):
+            import own_picks as _own_picks  # type: ignore[no-redef]
+        print()
+        for _line in _own_picks.panel_lines(ledger_path=DB_PATH):
+            print(_line)
+    except Exception:
+        pass
+
     # ── Roll Alerts ────────────────────────────────────────────────────────────
     roll_candidates = []
     today = date.today()

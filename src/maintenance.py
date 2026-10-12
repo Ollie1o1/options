@@ -619,6 +619,20 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
+    # 4b-ii. Quotes for the operator's own long-option picks, to the end of
+    #     their three-session window. The candidate marker above stops quoting
+    #     a contract once its simulated exit fires; the own-picks scorecard
+    #     needs the quote on session k whether or not anything exited.
+    try:
+        from src import own_picks as _op
+        if state.get("last_pick_marks") != today:
+            n = _op.record_pick_marks(ledger_path=db_path)
+            state["last_pick_marks"] = today
+            if n:
+                ran.append(f"pick-marks:{n}")
+    except Exception:
+        pass
+
     # 4c. Bull Put cohort watch. This ALSO runs at the end of `run_catchup`,
     #     and both call sites share the `last_bull_put_watch` key so the report
     #     is written once a day whichever path fires first.
