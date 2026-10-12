@@ -9,6 +9,14 @@ from unittest import mock
 
 from src import maintenance as m
 
+# Keep the candidate marker off the real database when this module is run
+# directly. scripts/run_tests.py already sets this; a bare
+# `python -m unittest tests.test_maintenance` did not, and on 2026-10-11 the
+# orchestrator tests below ran the live marker against data/candidates.db.
+os.environ.setdefault(
+    "OPTIONS_CANDIDATE_DB",
+    os.path.join(tempfile.gettempdir(), "options_test_candidates.db"))
+
 
 class TestThrottle(unittest.TestCase):
     def test_checkpoint_due_after_7_days(self):
