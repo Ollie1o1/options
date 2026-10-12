@@ -753,9 +753,12 @@ def health_lines(db_path: Optional[str] = None, days: int = 7,
             open_n, = conn.execute(
                 "SELECT COUNT(*) FROM candidate_positions WHERE status = ?",
                 (OPEN,)).fetchone()
+            # Windowed, as the line says. This counted every close ever
+            # made under a label reading "closed in 7d".
             closed_n, = conn.execute(
-                "SELECT COUNT(*) FROM candidate_positions WHERE status = ?",
-                (CLOSED,)).fetchone()
+                "SELECT COUNT(*) FROM candidate_positions "
+                "WHERE status = ? AND exit_date >= ?",
+                (CLOSED, since)).fetchone()
             # Positions entered TODAY have not missed a mark run, they are
             # waiting for their first. Counting them made this go CRITICAL
             # every day: 2026-08-24 reported 3,905 never-marked and every one

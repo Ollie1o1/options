@@ -763,23 +763,30 @@ def main() -> None:
     if "--health" in sys.argv[1:]:
         # On-demand staleness report — no scan, no network.
         from src.maintenance_health import (compute_health, health_lines, health_banner,
-                                            launchd_silence_days, read_launchd_status)
+                                            launchd_silence_days, overall_severity,
+                                            read_launchd_status)
         rep = compute_health(load_state(DEFAULT_STATE_PATH), datetime.now())
-        print("\n".join(health_lines(rep)))
+        _lines = list(health_lines(rep))
         # The candidate recorder is failure-SAFE, so it cannot announce its own
         # silence by crashing. Zero rows here is the only way a scan path that
         # stopped recording becomes visible.
         from src.candidate_record import health_lines as _candidate_health
-        print("\n".join(_candidate_health()))
+        _lines += _candidate_health()
         from src.candidate_marks import health_lines as _marks_health
-        print("\n".join(_marks_health()))
+        _lines += _marks_health()
         # Has the entered mix actually tracked the allocation's target
         # weights? `admits` gates each candidate independently, so nothing
         # enforces the target over any stretch of real entries — a
         # downstream defect drifted the mix for two weeks before anyone
         # noticed. This is the automated version of that manual check.
         from src.strategy_allocation import drift_health_lines as _drift_health
-        print("\n".join(_drift_health()))
+        _lines += _drift_health()
+        # The header's "worst" covers the scheduled jobs only; say so, and
+        # close with the worst across every section printed above.
+        _lines[0] = _lines[0].replace("(worst: ", "(jobs worst: ")
+        print("\n".join(_lines))
+        print(f"  OVERALL: {overall_severity(_lines)}")
+
         banner = health_banner(rep, launchd_jobs=read_launchd_status(),
                                silence_days=launchd_silence_days())
         if banner:

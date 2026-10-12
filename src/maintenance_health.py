@@ -588,6 +588,23 @@ def dead_scheduler_ack_banner(dead_days: int, width: int = 100) -> str:
     return "\n".join([rule, "  " + title] + ["  " + b for b in body] + [rule])
 
 
+def overall_severity(lines: List[str]) -> str:
+    """The worst `[SEVERITY]` tag across every printed health line.
+
+    `HealthReport.worst` covers the scheduled jobs only. `--health` also
+    prints the candidate recorder, the candidate marks and allocation drift,
+    each with its own tag, and the header read "worst: OK" above a CRITICAL
+    marks line.
+    """
+    import re
+    worst = "OK"
+    for line in lines:
+        for tag in re.findall(r"\[([A-Z]+)\]", line):
+            if _RANK.get(tag, -1) > _RANK[worst]:
+                worst = tag
+    return worst
+
+
 def health_lines(report: HealthReport) -> List[str]:
     """Per-job breakdown for the standalone `--health` command (all jobs, even
     healthy ones)."""

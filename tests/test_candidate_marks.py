@@ -1428,3 +1428,24 @@ class TestMarkGapAlarm(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHealthClosedCountIsWindowed(unittest.TestCase):
+    """The line says 'closed in 7d'; it used to print every close ever made."""
+
+    def test_only_closes_inside_the_window_are_counted(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            conn = cm.connect(path)
+            for key, exit_date in (("A|2026-09-18|call|1", "2026-08-17"),
+                                   ("B|2026-09-18|call|1", "2026-07-01")):
+                conn.execute(
+                    "INSERT INTO candidate_positions (scan_id, board, "
+                    "contract_key, family, entry_date, entry_price, status, "
+                    "exit_date, exit_price, exit_reason, pnl_pct) "
+                    "VALUES ('s','b',?,'long_option','2026-06-20',1.0,"
+                    "'CLOSED',?,1.1,'take_profit',0.1)", (key, exit_date))
+            conn.commit()
+            conn.close()
+            line = cm.health_lines(db_path=path, today="2026-08-19")[0]
+            self.assertIn("1 closed in 7d", line)
