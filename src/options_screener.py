@@ -1346,6 +1346,27 @@ def _print_budget_use(df, budget: Optional[float]) -> None:
         print("    " + (fmt.style(line, 'muted') if HAS_ENHANCED_CLI else line))
 
 
+def _print_swing_view(df, config: Optional[Dict]) -> None:
+    """The cost-capped table for a 1-3 session hold, under the discovery board.
+
+    Built from every gate survivor, not the per-bucket top picks, so a cheap
+    contract the board did not feature can still appear. Display only, and
+    failure-safe: it must never be able to stop a scan. See src/swing_view.py.
+    """
+    try:
+        from . import swing_view as _sv
+        cfg = (config or {}).get("swing_view") or {}
+        if cfg.get("enabled", True) is False:
+            return
+        result = _sv.swing_board(
+            df,
+            max_cost_pct=float(cfg.get("max_cost_pct", _sv.MAX_COST_PCT)),
+            horizon_sessions=int(cfg.get("horizon_sessions", _sv.HORIZON_SESSIONS)))
+        _sv.print_swing_view(result, max_rows=int(cfg.get("max_rows", _sv.MAX_ROWS)))
+    except Exception:
+        logging.getLogger(__name__).debug("swing view failed", exc_info=True)
+
+
 def _with_session_budget(trade_dict: dict, budget_was_chosen: bool,
                          session_budget: Optional[float]) -> dict:
     """Attach the session budget to a trade dict ONLY if a prompt happened.
@@ -5694,6 +5715,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 _print_per_risk_table(top_picks, _leg_label, session_budget,
                                       match_board=True)
                 _print_budget_use(top_picks, session_budget)
+                _print_swing_view(final_df, config)
         elif verbose and picks.empty:
             print("\nNo discovery picks found.")
             
