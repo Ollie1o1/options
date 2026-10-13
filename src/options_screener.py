@@ -1346,12 +1346,13 @@ def _print_budget_use(df, budget: Optional[float]) -> None:
         print("    " + (fmt.style(line, 'muted') if HAS_ENHANCED_CLI else line))
 
 
-def _print_swing_view(df, config: Optional[Dict]) -> None:
+def _print_swing_view(df, config: Optional[Dict], board_kept=None) -> None:
     """The cost-capped table for a 1-3 session hold, under the discovery board.
 
-    Built from every gate survivor, not the per-bucket top picks, so a cheap
-    contract the board did not feature can still appear. Display only, and
-    failure-safe: it must never be able to stop a scan. See src/swing_view.py.
+    `df` is every candidate the scan found, BEFORE the board's gates and the
+    budget filter; `board_kept` is what survived them, so each row can say
+    whether the board showed it. Display only, and failure-safe: it must
+    never be able to stop a scan. See src/swing_view.py.
     """
     try:
         from . import swing_view as _sv
@@ -1361,7 +1362,8 @@ def _print_swing_view(df, config: Optional[Dict]) -> None:
         result = _sv.swing_board(
             df,
             max_cost_pct=float(cfg.get("max_cost_pct", _sv.MAX_COST_PCT)),
-            horizon_sessions=int(cfg.get("horizon_sessions", _sv.HORIZON_SESSIONS)))
+            horizon_sessions=int(cfg.get("horizon_sessions", _sv.HORIZON_SESSIONS)),
+            board_kept=board_kept)
         _sv.print_swing_view(result, max_rows=int(cfg.get("max_rows", _sv.MAX_ROWS)))
     except Exception:
         logging.getLogger(__name__).debug("swing view failed", exc_info=True)
@@ -5715,7 +5717,10 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
                 _print_per_risk_table(top_picks, _leg_label, session_budget,
                                       match_board=True)
                 _print_budget_use(top_picks, session_budget)
-                _print_swing_view(final_df, config)
+        if verbose and not picks.empty:
+            # Outside the branch above on purpose: a board on which every
+            # candidate was refused still has contracts cheap enough to swing.
+            _print_swing_view(picks, config, board_kept=final_df)
         elif verbose and picks.empty:
             print("\nNo discovery picks found.")
             

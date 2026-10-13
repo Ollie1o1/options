@@ -138,6 +138,34 @@ class SwingBoard(unittest.TestCase):
         self.assertEqual(list(df.columns), before)
 
 
+class BoardKept(unittest.TestCase):
+    def _two(self):
+        return pd.DataFrame([_row(symbol="AAA"), _row(symbol="BBB")])
+
+    def test_marks_which_rows_the_board_kept(self):
+        df = self._two()
+        res = sv.swing_board(df, board_kept=df[df["symbol"] == "AAA"])
+        got = dict(zip(res.kept["symbol"], res.kept["swing_board_kept"]))
+        self.assertEqual(got, {"AAA": True, "BBB": False})
+
+    def test_a_board_that_kept_nothing_marks_every_row_refused(self):
+        res = sv.swing_board(self._two(), board_kept=pd.DataFrame())
+        self.assertEqual(list(res.kept["swing_board_kept"]), [False, False])
+
+    def test_same_name_different_strike_is_a_different_contract(self):
+        df = pd.DataFrame([_row(strike=200.0), _row(strike=205.0, bid=4.95, ask=5.05)])
+        res = sv.swing_board(df, board_kept=df[df["strike"] == 200.0])
+        self.assertEqual(list(res.kept["strike"]), [205.0])
+        self.assertFalse(res.kept.iloc[0]["swing_board_kept"])
+
+    def test_without_a_board_frame_the_column_is_absent(self):
+        self.assertNotIn("swing_board_kept", sv.swing_board(self._two()).kept.columns)
+
+    def test_unmatchable_board_frame_leaves_the_column_absent(self):
+        res = sv.swing_board(self._two(), board_kept=pd.DataFrame({"x": [1]}))
+        self.assertNotIn("swing_board_kept", res.kept.columns)
+
+
 class Rendering(unittest.TestCase):
     def _render(self, df, **kw):
         buf = io.StringIO()
@@ -166,6 +194,17 @@ class Rendering(unittest.TestCase):
         df = pd.DataFrame([_row(symbol=f"S{i:02d}") for i in range(5)])
         out = self._render(df, max_rows=2)
         self.assertIn("3 more", out)
+
+    def test_refused_rows_are_labelled_and_explained(self):
+        df = pd.DataFrame([_row(symbol="AAA"), _row(symbol="BBB")])
+        out = self._render(df, board={"board_kept": df[df["symbol"] == "AAA"]})
+        self.assertIn("Board", out)
+        self.assertRegex(out, r"AAA.*kept")
+        self.assertRegex(out, r"BBB.*refused")
+        self.assertIn("did not", out)
+
+    def test_no_board_column_without_a_board_frame(self):
+        self.assertNotIn("Board", self._render(pd.DataFrame([_row()])))
 
     def test_nothing_scanned_prints_nothing(self):
         self.assertEqual(self._render(pd.DataFrame()), "")

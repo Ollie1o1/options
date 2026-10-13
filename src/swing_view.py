@@ -20,6 +20,11 @@ left by that same cost, and says so. Beside each contract it prints the move
 the underlying must make over the hold to get back to zero, against the move
 that name has typically made. It holds no opinion on direction.
 
+It is built from every candidate the scan found, including the ones the
+board's own gates refused, because on the discovery board that gate is the
+negative-EV one and it is not established at this horizon. Each row says
+whether the board kept it, so the two tables cannot silently disagree.
+
 DISPLAY ONLY. It is not a gate: it does not touch `pick_ranking.gate_board`,
 the auto-logger, or what `candidate_record` persists.
 """
@@ -114,13 +119,31 @@ def typical_move(underlying: Any, hist_vol: Any,
     return s * v * math.sqrt(horizon_sessions / TRADING_DAYS)
 
 
+def _contract_keys(df: Optional[pd.DataFrame]) -> Optional[pd.Series]:
+    """(symbol, call/put, strike, expiry) per row, or None if it cannot be built."""
+    if df is None or any(c not in df.columns
+                         for c in ("symbol", "type", "strike", "expiration")):
+        return None
+    return pd.Series(
+        list(zip(df["symbol"].astype(str),
+                 df["type"].astype(str).str.lower(),
+                 pd.to_numeric(df["strike"], errors="coerce").round(4),
+                 df["expiration"].astype(str).str[:10])),
+        index=df.index, dtype="object")
+
+
 def swing_board(df: Optional[pd.DataFrame], *,
                 max_cost_pct: float = MAX_COST_PCT,
-                horizon_sessions: int = HORIZON_SESSIONS) -> SwingResult:
+                horizon_sessions: int = HORIZON_SESSIONS,
+                board_kept: Optional[pd.DataFrame] = None) -> SwingResult:
     """Keep the single-leg calls and puts whose round trip costs at most the cap.
 
     One contract per (symbol, call/put): the cheapest to trade. Ordered by
     cost, cheapest first — an ordering, not a ranking.
+
+    `board_kept` is the frame the board's gates let through. When given, each
+    row carries `swing_board_kept`; when it is not, or the contracts cannot be
+    matched, the column is absent rather than guessed.
     """
     empty = SwingResult(kept=pd.DataFrame(), max_cost_pct=max_cost_pct,
                         horizon_sessions=horizon_sessions)
@@ -137,6 +160,12 @@ def swing_board(df: Optional[pd.DataFrame], *,
         if name not in work.columns:
             return pd.Series([None] * len(work), index=work.index, dtype="object")
         return work[name]
+
+    keys, kept_keys = _contract_keys(work), _contract_keys(board_kept)
+    if board_kept is not None and keys is not None and (
+            kept_keys is not None or len(board_kept) == 0):
+        allowed = set(kept_keys) if kept_keys is not None else set()
+        work["swing_board_kept"] = [k in allowed for k in keys]
 
     cost: List[Optional[float]] = []
     need: List[Optional[float]] = []
@@ -204,10 +233,13 @@ def print_swing_view(result: SwingResult, max_rows: int = MAX_ROWS) -> None:
         "correct call room to pay", 'muted'))
 
     shown = result.kept.head(max_rows)
+    flagged = "swing_board_kept" in result.kept.columns
     if len(shown):
         header = (f"  {'Ticker':<7} {'Type':<5} {'Strike':>8} {'Expiry':<11} "
                   f"{'DTE':>4} {'Ask':>8} {'Cost%':>6} {'Need':>7} "
                   f"{'Typical':>8} {'Need/Typ':>9}")
+        if flagged:
+            header += "  Board"
         print(_style(header, 'label', bold=True))
         for _, r in shown.iterrows():
             expiry = str(r.get("expiration") or "")[:10]
@@ -216,7 +248,9 @@ def print_swing_view(result: SwingResult, max_rows: int = MAX_ROWS) -> None:
                   f"{_cell(r.get('dte'), '.0f'):>4} {_cell(r.get('ask'), '.2f'):>8} "
                   f"{_cell(r['swing_cost_pct'] * 100, '.1f') + '%':>6} "
                   f"{_pct(r['swing_need_pct']):>7} {_pct(r['swing_typical_pct']):>8} "
-                  f"{_ratio(r['swing_need_vs_typical']):>9}")
+                  f"{_ratio(r['swing_need_vs_typical']):>9}"
+                  + (("  kept" if r["swing_board_kept"] else "  refused")
+                     if flagged else ""))
         hidden = len(result.kept) - len(shown)
         if hidden > 0:
             print("  " + _style(f"{hidden} more within the cap not shown", 'muted'))
@@ -226,6 +260,12 @@ def print_swing_view(result: SwingResult, max_rows: int = MAX_ROWS) -> None:
         print("  " + _style(
             f"Typical = one standard deviation of its {h}-session move at "
             "30-day realised vol", 'muted'))
+        if flagged and not shown["swing_board_kept"].all():
+            print("  " + _style(
+                "Board = refused means the board above dropped it, for "
+                "negative expected value or your budget; that gate did not "
+                f"separate outcomes at 1 to {h} sessions (measured 2026-10-13)",
+                'muted'))
 
     if result.over_cap:
         print("  " + _style(
