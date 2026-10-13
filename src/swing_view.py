@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import pandas as pd
 
@@ -138,7 +138,9 @@ def swing_board(df: Optional[pd.DataFrame], *,
             return pd.Series([None] * len(work), index=work.index, dtype="object")
         return work[name]
 
-    cost, need, typical = [], [], []
+    cost: List[Optional[float]] = []
+    need: List[Optional[float]] = []
+    typical: List[Optional[float]] = []
     for bid, ask, delta, gamma, theta, spot, vol in zip(
             col("bid"), col("ask"), col("delta"), col("gamma"), col("theta"),
             col("underlying"), col("hv_30d")):
