@@ -146,9 +146,12 @@ def swing_board(df: Optional[pd.DataFrame], *,
         move = breakeven_move(bid, ask, delta, gamma, theta, horizon_sessions)
         usual = typical_move(spot, vol, horizon_sessions)
         s = _num(spot)
-        ok = s is not None and s > 0
-        need.append(move / s if move is not None and ok else None)
-        typical.append(usual / s if usual is not None and ok else None)
+        if s is None or s <= 0:
+            need.append(None)
+            typical.append(None)
+            continue
+        need.append(move / s if move is not None else None)
+        typical.append(usual / s if usual is not None else None)
 
     work["swing_cost_pct"] = pd.Series(cost, index=work.index, dtype="float64")
     work["swing_need_pct"] = pd.Series(need, index=work.index, dtype="float64")
