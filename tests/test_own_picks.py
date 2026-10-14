@@ -361,3 +361,93 @@ class TestRender(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeManager:
+    def __init__(self, accept=True):
+        self.accept, self.trades = accept, []
+
+    def log_trade(self, trade):
+        self.trades.append(dict(trade))
+        return self.accept
+
+
+_QUOTE = {(250.0, "call"): (4.0, 4.2), (240.0, "put"): (3.0, 3.3)}
+
+
+class TestLogPick(unittest.TestCase):
+    def _log(self, *a, **kw):
+        kw.setdefault("fetch", lambda t, e: _QUOTE)
+        kw.setdefault("today", "2026-10-14")
+        return op.log_pick(*a, **kw)
+
+    def test_a_call_is_a_manual_long_call_at_the_given_fill(self):
+        m = _FakeManager()
+        ok, msg = self._log("aapl", "2026-11-20", 250, "CALL", price=4.10, manager=m)
+        self.assertTrue(ok, msg)
+        t = m.trades[0]
+        self.assertEqual((t["ticker"], t["strategy_name"], t["type"], t["entry_price"]),
+                         ("AAPL", "Long Call", "call", 4.10))
+        self.assertIsNone(t["quality_score"])   # no board score, never a fake one
+        self.assertNotIn("allow_unaffordable", t)
+
+    def test_without_a_price_it_buys_at_the_live_ask(self):
+        m = _FakeManager()
+        ok, msg = self._log("AAPL", "2026-11-20", 240, "put", manager=m)
+        self.assertTrue(ok)
+        self.assertEqual((m.trades[0]["entry_price"], m.trades[0]["strategy_name"]),
+                         (3.3, "Long Put"))
+        self.assertIn("live ask", msg)
+
+    def test_no_quote_and_no_price_is_refused(self):
+        ok, msg = self._log("AAPL", "2026-11-20", 999, "call",
+                            manager=_FakeManager())
+        self.assertFalse(ok)
+        self.assertIn("--price", msg)
+
+    def test_no_quote_with_a_price_logs_but_warns(self):
+        ok, msg = self._log("AAPL", "2026-11-20", 999, "call", price=1.0,
+                            manager=_FakeManager())
+        self.assertTrue(ok)
+        self.assertIn("no live quote", msg)
+
+    def test_bad_inputs_are_refused_before_anything_is_written(self):
+        m = _FakeManager()
+        for args in (("AAPL", "2026-11-20", 250, "straddle"),
+                     ("AAPL", "11/20/2026", 250, "call"),
+                     ("AAPL", "2026-10-14", 250, "call")):
+            ok, _ = self._log(*args, price=1.0, manager=m)
+            self.assertFalse(ok, args)
+        self.assertEqual(m.trades, [])
+
+    def test_force_bypasses_the_ledger_gates(self):
+        m = _FakeManager()
+        self._log("AAPL", "2026-11-20", 250, "call", price=4.1, force=True, manager=m)
+        self.assertTrue(all(m.trades[0][k] for k in
+                            ("allow_untradeable", "allow_unaffordable", "allow_unsized")))
+
+    def test_a_ledger_refusal_points_at_force(self):
+        ok, msg = self._log("AAPL", "2026-11-20", 250, "call", price=4.1,
+                            manager=_FakeManager(accept=False))
+        self.assertFalse(ok)
+        self.assertIn("--force", msg)
+
+
+class TestLogPickEndToEnd(unittest.TestCase):
+    """Through the real PaperManager into a temporary ledger, then read back
+    by the scorecard's own query."""
+
+    def test_the_logged_pick_is_a_manual_pick(self):
+        from datetime import date, timedelta
+        exp = (date.today() + timedelta(days=30)).isoformat()
+        with tempfile.TemporaryDirectory() as d:
+            ledger = os.path.join(d, "ledger.db")
+            ok, msg = op.log_pick(
+                "AAPL", exp, 250, "call", price=4.1, force=True,
+                ledger_path=ledger, fetch=lambda t, e: _QUOTE)
+            self.assertTrue(ok, msg)
+            picks = op.manual_picks(ledger)
+            self.assertEqual(len(picks), 1)
+            self.assertEqual((picks[0]["ticker"], picks[0]["strike"],
+                              picks[0]["type"], picks[0]["entry_basis"]),
+                             ("AAPL", 250.0, "call", 4.1))
