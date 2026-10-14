@@ -18,6 +18,23 @@ os.environ.setdefault(
     os.path.join(tempfile.gettempdir(), "options_test_candidates.db"))
 
 
+# The estimates archive runs after 16:00 on trading days and fetches from
+# Yahoo into the real `data/estimates_archive.db`. Several tests below pin the
+# clock at or after 16:00, so it is patched out for the whole module — bare
+# `python -m unittest` included, not only `scripts/run_tests.py`.
+_ESTIMATES_PATCH = mock.patch(
+    "src.estimates_archive.archive_symbols",
+    return_value={"symbols": 0, "with_estimates": 0, "complete": True})
+
+
+def setUpModule():
+    _ESTIMATES_PATCH.start()
+
+
+def tearDownModule():
+    _ESTIMATES_PATCH.stop()
+
+
 class TestThrottle(unittest.TestCase):
     def test_checkpoint_due_after_7_days(self):
         self.assertTrue(m.due_checkpoint({"last_checkpoint": "2026-05-31"}, "2026-06-07"))
@@ -1077,3 +1094,45 @@ class TestCandidateMarksStamp(unittest.TestCase):
             self._run(d, {"marked": 4300, "complete": True})
             mc, _ = self._run(d, {"marked": 0, "complete": True})
             mc.assert_not_called()
+
+
+class TestEstimatesArchiveStep(unittest.TestCase):
+    """The daily estimates snapshot: after the close, once, retried if aborted."""
+
+    def _run(self, d, now, fn):
+        db = os.path.join(d, "t.db")
+        if not os.path.exists(db):
+            TestOrchestrator()._db(db)
+        with mock.patch("src.candidate_marks.mark_candidates", return_value={}), \
+                mock.patch("src.own_picks.record_pick_marks", return_value=0):
+            return m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27",
+                state_path=os.path.join(d, "state.json"), now=now,
+                runner=lambda cmd: 0, checkpoint_fn=lambda **k: None,
+                track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None, watch_fn=lambda db: None,
+                estimates_archive_fn=fn)
+
+    def test_not_before_the_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn = mock.Mock(return_value={"complete": True})
+            self._run(d, datetime(2026, 6, 4, 15, 59), fn)
+            fn.assert_not_called()
+
+    def test_once_per_day_after_the_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn = mock.Mock(return_value={"symbols": 120, "with_estimates": 100,
+                                         "complete": True})
+            summary = self._run(d, datetime(2026, 6, 4, 16, 30), fn)
+            self.assertIn("estimates-archive:100/120", summary["ran"])
+            self._run(d, datetime(2026, 6, 4, 17, 30), fn)
+            self.assertEqual(fn.call_count, 1)
+
+    def test_an_aborted_run_is_retried_the_same_day(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn = mock.Mock(return_value={"symbols": 10, "with_estimates": 0,
+                                         "complete": False})
+            summary = self._run(d, datetime(2026, 6, 4, 16, 30), fn)
+            self.assertIn("estimates-archive:0/10(aborted)", summary["ran"])
+            self._run(d, datetime(2026, 6, 4, 17, 30), fn)
+            self.assertEqual(fn.call_count, 2)
