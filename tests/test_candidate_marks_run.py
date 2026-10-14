@@ -121,6 +121,113 @@ class TestMarkCandidates(unittest.TestCase):
             self.assertEqual(out["opened"], 1)   # the rest of the run survives
 
 
+def _insert_pairs(path, n):
+    """`n` candidates, each on its own (symbol, expiration) pair."""
+    for i in range(n):
+        _insert_candidate(path, scan_id=f"S{i}", symbol=f"T{i}",
+                          contract_key=f"T{i}|2026-09-18|call|190")
+
+
+class TestARateLimitedRun(unittest.TestCase):
+    """2026-10-14: Yahoo rate-limited the 10:39 run, ~480 of ~800 pairs came
+    back empty, and the day was stamped done — 3,700 contracts lost their mark
+    for good, while later runs that day could have priced every one."""
+
+    def test_a_run_that_lost_most_pairs_is_not_complete(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_pairs(path, 40)
+            calls = []
+
+            def flaky(t, e):
+                calls.append(t)
+                return {} if len(calls) > 10 else {(190.0, "call"): (9.9, 10.1)}
+
+            out = cm.mark_candidates(db_path=path, today="2026-08-19",
+                                     cfg_path=cfg, fetch=flaky)
+            self.assertFalse(out["complete"])
+            self.assertGreater(out["failed_pairs"], 5)
+
+    def test_a_few_dead_pairs_still_count_as_complete(self):
+        # The normal day: 1-4 pairs out of ~800 have no quotes at all.
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_pairs(path, 40)
+            out = cm.mark_candidates(
+                db_path=path, today="2026-08-19", cfg_path=cfg,
+                fetch=lambda t, e: {} if t in ("T3", "T7") else
+                {(190.0, "call"): (9.9, 10.1)})
+            self.assertTrue(out["complete"])
+            self.assertEqual(out["failed_pairs"], 2)
+            self.assertEqual(out["marked"], 38)
+
+    def test_a_rerun_fetches_only_what_is_still_unmarked(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_pairs(path, 10)
+            good = {(190.0, "call"): (9.9, 10.1)}
+            cm.mark_candidates(
+                db_path=path, today="2026-08-19", cfg_path=cfg,
+                fetch=lambda t, e: {} if t in ("T1", "T2") else good)
+            fetched = []
+
+            def record(t, e):
+                fetched.append(t)
+                return good
+
+            out = cm.mark_candidates(db_path=path, today="2026-08-19",
+                                     cfg_path=cfg, fetch=record)
+            self.assertEqual(sorted(set(fetched)), ["T1", "T2"])
+            self.assertEqual(out["marked"], 2)
+            with sqlite3.connect(path) as conn:
+                n, = conn.execute("select count(*) from candidate_marks "
+                                  "where mark_date='2026-08-19'").fetchone()
+            self.assertEqual(n, 10)
+
+    def test_a_dead_feed_stops_after_a_run_of_failures(self):
+        # Hammering a rate-limited feed for every remaining pair extends the
+        # limit and starves the scan that runs next.
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_pairs(path, 100)
+            calls = []
+
+            def dead(t, e):
+                calls.append(t)
+                return {}
+
+            out = cm.mark_candidates(db_path=path, today="2026-08-19",
+                                     cfg_path=cfg, fetch=dead)
+            self.assertFalse(out["complete"])
+            self.assertTrue(out["aborted"])
+            self.assertLess(len(set(calls)), 100)
+
+    def test_an_incomplete_run_does_not_resolve(self):
+        # `resolve` falls back to the newest mark on or before today. On a
+        # partial day that is YESTERDAY's price for every unpriced contract,
+        # booked as an exit a later run could have priced properly.
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_pairs(path, 40)
+            cm.mark_candidates(db_path=path, today="2026-08-01", cfg_path=cfg,
+                               fetch=lambda t, e: {(190.0, "call"): (9.9, 10.1)})
+            up = {(190.0, "call"): (24.9, 25.1)}
+            calls = []
+
+            def flaky(t, e):
+                calls.append(t)
+                return up if len(calls) <= 10 else {}
+
+            out = cm.mark_candidates(db_path=path, today="2026-08-10",
+                                     cfg_path=cfg, fetch=flaky)
+            self.assertFalse(out["complete"])
+            self.assertEqual(out["closed"], 0)
+            out = cm.mark_candidates(db_path=path, today="2026-08-10",
+                                     cfg_path=cfg, fetch=lambda t, e: up)
+            self.assertTrue(out["complete"])
+            self.assertEqual(out["closed"], 40)
+
+
 class TestAgainstRealRecordedRows(unittest.TestCase):
     """Drives the whole run over rows written by the real recorder, not by a
     test fixture that happens to look like them."""

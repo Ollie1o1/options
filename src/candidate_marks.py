@@ -354,6 +354,23 @@ def open_positions(*, db_path: Optional[str] = None,
 # failure is refetching a genuinely dead pair once per contract.
 _CHAIN_ATTEMPTS = 2
 
+# Consecutive pairs that may come back empty before the run gives up on the
+# feed. Dead pairs are scattered (1-4 a day out of ~800); a run of them is a
+# rate limit. Continuing only extends the limit and starves the scan that runs
+# next — 2026-10-14 sent ~960 more requests into a feed that was refusing them.
+_ABORT_AFTER_CONSECUTIVE_FAILURES = 20
+
+# How many pairs may fail before a run counts as incomplete: the larger of a
+# floor and a share. An incomplete run is retried later the same day and does
+# not resolve. Set from the normal day (1-4 failed pairs) against the bad ones
+# (207, 317, 415, 481 between 10-08 and 10-14).
+_COMPLETE_MAX_FAILED_PAIRS = 5
+_COMPLETE_MAX_FAILED_SHARE = 0.05
+
+# What the last `mark_open` saw, for `mark_candidates` to judge completeness.
+# `mark_open` keeps returning the row count its callers already use.
+LAST_MARK_RUN: Dict[str, Any] = {}
+
 
 def _fetch_chain(fetch, symbol: str, expiration: str) -> Dict[Any, Any]:
     """Today's chain for one pair, retried, or {} once the budget is spent.
@@ -408,6 +425,8 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
         today = datetime.now().strftime("%Y-%m-%d")
     if fetch is None:
         fetch = _default_fetch
+    LAST_MARK_RUN.clear()
+    LAST_MARK_RUN.update(pairs=0, failed_pairs=0, aborted=False)
 
     with connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -436,9 +455,15 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
             "  AND p.exit_reason IN ('time_exit', 'take_profit', 'stop_loss') "
             "  AND c.gate_passed = 1 AND c.expiration >= ?", (CLOSED, today))]
 
+        # A run that was cut short is finished by the next one the same day, so
+        # what already carries today's mark is not fetched again.
+        seen: set = {r[0] for r in conn.execute(
+            "SELECT contract_key FROM candidate_marks WHERE mark_date = ?",
+            (today,))}
+
         chains: Dict[Tuple[str, str], dict] = {}
-        seen: set = set()
         written = 0
+        consecutive_failures = 0
         for row in rows:
             # One mark per contract, not per position: `candidate_marks` is
             # keyed by contract_key, and the same structure recorded on three
@@ -458,8 +483,21 @@ def mark_open(*, db_path: Optional[str] = None, today: Optional[str] = None,
 
             key = (symbol, expiration)
             if key not in chains:
+                if consecutive_failures >= _ABORT_AFTER_CONSECUTIVE_FAILURES:
+                    LAST_MARK_RUN["aborted"] = True
+                    log.warning(
+                        "candidate marks: %d pairs in a row returned no "
+                        "quotes — the feed is refusing requests; stopping "
+                        "and leaving the rest for a later run today",
+                        consecutive_failures)
+                    break
                 chains[key] = _fetch_chain(fetch, symbol, expiration)
-                if not chains[key]:
+                LAST_MARK_RUN["pairs"] += 1
+                if chains[key]:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    LAST_MARK_RUN["failed_pairs"] += 1
                     # Written off for the rest of the run so a dead pair is not
                     # refetched once per contract — but LOUDLY, because the
                     # silence is the defect this exists to close.
@@ -686,11 +724,25 @@ def mark_candidates(*, db_path: Optional[str] = None,
     from datetime import datetime
     if today is None:
         today = datetime.now().strftime("%Y-%m-%d")
-    return {
-        "opened": open_positions(db_path=db_path, today=today),
-        "marked": mark_open(db_path=db_path, today=today, fetch=fetch),
-        "closed": resolve(db_path=db_path, today=today, cfg_path=cfg_path),
-    }
+    LAST_MARK_RUN.clear()
+    opened = open_positions(db_path=db_path, today=today)
+    marked = mark_open(db_path=db_path, today=today, fetch=fetch)
+    pairs = int(LAST_MARK_RUN.get("pairs") or 0)
+    failed = int(LAST_MARK_RUN.get("failed_pairs") or 0)
+    aborted = bool(LAST_MARK_RUN.get("aborted"))
+    # A `mark_open` that raised (swallowed by `_safe`) never filled the dict.
+    complete = (bool(LAST_MARK_RUN) and not aborted
+                and failed <= max(_COMPLETE_MAX_FAILED_PAIRS,
+                                  _COMPLETE_MAX_FAILED_SHARE * pairs))
+    # An incomplete day does not resolve. `resolve` prices each position at
+    # its newest mark on or before today, which for every contract the run
+    # missed is yesterday's — booked as today's exit. The retry later today
+    # resolves on real marks; a day that never completes resolves tomorrow.
+    closed = (resolve(db_path=db_path, today=today, cfg_path=cfg_path)
+              if complete else 0)
+    return {"opened": opened, "marked": marked, "closed": closed,
+            "pairs": pairs, "failed_pairs": failed, "aborted": aborted,
+            "complete": complete}
 
 
 def missing_trading_days(mark_dates, today: str) -> List[str]:
