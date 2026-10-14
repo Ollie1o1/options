@@ -500,6 +500,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             checkpoint_fn: Optional[Callable] = None,
                             track_record_fn: Optional[Callable] = None,
                             chain_archive_fn: Optional[Callable] = None,
+                            estimates_archive_fn: Optional[Callable] = None,
                             morning_fn: Optional[Callable] = None,
                             walk_forward_fn: Optional[Callable] = None,
                             watch_fn: Optional[Callable] = None,
@@ -608,6 +609,26 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
             if n:
                 state["last_chain_archive"] = _cur_today
                 ran.append(f"chain-archive:{n}rows")
+    except Exception:
+        pass
+
+    # 4a-ii. Daily analyst-estimate snapshot, after the close. No free source
+    #     serves revision history, so a day skipped is a day lost. Stamped only
+    #     when the run did not stop on a dead feed.
+    try:
+        from src import estimates_archive as _ea
+        _cur = now_fn()
+        _cur_today = _cur.strftime("%Y-%m-%d")
+        if _ea.due_estimates_archive(state, _cur_today,
+                                     _cur.hour * 100 + _cur.minute):
+            fn = estimates_archive_fn or (
+                lambda: _ea.archive_symbols(_ea.universe(), today=_cur_today))
+            counts = fn() or {}
+            if counts.get("complete", True):
+                state["last_estimates_archive"] = _cur_today
+            ran.append(f"estimates-archive:{counts.get('with_estimates', 0)}"
+                       f"/{counts.get('symbols', 0)}"
+                       + ("" if counts.get("complete", True) else "(aborted)"))
     except Exception:
         pass
 
