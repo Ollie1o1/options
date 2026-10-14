@@ -1043,3 +1043,37 @@ class TestPickMarksHook(unittest.TestCase):
             self._run(d)
             self._run(d)
             self.assertEqual(rec.call_count, 1)
+
+
+class TestCandidateMarksStamp(unittest.TestCase):
+    """2026-10-14: a rate-limited mark run was stamped done, and ~3,700
+    contracts lost the day's mark although a later run priced them all."""
+
+    def _state(self, d):
+        with open(os.path.join(d, "state.json")) as fh:
+            return json.load(fh)
+
+    def _run(self, d, counts):
+        with mock.patch("src.candidate_marks.mark_candidates",
+                        return_value=counts) as mc, \
+                mock.patch("src.own_picks.record_pick_marks", return_value=0):
+            _, summary = TestPickMarksHook()._run(d)
+        return mc, summary
+
+    def test_an_incomplete_run_is_not_stamped_and_retries(self):
+        with tempfile.TemporaryDirectory() as d:
+            partial = {"marked": 1200, "complete": False,
+                       "failed_pairs": 480, "pairs": 800}
+            mc, summary = self._run(d, partial)
+            self.assertNotIn("last_candidate_marks", self._state(d))
+            self.assertTrue(any("partial(480/800" in r for r in summary["ran"]))
+            mc2, _ = self._run(d, {"marked": 3100, "complete": True})
+            mc2.assert_called_once()
+            self.assertEqual(self._state(d)["last_candidate_marks"],
+                             "2026-06-04")
+
+    def test_a_complete_run_is_stamped_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._run(d, {"marked": 4300, "complete": True})
+            mc, _ = self._run(d, {"marked": 0, "complete": True})
+            mc.assert_not_called()

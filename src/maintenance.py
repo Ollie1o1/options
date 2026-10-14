@@ -619,9 +619,17 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
         from src import candidate_marks as _cm
         if _cm.due_candidate_marks(state, today):
             counts = _cm.mark_candidates()
-            state["last_candidate_marks"] = today
+            # Stamped only when the run priced (nearly) every pair. A rate-
+            # limited run left unstamped is finished by the next invocation
+            # today; stamping it lost ~3,700 marks on 2026-10-14 that a run an
+            # hour later priced without a single failure.
+            if counts.get("complete", True):
+                state["last_candidate_marks"] = today
             if counts.get("marked"):
                 ran.append(f"candidate-marks:{counts['marked']}")
+            if counts.get("complete") is False:
+                ran.append(f"candidate-marks:partial({counts.get('failed_pairs')}"
+                           f"/{counts.get('pairs')} pairs failed, will retry)")
     except Exception:
         pass
 
