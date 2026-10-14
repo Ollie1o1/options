@@ -4,8 +4,10 @@ The ledger has tagged who opened a trade since schema v25 (`trades.origin`),
 and nothing read the tag. This module does: it measures the trades the
 operator logged by hand against what the board offered on the same days.
 
-It observes. Nothing gates, sizes or enters on anything here, and the ledger
-is opened read-only.
+The scorecard observes: nothing gates, sizes or enters on it, and it opens the
+ledger read-only. `log_pick` (`--log`) is the one writer — it records a pick
+the operator chose, through `PaperManager.log_trade` like every other entry,
+so contracts the board never showed can be scored too.
 
 DEFINITIONS - fixed on 2026-10-11, before a single manual pick existed.
 
@@ -343,7 +345,9 @@ def render(card: Dict[str, Any]) -> List[str]:
     lines = [fmt.format_header("OWN PICKS - manual long options, 1-3 sessions")]
     if not card["n_picks"]:
         lines.append("  No manual long-option picks in the ledger yet. Log one "
-                     "from a scan menu (or a bare ticker) and it is scored here.")
+                     "from a scan menu ([L]) or with "
+                     "`python -m src.own_picks --log TICKER YYYY-MM-DD STRIKE call|put "
+                     "--price FILL` and it is scored here.")
         return lines
     for title, side in (("Your picks", card["picks"]),
                         ("Board, same days, not picked", card["board"])):
@@ -376,10 +380,96 @@ def panel_lines(*, ledger_path: Optional[str] = None,
     return lines
 
 
-def main() -> None:
+# ── Logging a pick ───────────────────────────────────────────────────────────
+
+def log_pick(ticker: str, expiration: str, strike: float, opt_type: str, *,
+             price: Optional[float] = None, force: bool = False,
+             ledger_path: Optional[str] = None, fetch=None,
+             manager=None, today: Optional[str] = None) -> Tuple[bool, str]:
+    """Write one manual Long Call / Long Put to the ledger.
+
+    ``price`` is the operator's fill. Without it the live ask is used — what
+    buying at market would have cost. The ledger's own gates (DTE range,
+    budget, sizing) still apply; ``force`` bypasses them for a deliberate
+    entry, logged at quantity 1. Returns (logged, message).
+    """
+    from datetime import datetime as _dt
+    opt_type = str(opt_type).lower()
+    if opt_type not in ("call", "put"):
+        return False, f"type must be call or put, got {opt_type!r}"
+    try:
+        exp = _dt.strptime(expiration, "%Y-%m-%d").date()
+    except ValueError:
+        return False, f"expiration must be YYYY-MM-DD, got {expiration!r}"
+    today = today or date.today().isoformat()
+    if exp.isoformat() <= today:
+        return False, f"expiration {expiration} is not in the future"
+    ticker = ticker.upper()
+    strike = float(strike)
+
+    quote = cm._fetch_chain(fetch or cm._default_fetch, ticker,
+                            expiration).get((round(strike, 4), opt_type))
+    bid, ask = (quote if quote else (None, None))
+    notes: List[str] = []
+    if quote is None:
+        notes.append(f"no live quote for {ticker} {expiration} {strike:g} "
+                     f"{opt_type} — check the contract; its marks may be missing")
+    if price is None:
+        if not ask or ask <= 0:
+            return False, "no live ask to price it — pass --price with your fill"
+        price = float(ask)
+        notes.append(f"priced at the live ask ${price:.2f}")
+    if price <= 0:
+        return False, "price must be positive"
+
+    if manager is None:
+        from .paper_manager import PaperManager
+        manager = PaperManager(db_path=_ledger_path(ledger_path))
+    trade: Dict[str, Any] = {
+        "ticker": ticker, "expiration": expiration, "strike": strike,
+        "type": opt_type, "entry_price": price, "quality_score": None,
+        "strategy_name": "Long Call" if opt_type == "call" else "Long Put",
+    }
+    if force:
+        trade.update(allow_untradeable=True, allow_unaffordable=True,
+                     allow_unsized=True)
+    if not manager.log_trade(trade):
+        return False, ("refused by the ledger (reason above); "
+                       "re-run with --force to log it anyway")
+    label = f"{ticker} {expiration} {strike:g} {opt_type.upper()} @ ${price:.2f}"
+    if bid is not None and ask:
+        notes.append(f"market was {bid:.2f} / {ask:.2f}")
+    return True, "logged " + label + ("" if not notes else " (" + "; ".join(notes) + ")")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(
+        prog="python -m src.own_picks",
+        description="Scorecard for your own long-option picks; --log adds one.")
+    ap.add_argument("--log", nargs=4,
+                    metavar=("TICKER", "EXPIRATION", "STRIKE", "TYPE"),
+                    help="log a Long Call/Put, e.g. --log AAPL 2026-11-20 250 call")
+    ap.add_argument("--price", type=float,
+                    help="your fill per share (default: the live ask)")
+    ap.add_argument("--force", action="store_true",
+                    help="bypass the ledger's DTE/budget/sizing gates")
+    args = ap.parse_args(argv)
+    if args.log:
+        tk, exp, strike, typ = args.log
+        try:
+            strike_f = float(strike)
+        except ValueError:
+            print(f"strike must be a number, got {strike!r}")
+            return 2
+        ok, msg = log_pick(tk, exp, strike_f, typ, price=args.price,
+                           force=args.force)
+        print(("\u2713 " if ok else "\u2717 ") + msg)
+        return 0 if ok else 1
     for line in render(build_scorecard()):
         print(line)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

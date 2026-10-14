@@ -1763,7 +1763,8 @@ class PaperManager:
             float(trade_dict["strike"]),
             trade_dict["type"].lower(),
             float(trade_dict["entry_price"]),
-            float(trade_dict["quality_score"]),
+            (float(trade_dict["quality_score"])
+             if trade_dict.get("quality_score") is not None else None),
             trade_dict["strategy_name"],
             "OPEN",
             None,   # exit_price
