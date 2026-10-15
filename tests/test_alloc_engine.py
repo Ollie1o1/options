@@ -567,3 +567,90 @@ class EntryDepthFeatureTest(unittest.TestCase):
         c = self._chain(40, 999, 999, 25)
         del c[1]["ask_size"]
         self.assertIsNone(self._depth(c))
+
+
+class LiveRuleOptionsTest(unittest.TestCase):
+    """Default-off options that let `replay` run the LIVE Bull Put rule.
+
+    docs/PREREG_LIVE_BULL_PUT_ODX_STRESS_20261015.md. Each is absent from every
+    existing spec, so no earlier result can move.
+    """
+
+    def _held(self, min_days, exit_day):
+        # Entered 10 DTE, so the 21-DTE time exit is due from day one.
+        e = "2024-01-15"
+        data = {("AAA", "2024-01-05"): [_c(100.0, "put", 2.0, 2.3, e, -0.25),
+                                        _c(95.0, "put", 0.8, 1.0, e, -0.12)],
+                ("AAA", exit_day): [_c(100.0, "put", 1.9, 2.2, e, -0.25),
+                                    _c(95.0, "put", 0.7, 0.9, e, -0.12)]}
+        spec = _spec(entry={"dte": [5, 30], "short_delta": 0.25, "width": 5.0},
+                     exit={"profit_target": 0.5, "stop": 1.0,
+                           "time_exit_dte": 21, "min_days_held": min_days,
+                           "hold_to_expiry": False})
+        trades, _ = replay(spec, ["AAA"], ["2024-01-05", exit_day],
+                           FakeSource(data))
+        return trades[0]
+
+    def test_time_exit_waits_for_min_days_held(self):
+        self.assertIsNone(self._held(3, "2024-01-06").exit_date)
+
+    def test_time_exit_fires_once_min_days_held_is_met(self):
+        t = self._held(3, "2024-01-08")
+        self.assertEqual(t.exit_reason, "time_exit")
+
+    def test_without_min_days_held_the_time_exit_is_unchanged(self):
+        self.assertEqual(self._held(0, "2024-01-06").exit_reason, "time_exit")
+
+    def test_min_days_held_does_not_delay_the_profit_target(self):
+        e = "2024-01-15"
+        data = {("AAA", "2024-01-05"): [_c(100.0, "put", 2.0, 2.3, e, -0.25),
+                                        _c(95.0, "put", 0.8, 1.0, e, -0.12)],
+                ("AAA", "2024-01-06"): [_c(100.0, "put", 0.3, 0.4, e, -0.25),
+                                        _c(95.0, "put", 0.05, 0.1, e, -0.12)]}
+        spec = _spec(entry={"dte": [5, 30], "short_delta": 0.25, "width": 5.0},
+                     exit={"profit_target": 0.5, "stop": 1.0,
+                           "time_exit_dte": 21, "min_days_held": 3,
+                           "hold_to_expiry": False})
+        trades, _ = replay(spec, ["AAA"], ["2024-01-05", "2024-01-06"],
+                           FakeSource(data))
+        self.assertEqual(trades[0].exit_reason, "profit_target")
+
+    def _parity_chain(self):
+        # Spot 200 by put-call parity at the 200 strike (C = P).
+        rows = [_c(200.0, "call", 3.0, 3.2, delta=0.5),
+                _c(200.0, "put", 3.0, 3.2, delta=-0.5)]
+        for k, d in ((196.0, -0.32), (193.0, -0.22), (190.0, -0.15)):
+            rows.append(_c(k, "put", 1.5, 1.6, delta=d))
+        return rows
+
+    def test_width_pct_of_spot_sizes_the_wing_off_the_implied_spot(self):
+        entry = {"dte": [20, 90], "short_delta": 0.32, "width": 50.0,
+                 "width_pct_of_spot": 0.015}
+        legs = select_legs(_spec(entry=entry), self._parity_chain(),
+                           "2024-01-05")
+        # 1.5% of 200 = 3, so 196 -> 193, not the fixed $50.
+        self.assertEqual([l.strike for l in legs], [196.0, 193.0])
+
+    def test_width_pct_of_spot_without_a_spot_selects_nothing(self):
+        entry = {"dte": [20, 90], "short_delta": 0.25, "width": 5.0,
+                 "width_pct_of_spot": 0.015}
+        self.assertIsNone(select_legs(_spec(entry=entry), _bull_put_chain(),
+                                      "2024-01-05"))
+
+    def test_credit_below_the_floor_is_refused_and_counted(self):
+        # credit 1.00 on a 5-wide spread = 0.20; a 0.25 floor refuses it.
+        spec = _spec(entry={"dte": [20, 90], "short_delta": 0.25,
+                            "width": 5.0, "min_credit_to_width": 0.25})
+        trades, stats = replay(spec, ["AAA"], ["2024-01-05"],
+                               FakeSource({("AAA", "2024-01-05"):
+                                           _bull_put_chain()}))
+        self.assertEqual(trades, [])
+        self.assertEqual(stats["skipped_credit_floor"], 1)
+
+    def test_credit_at_the_floor_is_accepted(self):
+        spec = _spec(entry={"dte": [20, 90], "short_delta": 0.25,
+                            "width": 5.0, "min_credit_to_width": 0.20})
+        trades, _ = replay(spec, ["AAA"], ["2024-01-05"],
+                           FakeSource({("AAA", "2024-01-05"):
+                                       _bull_put_chain()}))
+        self.assertEqual(len(trades), 1)
