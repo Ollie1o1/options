@@ -96,12 +96,21 @@ def due_walk_forward(state: dict, today: str, min_days: int = 30) -> bool:
 # each logged once per day. (key, run.py-flag). Order is the run order.
 #   ds  long calls (cohort feeder, carries the DTE floor)
 #   sps credit spreads (Bull Put / Bear Call)
-#   ss  short puts (short-premium single leg)
 #   ics iron condors
+#
+# `ss` (short puts, `-ss`) was DROPPED 2026-10-15 by operator decision. It
+# could log nothing — Short Put is not an allowed strategy — and the account
+# cannot afford one: sizing allows 2% of ~$35k equity per trade, and a
+# cash-secured put risks strike x 100, so only strikes under ~$7 size (18 of
+# 36,466 candidates since 10-01). Its refusals were never measurable either:
+# `candidate_marks` opens short premium UNSUPPORTED (no spot/delta to run its
+# exits on). What it did do was run a full Yahoo-backed scan every day, and
+# Yahoo rate limits are what broke the candidate-marks run on 10-14 and 10-15.
+# Bull Put is the same bet with defined risk. Restore this line if the book
+# can afford a cash-secured put again; `-ss` still works interactively.
 WORKING_AUTOLOG_WINDOWS = [
     ("ds", "-ds"),
     ("sps", "-sps"),
-    ("ss", "-ss"),
     ("ics", "-ics"),
 ]
 # Catch-up runs only inside regular trading hours: outside this band yfinance

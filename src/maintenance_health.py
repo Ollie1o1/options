@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover
 # The working auto-log windows that must run every RTH weekday (mirrors
 # maintenance.WORKING_AUTOLOG_WINDOWS). If any is missing from state, the
 # cohort feeder has not fully run and auto-log is treated as not-run.
-WORKING_WINDOWS = ("ds", "sps", "ss", "ics")
+WORKING_WINDOWS = ("ds", "sps", "ics")
 
 # stale-day thresholds per cadence: (<=days -> severity); anything past the last
 # tier is CRITICAL. Daily jobs should run every trading day; weekly jobs refresh

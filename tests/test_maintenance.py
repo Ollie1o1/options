@@ -59,26 +59,37 @@ class TestDueAutologWindows(unittest.TestCase):
     """Catch-up model: a single market-hours launch returns EVERY working
     strategy not yet logged today, decoupled from per-clock slots."""
 
-    KEYS = {"ds", "sps", "ss", "ics"}
+    KEYS = {"ds", "sps", "ics"}
 
     def _keys(self, windows):
         return {w[0] for w in windows}
 
     def test_all_working_strategies_due_on_fresh_weekday(self):
-        # 1030 Wednesday, empty state -> all four working strategies are due.
+        # 1030 Wednesday, empty state -> all three working strategies are due.
         got = m.due_autolog_windows({}, weekday=3, hhmm=1030, today="2026-06-24")
         self.assertEqual(self._keys(got), self.KEYS)
 
-    def test_short_put_window_included(self):
-        # The user-requested fix: short puts (-ss) must be a logged strategy.
+    def test_short_put_window_is_not_scheduled(self):
+        # Dropped 2026-10-15 by operator decision, reversing the earlier
+        # request that added it: Short Put cannot be sized at this equity and
+        # cannot be logged, so the window was a daily Yahoo scan for nothing.
+        # See the comment on WORKING_AUTOLOG_WINDOWS before restoring it.
         got = m.due_autolog_windows({}, weekday=3, hhmm=1400, today="2026-06-24")
         flags = {w[1] for w in got}
-        self.assertIn("-ss", flags)
+        self.assertNotIn("-ss", flags)
+
+    def test_health_mirrors_the_scheduled_windows(self):
+        # maintenance_health keeps its own copy to avoid importing this
+        # module; a window scheduled but not checked (or checked but never
+        # scheduled — a permanent "not run") is the drift this pins.
+        from src.maintenance_health import WORKING_WINDOWS
+        self.assertEqual(set(WORKING_WINDOWS),
+                         {w[0] for w in m.WORKING_AUTOLOG_WINDOWS})
 
     def test_already_logged_windows_excluded(self):
         st = {"last_autolog": {"ds": "2026-06-24", "ics": "2026-06-24"}}
         got = m.due_autolog_windows(st, weekday=3, hhmm=1400, today="2026-06-24")
-        self.assertEqual(self._keys(got), {"sps", "ss"})
+        self.assertEqual(self._keys(got), {"sps"})
 
     def test_empty_outside_rth_band(self):
         self.assertEqual(m.due_autolog_windows({}, weekday=3, hhmm=945, today="2026-06-24"), [])
@@ -145,7 +156,7 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_autolog_catches_up_all_working_strategies(self):
         # 2026-06-04 is a Thursday, 14:30 (in RTH band): one launch logs ALL
-        # four working strategies, not just the clock-matched one.
+        # three working strategies, not just the clock-matched one.
         calls = []
         def fake_runner(cmd):
             calls.append(cmd); return 0
@@ -159,9 +170,9 @@ class TestOrchestrator(unittest.TestCase):
                 walk_forward_fn=lambda **k: None,
                 watch_fn=lambda db: None)
             flags = {f for c in calls for f in c if f in ("-ds", "-sps", "-ss", "-ics")}
-            self.assertEqual(flags, {"-ds", "-sps", "-ss", "-ics"})
+            self.assertEqual(flags, {"-ds", "-sps", "-ics"})
             st = m.load_state(state_path)
-            self.assertEqual(set(st["last_autolog"]), {"ds", "sps", "ss", "ics"})
+            self.assertEqual(set(st["last_autolog"]), {"ds", "sps", "ics"})
             self.assertEqual(st["last_autolog"]["ics"], "2026-06-04")
             self.assertIn("cohort", summary)
 
@@ -195,9 +206,9 @@ class TestOrchestrator(unittest.TestCase):
                 runner=lambda cmd: (calls.append(cmd), 0)[1],
                 swing_fn=lambda: None, watch_fn=lambda db: None,
                 lock_path=os.path.join(d, "catchup.lock"))
-            self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
+            self.assertEqual(set(summary["ran"]), {"ds", "sps", "ics"})
             self.assertEqual(set(m.load_state(sp)["last_autolog"]),
-                             {"ds", "sps", "ss", "ics"})
+                             {"ds", "sps", "ics"})
 
     def test_catchup_takes_the_swing_hook_by_injection(self):
         """The crypto swing track calls Binance over the network.
@@ -233,7 +244,7 @@ class TestOrchestrator(unittest.TestCase):
                 runner=lambda cmd: 0, swing_fn=_boom,
                 watch_fn=lambda db: None,
                 lock_path=os.path.join(d, "catchup.lock"))
-            self.assertEqual(set(summary["ran"]), {"ds", "sps", "ss", "ics"})
+            self.assertEqual(set(summary["ran"]), {"ds", "sps", "ics"})
 
     def test_ds_window_feeds_cohort_with_dte_floor(self):
         # 10:30 Thursday = 'ds' window; the scan must carry --min-dte so its
@@ -551,9 +562,9 @@ class TestCatchupSingleInstance(unittest.TestCase):
                 swing_fn=lambda: None, watch_fn=lambda db: None,   # offline: the real hook calls Binance
                 lock_path=os.path.join(d, "catchup.lock"))
         flags = {f for c in calls for f in c if f in ("-ds", "-sps", "-ss", "-ics")}
-        self.assertEqual(flags, {"-ds", "-sps", "-ss", "-ics"})
-        self.assertEqual(set(res["ran"]) & {"ds", "sps", "ss", "ics"},
-                         {"ds", "sps", "ss", "ics"})
+        self.assertEqual(flags, {"-ds", "-sps", "-ics"})
+        self.assertEqual(set(res["ran"]) & {"ds", "sps", "ics"},
+                         {"ds", "sps", "ics"})
 
 
 class TestChainArchiveJob(unittest.TestCase):
