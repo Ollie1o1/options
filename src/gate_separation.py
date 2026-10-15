@@ -460,7 +460,8 @@ def _derive_strategy(name: object, mode: object, opt_type: object) -> str:
         return UNLABELLED
 
 
-def load_cohort(db_path: str) -> pd.DataFrame:
+def load_cohort(db_path: str, scan_after: Optional[str] = None,
+                scan_through: Optional[str] = None) -> pd.DataFrame:
     """Closed, marked candidate positions joined to their recorded decision.
 
     THE ONLY I/O IN THIS MODULE.
@@ -468,8 +469,22 @@ def load_cohort(db_path: str) -> pd.DataFrame:
     `gate_passed IS NULL` is excluded: 8,454 such rows span the whole corpus
     rather than a legacy prefix, and a row whose arm is unknown cannot be
     assigned to one.
+
+    `scan_after` / `scan_through` bound the SCAN date (UTC, `date(ts)`):
+    strictly after the first, on or before the second. The forward test the
+    registration authorises is "scans recorded after the freeze", i.e.
+    `scan_after="2026-09-30"`. Only the population moves; every statistic and
+    threshold is untouched.
     """
     import sqlite3
+    where = ""
+    params: List[str] = []
+    if scan_after:
+        where += " AND date(c.ts) > ?"
+        params.append(scan_after)
+    if scan_through:
+        where += " AND date(c.ts) <= ?"
+        params.append(scan_through)
     sql = (
         "SELECT c.strategy_name, c.mode, c.opt_type, c.symbol, c.expiration,"
         "       date(c.ts) AS scan_date, c.contract_key,"
@@ -478,11 +493,11 @@ def load_cohort(db_path: str) -> pd.DataFrame:
         "  ON c.scan_id = p.scan_id AND c.board = p.board "
         " AND c.contract_key = p.contract_key "
         "WHERE p.status = 'CLOSED' AND p.pnl_pct IS NOT NULL "
-        "  AND c.gate_passed IS NOT NULL"
+        "  AND c.gate_passed IS NOT NULL" + where
     )
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-            df = pd.read_sql(sql, conn)
+            df = pd.read_sql(sql, conn, params=params)
     except Exception:
         log.warning("cohort unreadable at %s", db_path, exc_info=True)
         return pd.DataFrame(columns=COHORT_COLUMNS)

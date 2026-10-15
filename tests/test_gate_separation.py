@@ -15,6 +15,9 @@ See docs/PREREG_GATE_SEPARATION_20260929.md.
 """
 from __future__ import annotations
 
+import os
+import sqlite3
+import tempfile
 import unittest
 
 import numpy as np
@@ -383,6 +386,77 @@ class TestHalfSplit(unittest.TestCase):
         df = pd.DataFrame({"scan_date": ["2026-09-01"] * 5})
         a, b = gs.half_split(df)
         self.assertEqual(len(a) + len(b), 5)
+
+
+class TestScanWindow(unittest.TestCase):
+    """The forward test is the registered estimator on a later POPULATION.
+    The bound must select by scan date and nothing else, and the report must
+    say which scans it used — a forward run once printed the database range
+    as its window, which read as if the pre-freeze corpus was included."""
+
+    def _db(self, d):
+        from src import candidate_marks as cm
+        path = os.path.join(d, "c.db")
+        with cm.connect(path) as conn:
+            for i, day in enumerate(("2026-09-29", "2026-09-30", "2026-10-01",
+                                     "2026-10-05", "2026-10-06")):
+                for passed in (0, 1):
+                    key = f"AAPL|2026-11-20|call|{190 + i}|{passed}"
+                    conn.execute(
+                        "INSERT INTO candidates (scan_id, ts, board, "
+                        "contract_key, symbol, strategy_name, expiration, "
+                        "gate_passed) VALUES (?,?,?,?,?,?,?,?)",
+                        (f"S{i}", f"{day}T15:00:00+00:00", "b", key, "AAPL",
+                         "Bull Put", "2026-11-20", passed))
+                    conn.execute(
+                        "INSERT INTO candidate_positions (scan_id, board, "
+                        "contract_key, family, entry_date, entry_price, status, "
+                        "pnl_pct) VALUES (?,?,?,?,?,?,?,?)",
+                        (f"S{i}", "b", key, "spread", day, 1.0, "CLOSED",
+                         0.1 * passed))
+            conn.commit()
+        return path
+
+    def test_unbounded_loads_everything(self):
+        with tempfile.TemporaryDirectory() as d:
+            df = gs.load_cohort(self._db(d))
+        self.assertEqual(len(df), 10)
+
+    def test_scan_after_is_strict(self):
+        with tempfile.TemporaryDirectory() as d:
+            df = gs.load_cohort(self._db(d), scan_after="2026-09-30")
+        self.assertEqual(sorted(set(df["scan_date"])),
+                         ["2026-10-01", "2026-10-05", "2026-10-06"])
+
+    def test_scan_through_is_inclusive_and_combines(self):
+        with tempfile.TemporaryDirectory() as d:
+            df = gs.load_cohort(self._db(d), scan_after="2026-09-30",
+                                scan_through="2026-10-05")
+        self.assertEqual(sorted(set(df["scan_date"])),
+                         ["2026-10-01", "2026-10-05"])
+
+    def test_the_report_names_its_cohort(self):
+        from scripts import gate_separation_report as rep
+        with tempfile.TemporaryDirectory() as d:
+            out = rep.run(self._db(d), n_boot=20, n_perm=20, shuffles=2,
+                          seed=1, scan_after="2026-09-30")
+        self.assertEqual(out["cohort"]["rows"], 6)
+        self.assertEqual(out["cohort"]["scan_min"], "2026-10-01")
+        text = rep.render(out)
+        self.assertIn("scans 2026-10-01 .. 2026-10-06 (scan > 2026-09-30)",
+                      text)
+        self.assertIn("database     : 2026-09-29", text)
+
+    def test_an_old_manifest_reads_as_the_whole_database(self):
+        from scripts import gate_separation_report as rep
+        self.assertIn("whole database", rep._cohort_line(None))
+
+    def test_a_malformed_date_is_refused(self):
+        import argparse
+        from scripts import gate_separation_report as rep
+        with self.assertRaises(argparse.ArgumentTypeError):
+            rep._iso_date("09/30/2026")
+        self.assertEqual(rep._iso_date("2026-09-30"), "2026-09-30")
 
 
 if __name__ == "__main__":

@@ -88,10 +88,19 @@ def analyse(df: pd.DataFrame, strategy: str, *, n_boot: int, n_perm: int,
 
 
 def run(db_path: str, *, n_boot: int, n_perm: int, shuffles: int,
-        seed: int) -> Dict[str, object]:
-    df = gs.load_cohort(db_path)
+        seed: int, scan_after: Optional[str] = None,
+        scan_through: Optional[str] = None) -> Dict[str, object]:
+    df = gs.load_cohort(db_path, scan_after=scan_after,
+                        scan_through=scan_through)
     if len(df) == 0:
         return {"error": "empty cohort", "db_path": db_path}
+    # The fingerprint dates the whole DATABASE; this dates the rows the
+    # statistics were computed on. A forward run printed the database range
+    # as its "window", which read as if the pre-freeze corpus was included.
+    cohort = {"scan_after": scan_after, "scan_through": scan_through,
+              "rows": int(len(df)),
+              "scan_min": str(df["scan_date"].min()),
+              "scan_max": str(df["scan_date"].max())}
 
     strategies = sorted(df["strategy_name"].unique())
     rows = [analyse(df, s, n_boot=n_boot, n_perm=n_perm, shuffles=shuffles,
@@ -156,6 +165,7 @@ def run(db_path: str, *, n_boot: int, n_perm: int, shuffles: int,
         "run_at": datetime.now(timezone.utc).isoformat(),
         "db_path": db_path,
         "corpus_fingerprint": gs.corpus_fingerprint(db_path),
+        "cohort": cohort,
         "parameters": {"n_boot": n_boot, "n_perm": n_perm,
                        "negative_control_shuffles": shuffles, "seed": seed,
                        "alpha": gs.ALPHA, "min_clusters": gs.MIN_CLUSTERS,
@@ -182,6 +192,29 @@ def _fmt(v: object, nd: int = 4) -> str:
     return str(v)
 
 
+def _cohort_line(c: object) -> str:
+    """Which scans the statistics were computed on, and the bound that chose
+    them. Old manifests carry no cohort and read as the whole database."""
+    if not isinstance(c, dict) or not c:
+        return "  cohort       : whole database"
+    bounds = []
+    if c.get("scan_after"):
+        bounds.append(f"scan > {c['scan_after']}")
+    if c.get("scan_through"):
+        bounds.append(f"scan <= {c['scan_through']}")
+    return (f"  cohort       : {c.get('rows')} closed rows, scans "
+            f"{c.get('scan_min')} .. {c.get('scan_max')} "
+            f"({', '.join(bounds) if bounds else 'unbounded'})")
+
+
+def _iso_date(s: str) -> str:
+    """argparse type: a YYYY-MM-DD date, compared as text against date(ts)."""
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {s!r}")
+
+
 def render(out: Dict[str, object]) -> str:
     if "error" in out:
         return f"gate separation: {out['error']} ({out.get('db_path')})"
@@ -194,8 +227,9 @@ def render(out: Dict[str, object]) -> str:
         f"  corpus       : {fp.get('digest')} "
         f"({fp.get('candidate_rows')} candidate rows, "
         f"{fp.get('closed_positions')} closed positions)",
-        f"  window       : {str(fp.get('ts_min'))[:10]} .. "
+        f"  database     : {str(fp.get('ts_min'))[:10]} .. "
         f"{str(fp.get('ts_max'))[:10]}",
+        _cohort_line(out.get("cohort")),
         f"  family-wise p: {out['family_wise_p']:.4f} "
         f"(max-stat sign-flip over {len(out['family_members'])} claimants: "
         f"{', '.join(out['family_members'])})",
@@ -252,6 +286,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--shuffles", type=int,
                     default=gs.NEGATIVE_CONTROL_SHUFFLES)
     ap.add_argument("--seed", type=int, default=gs.SEED)
+    ap.add_argument("--scan-after", type=_iso_date, default=None,
+                    help="only scans dated strictly after this day (UTC). "
+                         "The registered forward test is --scan-after "
+                         "2026-09-30.")
+    ap.add_argument("--scan-through", type=_iso_date, default=None,
+                    help="only scans dated on or before this day (UTC); a "
+                         "sensitivity bound, e.g. to drop immature scans")
     ap.add_argument("--quick", action="store_true",
                     help="small resample counts, for a smoke run only")
     args = ap.parse_args(argv)
@@ -260,7 +301,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.n_boot, args.n_perm, args.shuffles = 500, 500, 20
 
     out = run(args.db, n_boot=args.n_boot, n_perm=args.n_perm,
-              shuffles=args.shuffles, seed=args.seed)
+              shuffles=args.shuffles, seed=args.seed,
+              scan_after=args.scan_after, scan_through=args.scan_through)
     text = render(out)
     print(text)
 
