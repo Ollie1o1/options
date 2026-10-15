@@ -48,6 +48,15 @@ Per trade *i*, with q = `quantity` and 100 shares per contract:
    entry delta (theta + vega + gamma + costs).
 6. **On capital:** x = X / `capital_at_risk`.
 
+**Amendment, before computation:** 16 of the 59 trades have NULL leg quotes. For
+these:
+- S₀ = the daily close of the entry date.
+- The long leg is priced at the short leg's `entry_iv` (flat).
+
+They are flagged `s0_fallback`, and the sensitivity that drops fallback rows
+drops them too. Times are America/Toronto (= New York), the ledger's local
+clock.
+
 ## Estimator and decision rule
 
 - Primary: **mean x**, with a CI from 10,000 bootstrap resamples **clustered by
