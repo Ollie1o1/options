@@ -97,3 +97,24 @@ of capital at risk, and both point estimates so far are negative. The section-3
 path is open but has no candidate rule. On task 4's sensitivities, the only place a premium shows is at mid fills,
 where it's +0.31% of capital at risk. That makes cost control (one crossing,
 not two) the first thing any section-3 rule has to solve.
+
+## Amendments
+
+**2026-10-15 — Bull Put auto-logging stopped NOW, not on 2027-01-15.** The
+user's decision, made the same day: §1 already vetoes the live rule for real
+money, so the January evaluation could not change what happens to it.
+Stricter than the original, as amendments must be.
+
+Implementation: `auto_log.blocked_strategies: ["Bull Put"]`.
+`apply_auto_log_allowlist` drops a blocked strategy before the allocation is
+consulted.
+- Long Call, Long Put and Short Put admissions are unchanged. Checked on the
+  real config: 400 sampled keys each, identical decisions before and after.
+- Removing Bull Put from `allocation.eligible_strategies` would instead have
+  moved Short Put from 6% to 73% of admissions.
+- Open Bull Puts run to their normal exits.
+- `data/candidates.db` keeps recording the board and the auto-log queue.
+- Revert: `config.bak.20261015-block-bull-put.json`, or remove the entry.
+
+§2 is still run on 2027-01-15, **for the record only**, on the trades closed
+by then.

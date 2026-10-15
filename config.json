@@ -131,6 +131,10 @@
     "allowed_strategies": [
       "Bull Put"
     ],
+    "_blocked_strategies_note": "Hard stop checked FIRST in apply_auto_log_allowlist, before the allocation is consulted, so every other structure's admission share is unchanged (removing Bull Put from allocation.eligible_strategies instead would have moved Short Put from 6% to 73%). Bull Put BLOCKED 2026-10-15 by the user, as a dated amendment to docs/DECISION_RULE_20261015.md: the live rule is costly beta on optionsDX SPY 2010-23 (excess over its own delta -2.10% of capital at risk per trade, CI [-2.72,-1.59], n=927) and the live book's +$878 is less than its delta's +$1,553. Open Bull Puts run to their normal exits; data/candidates.db shadow recording is unaffected. Revert via config.bak.20261015-block-bull-put.json or remove the entry.",
+    "blocked_strategies": [
+      "Bull Put"
+    ],
     "paper_only_strategies": [],
     "weight_profile": null,
     "phase1_start_date": "2026-05-27",

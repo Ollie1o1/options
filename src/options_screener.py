@@ -731,6 +731,15 @@ def apply_auto_log_allowlist(trade: dict, cfg_path: str = "config.json") -> tupl
     paper_only = set(al.get("paper_only_strategies") or [])
     strat = str(trade.get("strategy_name") or "")
 
+    # A hard stop, decided before the allocation is even consulted. Removing a
+    # structure from `allocation.eligible_strategies` instead would hand its
+    # share to the others: dropping Bull Put on 2026-10-15 would have moved
+    # Short Put from 6% to 73% of admissions. Blocking keeps every other
+    # structure's admission exactly where it was. Shadow recording
+    # (`record_autolog_rank`) happens upstream and is unaffected.
+    if strat in set(al.get("blocked_strategies") or []):
+        return ("drop", None)
+
     # An allowlist by NAME is self-sealing: nothing outside it can enter, so
     # nothing outside it can ever accumulate the evidence that would let it
     # in. When an allocation is configured it replaces the `allowed` set with
