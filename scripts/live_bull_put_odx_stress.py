@@ -285,16 +285,16 @@ def main() -> None:
         for y in STRESS_YEARS if y in yt.index))
 
     print("\n== H-B: the gate's flat-RV EV verdict on these trades")
-    g = df[df.take.notna()]
-    print(f"  gated rows {len(g)} | TAKE share {g.take.mean():.3f} "
+    g = df[df["take"].notna()]
+    print(f"  gated rows {len(g)} | TAKE share {g['take'].mean():.3f} "
           f"| gross<=0 share {(g.gross <= 0).mean():.3f}")
-    for arm, sub in (("TAKE", g[g.take == 1]), ("refused", g[g.take == 0])):
+    for arm, sub in (("TAKE", g[g["take"] == 1]), ("refused", g[g["take"] == 0])):
         if len(sub):
             print(f"  {arm:8s} n={len(sub):5d}  RoC {fmt(month_boot(sub, lambda d: d.roc.mean()))}"
                   f"\n  {'':8s}           x   {fmt(month_boot(sub, lambda d: d.x.mean()))}")
 
     def _diff(d: pd.DataFrame) -> float:
-        a, b = d[d.take == 0].x, d[d.take == 1].x
+        a, b = d[d["take"] == 0].x, d[d["take"] == 1].x
         return float(a.mean() - b.mean()) if len(a) and len(b) else np.nan
     hb = month_boot(g, _diff)
     print(f"  refused − TAKE (x) {fmt(hb)}")
@@ -304,7 +304,7 @@ def main() -> None:
     m = g[g.skew_pen.notna()].copy()
     m["q"] = pd.qcut(m.skew_pen, 5, labels=False) + 1
     for q, sub in m.groupby("q"):
-        print(f"    Q{q} pen {sub.skew_pen.median():+.4f}  TAKE {sub.take.mean():.2f}  "
+        print(f"    Q{q} pen {sub.skew_pen.median():+.4f}  TAKE {sub['take'].mean():.2f}  "
               f"x {fmt(month_boot(sub, lambda d: d.x.mean()))}")
 
     print("\n== Sensitivities (no authority)")
