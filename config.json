@@ -515,7 +515,9 @@
     ],
     "max_dte": 120,
     "moneyness_band": 0.15,
-    "min_open_interest": 1
+    "min_open_interest": 1,
+    "_ledger_lookback_days_note": "Tickers the book holds open, or entered or exited inside this many days, are archived on top of symbols. Added 2026-10-15: the archive is the only independent record of the prices the ledger exits at, and covered 15 of the 39 tickers traded since sizing. Each extra single name is ~300-1,100 rows a day against ~4,000 for SPY. 0 or null archives symbols only.",
+    "ledger_lookback_days": 30
   },
   "breakout": {
     "universe": [

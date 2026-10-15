@@ -591,9 +591,130 @@ def _days_between(a: str, b: str) -> Optional[int]:
         return None
 
 
+# ── Settling a position that was never marked ───────────────────────────────
+
+# Calendar days past expiration to keep retrying the underlying's close before
+# closing with no outcome. Covers a weekend plus a holiday or a bad feed day.
+_SETTLE_GIVE_UP_DAYS = 5
+
+
+def intrinsic_mark(legs: List[Dict[str, Any]], spot: float) -> float:
+    """What a structure is worth at expiration, on the same positive scale as a
+    mark: the net intrinsic value of its legs, bought legs positive.
+
+    `abs` because a mark is always the positive amount the position is worth
+    (a debit) or costs to close (a credit) — `pnl_pct` reads the direction
+    from the entry's sign, not from the mark's.
+    """
+    net = 0.0
+    for leg in legs:
+        k = float(leg["strike"])
+        v = max(0.0, spot - k) if leg["opt_type"] == "call" else max(0.0, k - spot)
+        net += v if leg["side"] == "buy" else -v
+    return abs(net)
+
+
+def _default_underlying(symbol: str, basis_date: str,
+                        expiration: str) -> Optional[Dict[str, Any]]:
+    """The underlying's UNADJUSTED close at expiration, and its split dates.
+
+    Yahoo split-adjusts all history, `auto_adjust=False` included: AXTX's
+    2026-09-21 close of $9.40 reads as $37.64 after its 1-for-4 reverse split
+    on 09-22. The strike is in pre-split dollars, so the close is un-adjusted
+    by every split dated after it. None on any failure or when the latest bar
+    is not near the expiration — the caller retries rather than settle on a
+    stale price.
+    """
+    from datetime import date, timedelta
+    try:
+        import yfinance as yf
+        t = yf.Ticker(symbol)
+        end = (date.fromisoformat(expiration) + timedelta(days=1)).isoformat()
+        hist = t.history(start=basis_date, end=end, auto_adjust=False)
+        if hist is None or hist.empty or "Close" not in hist:
+            return None
+        close_date = hist.index[-1].date().isoformat()
+        # A Friday expiration on a holiday settles on Thursday; anything
+        # older than that is a missing bar, not a settlement price.
+        if (_days_between(close_date, expiration) or 0) > 4:
+            return None
+        raw_splits = t.splits
+        splits = ([] if raw_splits is None else
+                  [(idx.date().isoformat(), float(r))
+                   for idx, r in raw_splits.items() if r and float(r) != 1.0])
+        factor = 1.0
+        for d, r in splits:
+            if d > close_date:
+                factor *= r
+        close = cr._num(hist["Close"].iloc[-1])
+        if close is None or close <= 0:
+            return None
+        return {"close": close * factor, "close_date": close_date,
+                "splits": [d for d, _r in splits]}
+    except Exception:
+        log.debug("underlying fetch failed for %s", symbol, exc_info=True)
+        return None
+
+
+def _settle_unmarked(row: Dict[str, Any], today: str, underlying,
+                     cache: Dict[Tuple[str, str, str], Any]
+                     ) -> Optional[Tuple[str, Optional[float], Optional[float]]]:
+    """(exit_reason, exit_price, pnl_pct) for an expired position that never
+    got a mark, or None to leave it OPEN and try again on the next run.
+
+    This replaced a flat -1.0 ("full loss") on 2026-10-15. That number was
+    invented, and wrong in both directions: a credit spread's full loss is a
+    multiple of its premium, not -100%, and a long option that finishes in the
+    money is a gain. AXTX was both lessons at once — a refused long put on a
+    stock that reverse-split 1-for-4 the day it was entered, never marked
+    because Yahoo's "$8 put" became a different, unquoted contract, and worth
+    about +150% at expiry. -1.0 would have recorded it as the negative-EV gate
+    being right.
+
+    A split between the scan and expiration VOIDS the position (pnl NULL): the
+    exchange adjusts the contract's deliverable, so neither the recorded strike
+    nor any quote under the same key describes it any more. NULL is "not
+    recorded" and every reader of `pnl_pct` already drops it. The comparison is
+    `>=` the scan date, not `>`: a scan stamped after midnight UTC carries the
+    next day's date, and voiding a valid position costs one observation where
+    settling an adjusted one writes a wrong number.
+    """
+    expiration = str(row.get("expiration") or "")
+    symbol = str(row.get("symbol") or "")
+    basis = str(row.get("ts") or row.get("entry_date") or "")[:10]
+    dte = _days_between(today, expiration)
+    if not symbol or not basis or dte is None:
+        return ("expired_unmarked", None, None)
+
+    key = (symbol, basis, expiration)
+    if key not in cache:
+        try:
+            cache[key] = underlying(symbol, basis, expiration)
+        except Exception:
+            log.debug("underlying lookup raised for %s", symbol, exc_info=True)
+            cache[key] = None
+    info = cache[key]
+    if not info:
+        if dte <= -_SETTLE_GIVE_UP_DAYS:
+            return ("expired_unmarked", None, None)
+        return None
+
+    if any(basis <= str(d)[:10] <= expiration for d in info.get("splits") or []):
+        log.warning("candidate marks: %s split between %s and %s — position "
+                    "voided, its contract was adjusted", symbol, basis, expiration)
+        return ("corporate_action", None, None)
+
+    legs = marking_legs(row)
+    spot = cr._num(info.get("close"))
+    if legs is None or spot is None:
+        return ("expired_unmarked", None, None)
+    mark = intrinsic_mark(legs, spot)
+    return ("expired_settled", mark, pnl_pct(row.get("entry_price"), mark))
+
+
 @cr._safe(default=0)
 def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
-            cfg_path: str = "config.json") -> int:
+            cfg_path: str = "config.json", underlying=None) -> int:
     """Close open positions whose latest mark triggers an exit.
 
     Precedence matches the book: expiry, then the time exit, then take-profit,
@@ -603,10 +724,17 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
     Only marks dated on or before `today` are considered — resolving day N
     against a mark from day N+1 would be lookahead, and lookahead in a
     counterfactual is how a study proves whatever it likes.
+
+    `underlying(symbol, basis_date, expiration)` prices a position that expired
+    without ever being marked — see `_settle_unmarked`. Injectable so no test
+    touches the network.
     """
     from datetime import datetime
     if today is None:
         today = datetime.now().strftime("%Y-%m-%d")
+    if underlying is None:
+        underlying = _default_underlying
+    settle_cache: Dict[Tuple[str, str, str], Any] = {}
 
     rules = exit_rules(cfg_path)
     min_days = int(rules.get("min_days_held") or 0)
@@ -616,7 +744,8 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute(
             "SELECT p.rowid AS rid, p.family, p.entry_date, p.entry_price,"
-            "       c.expiration,"
+            "       c.expiration, c.symbol, c.ts, c.strike, c.opt_type,"
+            "       c.strategy_name, c.mode, c.features_json,"
             "       (SELECT m.mid FROM candidate_marks m "
             "         WHERE m.contract_key = p.contract_key "
             "           AND m.mark_date <= ? "
@@ -639,16 +768,22 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
                 # a Yahoo chain-snapshot inconsistency, not a fetch bug) and
                 # this position would otherwise sit OPEN forever, past its
                 # own expiration, since every exit below is mark-driven.
-                # Expiration must still close it; -1.0 (full loss) is the
-                # convention since there is no real price to exit at.
+                # Expiration must still close it, at intrinsic value from the
+                # underlying's close. Not on expiration day itself: the
+                # settlement close does not exist until the session ends.
                 dte = _days_between(today, row.get("expiration") or "")
-                if dte is not None and dte <= 0:
-                    conn.execute(
-                        "UPDATE candidate_positions SET status=?, exit_date=?, "
-                        "exit_price=?, exit_reason=?, pnl_pct=? WHERE rowid=?",
-                        (CLOSED, today, None, "expired_unmarked", -1.0,
-                         row["rid"]))
-                    closed += 1
+                if dte is None or dte >= 0:
+                    continue
+                settled = _settle_unmarked(row, today, underlying, settle_cache)
+                if settled is None:
+                    continue
+                reason_u, price_u, pnl_u = settled
+                conn.execute(
+                    "UPDATE candidate_positions SET status=?, exit_date=?, "
+                    "exit_price=?, exit_reason=?, pnl_pct=? WHERE rowid=?",
+                    (CLOSED, row.get("expiration") or today, price_u,
+                     reason_u, pnl_u, row["rid"]))
+                closed += 1
                 continue
             pnl = pnl_pct(row.get("entry_price"), mark)
             if pnl is None:
@@ -713,7 +848,8 @@ def due_candidate_marks(state: Optional[dict], today: str) -> bool:
 
 def mark_candidates(*, db_path: Optional[str] = None,
                     today: Optional[str] = None, fetch=None,
-                    cfg_path: str = "config.json") -> Dict[str, int]:
+                    cfg_path: str = "config.json",
+                    underlying=None) -> Dict[str, int]:
     """One day's work: open, mark, resolve. Returns the counts.
 
     Order matters. Opening runs first so a candidate recorded today is marked
@@ -738,7 +874,8 @@ def mark_candidates(*, db_path: Optional[str] = None,
     # its newest mark on or before today, which for every contract the run
     # missed is yesterday's — booked as today's exit. The retry later today
     # resolves on real marks; a day that never completes resolves tomorrow.
-    closed = (resolve(db_path=db_path, today=today, cfg_path=cfg_path)
+    closed = (resolve(db_path=db_path, today=today, cfg_path=cfg_path,
+                      underlying=underlying)
               if complete else 0)
     return {"opened": opened, "marked": marked, "closed": closed,
             "pairs": pairs, "failed_pairs": failed, "aborted": aborted,

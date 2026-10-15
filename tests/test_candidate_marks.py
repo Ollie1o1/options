@@ -82,6 +82,70 @@ def _mark(path, contract_key, date, mid):
         conn.commit()
 
 
+def _entry_price(path):
+    with sqlite3.connect(path) as conn:
+        return conn.execute(
+            "select entry_price from candidate_positions").fetchone()[0]
+
+
+class TestIntrinsicMark(unittest.TestCase):
+    PUT_SPREAD = [{"strike": 100.0, "opt_type": "put", "side": "sell"},
+                  {"strike": 95.0, "opt_type": "put", "side": "buy"}]
+
+    def test_a_bull_put_is_worth_its_width_below_the_long_strike(self):
+        self.assertAlmostEqual(cm.intrinsic_mark(self.PUT_SPREAD, 90.0), 5.0)
+
+    def test_a_bull_put_between_the_strikes(self):
+        self.assertAlmostEqual(cm.intrinsic_mark(self.PUT_SPREAD, 97.0), 3.0)
+
+    def test_a_bull_put_above_the_short_strike_is_worthless(self):
+        self.assertAlmostEqual(cm.intrinsic_mark(self.PUT_SPREAD, 101.0), 0.0)
+
+    def test_single_legs(self):
+        call = [{"strike": 50.0, "opt_type": "call", "side": "buy"}]
+        put = [{"strike": 50.0, "opt_type": "put", "side": "buy"}]
+        self.assertAlmostEqual(cm.intrinsic_mark(call, 56.0), 6.0)
+        self.assertAlmostEqual(cm.intrinsic_mark(put, 56.0), 0.0)
+        self.assertAlmostEqual(cm.intrinsic_mark(put, 41.0), 9.0)
+
+
+class TestDefaultUnderlyingUnadjustsSplits(unittest.TestCase):
+    """Yahoo split-adjusts its whole history. The strike is in the dollars of
+    its day, so a close read back after a later split has to be un-adjusted —
+    AXTX's real pre-split $9.40 reads as $37.64 today."""
+
+    def _fake(self, closes, splits):
+        import pandas as pd
+        from unittest import mock
+
+        idx = pd.DatetimeIndex([pd.Timestamp(d, tz="America/New_York")
+                                for d in closes])
+        hist = pd.DataFrame({"Close": list(closes.values())}, index=idx)
+        sidx = pd.DatetimeIndex([pd.Timestamp(d, tz="America/New_York")
+                                 for d in splits])
+        ticker = mock.Mock()
+        ticker.history.return_value = hist
+        ticker.splits = pd.Series(list(splits.values()), index=sidx, dtype=float)
+        return mock.patch("yfinance.Ticker", return_value=ticker)
+
+    def test_a_split_after_the_close_is_undone(self):
+        with self._fake({"2026-09-17": 30.0, "2026-09-18": 37.64},
+                        {"2026-09-22": 0.25}):
+            out = cm._default_underlying("AXTX", "2026-09-10", "2026-09-18")
+        self.assertAlmostEqual(out["close"], 9.41)
+        self.assertEqual(out["splits"], ["2026-09-22"])
+
+    def test_a_split_before_the_close_is_left_alone(self):
+        with self._fake({"2026-10-16": 18.60}, {"2026-09-22": 0.25}):
+            out = cm._default_underlying("AXTX", "2026-09-21", "2026-10-16")
+        self.assertAlmostEqual(out["close"], 18.60)
+
+    def test_a_bar_well_before_expiration_is_not_a_settlement(self):
+        with self._fake({"2026-10-05": 18.60}, {}):
+            self.assertIsNone(
+                cm._default_underlying("AXTX", "2026-09-21", "2026-10-16"))
+
+
 class TestSchema(unittest.TestCase):
     def test_connect_creates_both_tables(self):
         with tempfile.TemporaryDirectory() as d:
@@ -951,28 +1015,152 @@ class TestResolve(unittest.TestCase):
             self.assertEqual(cm.resolve(db_path=path, today="2026-08-10",
                                         cfg_path=cfg), 0)
 
-    def test_expiry_with_no_mark_ever_closes_as_a_full_loss(self):
+    def test_expiry_with_no_mark_ever_settles_at_intrinsic(self):
         """A leg whose strike drops out of the chain after entry (a real Yahoo
-        chain-snapshot instability, observed 2026-09-17/18: strikes present at
-        scan time gone from the chain by mark time) never gets a mark, so it
-        can never resolve through the normal mark-driven exits above. Left
-        alone it sits OPEN forever, past its own expiration, and the "never
-        marked" health alarm becomes a one-way ratchet. Expiration must close
-        it out even with zero marks; -1.0 (full loss) is the convention since
-        there is no real price to exit at."""
+        chain-snapshot instability, observed 2026-09-17/18) never gets a mark,
+        so it can never resolve through the mark-driven exits above. Left alone
+        it sits OPEN forever. Expiration closes it at intrinsic value from the
+        underlying's close — not at an invented -1.0, which recorded an
+        in-the-money long as a total loss."""
         with tempfile.TemporaryDirectory() as d:
             path, cfg = os.path.join(d, "c.db"), _write_config(d)
             self._open(path)
-            self.assertEqual(cm.resolve(db_path=path, today="2026-09-19",
-                                        cfg_path=cfg), 1)
+            entry = _entry_price(path)
+            calls = []
+
+            def underlying(symbol, basis, expiration):
+                calls.append((symbol, basis, expiration))
+                return {"close": 200.0, "close_date": expiration, "splits": []}
+
+            self.assertEqual(cm.resolve(db_path=path, today="2026-09-21",
+                                        cfg_path=cfg, underlying=underlying), 1)
+            with sqlite3.connect(path) as conn:
+                status, reason, pnl, price, exit_date = conn.execute(
+                    "select status, exit_reason, pnl_pct, exit_price, exit_date "
+                    "from candidate_positions").fetchone()
+            self.assertEqual(status, "CLOSED")
+            self.assertEqual(reason, "expired_settled")
+            self.assertAlmostEqual(price, 10.0)        # 200 - 190 call
+            self.assertAlmostEqual(pnl, cm.pnl_pct(entry, 10.0))
+            self.assertEqual(exit_date, "2026-09-18")
+            # Basis is the SCAN date, the day whose spot the strike was priced on.
+            self.assertEqual(calls, [("AAPL", "2026-08-19", "2026-09-18")])
+
+    def test_an_unmarked_out_of_the_money_long_settles_as_a_full_loss(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            cm.resolve(db_path=path, today="2026-09-21", cfg_path=cfg,
+                       underlying=lambda *a: {"close": 150.0, "splits": []})
+            with sqlite3.connect(path) as conn:
+                pnl, price = conn.execute(
+                    "select pnl_pct, exit_price from candidate_positions").fetchone()
+            self.assertAlmostEqual(price, 0.0)
+            self.assertAlmostEqual(pnl, -1.0)
+
+    def test_expiration_day_itself_waits_for_the_settlement_close(self):
+        # The resolve runs mid-session; expiration day's close does not exist yet.
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+
+            def underlying(*a):
+                raise AssertionError("must not price before the close")
+
+            self.assertEqual(cm.resolve(db_path=path, today="2026-09-18",
+                                        cfg_path=cfg, underlying=underlying), 0)
+
+    def test_a_split_during_the_hold_voids_the_position(self):
+        """AXTX 2026-09-22: a 1-for-4 reverse split on the entry day. The
+        exchange adjusted the contract, so its key named a different, unquoted
+        one ever after. Its strike no longer describes the position, and a
+        settlement against it would be fiction — NULL, not a number."""
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            cm.resolve(db_path=path, today="2026-09-21", cfg_path=cfg,
+                       underlying=lambda *a: {"close": 200.0,
+                                              "splits": ["2026-08-20"]})
             with sqlite3.connect(path) as conn:
                 status, reason, pnl, price = conn.execute(
                     "select status, exit_reason, pnl_pct, exit_price "
                     "from candidate_positions").fetchone()
-            self.assertEqual(status, "CLOSED")
-            self.assertEqual(reason, "expired_unmarked")
-            self.assertEqual(pnl, -1.0)
+            self.assertEqual((status, reason), ("CLOSED", "corporate_action"))
+            self.assertIsNone(pnl)
             self.assertIsNone(price)
+
+    def test_a_split_on_the_scan_date_voids_too(self):
+        # A scan stamped after midnight UTC carries the next day's date.
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            cm.resolve(db_path=path, today="2026-09-21", cfg_path=cfg,
+                       underlying=lambda *a: {"close": 200.0,
+                                              "splits": ["2026-08-19"]})
+            with sqlite3.connect(path) as conn:
+                reason, = conn.execute(
+                    "select exit_reason from candidate_positions").fetchone()
+            self.assertEqual(reason, "corporate_action")
+
+    def test_splits_outside_the_hold_do_not_void(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            cm.resolve(db_path=path, today="2026-09-21", cfg_path=cfg,
+                       underlying=lambda *a: {"close": 200.0, "splits": [
+                           "2026-08-01", "2026-09-19"]})
+            with sqlite3.connect(path) as conn:
+                reason, = conn.execute(
+                    "select exit_reason from candidate_positions").fetchone()
+            self.assertEqual(reason, "expired_settled")
+
+    def test_a_failed_lookup_retries_then_closes_with_no_outcome(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            dead = lambda *a: None
+            self.assertEqual(cm.resolve(db_path=path, today="2026-09-21",
+                                        cfg_path=cfg, underlying=dead), 0)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-09-23",
+                                        cfg_path=cfg, underlying=dead), 1)
+            with sqlite3.connect(path) as conn:
+                reason, pnl = conn.execute(
+                    "select exit_reason, pnl_pct from candidate_positions"
+                ).fetchone()
+            self.assertEqual(reason, "expired_unmarked")
+            self.assertIsNone(pnl)
+
+    def test_one_lookup_serves_every_position_on_the_contract(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_candidate(path, board="DISCOVERY SCAN")
+            _insert_candidate(path, board="TOP PICK")
+            cm.open_positions(db_path=path, today="2026-08-01")
+            calls = []
+
+            def underlying(*a):
+                calls.append(a)
+                return {"close": 200.0, "splits": []}
+
+            self.assertEqual(cm.resolve(db_path=path, today="2026-09-21",
+                                        cfg_path=cfg, underlying=underlying), 2)
+            self.assertEqual(len(calls), 1)
+
+    def test_an_unmarked_bull_put_settles_on_both_legs(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_structure(path)                 # 185/180 Bull Put
+            cm.open_positions(db_path=path, today="2026-08-01")
+            entry = _entry_price(path)
+            cm.resolve(db_path=path, today="2026-09-21", cfg_path=cfg,
+                       underlying=lambda *a: {"close": 170.0, "splits": []})
+            with sqlite3.connect(path) as conn:
+                price, pnl = conn.execute(
+                    "select exit_price, pnl_pct from candidate_positions"
+                ).fetchone()
+            self.assertAlmostEqual(price, 5.0)      # the full width
+            self.assertAlmostEqual(pnl, cm.pnl_pct(entry, 5.0))
+            self.assertLess(pnl, -1.0)              # a credit's loss exceeds it
 
     def test_a_future_mark_is_not_used(self):
         # Resolving on day N must not see a mark from day N+1.

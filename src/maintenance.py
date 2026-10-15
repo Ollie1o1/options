@@ -480,7 +480,9 @@ def _run_chain_archive() -> int:
         cfg = {}
     if not cfg.get("enabled", False):
         return 0
-    symbols = cfg.get("symbols") or []
+    symbols = chain_archive.archive_universe(
+        cfg.get("symbols") or [], "paper_trades.db",
+        lookback_days=int(cfg.get("ledger_lookback_days", 30) or 0))
     if not symbols:
         return 0
     return chain_archive.archive_symbols(
@@ -809,6 +811,10 @@ def main() -> None:
         _lines += _candidate_health()
         from src.candidate_marks import health_lines as _marks_health
         _lines += _marks_health()
+        # The jobs line above only dates the newest snapshot; a day lost in
+        # the middle shows here or nowhere.
+        from src.chain_archive import health_lines as _archive_health
+        _lines += _archive_health()
         # Has the entered mix actually tracked the allocation's target
         # weights? `admits` gates each candidate independently, so nothing
         # enforces the target over any stretch of real entries — a

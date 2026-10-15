@@ -82,6 +82,83 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(n, 1)  # SPY still archived
 
 
+def _ledger(path, rows):
+    """A throwaway ledger with just the columns `archive_universe` reads."""
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE trades (ticker TEXT, date TEXT, "
+                     "status TEXT, exit_date TEXT)")
+        conn.executemany("INSERT INTO trades VALUES (?,?,?,?)", rows)
+
+
+class UniverseTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.ledger = os.path.join(self.tmp, "ledger.db")
+
+    def test_adds_open_recent_and_recently_exited_tickers(self):
+        _ledger(self.ledger, [
+            ("ABT", "2026-10-13 10:00:00", "CLOSED", "2026-10-15 10:34:20"),
+            ("unh", "2026-10-01 10:00:00", "CLOSED", "2026-10-03 10:00:00"),
+            ("MU", "2026-06-01 10:00:00", "OPEN", None),
+            ("OLD", "2026-06-01 10:00:00", "CLOSED", "2026-06-20 10:00:00"),
+            ("SPY", "2026-10-14 10:00:00", "OPEN", None),
+        ])
+        out = ca.archive_universe(["SPY", "qqq"], self.ledger,
+                                  lookback_days=30, today="2026-10-15")
+        # Configured symbols first and in order; no duplicates; case folded.
+        self.assertEqual(out, ["SPY", "QQQ", "ABT", "MU", "UNH"])
+
+    def test_skips_crypto_pairs(self):
+        _ledger(self.ledger, [("BTC-USD", "2026-10-14", "OPEN", None)])
+        self.assertEqual(ca.archive_universe(["SPY"], self.ledger,
+                                             today="2026-10-15"), ["SPY"])
+
+    def test_zero_lookback_or_no_ledger_is_the_configured_list(self):
+        _ledger(self.ledger, [("ABT", "2026-10-14", "OPEN", None)])
+        self.assertEqual(ca.archive_universe(["SPY"], self.ledger,
+                                             lookback_days=0), ["SPY"])
+        self.assertEqual(ca.archive_universe(
+            ["SPY"], os.path.join(self.tmp, "missing.db")), ["SPY"])
+
+    def test_a_broken_ledger_degrades_to_the_configured_list(self):
+        with sqlite3.connect(self.ledger) as conn:
+            conn.execute("CREATE TABLE other (x)")
+        self.assertEqual(ca.archive_universe(["SPY"], self.ledger,
+                                             today="2026-10-15"), ["SPY"])
+
+
+class GapHealthTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "chains.db")
+
+    def _snap(self, *days):
+        for d in days:
+            ca.archive_symbols(["SPY"], db_path=self.db, today=d,
+                               fetcher=lambda s, d=d: [_row(
+                                   symbol=s, expiration="2026-11-20")])
+
+    def test_a_missed_trading_day_warns_and_names_it(self):
+        # 2026-10-06 and 10-09 are the real lost days.
+        self._snap("2026-10-02", "2026-10-05", "2026-10-07", "2026-10-08",
+                   "2026-10-12")
+        text = " ".join(ca.health_lines(self.db, days=14, today="2026-10-13"))
+        self.assertIn("[WARN]", text)
+        self.assertIn("2026-10-06", text)
+        self.assertIn("2026-10-09", text)
+
+    def test_an_unbroken_run_is_ok_and_today_is_not_a_gap(self):
+        # 10-13 (today) has no snapshot yet: the run is due in the afternoon.
+        self._snap("2026-10-08", "2026-10-09", "2026-10-12")
+        lines = ca.health_lines(self.db, days=14, today="2026-10-13")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("[OK]", lines[0])
+
+    def test_no_archive_prints_nothing(self):
+        self.assertEqual(ca.health_lines(
+            os.path.join(self.tmp, "none.db"), today="2026-10-13"), [])
+
+
 class ThrottleTest(unittest.TestCase):
     def test_due_on_weekday_afternoon(self):
         self.assertTrue(ca.due_chain_archive({}, "2026-06-10", weekday=3, hhmm=1405))
