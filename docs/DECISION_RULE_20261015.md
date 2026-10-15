@@ -14,7 +14,7 @@ after the evaluation is run.
 | Task 1 (EV gate) | The spread EV prices both legs at one flat realised vol, so put skew counts against the seller; index Bull Puts pass 5.2% vs 13.2% for single names. |
 | Task 2 (shadow corpus) | Refused index vs passed single-name: inconclusive, underpowered (CI ±10% of capital at risk). |
 | Task 3 (live book) | +$878 book vs +$1,553 from holding its own delta. Excess −4.02% of capital at risk per trade, CI [−9.61, +1.64], inconclusive. |
-| Task 4 (optionsDX SPY 2010-23, the live rule) | Excess **−2.10% [−2.72, −1.59]**, 927 trades, 114 months → **costly beta**. PF on capital at risk 0.958 [0.74, 1.27]. |
+| Task 4 (optionsDX SPY 2010-23, the live rule) | Excess **−2.10% [−2.72, −1.59]**, 927 trades, 114 months → **costly beta**. PF on capital at risk 0.958 [0.74, 1.27]. The gate doesn't separate (−0.20% [−1.29, +1.07]). Refunding both crossings gives excess +0.31% [+0.01, +0.62]; holding to expiry gives +0.03% [−2.91, +2.90]. `docs/RESULT_LIVE_BULL_PUT_ODX_STRESS_20261015.md` |
 
 ## The rule
 
@@ -94,6 +94,6 @@ Their results inform section 3; they cannot amend sections 1-2.
 
 Section 2 fails. At ~150 trades by January, the CI on A is roughly ±3.5 points
 of capital at risk, and both point estimates so far are negative. The section-3
-path is open but has no candidate rule. Every structural edge with evidence in
-this repo so far is either index premium held longer (not yet tested with the
-delta-matched estimator) or cost control.
+path is open but has no candidate rule. On task 4's sensitivities, the only place a premium shows is at mid fills,
+where it's +0.31% of capital at risk. That makes cost control (one crossing,
+not two) the first thing any section-3 rule has to solve.
