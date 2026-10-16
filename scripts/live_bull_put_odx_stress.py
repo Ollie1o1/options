@@ -114,6 +114,7 @@ def frame(trades: List[Any], spot: Dict[str, Optional[float]],
             car = float(t.capital_at_risk)
             H = (sd - ld) * 100.0 * (s1 - s0)
             row = dict(entry=t.entry_date, exit=t.exit_date, reason=t.exit_reason,
+                       expiration=t.expiration,
                        dte=f.get("dte"), short_delta=sd, long_delta=ld,
                        width=f.get("width"), credit=t.entry_price, car=car,
                        pnl=float(t.pnl), H=H, roc=float(t.pnl) / car,
