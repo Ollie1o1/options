@@ -285,3 +285,52 @@ class SpreadCondorPaperOnlyPersistenceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlockedStrategiesTest(unittest.TestCase):
+    """`auto_log.blocked_strategies` drops a structure before anything else.
+
+    Added 2026-10-15 to stop Bull Put auto-logging (docs/DECISION_RULE_20261015.md,
+    amendment). It must beat the allowlist, paper_only and the allocation, and
+    must not move any other structure's admission.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(self.cfg_path, "w") as f:
+            json.dump({"auto_log": {
+                "allowed_strategies": ["Bull Put", "Long Call"],
+                "paper_only_strategies": ["Bear Call"],
+                "blocked_strategies": ["Bull Put", "Bear Call"]}}, f)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _call(self, name):
+        from src.options_screener import apply_auto_log_allowlist
+        return apply_auto_log_allowlist({"strategy_name": name,
+                                         "contract_key": "k1"},
+                                        cfg_path=self.cfg_path)
+
+    def test_blocked_beats_allowed(self):
+        self.assertEqual(self._call("Bull Put"), ("drop", None))
+
+    def test_blocked_beats_paper_only(self):
+        self.assertEqual(self._call("Bear Call"), ("drop", None))
+
+    def test_an_unblocked_strategy_is_unaffected(self):
+        self.assertEqual(self._call("Long Call"), ("insert", 0))
+
+    def test_blocked_is_decided_before_the_allocation_is_consulted(self):
+        from unittest import mock
+        from src import options_screener as os_
+        with mock.patch.object(os_, "_allocation_for") as alloc:
+            self.assertEqual(self._call("Bull Put"), ("drop", None))
+            alloc.assert_not_called()
+
+    def test_absent_key_blocks_nothing(self):
+        with open(self.cfg_path, "w") as f:
+            json.dump({"auto_log": {"allowed_strategies": ["Bull Put"]}}, f)
+        self.assertEqual(self._call("Bull Put"), ("insert", 0))

@@ -123,13 +123,29 @@ class TestTheFamiliesThatFailTheirBreakevenAreNotLogged(unittest.TestCase):
 class TestTheAllowlistStillWorks(unittest.TestCase):
     """Guards against 'switch it off' becoming 'switch everything off'."""
 
-    def test_bull_put_still_takes_the_large_majority_of_entries(self):
-        """Was `_decide("Bull Put") == ("insert", 0)`. The allocation made
-        admission a share rather than a certainty — Bull Put holds ~88% of it,
-        the rest being the priced exploration budget. The guard this test
-        exists for is unchanged: 'switch it off' must not become 'switch
-        everything off'."""
-        self.assertGreater(_admission_rate("Bull Put"), 0.70)
+    def test_blocking_bull_put_moves_no_other_structure(self):
+        """REWRITTEN 2026-10-15. This asserted Bull Put took >70% of entries;
+        Bull Put is now blocked (see TestBullPutBlocked). The guard it existed
+        for is unchanged: 'switch it off' must not become 'switch everything
+        off'. Asserted as identical decisions against the same config with the
+        block removed, which holds with or without a ledger (CI has none)."""
+        import tempfile
+        with open(repo_path("config.json")) as fh:
+            cfg = json.load(fh)
+        cfg["auto_log"].pop("blocked_strategies", None)
+        with tempfile.TemporaryDirectory() as d:
+            unblocked = os.path.join(d, "config.json")
+            with open(unblocked, "w") as fh:
+                json.dump(cfg, fh)
+            for strat in ("Long Call", "Long Put", "Short Put"):
+                for i in range(200):
+                    trade = dict(FAR_DATED, strategy_name=strat, symbol="NVDA",
+                                 strike=100.0 + i, type="put")
+                    with self.subTest(strategy=strat, i=i):
+                        self.assertEqual(
+                            apply_auto_log_allowlist(dict(trade)),
+                            apply_auto_log_allowlist(dict(trade),
+                                                     cfg_path=unblocked))
 
     def test_an_unknown_strategy_is_dropped_rather_than_logged(self):
         self.assertEqual(_decide("Jade Lizard"), ("drop", None))
@@ -244,41 +260,34 @@ class TestLongCallIsHeldToItsExplorationShare(unittest.TestCase):
             ("drop", None))
 
 
-class TestBullPutLogsAgain(unittest.TestCase):
-    """Restored 2026-08-18. It was switched off by accident, not by evidence.
+class TestBullPutBlocked(unittest.TestCase):
+    """Bull Put auto-logging STOPPED 2026-10-15, by the user.
 
-    `c0cd5bc` (2026-08-01) removed Bull Put, Bear Call and Short Put from
-    `paper_only_strategies` so the short-premium gate's cohort could authorise
-    capital, and added none of them to `allowed_strategies`. Absence from both
-    lists is exactly how a strategy is switched off, so all three stopped being
-    auto-logged that day — silently, and against the intent of the change.
+    History: restored 2026-08-18 after `c0cd5bc` switched it off by accident;
+    it then held ~88% of the allocation. Stopped on evidence, not by accident:
+    on optionsDX SPY 2010-2023 the live rule earns less than its own delta
+    (excess -2.10% of capital at risk per trade, CI [-2.72, -1.59], n=927), and
+    the live book's +$878 trails its delta's +$1,553. See
+    docs/DECISION_RULE_20261015.md (amendment) and
+    docs/RESULT_LIVE_BULL_PUT_ODX_STRESS_20261015.md.
 
-    Bull Put is the one line in the book that clears its own bar: it needs a
-    50.9% win rate under the exits actually used and has delivered 66.4% over
-    131 closed trades, +$5,315. Bear Call (-7.4pp) and Short Put (-$8,278 over
-    109 closed) do not, and stay off.
+    Switched off by `auto_log.blocked_strategies`, NOT by deleting it from
+    `allowed_strategies`/`eligible_strategies`: removing it from the
+    allocation would re-spread its share and take Short Put from 6% to 73%.
     """
 
-    def test_bull_put_is_logged_and_cohort_eligible(self):
-        """Admitted candidates are cohort-eligible (flag 0), and Bull Put
-        holds the large majority of the allocation. See
-        `test_bull_put_still_takes_the_large_majority_of_entries`."""
-        self.assertGreater(_admission_rate("Bull Put"), 0.70)
-        flags = {apply_auto_log_allowlist(
-                     dict(FAR_DATED, strategy_name="Bull Put", symbol="NVDA",
-                          strike=100.0 + i, type="put"))
-                 for i in range(200)}
-        self.assertIn(("insert", 0), flags)
-        self.assertNotIn(("insert", 1), flags,
-                         "a far-dated Bull Put was quarantined")
+    def test_bull_put_is_never_logged(self):
+        self.assertEqual(_admission_rate("Bull Put"), 0.0)
+        decisions = {apply_auto_log_allowlist(
+                         dict(FAR_DATED, strategy_name="Bull Put", symbol="NVDA",
+                              strike=100.0 + i, type="put"))
+                     for i in range(200)}
+        self.assertEqual(decisions, {("drop", None)})
 
-    def test_bull_put_appears_in_allowed_strategies(self):
-        """Pins the mechanism: `paper_only_strategies` would also make it log,
-        but quarantined out of every cohort — which is the state we are
-        leaving, not the one we are moving to."""
+    def test_the_mechanism_is_the_block(self):
         with open(repo_path("config.json")) as fh:
             al = json.load(fh)["auto_log"]
-        self.assertIn("Bull Put", al.get("allowed_strategies") or [])
+        self.assertIn("Bull Put", al.get("blocked_strategies") or [])
 
     def test_bear_call_stays_off_entirely(self):
         """The fix restored one strategy on its own evidence, not the family

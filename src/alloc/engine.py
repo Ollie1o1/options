@@ -200,6 +200,14 @@ def select_legs(spec: StrategySpec, chain, date: str,
     puts = [c for c in at_exp if str(c["type"]).lower() == "put"]
     calls = [c for c in at_exp if str(c["type"]).lower() == "call"]
     width = float(entry.get("width", 5.0))
+    if entry.get("width_pct_of_spot") is not None:
+        # A fixed dollar width is a different instrument at different price
+        # levels: $5 is 4.5% of SPY in 2010 and 1.1% in 2023. The live book
+        # sizes its wings around 1.5% of spot.
+        spot = implied_spot_any(chain, expiry)
+        if spot is None or spot <= 0:
+            return None
+        width = float(entry["width_pct_of_spot"]) * spot
     struct = spec.structure
 
     tol = float(entry.get("delta_tolerance", DELTA_TOLERANCE))
@@ -339,6 +347,12 @@ def _should_exit(spec: StrategySpec, trade: Trade, close_price: float,
             if ex.get("stop") and value <= paid * 0.5:
                 return "stop"
     if ex.get("time_exit_dte") and dte <= int(ex["time_exit_dte"]):
+        # `min_days_held` gates the time exit only, never TP or stop — the
+        # order `paper_manager._evaluate_multileg_exit` applies live. Without
+        # it a 14-DTE entry is time-exited the next day, which no live trade
+        # ever was.
+        if _dte(trade.entry_date, date) < int(ex.get("min_days_held") or 0):
+            return None
         return "time_exit"
     return None
 
@@ -456,6 +470,7 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
     stats = {"opened": 0, "closed": 0, "skipped_missing": 0,
              "skipped_crossed": 0, "skipped_no_legs": 0,
              "skipped_capital": 0, "skipped_friction": 0, "skipped_signal": 0,
+             "skipped_credit_floor": 0,
              "split_closed": 0,
              "ticker_ended": 0}
 
@@ -558,6 +573,13 @@ def replay(spec: StrategySpec, symbols: Sequence[str], dates: Sequence[str],
                 fric = crossing_cost(legs, quotes)
                 if fric is None or fric > float(max_fric) * price:
                     stats["skipped_friction"] += 1
+                    continue
+
+            floor = spec.entry.get("min_credit_to_width")
+            if floor is not None and price > 0:
+                w = actual_width(legs)
+                if w <= 0 or price / w < float(floor) - 1e-9:
+                    stats["skipped_credit_floor"] += 1
                     continue
 
             car = capital_at_risk(spec, legs, price)

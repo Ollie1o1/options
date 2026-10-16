@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -38,7 +38,7 @@ def put_delta(S, K, s, T, q=0.0):
     return -np.exp(-q * T) * norm.cdf(-_d1(S, K, s, T, q))
 
 
-def load_trades(path: str) -> pd.DataFrame:
+def load_trades(path: str, exit_through: Optional[str] = None) -> pd.DataFrame:
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     df = pd.read_sql(
         """SELECT entry_id, date, ticker, expiration, strike, long_strike,
@@ -46,7 +46,9 @@ def load_trades(path: str) -> pd.DataFrame:
                   exit_date, short_bid_entry, short_ask_entry,
                   long_bid_entry, long_ask_entry
            FROM trades WHERE strategy_name='Bull Put' AND status='CLOSED'
-             AND date >= '2026-08-20' AND pnl_usd IS NOT NULL""", con)
+             AND date >= '2026-08-20' AND pnl_usd IS NOT NULL
+             AND (? IS NULL OR substr(exit_date, 1, 10) <= ?)""",
+        con, params=(exit_through, exit_through))
     con.close()
     return df
 
@@ -139,15 +141,38 @@ def per_trade(df: pd.DataFrame, px: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def cluster_boot(df: pd.DataFrame, col: str, by: str) -> Dict:
+def pf(v: np.ndarray) -> float:
+    """Profit factor on capital at risk: sum of gains over sum of losses.
+
+    docs/DECISION_RULE_20261015.md §2 condition B, on r_i = pnl_usd /
+    capital_at_risk. Infinite with no losses; zero with no gains.
+    """
+    v = np.asarray(v, dtype=float)
+    loss = -v[v < 0].sum()
+    gain = v[v > 0].sum()
+    if loss <= 0:
+        return float("inf") if gain > 0 else float("nan")
+    return float(gain / loss)
+
+
+def cluster_boot(df: pd.DataFrame, col: str, by: str,
+                 stat: Callable[[np.ndarray], float] = np.mean) -> Dict:
+    """Cluster bootstrap of `stat` over `col`. The default (mean) draws exactly
+    as the registered excess estimator always has, so its numbers cannot move."""
     groups = {k: g[col].values for k, g in df.groupby(by)}
     keys = np.array(list(groups))
     rng = np.random.default_rng(SEED)
     boots = np.empty(N_BOOT)
     for i in range(N_BOOT):
-        boots[i] = np.concatenate([groups[k] for k in rng.choice(keys, len(keys))]).mean()
-    lo, hi = np.percentile(boots, [2.5, 97.5])
-    return {"est": float(df[col].mean()), "lo": float(lo), "hi": float(hi), "k": len(keys)}
+        boots[i] = stat(np.concatenate([groups[k] for k in rng.choice(keys, len(keys))]))
+    lo, hi = np.nanpercentile(boots, [2.5, 97.5])
+    return {"est": float(stat(df[col].values)), "lo": float(lo), "hi": float(hi),
+            "k": len(keys)}
+
+
+def pf_verdict(r: Dict) -> str:
+    """Condition B: the CI's lower bound must clear 1."""
+    return "profitable" if r["lo"] > 1 else "unprofitable" if r["hi"] < 1 else "inconclusive"
 
 
 def verdict(r: Dict) -> str:
@@ -163,8 +188,11 @@ def main() -> None:
     ap.add_argument("--ledger", default=LEDGER)
     ap.add_argument("--cache", required=True)
     ap.add_argument("--csv")
+    ap.add_argument("--exit-through", metavar="YYYY-MM-DD",
+                    help="only trades closed on or before this date; the "
+                         "decision rule runs with 2027-01-15")
     a = ap.parse_args()
-    trades = load_trades(a.ledger)
+    trades = load_trades(a.ledger, a.exit_through)
     px = fetch_prices(sorted(trades.ticker.unique()), "2026-08-10", a.cache)
     t = per_trade(trades, px)
     if a.csv:
@@ -179,6 +207,12 @@ def main() -> None:
         print(f"  {name:17s} {fmt(cluster_boot(t, col, 'week'))}")
     prim = cluster_boot(t, "x", "week")
     print(f"\nVERDICT: {verdict(prim)}")
+    pfr = cluster_boot(t, "p", "week", stat=pf)
+    print(f"PF on capital at risk  {pfr['est']:.3f} [{pfr['lo']:.3f}, {pfr['hi']:.3f}]"
+          f" clusters={pfr['k']} -> {pf_verdict(pfr)}")
+    print(f"DECISION RULE §2: A {'PASS' if prim['lo'] > 0 else 'FAIL'} "
+          f"(excess CI lower > 0) | B {'PASS' if pfr['lo'] > 1 else 'FAIL'} "
+          f"(PF CI lower > 1)")
     print("\nsensitivities (no authority):")
     r = cluster_boot(t, "x", "ticker")
     print(f"  cluster by symbol      {fmt(r)} -> {verdict(r)}")
