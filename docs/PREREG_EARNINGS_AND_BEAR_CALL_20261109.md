@@ -82,3 +82,22 @@ None of these tests is a profitability claim for the live system; passes feed
 §3 step 3 (≥ 8 forward weeks). Data caveats stated in advance: Dolt quotes are
 EOD on Mon/Wed/Fri and pre-08-14 Dolt results had defects (spots); E1 uses no
 spot. B1's shadow fills are paper (execution truth ≈ 27% of credit).
+
+## AMENDMENT 1 (2026-11-09, before the E1 estimator was run on any event set)
+
+A one-event mechanics check (AAPL 2025-10-30) showed Dolt stores a sparse,
+day-varying subset of ~27 strikes per expiry, so exact leg strikes are often
+absent at exit. The registered "drop if unquoted at exit" would drop events
+**selectively by the size of the move** (the stored strikes re-centre after a
+gap), biasing toward the seller. Only that one event's outcome (a straddle)
+was seen. Amended rule:
+
+- A leg missing at exit is priced by **linear interpolation of bid and of ask
+  in strike** between the nearest stored strikes on each side (same expiry,
+  type, post snapshot). No bracket on both sides → beyond the stored range:
+  price = intrinsic-free bound 0 for an OTM leg is NOT assumed; the event is
+  dropped and counted.
+- Option prices are convex in strike, so linear interpolation is an upper
+  bound on the price: conservative for buying back short legs, generous for
+  selling back long legs.
+- Sensitivity added (no authority): exact-quoted events only.
