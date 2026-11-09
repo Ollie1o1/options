@@ -100,8 +100,14 @@ fi
 # 6. Invoke screener
 echo "[auto-log-eq] mode=$MODE stress=$STRESS"
 echo "[auto-log-eq] invoking: run.py $MODE --5 --no-ai"
+set +e
 "$VENV" run.py "$MODE" --5 --no-ai
 RC=$?
+
+# 7. Push trade alerts (Discord/Telegram) for new candidates from ANY scan since
+#    the last run. Never fails the job; no-op until a channel is set in .env.
+"$VENV" -m src.trade_alerts || echo "[auto-log-eq] trade alerts failed (ignored)"
+set -e
 
 echo "[$(ts)] auto_log_equity done (rc=$RC)"
 exit $RC

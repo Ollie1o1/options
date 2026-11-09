@@ -582,5 +582,47 @@
     "_authorising_gate_note": "Which gate the Phase-3 execution pipeline reads to decide ARMED vs DISARMED. 'long_call' is the historical wiring; it resolved STOP. 'short_premium' would read Arm A of the short-premium gate instead, which reads READY \u2014 deliberately NOT selected: pointing the pipeline at the arm that says yes is a real-money decision, and it is not implied by the promotion that made the cohort readable. Changing this is necessary but not sufficient to trade; live_execution.enabled is a separate switch.",
     "authorising_gate": "long_call",
     "short_premium_extensions_used": 0
+  },
+  "trade_alerts": {
+    "enabled": true,
+    "strategies": [
+      "Bear Call"
+    ],
+    "symbols": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "DIA",
+      "XLF",
+      "XLE",
+      "XLK",
+      "XLU",
+      "XLV",
+      "XLI",
+      "XLP",
+      "XLY",
+      "XLB",
+      "XLRE",
+      "XLC",
+      "EEM",
+      "EFA",
+      "GLD",
+      "SLV",
+      "TLT",
+      "HYG",
+      "SMH",
+      "XBI",
+      "KRE",
+      "GDX",
+      "USO",
+      "ARKK"
+    ],
+    "min_dte": 7,
+    "max_dte": 45,
+    "max_per_run": 3,
+    "dedupe_days": 5,
+    "max_age_minutes": 120,
+    "evidence_note": "Paper evidence only: gate-passed Bear Calls on ETFs, Aug-Oct 2026, PF 2.2, but not yet shown to beat their own market direction. Forward verdict due 2027-01-20. Size small.",
+    "_note": "Push alerts (src/trade_alerts.py). Credentials live in .env: DISCORD_WEBHOOK_URL and/or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID. Rule = where the evidence points (docs/RESEARCH_FINDINGS.md)."
   }
 }
