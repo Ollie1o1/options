@@ -32,14 +32,22 @@ here with another hand-set constant — this repo already paid for those
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 
 import pandas as pd
 
 
+# One clock for the whole fixture: expirations are dated from the same instant
+# the chain is priced at. Dating them from wall-clock while pricing at a pinned
+# `as_of` made the "30-DTE" contract drift (113 DTE by 2026-11-09), where the
+# vol-gap refusal blanks its EV and both tests fail on the calendar alone.
+AS_OF = datetime(2026, 8, 17, 16, 0, tzinfo=timezone.utc)
+
+
 def _chain(rows):
     """A minimal frame with two expirations at controllable IV levels."""
-    from datetime import datetime, timedelta
-    base = datetime.today()
+    from datetime import timedelta
+    base = AS_OF
     out = []
     for dte, iv, strike in rows:
         out.append({
@@ -71,8 +79,8 @@ CONFIG = {
 
 
 def _target_expiration(dte=30):
-    from datetime import datetime, timedelta
-    return (datetime.today() + timedelta(days=dte)).strftime("%Y-%m-%d")
+    from datetime import timedelta
+    return (AS_OF + timedelta(days=dte)).strftime("%Y-%m-%d")
 
 
 def _ev_of_target(rows, dte=30):
@@ -87,14 +95,13 @@ def _ev_of_target(rows, dte=30):
     the quote columns (`premium`, `mid`, `spread_pct`) are assembled by the
     former and are a precondition of the latter.
     """
-    from datetime import datetime, timezone
     from src.options_screener import enrich_and_score
     # Pin `as_of`: T_years is otherwise taken from wall-clock, so two calls
     # milliseconds apart price the same contract at fractionally different
     # tenors and the comparison below wobbles in the 7th significant figure.
     # See project_scorer_not_reproducible_20260810.
     out = enrich_and_score(
-        as_of=datetime(2026, 8, 17, 16, 0, tzinfo=timezone.utc),
+        as_of=AS_OF,
         df=_chain(rows), min_dte=1, max_dte=200, risk_free_rate=0.045,
         config=CONFIG, vix_regime_weights=CONFIG["composite_weights"],
         trader_profile="swing", mode="Discovery scan", iv_rank=0.5,
