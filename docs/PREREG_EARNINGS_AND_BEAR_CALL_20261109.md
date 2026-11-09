@@ -101,3 +101,13 @@ was seen. Amended rule:
   bound on the price: conservative for buying back short legs, generous for
   selling back long legs.
 - Sensitivity added (no authority): exact-quoted events only.
+
+## AMENDMENT 2 (2026-11-09, after B1 was run) — B1-F forward replication
+
+B1 ran with A fail (+2.84% [−1.98, +6.33]) and B pass (PF 1.891 [1.087,
+3.670]) on only 11 week clusters, so it is NOT a pass. Registered now: **B1-F**,
+the identical estimator (`scripts/bear_call_absolute.py`, unchanged except
+these two constants) on **entries dated ≥ 2026-10-30 only** (none of which B1
+used) and **expiration ≤ 2027-01-15**. Judge on or after **2027-01-20**. Pass =
+A and B, 95%, week clusters. The index-ETF sub-population is reported
+alongside with no authority (it was seen to carry B1).
