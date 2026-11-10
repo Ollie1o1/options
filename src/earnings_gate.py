@@ -83,8 +83,15 @@ DEFAULT_CACHE = "data/dolt_options.db"
 #: 1.3% — so the choice is a real one and is recorded in config.
 _HORIZONS = ("expiration", "time_exit")
 
+#: Long premium is held for the paper exit rules' window, not to expiry: a long
+#: option with more than ``time_exit_dte`` left is force-closed at that DTE, and
+#: one inside it after ``min_days_held`` (3 trading days). Five calendar days
+#: covers three trading days across a weekend.
+_LONG_MIN_HOLD_CAL_DAYS = 5
+
 _DEFAULTS: Dict[str, Any] = {
     "enabled": False,
+    "long_enabled": False,
     "horizon": "expiration",
     "cache_path": DEFAULT_CACHE,
     "projection": "off",
@@ -117,6 +124,43 @@ def applies_to(strategy_name: Optional[str]) -> bool:
     return bool(is_short_position(name))
 
 
+def applies_to_long(strategy_name: Optional[str]) -> bool:
+    """True for long-premium structures (long calls/puts, debit spreads).
+
+    Added 2026-11-09. Buying across an event was left ungated on purpose
+    ("a different trade with different evidence"); that evidence now exists.
+    On Dolt 2020-26, an ATM straddle bought the day before earnings and sold
+    the day after lost -16.1% of its debit at the touch [-18.1, -14.1], n=1,684
+    (docs/RESULT_EARNINGS_AND_BEAR_CALL_20261109.md, E1-L); held to expiry it
+    still lost -6.0%. The trade that prompted this: an XYZ Long Put bought on
+    report day 2026-11-03, -99.6% overnight through a -50% stop.
+    """
+    name = (strategy_name or "").strip().lower()
+    return bool(name) and any(key in name for key in _LONG_KEYS)
+
+
+def long_horizon_end(entry_date: str, expiration: Optional[str],
+                     time_exit_dte: Any) -> Optional[str]:
+    """Last date a LONG position can be open under the paper exit rules.
+
+    ``expiration - time_exit_dte`` when that is later than the minimum hold,
+    else ``entry + 5 calendar days``; never past expiration. ``None`` when a
+    date can't be parsed.
+    """
+    try:
+        exp = _dt.date.fromisoformat(str(expiration)[:10])
+        ent = _dt.date.fromisoformat(str(entry_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    try:
+        dte = max(0, int(time_exit_dte))
+    except (TypeError, ValueError):
+        dte = 0
+    end = max(exp - _dt.timedelta(days=dte),
+              ent + _dt.timedelta(days=_LONG_MIN_HOLD_CAL_DAYS))
+    return min(end, exp).isoformat()
+
+
 def load_earnings_gate_config(config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Read `auto_log.refuse_through_earnings` and friends, falling back per key.
 
@@ -128,6 +172,7 @@ def load_earnings_gate_config(config: Optional[Mapping[str, Any]]) -> Dict[str, 
     if isinstance(config, Mapping) and isinstance(config.get("auto_log"), Mapping):
         block = config["auto_log"]
     out["enabled"] = bool(block.get("refuse_through_earnings", False))
+    out["long_enabled"] = bool(block.get("refuse_long_through_earnings", False))
     horizon = str(block.get("earnings_horizon", _DEFAULTS["horizon"]))
     # An unrecognised horizon falls back to the CONSERVATIVE one rather than
     # to the permissive one: a typo must not quietly widen what gets logged.
@@ -184,6 +229,46 @@ def cached_earnings_dates(symbol: str, cache_path: str = DEFAULT_CACHE) -> List[
         return []
     finally:
         conn.close()
+
+
+def reports_after_open_on(symbol: str, day: str,
+                          cache_path: str = DEFAULT_CACHE) -> bool:
+    """True when a cached report falls ON ``day`` and is not before the open.
+
+    Added 2026-11-09. ``classify`` treats an event on the entry date as
+    already public, which is right for a before-open report and wrong for an
+    after-close one: the XYZ Long Put bought 2026-11-03 at 10:30 held through
+    that evening's report. Unknown timing counts as not-before-open
+    (conservative). NEVER fetches.
+    """
+    if not symbol or not day:
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        rows = conn.execute(
+            "SELECT whn FROM earnings_cal WHERE UPPER(symbol) = ? AND date = ?",
+            (symbol.upper(), str(day)[:10])).fetchall()
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return any("before" not in str(r[0] or "").lower() for r in rows)
+
+
+def effective_entry(symbol: str, entry_date: str,
+                    cache_path: str = DEFAULT_CACHE) -> str:
+    """The entry date ``classify`` should use: one day earlier when a report
+    lands later on the entry day, so ``(entry, end]`` contains it."""
+    entry = str(entry_date)[:10]
+    if reports_after_open_on(symbol, entry, cache_path):
+        try:
+            return (_dt.date.fromisoformat(entry) - _dt.timedelta(days=1)).isoformat()
+        except ValueError:
+            return entry
+    return entry
 
 
 def classify(dates: Sequence[str], entry_date: str,
@@ -307,16 +392,21 @@ def verdict_for_trade(strategy_name: Optional[str], symbol: Optional[str],
                       time_exit_dte: Any, cfg: Mapping[str, Any]) -> Optional[str]:
     """The gate's answer for one candidate, or None when it does not apply.
 
-    None means "this gate has nothing to say" — disabled, or long premium —
-    and is deliberately distinct from CLEAR, which is a measured all-clear.
+    None means "this gate has nothing to say" — disabled, or a structure it
+    doesn't cover (long premium needs ``refuse_long_through_earnings``) — and
+    is deliberately distinct from CLEAR, which is a measured all-clear.
     """
-    if not cfg.get("enabled") or not applies_to(strategy_name):
+    if cfg.get("long_enabled") and applies_to_long(strategy_name):
+        end = long_horizon_end(entry_date, expiration, time_exit_dte)
+    elif cfg.get("enabled") and applies_to(strategy_name):
+        end = horizon_end(expiration, time_exit_dte, str(cfg.get("horizon")))
+    else:
         return None
-    end = horizon_end(expiration, time_exit_dte, str(cfg.get("horizon")))
-    dates = cached_earnings_dates(str(symbol or ""),
-                                  str(cfg.get("cache_path") or DEFAULT_CACHE))
+    cache = str(cfg.get("cache_path") or DEFAULT_CACHE)
+    dates = cached_earnings_dates(str(symbol or ""), cache)
     mode = str(cfg.get("projection", "off"))
-    return classify_with_projection(dates, entry_date, end,
+    return classify_with_projection(dates, effective_entry(str(symbol or ""), entry_date, cache),
+                                    end,
                                     enabled=mode in ("report", "refuse"))
 
 

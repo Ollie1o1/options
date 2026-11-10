@@ -21,7 +21,7 @@ def _db(path: Path, rows):
     for r in rows:
         con.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
             "s", r.get("ts", "2026-11-09T19:49:01+00:00"), "TOP PICK", r["key"], r["sym"],
-            r.get("strat", "Bear Call"), r.get("exp", "2026-11-19"), 3.2, r.get("ev", 10.0),
+            r.get("strat", "Bear Call"), r.get("exp", "2026-11-27"), 3.2, r.get("ev", 10.0),
             None, r.get("gp", 1), json.dumps({"short_strike": 100, "long_strike": 105,
                                                "short_bid": 2.0, "short_ask": 2.1,
                                                "long_bid": 0.5, "long_ask": 0.6,
@@ -57,8 +57,9 @@ class TradeAlertsTest(unittest.TestCase):
             {"key": "AAPL|a", "sym": "AAPL", "ev": 99},       # not an ETF
             {"key": "IWM|a", "sym": "IWM", "strat": "Bull Put"},  # strategy off
             {"key": "DIA|a", "sym": "DIA", "gp": 0},          # refused by the gate
-            {"key": "XLF|a", "sym": "XLF", "exp": "2026-11-12"},  # 3 DTE < min
+            {"key": "XLF|a", "sym": "XLF", "exp": "2026-11-19"},  # 10 DTE < 14 min
             {"key": "XLE|a", "sym": "XLE", "ts": "2026-11-09T10:00:00+00:00"},  # stale
+            {"key": "XLK|a", "sym": "XLK", "exp": "2027-01-29"},  # 81 DTE > 60 max
         ])
         self.assertEqual(self._run(), 2)
         self.assertIn("SPY Bear Call 100/105C", self.sent[0])

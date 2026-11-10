@@ -107,6 +107,12 @@ RC=$?
 # 7. Push trade alerts (Discord/Telegram) for new candidates from ANY scan since
 #    the last run. Never fails the job; no-op until a channel is set in .env.
 "$VENV" -m src.trade_alerts || echo "[auto-log-eq] trade alerts failed (ignored)"
+
+# 8. Keep the earnings calendar fresh for the earnings gates. Only symbols
+#    cached >= 7 days ago are re-queried, so most runs fetch nothing; the
+#    cache had silently gone stale from 2026-08-20 to 11-09 without this.
+"$VENV" -m src.dolt_earnings --refresh --max-age-days 7 > logs/earnings_refresh.log 2>&1 \
+  || echo "[auto-log-eq] earnings refresh failed (ignored)"
 set -e
 
 echo "[$(ts)] auto_log_equity done (rc=$RC)"

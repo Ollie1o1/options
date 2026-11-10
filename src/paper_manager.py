@@ -38,7 +38,8 @@ from .book_sizing import (SizingDecision, book_equity, load_sizing_config,
                           open_risk_breakdown, sector_open_risk_for, size)
 from .earnings_gate import (PROJECTED_THROUGH, THROUGH, UNKNOWN,
                             cached_earnings_dates, load_earnings_gate_config,
-                            project_next_earnings, refuses, verdict_for_trade)
+                            project_next_earnings, refuses, verdict_for_trade,
+                            applies_to_long)
 
 # ── Chain-quote memo ─────────────────────────────────────────────────────────
 # _fetch_chain_quotes already serves every leg on a (ticker, expiration) from
@@ -852,11 +853,17 @@ def _earnings_dates_in_window(trade_dict: Dict[str, Any], cfg: Dict[str, Any],
     A refusal the operator cannot check is a refusal they cannot trust, so the
     print says WHICH date rather than only that there was one.
     """
-    from .earnings_gate import cached_earnings_dates, horizon_end
-    entry = str(trade_dict.get("date") or
-                datetime.now().strftime("%Y-%m-%d"))[:10]
-    end = horizon_end(trade_dict.get("expiration"), time_exit_dte,
-                      str(cfg.get("horizon")))
+    from .earnings_gate import (applies_to_long, cached_earnings_dates,
+                                effective_entry, horizon_end, long_horizon_end)
+    sym = str(trade_dict.get("ticker") or "")
+    raw_entry = str(trade_dict.get("date") or
+                    datetime.now().strftime("%Y-%m-%d"))[:10]
+    entry = effective_entry(sym, raw_entry, str(cfg.get("cache_path")))
+    if cfg.get("long_enabled") and applies_to_long(trade_dict.get("strategy_name")):
+        end = long_horizon_end(raw_entry, trade_dict.get("expiration"), time_exit_dte)
+    else:
+        end = horizon_end(trade_dict.get("expiration"), time_exit_dte,
+                          str(cfg.get("horizon")))
     if not end:
         return []
     return [d for d in cached_earnings_dates(
@@ -1670,7 +1677,9 @@ class PaperManager:
                     f"Skipped {trade_dict['strategy_name']} on "
                     f"{trade_dict.get('ticker')}: holds through earnings on "
                     f"{', '.join(_when) if _when else 'a known date'} — "
-                    "selling premium across a dated binary event"
+                    + ("buying premium into a dated binary event"
+                       if applies_to_long(trade_dict["strategy_name"])
+                       else "selling premium across a dated binary event")
                 )
                 return False
             if _earn == UNKNOWN:

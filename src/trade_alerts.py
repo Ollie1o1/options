@@ -41,8 +41,8 @@ DEFAULTS: Dict[str, Any] = {
     "symbols": ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLU", "XLV",
                 "XLI", "XLP", "XLY", "XLB", "XLRE", "XLC", "EEM", "EFA", "GLD",
                 "SLV", "TLT", "HYG", "SMH", "XBI", "KRE", "GDX", "USO", "ARKK"],
-    "min_dte": 7,
-    "max_dte": 45,
+    "min_dte": 14,   # the user trades 2 weeks to 2 months out
+    "max_dte": 60,
     "max_per_run": 3,
     "dedupe_days": 5,
     "max_age_minutes": 120,
