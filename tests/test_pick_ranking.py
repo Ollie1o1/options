@@ -321,3 +321,74 @@ class FailureSafetyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TopQuintileOnUnnamedSingleLegsTest(unittest.TestCase):
+    """G6 on the rows a discovery board actually carries.
+
+    Every other G6 test here builds its row with `strategy_name="Long Call"`.
+    A discovery board never does: its rows carry `type="call"|"put"` and no
+    strategy name (candidates.strategy_name is NULL on all of them, by
+    design). G6 keyed on the name alone, so on those boards it could not fire:
+    `refused_by='top_quintile'` appears on 0 of 840,691 recorded candidates,
+    and on 2026-09-22/25 eight MRNA contracts scoring 0.78-0.79 against a
+    0.742 cutoff were recorded as having cleared every gate.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.dir.name) / "ledger.db")
+        pr._top_quintile_cutoff.cache_clear()
+        conn = sqlite3.connect(self.db)
+        conn.execute("create table trades (quality_score real, status text, "
+                     "duplicate_of int, strategy_name text)")
+        conn.executemany(
+            "insert into trades values (?, 'CLOSED', null, 'Long Call')",
+            [(i / 100,) for i in range(100)])
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.dir.cleanup()
+        pr._top_quintile_cutoff.cache_clear()
+
+    def _gate(self, mode, **over):
+        from src import candidate_record as cr
+        row = _leg(quality_score=0.95, **over)
+        row.pop("strategy_name")
+        row.setdefault("type", "call")
+        token = cr._SCAN_MODE.set(mode)
+        try:
+            return pr.gate_board(pd.DataFrame([row]), db_path=self.db)
+        finally:
+            cr._SCAN_MODE.reset(token)
+
+    def test_a_nameless_discovery_call_in_the_top_quintile_is_refused(self):
+        r = self._gate("Discovery scan")
+        self.assertTrue(r.empty)
+        self.assertEqual(r.reasons["top_quintile"], 1)
+
+    def test_a_nameless_discovery_put_is_refused_too(self):
+        r = self._gate("Discovery scan", type="put")
+        self.assertEqual(r.reasons["top_quintile"], 1)
+
+    def test_a_blank_name_column_does_not_hide_the_leg(self):
+        # A frame that carries the column but no value hands the gate NaN.
+        from src import candidate_record as cr
+        row = _leg(quality_score=0.95, type="call")
+        row["strategy_name"] = float("nan")
+        token = cr._SCAN_MODE.set("Discovery scan")
+        try:
+            r = pr.gate_board(pd.DataFrame([row]), db_path=self.db)
+        finally:
+            cr._SCAN_MODE.reset(token)
+        self.assertEqual(r.reasons["top_quintile"], 1)
+
+    def test_a_premium_selling_put_is_short_and_is_left_alone(self):
+        # G6 was measured on LONG single legs. A sold put is not one.
+        r = self._gate("Premium Selling", type="put")
+        self.assertEqual(r.reasons["top_quintile"], 0)
+
+    def test_an_unknown_mode_is_not_guessed_at(self):
+        r = self._gate(None)
+        self.assertEqual(r.reasons["top_quintile"], 0)

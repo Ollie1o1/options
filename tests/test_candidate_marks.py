@@ -511,7 +511,10 @@ class TestOpenPositions(unittest.TestCase):
     def test_a_candidate_becomes_exactly_one_position(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "c.db")
-            _insert_candidate(path)
+            # Mid-session UTC, so the scan day is 08-19 in every US zone too:
+            # `entry_date` is the scan's local day, and the fixture's default
+            # midnight-UTC stamp is still the evening of 08-18 west of UTC.
+            _insert_candidate(path, ts="2026-08-19T15:00:00+00:00")
             self.assertEqual(cm.open_positions(db_path=path, today="2026-08-19"), 1)
             with sqlite3.connect(path) as conn:
                 rows = conn.execute(
@@ -1176,6 +1179,183 @@ class TestResolve(unittest.TestCase):
         self.assertIn("time_exit_dte", rules)
         for family in ("long_option", "spread"):
             self.assertIsNotNone(rules.get(family, {}).get("take_profit"))
+
+
+class TestEntryDateIsTheScanDay(unittest.TestCase):
+    """`entry_date` is the day the entry price was QUOTED, not the day the
+    marker next ran.
+
+    `open_positions` runs once a day inside the mark job. A scan recorded after
+    that day's run was opened by the NEXT run and stamped with that run's
+    date: 206,221 of 833,897 positions (25%) carried an entry date 1 or 3 days
+    after the scan whose quotes set their entry price. `resolve` counts
+    `min_days_held` from `entry_date`, so a Friday-afternoon candidate could
+    not time-exit before the following Thursday.
+    """
+
+    def _entry_date(self, path):
+        with sqlite3.connect(path) as conn:
+            return conn.execute(
+                "select entry_date from candidate_positions").fetchone()[0]
+
+    def test_a_friday_scan_opened_on_monday_is_entered_on_friday(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            # 15:00 UTC is the same calendar day in every US zone and in UTC.
+            _insert_candidate(path, ts="2026-08-14T15:00:00+00:00")
+            cm.open_positions(db_path=path, today="2026-08-17")
+            self.assertEqual(self._entry_date(path), "2026-08-14")
+
+    def test_a_scan_opened_the_same_day_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, ts="2026-08-14T15:00:00+00:00")
+            cm.open_positions(db_path=path, today="2026-08-14")
+            self.assertEqual(self._entry_date(path), "2026-08-14")
+
+    def test_an_entry_is_never_dated_after_the_run_that_opened_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, ts="2026-08-19T15:00:00+00:00")
+            cm.open_positions(db_path=path, today="2026-08-01")
+            self.assertEqual(self._entry_date(path), "2026-08-01")
+
+    def test_an_unreadable_timestamp_falls_back_to_the_run_day(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path, ts="not a timestamp")
+            cm.open_positions(db_path=path, today="2026-08-17")
+            self.assertEqual(self._entry_date(path), "2026-08-17")
+
+    def test_min_days_held_counts_from_the_scan_day(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            _insert_candidate(path, ts="2026-08-14T15:00:00+00:00")
+            cm.open_positions(db_path=path, today="2026-08-17")
+            _mark(path, "AAPL|2026-09-18|call|190", "2026-08-17", 25.0)
+            # Three days after the Friday quote: the take-profit may fire.
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-17",
+                                        cfg_path=cfg), 1)
+
+
+class TestResolveNeedsAFreshMark(unittest.TestCase):
+    """An exit is decided on TODAY's mark or not at all.
+
+    `resolve` took the newest mark on or before today, however old. A contract
+    that quoted on its first day and then went dark was closed days later on
+    that first-day mark, with `exit_date` set to the mark's date: 31,559
+    simulated time exits (6%) are dated 0-2 days after entry, which
+    `min_days_held = 3` forbids.
+    """
+    KEY = "AAPL|2026-09-18|call|190"
+
+    def _open(self, path, today="2026-08-01"):
+        _insert_candidate(path)
+        cm.open_positions(db_path=path, today=today)
+
+    def _row(self, path):
+        with sqlite3.connect(path) as conn:
+            return conn.execute(
+                "select status, exit_reason, exit_date, exit_price "
+                "from candidate_positions").fetchone()
+
+    def test_an_old_mark_does_not_take_profit_today(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-02", 25.0)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-10",
+                                        cfg_path=cfg), 0)
+            self.assertEqual(self._row(path)[0], "OPEN")
+
+    def test_an_old_mark_does_not_time_exit_today(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-02", 10.5)
+            # 21 DTE on 2026-08-28; the only mark is 26 days old.
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-28",
+                                        cfg_path=cfg), 0)
+            self.assertEqual(self._row(path)[0], "OPEN")
+
+    def test_todays_mark_still_exits(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, cfg = os.path.join(d, "c.db"), _write_config(d)
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-02", 10.5)
+            _mark(path, self.KEY, "2026-08-28", 10.5)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-08-28",
+                                        cfg_path=cfg), 1)
+            status, reason, exit_date, _ = self._row(path)
+            self.assertEqual((status, reason, exit_date),
+                             ("CLOSED", "time_exit", "2026-08-28"))
+
+    def test_a_position_last_marked_before_expiry_settles_at_intrinsic(self):
+        # Marked once at 3.00, then dark to expiration. It is worth what the
+        # underlying says at expiry, not what it quoted five weeks earlier.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cfg = _write_config(d, time_exit_dte=0)
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-10", 3.0)
+            closed = cm.resolve(
+                db_path=path, today="2026-09-21", cfg_path=cfg,
+                underlying=lambda s, b, e: {"close": 200.0,
+                                            "close_date": "2026-09-18",
+                                            "splits": []})
+            self.assertEqual(closed, 1)
+            status, reason, exit_date, price = self._row(path)
+            self.assertEqual((status, reason, exit_date),
+                             ("CLOSED", "expired_settled", "2026-09-18"))
+            self.assertAlmostEqual(price, 10.0)     # 200 - 190 strike
+
+    def test_expiration_day_with_only_an_old_mark_waits(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            cfg = _write_config(d, time_exit_dte=0)
+            self._open(path)
+            _mark(path, self.KEY, "2026-08-10", 3.0)
+            self.assertEqual(cm.resolve(db_path=path, today="2026-09-18",
+                                        cfg_path=cfg), 0)
+
+
+class TestHealthAfterAnAfternoonScan(unittest.TestCase):
+    """A position scanned after the last mark run has not missed a run."""
+
+    def test_it_is_not_reported_dark_before_the_next_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today=_days_ago(2))
+            _mark(path, "AAPL|2026-09-18|call|190", _days_ago(1), 10.0)
+            # Scanned yesterday afternoon, after yesterday's run.
+            _insert_candidate(path, scan_id="S2",
+                              ts=f"{_days_ago(1)}T15:00:00+00:00",
+                              contract_key="MSFT|2026-09-18|call|400",
+                              symbol="MSFT", strike=400.0)
+            # ...so it is opened by today's run, which has not marked yet.
+            cm.open_positions(db_path=path, today=_days_ago(0))
+            with sqlite3.connect(path) as conn:
+                entered, = conn.execute(
+                    "select entry_date from candidate_positions "
+                    "where scan_id = 'S2'").fetchone()
+            self.assertEqual(entered, _days_ago(1))
+            lines = "\n".join(cm.health_lines(db_path=path, days=30))
+            self.assertNotIn("NEVER BEEN MARKED", lines)
+
+    def test_one_that_sat_through_a_run_unmarked_still_is(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.db")
+            _insert_candidate(path)
+            cm.open_positions(db_path=path, today=_days_ago(3))
+            _mark(path, "AAPL|2026-09-18|call|190", _days_ago(1), 10.0)
+            _insert_candidate(path, scan_id="S2",
+                              ts=f"{_days_ago(2)}T15:00:00+00:00",
+                              contract_key="MSFT|2026-09-18|call|400",
+                              symbol="MSFT", strike=400.0)
+            cm.open_positions(db_path=path, today=_days_ago(2))
+            lines = "\n".join(cm.health_lines(db_path=path, days=30))
+            self.assertIn("1 OPEN POSITIONS HAVE NEVER BEEN MARKED", lines)
 
 
 class TestHealthLines(unittest.TestCase):

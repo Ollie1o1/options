@@ -232,12 +232,50 @@ def is_negative_ev(row: Any) -> bool:
         return False
 
 
+def _strategy_of(row: Dict[str, Any]) -> str:
+    """The strategy the measured gates key on, for a named or a nameless row.
+
+    Discovery, single-stock and premium-selling boards carry `type='call'|
+    'put'` — an option type — and no `strategy_name`; `candidates.strategy_name`
+    is NULL on every one of them by design. G6 compares against "Long Call" /
+    "Long Put", so reading the bare type meant it could not fire on any board
+    a person reads: `refused_by='top_quintile'` is on 0 of 840,691 recorded
+    candidates, and eight MRNA contracts above the cutoff were recorded as
+    cleared on 2026-09-22/25.
+
+    The side comes from the scan mode, by the same `strategy_label_for_mode`
+    the auto-logger, `candidate_marks` and `gate_separation` already use. With
+    no mode in scope the bare type is returned and nothing is guessed: a
+    premium-selling put is SHORT, and calling it a long put would apply a
+    threshold fitted on long legs to a trade it was never measured on.
+
+    A blank name arrives as NaN when the frame carries the column, and NaN is
+    truthy — `nan or "call"` is NaN — so the name is tested as a string.
+    """
+    name = row.get("strategy_name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    opt_type = row.get("type")
+    if not isinstance(opt_type, str) or not opt_type.strip():
+        return ""
+    try:
+        from . import candidate_record as _cr
+        from .trade_analysis import strategy_label_for_mode
+        mode = _cr._SCAN_MODE.get()
+        if mode:
+            return strategy_label_for_mode(str(mode), opt_type.strip())
+    except Exception:
+        log.debug("strategy labelling failed; using the bare type",
+                  exc_info=True)
+    return opt_type.strip()
+
+
 def _refusal_for(row: Dict[str, Any], cutoff: float,
                  win_rates: Optional[Dict[str, float]] = None) -> Optional[str]:
     """The first gate this candidate fails, or None if it clears them all."""
     from . import candidate_verdict as cv
 
-    strategy = str(row.get("strategy_name") or row.get("type") or "")
+    strategy = _strategy_of(row)
     failed = set()
 
     # G1-G3 come from the existing cost work, which already prices a candidate
