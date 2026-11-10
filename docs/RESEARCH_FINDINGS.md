@@ -10,7 +10,7 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ## 2026-11-10 (newest) — audit of the findings below
 
-Every finding was re-read against the script that produced it. The Bear Call
+Each finding was re-read against the script that produced it, except where a row says otherwise. The Bear Call
 and gate-separation numbers were re-run and reproduce to the digit.
 
 | Finding | As recorded | Could it flip? | What the check showed |
@@ -18,10 +18,12 @@ and gate-separation numbers were re-run and reproduce to the digit.
 | #1 Bear Calls made money (PF 1.89) | LEAD | **Yes — it does** | The paper P&L exits at the **mid** and concedes 35% of the half-spread at entry. Crossing both ends: PF 1.19 [0.68, 2.24], excess −1.4% [−6.3, +2.2]. Index ETFs: PF 1.41 [0.69, 3.14], excess −0.1%. Single names: excess −4.8% [−6.9, −2.8]. **Not profitable at the fills the earnings and SPY tests were judged on.** Still a lead only in the sense that mid-fill profit exists. |
 | #6 Friction-refused Bear Calls trail their delta | supports the gate | No | −3.1% as recorded; −20% once crossed. Stronger, same sign. |
 | #5 The gate separates credit spreads | CLOSED (replicated) | No | Reproduces (+0.19 / +0.17). Holds with the 08-29/30 weekend exits removed (original window +0.24 / +0.23) and at mid-to-mid prices (forward +0.10 / +0.07, both CIs above zero). The negative-EV arm alone separates at mid (+0.19 / +0.13), so it is not only the spread being charged to the wide contracts. One exception: forward Bull Put, passed vs friction-refused at mid, +0.04 [−0.01, +0.09]. |
-| #2, #3 Earnings premium real at mid, dead at the touch | CLOSED | No | Entry/exit days are correct for before-open and after-close reports; no look-ahead. The touch result (−20% to −33%) is far from zero. "Real at mid" rests on mids of quotes up to 50% wide and is the weaker half. |
+| #2 Earnings premium real at mid, dead at the touch | CLOSED | No | Entry/exit days are correct for before-open and after-close reports; no look-ahead. The touch result (−20% to −33%) is far from zero. "Real at mid" rests on mids of quotes up to 50% wide and is the weaker half. |
+| #3 Earnings held to expiry is worse | CLOSED | **Not audited** | `scripts/earnings_to_expiry_dolt.py` was not read. |
 | #4 Hedged SPY short vol | CLOSED | No | Hedge uses the prior close's delta; the VRP split uses only prior trades. Null stands. |
-| #8 Nine Long Puts lagged their delta | descriptive | No | Ledger arithmetic; no duplicates, no weekend exits. |
-| 10-15 costly beta, hold-to-expiry | CLOSED | No | Crosses both ends, month clusters, absolute deltas. Negative in 12 of 13 years. |
+| #8 Nine Long Puts lagged their delta | descriptive | No | No duplicates or weekend exits in the ledger; the +$241 / +$786 figures were not recomputed. |
+| 10-15 live Bull Put rule is costly beta | CLOSED | No | Crosses both ends, month clusters, absolute deltas. Negative in 12 of 13 years. |
+| 10-15 SPY put spread held to expiry | CLOSED | **Not audited** | `scripts/index_hold_to_expiry_odx.py` was not read. |
 | 10-10..14 direction signals | CLOSED | No (not re-run) | All null or below the cost hurdle with tight CIs; a bug would have to create an effect 5× larger. |
 | 09-28 book vs SPY, exit sweep | CLOSED | No (not re-run) | Read from the real ledger on capital at risk. |
 
