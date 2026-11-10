@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 import sqlite3
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -120,10 +120,42 @@ def per_row(df: pd.DataFrame, px: pd.DataFrame) -> pd.DataFrame:
         rr = float(r.pnl_pct) * credit / car
         h = -d * (c1 - S0) / car
         wk = pd.Timestamp(r.entry_date[:10]).isocalendar()
+        r_cross, x_cross = cross_fills(r, credit, width, h * car)
         out.append({"symbol": r.symbol, "entry": r.entry_date[:10], "exit": r.exit_date[:10],
                     "r": rr, "h": h, "x": rr - h, "delta": d, "implied": implied,
-                    "index": r.symbol in INDEX, "week": f"{wk[0]}-W{wk[1]:02d}"})
+                    "index": r.symbol in INDEX, "week": f"{wk[0]}-W{wk[1]:02d}",
+                    "r_cross": r_cross, "x_cross": x_cross})
     return pd.DataFrame(out)
+
+
+def cross_fills(r, credit: float, width: float,
+                hedge_per_share: float) -> Tuple[float, float]:
+    """(r, x) with the bid-ask crossed at BOTH ends. Amendment 3, no authority.
+
+    The registered r is the shadow position's `pnl_pct`: entry at the `limit`
+    policy (35% of the half-spread conceded) and exit at the MID, so it charges
+    about a sixth of a round trip. Here:
+
+        credit_cross = short_bid - long_ask                  (scan-time quotes)
+        exit_cost    = exit_mid + (short and long half-spreads AT ENTRY)
+        exit_mid     = credit * (1 - pnl_pct)                (inverts pnl_pct)
+        r_cross      = (credit_cross - exit_cost) / (width - credit_cross)
+
+    Per-leg quotes at exit are not stored, so the entry half-spreads stand in
+    for them. NaN when a leg quote is missing or the crossed credit leaves no
+    capital at risk to divide by.
+    """
+    try:
+        hs = ((r.short_ask - r.short_bid) + (r.long_ask - r.long_bid)) / 2
+        c_cross = float(r.short_bid - r.long_ask)
+    except TypeError:
+        return np.nan, np.nan
+    if not np.isfinite(hs) or not np.isfinite(c_cross) or not width > c_cross:
+        return np.nan, np.nan
+    car = width - c_cross
+    exit_mid = credit * (1 - float(r.pnl_pct))
+    r_cross = (c_cross - (exit_mid + hs)) / car
+    return r_cross, r_cross - hedge_per_share / car
 
 
 def pf(v: np.ndarray) -> float:
@@ -160,6 +192,10 @@ def main() -> None:
     ap.add_argument("--cache", required=True)
     ap.add_argument("--forward", action="store_true",
                     help="B1-F: entries >= 2026-10-30, expiry <= 2027-01-15; judge >= 2027-01-20")
+    ap.add_argument("--split-at", metavar="YYYY-MM-DD",
+                    help="also report entries before / on-or-after this date "
+                         "(Amendment 3: the day the entry-date and fresh-mark "
+                         "fixes merged); no authority")
     a = ap.parse_args()
     global EXP_THROUGH, ENTRY_FROM
     if a.forward:
@@ -184,6 +220,28 @@ def main() -> None:
     show("passed, drop exits 2026-10-12", p[p.exit != "2026-10-12"])
     show("passed, index ETFs", p[p["index"]])
     show("passed, single names", p[~p["index"]])
+    if a.split_at:
+        for label, d in ((f"passed, entries < {a.split_at}", p[p.entry < a.split_at]),
+                         (f"passed, entries >= {a.split_at}", p[p.entry >= a.split_at])):
+            if len(d):
+                show(label, d)
+            else:
+                print(f"  {label}: no rows")
+    print("\n== Amendment 3 (no authority): crossing the spread at both ends")
+    for label, d in (("passed", p), ("passed, index ETFs", p[p["index"]]),
+                     ("passed, single names", p[~p["index"]])):
+        d = d.dropna(subset=["r_cross", "x_cross"])
+        if not len(d):
+            print(f"  {label}: no rows with both legs quoted")
+            continue
+        a, b = cboot(d, "x_cross", "week"), cboot(d, "r_cross", "week", pf)
+        m = cboot(d, "r_cross", "week")
+        print(f"  {label}: n={len(d)}")
+        print(f"    r (on CAR)        {m['est']:+.4f} [{m['lo']:+.4f},{m['hi']:+.4f}]")
+        print(f"    A excess x        {a['est']:+.4f} [{a['lo']:+.4f},{a['hi']:+.4f}]")
+        print(f"    B PF on r         {b['est']:.3f} [{b['lo']:.3f},{b['hi']:.3f}]")
+        print(f"    would pass at the touch: "
+              f"{'yes' if a['lo'] > 0 and b['lo'] > 1 else 'no'}")
 
 
 if __name__ == "__main__":

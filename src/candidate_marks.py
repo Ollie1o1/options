@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS candidate_positions (
   exit_price   REAL,
   exit_reason  TEXT,
   pnl_pct      REAL,
+  opened_on    TEXT,
   PRIMARY KEY (scan_id, board, contract_key)
 );
 CREATE INDEX IF NOT EXISTS idx_pos_status ON candidate_positions(status);
@@ -70,6 +71,14 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
     """
     conn = cr.connect(db_path)
     conn.executescript(_SCHEMA)
+    # `opened_on` is the day the mark job created the row. It was the same
+    # thing as `entry_date` until that became the scan day; the health alarms
+    # ask "has this position been through a mark run", which is a question
+    # about the job, not about the quote. NULL on rows from before the split,
+    # where `entry_date` still holds it.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(candidate_positions)")}
+    if "opened_on" not in have:
+        conn.execute("ALTER TABLE candidate_positions ADD COLUMN opened_on TEXT")
     conn.commit()
     return conn
 
@@ -282,6 +291,33 @@ def pnl_pct(entry_signed: Optional[float],
 
 # ── The simulated book ───────────────────────────────────────────────────────
 
+def entry_date_for(ts: Any, today: str) -> str:
+    """The day a candidate's entry price was quoted, on the marker's clock.
+
+    `open_positions` runs once a day inside the mark job, so a scan recorded
+    after that day's run is opened by the next one. Stamping the run's date
+    put 206,221 of 833,897 positions (25%) one or three days after the scan
+    whose quotes set their `entry_price`, and `resolve` counts `min_days_held`
+    from this column: a Friday-afternoon candidate could not time-exit before
+    the following Thursday, six days after it was priced.
+
+    `candidates.ts` is UTC; marks and `today` are the machine's local date, so
+    the timestamp is converted rather than truncated — an evening scan is
+    already tomorrow in UTC. Never later than `today`: a position cannot have
+    been entered after the run that opened it. An unreadable timestamp falls
+    back to `today`, which is what every row had before.
+    """
+    from datetime import datetime
+    try:
+        stamp = datetime.fromisoformat(str(ts))
+        if stamp.tzinfo is not None:
+            stamp = stamp.astimezone()
+        scanned = stamp.strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return today
+    return min(scanned, today)
+
+
 @cr._safe(default=0)
 def open_positions(*, db_path: Optional[str] = None,
                    today: Optional[str] = None) -> int:
@@ -335,9 +371,10 @@ def open_positions(*, db_path: Optional[str] = None,
             conn.execute(
                 "INSERT OR REPLACE INTO candidate_positions "
                 "(scan_id, board, contract_key, family, entry_date, entry_price,"
-                " status, exit_reason) VALUES (?,?,?,?,?,?,?,?)",
+                " status, exit_reason, opened_on) VALUES (?,?,?,?,?,?,?,?,?)",
                 (row["scan_id"], row["board"], row["contract_key"], family,
-                 today, price, status, reason))
+                 entry_date_for(row.get("ts"), today), price, status, reason,
+                 today))
             made += 1
         conn.commit()
     return made
@@ -659,8 +696,9 @@ def _default_underlying(symbol: str, basis_date: str,
 def _settle_unmarked(row: Dict[str, Any], today: str, underlying,
                      cache: Dict[Tuple[str, str, str], Any]
                      ) -> Optional[Tuple[str, Optional[float], Optional[float]]]:
-    """(exit_reason, exit_price, pnl_pct) for an expired position that never
-    got a mark, or None to leave it OPEN and try again on the next run.
+    """(exit_reason, exit_price, pnl_pct) for an expired position with no mark
+    from its expiration day — never marked, or dark since — or None to leave
+    it OPEN and try again on the next run.
 
     This replaced a flat -1.0 ("full loss") on 2026-10-15. That number was
     invented, and wrong in both directions: a credit spread's full loss is a
@@ -725,9 +763,13 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
     against a mark from day N+1 would be lookahead, and lookahead in a
     counterfactual is how a study proves whatever it likes.
 
+    A mark is acted on only on the day it was taken (or, past expiration, when
+    it is the expiration-day mark). A position whose contract has stopped
+    quoting waits; it is not closed on the last quote it happened to have.
+
     `underlying(symbol, basis_date, expiration)` prices a position that expired
-    without ever being marked — see `_settle_unmarked`. Injectable so no test
-    touches the network.
+    without an expiration-day mark — see `_settle_unmarked`. Injectable so no
+    test touches the network.
     """
     from datetime import datetime
     if today is None:
@@ -762,12 +804,25 @@ def resolve(*, db_path: Optional[str] = None, today: Optional[str] = None,
         closed = 0
         for row in rows:
             mark = cr._num(row.get("mark"))
+            mark_date = str(row.get("mark_date") or "")[:10]
+            expiration = str(row.get("expiration") or "")[:10]
+            # A mark decides an exit only on the day it was taken. This read
+            # "the newest mark on or before today" with no limit on its age,
+            # so a contract that quoted once and went dark was closed days
+            # later on that one quote and dated back to it: 31,559 simulated
+            # time exits (6%) sit 0-2 days after entry, which `min_days_held`
+            # forbids. Past expiration the final mark is the one taken on
+            # expiration day; anything older is not a settlement price.
+            if mark is not None and expiration and mark_date < expiration \
+                    and mark_date != today:
+                mark = None
             if mark is None:
-                # No mark ever arrived — a leg's strike can vanish from the
-                # chain between scan and mark time (observed 2026-09-17/18,
-                # a Yahoo chain-snapshot inconsistency, not a fetch bug) and
-                # this position would otherwise sit OPEN forever, past its
-                # own expiration, since every exit below is mark-driven.
+                # No usable mark — none ever arrived, or the contract stopped
+                # quoting. A leg's strike can vanish from the chain between
+                # scan and mark time (observed 2026-09-17/18, a Yahoo
+                # chain-snapshot inconsistency, not a fetch bug) and this
+                # position would otherwise sit OPEN forever, past its own
+                # expiration, since every exit below is mark-driven.
                 # Expiration must still close it, at intrinsic value from the
                 # underlying's close. Not on expiration day itself: the
                 # settlement close does not exist until the session ends.
@@ -981,9 +1036,15 @@ def health_lines(db_path: Optional[str] = None, days: int = 7,
             # was entered that morning, while every earlier entry date showed
             # zero. An alarm that is red daily carries the same information as
             # one that is never red.
+            #
+            # "Entered" here is the day the mark job OPENED the row
+            # (`opened_on`), not `entry_date`: that is now the scan day, and a
+            # candidate scanned after yesterday's run is dated yesterday
+            # without having been through any run at all.
             dark_n, = conn.execute(
                 "SELECT COUNT(*) FROM candidate_positions p "
-                "WHERE p.status = ? AND p.entry_date < ? AND NOT EXISTS ("
+                "WHERE p.status = ? "
+                "  AND COALESCE(p.opened_on, p.entry_date) < ? AND NOT EXISTS ("
                 "  SELECT 1 FROM candidate_marks m "
                 "   WHERE m.contract_key = p.contract_key)",
                 (OPEN, today)).fetchone()
@@ -1016,7 +1077,8 @@ def health_lines(db_path: Optional[str] = None, days: int = 7,
                 "  SELECT c.symbol, c.expiration FROM candidate_positions p "
                 "    JOIN candidates c ON c.scan_id = p.scan_id "
                 "     AND c.board = p.board AND c.contract_key = p.contract_key "
-                "   WHERE p.status = ? AND p.entry_date < ? "
+                "   WHERE p.status = ? "
+                "     AND COALESCE(p.opened_on, p.entry_date) < ? "
                 "   GROUP BY c.symbol, c.expiration "
                 "  HAVING SUM(CASE WHEN EXISTS ("
                 "     SELECT 1 FROM candidate_marks m "

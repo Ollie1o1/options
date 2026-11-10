@@ -60,3 +60,37 @@ class ClusterBootTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpotAtExitFreshnessTest(unittest.TestCase):
+    """A price cache that ends before the exit must not price the exit.
+
+    `fetch_prices` reuses `px_1d.pkl` / `px_1h.pkl` whenever they exist. Run in
+    January against a cache directory left from October, `spot_at_exit` took
+    the last bar on or before the exit — October's — and returned it as the
+    exit spot with no warning.
+    """
+
+    def _px(self, days):
+        idx = pd.DatetimeIndex(days, tz="America/New_York")
+        return pd.DataFrame({"SPY": np.linspace(500.0, 510.0, len(idx))}, index=idx)
+
+    def test_a_stale_cache_yields_no_spot(self):
+        from scripts.delta_matched_benchmark import spot_at_exit
+        px1d = self._px(["2026-10-12", "2026-10-13", "2026-10-14"])
+        px1h = self._px(["2026-10-14 15:30"])
+        self.assertIsNone(spot_at_exit(px1h, px1d, "SPY", "2027-01-08 10:20:00"))
+
+    def test_the_last_session_before_a_holiday_exit_is_still_a_spot(self):
+        from scripts.delta_matched_benchmark import spot_at_exit
+        px1d = self._px(["2026-10-12", "2026-10-13", "2026-10-14"])
+        px1h = self._px(["2026-10-14 15:30"])
+        self.assertAlmostEqual(
+            spot_at_exit(px1h, px1d, "SPY", "2026-10-16 10:20:00"), 510.0)
+
+    def test_an_hourly_bar_on_the_exit_day_wins(self):
+        from scripts.delta_matched_benchmark import spot_at_exit
+        px1d = self._px(["2026-10-13", "2026-10-14"])
+        px1h = self._px(["2026-10-14 09:30", "2026-10-14 10:30"])
+        self.assertAlmostEqual(
+            spot_at_exit(px1h, px1d, "SPY", "2026-10-14 10:20:00"), 500.0)

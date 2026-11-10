@@ -22,6 +22,9 @@ TZ = "America/New_York"
 R_RATE = 0.04
 N_BOOT = 10_000
 SEED = 20261015
+# A Friday close serves a Tuesday exit after a Monday holiday; nothing older
+# is a spot for that exit.
+MAX_SPOT_AGE_DAYS = 4
 
 
 def _d1(S, K, s, T, q):
@@ -87,7 +90,15 @@ def spot_at_exit(px1h: pd.DataFrame, px1d: pd.DataFrame, t: str, ts: str) -> Opt
     d = px1d[t].dropna()
     d.index = d.index.tz_convert(TZ).date
     hit = d[[x <= when.date() for x in d.index]]
-    return float(hit.iloc[-1]) if len(hit) else None
+    if not len(hit):
+        return None
+    # The newest bar must be the exit's own session or the one before a
+    # weekend/holiday. `fetch_prices` reuses its pickles whenever they exist,
+    # so a cache directory left from an earlier run would otherwise price a
+    # January exit at October's last close, silently.
+    if (when.date() - hit.index[-1]).days > MAX_SPOT_AGE_DAYS:
+        return None
+    return float(hit.iloc[-1])
 
 
 def daily_close(px1d: pd.DataFrame, t: str, day: str) -> Optional[float]:
@@ -126,7 +137,9 @@ def per_trade(df: pd.DataFrame, px: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             S0 = close0
         S1 = spot_at_exit(px["1h"], px["1d"], r.ticker, r.exit_date)
         if S0 is None or S1 is None:
-            raise RuntimeError(f"no spot for trade {r.entry_id} {r.ticker}")
+            raise RuntimeError(
+                f"no spot for trade {r.entry_id} {r.ticker} (exit {r.exit_date}) "
+                "- if the --cache directory is from an earlier run, use a new one")
         delta = abs(put_delta(S0, Ks, iv, T, q)) - abs(put_delta(S0, Kl, iv_l, T, q))
         H = delta * 100 * float(r.quantity) * (S1 - S0)
         X = float(r.pnl_usd) - H

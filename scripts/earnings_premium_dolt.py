@@ -3,6 +3,12 @@
 Registration: docs/PREREG_EARNINGS_AND_BEAR_CALL_20261109.md (frozen before running).
 
     PYTHONPATH=$PWD ~/.venvs/options/bin/python -u -m scripts.earnings_premium_dolt
+
+E2 (Amendment 3) is the same rule on our own chain archive, judged on or after
+2027-03-15:
+
+    ... -m scripts.earnings_premium_dolt --forward             # the E2 run
+    ... -m scripts.earnings_premium_dolt --forward --coverage  # event counts only
 """
 from __future__ import annotations
 
@@ -15,6 +21,10 @@ import numpy as np
 import pandas as pd
 
 DB = "data/dolt_options.db"
+# E2: chains from our own daily archive; the calendar stays the Dolt cache.
+ARCHIVE_DB = "data/chain_archive.db"
+E2_FROM, E2_TO = "2026-10-01", "2027-02-28"
+E2_JUDGE_FROM = "2027-03-15"
 SEED = 20261109
 N_BOOT = 10_000
 WINDOW = 4
@@ -25,10 +35,23 @@ def _d(s: str) -> dt.date:
     return dt.date.fromisoformat(s)
 
 
-def events(con) -> pd.DataFrame:
+def events(con, snaps: Optional[pd.DataFrame] = None,
+           date_from: Optional[str] = None,
+           date_to: Optional[str] = None) -> pd.DataFrame:
+    """Earnings events with a chain snapshot on each side.
+
+    `snaps` (columns symbol, date) names the days a chain exists; by default
+    the Dolt chains in `con`. `date_from`/`date_to` bound the EVENT date,
+    inclusive. E1 passes none of the three and is unchanged.
+    """
     ec = pd.read_sql("SELECT symbol, date, whn FROM earnings_cal", con)
     ec = ec[ec.whn.isin(["Before market open", "After market close"])]
-    snaps = pd.read_sql("SELECT DISTINCT symbol, date FROM dolt_chain", con)
+    if date_from:
+        ec = ec[ec.date >= date_from]
+    if date_to:
+        ec = ec[ec.date <= date_to]
+    if snaps is None:
+        snaps = pd.read_sql("SELECT DISTINCT symbol, date FROM dolt_chain", con)
     days = {s: sorted(_d(x) for x in g.date) for s, g in snaps.groupby("symbol")}
     rows = []
     for e in ec.itertuples():
@@ -45,12 +68,29 @@ def events(con) -> pd.DataFrame:
             rows.append({"symbol": e.symbol, "event": e.date, "amc": amc,
                          "D": post_from.isoformat(), "pre": pre[-1].isoformat(),
                          "post": post[0].isoformat()})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["symbol", "event", "amc", "D", "pre", "post"])
 
 
 def chain(con, sym: str, day: str) -> pd.DataFrame:
     return pd.read_sql("SELECT expiration, strike, type, bid, ask, mid, delta "
                        "FROM dolt_chain WHERE symbol=? AND date=?", con, params=(sym, day))
+
+
+def archive_snaps(acon) -> pd.DataFrame:
+    return pd.read_sql("SELECT DISTINCT symbol, snap_date AS date "
+                       "FROM chain_snapshots", acon)
+
+
+def archive_chain(acon, sym: str, day: str) -> pd.DataFrame:
+    """One day's chain from `chain_snapshots`, in `chain`'s columns.
+
+    The archive stores no mid; it is the quote midpoint, which is what Dolt's
+    `mid` column is. Type is lower-cased so 'call'/'put' compare as in E1.
+    """
+    df = pd.read_sql("SELECT expiration, strike, LOWER(type) AS type, bid, ask, "
+                     "(bid + ask) / 2.0 AS mid, delta FROM chain_snapshots "
+                     "WHERE symbol=? AND snap_date=?", acon, params=(sym, day))
+    return df.dropna(subset=["bid", "ask"])
 
 
 def _ok(r) -> bool:
@@ -174,14 +214,14 @@ def judge(label: str, df: pd.DataFrame, claim=True) -> Dict:
     return {"pass": ok}
 
 
-def run(con, ev: pd.DataFrame, kind: str, mid=False) -> pd.DataFrame:
+def run(con, ev: pd.DataFrame, kind: str, mid=False, get_chain=chain) -> pd.DataFrame:
     out: List[Dict] = []
     skips: Dict[str, int] = {}
     cache: Dict[tuple, pd.DataFrame] = {}
 
     def get(sym, day):
         if (sym, day) not in cache:
-            cache[(sym, day)] = chain(con, sym, day)
+            cache[(sym, day)] = get_chain(con, sym, day)
         return cache[(sym, day)]
 
     for e in ev.itertuples():
@@ -194,17 +234,74 @@ def run(con, ev: pd.DataFrame, kind: str, mid=False) -> pd.DataFrame:
         wk = _d(e.D).isocalendar()
         out.append({**e._asdict(), **t, "week": f"{wk[0]}-W{wk[1]:02d}",
                     "year": int(e.D[:4])})
-    df = pd.DataFrame(out)
-    tot = len(ev)
+    df = pd.DataFrame(out, columns=None if out else
+                      ["symbol", "event", "amc", "D", "pre", "post", "exp", "pnl",
+                       "car", "r", "interp", "week", "year"])
+    tot = max(len(ev), 1)
     print(f"  [{kind}{' mid' if mid else ''}] traded {len(df)}/{tot}; skipped {skips} "
           f"(unquoted at exit {skips.get('unquoted_at_exit', 0) / tot:.1%})")
     return df
 
 
+def forward(a) -> None:
+    """E2: E1-S and E1-F on the chain archive, earnings 2026-10-01..2027-02-28.
+
+    No claimant is judged for a pass: the registration gives E2 the job of
+    confirming sign and cost on ~30-60 events, not of reaching significance.
+    """
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    acon = sqlite3.connect(f"file:{ARCHIVE_DB}?mode=ro", uri=True)
+    snaps = archive_snaps(acon)
+    cal = pd.read_sql("SELECT symbol, date, whn FROM earnings_cal "
+                      "WHERE date BETWEEN ? AND ?", con, params=(E2_FROM, E2_TO))
+    cal = cal[cal.symbol.isin(set(snaps.symbol))]
+    ev = events(con, snaps, E2_FROM, E2_TO)
+    timed = cal.whn.isin(["Before market open", "After market close"])
+    print(f"E2 window {E2_FROM}..{E2_TO} | archive {snaps.date.min()}..{snaps.date.max()}, "
+          f"{snaps.date.nunique()} days, {snaps.symbol.nunique()} symbols")
+    print(f"calendar events on archived symbols: {len(cal)} "
+          f"({int(timed.sum())} with a known session) | "
+          f"with a snapshot within {WINDOW} days on BOTH sides: {len(ev)}")
+    lost = sorted(set(cal[timed].symbol + " " + cal[timed].date)
+                  - set(ev.symbol + " " + ev.event))
+    if lost:
+        print(f"  no usable snapshot pair ({len(lost)}): {', '.join(lost)}")
+    if a.coverage:
+        return
+    today = dt.date.today().isoformat()
+    if today < E2_JUDGE_FROM and not a.early:
+        raise SystemExit(f"E2 is judged on or after {E2_JUDGE_FROM}; today is "
+                         f"{today}. --coverage prints counts with no outcomes; "
+                         "--early overrides and must be disclosed in the result.")
+    frames = {}
+    for kind, label in (("condor", "E2-S short 25/10 condor"),
+                        ("fly", "E2-F short ATM iron fly")):
+        print(f"\n== {label}")
+        df = run(acon, ev, kind, get_chain=archive_chain)
+        frames[kind] = df
+        if len(df):
+            judge(label, df, claim=False)
+            judge(f"{kind} mid fills (no authority)",
+                  run(acon, ev, kind, mid=True, get_chain=archive_chain), claim=False)
+        else:
+            print("  no tradable events")
+    if a.csv:
+        pd.concat([f.assign(kind=k) for k, f in frames.items()]).to_csv(a.csv, index=False)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv")
+    ap.add_argument("--forward", action="store_true",
+                    help=f"E2: the chain archive, judged >= {E2_JUDGE_FROM}")
+    ap.add_argument("--coverage", action="store_true",
+                    help="with --forward: event counts only, no outcomes")
+    ap.add_argument("--early", action="store_true",
+                    help="with --forward: run before the judge date (disclose it)")
     a = ap.parse_args()
+    if a.forward:
+        forward(a)
+        return
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     ev = events(con)
     print(f"Dolt earnings events with pre+post snapshots: {len(ev)}, "
