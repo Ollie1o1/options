@@ -22,8 +22,8 @@ Three properties this module is built around, each pinned below.
   2. **Cache only, never the network.** `log_trade` is on the entry path;
      `dolt_earnings.earnings_dates` fetches on a cache miss and would put an
      HTTP call inside a ledger write.
-  3. **Short premium only.** Selling a spread across an event is short a
-     gap; buying one is long it. The book's evidence is about the former.
+  3. **Short premium by default; long premium behind its own switch**
+     (`refuse_long_through_earnings`, added 2026-11-09 on the E1-L evidence).
 
 Run:
     PYTHONPATH=$PWD ~/.venvs/options/bin/python -m unittest \
@@ -229,3 +229,80 @@ class TheWmtTradeThatCausedThis(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LongPremiumGate(unittest.TestCase):
+    """2026-11-09: long premium is gated too, behind its own switch, over the
+    paper exit rules' window; a report later on the entry day counts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.tmp.name, "cal.db")
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE earnings_cal (symbol TEXT, date TEXT, whn TEXT)")
+        conn.executemany("INSERT INTO earnings_cal VALUES (?,?,?)", [
+            ("XYZ", "2026-08-05", "After market close"),
+            ("XYZ", "2026-11-03", "After market close"),
+            ("WMT", "2026-11-19", "Before market open"),
+            ("WMT", "2027-02-19", "Before market open"),
+        ])
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _cfg(self, long_on=True, short_on=True):
+        from src.earnings_gate import load_earnings_gate_config
+        return load_earnings_gate_config({"auto_log": {
+            "refuse_through_earnings": short_on,
+            "refuse_long_through_earnings": long_on,
+            "earnings_cache_path": self.db}})
+
+    def _v(self, strat, sym, entry, exp, cfg):
+        from src.earnings_gate import verdict_for_trade
+        return verdict_for_trade(strat, sym, entry, exp, 21, cfg)
+
+    def test_the_xyz_trade_is_refused(self):
+        # Bought 10:30 on report day; the report came after the close.
+        from src.earnings_gate import refuses
+        cfg = self._cfg()
+        v = self._v("Long Put", "XYZ", "2026-11-03", "2026-11-13", cfg)
+        self.assertEqual(v, THROUGH)
+        self.assertTrue(refuses(v, cfg))
+
+    def test_a_before_open_report_on_the_entry_day_is_priced_in(self):
+        self.assertEqual(
+            self._v("Long Call", "WMT", "2026-11-19", "2026-12-04", self._cfg()), CLEAR)
+
+    def test_off_by_default_and_independent_of_the_credit_switch(self):
+        from src.earnings_gate import load_earnings_gate_config
+        cfg = load_earnings_gate_config({"auto_log": {
+            "refuse_through_earnings": True, "earnings_cache_path": self.db}})
+        self.assertIsNone(self._v("Long Put", "XYZ", "2026-11-03", "2026-11-13", cfg))
+        self.assertEqual(self._v("Long Put", "XYZ", "2026-11-03", "2026-11-13",
+                                 self._cfg(short_on=False)), THROUGH)
+
+    def test_window_is_the_exit_rules_not_expiry(self):
+        # 60 DTE long call: force-closed at 21 DTE (2027-01-02 - 21d). A
+        # report after that is outside the window; one before it is inside.
+        from src.earnings_gate import long_horizon_end
+        self.assertEqual(long_horizon_end("2026-11-03", "2027-01-02", 21), "2026-12-12")
+        self.assertEqual(
+            self._v("Long Call", "WMT", "2026-11-03", "2027-01-02", self._cfg()), THROUGH)
+        # Expiring 2027-02-28: force-closed 2027-02-07, before the 02-19 report.
+        self.assertEqual(
+            self._v("Long Call", "WMT", "2026-11-20", "2027-02-28", self._cfg()), CLEAR)
+        # Expiring 2027-03-31: still open on 02-19.
+        self.assertEqual(
+            self._v("Long Call", "WMT", "2026-11-20", "2027-03-31", self._cfg()), THROUGH)
+
+    def test_short_dated_long_is_held_the_minimum_window(self):
+        # 10 DTE: inside the time-exit zone, held ~3 trading days (5 calendar).
+        from src.earnings_gate import long_horizon_end
+        self.assertEqual(long_horizon_end("2026-11-16", "2026-11-26", 21), "2026-11-21")
+        self.assertEqual(long_horizon_end("2026-11-16", "2026-11-18", 21), "2026-11-18")
+
+    def test_credit_gate_also_sees_a_same_day_after_close_report(self):
+        self.assertEqual(
+            self._v("Bull Put", "XYZ", "2026-11-03", "2026-11-20", self._cfg()), THROUGH)
