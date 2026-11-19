@@ -19,6 +19,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -41,6 +42,46 @@ DEFAULT_LOCK_PATH = os.path.join("logs", ".catchup.lock")
 # bomb on 2026-06-10. Children are marked via this env var and skip all
 # maintenance (the parent owns it).
 CHILD_ENV_MARKER = "OPTIONS_MAINTENANCE_CHILD"
+
+
+# Ceiling on one child (a full scan is 3-6 minutes awake). Measured on the
+# monotonic clock, which on macOS (mach_absolute_time) stops while the Mac
+# sleeps, so a scan that spans a lid-closed afternoon is not killed for it.
+# Without a ceiling a hung child blocks every later window: on 2026-11-06 a
+# `run.py -ss` hung after the disk filled and held its launchd job for 12 days.
+CHILD_TIMEOUT_S = 45 * 60
+
+
+def network_up(hosts=("cdn.cboe.com", "query2.finance.yahoo.com"),
+               timeout: float = 3.0) -> bool:
+    """True when any market-data host resolves and accepts a TCP connection.
+
+    Scheduled runs often fire in a macOS dark wake with no network
+    (`networkoversleep 0`). Every fetch then fails, and on 2026-11-18 the
+    archive, estimates and marks runs all lost the day that way."""
+    import socket
+    for host in hosts:
+        try:
+            with socket.create_connection((host, 443), timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _hold_awake() -> None:
+    """Keep the Mac from idle-sleeping while this process runs (best effort).
+
+    `caffeinate -w PID` holds the assertion until PID exits, so nothing has to
+    clean it up. It cannot stop a lid-close sleep on battery."""
+    if sys.platform != "darwin" or not os.path.exists("/usr/bin/caffeinate"):
+        return
+    try:
+        subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
 
 
 def _child_env() -> dict:
@@ -116,6 +157,8 @@ WORKING_AUTOLOG_WINDOWS = [
 # Catch-up runs only inside regular trading hours: outside this band yfinance
 # returns 0/0 bid-ask and every contract fails the liquidity filter.
 AUTOLOG_RTH_BAND = (1015, 1600)
+# Exit enforcement on the scheduled path: regular session only.
+EXITS_RTH_BAND = (935, 1600)
 
 
 def due_autolog_windows(state: dict, weekday: int, hhmm: int, today: str):
@@ -223,8 +266,16 @@ def _default_runner(cmd) -> int:
     with open(os.path.join("logs", "maintenance.log"), "a") as logf:
         logf.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] $ {' '.join(cmd)}\n")
         logf.flush()
-        return subprocess.call(cmd, stdin=subprocess.DEVNULL,
-                               stdout=logf, stderr=logf, env=_child_env())
+        try:
+            return subprocess.call(cmd, stdin=subprocess.DEVNULL,
+                                   stdout=logf, stderr=logf, env=_child_env(),
+                                   timeout=CHILD_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            # subprocess.call has already killed and reaped the child.
+            logf.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] TIMEOUT after "
+                       f"{CHILD_TIMEOUT_S // 60} awake minutes — killed: "
+                       f"{' '.join(cmd)}\n")
+            return 124
 
 
 def _autolog_cmd(win) -> list:
@@ -298,12 +349,20 @@ def run_catchup(db_path: str = "paper_trades.db",
 
 def _run_catchup_locked(db_path, state_path, now, runner, swing_fn=None,
                         watch_fn=None) -> dict:
+    _live_clock = now is None
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
     runner = runner or _default_runner
     ran = []
     for win in due_autolog_windows(load_state(state_path), now.isoweekday(),
                                    now.hour * 100 + now.minute, today):
+        # Same in-band recheck as run_startup_maintenance: never start a scan
+        # after the close just because an earlier one ran long.
+        if _live_clock:
+            _c = datetime.now()
+            if not (AUTOLOG_RTH_BAND[0] <= _c.hour * 100 + _c.minute
+                    <= AUTOLOG_RTH_BAND[1]):
+                break
         try:
             rc = runner(_autolog_cmd(win))
         except Exception:
@@ -477,7 +536,7 @@ def _cohort_min_dte(config_path: str = "config.json", default: int = 30) -> int:
 _MORNING_CMD = [VENV_PY, "-m", "src.morning"]
 
 
-def _run_chain_archive() -> int:
+def _run_chain_archive():
     """Snapshot today's option chains (free CBOE) per config → data_archive."""
     import json as _json
 
@@ -494,11 +553,16 @@ def _run_chain_archive() -> int:
         lookback_days=int(cfg.get("ledger_lookback_days", 30) or 0))
     if not symbols:
         return 0
-    return chain_archive.archive_symbols(
+    stats: dict = {}
+    rows = chain_archive.archive_symbols(
         symbols,
         max_dte=int(cfg.get("max_dte", 120)),
         moneyness_band=float(cfg.get("moneyness_band", 0.15)),
-        min_open_interest=float(cfg.get("min_open_interest", 1)))
+        min_open_interest=float(cfg.get("min_open_interest", 1)),
+        stats=stats)
+    stats["rows"] = rows
+    stats["complete"] = chain_archive.archive_complete(stats)
+    return stats
 
 
 def run_startup_maintenance(db_path: str = "paper_trades.db",
@@ -515,9 +579,15 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             morning_fn: Optional[Callable] = None,
                             walk_forward_fn: Optional[Callable] = None,
                             watch_fn: Optional[Callable] = None,
-                            now_fn: Optional[Callable[[], datetime]] = None) -> dict:
+                            now_fn: Optional[Callable[[], datetime]] = None,
+                            online_fn: Optional[Callable[[], bool]] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
+
+    `online_fn` (the scheduled entry passes `network_up`) is asked before each
+    network job. When it says offline, that job is skipped UNSTAMPED, so a
+    later invocation today retries it, instead of running, failing every
+    fetch, and losing the day. Default: always online (tests, interactive).
 
     Note: exit-rule enforcement is NOT run here. The interactive screener startup
     already enforces exits synchronously via ``PaperManager.update_positions()``;
@@ -539,8 +609,20 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     if now_fn is None:
         now_fn = (lambda: now) if _explicit_now else datetime.now
     runner = runner or _default_runner
+    online_fn = online_fn or (lambda: True)
     state = load_state(state_path)
     ran = []
+    _offline_noted = []
+
+    def _online() -> bool:
+        try:
+            up = bool(online_fn())
+        except Exception:
+            up = True
+        if not up and not _offline_noted:
+            _offline_noted.append(True)
+            ran.append("offline:network-jobs-deferred")
+        return up
 
     # 1. Auto-log every working strategy not yet logged today (weekdays, RTH).
     #    One launch logs long calls, spreads, short puts, and iron condors —
@@ -560,6 +642,16 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                 pass
         else:
             for win in windows:
+                # Re-check before each window: one scan can take hours when
+                # the Mac sleeps through it, and a scan begun after the close
+                # (2026-11-18 -ics at 17:52) prices 0/0 after-hours quotes.
+                if not _explicit_now:
+                    _c = now_fn()
+                    if not (AUTOLOG_RTH_BAND[0] <= _c.hour * 100 + _c.minute
+                            <= AUTOLOG_RTH_BAND[1]):
+                        break
+                if not _online():
+                    break
                 try:
                     rc = runner(_autolog_cmd(win))
                 except Exception:
@@ -608,18 +700,27 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
         # afternoon check for a day already covered.
         _cur_today = _cur.strftime("%Y-%m-%d")
         if _ca.due_chain_archive(state, _cur_today, _cur.isoweekday(),
-                                 _cur.hour * 100 + _cur.minute):
+                                 _cur.hour * 100 + _cur.minute) and _online():
             fn = chain_archive_fn or _run_chain_archive
-            n = fn()
-            # Stamp the day only when something was archived. The archiver
-            # isolates per-symbol failures and returns 0 when the feed fails
-            # for all of them; stamping regardless marked that day done and
-            # it was never retried (2026-10-09: stamped, zero rows on disk).
-            # Left unstamped, the next invocation tries again, and a day that
-            # never succeeds shows as stale in the health report.
-            if n:
+            res = fn()
+            # Stamp the day only when the run covered the universe. The
+            # archiver isolates per-symbol failures; stamping on zero rows lost
+            # 2026-10-09, and stamping on ANY rows lost 2026-11-18 (1 of 22
+            # symbols archived offline, then marked done). Left unstamped, the
+            # next invocation archives only the missing symbols (idempotent
+            # per symbol/day). A bare int (rows) is still accepted from
+            # injected test doubles and keeps the old any-rows rule.
+            if isinstance(res, dict):
+                n = int(res.get("rows") or 0)
+                if res.get("complete"):
+                    state["last_chain_archive"] = _cur_today
+                    ran.append(f"chain-archive:{n}rows")
+                elif n or res.get("failed"):
+                    ran.append(f"chain-archive:partial({len(res.get('failed') or [])}"
+                               f"/{res.get('symbols')} symbols failed, will retry)")
+            elif res:
                 state["last_chain_archive"] = _cur_today
-                ran.append(f"chain-archive:{n}rows")
+                ran.append(f"chain-archive:{res}rows")
     except Exception:
         pass
 
@@ -631,7 +732,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
         _cur = now_fn()
         _cur_today = _cur.strftime("%Y-%m-%d")
         if _ea.due_estimates_archive(state, _cur_today,
-                                     _cur.hour * 100 + _cur.minute):
+                                     _cur.hour * 100 + _cur.minute) and _online():
             fn = estimates_archive_fn or (
                 lambda: _ea.archive_symbols(_ea.universe(), today=_cur_today))
             counts = fn() or {}
@@ -649,7 +750,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     #     able to disturb the live book.
     try:
         from src import candidate_marks as _cm
-        if _cm.due_candidate_marks(state, today):
+        if _cm.due_candidate_marks(state, today) and _online():
             counts = _cm.mark_candidates()
             # Stamped only when the run priced (nearly) every pair. A rate-
             # limited run left unstamped is finished by the next invocation
@@ -709,7 +810,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     #    on ~30s of fetches — the INTEL menu covers on-demand builds there.
     #    Goes through `runner` so stubbed-runner tests never spawn a real build.
     try:
-        if not background and due_morning_briefing(state, today, now.isoweekday()):
+        if (not background and due_morning_briefing(state, today, now.isoweekday())
+                and _online()):
             rc = morning_fn() if morning_fn else runner(_MORNING_CMD)
             if rc == 0:
                 state["last_morning_briefing"] = today
@@ -764,7 +866,9 @@ def run_headless(db_path: str = "paper_trades.db",
                  chain_archive_fn: Optional[Callable] = None,
                  morning_fn: Optional[Callable] = None,
                  walk_forward_fn: Optional[Callable] = None,
-                 watch_fn: Optional[Callable] = None) -> dict:
+                 watch_fn: Optional[Callable] = None,
+                 online_fn: Optional[Callable[[], bool]] = None,
+                 exits_rth_only: bool = False) -> dict:
     """Run startup maintenance without the interactive screener.
 
     The LaunchAgent entry: reads phase1_start from config.json itself,
@@ -788,8 +892,22 @@ def run_headless(db_path: str = "paper_trades.db",
     # Enforce exits first so a later failure in auto-log/checkpoint can't keep
     # a stopped-out position open. Crash-isolated: a yfinance hiccup must not
     # abort the rest of maintenance.
+    #
+    # Scheduled runs only enforce inside market hours (`exits_rth_only`, set by
+    # main): a run that fires after the close (the evening retry slots, or
+    # launchd catching up on wake at night) would mark positions on after-hours
+    # quotes, where yfinance serves 0/0 bid-ask. The next in-hours run, or the
+    # 14:07 enforce-exits job, closes anything due.
+    _skip_exits = False
+    if exits_rth_only and now is None:
+        _c = datetime.now()
+        _skip_exits = (_c.isoweekday() > 5 or
+                       not (EXITS_RTH_BAND[0] <= _c.hour * 100 + _c.minute
+                            <= EXITS_RTH_BAND[1]))
     try:
-        (enforce_exits_fn or _default_enforce_exits)(db_path=db_path, config_path=config_path)
+        if not _skip_exits:
+            (enforce_exits_fn or _default_enforce_exits)(db_path=db_path,
+                                                         config_path=config_path)
     except Exception:
         pass
 
@@ -799,7 +917,7 @@ def run_headless(db_path: str = "paper_trades.db",
             now=now, runner=runner, checkpoint_fn=checkpoint_fn,
             track_record_fn=track_record_fn, chain_archive_fn=chain_archive_fn,
             morning_fn=morning_fn, walk_forward_fn=walk_forward_fn,
-            watch_fn=watch_fn)
+            watch_fn=watch_fn, online_fn=online_fn)
     except Exception:
         return {"cohort": "", "ran": []}
 
@@ -831,6 +949,9 @@ def main() -> None:
         # noticed. This is the automated version of that manual check.
         from src.strategy_allocation import drift_health_lines as _drift_health
         _lines += _drift_health()
+        from src.maintenance_health import disk_health_lines, stuck_job_lines
+        _lines += disk_health_lines(repo_path("."))
+        _lines += stuck_job_lines(repo=repo_path("."))
         # The header's "worst" covers the scheduled jobs only; say so, and
         # close with the worst across every section printed above.
         _lines[0] = _lines[0].replace("(worst: ", "(jobs worst: ")
@@ -844,6 +965,7 @@ def main() -> None:
         return
     if "--catchup" in sys.argv[1:]:
         # Detached multi-window auto-log fired by an interactive launch.
+        _hold_awake()
         summary = run_catchup()
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Distinguish "refused, another catch-up holds the lock" from "nothing
@@ -854,7 +976,10 @@ def main() -> None:
             if summary.get("skipped") else "nothing due")
         print(f"[{stamp}] catch-up auto-log: {ran}")
         return
-    summary = run_headless()
+    # The scheduled entry: stay awake until done, and defer network jobs
+    # rather than burn the day when the Mac woke without a network.
+    _hold_awake()
+    summary = run_headless(online_fn=network_up, exits_rth_only=True)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ran = ", ".join(summary.get("ran") or []) or "nothing due"
     print(f"[{stamp}] maintenance: {ran}")
