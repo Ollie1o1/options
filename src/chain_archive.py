@@ -106,22 +106,42 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                     today: Optional[str] = None,
                     fetcher: Optional[Callable] = None,
                     max_dte: int = 120, moneyness_band: float = 0.15,
-                    min_open_interest: float = 1) -> int:
+                    min_open_interest: float = 1,
+                    stats: Optional[Dict[str, Any]] = None,
+                    max_consecutive_failures: int = 6) -> int:
     """Snapshot each symbol once for `today`. Idempotent per (symbol, day);
-    per-symbol failures are isolated. Returns rows written."""
+    per-symbol failures are isolated. Returns rows written.
+
+    `stats`, when given, is filled with how the run went: symbols requested,
+    already archived, archived now, failed, and whether the run stopped early.
+    A symbol that raises or returns no rows counts as failed.
+
+    After `max_consecutive_failures` failures in a row the feed is treated as
+    down and the run stops. The rest are left for a later run today. On
+    2026-11-18 the run fired with the Mac asleep and offline: 1 of 22 symbols
+    archived, the day was stamped done, and the other 21 were lost for good.
+    """
     from src import cboe_client
     today = today or datetime.now().strftime("%Y-%m-%d")
     fetcher = fetcher or cboe_client.fetch_chain
     ensure_db(db_path)
     written = 0
+    st: Dict[str, Any] = {"symbols": len(symbols), "already": 0, "archived": 0,
+                          "failed": [], "aborted": False}
+    streak = 0
     with sqlite3.connect(db_path) as conn:
         for sym in symbols:
             sym = sym.upper()
+            if max_consecutive_failures and streak >= max_consecutive_failures:
+                st["aborted"] = True
+                break
             try:
                 done = conn.execute(
                     "SELECT 1 FROM chain_snapshots WHERE symbol=? AND snap_date=? LIMIT 1",
                     (sym, today)).fetchone()
                 if done:
+                    st["already"] += 1
+                    streak = 0
                     continue
                 rows = filter_rows(fetcher(sym) or [], today,
                                    max_dte=max_dte, moneyness_band=moneyness_band,
@@ -133,9 +153,36 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                         f"VALUES ({','.join('?' * len(_COLUMNS))})", values)
                     written += 1
                 conn.commit()
+                if rows:
+                    st["archived"] += 1
+                    streak = 0
+                else:
+                    st["failed"].append(sym)
+                    streak += 1
             except Exception:
+                st["failed"].append(sym)
+                streak += 1
                 continue
+    if stats is not None:
+        stats.update(st)
     return written
+
+
+def archive_complete(stats: Dict[str, Any], tolerance: float = 0.10) -> bool:
+    """True when a run covered (nearly) the whole universe for the day.
+
+    A symbol with no listed options can fail every day, so a small share of
+    failures is tolerated: at most `tolerance` of the symbols, and at least
+    one. A run that stopped on a dead feed is never complete."""
+    if stats.get("aborted"):
+        return False
+    n = int(stats.get("symbols") or 0)
+    if n == 0:
+        return False
+    covered = int(stats.get("already") or 0) + int(stats.get("archived") or 0)
+    if covered == 0:
+        return False
+    return len(stats.get("failed") or []) <= max(1, int(n * tolerance))
 
 
 def archive_universe(symbols: Sequence[str], ledger_path: Optional[str],

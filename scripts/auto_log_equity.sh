@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# Equity paper-trade auto-logger — runs M-F at 10:30, 12:30, 14:15 ET.
-# Reads off-switch + stress threshold from config.json; dormant by default.
+# Equity side jobs — launchd `com.ollie.options.auto-log-equity`, M-F 10:30,
+# 12:30, 14:15 local. (The label is historical; reloading a LaunchAgent can
+# re-trigger the macOS background-item approval, so it was kept.)
 #
-# Install via crontab (three weekday lines, same wrapper each time):
-#   30 10 * * 1-5  /path/to/options/scripts/auto_log_equity.sh \
-#     >> /path/to/options/logs/auto_log_equity.log 2>&1
-#   30 12 * * 1-5  /path/to/options/scripts/auto_log_equity.sh \
-#     >> /path/to/options/logs/auto_log_equity.log 2>&1
-#   15 14 * * 1-5  /path/to/options/scripts/auto_log_equity.sh \
-#     >> /path/to/options/logs/auto_log_equity.log 2>&1
+# WHAT IT NO LONGER DOES (2026-11-18): run its own `run.py` scan. The entry
+# windows (-ds, -sps, -ics) belong to `src.maintenance`, which launchd runs ten
+# minutes earlier and which logs each window once per day. This script's scans
+# duplicated them, and overlapping scans can log the same contract twice at a
+# slightly different price (see maintenance.run_catchup). Its 14:15 slot still
+# ran `-ss`, the Short Put window #136 dropped. On 2026-11-06 that `-ss` scan
+# hit a full disk and hung for 12 days, which also stopped the two jobs below.
+#
+# WHAT IT DOES: push trade alerts for any scan since the last run, and keep the
+# earnings calendar fresh for the earnings gates. Each runs under an
+# awake-time timeout and the Mac is held awake until the script exits.
 
 set -euo pipefail
 
@@ -66,52 +71,33 @@ if (( HMN < 945 || HMN > 1530 )); then
   exit 0
 fi
 
-# 4. Stress gate
-STRESS=$("$VENV" scripts/equity_stress_check.py 2>&1 || true)
-if [[ "$STRESS" != SAFE* ]]; then
-  echo "[auto-log-eq] skipped: stress gate $STRESS"
-  echo "[$(ts)] auto_log_equity done"
-  exit 0
+# 4. Hold the Mac awake while this script runs; `-w $$` ends with it.
+if [[ -x /usr/bin/caffeinate ]]; then
+  /usr/bin/caffeinate -i -w $$ >/dev/null 2>&1 &
 fi
 
-# 5. Mode by clock window
-MODE=""
-if   (( HMN >= 1015 && HMN <= 1130 )); then MODE="-ds"
-elif (( HMN >= 1215 && HMN <= 1330 )); then MODE="-sps"
-# 14:15 was -ics until 2026-08-25 (repointed to -sps: Iron Condor is excluded
-# from auto_log.allocation.eligible_strategies, so -ics could log NOTHING),
-# then -sps until 2026-09-10. Repointed to -ss because no scheduled window
-# ever called it: -ds and -sps only ever generate Long Call/Long Put and
-# Bull Put/Bear Call/Iron Condor, never Short Put, which is the "sell" mode's
-# board. Short Put carries a real ~3.8% allocation weight (all exploration
-# share — its posterior P(best) is near zero) and clears every upstream gate
-# at volume (hundreds/day), but with no window ever invoking -ss it could
-# never actually be entered — its last real trade was 2026-07-31, before it
-# even had a weight. Never -ss under stress (see run.py's quick reference);
-# harmless here since the stress gate above already skips the whole run.
-elif (( HMN >= 1400 && HMN <= 1500 )); then MODE="-ss"
-fi
-if [[ -z "$MODE" ]]; then
-  echo "[auto-log-eq] skipped: no mode window for clock $HM"
-  echo "[$(ts)] auto_log_equity done"
-  exit 0
-fi
+# Run "$@" with a ceiling on AWAKE time (Python's monotonic clock stops while
+# macOS sleeps). Exit 124 on timeout, like coreutils `timeout`.
+with_timeout() {
+  local secs="$1"; shift
+  "$VENV" -c 'import subprocess, sys
+try:
+    sys.exit(subprocess.call(sys.argv[2:], timeout=float(sys.argv[1])))
+except subprocess.TimeoutExpired:
+    print("[auto-log-eq] TIMEOUT after %ss: %s" % (sys.argv[1], " ".join(sys.argv[2:])), flush=True)
+    sys.exit(124)' "$secs" "$@"
+}
 
-# 6. Invoke screener
-echo "[auto-log-eq] mode=$MODE stress=$STRESS"
-echo "[auto-log-eq] invoking: run.py $MODE --5 --no-ai"
 set +e
-"$VENV" run.py "$MODE" --5 --no-ai
-RC=$?
-
-# 7. Push trade alerts (Discord/Telegram) for new candidates from ANY scan since
+RC=0
+# 5. Push trade alerts (Discord/Telegram) for new candidates from ANY scan since
 #    the last run. Never fails the job; no-op until a channel is set in .env.
-"$VENV" -m src.trade_alerts || echo "[auto-log-eq] trade alerts failed (ignored)"
+with_timeout 600 "$VENV" -m src.trade_alerts || echo "[auto-log-eq] trade alerts failed (ignored)"
 
-# 8. Keep the earnings calendar fresh for the earnings gates. Only symbols
+# 6. Keep the earnings calendar fresh for the earnings gates. Only symbols
 #    cached >= 7 days ago are re-queried, so most runs fetch nothing; the
 #    cache had silently gone stale from 2026-08-20 to 11-09 without this.
-"$VENV" -m src.dolt_earnings --refresh --max-age-days 7 > logs/earnings_refresh.log 2>&1 \
+with_timeout 1800 "$VENV" -m src.dolt_earnings --refresh --max-age-days 7 > logs/earnings_refresh.log 2>&1 \
   || echo "[auto-log-eq] earnings refresh failed (ignored)"
 set -e
 
