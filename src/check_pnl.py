@@ -846,6 +846,28 @@ def resolve_period(choice: Optional[str]) -> Optional[str]:
     return "current"
 
 
+def _closed_type_label(r) -> str:
+    """Type column for a closed row, matching the open table's labels.
+
+    The closed table printed the bare leg type, so a Bull Put spread and a
+    Long Put both read "PUT" — with opposite sign conventions (exit below
+    entry is a win for the credit, a loss for the long). On a ledger mixing
+    them the rows could not be read without cross-referencing the DB."""
+    try:
+        structure = _classify_structure(r)
+    except Exception:
+        structure = "single"
+    sn = str((r.get("strategy_name") if hasattr(r, "get") else "") or "").lower()
+    if structure == "iron_condor":
+        return "IC"
+    if structure == "spread":
+        return "BPS" if "bull put" in sn else ("BCS" if "bear call" in sn else "SPR")
+    leg = str(r["type"] or "").upper()
+    if sn.startswith("short") or "cash-secured" in sn or "covered" in sn:
+        return "S PUT" if leg == "PUT" else "S CAL"
+    return leg
+
+
 def view_portfolio_menu() -> None:
     """Interactive entry point — prompt for which slice of the book, then render."""
     print()
@@ -1359,7 +1381,7 @@ def view_portfolio(period: Optional[str] = None):
 
         for r in closed_trades:
             ticker      = r["ticker"]
-            opt_type    = r["type"].upper()
+            opt_type    = _closed_type_label(r)
             strike      = float(r["strike"])
             expiry      = r["expiration"][:10]
             opened      = r["date"][:10]
@@ -1423,7 +1445,9 @@ def view_portfolio(period: Optional[str] = None):
                 raw_peak = "—"
 
             if HAS_FMT and fmt:
-                tc = fmt.Colors.BRIGHT_GREEN if opt_type == "CALL" else fmt.Colors.BRIGHT_RED
+                tc = (fmt.Colors.BRIGHT_GREEN if opt_type == "CALL"
+                      else fmt.Colors.BRIGHT_RED if opt_type == "PUT"
+                      else fmt.Colors.BRIGHT_CYAN)
                 type_str   = fmt.colorize(f"{opt_type:<5}", tc)
                 pc         = fmt.Colors.GREEN if won else fmt.Colors.RED
                 usd_str    = fmt.colorize(f"{raw_usd:>10}", pc)
@@ -1558,8 +1582,12 @@ def view_portfolio(period: Optional[str] = None):
                 else:
                     print(strat_db_hdr)
                     print(sep)
+                # "Total P&L" used to be SUM(pnl_pct): adding per-trade returns
+                # on premium printed figures like +1782.3% that are not a
+                # quantity of anything. Dollars are; On Risk is the column
+                # that compares strategies fairly.
                 col_hdr = (f"    {'Strategy':<24} {'Trades':>6}  {'Win%':>5}  "
-                           f"{'Avg P&L':>9}  {'Total P&L':>10}  {'On Risk':>7}")
+                           f"{'Avg %prem':>9}  {'Total $':>10}  {'On Risk':>7}")
                 if HAS_FMT and fmt:
                     print(fmt.colorize(col_hdr, fmt.Colors.BOLD))
                 else:
@@ -1567,16 +1595,27 @@ def view_portfolio(period: Optional[str] = None):
                 for row in breakdown:
                     wr = row["win_rate"] * 100
                     avg = row["avg_pnl"] * 100
-                    tot = row["total_pnl"] * 100
+                    _usd = row.get("total_usd")
+                    tot_cell = (f"{'—':>10}" if _usd is None
+                                else f"{('+' if _usd >= 0 else '-') + '$' + format(abs(_usd), ',.0f'):>10}")
                     strat_name = (row["strategy"] or "Unknown").split(":")[0].strip()[:24]
                     line = (f"    {strat_name:<24} {row['total']:>6}  {wr:>4.0f}%  "
-                            f"{avg:>+8.1f}%  {tot:>+9.1f}%  "
+                            f"{avg:>+8.1f}%  {tot_cell}  "
                             f"{_ror_cell(row.get('return_on_risk'))}")
                     if HAS_FMT and fmt:
-                        lc = fmt.Colors.GREEN if row["avg_pnl"] > 0 else fmt.Colors.RED
+                        # Colour by money made, not the raw mean of return on
+                        # premium (unbounded below for credit spreads): Bear
+                        # Call read red at avg -7.1% while +1.1% on risk.
+                        _ror = row.get("return_on_risk")
+                        _key = (_ror if _ror is not None
+                                else _usd if _usd is not None else row["avg_pnl"])
+                        lc = fmt.Colors.GREEN if (_key or 0) > 0 else fmt.Colors.RED
                         print(fmt.colorize(line, lc))
                     else:
                         print(line)
+                _note = ("    On Risk = total $ / capital at risk — the fair comparison. "
+                         "Avg %prem is return on premium (unbounded for credit spreads).")
+                print(fmt.style(_note, 'muted') if HAS_FMT and fmt else _note)
         except Exception:
             pass
 
@@ -1590,13 +1629,23 @@ def view_portfolio(period: Optional[str] = None):
         if _attr_trades and HAS_BS:
             _attr_tickers = list({r["ticker"] for r in _attr_trades})
             _attr_prices: dict = {}
-            for _t in _attr_tickers:
-                try:
-                    _p = getattr(yf.Ticker(_t).fast_info, "last_price", None)
-                    if _p and float(_p) > 0:
-                        _attr_prices[_t] = float(_p)
-                except Exception:
-                    pass
+            # One live quote per ticker, sequentially — on a long ledger that
+            # is dozens of requests (12s measured on 1,001 closed trades) and
+            # it printed nothing, so the report looked hung mid-way.
+            import contextlib as _ctx
+            _sp = (ui.spinner(f"Pricing {len(_attr_tickers)} tickers for P&L attribution…")
+                   if ui is not None else _ctx.nullcontext())
+            with _sp as _spin:
+                for _i, _t in enumerate(_attr_tickers, 1):
+                    if _spin is not None and hasattr(_spin, "set_label"):
+                        _spin.set_label(f"Pricing tickers for P&L attribution… "
+                                        f"{_i}/{len(_attr_tickers)}")
+                    try:
+                        _p = getattr(yf.Ticker(_t).fast_info, "last_price", None)
+                        if _p and float(_p) > 0:
+                            _attr_prices[_t] = float(_p)
+                    except Exception:
+                        pass
             _print_pnl_attribution(_attr_trades, _attr_prices, width)
 
         # Paper trade IC analysis
