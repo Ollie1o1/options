@@ -1,41 +1,41 @@
 # Paper Trading Track Record
 
-_Generated 2026-11-04 11:07 • 996 closed trades_
+_Generated 2026-11-18 20:02 • 1001 closed trades_
 
 > **Methodology & caveats.** These are **paper trades**, not live fills. Entries and exits use **delayed retail data** (Yahoo Finance) and a **modeled friction** assumption (spread/slippage), so realized results would differ. The descriptive stats below are real; the **predictive edge of the ranking model is still under out-of-sample evaluation** and is *not* established — see [docs/VALIDATION_POWER.md](../docs/VALIDATION_POWER.md).
 
 _Ranking model: EXPERIMENTAL — OOS IC -0.01 (p=0.87, n=259), folds -0.12 [95% CI -0.32..+0.09], 7/15 positive — NOT distinguishable from zero | gate: STOP (n=159/50)
-OOS walk-forward as of 2026-11-02 (2d old) | cohort IC -0.013 pearson / -0.094 rank_
+OOS walk-forward as of 2026-11-02 (16d old) | cohort IC -0.013 pearson / -0.094 rank_
 
 ## Headline
 
-- Net P&L: **+$2,004.32** across 996 closed trades with a recorded dollar result
-- Return on capital risked: **+0.1%** (+$2,004.32 of $3,380,622 risked across 996 trades with capital_at_risk recorded)
-- Within the $4,000 per-position ceiling: **+2.7%** of capital risked (+$16,689.64 of $621,616 risked, 902 trades) — the subset the account could actually have held
+- Net P&L: **+$1,934.72** across 1001 closed trades with a recorded dollar result
+- Return on capital risked: **+0.1%** (+$1,934.72 of $3,383,653 risked across 1001 trades with capital_at_risk recorded)
+- Within the $4,000 per-position ceiling: **+2.7%** of capital risked (+$16,620.04 of $624,647 risked, 907 trades) — the subset the account could actually have held
 
 Secondary, size-blind figures:
 
-- Win rate: **47.9%** = 477 wins / 996 closed trades with a recorded return; 0 closed trades excluded for missing returns
+- Win rate: **47.8%** = 478 wins / 1001 closed trades with a recorded return; 0 closed trades excluded for missing returns
 - Mean return per trade: **-1.8%** (unweighted mean of per-trade returns **on entry premium** — a $28 spread counts the same as a $27,000 cash-secured put, and the premium denominator is a debit on long structures but a credit on short ones; not the headline for either reason)
 - Median return per trade: **-0.5%** of capital risked (typical trade, size-blind)
 
 ## Recent — last 14 days
 
-3 closed trades entered in the last 14 days, through 2026-11-03.
+7 closed trades entered in the last 14 days, through 2026-11-05.
 
-- Net P&L: **-$373.56**
-- Return on capital risked: **-22.3%** (-$373.56 of $1,676 risked, 3 trades)
-- Win rate: **33.3%**
-- Profit factor, equal-weighted at $1,000 a trade: **0.226** (95% bootstrap CI [0.00, 2.34])
-  - Only 3 trades in this window — too few for the interval to mean much either way; read the point estimate as a rough signal, not a verdict.
+- Net P&L: **-$612.30**
+- Return on capital risked: **-14.9%** (-$612.30 of $4,101 risked, 7 trades)
+- Win rate: **14.3%**
+- Profit factor, equal-weighted at $1,000 a trade: **0.480** (95% bootstrap CI [0.00, 2.79])
+  - Only 7 trades in this window — too few for the interval to mean much either way; read the point estimate as a rough signal, not a verdict.
 
 ## Equal-weighted — the same book with size taken out
 
 Every closed trade given the **same $1,000 of capital at risk**. Until 2026-08-20 no ledger row recorded a chosen position size — `quantity` was 1.0 on all of them — so bet size was the option's premium, a function of share price and implied volatility rather than of the pick. This is the headline with that removed.
 
-- Equal-weighted P&L: **-$2,042.86** at $1,000 a trade across 996 closed trades
+- Equal-weighted P&L: **-$2,323.82** at $1,000 a trade across 1001 closed trades
 - Mean return per trade: **-0.2%** of capital risked
-- Profit factor, equal-weighted: **0.990** (95% bootstrap CI [0.83, 1.17])
+- Profit factor, equal-weighted: **0.989** (95% bootstrap CI [0.83, 1.17])
   - **The interval contains 1**, so no book-level edge is established: this book has not been shown to make money per trade, whatever the dollar headline says.
 - The same exercise on **entry premium** instead of capital at risk gives 0.932. Both bases agree on the direction here.
 
@@ -46,7 +46,7 @@ Every closed trade given the **same $1,000 of capital at risk**. Until 2026-08-2
 | Iron Condor | 148 | 0.584 | [0.38, 0.88] | -5.3% |
 | Bear Call | 135 | 0.791 | [0.51, 1.24] | -4.7% |
 | Short Put | 108 | 1.945 | [0.45, 5.31] | +0.6% |
-| Long Put | 88 | 0.747 | [0.39, 1.27] | -6.5% |
+| Long Put | 93 | 0.752 | [0.41, 1.26] | -6.4% |
 
 _A line whose interval contains 1 has not been shown to have an edge at this sample size; one whose interval sits below 1 has been shown to lose. Intervals are seeded bootstraps over per-trade returns on capital at risk, so they are stable across regenerations of this file._
 
@@ -58,7 +58,7 @@ _A line whose interval contains 1 has not been shown to have an edge at this sam
 | Bull Put | 201 | 61.2% | +$5,597.75 | +9.9% | +11.9% | +8.9% |
 | Iron Condor | 148 | 50.0% | +$3,299.31 | +1.6% | +0.2% | -8.1% |
 | Long Call | 316 | 37.7% | -$3,649.02 | -1.3% | -29.4% | -1.8% |
-| Long Put | 88 | 31.8% | +$4,991.23 | +9.5% | -20.8% | -6.5% |
+| Long Put | 93 | 31.2% | +$4,921.63 | +8.9% | -20.7% | -6.4% |
 | Short Put | 108 | 49.1% | -$8,342.99 | -0.3% | -0.0% | -2.3% |
 
 _Win rate counts trades with a recorded return; aggregate return on risk and median return on risk count trades with capital_at_risk recorded. Where aggregate and median disagree in sign, see the methodology notes._
@@ -83,13 +83,13 @@ _Win rate counts trades with a recorded return; aggregate return on risk and med
 
 Every percentage in this document names its basis. **Of capital risked** means dollars of P&L over dollars of capital_at_risk (the ledger's own per-position risk figure: premium paid on debits, collateral or width less credit on credits). **Of credit collected** is P&L over premium taken in. **Unweighted mean** is the arithmetic mean of per-trade percentage returns, which counts every trade equally no matter its size and is reported only as a secondary line.
 
-Size dominates the raw aggregate: of $3,380,622 risked across the book, only $621,616 sat inside the $4,000 per-position ceiling the ledger now enforces (`auto_log.max_capital_at_risk`). The oversized positions are a sizing artifact of an unbounded feeder, not a strategy result, which is why the affordable subset is published beside the whole book.
+Size dominates the raw aggregate: of $3,383,653 risked across the book, only $624,647 sat inside the $4,000 per-position ceiling the ledger now enforces (`auto_log.max_capital_at_risk`). The oversized positions are a sizing artifact of an unbounded feeder, not a strategy result, which is why the affordable subset is published beside the whole book.
 
 ### Median vs aggregate
 
 Aggregate return on risk is a dollar-weighted number: one large contract can carry a whole line. The median per-trade return on risk is published beside it so the typical trade is visible. Where the two disagree in sign, the aggregate is a story about one or two positions.
 
-- **Long Put**: aggregate +9.5% of capital risked but median -20.8% per trade — one GS trade (+$3,255.70) is +65% of the line's net.
+- **Long Put**: aggregate +8.9% of capital risked but median -20.7% per trade — one GS trade (+$3,255.70) is +66% of the line's net.
 
 ### Cash-secured collateral denominator
 
@@ -1115,4 +1115,9 @@ This note is removed only once the scheduler has been verifiably alive for a ful
 | 2026-10-19 | SLV | Long Put | $1.64 | $3.45 | +104.3% | +$684.00 | $656 | Take Profit (100%) |
 | 2026-10-21 | PYPL | Long Put | $2.02 | $2.71 | +27.9% | +$169.14 | $606 | Time Exit (4d to expiry) |
 | 2026-10-27 | XYZ | Long Put | $3.45 | $2.83 | -23.8% | -$164.40 | $690 | Time Exit (7d to expiry) |
+| 2026-11-02 | TGT | Long Put | $5.00 | $3.22 | -41.5% | -$207.50 | $500 | Time Exit (15d to expiry) |
+| 2026-11-02 | PFE | Long Put | $0.83 | $0.20 | -88.0% | -$584.00 | $664 | Time Exit (8d to expiry) |
+| 2026-11-03 | INTC | Long Put | $3.40 | $8.35 | +139.6% | +$949.20 | $680 | Take Profit (100%) |
 | 2026-11-03 | XYZ | Long Put | $3.80 | $0.24 | -99.6% | -$378.30 | $380 | Stop Loss (-50%) |
+| 2026-11-05 | CSCO | Long Put | $5.55 | $4.85 | -18.6% | -$103.30 | $555 | Time Exit (11d to expiry) |
+| 2026-11-05 | XLF | Long Put | $0.79 | $0.73 | -19.6% | -$124.00 | $632 | Time Exit (4d to expiry) |
