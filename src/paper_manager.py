@@ -2938,7 +2938,8 @@ class PaperManager:
                    SUM(pnl_pct) as total_pnl,
                    SUM(CASE WHEN capital_at_risk > 0 THEN capital_at_risk ELSE 0 END) as risk,
                    SUM(CASE WHEN capital_at_risk > 0 AND pnl_usd IS NOT NULL
-                            THEN pnl_usd ELSE 0 END) as pnl_on_risk
+                            THEN pnl_usd ELSE 0 END) as pnl_on_risk,
+                   SUM(pnl_usd) as total_usd
             FROM trades
             WHERE status = 'CLOSED' AND pnl_pct IS NOT NULL
             GROUP BY strategy_name
@@ -2955,6 +2956,10 @@ class PaperManager:
                 "avg_pnl": r[4], "total_pnl": r[5],
                 "capital_at_risk": risk,
                 "return_on_risk": (r[7] / risk) if risk > 0 else None,
+                # Dollars, the only additive P&L. `total_pnl` is a SUM of
+                # per-trade return-on-premium fractions — not a quantity —
+                # kept only for existing callers.
+                "total_usd": r[8],
             })
         return out
 
