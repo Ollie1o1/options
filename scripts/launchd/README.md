@@ -42,7 +42,7 @@ well under half the assumed rate.
 
 | label | schedule | script |
 |---|---|---|
-| `com.ollie.options.auto-log-equity` | Mon–Fri 10:30, 12:30, 14:15 | `scripts/auto_log_equity.sh` |
+| `com.ollie.options.auto-log-equity` | Mon–Fri 10:30, 12:30, 14:15 | `scripts/auto_log_equity.sh` — trade alerts + earnings-calendar refresh only since 2026-11-18; entry scans belong to `com.ollie.options.maintenance` |
 | `com.ollie.options.enforce-exits` | Mon–Fri 14:07 | `scripts/enforce_exits.sh` |
 
 **`RunAtLoad` is `false` on both, deliberately.** The auto-logger writes real

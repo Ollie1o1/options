@@ -12,6 +12,7 @@ a missing artifact is reported as "no activity recorded", never an exception.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -79,6 +80,17 @@ def _last_db_trade_date(db_path: str) -> Optional[datetime]:
     return None
 
 
+def _last_autolog_window(state_path: str) -> Optional[datetime]:
+    """Newest `last_autolog` window date in the maintenance state file."""
+    try:
+        with open(state_path) as f:
+            windows = (json.load(f) or {}).get("last_autolog") or {}
+        dates = [str(v)[:10] for v in windows.values() if v]
+        return datetime.strptime(max(dates), "%Y-%m-%d") if dates else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
 def _last_tsv_date(path: str) -> Optional[datetime]:
     """Date in the first column of the last data row of a TSV (e.g.
     reports/checkpoint_history.tsv: 'date\\tweeks\\tn\\t...')."""
@@ -106,11 +118,16 @@ def collect_checks(root: str = ".", db_path: str = "paper_trades.db",
     def _p(*parts: str) -> str:
         return os.path.join(root, *parts)
 
-    # Auto-log: freshest of the DB's last trade date and the cron log mtime.
+    # Auto-log: freshest of the DB's last trade date, the old cron log mtime,
+    # and the day maintenance last ran an auto-log window. The window stamp is
+    # the one that matters: a window that ran and refused every candidate is a
+    # working job, and with Bull Put blocked that is most days. Without it this
+    # said "last ran 12d ago" on 2026-11-18 while every window ran daily.
     autolog_last = _last_db_trade_date(db_path)
-    log_mtime = _file_mtime(_p("logs", "auto_log_equity.log"))
-    if log_mtime and (autolog_last is None or log_mtime > autolog_last):
-        autolog_last = log_mtime
+    for cand in (_file_mtime(_p("logs", "auto_log_equity.log")),
+                 _last_autolog_window(_p("logs", ".maintenance_state.json"))):
+        if cand and (autolog_last is None or cand > autolog_last):
+            autolog_last = cand
 
     return [
         Check("auto-log", autolog_last, max_age_days=4,

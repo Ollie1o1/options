@@ -619,3 +619,100 @@ def health_lines(report: HealthReport) -> List[str]:
                        f"{j.business_days_stale:>3} business days ago  "
                        f"[{j.severity}]")
     return out
+
+
+# ── Disk space and stuck jobs ────────────────────────────────────────────────
+#
+# Both added 2026-11-18. The disk filled on 2026-11-06 (data/ is 13 GB and
+# grows daily), a scan died writing to its log, and the launchd job that
+# launched it hung for 12 days. Nothing reported either: the job lines read
+# state stamps, and a hung process stamps nothing.
+
+DISK_WARN_GB = 25.0
+DISK_CRITICAL_GB = 10.0
+
+
+def disk_health_lines(path: str = ".", free_bytes: Optional[int] = None) -> List[str]:
+    """Free space on the volume holding the repo. WARN below 25 GB, CRITICAL
+    below 10 GB. `free_bytes` is injectable for tests."""
+    if free_bytes is None:
+        try:
+            import shutil
+            free_bytes = shutil.disk_usage(path).free
+        except OSError:
+            return [f"  {'disk':<14} unreadable{'':<24}[WARN]"]
+    gb = free_bytes / 1e9
+    sev = ("CRITICAL" if gb < DISK_CRITICAL_GB else
+           "WARN" if gb < DISK_WARN_GB else "OK")
+    out = [f"  {'disk':<14} {gb:.1f} GB free{'':<21}[{sev}]"]
+    if sev != "OK":
+        out.append("     the 2026-11-06 scan crashed on a full disk; free space "
+                   "or move data/optionsdx* off this volume")
+    return out
+
+
+# Commands that belong to the scheduled jobs. Matched as substrings of the
+# full `ps` command line.
+_JOB_MARKERS = ("run.py", "src.maintenance", "auto_log_equity.sh",
+                "enforce_exits.sh", "src.trade_alerts", "src.dolt_earnings")
+STUCK_AFTER_HOURS = 12.0
+
+
+def _etime_hours(etime: str) -> Optional[float]:
+    """`ps -o etime` ([[dd-]hh:]mm:ss) as hours."""
+    try:
+        days = 0
+        if "-" in etime:
+            d, etime = etime.split("-", 1)
+            days = int(d)
+        parts = [int(p) for p in etime.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0)
+        h, m, s = parts
+        return days * 24 + h + m / 60 + s / 3600
+    except ValueError:
+        return None
+
+
+def stuck_job_lines(ps_output: Optional[str] = None, repo: Optional[str] = None,
+                    stuck_after_hours: float = STUCK_AFTER_HOURS) -> List[str]:
+    """Scheduled-job processes alive longer than `stuck_after_hours`.
+
+    Wall-clock age, so a run the Mac slept through can look long; 12 h is
+    well past any real run (a scan is minutes awake; the slowest day seen was
+    about 4 h of mostly sleep). launchd will not start a job again while its
+    last run is alive, so one stuck process silently stops that job."""
+    if ps_output is None:
+        try:
+            import subprocess
+            ps_output = subprocess.run(
+                ["ps", "-axww", "-o", "pid=,etime=,command="],
+                capture_output=True, text=True, timeout=10).stdout
+        except Exception:
+            return []
+    repo = repo or os.getcwd()
+    stuck = []
+    for line in ps_output.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, etime, cmd = parts
+        if "ps -axww" in cmd or not any(m in cmd for m in _JOB_MARKERS):
+            continue
+        # `run.py` is a common name. Ours is started with a relative path from
+        # the repo cwd, so match it by the scheduled flag instead.
+        if ("run.py" in cmd and repo not in cmd and "--no-ai" not in cmd):
+            continue
+        hours = _etime_hours(etime)
+        if hours is not None and hours >= stuck_after_hours:
+            stuck.append((pid, hours, cmd))
+    if not stuck:
+        return [f"  {'stuck jobs':<14} none{'':<30}[OK]"]
+    out = [f"  {'stuck jobs':<14} {len(stuck)} process(es) older than "
+           f"{stuck_after_hours:.0f}h{'':<6}[CRITICAL]"]
+    for pid, hours, cmd in stuck[:5]:
+        short = cmd if len(cmd) <= 70 else cmd[:67] + "..."
+        out.append(f"     pid {pid}, {hours / 24:.1f} days: {short}")
+    out.append("     launchd will not rerun a job while it is alive; "
+               "`kill <pid>` it")
+    return out

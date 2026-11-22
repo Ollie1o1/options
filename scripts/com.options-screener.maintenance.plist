@@ -4,7 +4,10 @@
   Headless cohort-filling maintenance for the options screener.
 
   Template: __REPO__ and __PYTHON__ are substituted by scripts/install_launchagent.sh.
-  Fires at 10:20 / 12:20 / 14:05, Mon-Fri. The first weekday fire inside the RTH
+  Fires at 10:20 / 12:20 / 14:05, Mon-Fri, plus 16:30 / 18:30 / 20:30 retry
+  slots (added 2026-11-18) for the network jobs - chain archive, estimates,
+  candidate marks - that a run in a no-network dark wake leaves unstamped.
+  Entry windows stay RTH-only and scheduled exits skip after the close. The first weekday fire inside the RTH
   band (see src/maintenance.due_autolog_windows) catches up EVERY working
   strategy not yet logged today (long calls, spreads, short puts, iron condors);
   the later fires are idempotent retries (once per strategy per day).
@@ -47,6 +50,21 @@
         <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>3</integer></dict>
         <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>4</integer></dict>
         <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>5</integer><key>Weekday</key><integer>5</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>1</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>5</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>1</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>5</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>1</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer><key>Weekday</key><integer>5</integer></dict>
     </array>
     <key>StandardOutPath</key>
     <string>__REPO__/logs/launchagent.log</string>
