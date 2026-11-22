@@ -378,6 +378,10 @@ class Spinner:
             vix = get_vix_level()
     """
 
+    # A wait longer than this shows its elapsed seconds, so a slow fetch reads
+    # as "still working, 40s in" rather than an animation that might be stuck.
+    ELAPSED_AFTER_S = 3.0
+
     def __init__(self, label: str = '', frames: str = SPINNER_FRAMES,
                  interval: float = 0.1, stream=None):
         self.label = label
@@ -387,19 +391,38 @@ class Spinner:
         self._stop = threading.Event()
         self._thread = None
         self._enabled = bool(getattr(self.stream, 'isatty', lambda: False)())
+        self._t0 = 0.0
+        self._widest = 0
+
+    def set_label(self, label: str) -> None:
+        """Change the label while spinning (e.g. per step of a multi-job wait)."""
+        self.label = label
 
     def _spin(self) -> None:
+        import time as _time
         i = 0
         while not self._stop.is_set():
             frame = self.frames[i % len(self.frames)]
+            label = self.label
+            elapsed = _time.monotonic() - self._t0
+            if elapsed >= self.ELAPSED_AFTER_S:
+                label = f'{label}  {int(elapsed)}s'
+            line = '  ' + frame + ' ' + label
+            # Pad over the previous frame: a label that shrinks (set_label, or
+            # the clock gaining a digit then the label changing) would
+            # otherwise leave the tail of the longer line on screen.
+            pad = max(0, self._widest - visible_len(line))
+            self._widest = max(self._widest, visible_len(line))
             self.stream.write('\r  ' + fmt.style(frame, 'accent')
-                              + ' ' + fmt.style(self.label, 'muted'))
+                              + ' ' + fmt.style(label, 'muted') + ' ' * pad)
             self.stream.flush()
             i += 1
             self._stop.wait(self.interval)
 
     def start(self) -> 'Spinner':
         if self._enabled and self._thread is None:
+            import time as _time
+            self._t0 = _time.monotonic()
             self._thread = threading.Thread(target=self._spin, daemon=True)
             self._thread.start()
         return self
@@ -410,7 +433,8 @@ class Spinner:
             self._thread.join()
             self._thread = None
         if self._enabled:
-            self.stream.write('\r' + ' ' * (visible_len(self.label) + 4) + '\r')
+            width = max(self._widest, visible_len(self.label) + 4)
+            self.stream.write('\r' + ' ' * width + '\r')
             self.stream.flush()
 
     def __enter__(self) -> 'Spinner':

@@ -270,11 +270,18 @@ def compute_health(state: dict, now) -> HealthReport:
     # A fresh clone is a setup state, and reporting it as a 99-day outage is
     # how an operator learns to scroll past this banner.
     #
-    # The signal is the STATE being empty, not "no job has a last_run": auto-log
-    # reports None whenever any single window is missing, so keying on that
-    # would read a live install with three unrun windows — the starving-cohort
-    # case this banner exists for — as a fresh clone and mute it.
-    first_run = not (state or {})
+    # The signal is "auto-log has NEVER recorded a single window", not "no job
+    # has a last_run": auto-log reports None whenever any single window is
+    # missing, so keying on that would read a live install with three unrun
+    # windows — the starving-cohort case this banner exists for — as a fresh
+    # clone and mute it. One recorded window anywhere makes it a live install.
+    #
+    # It used to be "the state dict is empty", which never fired: the startup
+    # jobs that run on every launch (track record, pick marks, the Bull Put
+    # watch) stamp the state BEFORE this banner is computed, so a brand-new
+    # clone opened its very first session on AUTOMATION CRITICAL.
+    _al = (state or {}).get("last_autolog") or {}
+    first_run = not any(_al.values()) if isinstance(_al, dict) else not _al
     worst = "OK"
     for j in jobs:
         sev = j.severity
@@ -371,7 +378,8 @@ def health_banner(report: HealthReport, width: int = 100,
         title = _style(f"{warn} SETUP — scheduled jobs have not run yet",
                        "warn", bold=True)
         first_body = [
-            "This looks like a fresh install: no maintenance run is on record.",
+            "This looks like a fresh install: auto-log has no recorded run "
+            "yet. That is expected on day one, not a fault.",
             "Open the screener on a weekday during market hours and startup "
             "maintenance will seed the cohort, the checkpoint and the archive.",
         ]

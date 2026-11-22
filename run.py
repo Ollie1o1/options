@@ -227,6 +227,19 @@ def _probe_imports(python_path: str) -> tuple[str, float]:
         return "slow", elapsed
     return "ok", elapsed
 
+_checking_said = False
+
+
+def _say_checking() -> None:
+    """One line before an uncached import probe. The probe is a subprocess
+    that can run for up to _PROBE_TIMEOUT_S with nothing on screen; on a first
+    launch that was a blank terminal for several seconds before the menu."""
+    global _checking_said
+    if not _checking_said:
+        _checking_said = True
+        print("Checking the Python environment (a few seconds)…", flush=True)
+
+
 def _probe_stamp_fresh(path: str) -> bool:
     """A cached probe verdict is fresh if it post-dates the venv's identity file
     (pyvenv.cfg) and this launcher. Anchored on pyvenv.cfg — NOT the venv
@@ -244,6 +257,7 @@ def _venv_status() -> str:
     """Return "ok"|"error"|"slow"|"timeout" for the project venv (cached both ways)."""
     if sys.platform != "darwin":
         # Non-Darwin: skip the cache + slow check, just probe import success.
+        _say_checking()
         status, _ = _probe_imports(_venv_python)
         return status
     if not os.path.isdir(os.path.join(_project_root, "venv", "lib")):
@@ -256,6 +270,7 @@ def _venv_status() -> str:
         except OSError:
             cached = ""
         return cached or "slow"
+    _say_checking()
     status, _ = _probe_imports(_venv_python)
     try:
         if status == "ok":
@@ -271,11 +286,57 @@ def _venv_status() -> str:
         pass
     return status
 
+_FALLBACK_STAMP = os.path.join(_project_root, "logs", ".fallback_venv_probe_ok")
+
+
+def _fallback_ok(python_path: str) -> bool:
+    """Probe an alternative interpreter, caching a pass so it isn't re-paid
+    (~2s of blank screen) on every launch. Fresh while the stamp post-dates
+    that venv's pyvenv.cfg and this launcher; an interpreter with no
+    pyvenv.cfg is never cached."""
+    cfg = os.path.join(os.path.dirname(os.path.dirname(python_path)), "pyvenv.cfg")
+    import hashlib
+    stamp = f"{_FALLBACK_STAMP}.{hashlib.sha1(python_path.encode()).hexdigest()[:8]}"
+    try:
+        sm = os.path.getmtime(stamp)
+        if sm >= os.path.getmtime(cfg) and sm >= os.path.getmtime(__file__):
+            return True
+    except OSError:
+        pass
+    _say_checking()
+    status, _ = _probe_imports(python_path)
+    if status == "ok" and os.path.isfile(cfg):
+        try:
+            os.makedirs(os.path.dirname(stamp), exist_ok=True)
+            open(stamp, "w").close()
+        except OSError:
+            pass
+    return status == "ok"
+
+
+def _alternative_interpreters() -> list:
+    """Interpreters to try when venv/ is unusable, best first: the venv the
+    user has already activated, a project-local .venv/, then this machine's
+    ~/.venvs/options. Before this, someone who followed the common
+    `python -m venv .venv && source .venv/bin/activate` habit got
+    "Virtual environment not found" even though their interpreter was fine."""
+    out = []
+    if sys.prefix != sys.base_prefix:
+        out.append(sys.executable)
+    for cand in (os.path.join(_project_root, ".venv", "Scripts", "python.exe"),
+                 os.path.join(_project_root, ".venv", "bin", "python"),
+                 _FALLBACK_VENV):
+        if os.path.isfile(cand) and cand not in out:
+            out.append(cand)
+    return out
+
+
 def _print_rebuild_instructions():
     print()
     print("Fix (run from Terminal.app / iTerm / Ghostty — NOT a coding-CLI):")
     print(f"  cd {_project_root}")
-    print("  rm -rf venv")
+    if os.path.isdir(os.path.join(_project_root, "venv")):
+        print("  rm -rf venv")
     print("  python3 -m venv venv")
     print("  venv/bin/pip install -r requirements-lock.txt")
     print()
@@ -288,24 +349,33 @@ _project_venv_status = _venv_status() if os.path.isfile(_venv_python) else "miss
 # auto_log_*.sh, so it's typically healthy when the project venv isn't.
 if _project_venv_status != "ok":
     fb_ok = False
-    if os.path.isfile(_FALLBACK_VENV):
-        fb_status, _ = _probe_imports(_FALLBACK_VENV)
-        fb_ok = fb_status == "ok"
-    if fb_ok:
+    _fb_python = None
+    for _cand in _alternative_interpreters():
+        if _fallback_ok(_cand):
+            fb_ok, _fb_python = True, _cand
+            break
+    if fb_ok and _project_venv_status == "missing":
+        # No venv/ at all and a working interpreter found: nothing is wrong,
+        # so say nothing. (Printing a "rebuild venv/" NOTICE on every launch
+        # for a venv that was deliberately never created is just noise.)
+        _venv_python = _fb_python
+    elif fb_ok:
         reason = {
             "missing": "missing",
             "error":   "broken (imports fail)",
             "slow":    "slow to import (provenance poisoning)",
             "timeout": "timing out on imports",
         }.get(_project_venv_status, _project_venv_status)
-        print(f"NOTICE: project venv is {reason} — falling back to {_FALLBACK_VENV}")
+        print(f"NOTICE: project venv is {reason} — falling back to {_fb_python}")
         print("        Rebuild venv/ from your own Terminal when convenient:")
         print(f"          cd {_project_root} && rm -rf venv && python3 -m venv venv")
         print("          venv/bin/pip install -r requirements-lock.txt")
-        _venv_python = _FALLBACK_VENV
+        _venv_python = _fb_python
     else:
         if _project_venv_status == "missing":
-            print("ERROR: Virtual environment not found and no fallback at ~/.venvs/options.")
+            print("ERROR: no Python environment with the screener's dependencies was found.")
+            print("       Looked for: venv/, .venv/, an activated venv, ~/.venvs/options.")
+            print("       First-time setup is three commands:")
         elif _project_venv_status in ("slow", "timeout"):
             print("ERROR: venv imports are slow or hanging — macOS provenance poisoning.")
             print()
@@ -329,7 +399,10 @@ _target_module = "src.launcher" if not _argv else "src.options_screener"
 # -u: the child is a fresh interpreter that makes its own tty-buffering
 # decision at startup — this process's own reconfigure() above doesn't
 # carry over a fork/exec boundary, so it needs the same forcing directly.
-if sys.prefix == sys.base_prefix:
+# Run in-process only when the chosen interpreter IS this one. Keying on "some
+# venv is active" ran the screener inside whatever venv happened to be
+# activated, including one the probe above had just found broken.
+if os.path.abspath(_venv_python) != os.path.abspath(sys.executable):
     sys.exit(subprocess.call(
         [_venv_python, "-u", "-m", _target_module] + _argv,
         cwd=_project_root,
