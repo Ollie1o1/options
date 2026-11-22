@@ -31,7 +31,14 @@ except ImportError:       # pragma: no cover - not exercised on macOS/Linux
 from src import phase1_checkpoint
 from src.paths import repo_path
 
-VENV_PY = os.path.expanduser("~/.venvs/options/bin/python")
+# The scheduled jobs' interpreter. ~/.venvs/options is this machine's
+# convention (the LaunchAgents point at it); a fresh clone has only its own
+# venv, so spawning that path would fail every catch-up with
+# FileNotFoundError, swallowed. The interpreter running us already imports
+# everything the children need.
+_PREFERRED_VENV_PY = os.path.expanduser("~/.venvs/options/bin/python")
+VENV_PY = (_PREFERRED_VENV_PY if os.path.isfile(_PREFERRED_VENV_PY)
+           else sys.executable)
 DEFAULT_STATE_PATH = os.path.join("logs", ".maintenance_state.json")
 DEFAULT_LOCK_PATH = os.path.join("logs", ".catchup.lock")
 
@@ -580,9 +587,15 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             walk_forward_fn: Optional[Callable] = None,
                             watch_fn: Optional[Callable] = None,
                             now_fn: Optional[Callable[[], datetime]] = None,
-                            online_fn: Optional[Callable[[], bool]] = None) -> dict:
+                            online_fn: Optional[Callable[[], bool]] = None,
+                            progress: Optional[Callable[[str], None]] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
+
+    `progress`, when given, is called with a short human label just before
+    each job that actually runs. Interactive startup feeds it to a spinner:
+    on a weekday afternoon the archive and marking jobs can hold the screen
+    for minutes, and a silent wait there reads as a frozen program.
 
     `online_fn` (the scheduled entry passes `network_up`) is asked before each
     network job. When it says offline, that job is skipped UNSTAMPED, so a
@@ -613,6 +626,14 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     state = load_state(state_path)
     ran = []
     _offline_noted = []
+
+    def _step(label: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(label)
+        except Exception:
+            pass
 
     def _online() -> bool:
         try:
@@ -665,6 +686,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     # 2. Weekly checkpoint (>=7 days) — read-only gate refresh.
     try:
         if phase1_start and due_checkpoint(state, today):
+            _step("Refreshing the weekly gate checkpoint…")
             fn = checkpoint_fn or _run_checkpoint
             fn(db_path=db_path, phase1_start=phase1_start)
             state["last_checkpoint"] = today
@@ -675,6 +697,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     # 3. Weekly public track-record refresh (>=7 days), read-only over the db.
     try:
         if due_track_record(state, today):
+            _step("Refreshing the track record…")
             fn = track_record_fn or _run_track_record
             fn(db_path=db_path)
             state["last_track_record"] = today
@@ -701,6 +724,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
         _cur_today = _cur.strftime("%Y-%m-%d")
         if _ca.due_chain_archive(state, _cur_today, _cur.isoweekday(),
                                  _cur.hour * 100 + _cur.minute) and _online():
+            _step("Archiving today's option chains (once a day, can take a few minutes)…")
             fn = chain_archive_fn or _run_chain_archive
             res = fn()
             # Stamp the day only when the run covered the universe. The
@@ -733,6 +757,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
         _cur_today = _cur.strftime("%Y-%m-%d")
         if _ea.due_estimates_archive(state, _cur_today,
                                      _cur.hour * 100 + _cur.minute) and _online():
+            _step("Snapshotting analyst estimates (once a day)…")
             fn = estimates_archive_fn or (
                 lambda: _ea.archive_symbols(_ea.universe(), today=_cur_today))
             counts = fn() or {}
@@ -751,6 +776,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     try:
         from src import candidate_marks as _cm
         if _cm.due_candidate_marks(state, today) and _online():
+            _step("Marking recorded candidates to market (once a day, can take a few minutes)…")
             counts = _cm.mark_candidates()
             # Stamped only when the run priced (nearly) every pair. A rate-
             # limited run left unstamped is finished by the next invocation
@@ -773,6 +799,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     try:
         from src import own_picks as _op
         if state.get("last_pick_marks") != today:
+            _step("Quoting your own picks…")
             n = _op.record_pick_marks(ledger_path=db_path)
             state["last_pick_marks"] = today
             if n:
@@ -798,6 +825,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     #     LaunchAgent, it was a job that had not been connected to the timer.
     try:
         if due_bull_put_watch(state, today):
+            _step("Updating the Bull Put cohort watch…")
             if (watch_fn or _run_bull_put_watch)(db_path) is not None:
                 state["last_bull_put_watch"] = today
                 ran.append("bull-put-watch")
@@ -826,6 +854,7 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     #    by hand.
     try:
         if due_walk_forward(state, today):
+            _step("Re-running the monthly walk-forward check…")
             fn = walk_forward_fn or _run_walk_forward
             wf_summary = fn(db_path=db_path)
             state["last_walk_forward"] = today

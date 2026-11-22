@@ -5794,6 +5794,9 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     elif mode == "Lottery Ticket":
         if not picks.empty:
             final_df = picks.sort_values("lottery_ticket_score", ascending=False)
+            # The board is shown in this order, so "pick N" must index it —
+            # not the unsorted `picks` the tearsheet used to fall back to.
+            _display_df = final_df
             if verbose:
                 print_lottery_ticket_report(final_df, underlying_price, market_trend, volatility_regime)
         elif verbose:
@@ -5894,7 +5897,11 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
 
     # Phase 7: optional HTML tearsheet for one pick.
     # One hook covers every single-leg mode, because they all fall through here.
-    if verbose and not picks.empty:
+    # Only what the board actually showed. When every candidate was refused
+    # `_display_df` is None, and falling back to `picks` offered a tearsheet
+    # ("pick number 1-1") for a contract the screen had just said cleared
+    # nothing — the exact pre-gate leak the comment below describes.
+    if verbose and _display_df is not None and not _display_df.empty:
         try:
             _ts_ctx = {"mode": mode, "spot": underlying_price, "rfr": rfr,
                        "vix": get_vix_level(), "vix_regime": volatility_regime,
@@ -5905,7 +5912,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             # strike and expiry from anything on screen. Observed 2026-08-10 on
             # an NVDA scan — terminal showed $222.5 08-19/08-21, the tearsheet
             # rendered $225 08-28.
-            offer_tearsheet(_display_df if _display_df is not None else picks,
+            offer_tearsheet(_display_df,
                             _ts_ctx, interactive=interactive,
                             preselect=tearsheet_pick)
         except Exception as _ts_exc:
@@ -6180,12 +6187,15 @@ def _macro_scan_section(symbols, focus_symbol=None) -> None:
         # Deterministic narrative only: this panel is shown BEFORE the AI-ranking
         # prompt below, so building it must not fire an AI request. The opt-in
         # AI call is the ranking, gated on an explicit 'yes'.
-        ctx = _mp.build_context(use_ai=False)
+        # Context + one sector lookup per symbol is several seconds of network
+        # with nothing on screen, right after the board — it read as a hang.
+        with _spinner("Building the macro overlay (sectors + market context)…"):
+            ctx = _mp.build_context(use_ai=False)
+            sectors = {s: _mp._lookup_sector(s) for s in uniq}
     except Exception as exc:
         logging.getLogger(__name__).debug("macro scan section skipped: %s", exc)
         return
 
-    sectors = {s: _mp._lookup_sector(s) for s in uniq}
     focus = (focus_symbol or "").upper() or None
     focus_sector = sectors.get(focus) if focus else None
     try:
@@ -6603,13 +6613,19 @@ def main():
                     and not args.ticker and not getattr(args, "auto_log", False))
 
     # ── Startup maintenance (replaces retired cron) ─────────────────────────
+    _first_run = False
     try:
         import json as _json
         from .maintenance import run_startup_maintenance
         with open("config.json") as _cf:
             _p1 = (_json.load(_cf).get("auto_log") or {}).get("phase1_start_date")
-        _maint = run_startup_maintenance(db_path="paper_trades.db", phase1_start=_p1,
-                                         background=True)
+        # Spinner over the whole block, relabelled per job: on a weekday
+        # afternoon the archive/marking jobs run inline here and can take
+        # minutes, which with no output looked exactly like a hung launch.
+        with _spinner("Checking background jobs…") as _msp:
+            _maint = run_startup_maintenance(
+                db_path="paper_trades.db", phase1_start=_p1, background=True,
+                progress=getattr(_msp, "set_label", None))
         if _maint.get("cohort"):
             print(fmt.colorize(f"  {_maint['cohort']}", fmt.Colors.BRIGHT_WHITE)
                   if HAS_ENHANCED_CLI else f"  {_maint['cohort']}")
@@ -6632,7 +6648,9 @@ def main():
             # they ran or not. The agents' own log is the only record of an
             # actual firing — see launchd_silence_days.
             _silence = launchd_silence_days()
-            _banner = health_banner(compute_health(_mh_state, datetime.now()),
+            _mh_report = compute_health(_mh_state, datetime.now())
+            _first_run = bool(_mh_report.first_run)
+            _banner = health_banner(_mh_report,
                                     launchd_jobs=_launchd_jobs,
                                     silence_days=_silence)
             if _banner:
@@ -6663,7 +6681,10 @@ def main():
     try:
         from .health import automation_health_warnings
         _health = automation_health_warnings(db_path="paper_trades.db")
-        if _health:
+        # A fresh install has already been told, once, in the SETUP card
+        # above that nothing has run yet; three more "no activity recorded"
+        # alarms about the same fact read as a broken install.
+        if _health and not _first_run:
             hdr = "Automation stale — scheduled jobs may have stopped:"
             print(fmt.format_warning(hdr) if HAS_ENHANCED_CLI else f"  WARNING: {hdr}")
             for _hw in _health:

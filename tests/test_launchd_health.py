@@ -441,8 +441,22 @@ class NeverRanIsNotAMeasurementTest(unittest.TestCase):
             {"last_track_record": "2026-08-03", "last_chain_archive": "2026-08-03"},
             date(2026, 8, 3))
 
-    def test_the_state_is_not_empty_so_the_first_run_check_cannot_help(self):
-        self.assertFalse(self.report.first_run)
+    def test_a_state_seeded_only_by_startup_jobs_is_still_a_first_run(self):
+        # Exactly the fresh-clone shape at banner time. Keying first-run on an
+        # empty state never fired here, so a new install opened on CRITICAL.
+        self.assertTrue(self.report.first_run)
+        self.assertNotEqual(self.report.worst, "CRITICAL")
+
+    def test_one_recorded_autolog_window_is_a_live_install(self):
+        from datetime import date
+
+        from src.maintenance_health import compute_health
+
+        rep = compute_health({"last_track_record": "2026-08-03",
+                              "last_autolog": {"ds": "2026-07-01"}},
+                             date(2026, 8, 3))
+        self.assertFalse(rep.first_run)
+        self.assertEqual(rep.worst, "CRITICAL")
 
     def test_the_banner_never_invents_a_day_count(self):
         from src.maintenance_health import health_banner
