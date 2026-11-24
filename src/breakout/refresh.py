@@ -263,8 +263,9 @@ def refresh_universe(db_path: str, tickers: list[str], *,
                     if holiday_calendar_covers(day.year) and is_trading_day(day):
                         reference.add(day.isoformat())
                     day += timedelta(days=1)
-                values = {d: float(old[d][0]) for d in old}
-                values.update({d: r["close"] for d, r in incoming.items()})
+                # A full refresh may have just repaired a legacy NULL close.
+                # Inspect the accepted values instead of coercing that old NULL.
+                values = {d: incoming[d]["close"] if d in incoming else float(old[d][0]) for d in all_dates}
                 dates = sorted(values)
                 large_moves = [{"date": b, "return": values[b] / values[a] - 1}
                                for a, b in zip(dates, dates[1:])

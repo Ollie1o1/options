@@ -57,6 +57,15 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(json.loads(encoded), rows())
         self.assertEqual(accepted, 1)
 
+    def test_full_refresh_repairs_a_legacy_null_without_failing_after_commit(self):
+        upsert_ohlcv(self.db, "SPY", rows())
+        with closing(sqlite3.connect(self.db)) as con, con:
+            con.execute("UPDATE ohlcv SET close=NULL WHERE date=?", (DAYS[0],))
+        result = self.refresh()
+        self.assertTrue(result["complete"])
+        self.assertEqual(self.query("SELECT close FROM ohlcv_revisions"), [(None,)])
+        self.assertEqual(load_series(self.db, "SPY").close[0], 100.)
+
     def test_incremental_request_contains_overlap_and_is_idempotent(self):
         self.refresh()
         fetch = Mock(return_value=rows())
