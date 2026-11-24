@@ -4952,7 +4952,7 @@ def prompt_for_tickers() -> List[str]:
     source_choice = prompt_input("Enter 1, 2, or 3", "1")
 
     if source_choice == "1":
-        # Top 100 most liquid options tickers (ordered by typical volume)
+        # Curated liquid names, not a live top-volume ranking.
         tickers = [
             # Major Indices & ETFs
             "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "EEM", "GLD", "SLV", "TLT",
@@ -5552,6 +5552,19 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
         if result.get("success") and result.get("context"):
             ticker_contexts[symbol] = result["context"]
 
+    # One immutable-in-use evidence snapshot for terminal and HTML. All inputs
+    # were already fetched; explanations never trigger per-contract requests.
+    from .discovery import history_observations
+    from .data_fetching import get_cached_market_observations
+    _discovery_ctx = {
+        "mode": mode, "as_of": datetime.now().date().isoformat(), "vix": vix_level,
+        "market_observations": get_cached_market_observations(),
+        "ticker_contexts": {
+            sym: dict(context, price_observations=history_observations(ticker_histories.get(sym)))
+            for sym, context in ticker_contexts.items()
+        },
+    }
+
     # --- Portfolio Protection: Correlation Warning ---
     # Only the tickers that actually produced picks matter here — correlating
     # the whole 100+ ticker scan universe just proves SPY≈QQQ and buries the
@@ -5702,7 +5715,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             _display_df = top_picks
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, budget=budget, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs, discovery_context=_discovery_ctx)
                 _print_per_risk_table(top_picks, _leg_label, session_budget,
                                       match_board=True)
                 _print_budget_use(top_picks, session_budget)
@@ -5722,7 +5735,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             top_picks = pick_top_per_bucket(final_df, per_bucket=3, diversify_tickers=True)
             _display_df = top_picks
             if verbose:
-                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                print_report(top_picks, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs, discovery_context=_discovery_ctx)
                 _print_per_risk_table(top_picks, _leg_label, session_budget,
                                       match_board=True)
                 _print_budget_use(top_picks, session_budget)
@@ -5784,7 +5797,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=None)
             _display_df = final_df.head(10)
             if verbose:
-                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                print_report(final_df.head(10), underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs, discovery_context=_discovery_ctx)
                 _print_per_risk_table(final_df.head(10), _leg_label,
                                       session_budget, match_board=True)
                 _print_budget_use(final_df.head(10), session_budget)
@@ -5812,7 +5825,7 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
             final_df = categorize_by_premium(final_df, budget=None)
             _display_df = final_df
             if verbose:
-                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs)
+                print_report(final_df, underlying_price, rfr, max_expiries, min_dte, max_dte, mode=mode, market_trend=market_trend, volatility_regime=volatility_regime, config=config, show_surface=show_surface, surface_mode=surface_mode, surface_type=surface_type, show_contours=show_contours, compact=compact, corr_pairs=corr_pairs, discovery_context=_discovery_ctx)
                 _print_per_risk_table(final_df, _leg_label, session_budget,
                                       match_board=True)
                 _print_budget_use(final_df, session_budget)
@@ -5903,8 +5916,8 @@ def run_scan(mode: str, tickers: List[str], budget: Optional[float], max_expirie
     # nothing — the exact pre-gate leak the comment below describes.
     if verbose and _display_df is not None and not _display_df.empty:
         try:
-            _ts_ctx = {"mode": mode, "spot": underlying_price, "rfr": rfr,
-                       "vix": get_vix_level(), "vix_regime": volatility_regime,
+            _ts_ctx = {**_discovery_ctx, "mode": mode, "spot": underlying_price, "rfr": rfr,
+                       "vix": vix_level, "vix_regime": volatility_regime,
                        "config": config, "config_sha": _config_sha(config)}
             # The frame the CARDS were numbered from, not `picks`.
             # `picks` is pre-gate and pre-ordering: a tearsheet built from it
@@ -6249,6 +6262,7 @@ def run_top_scan(
     market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
 
     all_rows = []
+    research_contexts = {}
     for sym in tickers:
         try:
             # The bounds decide WHICH expiries are pulled, not just which rows
@@ -6271,6 +6285,10 @@ def run_top_scan(
                 None, macro_risk_active, tnx_change_pct,
             )
             if result.get("success"):
+                from .discovery import history_observations
+                research_contexts[sym] = dict(
+                    data.get("context") or {},
+                    price_observations=history_observations(data.get("history_df")))
                 for picks_df in result.get("picks", []):
                     if not picks_df.empty:
                         all_rows.append(picks_df)
@@ -6327,6 +6345,9 @@ def run_top_scan(
                    "vix_regime": vix_regime, "config": config,
                    "config_sha": _config_sha(config),
                    "sibling_rows": top.to_dict("records")}
+            from .data_fetching import get_cached_market_observations
+            ctx.update(as_of=datetime.now().date().isoformat(), ticker_contexts=research_contexts,
+                       market_observations=get_cached_market_observations())
             data = build(row, ctx)
             html_path, _ = write_tearsheet(data)
             print(f"\n  tearsheet: {html_path}")
@@ -6779,7 +6800,7 @@ def main():
             modes = [
                 ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
                 ("2", "ALL",       "Budget-based multi-stock scan"),
-                ("3", "DISCOVER",  "Top 100 most-traded tickers \u2014 no budget limit"),
+                ("3", "DISCOVER",  "Curated liquid names / gainers / high IV"),
                 ("4", "SELL",      "Premium Selling \u2014 income via short puts"),
                 ("5", "SPREADS",   "Credit Spread analysis"),
                 ("6", "IRON",      "Iron Condor analysis \u2014 range-bound"),
@@ -6803,7 +6824,7 @@ def main():
             print(_START_HINT)
             print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")
             print("  [2] ALL        \u2014 Budget-based multi-stock scan")
-            print("  [3] DISCOVER   \u2014 Top 100 most-traded tickers (no budget limit)")
+            print("  [3] DISCOVER   \u2014 Curated liquid names / gainers / high IV")
             print("  [4] SELL       \u2014 Premium Selling analysis (short puts)")
             print("  [5] SPREADS    \u2014 Credit Spread analysis")
             print("  [6] IRON       \u2014 Iron Condor analysis")

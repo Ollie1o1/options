@@ -58,7 +58,7 @@ _START = Chapter(
          (("1 STOCKS", "equity options — the main screener, 13 modes"),
           ("2 CRYPTO", "BTC/ETH options on Deribit, perp funding and basis"),
           ("3 LEVERAGE", "perp futures — research only, no edge found yet"),
-          ("4 RESEARCH", "breakout, vol-intelligence, equity-VRP — read-only"),
+          ("4 RESEARCH", "breakout, vol, catalysts, Discovery Lab — read-only"),
           ("5 HOLDINGS", "long-term stock accumulation, buy zones, tranches"),
           ("6 STRATEGIES", "your written setups, with costs attached"))),
 
@@ -69,9 +69,9 @@ _START = Chapter(
             "Run [10] INTEL first. It is a briefing, not a scan: where the "
             "market is, what the vol regime is, what is happening this week. "
             "Context before candidates.",
-            "Then run [3] DISCOVER. It scans the hundred most-traded tickers "
-            "with no budget limit, which is the widest honest look you can "
-            "take in one command.",
+            "Then run [3] DISCOVER. Choose curated liquid names, gainers or high-IV stocks "
+            "as the ticker source. The curated list is maintained locally, not a live ranking. You can "
+            "then investigate the candidates individually.",
             "Read the VERDICT column before anything else. It answers one "
             "question: does this trade still make money after you pay to get "
             "into it and out of it? THE VERDICT explains it in full.",
@@ -475,7 +475,7 @@ _MODES = Chapter(
          (("1 STOCKS", "equity options — discover, spreads, iron, sell"),
           ("2 CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"),
           ("3 LEVERAGE", "BTC/ETH perp futures — tagged no edge yet"),
-          ("4 RESEARCH", "breakout, vol-intel, equity-VRP — read-only"),
+          ("4 RESEARCH", "breakout, vol, catalysts, Discovery Lab — read-only"),
           ("5 HOLDINGS", "long-term accumulation, buy zones, tranches, TFSA"),
           ("6 STRATEGIES", "your setups — display-only, never an order"),
           ("7 SETTINGS", "theme, preferences, doctor"),
@@ -486,7 +486,7 @@ _MODES = Chapter(
          ({"h": "", "w": 14}, {"h": "", "w": 56}),
          (("1 TICKER", "single-stock deep analysis, e.g. AAPL"),
           ("2 ALL", "budget-based multi-stock scan"),
-          ("3 DISCOVER", "top 100 most-traded tickers, no budget limit"),
+          ("3 DISCOVER", "curated liquid names / gainers / high IV"),
           ("4 SELL", "premium selling — income via short puts"),
           ("5 SPREADS", "credit spread analysis"),
           ("6 IRON", "iron condor analysis — range-bound views"),

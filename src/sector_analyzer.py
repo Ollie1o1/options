@@ -1,8 +1,8 @@
 """Sector Relative Strength analyzer.
 
 Fetches 3 months of daily closes for all 11 SPDR sector ETFs + SPY via a
-single yf.download batch call, computes 20-day ROC for each sector relative
-to SPY's 20-day ROC, and returns a SectorContext dataclass.
+single yf.download batch call, compares sector and SPY wealth growth over
+matching 20-session windows, and returns a SectorContext dataclass.
 
 15-minute in-process TTL cache — no SQLite persistence required.
 """
@@ -10,6 +10,7 @@ to SPY's 20-day ROC, and returns a SectorContext dataclass.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -35,17 +36,18 @@ class SectorContext:
     fetched_at: float = field(default_factory=time.time)
 
 
-def _roc_20(series: pd.Series) -> float:
+def _roc_20(series: pd.Series) -> Optional[float]:
     """20-day Rate of Change: (price[-1] / price[-21]) - 1."""
     if len(series) < 21:
-        return 0.0
+        return None
     try:
         denom = series.iloc[-21]
-        if denom == 0 or pd.isna(denom):
-            return 0.0
+        window = series.iloc[-21:]
+        if denom <= 0 or window.isna().any() or (window <= 0).any() or not window.map(math.isfinite).all():
+            return None
         return float(series.iloc[-1] / denom) - 1.0
     except Exception:
-        return 0.0
+        return None
 
 
 def _empty_context() -> SectorContext:
@@ -108,9 +110,9 @@ class SectorAnalyzer:
             logger.warning("SectorAnalyzer: SPY data missing; returning empty context")
             return _empty_context()
 
-        spy_roc = _roc_20(closes["SPY"])
-        if abs(spy_roc) < 1e-10:
-            # Avoid division by zero — return neutral context
+        spy_series = closes["SPY"].dropna()
+        spy_roc = _roc_20(spy_series)
+        if spy_roc is None or spy_roc <= -1:
             return _empty_context()
 
         rs_matrix: Dict[str, float] = {}
@@ -119,15 +121,23 @@ class SectorAnalyzer:
         for etf in ALL_SECTOR_ETFS:
             if etf not in closes.columns:
                 continue
-            series = closes[etf].dropna()
+            # Same session endpoints, with no dropping a hole and quietly
+            # turning 20 sessions into a different holding window.
+            series = closes[etf].reindex(spy_series.index[-21:])
             if len(series) < 21:
                 continue
             etf_roc = _roc_20(series)
-            rs_matrix[etf] = round(etf_roc / spy_roc, 4)
+            if etf_roc is None:
+                continue
+            # Ratio of gross returns, not ratio of signed returns. Dividing
+            # by a negative SPY ROC used to call the worst decliners leaders;
+            # dividing by a near-zero ROC made the result explode or vanish.
+            rs_matrix[etf] = round((1.0 + etf_roc) / (1.0 + spy_roc), 4)
 
             # 50-day SMA for mean-reversion detection
-            if len(series) >= 50:
-                sma50[etf] = float(series.iloc[-50:].mean())
+            full_series = closes[etf].reindex(spy_series.index)
+            if len(full_series) >= 50 and full_series.iloc[-50:].notna().all():
+                sma50[etf] = float(full_series.iloc[-50:].mean())
 
         if not rs_matrix:
             return _empty_context()

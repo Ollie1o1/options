@@ -1,5 +1,10 @@
 # ROADMAP — the path to real money
 
+> **Historical plan — superseded.** This plan predates the Long Call gate's
+> STOP result. Its proposed next actions are not current execution guidance.
+> Consult the dated [generated gate status](../reports/GATE_STATUS.md),
+> [track record](../reports/TRACK_RECORD.md), and [decision log](DECISIONS.md).
+
 **Goal:** Deploy real money on Long-Call options, but only after the screener proves a real,
 statistically significant edge on trades it has never seen.
 

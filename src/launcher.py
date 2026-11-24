@@ -67,7 +67,7 @@ def _menu_rows() -> list:
     rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
     rows.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
     rows.append(_row("4", "RESEARCH",
-                     "breakout · vol-intelligence · equity-VRP · pharma catalysts",
+                     "breakout · vol · VRP · catalysts · discovery lab",
                      tag="read-only"))
     rows.append(_row("5", "HOLDINGS", "long-term stock accumulation — buy zones · tranches · TFSA book"))
     rows.append(_row("6", "STRATEGIES",
@@ -157,6 +157,7 @@ def _research_menu() -> None:
                    tag="no single-name edge"))
         print(_row("4", "CATALYSTS", "dated pharma Ph2/Ph3 events — runway · amendments · implied move",
                    tag="not ranked"))
+        print(_row("5", "DISCOVERY", "Lab: channels, peers, sector drivers", tag="research"))
         print(_row("B", "BACK", "", muted_key=True))
         print(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
         try:
@@ -180,8 +181,11 @@ def _research_menu() -> None:
             _evrp_main([])
         elif choice in ("4", "CATALYSTS", "CATALYST"):
             _catalyst_prompt()
+        elif choice in ("5", "DISCOVERY LAB", "DISCOVERY"):
+            from src.discovery_research.__main__ import main as _discovery_main
+            _discovery_main(["--view"])
         else:
-            print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, or B")
+            print(f"  Unknown choice: {choice!r} — pick 1, 2, 3, 4, 5, or B")
 
 
 def _catalyst_prompt() -> None:

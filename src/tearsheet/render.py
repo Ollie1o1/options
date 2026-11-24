@@ -892,9 +892,46 @@ def _zone_lottery(data) -> str:
             + "</div>")
 
 
+def _discovery_section(data):
+    brief = data.get("discovery")
+    if not brief:
+        return ""  # Older sidecars preserve their original rendering.
+    body = '<p>{}</p><p>{}</p>'.format(_esc(brief.get("selection")), _esc(brief.get("summary")))
+    for title, alignment in (("Supports the exposure", "supports"),
+                             ("Challenges the exposure", "conflicts"),
+                             ("Context and option pricing", "context")):
+        rows = [o for o in brief.get("observations", []) if o.get("alignment") == alignment]
+        if rows:
+            body += '<h3>{}</h3><ul>'.format(title)
+            for obs in rows:
+                body += '<li><strong>{}: {}</strong> — {}</li>'.format(
+                    _esc(obs.get("label")), _esc(obs.get("fact")), _esc(obs.get("implication")))
+            body += '</ul>'
+    body += '<h3>Unknowns</h3><ul>' + ''.join('<li>{}</li>'.format(_esc(u))
+                                          for u in brief.get("unknowns", [])) + '</ul>'
+    body += '<h3>Investigate next</h3><ul>' + ''.join(
+        '<li><strong>{}</strong>: {}</li>'.format(_esc(c.get("tool")), _esc(c.get("question")))
+        for c in brief.get("next_checks", [])) + '</ul>'
+    drivers = brief.get("business_drivers") or {}
+    if drivers:
+        body += '<h3>Business drivers to check — {}</h3><p>{}</p><p>{}</p>'.format(
+            _esc(drivers.get("sector")), _esc(drivers.get("drivers")), _esc(drivers.get("mechanism")))
+        if drivers.get("peers"):
+            body += '<p>Peer releases to compare: {}. These are research leads; a predictive relationship has not been established.</p>'.format(
+                _esc(", ".join(drivers["peers"])))
+    body += '<p class="mut">{} {}</p>'.format(_esc(brief.get("validation")), _esc(brief.get("dependence_note")))
+    body += '<details><summary>Sources and observation windows</summary><table><thead><tr>' \
+            '<th>Observation</th><th>Source</th><th>As of</th><th>Window</th></tr></thead><tbody>'
+    for obs in brief.get("observations", []):
+        body += '<tr>{}</tr>'.format(''.join('<td>{}</td>'.format(_esc(v)) for v in (
+            obs.get("label"), obs.get("source"), obs.get("as_of") or "unknown", obs.get("horizon"))))
+    body += '</tbody></table></details>'
+    return '<div class="grid">' + shell.card("Discovery brief", body, span=12, anchor="discovery") + '</div>'
+
+
 def render(data: dict) -> str:
     """The complete HTML document. Pure."""
-    body = [_hero(data), _zone_lottery(data), _payoff_section(data)]
+    body = [_hero(data), _discovery_section(data), _zone_lottery(data), _payoff_section(data)]
     if _panel_ok(data, "decision"):
         body.append(_risk_section(data))
     else:
