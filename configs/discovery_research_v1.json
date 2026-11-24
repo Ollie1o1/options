@@ -1,0 +1,51 @@
+{
+  "id": "discovery-information-channels-v1-20261124",
+  "created": "2026-11-24",
+  "purpose": "Evaluate whether information channels improve out-of-sample estimates beyond simple existing price/volatility baselines. No automatic promotion into scoring, gates, or execution.",
+  "outcome_status": "Preregistered before inspecting outcome statistics. Preserve all failed and insufficient trials.",
+  "universe": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "AMD", "AVGO", "JPM", "BAC", "WFC", "GS", "XOM", "CVX", "JNJ", "LLY", "UNH", "HD", "WMT", "KO", "PG", "CAT", "BA"],
+  "peer_groups": {
+    "semiconductors": ["NVDA", "AMD", "AVGO"],
+    "banks": ["JPM", "BAC", "WFC", "GS"],
+    "energy": ["XOM", "CVX"],
+    "consumer_staples": ["WMT", "KO", "PG"]
+  },
+  "limitations": [
+    "Named present-day liquid universe is survivorship-selected; results apply only to this conditional universe.",
+    "Historical prices and public index histories are end-of-day observations; entry is the NEXT session close, never the signal day's earlier close.",
+    "News and analyst events are available only after archived_at / first_seen; revised publication/grade dates never establish availability.",
+    "Underlying return or volatility predictability is not evidence that an option strategy makes money. Actual option quote paths and costs require a separate study.",
+    "No search for optimal thresholds, symbols, feature signs, or holding horizons after results. These eight trials are the declared search family.",
+    "Macro data needing historical release vintages is deferred until point-in-time series are available. Current revised economic history is not a valid substitute."
+  ],
+  "evaluation": {
+    "start": "2017-10-02",
+    "first_test": "2022-01-03",
+    "test_block_sessions": 126,
+    "train_window_sessions": 756,
+    "min_train_dates": 252,
+    "min_test_dates": 80,
+    "min_test_years": 3,
+    "ridge_alpha": 1.0,
+    "entry_lag_sessions": 1,
+    "bootstrap_repetitions": 2000,
+    "bootstrap_seed": 20261124,
+    "family_alpha": 0.05,
+    "multiple_testing": "Holm across all eight preregistered trials, including insufficient trials as p=1.",
+    "primary_statistic": "Mean date-level reduction in squared prediction error, candidate minus baseline improvement; positive favors the added channel. Bootstrap over non-overlapping evaluation dates, retaining all names within a date.",
+    "secondary_statistics": "Baseline/candidate RMSE, percent MSE improvement, directional hit rates only for return targets, per-year mean error improvement, evaluation observation counts.",
+    "purge": "Every training label must end strictly before the first feature date of its test block. Standardization and fit use training data only.",
+    "independence": "Test dates sampled at horizon+2 trading sessions to avoid overlapping holding intervals, including next-session entry. One cluster per evaluation date across all names.",
+    "verdict": "INSUFFICIENT if min train dates, min held-out dates or years fails; RESEARCH_SUPPORT only if family-adjusted p<0.05, bootstrap CI lower bound>0, and a majority of test years improve; otherwise NOT_ESTABLISHED. No verdict authorises capital."
+  },
+  "trials": [
+    {"id": "vix_realized_risk_5", "target": "log_future_realized_vol", "horizon": 5, "population": "SPY", "baseline": ["log_rv20", "log_rv5"], "candidate": ["log_vix", "vix_change5"], "question": "Do VIX level and trend improve next-week realized-risk estimates beyond trailing realized risk?"},
+    {"id": "vix_realized_risk_21", "target": "log_future_realized_vol", "horizon": 21, "population": "SPY", "baseline": ["log_rv20", "log_rv5"], "candidate": ["log_vix", "vix_change5"], "question": "Does the same information improve next-month realized-risk estimates?"},
+    {"id": "vix_direction_5", "target": "forward_return", "horizon": 5, "population": "SPY", "baseline": ["ret5", "ret20", "log_rv20"], "candidate": ["log_vix", "vix_change5"], "question": "Does VIX add directional information after controlling for price momentum and trailing risk?"},
+    {"id": "peer_incremental_5", "target": "forward_market_excess_return", "horizon": 5, "population": "peer_groups", "baseline": ["ret5", "ret20", "market_ret5", "log_rv20"], "candidate": ["peer_excess5"], "question": "Does leave-one-out peer momentum improve a stock's future excess-return estimate beyond its own momentum and the market?"},
+    {"id": "news_tone_5", "target": "forward_market_excess_return", "horizon": 5, "population": "universe", "baseline": ["ret5", "ret20", "market_ret5", "log_rv20"], "candidate": ["news_tone"], "question": "Does first-seen headline tone add directional information beyond prices?"},
+    {"id": "news_activity_risk_5", "target": "log_future_realized_vol", "horizon": 5, "population": "universe", "baseline": ["log_rv20", "log_rv5"], "candidate": ["news_activity"], "question": "Does unusual first-seen news volume add risk information beyond trailing realized risk?"},
+    {"id": "news_disagreement_risk_5", "target": "log_future_realized_vol", "horizon": 5, "population": "universe", "baseline": ["log_rv20", "log_rv5"], "candidate": ["news_disagreement"], "question": "Does disagreement among contemporaneously observed headlines add risk information?"},
+    {"id": "analyst_revisions_5", "target": "forward_market_excess_return", "horizon": 5, "population": "universe", "baseline": ["ret5", "ret20", "market_ret5", "log_rv20"], "candidate": ["analyst_net"], "question": "Do upgrades minus downgrades, observed at first_seen rather than backfilled grade_date, improve directional estimates?"}
+  ]
+}
