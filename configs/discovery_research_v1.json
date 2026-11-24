@@ -3,6 +3,19 @@
   "created": "2026-11-24",
   "purpose": "Evaluate whether information channels improve out-of-sample estimates beyond simple existing price/volatility baselines. No automatic promotion into scoring, gates, or execution.",
   "outcome_status": "Preregistered before inspecting outcome statistics. Preserve all failed and insufficient trials.",
+  "feature_definitions": {
+    "ret5_ret20": "Trailing close-to-close returns over 5 and 20 trading sessions, using only dates through the feature date.",
+    "log_rv5_log_rv20": "Log annualized sample standard deviation of trailing 5/20 daily log returns; positive floor 1e-8.",
+    "log_vix": "Log of official Cboe VIX close divided by 100, aligned exactly to the feature date; no forward fill.",
+    "vix_change5": "VIX close divided by close five trading sessions earlier, minus one. Genuine VIX spikes remain in sample.",
+    "peer_excess5": "Mean trailing 5-session return of the other members of the fixed peer group, excluding the target, minus SPY's matching return. All available group members must have valid windows.",
+    "news_tone": "Relevance-weighted tone of newly first-seen stories on the feature session; neutral 0 is retained only when measured stories exist.",
+    "news_activity": "Log(1 + number of newly first-seen, normalized-headline-deduplicated stories for the symbol/session). This measures activity level, not a separately fitted novelty model.",
+    "news_disagreement": "Population standard deviation of those stories' tone on that session.",
+    "analyst_net": "Upgrades minus downgrades first seen in that session; backfilled grade dates never establish availability.",
+    "availability": "Weekend first-seen events become observations on the next SPY session; entry then waits one more session close. Missing archive coverage is not zero activity.",
+    "price_quality": "Require complete matching windows and positive finite closes; exclude equity windows with a daily move greater than 45% in magnitude rather than guessing a split adjustment. This can exclude genuine extreme moves and is a limitation."
+  },
   "universe": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "AMD", "AVGO", "JPM", "BAC", "WFC", "GS", "XOM", "CVX", "JNJ", "LLY", "UNH", "HD", "WMT", "KO", "PG", "CAT", "BA"],
   "peer_groups": {
     "semiconductors": ["NVDA", "AMD", "AVGO"],
