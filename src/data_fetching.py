@@ -1831,6 +1831,7 @@ def get_sector_performance(ticker_symbol: str, hist: "pd.DataFrame | None" = Non
             if len(tkr_hist) < 2:
                 return {}
             tkr_ret = float(tkr_hist['Close'].iloc[-1] / tkr_hist['Close'].iloc[0] - 1)
+            hist = tkr_hist
 
         etf = yf.Ticker(sector_etf, session=_yf_session)
         etf_hist = etf.history(period="5d")
@@ -1838,10 +1839,14 @@ def get_sector_performance(ticker_symbol: str, hist: "pd.DataFrame | None" = Non
             return {}
         etf_ret = float(etf_hist['Close'].iloc[-1] / etf_hist['Close'].iloc[0] - 1)
 
+        from .discovery import relative_observations
         return {
             "sector_etf": sector_etf,
             "ticker_return": tkr_ret,
-            "sector_return": etf_ret
+            "sector_return": etf_ret,
+            # Descriptive comparison over MATCHING dates. Keep legacy scoring
+            # inputs above intact while making their differing windows explicit.
+            "aligned_returns": relative_observations(hist, etf_hist),
         }
     except Exception:
         return {}
@@ -1892,6 +1897,17 @@ def check_yield_spike() -> Tuple[bool, float]:
 _market_context_cache: dict = {"value": None, "ts": 0.0}
 _MARKET_CONTEXT_TTL = 900  # 15 minutes
 
+
+def get_cached_market_observations() -> Dict:
+    """Read the last context fetch's dated evidence; never make a network call."""
+    import copy
+    import time as _time
+    observations = copy.deepcopy(_market_context_cache.get("observations") or {})
+    if observations:
+        observations["cache_stale"] = _time.time() - _market_context_cache.get("ts", 0) >= _MARKET_CONTEXT_TTL
+    return observations
+
+
 def get_market_context() -> Tuple[str, str, bool, float]:
     import time as _time
     now = _time.time()
@@ -1905,6 +1921,8 @@ def get_market_context() -> Tuple[str, str, bool, float]:
     volatility_regime = "Unknown"
     macro_risk_active = False
     tnx_change_pct = 0.0
+    # Do not serve evidence from a previous fetch when the new one fails.
+    _market_context_cache["observations"] = {}
 
     # Fetch SPY, VIX, EURUSD, TNX in parallel to cut wall-clock time ~4x.
     # Each inner call is throttled via _yf_throttle() and guards yfinance's
@@ -1926,7 +1944,7 @@ def get_market_context() -> Tuple[str, str, bool, float]:
             vix = yf.Ticker("^VIX", session=_yf_session)
             _yf_throttle()
             try:
-                return vix.history(period="5d")
+                return vix.history(period="1mo")
             except TypeError:
                 return None
         except Exception:
@@ -1960,6 +1978,11 @@ def get_market_context() -> Tuple[str, str, bool, float]:
             _, tnx_change_pct = _safe_result(yield_fut, 15, (False, 0.0))
 
         result = (market_trend, volatility_regime, macro_risk_active, tnx_change_pct)
+        from .discovery import history_observations
+        _market_context_cache["observations"] = {
+            "spy": history_observations(spy_hist),
+            "vix": history_observations(vix_hist),
+        }
         _market_context_cache["value"] = result
         _market_context_cache["ts"] = now
         return result

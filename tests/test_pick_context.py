@@ -78,6 +78,12 @@ class EventsInWindowTest(unittest.TestCase):
 
 
 class CohortEligibleTest(unittest.TestCase):
+    def test_strategy_history_respects_short_premium_and_stored_names(self):
+        self.assertEqual(pc.strategy_for_row({"type": "put"}, "Premium Selling"), "Short Put")
+        self.assertEqual(pc.strategy_for_row({"type": "put", "strategy_name": "short_put"}), "Short Put")
+        self.assertEqual(pc.strategy_for_row({"type": "call", "strategy_name": "long_call"}), "Long Call")
+        self.assertEqual(pc.strategy_for_row({}), "Unknown")
+
     def test_long_call_30dte_eligible(self):
         self.assertTrue(pc.cohort_eligible("Long Call", 36))
 
@@ -132,6 +138,18 @@ class ContextLinesTest(unittest.TestCase):
 
     def tearDown(self):
         pc.reset_caches()
+
+    def test_premium_selling_history_uses_short_put_analogues(self):
+        _db(self.db, closed=_closed(6, strategy="Short Put", pnl=.2)
+            + _closed(9, strategy="Long Put", pnl=-.2))
+        row = {"type": "put", "T_years": 35 / 365, "delta": -.4,
+               "symbol": "TEST", "expiration": "2026-07-17"}
+        lines = pc.context_lines(row, today="2026-06-11", db_path=self.db,
+                                 with_insider=False, mode="Premium Selling")
+        history = next(line for line in lines if line.startswith("History:"))
+        self.assertIn("Short Put", history)
+        self.assertIn("n=6", history)
+        self.assertNotIn("Long Put", history)
 
     def test_lines_for_cohort_call_with_history(self):
         _db(self.db, closed=_closed(8, pnl=0.15),

@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import sqlite3
+from unittest.mock import patch
 
 from src import dolt_options as do
 
@@ -37,6 +39,33 @@ class CacheRoundTripTest(unittest.TestCase):
                 "bid": 1.0, "ask": 1.2, "mid": 1.1, "iv": 0.25,
                 "delta": 0.5, "gamma": 0.01, "theta": -0.05,
                 "vega": 0.1, "rho": 0.02}
+
+    def test_cache_connections_close_without_waiting_for_garbage_collection(self):
+        opened = []
+        original = sqlite3.connect
+
+        def connect(*args, **kwargs):
+            connection = original(*args, **kwargs)
+            opened.append(connection)
+            return connection
+
+        with patch.object(do.sqlite3, "connect", side_effect=connect):
+            do._ensure_cache(self.db)
+            do._cache_write(self.db, "AAPL", "2024-01-05", [self._contract()])
+            self.assertEqual(len(do._cache_read(self.db, "AAPL", "2024-01-05")), 1)
+            self.assertTrue(do._already_fetched(self.db, "AAPL", "2024-01-05"))
+        # References deliberately stay alive: GC cannot hide a leaked handle.
+        for connection in opened:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
+    def test_failed_batch_rolls_back_and_closes_the_connection(self):
+        with self.assertRaises(KeyError):
+            do._cache_write(self.db, "AAPL", "2024-01-05", [self._contract(), {}])
+        self.assertIsNone(do._cache_read(self.db, "AAPL", "2024-01-05"))
+        from contextlib import closing
+        with closing(sqlite3.connect(self.db)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM dolt_chain").fetchone()[0], 0)
 
     def test_write_then_read_roundtrip(self):
         do._cache_write(self.db, "AAPL", "2024-01-05", [self._contract()])

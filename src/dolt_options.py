@@ -16,6 +16,7 @@ import datetime as _dtmod
 import os
 import sqlite3
 import time
+from contextlib import closing
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -151,13 +152,13 @@ CREATE TABLE IF NOT EXISTS dolt_fetched (
 
 def _ensure_cache(db_path: str) -> None:
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         conn.execute(_DDL_CHAIN)
         conn.execute(_DDL_FETCHED)
 
 
 def _cache_read(db_path: str, symbol: str, date: str):
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         done = conn.execute(
             "SELECT n_rows FROM dolt_fetched WHERE symbol=? AND date=?",
             (symbol, date)).fetchone()
@@ -172,7 +173,7 @@ def _cache_read(db_path: str, symbol: str, date: str):
 
 
 def _cache_write(db_path: str, symbol: str, date: str, chain) -> None:
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         for c in chain:
             conn.execute(
                 "INSERT OR REPLACE INTO dolt_chain "
@@ -251,7 +252,7 @@ def nearest_contract(chain: List[Dict[str, Any]], opt_type: str, target_strike: 
 # ── Backfill + stats + CLI ──────────────────────────────────────────────────
 def _already_fetched(db_path: str, symbol: str, date: str) -> bool:
     _ensure_cache(db_path)
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         return conn.execute("SELECT 1 FROM dolt_fetched WHERE symbol=? AND date=?",
                             (symbol, date)).fetchone() is not None
 
@@ -293,7 +294,7 @@ def missing_pairs(symbols, dates, db_path: str = DEFAULT_CACHE):
     _ensure_cache(db_path)
     syms = [s.strip().upper() for s in symbols if s and s.strip()]
     days = [_clamp_date(d) for d in dates]
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         done = {(r[0], r[1]) for r in
                 conn.execute("SELECT symbol, date FROM dolt_fetched")}
     return [(s, d) for d in days for s in syms if (s, d) not in done]
@@ -419,7 +420,7 @@ def symbol_has_data(symbol: str, db_path: str = DEFAULT_CACHE) -> bool:
     IWM) are absent from the DoltHub options dataset and fetch as all-empty —
     callers should warn rather than silently produce zero trades."""
     _ensure_cache(db_path)
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         return conn.execute("SELECT 1 FROM dolt_chain WHERE symbol=? LIMIT 1",
                             (symbol.upper(),)).fetchone() is not None
 
@@ -430,7 +431,7 @@ def coverage(db_path: str = DEFAULT_CACHE) -> List[Dict[str, Any]]:
     symbols absent from the DoltHub dataset (e.g. QQQ, IWM)."""
     _ensure_cache(db_path)
     out = []
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         syms = [r[0] for r in conn.execute("SELECT DISTINCT symbol FROM dolt_fetched ORDER BY symbol")]
         for s in syms:
             days = conn.execute("SELECT COUNT(*) FROM dolt_fetched WHERE symbol=?", (s,)).fetchone()[0]
@@ -446,7 +447,7 @@ def coverage(db_path: str = DEFAULT_CACHE) -> List[Dict[str, Any]]:
 
 def stats(db_path: str = DEFAULT_CACHE) -> Dict[str, Any]:
     _ensure_cache(db_path)
-    with sqlite3.connect(db_path, timeout=READ_TIMEOUT_S) as conn:
+    with closing(sqlite3.connect(db_path, timeout=READ_TIMEOUT_S)) as conn, conn:
         pairs = conn.execute("SELECT COUNT(*) FROM dolt_fetched").fetchone()[0]
         rows = conn.execute("SELECT COUNT(*) FROM dolt_chain").fetchone()[0]
         syms = conn.execute("SELECT COUNT(DISTINCT symbol) FROM dolt_fetched").fetchone()[0]

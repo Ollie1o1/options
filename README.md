@@ -381,7 +381,7 @@ Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (
 |---------|------|--------------|
 | `AAPL` (any ticker) | Single-stock | Deep analysis of one symbol across all expiries |
 | `ALL` | Budget scan | Multi-ticker scan filtered to a per-contract dollar budget |
-| `DISCOVER` | Discovery | Scans the top 100 most-liquid tickers, no budget limit |
+| `DISCOVER` | Discovery | Choose curated liquid names (static list), Finviz gainers, or high-IV stocks |
 | `SELL` | Premium Selling | Short put candidates ranked by return-on-risk |
 | `SPREADS` | Credit Spreads | Bull Put and Bear Call spread opportunities — full detail cards with thesis, breakevens, top components, execution guidance + comparison table |
 | `IRON` | Iron Condors | Delta-neutral range-bound strategies — same detail-card pipeline as singles + spreads |
@@ -446,6 +446,29 @@ Options:
 ```
 
 ### Terminal Output
+
+Single-leg report cards and new tearsheets include a **Discovery brief**:
+market/stock momentum, dated VIX changes, stock/sector comparisons over matching
+dates, IV versus realized volatility, available news tone and analyst changes,
+conflicting observations, unknowns, and suggested next investigations. It reuses
+the scan's fetched data, so each contract does not trigger another news or market
+request. The HTML report retains sources and observation windows in its JSON
+sidecar for offline reproduction. Older sidecars still render without the brief.
+
+These observations are descriptive. Agreement does not establish independent
+confirmation or predictive accuracy; VIX measures implied volatility, and news
+tone is not assumed to forecast returns. Missing inputs remain visibly unknown.
+
+**Discovery Lab:** launcher `[4] RESEARCH → [5] DISCOVERY LAB` opens the saved
+information-channel study, market-adjusted peer relationships, and a sector
+driver/source guide. A dated research snapshot is included for a fresh checkout.
+Run `python -m src.discovery_research --no-open` to recompute the fixed study
+from local price/news/analyst archives and `data/discovery/VIX_History.csv`.
+The command makes no network calls and never changes scoring or trading gates.
+The report names its actual data cutoff, all eight preregistered tests, sample
+limits, chronological folds, uncertainty intervals and multiple-test adjustment.
+The source history is available from [Cboe](https://www.cboe.com/tradable-products/vix/vix-historical-data).
+`python -m src.discovery_research --view` opens the latest saved result.
 
 The CLI renders a responsive, colour-coded interface that adapts to your terminal width (60–120 chars). The display follows a deliberate **house style** (`src/ui.py` + `src/formatting.py` semantic theme):
 
@@ -924,7 +947,7 @@ python -m src.options_screener --mode discover --weights baseline --auto-log --l
 
 It:
 
-- Runs a **Discovery scan** across the top 100 most-liquid tickers (thousands of contracts screened).
+- Runs a **Discovery scan** across a curated list of liquid names (a static universe, not a live volume ranking).
 - Applies the **baseline** weight profile (a snapshot of `config.json`'s `composite_weights` — the control).
 - Takes up to **5 picks** and logs them to `paper_trades.db`. **Not by `quality_score`** — that was removed as a sort key (its top quintile is the worst cell in the ledger: 31.6% win rate, −19.9% return on capital, against +5.2% for the [0.55, 0.65) bucket; Wilcoxon p=0.89 at the #1 slot). It survives only as a tie-break. Boards are ordered by EV net of trading cost, and the entries themselves are **drawn at random among gate survivors** so the resulting cohort can test the ordering — a cohort selected by rule X cannot test rule X.
 - **Deduplicates**: if you re-run the same day under the same profile, duplicates are skipped so noise doesn't pollute the dataset.

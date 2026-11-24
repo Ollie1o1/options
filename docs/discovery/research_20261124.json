@@ -1,0 +1,1261 @@
+{
+  "coverage": {
+    "SKEW": {
+      "first": "1990-01-02",
+      "last": "2026-11-23",
+      "observations": 9276,
+      "sha256": "6641f147712699875cedfbea103fc2ed6462bd039eb41b40c88a37ac8e9ffe37",
+      "source": "data/discovery/SKEW_History.csv",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_History.csv"
+    },
+    "VIX3M": {
+      "first": "2009-09-18",
+      "last": "2026-11-23",
+      "observations": 4322,
+      "sha256": "11082b053dd5f1f79a7e4820584cd95f7247eeb37222deb5695feaedf2a59437",
+      "source": "data/discovery/VIX3M_History.csv",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX3M_History.csv"
+    },
+    "VVIX": {
+      "first": "2006-03-06",
+      "last": "2026-11-23",
+      "observations": 5153,
+      "sha256": "6e9bb19d3722afc4ce3befd72e777ec5302146a8640ff7599283ff0ba846d2d0",
+      "source": "data/discovery/VVIX_History.csv",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VVIX_History.csv"
+    },
+    "analysts": {
+      "availability": "first_seen; grade_date not used",
+      "dates": 4,
+      "first": "2026-10-14",
+      "last": "2026-11-17",
+      "rows": 13995,
+      "source": "data/estimates_archive.db"
+    },
+    "news": {
+      "availability": "first archived_at; publication dates not used",
+      "dates": 112,
+      "first": "2026-06-20",
+      "last": "2026-11-24",
+      "rows": 50755,
+      "source": "data/news_archive.db"
+    },
+    "prices": {
+      "adjustment_policy": "cached adjusted closes; exclude windows with daily changes exceeding 45% in magnitude",
+      "first": "2017-10-02",
+      "last": "2026-08-14",
+      "missing_symbols": [],
+      "selected_data_sha256": "05b3daaa927da62c2143d6f00118d05e9b53da5c9905f485f373ef47193d1622",
+      "sessions": 2229,
+      "source": "data/equity_ohlcv.db",
+      "symbols": 26
+    },
+    "vix": {
+      "first": "1990-01-02",
+      "last": "2026-11-23",
+      "observations": 9322,
+      "sha256": "409c4e80171f82285054875e0095aab5fd19b59670c987bc0e58f5919a69f3ee",
+      "source": "data/discovery/VIX_History.csv",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+    }
+  },
+  "deployment": "Research only; no scoring, gate or execution changes.",
+  "evaluation": {
+    "bootstrap_block_dates": 4,
+    "bootstrap_repetitions": 2000,
+    "bootstrap_seed": 20261124,
+    "entry_lag_sessions": 1,
+    "family_alpha": 0.05,
+    "first_test": "2022-01-03",
+    "independence": "Test dates sampled at horizon+2 trading sessions to avoid overlapping holding intervals, including next-session entry. One cluster per evaluation date across all names.",
+    "min_test_dates": 80,
+    "min_test_years": 3,
+    "min_train_dates": 252,
+    "multiple_testing": "Holm across all eight preregistered trials, including insufficient trials as p=1.",
+    "primary_statistic": "Mean date-level reduction in squared prediction error, candidate minus baseline improvement; positive favors the added channel. Moving-block bootstrap over four consecutive non-overlapping evaluation dates, retaining all names within a date; this also preserves short-range serial dependence.",
+    "purge": "Every training label must end strictly before the first feature date of its test block. Standardization and fit use training data only.",
+    "ridge_alpha": 1.0,
+    "secondary_statistics": "Baseline/candidate RMSE, percent MSE improvement, directional hit rates only for return targets, per-year mean error improvement, evaluation observation counts.",
+    "start": "2017-10-02",
+    "test_block_sessions": 126,
+    "train_window_sessions": 756,
+    "verdict": "INSUFFICIENT if min train dates, min held-out dates or years fails; RESEARCH_SUPPORT only if family-adjusted p<0.05, bootstrap CI lower bound>0, and a majority of test years improve; otherwise NOT_ESTABLISHED. No verdict authorises capital."
+  },
+  "generated_at": "2026-11-24T16:19:31.140946+00:00",
+  "limitations": [
+    "Named present-day liquid universe is survivorship-selected; results apply only to this conditional universe.",
+    "Historical prices and public index histories are end-of-day observations; entry is the NEXT session close, never the signal day's earlier close.",
+    "News and analyst events are available only after archived_at / first_seen; revised publication/grade dates never establish availability.",
+    "Underlying return or volatility predictability is not evidence that an option strategy makes money. Actual option quote paths and costs require a separate study.",
+    "No search for optimal thresholds, symbols, feature signs, or holding horizons after results. These eight trials are the declared search family.",
+    "Macro data needing historical release vintages is deferred until point-in-time series are available. Current revised economic history is not a valid substitute."
+  ],
+  "preregistration_id": "discovery-information-channels-v1-20261124",
+  "preregistration_sha256": "58d8edbdf913ae3ad920617f9e03f2f0770157cc6fd4f7d0da18a287c7c67588",
+  "relationships": [
+    {
+      "a": "NVDA",
+      "b": "AMD",
+      "first": "2025-08-14",
+      "first_half": 0.22315754513938058,
+      "group": "semiconductors",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.15959369845244945,
+      "observations": 252,
+      "raw_correlation": 0.4747987873599508,
+      "second_half": 0.10162601388730563
+    },
+    {
+      "a": "NVDA",
+      "b": "AVGO",
+      "first": "2025-08-14",
+      "first_half": 0.2801665244658821,
+      "group": "semiconductors",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.20685983892826962,
+      "observations": 252,
+      "raw_correlation": 0.5093453372494807,
+      "second_half": 0.13797659619611288
+    },
+    {
+      "a": "AMD",
+      "b": "AVGO",
+      "first": "2025-08-14",
+      "first_half": 0.07962344479228617,
+      "group": "semiconductors",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.1494416570908192,
+      "observations": 252,
+      "raw_correlation": 0.43146692594120745,
+      "second_half": 0.22243060526250646
+    },
+    {
+      "a": "JPM",
+      "b": "BAC",
+      "first": "2025-08-14",
+      "first_half": 0.6163866142307017,
+      "group": "banks",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.6885124703988642,
+      "observations": 252,
+      "raw_correlation": 0.7510669587325124,
+      "second_half": 0.75307800999144
+    },
+    {
+      "a": "JPM",
+      "b": "WFC",
+      "first": "2025-08-14",
+      "first_half": 0.5145652422292069,
+      "group": "banks",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.6131313573147971,
+      "observations": 252,
+      "raw_correlation": 0.6753433603351576,
+      "second_half": 0.6999516229294198
+    },
+    {
+      "a": "JPM",
+      "b": "GS",
+      "first": "2025-08-14",
+      "first_half": 0.47684475332496584,
+      "group": "banks",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.5182013706246157,
+      "observations": 252,
+      "raw_correlation": 0.6493147967293202,
+      "second_half": 0.5578200612334673
+    },
+    {
+      "a": "BAC",
+      "b": "WFC",
+      "first": "2025-08-14",
+      "first_half": 0.7669025195301273,
+      "group": "banks",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.7623907460985384,
+      "observations": 252,
+      "raw_correlation": 0.7982491114916465,
+      "second_half": 0.7611468979283635
+    },
+    {
+      "a": "BAC",
+      "b": "GS",
+      "first": "2025-08-14",
+      "first_half": 0.3266739893814008,
+      "group": "banks",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.40168405538033614,
+      "observations": 252,
+      "raw_correlation": 0.5582667760565666,
+      "second_half": 0.45954861822786647
+    },
+    {
+      "a": "WFC",
+      "b": "GS",
+      "first": "2025-08-14",
+      "first_half": 0.2850960050811725,
+      "group": "banks",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.30872082507571946,
+      "observations": 252,
+      "raw_correlation": 0.45650705477675196,
+      "second_half": 0.3239246489334238
+    },
+    {
+      "a": "XOM",
+      "b": "CVX",
+      "first": "2025-08-14",
+      "first_half": 0.8286586572996288,
+      "group": "energy",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.8259928423001822,
+      "observations": 252,
+      "raw_correlation": 0.8370050180607113,
+      "second_half": 0.8267691392334773
+    },
+    {
+      "a": "WMT",
+      "b": "KO",
+      "first": "2025-08-14",
+      "first_half": 0.1294095407788655,
+      "group": "consumer_staples",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.29724574221577404,
+      "observations": 252,
+      "raw_correlation": 0.3020317465395045,
+      "second_half": 0.42155508978572376
+    },
+    {
+      "a": "WMT",
+      "b": "PG",
+      "first": "2025-08-14",
+      "first_half": 0.26247692808377,
+      "group": "consumer_staples",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.3140689397194207,
+      "observations": 252,
+      "raw_correlation": 0.3156209786250866,
+      "second_half": 0.34709515354008635
+    },
+    {
+      "a": "KO",
+      "b": "PG",
+      "first": "2025-08-14",
+      "first_half": 0.49271147873360543,
+      "group": "consumer_staples",
+      "interpretation": "Contemporaneous return relationship; not causation, lead-lag or forecast evidence.",
+      "last": "2026-08-14",
+      "market_adjusted_correlation": 0.5433435882345696,
+      "observations": 252,
+      "raw_correlation": 0.5405923473117564,
+      "second_half": 0.5746034750974719
+    }
+  ],
+  "results": [
+    {
+      "adjusted_p": 1.0,
+      "available_dates": 2203,
+      "available_first": "2017-10-30",
+      "available_last": "2026-08-06",
+      "available_rows": 2203,
+      "baseline_features": [
+        "log_rv20",
+        "log_rv5"
+      ],
+      "baseline_rmse": 0.4914092053924724,
+      "candidate_features": [
+        "log_vix",
+        "vix_change5"
+      ],
+      "candidate_rmse": 0.48143222661409857,
+      "error_improvement_ci": [
+        -0.018717547616530546,
+        0.037624661375536855
+      ],
+      "folds": [
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2022-07-05",
+          "test_rows": 18,
+          "test_start": "2022-01-03",
+          "train_dates": 750,
+          "train_feature_end": "2021-12-22",
+          "train_label_end": "2021-12-31"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2023-01-03",
+          "test_rows": 18,
+          "test_start": "2022-07-06",
+          "train_dates": 750,
+          "train_feature_end": "2022-06-24",
+          "train_label_end": "2022-07-05"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2023-07-06",
+          "test_rows": 18,
+          "test_start": "2023-01-04",
+          "train_dates": 750,
+          "train_feature_end": "2022-12-22",
+          "train_label_end": "2023-01-03"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2024-01-04",
+          "test_rows": 18,
+          "test_start": "2023-07-07",
+          "train_dates": 750,
+          "train_feature_end": "2023-06-27",
+          "train_label_end": "2023-07-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2024-07-08",
+          "test_rows": 18,
+          "test_start": "2024-01-05",
+          "train_dates": 750,
+          "train_feature_end": "2023-12-26",
+          "train_label_end": "2024-01-04"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2025-01-06",
+          "test_rows": 18,
+          "test_start": "2024-07-09",
+          "train_dates": 750,
+          "train_feature_end": "2024-06-27",
+          "train_label_end": "2024-07-08"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2025-07-10",
+          "test_rows": 18,
+          "test_start": "2025-01-07",
+          "train_dates": 750,
+          "train_feature_end": "2024-12-26",
+          "train_label_end": "2025-01-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2026-01-08",
+          "test_rows": 18,
+          "test_start": "2025-07-11",
+          "train_dates": 750,
+          "train_feature_end": "2025-07-01",
+          "train_label_end": "2025-07-10"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2026-07-13",
+          "test_rows": 18,
+          "test_start": "2026-01-09",
+          "train_dates": 750,
+          "train_feature_end": "2025-12-30",
+          "train_label_end": "2026-01-08"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 3,
+          "test_end": "2026-08-14",
+          "test_rows": 3,
+          "test_start": "2026-07-14",
+          "train_dates": 750,
+          "train_feature_end": "2026-07-02",
+          "train_label_end": "2026-07-13"
+        }
+      ],
+      "horizon": 5,
+      "id": "vix_realized_risk_5",
+      "mean_error_improvement": 0.009706018321852411,
+      "mse_improvement_pct": 4.0193380215966945,
+      "p_value": 0.24887556221889057,
+      "per_year": {
+        "2022": {
+          "dates": 36,
+          "mean_improvement": 0.013405218254349665
+        },
+        "2023": {
+          "dates": 36,
+          "mean_improvement": 0.021446585561039955
+        },
+        "2024": {
+          "dates": 36,
+          "mean_improvement": -0.015757147186794884
+        },
+        "2025": {
+          "dates": 36,
+          "mean_improvement": -0.016331370675681942
+        },
+        "2026": {
+          "dates": 21,
+          "mean_improvement": 0.07152451089527558
+        }
+      },
+      "question": "Do VIX level and trend improve next-week realized-risk estimates beyond trailing realized risk?",
+      "reason": "Added channel did not clear all preregistered uncertainty, multiplicity and year-consistency checks.",
+      "status": "NOT_ESTABLISHED",
+      "target": "log_future_realized_vol",
+      "test_dates": 165,
+      "test_first": "2022-01-03",
+      "test_last": "2026-08-03",
+      "test_rows": 165,
+      "test_years": 5
+    },
+    {
+      "adjusted_p": 1.0,
+      "available_dates": 2187,
+      "available_first": "2017-10-30",
+      "available_last": "2026-07-15",
+      "available_rows": 2187,
+      "baseline_features": [
+        "log_rv20",
+        "log_rv5"
+      ],
+      "baseline_rmse": 0.38727500923411157,
+      "candidate_features": [
+        "log_vix",
+        "vix_change5"
+      ],
+      "candidate_rmse": 0.3869280668334838,
+      "error_improvement_ci": [
+        -0.023297212229898046,
+        0.021438334522380975
+      ],
+      "folds": [
+        {
+          "status": "evaluated",
+          "test_dates": 6,
+          "test_end": "2022-07-05",
+          "test_rows": 6,
+          "test_start": "2022-01-03",
+          "train_dates": 734,
+          "train_feature_end": "2021-11-30",
+          "train_label_end": "2021-12-31"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 5,
+          "test_end": "2023-01-03",
+          "test_rows": 5,
+          "test_start": "2022-07-06",
+          "train_dates": 734,
+          "train_feature_end": "2022-06-01",
+          "train_label_end": "2022-07-05"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 6,
+          "test_end": "2023-07-06",
+          "test_rows": 6,
+          "test_start": "2023-01-04",
+          "train_dates": 734,
+          "train_feature_end": "2022-11-30",
+          "train_label_end": "2023-01-03"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 5,
+          "test_end": "2024-01-04",
+          "test_rows": 5,
+          "test_start": "2023-07-07",
+          "train_dates": 734,
+          "train_feature_end": "2023-06-02",
+          "train_label_end": "2023-07-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 6,
+          "test_end": "2024-07-08",
+          "test_rows": 6,
+          "test_start": "2024-01-05",
+          "train_dates": 734,
+          "train_feature_end": "2023-12-01",
+          "train_label_end": "2024-01-04"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 5,
+          "test_end": "2025-01-06",
+          "test_rows": 5,
+          "test_start": "2024-07-09",
+          "train_dates": 734,
+          "train_feature_end": "2024-06-04",
+          "train_label_end": "2024-07-08"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 6,
+          "test_end": "2025-07-10",
+          "test_rows": 6,
+          "test_start": "2025-01-07",
+          "train_dates": 734,
+          "train_feature_end": "2024-12-03",
+          "train_label_end": "2025-01-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 5,
+          "test_end": "2026-01-08",
+          "test_rows": 5,
+          "test_start": "2025-07-11",
+          "train_dates": 734,
+          "train_feature_end": "2025-06-06",
+          "train_label_end": "2025-07-10"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 6,
+          "test_end": "2026-07-13",
+          "test_rows": 6,
+          "test_start": "2026-01-09",
+          "train_dates": 734,
+          "train_feature_end": "2025-12-05",
+          "train_label_end": "2026-01-08"
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2026-08-14",
+          "test_rows": 0,
+          "test_start": "2026-07-14",
+          "train_dates": 734
+        }
+      ],
+      "horizon": 21,
+      "id": "vix_realized_risk_21",
+      "mean_error_improvement": 0.00026860387378427363,
+      "mse_improvement_pct": 0.17909082034776966,
+      "p_value": 0.504247876061969,
+      "per_year": {
+        "2022": {
+          "dates": 11,
+          "mean_improvement": -0.003959376627698544
+        },
+        "2023": {
+          "dates": 11,
+          "mean_improvement": 0.014334222844721111
+        },
+        "2024": {
+          "dates": 11,
+          "mean_improvement": -0.01946557306007028
+        },
+        "2025": {
+          "dates": 11,
+          "mean_improvement": -0.004797329125819519
+        },
+        "2026": {
+          "dates": 6,
+          "mean_improvement": 0.027699801557792208
+        }
+      },
+      "question": "Does the same information improve next-month realized-risk estimates?",
+      "reason": "Requires 80 non-overlapping test dates across 3 years; has 50 dates across 5 years.",
+      "status": "INSUFFICIENT",
+      "target": "log_future_realized_vol",
+      "test_dates": 50,
+      "test_first": "2022-01-03",
+      "test_last": "2026-07-02",
+      "test_rows": 50,
+      "test_years": 5
+    },
+    {
+      "adjusted_p": 1.0,
+      "available_dates": 2203,
+      "available_first": "2017-10-30",
+      "available_last": "2026-08-06",
+      "available_rows": 2203,
+      "baseline_features": [
+        "ret5",
+        "ret20",
+        "log_rv20"
+      ],
+      "baseline_hit_rate": 0.5515151515151515,
+      "baseline_rmse": 0.02507719312022322,
+      "candidate_features": [
+        "log_vix",
+        "vix_change5"
+      ],
+      "candidate_hit_rate": 0.4909090909090909,
+      "candidate_rmse": 0.02530735167504409,
+      "error_improvement_ci": [
+        -3.2896544567800316e-05,
+        8.621124310265887e-06
+      ],
+      "folds": [
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2022-07-05",
+          "test_rows": 18,
+          "test_start": "2022-01-03",
+          "train_dates": 750,
+          "train_feature_end": "2021-12-22",
+          "train_label_end": "2021-12-31"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2023-01-03",
+          "test_rows": 18,
+          "test_start": "2022-07-06",
+          "train_dates": 750,
+          "train_feature_end": "2022-06-24",
+          "train_label_end": "2022-07-05"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2023-07-06",
+          "test_rows": 18,
+          "test_start": "2023-01-04",
+          "train_dates": 750,
+          "train_feature_end": "2022-12-22",
+          "train_label_end": "2023-01-03"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2024-01-04",
+          "test_rows": 18,
+          "test_start": "2023-07-07",
+          "train_dates": 750,
+          "train_feature_end": "2023-06-27",
+          "train_label_end": "2023-07-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2024-07-08",
+          "test_rows": 18,
+          "test_start": "2024-01-05",
+          "train_dates": 750,
+          "train_feature_end": "2023-12-26",
+          "train_label_end": "2024-01-04"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2025-01-06",
+          "test_rows": 18,
+          "test_start": "2024-07-09",
+          "train_dates": 750,
+          "train_feature_end": "2024-06-27",
+          "train_label_end": "2024-07-08"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2025-07-10",
+          "test_rows": 18,
+          "test_start": "2025-01-07",
+          "train_dates": 750,
+          "train_feature_end": "2024-12-26",
+          "train_label_end": "2025-01-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2026-01-08",
+          "test_rows": 18,
+          "test_start": "2025-07-11",
+          "train_dates": 750,
+          "train_feature_end": "2025-07-01",
+          "train_label_end": "2025-07-10"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2026-07-13",
+          "test_rows": 18,
+          "test_start": "2026-01-09",
+          "train_dates": 750,
+          "train_feature_end": "2025-12-30",
+          "train_label_end": "2026-01-08"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 3,
+          "test_end": "2026-08-14",
+          "test_rows": 3,
+          "test_start": "2026-07-14",
+          "train_dates": 750,
+          "train_feature_end": "2026-07-02",
+          "train_label_end": "2026-07-13"
+        }
+      ],
+      "horizon": 5,
+      "id": "vix_direction_5",
+      "mean_error_improvement": -1.159643401538564e-05,
+      "mse_improvement_pct": -1.8440241830168032,
+      "p_value": 0.8585707146426786,
+      "per_year": {
+        "2022": {
+          "dates": 36,
+          "mean_improvement": 1.0237691259190002e-05
+        },
+        "2023": {
+          "dates": 36,
+          "mean_improvement": -4.554314151456544e-05
+        },
+        "2024": {
+          "dates": 36,
+          "mean_improvement": -1.7571283721001783e-05
+        },
+        "2025": {
+          "dates": 36,
+          "mean_improvement": 6.57061220904027e-06
+        },
+        "2026": {
+          "dates": 21,
+          "mean_improvement": -1.1732915662595255e-05
+        }
+      },
+      "question": "Does VIX add directional information after controlling for price momentum and trailing risk?",
+      "reason": "Added channel did not clear all preregistered uncertainty, multiplicity and year-consistency checks.",
+      "status": "NOT_ESTABLISHED",
+      "target": "forward_return",
+      "test_dates": 165,
+      "test_first": "2022-01-03",
+      "test_last": "2026-08-03",
+      "test_rows": 165,
+      "test_years": 5
+    },
+    {
+      "adjusted_p": 1.0,
+      "available_dates": 2203,
+      "available_first": "2017-10-30",
+      "available_last": "2026-08-06",
+      "available_rows": 26436,
+      "baseline_features": [
+        "ret5",
+        "ret20",
+        "market_ret5",
+        "log_rv20"
+      ],
+      "baseline_hit_rate": 0.5131313131313131,
+      "baseline_rmse": 0.042091421517995796,
+      "candidate_features": [
+        "peer_excess5"
+      ],
+      "candidate_hit_rate": 0.5080808080808081,
+      "candidate_rmse": 0.04209318066665155,
+      "error_improvement_ci": [
+        -2.0902635567652977e-06,
+        1.8947249416904741e-06
+      ],
+      "folds": [
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2022-07-05",
+          "test_rows": 216,
+          "test_start": "2022-01-03",
+          "train_dates": 750,
+          "train_feature_end": "2021-12-22",
+          "train_label_end": "2021-12-31"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2023-01-03",
+          "test_rows": 216,
+          "test_start": "2022-07-06",
+          "train_dates": 750,
+          "train_feature_end": "2022-06-24",
+          "train_label_end": "2022-07-05"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2023-07-06",
+          "test_rows": 216,
+          "test_start": "2023-01-04",
+          "train_dates": 750,
+          "train_feature_end": "2022-12-22",
+          "train_label_end": "2023-01-03"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2024-01-04",
+          "test_rows": 216,
+          "test_start": "2023-07-07",
+          "train_dates": 750,
+          "train_feature_end": "2023-06-27",
+          "train_label_end": "2023-07-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2024-07-08",
+          "test_rows": 216,
+          "test_start": "2024-01-05",
+          "train_dates": 750,
+          "train_feature_end": "2023-12-26",
+          "train_label_end": "2024-01-04"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2025-01-06",
+          "test_rows": 216,
+          "test_start": "2024-07-09",
+          "train_dates": 750,
+          "train_feature_end": "2024-06-27",
+          "train_label_end": "2024-07-08"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2025-07-10",
+          "test_rows": 216,
+          "test_start": "2025-01-07",
+          "train_dates": 750,
+          "train_feature_end": "2024-12-26",
+          "train_label_end": "2025-01-06"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2026-01-08",
+          "test_rows": 216,
+          "test_start": "2025-07-11",
+          "train_dates": 750,
+          "train_feature_end": "2025-07-01",
+          "train_label_end": "2025-07-10"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 18,
+          "test_end": "2026-07-13",
+          "test_rows": 216,
+          "test_start": "2026-01-09",
+          "train_dates": 750,
+          "train_feature_end": "2025-12-30",
+          "train_label_end": "2026-01-08"
+        },
+        {
+          "status": "evaluated",
+          "test_dates": 3,
+          "test_end": "2026-08-14",
+          "test_rows": 36,
+          "test_start": "2026-07-14",
+          "train_dates": 750,
+          "train_feature_end": "2026-07-02",
+          "train_label_end": "2026-07-13"
+        }
+      ],
+      "horizon": 5,
+      "id": "peer_incremental_5",
+      "mean_error_improvement": -1.4809322976751933e-07,
+      "mse_improvement_pct": -0.008358878616171638,
+      "p_value": 0.5452273863068465,
+      "per_year": {
+        "2022": {
+          "dates": 36,
+          "mean_improvement": -3.937741155416112e-06
+        },
+        "2023": {
+          "dates": 36,
+          "mean_improvement": 1.1734622101397324e-07
+        },
+        "2024": {
+          "dates": 36,
+          "mean_improvement": -4.67083559225097e-07
+        },
+        "2025": {
+          "dates": 36,
+          "mean_improvement": 1.438818970100143e-07
+        },
+        "2026": {
+          "dates": 21,
+          "mean_improvement": 5.939718788884728e-06
+        }
+      },
+      "question": "Does leave-one-out peer momentum improve a stock's future excess-return estimate beyond its own momentum and the market?",
+      "reason": "Added channel did not clear all preregistered uncertainty, multiplicity and year-consistency checks.",
+      "status": "NOT_ESTABLISHED",
+      "target": "forward_market_excess_return",
+      "test_dates": 165,
+      "test_first": "2022-01-03",
+      "test_last": "2026-08-03",
+      "test_rows": 1980,
+      "test_years": 5
+    },
+    {
+      "adjusted_p": 1.0,
+      "available_dates": 26,
+      "available_first": "2026-06-22",
+      "available_last": "2026-08-06",
+      "available_rows": 650,
+      "baseline_features": [
+        "ret5",
+        "ret20",
+        "market_ret5",
+        "log_rv20"
+      ],
+      "candidate_features": [
+        "news_tone"
+      ],
+      "folds": [
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2022-07-05",
+          "test_rows": 0,
+          "test_start": "2022-01-03",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2023-01-03",
+          "test_rows": 0,
+          "test_start": "2022-07-06",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2023-07-06",
+          "test_rows": 0,
+          "test_start": "2023-01-04",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2024-01-04",
+          "test_rows": 0,
+          "test_start": "2023-07-07",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2024-07-08",
+          "test_rows": 0,
+          "test_start": "2024-01-05",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2025-01-06",
+          "test_rows": 0,
+          "test_start": "2024-07-09",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2025-07-10",
+          "test_rows": 0,
+          "test_start": "2025-01-07",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2026-01-08",
+          "test_rows": 0,
+          "test_start": "2025-07-11",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 1,
+          "test_end": "2026-07-13",
+          "test_rows": 25,
+          "test_start": "2026-01-09",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 3,
+          "test_end": "2026-08-14",
+          "test_rows": 73,
+          "test_start": "2026-07-14",
+          "train_dates": 5
+        }
+      ],
+      "horizon": 5,
+      "id": "news_tone_5",
+      "p_value": 1.0,
+      "question": "Does first-seen headline tone add directional information beyond prices?",
+      "reason": "No fold had enough independent training dates and matched held-out observations.",
+      "status": "INSUFFICIENT",
+      "target": "forward_market_excess_return",
+      "test_dates": 0,
+      "test_rows": 0,
+      "test_years": 0
+    },
+    {
+      "adjusted_p": 1.0,
+      "available_dates": 26,
+      "available_first": "2026-06-22",
+      "available_last": "2026-08-06",
+      "available_rows": 650,
+      "baseline_features": [
+        "log_rv20",
+        "log_rv5"
+      ],
+      "candidate_features": [
+        "news_activity"
+      ],
+      "folds": [
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2022-07-05",
+          "test_rows": 0,
+          "test_start": "2022-01-03",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2023-01-03",
+          "test_rows": 0,
+          "test_start": "2022-07-06",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2023-07-06",
+          "test_rows": 0,
+          "test_start": "2023-01-04",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2024-01-04",
+          "test_rows": 0,
+          "test_start": "2023-07-07",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2024-07-08",
+          "test_rows": 0,
+          "test_start": "2024-01-05",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2025-01-06",
+          "test_rows": 0,
+          "test_start": "2024-07-09",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2025-07-10",
+          "test_rows": 0,
+          "test_start": "2025-01-07",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2026-01-08",
+          "test_rows": 0,
+          "test_start": "2025-07-11",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 1,
+          "test_end": "2026-07-13",
+          "test_rows": 25,
+          "test_start": "2026-01-09",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 3,
+          "test_end": "2026-08-14",
+          "test_rows": 73,
+          "test_start": "2026-07-14",
+          "train_dates": 5
+        }
+      ],
+      "horizon": 5,
+      "id": "news_activity_risk_5",
+      "p_value": 1.0,
+      "question": "Does unusual first-seen news volume add risk information beyond trailing realized risk?",
+      "reason": "No fold had enough independent training dates and matched held-out observations.",
+      "status": "INSUFFICIENT",
+      "target": "log_future_realized_vol",
+      "test_dates": 0,
+      "test_rows": 0,
+      "test_years": 0
+    },
+    {
+      "adjusted_p": 1.0,
+      "available_dates": 26,
+      "available_first": "2026-06-22",
+      "available_last": "2026-08-06",
+      "available_rows": 650,
+      "baseline_features": [
+        "log_rv20",
+        "log_rv5"
+      ],
+      "candidate_features": [
+        "news_disagreement"
+      ],
+      "folds": [
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2022-07-05",
+          "test_rows": 0,
+          "test_start": "2022-01-03",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2023-01-03",
+          "test_rows": 0,
+          "test_start": "2022-07-06",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2023-07-06",
+          "test_rows": 0,
+          "test_start": "2023-01-04",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2024-01-04",
+          "test_rows": 0,
+          "test_start": "2023-07-07",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2024-07-08",
+          "test_rows": 0,
+          "test_start": "2024-01-05",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2025-01-06",
+          "test_rows": 0,
+          "test_start": "2024-07-09",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2025-07-10",
+          "test_rows": 0,
+          "test_start": "2025-01-07",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 0,
+          "test_end": "2026-01-08",
+          "test_rows": 0,
+          "test_start": "2025-07-11",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 1,
+          "test_end": "2026-07-13",
+          "test_rows": 25,
+          "test_start": "2026-01-09",
+          "train_dates": 0
+        },
+        {
+          "status": "insufficient training dates or no held-out samples",
+          "test_dates": 3,
+          "test_end": "2026-08-14",
+          "test_rows": 73,
+          "test_start": "2026-07-14",
+          "train_dates": 5
+        }
+      ],
+      "horizon": 5,
+      "id": "news_disagreement_risk_5",
+      "p_value": 1.0,
+      "question": "Does disagreement among contemporaneously observed headlines add risk information?",
+      "reason": "No fold had enough independent training dates and matched held-out observations.",
+      "status": "INSUFFICIENT",
+      "target": "log_future_realized_vol",
+      "test_dates": 0,
+      "test_rows": 0,
+      "test_years": 0
+    },
+    {
+      "adjusted_p": 1.0,
+      "baseline_features": [
+        "ret5",
+        "ret20",
+        "market_ret5",
+        "log_rv20"
+      ],
+      "candidate_features": [
+        "analyst_net"
+      ],
+      "folds": [],
+      "horizon": 5,
+      "id": "analyst_revisions_5",
+      "p_value": 1.0,
+      "question": "Do upgrades minus downgrades, observed at first_seen rather than backfilled grade_date, improve directional estimates?",
+      "reason": "No matched, point-in-time observations.",
+      "status": "INSUFFICIENT",
+      "target": "forward_market_excess_return",
+      "test_dates": 0,
+      "test_rows": 0,
+      "test_years": 0
+    }
+  ],
+  "schema": 1,
+  "snapshot_note": "Dated research snapshot. Full local run retains per-date losses and individual forecasts; this distribution copy retains findings, coverage, source fingerprints and fold audits.",
+  "source_code_sha256": {
+    "__init__.py": "5fdf1fca037cecc6d28916bc565d2f5aee7cadfc7086515e5cc72bc0926e6117",
+    "__main__.py": "78d1068cbe293a71577c092d7530d00e116679c515124c7a26607683b801c856",
+    "channels.py": "030b381131951ad2d234c1f1dc25f954eee4908a0582eb3364b435f2e02c0252",
+    "data.py": "a8d8d64817fc5a7a740ac5db0d12219f71fd3c3a6320697c2b74c7ba5107aa96",
+    "engine.py": "3fba82e9cc1411285e1bb3614538bd9319f7ab8cfbd56ebd0c60a80481b341b8",
+    "report.py": "85c57942480a0948f533598d64be8fb67f1d2ad7657b78291694f814c5d190ee"
+  }
+}

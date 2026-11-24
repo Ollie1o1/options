@@ -33,6 +33,20 @@ _open_book_cache: Optional[Dict[str, List[str]]] = None
 
 # ── History: setup analogs from your own closed trades ──────────────────────
 
+def strategy_for_row(row: Dict[str, Any], mode: str = "") -> str:
+    """The strategy whose history is relevant, preserving short-premium sides."""
+    raw = str(row.get("strategy_name", "")).replace("_", " ").strip().title()
+    known = {"Long Call", "Long Put", "Short Call", "Short Put", "Bull Put", "Bear Call",
+             "Bull Call", "Bear Put", "Iron Condor"}
+    if raw in known:
+        return raw
+    opt = str(row.get("type", "")).lower()
+    if opt not in ("call", "put"):
+        return "Unknown"
+    from .trade_analysis import strategy_label_for_mode
+    return strategy_label_for_mode(mode, opt)
+
+
 def _load_closed_trades(db_path: str = PAPER_DB) -> List[Dict[str, Any]]:
     global _closed_trades_cache
     if _closed_trades_cache is not None:
@@ -223,12 +237,11 @@ def cost_line(row: Dict[str, Any],
 
 def context_lines(row: Dict[str, Any], today: Optional[str] = None,
                   db_path: str = PAPER_DB,
-                  with_insider: bool = True) -> List[str]:
+                  with_insider: bool = True, mode: str = "") -> List[str]:
     """Up to three plain-text lines for the per-pick detail. Never raises."""
     out: List[str] = []
     try:
-        opt_type = str(row.get("type") or "").lower()
-        strategy = "Long Call" if opt_type == "call" else "Long Put"
+        strategy = strategy_for_row(row, mode)
         dte = int(float(row.get("T_years") or 0) * 365)
         delta = row.get("delta")
         delta = float(delta) if delta is not None else None

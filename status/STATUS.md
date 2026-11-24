@@ -1,5 +1,12 @@
 # STATUS — where we are right now
 
+> **Historical snapshot — superseded.** The text below describes June 2026,
+> not current readiness. Read the dated [generated gate status](../reports/GATE_STATUS.md)
+> and [paper track record](../reports/TRACK_RECORD.md) for the latest available
+> measurements; check their generation dates before relying on them. The gate
+> report dated 2026-11-18 records **STOP**, not GATHERING. Historical reasoning
+> below is preserved for the audit trail.
+
 **Last updated:** 2026-06-10
 **Current phase:** Phase 2 — Forward Observation (cohort **reset clean**)
 **Real money deployed?** ❌ Not yet. Waiting on the gate (see below).

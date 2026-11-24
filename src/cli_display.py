@@ -854,7 +854,7 @@ def format_analysis_lines(row: pd.Series, chain_iv_median: float, mode: str) -> 
         # crossing cost was invisible across 907 logged trades and is the
         # largest measured term in whether a structure can win at all.
         _cost = _cost_line(dict(row), win_rates=_wr())
-        for _cl in ([_cost] if _cost else []) + _ctx_lines(dict(row)) + _exit_lines(dict(row)):
+        for _cl in ([_cost] if _cost else []) + _ctx_lines(dict(row), mode=mode) + _exit_lines(dict(row)):
             if HAS_ENHANCED_CLI and ":" in _cl:
                 _lab, _rest = _cl.split(":", 1)
                 lines.append(ui.kv_line(_lab.strip(), _rest.strip()))
@@ -1859,7 +1859,7 @@ def _skew_read_from_picks(df_picks):
     return out
 
 
-def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, corr_pairs: Optional[list] = None):
+def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, num_expiries: int, min_dte: int, max_dte: int, mode: str = "Single-stock", budget: Optional[float] = None, market_trend: str = "Unknown", volatility_regime: str = "Unknown", config: Optional[Dict] = None, show_surface: bool = False, surface_mode: str = "braille", surface_type: str = "pnl", show_contours: bool = True, compact: bool = False, corr_pairs: Optional[list] = None, discovery_context: Optional[Dict] = None):
     """Enhanced report with context, formatting, top pick, and summary."""
     if df_picks.empty:
         print("No picks available after filtering.")
@@ -2127,8 +2127,18 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
 
             arrow = fmt.style(fmt.GLYPHS['anchor'], 'accent') if HAS_ENHANCED_CLI else fmt.GLYPHS['anchor']
 
+            from .discovery import build as build_discovery, lines as discovery_lines
+            import textwrap
+            brief = build_discovery(r, discovery_context or {"mode": mode})
+            for label, text in discovery_lines(brief, compact=compact):
+                gutter = ui.LABEL_W + 3 if HAS_ENHANCED_CLI else 16
+                wrapped = textwrap.wrap(text, width=max(24, WIDTH - gutter)) or [""]
+                print(ui.kv_line(label, wrapped[0]) if HAS_ENHANCED_CLI else f"  {label:<12} {wrapped[0]}")
+                for continuation in wrapped[1:]:
+                    print(" " * gutter + continuation)
+
             if compact:
-                # Compact mode: thesis line only
+                # Compact mode keeps the research summary and a thesis.
                 if HAS_ENHANCED_CLI:
                     thesis = generate_trade_thesis(r)
                     print(_anchor_line("Thesis", thesis))

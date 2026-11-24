@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.run_tests import is_missing_pytest
+from scripts.run_tests import CollectingSuite, is_missing_pytest
 
 
 class TestImportErrorClassification(unittest.TestCase):
@@ -31,6 +31,31 @@ class TestImportErrorClassification(unittest.TestCase):
 
     def test_a_syntax_error_is_a_real_breakage(self):
         self.assertFalse(is_missing_pytest(SyntaxError("bad")))
+
+
+class TestFixtureCleanup(unittest.TestCase):
+    def test_finished_group_releases_unreachable_fixture_cycles(self):
+        import gc
+        import weakref
+        refs = []
+
+        class Fixture:
+            pass
+
+        class Case(unittest.TestCase):
+            def runTest(self):
+                fixture = Fixture()
+                fixture.cycle = fixture
+                refs.append(weakref.ref(fixture))
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            CollectingSuite([Case()]).run(unittest.TestResult())
+            self.assertIsNone(refs[0]())
+        finally:
+            if enabled:
+                gc.enable()
 
 
 if __name__ == "__main__":

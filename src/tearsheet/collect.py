@@ -17,7 +17,8 @@ _SLOW_IDS = ("earnings", "insider", "news")
 # degrades to an expiry-only payoff on v1 sidecars.
 # v3: adds the optional `exits` panel (Monte-Carlo of the book's exit rules);
 # older sidecars simply render without the exit-odds block.
-SCHEMA = 3
+# v4: shared discovery brief with observation sources, conflicts and unknowns.
+SCHEMA = 4
 
 # `_IV_SIGMA_POINTS` used to live here: 1.0-2.5 IV points by `iv_confidence`.
 # Removed 2026-08-17 rather than left dangling — it described how wrong the
@@ -447,7 +448,7 @@ def _narrative_block(row, ctx):
     dte = int(round(float(row.get("T_years") or 0) * 365))
     try:
         history = _jsonable(pick_context.analog_stats(
-            row.get("strategy_name", "long_call"), dte, row.get("delta"))) or None
+            pick_context.strategy_for_row(row, ctx.get("mode", "")), dte, row.get("delta"))) or None
     except Exception:
         history = None
 
@@ -549,6 +550,8 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
     silently omitted.
     """
     panels = {}
+    from src.discovery import build as build_discovery
+    discovery = _safe("discovery", lambda: build_discovery(row, ctx), panels, None)
     sym = row.get("symbol")
     # The row's own underlying price wins: on a cross-ticker scan the ctx spot
     # is whatever ticker the scan loop touched last, which silently poisons
@@ -648,5 +651,5 @@ def build(row: dict, ctx: dict, slow: bool = True) -> dict:
         "name": name, "narrative": narrative,
         "evidence": evidence, "context": _context(row), "panels": panels,
         "greeks_full": greeks_full, "quote": quote, "ticket": ticket,
-        "events": events, "lottery": lottery,
+        "events": events, "lottery": lottery, "discovery": discovery,
     }
