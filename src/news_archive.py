@@ -13,6 +13,7 @@ same day does not inflate the corpus.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -58,6 +59,14 @@ def _dedup_key(symbol: str, headline: str, published) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def _optional_number(value) -> Optional[float]:
+    try:
+        number = float(value)
+    except (ValueError, TypeError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def archive_items(items, symbol: str, db_path: str = DEFAULT_DB,
                   now: Optional[datetime] = None) -> int:
     """Persist *items* for *symbol*; return the number of NEW rows inserted.
@@ -85,8 +94,8 @@ def archive_items(items, symbol: str, db_path: str = DEFAULT_DB,
                 (key, symbol.upper(), headline,
                  getattr(it, "source", "") or "",
                  _published_str(published),
-                 float(getattr(it, "sentiment", 0.0) or 0.0),
-                 float(getattr(it, "relevance", 0.0) or 0.0),
+                 _optional_number(getattr(it, "sentiment", None)),
+                 _optional_number(getattr(it, "relevance", None)),
                  getattr(it, "url", "") or "",
                  stamp),
             )

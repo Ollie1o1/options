@@ -3,10 +3,11 @@
 return distributions per ticker per horizon, and emits breakout/breakdown
 forecasts. The news overlay is applied live only (forward-tracked)."""
 from __future__ import annotations
-import argparse, json, warnings
+import argparse, json
 from typing import Dict, List, Optional
 
-from src.breakout.data import Series, HORIZONS, DEFAULT_DB, load_series, update_universe
+from src.breakout.data import Series, HORIZONS, DEFAULT_DB, load_series
+from src.breakout.refresh import completed_session, fetch_yahoo, refresh_universe
 from src.breakout import features as F
 from src.breakout.distribution import baseline_distribution, parametric_distribution, make_distribution
 from src.breakout import backtest as B
@@ -42,19 +43,18 @@ def live_forecasts(series_by_ticker: Dict[str, Series], model: str = "parametric
 
 
 def _yf_fetcher(ticker: str, start: Optional[str]):
-    import pandas as pd, yfinance as yf
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        df = yf.Ticker(ticker).history(period="max", interval="1d")
-    if df is None or df.empty:
-        return []
-    df = df.dropna(subset=["Close"])
-    out = []
-    for idx, r in df.iterrows():
-        out.append({"date": idx.strftime("%Y-%m-%d"), "close": float(r["Close"]),
-                    "high": float(r["High"]), "low": float(r["Low"]),
-                    "volume": float(r.get("Volume", 0) or 0)})
-    return out
+    through = completed_session()
+    if through is None:
+        raise ValueError("Completed session unknown; maintain the holiday calendar")
+    return fetch_yahoo(ticker, start, through)
+
+
+def _refresh(db_path: str, universe: List[str]) -> None:
+    res = refresh_universe(db_path, universe)
+    for ticker, info in res["symbols"].items():
+        print(f"  {ticker}: {info['status']} | +{info['inserted']} rows, "
+              f"{info['revised']} revisions" + (f" | {info['error']}" if info.get("error") else ""))
+    print(f"  completed session {res['through']} | complete={res['complete']}")
 
 
 def _load_all(db_path: str, tickers: List[str]) -> Dict[str, Series]:
@@ -94,8 +94,7 @@ def menu(config_path: str = "config.json", db_path: str = DEFAULT_DB) -> None:
             return
         if choice == "4":
             print("  refreshing price cache…")
-            res = update_universe(db_path, universe, _yf_fetcher)
-            print(f"  updated {sum(1 for v in res.values() if v)} / {len(universe)} tickers")
+            _refresh(db_path, universe)
             continue
         series = _load_all(db_path, universe)
         if not series:
@@ -120,8 +119,7 @@ def main(argv=None):
     universe = load_universe(args.config)
 
     if args.update_data:
-        res = update_universe(args.db, universe, _yf_fetcher)
-        print(f"  updated {sum(1 for v in res.values() if v)} / {len(universe)} tickers")
+        _refresh(args.db, universe)
         return
 
     series = _load_all(args.db, universe)

@@ -1,5 +1,6 @@
 """Tests for src.news_archive — point-in-time persistence of fetched news."""
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -68,6 +69,30 @@ class NewsArchiveTest(unittest.TestCase):
 
     def test_empty_items_noop(self):
         self.assertEqual(na.archive_items([], "AAPL", db_path=self.db), 0)
+
+    def test_missing_measurements_stay_unknown_and_measured_neutral_is_zero(self):
+        na.archive_items([_Item("missing", sentiment=None, relevance=None),
+                          _Item("neutral", sentiment=0., relevance=0.),
+                          _Item("invalid", sentiment=float("nan"), relevance=float("inf"))],
+                         "AAPL", db_path=self.db)
+        conn = sqlite3.connect(self.db)
+        try:
+            values = {r[0]: r[1:] for r in conn.execute("SELECT headline,sentiment,relevance FROM news_archive")}
+        finally:
+            conn.close()
+        self.assertEqual(values, {"missing": (None, None), "neutral": (0., 0.), "invalid": (None, None)})
+
+    def test_reobservation_preserves_first_seen_and_original_measurement(self):
+        first = datetime(2026, 6, 19, 12, tzinfo=timezone.utc)
+        na.archive_items([_Item("same", sentiment=.2)], "AAPL", db_path=self.db, now=first)
+        na.archive_items([_Item("same", sentiment=.9)], "AAPL", db_path=self.db,
+                         now=datetime(2026, 6, 20, 12, tzinfo=timezone.utc))
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT archived_at,sentiment FROM news_archive").fetchall(),
+                             [(first.isoformat(), .2)])
+        finally:
+            conn.close()
 
     def test_stats_on_missing_db_is_zeroed(self):
         stats = na.archive_stats(self.db + ".nope")

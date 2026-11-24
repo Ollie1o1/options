@@ -3,6 +3,7 @@ sqlite, fetched incrementally. Pure storage + an injectable fetcher so tests
 never hit the network."""
 from __future__ import annotations
 import sqlite3
+from contextlib import closing
 from typing import Callable, Dict, List, NamedTuple, Optional
 import numpy as np
 from src.paths import repo_path
@@ -35,7 +36,7 @@ def _conn(db_path: str) -> sqlite3.Connection:
 def upsert_ohlcv(db_path: str, ticker: str, rows: List[dict]) -> int:
     if not rows:
         return 0
-    with _conn(db_path) as c:
+    with closing(_conn(db_path)) as c, c:
         before = c.total_changes
         c.executemany(
             "INSERT OR IGNORE INTO ohlcv(ticker,date,close,high,low,volume) "
@@ -46,7 +47,7 @@ def upsert_ohlcv(db_path: str, ticker: str, rows: List[dict]) -> int:
 
 
 def load_series(db_path: str, ticker: str) -> Optional[Series]:
-    with _conn(db_path) as c:
+    with closing(_conn(db_path)) as c:
         rows = c.execute(
             "SELECT date,close,high,low,volume FROM ohlcv WHERE ticker=? ORDER BY date",
             (ticker,),
@@ -59,21 +60,14 @@ def load_series(db_path: str, ticker: str) -> Optional[Series]:
 
 
 def _latest_date(db_path: str, ticker: str) -> Optional[str]:
-    with _conn(db_path) as c:
+    with closing(_conn(db_path)) as c:
         r = c.execute("SELECT MAX(date) FROM ohlcv WHERE ticker=?", (ticker,)).fetchone()
     return r[0] if r and r[0] else None
 
 
 def update_universe(db_path: str, tickers: List[str],
                     fetcher: Callable[[str, Optional[str]], List[dict]]) -> Dict[str, int]:
-    out: Dict[str, int] = {}
-    for t in tickers:
-        start = _latest_date(db_path, t)
-        try:
-            rows = fetcher(t, start)
-        except Exception:
-            rows = []
-        if start:  # don't re-insert the boundary day
-            rows = [r for r in rows if r["date"] > start]
-        out[t] = upsert_ohlcv(db_path, t, rows)
-    return out
+    """Compatibility counts; the audited updater retains failures and revisions."""
+    from .refresh import refresh_universe
+    result = refresh_universe(db_path, tickers, fetcher=fetcher)
+    return {sym: info["inserted"] for sym, info in result["symbols"].items()}

@@ -68,10 +68,42 @@ def main(argv=None) -> int:
     parser.add_argument("--vix", default=repo_path("data/discovery/VIX_History.csv"))
     parser.add_argument("--output", default=repo_path("reports/discovery"))
     parser.add_argument("--no-open", action="store_true")
-    parser.add_argument("--view", action="store_true", help="open the saved report without rerunning anything")
+    parser.add_argument("--view", action="store_true", help="open saved findings and audit local coverage; no hypothesis evaluation")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--coverage", action="store_true", help="audit local coverage only; no hypothesis evaluation")
+    mode.add_argument("--update-prices", action="store_true", help="refresh the existing equity archive, then report coverage only")
     args = parser.parse_args(argv)
+    if args.view and (args.coverage or args.update_prices):
+        parser.error("--view cannot be combined with --coverage or --update-prices")
+    if args.coverage or args.update_prices:
+        from .collection import collect
+        try:
+            result = collect(config_path=args.config, prices_path=args.prices, news_path=args.news,
+                             analysts_path=args.analysts, output_dir=args.output, update=args.update_prices)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            print(f"Coverage unavailable: {exc}")
+            return 1
+        for row in result["coverage"]["prices"]["symbols"]:
+            print(f"{row['symbol']}: {row['status']} | {row['first']} to {row['last']} | "
+                  f"{len(row['missing_spy_dates'])} missing SPY dates | {len(row['large_moves'])} large moves")
+            if (row.get("last_attempt") or {}).get("error"):
+                print("  Collection: " + row["last_attempt"]["error"])
+        path = Path(args.output) / "coverage.html"
+        print(path)
+        if not args.no_open:
+            import webbrowser
+            webbrowser.open(path.resolve().as_uri())
+        return 0 if result["complete"] else 1
     path = Path(args.output) / "latest.html"
     if args.view:
+        # Refresh only the linked coverage audit. Saved findings keep their
+        # original sample and remain available even when local archives are absent.
+        from .collection import collect
+        try:
+            collect(config_path=args.config, prices_path=args.prices, news_path=args.news,
+                    analysts_path=args.analysts, output_dir=args.output, update=False)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            print(f"Coverage audit unavailable: {exc}")
         if not path.exists():
             snapshot = Path(repo_path("docs/discovery/research_20261124.json"))
             if not snapshot.exists():
