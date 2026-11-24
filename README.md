@@ -470,6 +470,25 @@ limits, chronological folds, uncertainty intervals and multiple-test adjustment.
 The source history is available from [Cboe](https://www.cboe.com/tradable-products/vix/vix-historical-data).
 `python -m src.discovery_research --view` opens the latest saved result.
 
+**Collection and coverage:** `python -m src.discovery_research --coverage --no-open`
+audits each cached/research symbol's freshness, exact-date gaps, missing data and
+source evidence without fetching or evaluating hypotheses. Open
+`reports/discovery/coverage.html` for the collection worklist; its JSON sidecar
+retains the individual dates. `--update-prices --no-open` refreshes the existing
+`data/equity_ohlcv.db` and produces that coverage report. It does not rerun the
+study. The existing maintenance scheduler also collects after 18:00 Eastern,
+marks only complete runs done, and retries partial failures.
+
+Price requests include an overlap window. Legacy data, changed adjustments and
+monthly revalidation trigger a full history refresh before appending; previous
+values, compressed provider observations, action fields and fingerprints remain
+in the same archive. Yahoo's `Close` is already split-adjusted; adjusted closes
+also incorporate its dividend adjustments. No split is inferred from a large
+price move. The completed-session cutoff uses the maintained US holiday
+calendar and stays unknown for unsupported years. See the
+[dated data audit](docs/DATA_COVERAGE_AUDIT_20261124.md) for measured coverage,
+limitations and the next collection priorities.
+
 The CLI renders a responsive, colour-coded interface that adapts to your terminal width (60–120 chars). The display follows a deliberate **house style** (`src/ui.py` + `src/formatting.py` semantic theme):
 
 - **Colour discipline** — green/red are reserved for *directional sign only* (EV-after-cost, P&L, CHEAP/RICH vs surface). Amber marks caution (catalyst in window, accelerating theta, <14 DTE, concentration). Everything else stays neutral so the signal actually stands out.

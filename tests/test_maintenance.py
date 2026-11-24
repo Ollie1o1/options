@@ -25,14 +25,17 @@ os.environ.setdefault(
 _ESTIMATES_PATCH = mock.patch(
     "src.estimates_archive.archive_symbols",
     return_value={"symbols": 0, "with_estimates": 0, "complete": True})
+_DISCOVERY_PATCH = mock.patch("src.discovery_research.collection.collect", return_value={"complete": True})
 
 
 def setUpModule():
     _ESTIMATES_PATCH.start()
+    _DISCOVERY_PATCH.start()
 
 
 def tearDownModule():
     _ESTIMATES_PATCH.stop()
+    _DISCOVERY_PATCH.stop()
 
 
 class TestThrottle(unittest.TestCase):
@@ -1147,3 +1150,46 @@ class TestEstimatesArchiveStep(unittest.TestCase):
             self.assertIn("estimates-archive:0/10(aborted)", summary["ran"])
             self._run(d, datetime(2026, 6, 4, 17, 30), fn)
             self.assertEqual(fn.call_count, 2)
+
+
+class TestDiscoveryPriceStep(unittest.TestCase):
+    def _run(self, directory, now, fn, online=True):
+        db = os.path.join(directory, "t.db")
+        if not os.path.exists(db):
+            TestOrchestrator()._db(db)
+        with mock.patch("src.candidate_marks.mark_candidates", return_value={}), \
+                mock.patch("src.own_picks.record_pick_marks", return_value=0):
+            return m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=os.path.join(directory, "state.json"),
+                now=now, runner=lambda cmd: 0, checkpoint_fn=lambda **k: None,
+                track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None, watch_fn=lambda db: None,
+                discovery_prices_fn=fn, online_fn=lambda: online)
+
+    def test_completed_run_is_stamped_and_not_repeated(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn = mock.Mock(return_value={"complete": True})
+            out = self._run(d, datetime(2026, 11, 24, 18, 30), fn)
+            self.assertIn("discovery-prices:complete", out["ran"])
+            self._run(d, datetime(2026, 11, 24, 19, 30), fn)
+            self.assertEqual(fn.call_count, 1)
+
+    def test_partial_and_exception_remain_unstamped_and_retry(self):
+        for value in ({"complete": False}, RuntimeError("failed")):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d:
+                fn = mock.Mock(side_effect=value) if isinstance(value, Exception) else mock.Mock(return_value=value)
+                out = self._run(d, datetime(2026, 11, 24, 18, 30), fn)
+                self.assertTrue(any("retry" in r for r in out["ran"]))
+                self._run(d, datetime(2026, 11, 24, 19, 30), fn)
+                self.assertEqual(fn.call_count, 2)
+                state = json.loads(open(os.path.join(d, "state.json")).read())
+                self.assertNotIn("last_discovery_prices", state)
+
+    def test_not_due_or_offline_does_not_collect(self):
+        for now, online in [(datetime(2026, 11, 24, 17, 59), True),
+                            (datetime(2026, 11, 24, 18), False),
+                            (datetime(2026, 11, 26, 19), True)]:
+            with tempfile.TemporaryDirectory() as d:
+                fn = mock.Mock(return_value={"complete": True})
+                self._run(d, now, fn, online)
+                fn.assert_not_called()

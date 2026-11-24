@@ -56,6 +56,9 @@ def render(data: dict) -> str:
     coverage += '</tbody></table>'
     coverage += '<p>The common price window caps the study even when an index or news feed is newer. '
     coverage += 'No forecast is extrapolated into missing price history.</p>'
+    coverage += '<p><a href="coverage.html">Current per-symbol coverage and collection evidence</a> '
+    coverage += '(generated separately with <code>python -m src.discovery_research --coverage --no-open</code>). '
+    coverage += 'Updating that audit does not update these dated hypothesis findings.</p>'
     body += '<div class="grid">' + shell.card("Data coverage and limits", coverage, span=12, anchor="coverage") + '</div>'
     relationships = data.get("relationships") or []
     if relationships:

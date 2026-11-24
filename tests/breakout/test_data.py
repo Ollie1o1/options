@@ -36,14 +36,14 @@ class CacheTests(unittest.TestCase):
     def test_load_missing_returns_none(self):
         self.assertIsNone(load_series(self.db, "NOPE"))
 
-    def test_update_universe_fetches_only_new(self):
+    def test_legacy_cache_is_revalidated_before_incremental_updates(self):
         upsert_ohlcv(self.db, "AAA", _rows(["2020-01-02"]))
         calls = {}
         def fetcher(ticker, start_date):
             calls[ticker] = start_date
             return _rows(["2020-01-03"]) if start_date else _rows(["2020-01-02", "2020-01-03"])
         res = update_universe(self.db, ["AAA", "BBB"], fetcher)
-        self.assertEqual(calls["AAA"], "2020-01-02")   # had data -> incremental
+        self.assertIsNone(calls["AAA"])              # unverified legacy -> full
         self.assertIsNone(calls["BBB"])                 # no data -> full
         self.assertEqual(res["AAA"], 1)
         self.assertEqual(res["BBB"], 2)

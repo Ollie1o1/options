@@ -588,7 +588,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             watch_fn: Optional[Callable] = None,
                             now_fn: Optional[Callable[[], datetime]] = None,
                             online_fn: Optional[Callable[[], bool]] = None,
-                            progress: Optional[Callable[[str], None]] = None) -> dict:
+                            progress: Optional[Callable[[str], None]] = None,
+                            discovery_prices_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -768,6 +769,23 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                        + ("" if counts.get("complete", True) else "(aborted)"))
     except Exception:
         pass
+
+    # After-close research prices share the existing equity archive. Incomplete
+    # symbols remain retryable; collection never evaluates a predictive idea.
+    try:
+        from src.discovery_research import collection as _dc
+        _cur = now_fn()
+        if _dc.due(state, _cur) and _online():
+            _step("Updating research price history and coverage…")
+            counts = (discovery_prices_fn or _dc.collect)() or {}
+            if counts.get("complete"):
+                from zoneinfo import ZoneInfo
+                et = ZoneInfo("America/New_York")
+                local = _cur.replace(tzinfo=et) if _cur.tzinfo is None else _cur.astimezone(et)
+                state["last_discovery_prices"] = local.date().isoformat()
+            ran.append("discovery-prices:" + ("complete" if counts.get("complete") else "incomplete(will retry)"))
+    except Exception as exc:
+        ran.append(f"discovery-prices:failed({type(exc).__name__}; will retry)")
 
     # 4b. Forward marks for recorded candidates — gives the REFUSED population
     #     outcomes, which is the only way the ranker can ever be validated: the
