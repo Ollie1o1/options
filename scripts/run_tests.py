@@ -20,6 +20,7 @@ reassuring.
 from __future__ import annotations
 
 import importlib.util
+import gc
 import sys
 import unittest
 from pathlib import Path
@@ -33,6 +34,23 @@ SKIP = {
     # CI ignores this one explicitly; it is a long-running stress harness.
     "_phase3_stress.py",
 }
+
+
+class CollectingSuite(unittest.TestSuite):
+    """Release unreachable SQLite/fixture cycles between test groups.
+
+    sqlite3's connection context manager commits/rolls back but does not close
+    the connection. Thousands of otherwise independent fixtures can reach the
+    Mac's descriptor limit before cyclic GC runs, turning later tests into
+    unrelated 'unable to open database' failures. This changes no assertions
+    and closes no live connection: it only collects unreachable objects after
+    a class/module suite has finished.
+    """
+    def run(self, result, debug=False):
+        try:
+            return super().run(result, debug)
+        finally:
+            gc.collect()
 
 
 def _module_name(path: Path) -> str:
@@ -100,7 +118,8 @@ def main(argv: list[str]) -> int:
     )
 
     loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
+    loader.suiteClass = CollectingSuite
+    suite = CollectingSuite()
     ran, pytest_only, unloadable = [], [], []
 
     for path in paths:
