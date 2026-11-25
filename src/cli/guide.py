@@ -234,7 +234,8 @@ def guide_cmd(ctx: click.Context) -> None:
         console.print("  [bold][4][/bold] Scan Live ETF Spreads  — Live 60–120d wide ETF Bull Puts (Test O1 limit-only)")
         console.print("  [bold][5][/bold] Log Trade / My Results — Record a buy & check if your picks beat SPY")
         console.print("  [bold][6][/bold] TFSA Core Rebalancer   — Exact monthly ETF share orders for your account")
-        console.print("  [bold][7][/bold] Open Full Dashboard    — Interactive 5-tab keyboard cockpit (`opt`)")
+        console.print("  [bold][7][/bold] Open Full Dashboard    — Interactive 6-tab keyboard cockpit (`opt`)")
+        console.print("  [bold][8][/bold] Discover (top-down)    — ① Market → ② Sectors → ③ Ideas → ④ Evidence card")
         console.print("  [bold][?][/bold] Plain-English Guide    — Explain every strategy & label simply")
         console.print("  [bold][Q][/bold] Quit")
         console.print()
@@ -380,7 +381,17 @@ def guide_cmd(ctx: click.Context) -> None:
 
             run_desk()
 
+        elif choice == "8":
+            from src.topdown import render as td_render
+            from src.topdown.hub import build_hub
+
+            hub = build_hub(ohlcv_db=ohlcv_db, cache_path=cache_path)
+            console.print(td_render.hub_overview(hub))
+            tk = Prompt.ask("④ Evidence card for which ticker? (Enter to skip)", default="").strip().upper()
+            if tk:
+                console.print(td_render.card_renderable(hub.card(tk)))
+
         elif choice == "?":
             console.print(Panel(GLOSSARY_TEXT, title="PLAIN-ENGLISH CHEAT SHEET", border_style="#82aad2"))
         else:
-            console.print("[#d6a452]Please enter 1, 2, 3, 4, 5, 6, 7, ?, or Q.[/#d6a452]")
+            console.print("[#d6a452]Please enter 1-8, ?, or Q.[/#d6a452]")

@@ -1,4 +1,4 @@
-/* Responsive layout for the 5-tab Daily Trading Cockpit (120x36 standard, 80x24 compact). */
+/* Responsive layout for the 6-tab Daily Trading Cockpit (120x36 standard, 80x24 compact). */
 
 Screen {
     background: $background;

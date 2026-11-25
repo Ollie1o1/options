@@ -176,6 +176,7 @@ class DeskApp(App[None]):
                         yield Button("Refresh Ideas [r]", id="act-refresh", variant="primary")
                         yield Button("Live ETF Spreads [o]", id="act-live-opts")
                         yield Button("Analyze a Stock", id="act-workbench")
+                        yield Button("Discover [6]", id="act-discover")
                         yield Button("Log Pick [l]", id="act-log")
                         yield Button("Log Fill [f]", id="act-fill")
                         yield Button("? Guide", id="act-help")
@@ -747,6 +748,8 @@ class DeskApp(App[None]):
             self.action_live_options()
         elif bid == "act-workbench":
             self.open_workbench(self.focused_ticker)
+        elif bid == "act-discover":
+            self.action_switch_tab("discover")
         elif bid == "act-log":
             self.action_quick_log()
         elif bid == "act-help":

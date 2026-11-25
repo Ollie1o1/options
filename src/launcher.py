@@ -65,7 +65,7 @@ def _menu_rows() -> list:
     rows = []
     rows.append(_row("G", "GUIDE", "step-by-step plain-English coach — zero commands to memorize",
                      tag="start here"))
-    rows.append(_row("D", "DESK", "interactive 5-tab trading dashboard — radar · shares vs options",
+    rows.append(_row("D", "DESK", "interactive 6-tab trading dashboard — discover · radar · shares vs options",
                      tag="recommended"))
     rows.append(_row("W", "WEB", "visual browser cockpit — Plotly RND charts · TFSA rebalance"))
     rows.append(_row("1", "STOCKS", "legacy equity options screener — discover / spreads / iron / sell"))

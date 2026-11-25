@@ -41,7 +41,7 @@ def cli(ctx: click.Context, as_json: bool, no_color: bool) -> None:
 @click.option("--tab", type=click.Choice(["today", "radar", "workbench", "book", "lab", "discover"]), default="today")
 @click.option("--offline", is_flag=True, help="Start in cache-only offline mode.")
 def desk_cmd(tab: str, offline: bool) -> None:
-    """Launch the interactive 5-tab Textual Daily Trading Cockpit."""
+    """Launch the interactive 6-tab Textual Daily Trading Cockpit."""
     try:
         from src.tui.app import run_desk
 
