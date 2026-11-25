@@ -26,16 +26,25 @@ _ESTIMATES_PATCH = mock.patch(
     "src.estimates_archive.archive_symbols",
     return_value={"symbols": 0, "with_estimates": 0, "complete": True})
 _DISCOVERY_PATCH = mock.patch("src.discovery_research.collection.collect", return_value={"complete": True})
+# The Discover lens snapshot runs after 16:30 on trading days and builds the hub
+# from the real local archives; patched out for the whole module, and its DB is
+# redirected in case anything slips past the patch.
+os.environ.setdefault(
+    "OPTIONS_LENS_FORWARD_DB",
+    os.path.join(tempfile.gettempdir(), "options_test_lens_forward.db"))
+_LENS_PATCH = mock.patch("src.topdown.forward_log.run_snapshot", return_value={"rows_new": 0, "rows_seen": 0})
 
 
 def setUpModule():
     _ESTIMATES_PATCH.start()
     _DISCOVERY_PATCH.start()
+    _LENS_PATCH.start()
 
 
 def tearDownModule():
     _ESTIMATES_PATCH.stop()
     _DISCOVERY_PATCH.stop()
+    _LENS_PATCH.stop()
 
 
 class TestThrottle(unittest.TestCase):
@@ -1149,6 +1158,39 @@ class TestEstimatesArchiveStep(unittest.TestCase):
             summary = self._run(d, datetime(2026, 6, 4, 16, 30), fn)
             self.assertIn("estimates-archive:0/10(aborted)", summary["ran"])
             self._run(d, datetime(2026, 6, 4, 17, 30), fn)
+            self.assertEqual(fn.call_count, 2)
+
+
+class TestLensSnapshotStep(unittest.TestCase):
+    def _run(self, directory, now, fn):
+        db = os.path.join(directory, "t.db")
+        if not os.path.exists(db):
+            TestOrchestrator()._db(db)
+        with mock.patch("src.candidate_marks.mark_candidates", return_value={}), \
+                mock.patch("src.own_picks.record_pick_marks", return_value=0):
+            return m.run_startup_maintenance(
+                db_path=db, phase1_start="2026-05-27", state_path=os.path.join(directory, "state.json"),
+                now=now, runner=lambda cmd: 0, checkpoint_fn=lambda **k: None,
+                track_record_fn=lambda **k: None, chain_archive_fn=lambda: 0,
+                walk_forward_fn=lambda **k: None, watch_fn=lambda db: None,
+                lens_snapshot_fn=fn, online_fn=lambda: False)
+
+    def test_once_per_trading_day_after_the_close_even_offline(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn = mock.Mock(return_value={"rows_new": 12, "rows_seen": 40})
+            self._run(d, datetime(2026, 11, 24, 16, 15), fn)
+            fn.assert_not_called()
+            out = self._run(d, datetime(2026, 11, 24, 16, 45), fn)
+            self.assertIn("lens-snapshot:12new/40", out["ran"])
+            self._run(d, datetime(2026, 11, 24, 18, 0), fn)
+            self.assertEqual(fn.call_count, 1)
+
+    def test_a_failure_is_not_stamped_and_retries(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn = mock.Mock(side_effect=RuntimeError("boom"))
+            out = self._run(d, datetime(2026, 11, 24, 17, 0), fn)
+            self.assertTrue(any(r.startswith("lens-snapshot:failed") for r in out["ran"]))
+            self._run(d, datetime(2026, 11, 24, 18, 0), fn)
             self.assertEqual(fn.call_count, 2)
 
 

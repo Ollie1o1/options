@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 import os
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.radar.schema import Opportunity
@@ -137,26 +138,27 @@ def refresh_local_prices(
 
 
 def _default_fetch_etf_chain(symbol: str) -> Optional[Dict[str, Any]]:
-    """Fetch spot + nearest 60-120 DTE expiration put/call chain via yfinance."""
+    """Spot + the O1 expiration's (nearest 90 DTE in [60, 120]) put/call chain via yfinance."""
     import yfinance as yf
+
+    from src.radar.wide_spread_rule import choose_expiration
 
     tkr = yf.Ticker(symbol)
     exps = list(tkr.options or ())
     if not exps:
         return None
     today = dt.date.today()
-    scored_exps: List[Tuple[float, int, str]] = []
+    exp_dtes: Dict[str, float] = {}
     for e in exps:
         try:
-            dte = (dt.date.fromisoformat(e) - today).days
+            exp_dtes[e] = float((dt.date.fromisoformat(e) - today).days)
         except ValueError:
             continue
-        if 60 <= dte <= 120:
-            scored_exps.append((abs(dte - 90.0), dte, e))
-    if not scored_exps:
-        return None
-    scored_exps.sort()
-    _, chosen_dte, chosen_exp = scored_exps[0]
+    chosen_exp = choose_expiration(exp_dtes)
+    if chosen_exp is None:
+        return {"symbol": symbol, "spot": 0.0, "expiration": "", "dte": 0, "puts": [], "calls": [],
+                "no_expiry": True}
+    chosen_dte = int(exp_dtes[chosen_exp])
 
     hist = tkr.history(period="5d")
     if hist is None or hist.empty:
@@ -175,23 +177,86 @@ def _default_fetch_etf_chain(symbol: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def scan_live_etf_wide_spreads(
+SKIP_PLAIN = {
+    "no_expiry": "no expiration listed 60-120 DTE",
+    "no_short_delta": "no strike within 0.08 of the 0.25-delta target",
+    "no_long_leg": "no quoted strike for the 5%-of-spot long leg",
+    "zero_width": "long leg collapsed onto the short strike",
+    "non_pos_credit": "crossed credit not positive (or not below width)",
+    "friction_gt_25pct": "round-trip spread above 25% of the credit",
+    "no_chain": "chain unavailable",
+}
+
+
+@dataclass
+class LiveScanResult:
+    opportunities: List[Opportunity]
+    warnings: List[str]                       # fetch errors
+    skipped: Dict[str, str] = field(default_factory=dict)   # ticker -> plain-English reason
+    rate_source: str = ""
+
+
+def _rows_to_quotes(rows: Sequence[Dict[str, Any]], *, spot: float, dte: float, opt_type: str,
+                    r: float) -> List[Any]:
+    """LegQuotes: use a supplied `delta` column when the source has one, else compute it."""
+    from src.radar.wide_spread_rule import LegQuote, quotes_from_rows
+
+    if rows and all("delta" in row for row in rows):
+        out = []
+        for row in rows:
+            try:
+                k = float(row["strike"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            out.append(LegQuote(strike=k, bid=_num(row.get("bid")), ask=_num(row.get("ask")),
+                                delta=_num(row.get("delta")), iv=_num(row.get("iv")),
+                                open_interest=_num(row.get("openInterest")), volume=_num(row.get("volume"))))
+        return sorted(out, key=lambda q: q.strike)
+    return quotes_from_rows(rows, spot=spot, dte=dte, opt_type=opt_type, r=r)
+
+
+def quote_coverage(quotes: Sequence[Any], *, spot: float, is_put: bool) -> Tuple[int, int]:
+    """(strikes within 20% OTM of spot on the traded side, how many have a two-sided quote)."""
+    if spot <= 0:
+        return 0, 0
+    lo, hi = (0.80 * spot, spot) if is_put else (spot, 1.20 * spot)
+    near = [q for q in quotes if lo <= float(q.strike) <= hi]
+    return len(near), sum(1 for q in near if q.two_sided)
+
+
+def _num(x: Any) -> Optional[float]:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def scan_live_etf_wide_spreads_detailed(
     symbols: Sequence[str] = DEFAULT_LIQUID_ETFS,
     *,
     side: str = "bull_put",
     max_friction_to_credit: float = 0.25,
     fetch_fn: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
-) -> Tuple[List[Opportunity], List[str]]:
-    """Scan tight-spread ETFs for Test O1 (`60-120 DTE, 5%-wide, <=25% friction`) credit spreads.
+    risk_free: Optional[float] = None,
+) -> LiveScanResult:
+    """Live chains through the Test O1 rule (src.radar.wide_spread_rule.select_legs).
 
-    Returns `(opportunities, warnings)`. Always computes exact Walk-Away Limit Price so the user
-    knows the exact price to post (and never crosses market orders).
+    Every admitted spread carries an exact Walk-Away Limit Price (never cross the
+    touch); every symbol that produced nothing says why.
     """
+    from src.radar.wide_spread_rule import risk_free_rate, select_legs
+
     fetcher = fetch_fn or _default_fetch_etf_chain
     as_of = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     opps: List[Opportunity] = []
     warnings: List[str] = []
+    skipped: Dict[str, str] = {}
     is_put = str(side).lower() != "bear_call"
+    if risk_free is None:
+        r, r_src = risk_free_rate()
+    else:
+        r, r_src = float(risk_free), f"given {float(risk_free):.2%}"
 
     sym_list = [s.upper() for s in symbols]
     fetched: Dict[str, Optional[Dict[str, Any]]] = {}
@@ -218,59 +283,39 @@ def scan_live_etf_wide_spreads(
                 warnings.append(f"{tk}: {exc}")
 
     for sym in sym_list:
+        if sym not in fetched:
+            continue
         data = fetched.get(sym)
         if not data:
+            skipped[sym] = SKIP_PLAIN["no_chain"]
+            continue
+        if data.get("no_expiry"):
+            skipped[sym] = SKIP_PLAIN["no_expiry"]
             continue
         spot = float(data.get("spot") or 0.0)
         exp = str(data.get("expiration") or "")
         dte = int(data.get("dte") or 90)
         rows = data.get("puts" if is_put else "calls") or []
         if spot <= 0 or not rows:
+            skipped[sym] = SKIP_PLAIN["no_chain"]
             continue
 
-        # Clean valid quotes (bid > 0, ask >= bid)
-        valid = []
-        for r in rows:
-            try:
-                k = float(r["strike"])
-                b = float(r["bid"])
-                a = float(r["ask"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if math.isfinite(k) and math.isfinite(b) and math.isfinite(a) and b > 0 and a >= b:
-                valid.append({"strike": k, "bid": b, "ask": a, "mid": 0.5 * (b + a)})
-        if len(valid) < 2:
+        quotes = _rows_to_quotes(rows, spot=spot, dte=dte, opt_type="put" if is_put else "call", r=r)
+        legs, reason = select_legs(quotes, spot=spot, side=side, expiration=exp, dte=dte,
+                                   max_friction_to_credit=max_friction_to_credit)
+        if legs is None:
+            msg = SKIP_PLAIN.get(reason, reason)
+            n_near, n_two = quote_coverage(quotes, spot=spot, is_put=is_put)
+            if reason in ("no_short_delta", "no_long_leg") and n_near and n_two < 0.5 * n_near:
+                # A data condition, not a market one: Yahoo often serves 0/0
+                # quotes for most strikes for a while after the open.
+                msg = (f"Yahoo quotes thin — only {n_two} of {n_near} strikes near the money have a "
+                       f"live bid/ask; retry later ({msg})")
+            skipped[sym] = msg
             continue
 
-        # Target short strike ~6% OTM (~0.25 delta at 90 DTE) and long strike 5% of spot wider
-        target_short = spot * (0.94 if is_put else 1.06)
-        short_leg = min(valid, key=lambda x: abs(x["strike"] - target_short))
-        k_short = short_leg["strike"]
-
-        if is_put:
-            long_cands = [x for x in valid if x["strike"] < k_short]
-            target_long = k_short - 0.05 * spot
-        else:
-            long_cands = [x for x in valid if x["strike"] > k_short]
-            target_long = k_short + 0.05 * spot
-        if not long_cands:
-            continue
-        long_leg = min(long_cands, key=lambda x: abs(x["strike"] - target_long))
-        k_long = long_leg["strike"]
-        width = abs(k_short - k_long)
-        if width <= 0:
-            continue
-
-        cr_mid = short_leg["mid"] - long_leg["mid"]
-        cr_cross = short_leg["bid"] - long_leg["ask"]
-        if cr_mid <= 0 or cr_cross <= 0 or cr_mid >= width:
-            continue
-
-        rt_spread = (short_leg["ask"] - short_leg["bid"]) + (long_leg["ask"] - long_leg["bid"])
-        fric_ratio = rt_spread / cr_cross
-        if fric_ratio > max_friction_to_credit:
-            continue
-
+        k_short, k_long = legs.short.strike, legs.long.strike
+        cr_mid, cr_cross, width, fric_ratio = legs.credit_mid, legs.credit_cross, legs.width, legs.friction_ratio
         ladder = build_walk_away_ladder(
             structure="Wide Credit Spread",
             is_credit=True,
@@ -281,6 +326,14 @@ def scan_live_etf_wide_spreads(
         )
         max_risk_usd = (width - ladder.p_walk) * 100.0
         strat_label = "Bull Put" if is_put else "Bear Call"
+        short_delta = float(legs.short.delta or 0.0)
+        flags = ["LIMIT_ONLY_NO_MKT"]
+        if sym != "SPY":
+            # The LEAD verdict was measured on SPY 2010-2023 only.
+            flags.append("TESTED_ON_SPY_ONLY")
+        if abs(legs.width_pct - 0.05) > 0.01:
+            # Nearest quoted strike to the 5% wing was far from it (thin or coarse chain).
+            flags.append(f"WING_{legs.width_pct * 100:.1f}PCT_NOT_5")
         opps.append(
             Opportunity(
                 ticker=sym.upper(),
@@ -294,11 +347,12 @@ def scan_live_etf_wide_spreads(
                 chg_5d_pct=None,
                 horizon_label=f"{dte}d",
                 setup_summary=(
-                    f"{strat_label} {k_short:g}/{k_long:g} exp {exp} · "
+                    f"{strat_label} {k_short:g}/{k_long:g} ({legs.width_pct * 100:.1f}% wide) exp {exp} · "
+                    f"short Δ{short_delta:+.2f} · "
                     f"Mid ${cr_mid:.2f} · Min Limit ${ladder.p_walk:.2f} · Risk ${max_risk_usd:,.0f}"
                 ),
-                badges=("LIVE_CHAIN", f"DTE:{dte}", f"LIMIT>={ladder.p_walk:.2f}", "TP50_21DTE"),
-                risk_flags=("LIMIT_ONLY_NO_MKT",),
+                badges=("LIVE_CHAIN", f"DTE:{dte}", f"Δ{short_delta:+.2f}", f"LIMIT>={ladder.p_walk:.2f}", "TP50_21DTE"),
+                risk_flags=tuple(flags),
                 friction_label=f"{fric_ratio*100:.1f}% cr",
                 friction_value=round(fric_ratio, 4),
                 confluence_count=1,
@@ -308,10 +362,20 @@ def scan_live_etf_wide_spreads(
                     "dte": dte,
                     "short_strike": k_short,
                     "long_strike": k_long,
+                    "short_delta": round(short_delta, 4),
+                    "short_iv": None if legs.short.iv is None else round(float(legs.short.iv), 4),
+                    "net_delta": None if legs.net_delta is None else round(float(legs.net_delta), 4),
+                    "width": round(width, 4),
+                    "width_pct": round(legs.width_pct, 4),
                     "credit_mid": round(cr_mid, 2),
                     "credit_cross": round(cr_cross, 2),
                     "walk_away_limit": ladder.p_walk,
                     "max_risk_usd": round(max_risk_usd, 2),
+                    "short_oi": legs.short.open_interest,
+                    "long_oi": legs.long.open_interest,
+                    "rule": "O1: nearest 90 DTE in [60,120], short nearest 0.25 delta (+/-0.08), long 5% of spot OTM",
+                    "delta_source": "mid-implied IV, Black-Scholes" if legs.short.iv is not None else "chain",
+                    "rate_source": r_src,
                 },
             )
         )
@@ -325,4 +389,20 @@ def scan_live_etf_wide_spreads(
             pass
 
     opps.sort(key=lambda o: (o.friction_value, o.ticker))
-    return opps, warnings
+    return LiveScanResult(opportunities=opps, warnings=warnings, skipped=skipped, rate_source=r_src)
+
+
+def scan_live_etf_wide_spreads(
+    symbols: Sequence[str] = DEFAULT_LIQUID_ETFS,
+    *,
+    side: str = "bull_put",
+    max_friction_to_credit: float = 0.25,
+    fetch_fn: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    risk_free: Optional[float] = None,
+) -> Tuple[List[Opportunity], List[str]]:
+    """`(opportunities, fetch warnings)` — see scan_live_etf_wide_spreads_detailed for skip reasons."""
+    res = scan_live_etf_wide_spreads_detailed(
+        symbols, side=side, max_friction_to_credit=max_friction_to_credit,
+        fetch_fn=fetch_fn, risk_free=risk_free,
+    )
+    return res.opportunities, res.warnings

@@ -589,7 +589,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             now_fn: Optional[Callable[[], datetime]] = None,
                             online_fn: Optional[Callable[[], bool]] = None,
                             progress: Optional[Callable[[str], None]] = None,
-                            discovery_prices_fn: Optional[Callable] = None) -> dict:
+                            discovery_prices_fn: Optional[Callable] = None,
+                            lens_snapshot_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -786,6 +787,21 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
             ran.append("discovery-prices:" + ("complete" if counts.get("complete") else "incomplete(will retry)"))
     except Exception as exc:
         ran.append(f"discovery-prices:failed({type(exc).__name__}; will retry)")
+
+    # 4a-iv. Discover lens forward record (docs/PREREG_DISCOVER_LENS_FORWARD_20261125.md).
+    #     Local archives only — no network. After the price refresh above, so
+    #     the lists reflect today's bars; each row is keyed on its own data date.
+    try:
+        from src.topdown import forward_log as _lf
+        _cur = now_fn()
+        _cur_today = _cur.strftime("%Y-%m-%d")
+        if _lf.due(state, _cur_today, _cur.hour * 100 + _cur.minute):
+            _step("Recording the Discover idea lists (once a day)…")
+            counts = (lens_snapshot_fn or _lf.run_snapshot)() or {}
+            state["last_lens_snapshot"] = _cur_today
+            ran.append(f"lens-snapshot:{counts.get('rows_new', 0)}new/{counts.get('rows_seen', 0)}")
+    except Exception as exc:
+        ran.append(f"lens-snapshot:failed({type(exc).__name__}; will retry)")
 
     # 4b. Forward marks for recorded candidates — gives the REFUSED population
     #     outcomes, which is the only way the ranker can ever be validated: the

@@ -14,7 +14,7 @@ Every panel ends with a dim "Source · as of" line.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from rich import box
 from rich.console import Group
@@ -381,6 +381,42 @@ def null_ledger_panel() -> Panel:
                  border_style=GREY)
 
 
+def forward_panel(rep: Sequence[Any]) -> Panel:
+    """Forward record of the lenses: counts always; outcomes only after the preregistered read date."""
+    from .forward_log import MIN_WEEKS, PREREG, READ_NOT_BEFORE, status_line
+
+    any_open = any(not r.locked for r in rep)
+    t = Table(box=box.SIMPLE_HEAD, pad_edge=False, show_edge=False)
+    t.add_column("Lens", style="bold", no_wrap=True)
+    t.add_column("Label", no_wrap=True)
+    t.add_column("Hold", justify="right", no_wrap=True)
+    t.add_column("Weeks", justify="right", no_wrap=True)
+    t.add_column("Rows", justify="right", no_wrap=True)
+    t.add_column("Since", no_wrap=True)
+    if any_open:
+        t.add_column("Excess vs SPY", justify="right", no_wrap=True)
+        t.add_column("99.17% CI", justify="right", no_wrap=True)
+        t.add_column("Read")
+    for r in rep:
+        cells = [r.lens_id, chip(r.label), f"{r.horizon}d", f"{r.weeks_recorded}/{MIN_WEEKS}", str(r.rows),
+                 r.first or "—"]
+        if any_open:
+            if r.locked:
+                cells += ["—", "—", r.lock_reason]
+            else:
+                cells += [f"{r.mean_excess * 100:+.2f}%",
+                          f"[{r.ci_bonf[0] * 100:+.2f}, {r.ci_bonf[1] * 100:+.2f}]", r.proposal]
+        t.add_row(*cells)
+    head = Text(status_line(rep), style="bold")
+    lock = (Text("Outcomes are not computed yet: the read unlocks on " + READ_NOT_BEFORE
+                 + f" with {MIN_WEEKS} complete weeks per lens (preregistered, so nobody can peek and re-tune).",
+                 style=AMBER) if not any_open else Text(""))
+    rule = Text(f"Rule: {PREREG}. One observation = one lens-week; entry the session after each row's "
+                "data date; 10 bps cost; Bonferroni 99.17% CI across 6 lenses.", style="dim")
+    return Panel(Group(head, lock, t, rule), title="Discover lenses — forward record", title_align="left",
+                 border_style=GREY)
+
+
 def sector_members_panel(hub: DiscoveryHub, etf: str) -> Panel:
     from .peers import _metrics
     from .sectors import sector_members
@@ -557,8 +593,38 @@ def card_renderable(card: EvidenceCard) -> Group:
         age = Text("—", style="dim") if p.age_days is None else Text(
             f"{p.age_days}d", style=(AMBER if p.age_days > 5 else ""))
         st.add_row(p.section, p.source, p.as_of or "—", age, p.note)
-    src_panel = Panel(st, title="6 Where every number came from", title_align="left", border_style=GREY)
-    return Group(verdict_panel, price_panel, peers_panel, opt_panel, ev_panel, src_panel)
+    src_panel = Panel(st, title="7 Where every number came from", title_align="left", border_style=GREY)
+    return Group(verdict_panel, price_panel, peers_panel, opt_panel, ev_panel, fit_panel(card), src_panel)
+
+
+def fit_panel(card: EvidenceCard) -> Panel:
+    """6 Portfolio fit: what this adds to what you already hold (descriptive, never a gate)."""
+    fit = card.fit
+    g = Table.grid(padding=(0, 2))
+    g.add_column(min_width=14)
+    g.add_column()
+    if fit is None:
+        _kv(g, "Holdings", Text("not checked", style="dim"))
+    else:
+        by_src: Dict[str, List[str]] = {}
+        for h in fit.holdings:
+            label = h.ticker + (f" {h.weight * 100:.0f}%" if h.weight else "")
+            by_src.setdefault(h.source, []).append(label)
+        _kv(g, "You hold", Text(" · ".join(f"{src}: {', '.join(v)}" for src, v in sorted(by_src.items()))
+                                 or "nothing recorded", style="" if by_src else "dim"))
+        for w in fit.warnings:
+            _kv(g, "Overlap", Text("⚠ " + w, style=AMBER))
+        for n in fit.notes:
+            _kv(g, "Note", n)
+        if fit.correlations:
+            _kv(g, "Co-movement", ", ".join(f"{tk} {r:+.2f}" for tk, r in fit.correlations[:5]))
+        if fit.diversifiers:
+            _kv(g, "Least correlated", Text(", ".join(f"{tk} {r:+.2f}" for tk, r in fit.diversifiers)
+                                            + "  (sleeve-universe ETFs; information, not a recommendation)"))
+        if not fit.warnings and by_src:
+            _kv(g, "Verdict", Text("no concentration flag", style="dim"))
+        _kv(g, "Method", Text(fit.method, style="dim"))
+    return Panel(g, title="6 Portfolio fit", title_align="left", border_style=GREY)
 
 
 def hub_overview(hub: DiscoveryHub) -> Group:
@@ -569,4 +635,5 @@ __all__ = [
     "LABEL_STYLE", "LABEL_MEANING", "STEP_TITLES", "chip", "signed", "legend", "breadcrumb",
     "market_panel", "board_table", "board_panel", "lens_header", "lens_table", "lens_panel",
     "ideas_overview", "null_ledger_panel", "tag_chips", "tag_legend", "freshness_line", "sector_members_panel", "card_renderable", "hub_overview",
+    "fit_panel", "forward_panel",
 ]

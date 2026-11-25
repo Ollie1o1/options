@@ -8,7 +8,20 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
-## 2026-11-25 (newest) — the live VALIDATED sleeve was not the validated rule
+## 2026-11-25 (newest, later) — the option-contract search, and the live O1 rule
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **The screener searched only the front of its DTE window.** It spent its per-symbol expiration budget (`max_expirations = 4`) on the 4 *nearest* expirations inside the window. Measured on `data/candidates.db` (scans 11-10..11-24, Credit Spreads, window 7–45 DTE): SPY/QQQ/IWM were only ever priced at **9–15 DTE**, weekly single names stopped at ~24 DTE; only 5% of Credit Spreads candidates were 29–45 DTE. Now the same 4 requests are spread across the window (ends always included); live 11-25 listing: SPY nearest `[7, 8, 9, 12]` → spread `[7, 16, 23, 36]` (nothing is listed 37–45). Legacy kept as `config.json → expiry_selection: "nearest"`. | **FIXED** | `src/expiry_selection.py`, `tests/test_expiry_selection.py` |
+| 2 | **Monthly (third-Friday) expirations quote tighter than the weeklies around them.** `data/chain_archive.db` 09-01..11-18, \|delta\| 0.15–0.40, DTE 14–60: a monthly's median relative bid-ask was **1.6 pp of mid tighter** than the average of the weeklies one week either side, tighter in **93.5% of 646** comparisons, 36 of 37 symbols (PFE the exception). The spread selector prefers a monthly near each interior target. | **BASELINE** | same |
+| 3 | **The live `etf_wide_spread` (Test O1, LEAD) scanner sold a fixed 6% OTM put, not the tested −0.25Δ.** 6% OTM is −0.25Δ only near 20% IV (~−0.16Δ at 13% IV, ~−0.34Δ at 40%). Now one implementation of the O1 leg rule (`select_legs`) is shared; `tests/radar/test_wide_spread_rule_parity.py` replays `scripts/backtest_odx_wide_60_120.run_side` on a synthetic chain and asserts identical expiration/strikes for every entry (a −0.20Δ mutant fails it). Live deltas come from mid-implied IV (Black-Scholes, r = 3m T-bill). Non-SPY rows are flagged `TESTED_ON_SPY_ONLY`; wings that land far from 5% are flagged. | **FIXED** | `src/radar/wide_spread_rule.py` |
+| 4 | **Yahoo serves 0/0 quotes on most strikes for a while after the open.** 11-25 09:46 ET: QQQ, IWM, XLK, XLF had **0** two-sided puts within 15% of spot on the O1 expiry (SPY 20/33). The live scan now says so per symbol ("Yahoo quotes thin — only 0 of 42 strikes… retry later") instead of silently dropping it; every skipped ETF gets its reason in the TUI, `opt guide` and the web cockpit. | **FIXED** (display) | `src/radar/live_options.py` |
+| 5 | **The `--health` "alloc drift" WARN (Long Put 33% vs 16%) was an artifact of the Bull Put block.** The window was 20 pre-block Bull Puts + 10 Long Puts, judged against weights still holding the blocked Bull Put at 70%. Blocked structures are now dropped, the rest renormalised, and only entries after the last blocked-structure entry counted (today: 9 — too few to read). A survivor flag names structures with zero entries (Long Call, Short Put), whose absence raises the rest's share without any allocation defect. | **FIXED** | `src/strategy_allocation.py` |
+| 6 | **Test O1's execution premise is now a preregistered test:** mean realized concession `k` over ≥ 20 real `O1` fills, one-sided 95% bounds vs 0.35 → PASS / FAIL / INCONCLUSIVE. 0 fills today. The TUI fill logger pre-fills the spread's own quote from the live row (combo `k` = the backtest's per-leg `k`). | **PENDING** (0/20) | `PREREG_O1_FILL_K_20261125.md` |
+| 7 | **Discover lenses now have a forward record** (daily, after the close, keyed on each row's own data date) and a preregistered read: one lens-week = one observation, excess vs SPY net of 10 bps, Bonferroni 99.17% CI; no outcome computed before 2027-05-25 + 26 weeks. First record: 11-24 session. | **PENDING** (≥ 2027-05-25) | `PREREG_DISCOVER_LENS_FORWARD_20261125.md` |
+| 8 | Evidence Card gained **6 Portfolio fit**: same-sector count, 126d co-movement with what you hold (own picks, long-term fills, core-sleeve targets), and the least-correlated sleeve ETFs. Descriptive; thresholds are rules of thumb. XOM today: rho 0.90 with the sleeve's XLE. | BASELINE | `src/topdown/portfolio_fit.py` |
+
+## 2026-11-25 — the live VALIDATED sleeve was not the validated rule
 
 | # | Finding | Status | Detail |
 |---|---|---|---|

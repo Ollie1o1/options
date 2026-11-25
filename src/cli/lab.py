@@ -49,6 +49,7 @@ def lab_health(ctx: click.Context, as_json: bool) -> None:
         {"date": "2027-01-15", "name": "Bull Put §2 Forward", "cmd": "python -m scripts.delta_matched_benchmark"},
         {"date": "2027-01-20", "name": "B1-F ETF Bear Call Forward", "cmd": "python -m scripts.bear_call_absolute --forward"},
         {"date": "2027-03-15", "name": "E2 Earnings Forward", "cmd": "python -m scripts.earnings_premium_dolt --forward"},
+        {"date": "2027-05-25", "name": "Discover lens forward read (26 weeks)", "cmd": "opt discover --forward"},
     ]
     payload = {"disk_free_gb": free_gb, "databases": db_info, "pending_readouts": readouts}
     if use_json:
@@ -107,12 +108,17 @@ def lab_fills(ctx: click.Context, as_json: bool) -> None:
     use_json = as_json or bool((ctx.obj or {}).get("json"))
     no_color = bool((ctx.obj or {}).get("no_color"))
     fills_db = (ctx.obj or {}).get("fills_db", "data/fills.db")
+    from src.fill_experiment import o1_fill_verdict, o1_progress_line
+
     summary = fill_rate_summary(db_path=fills_db)
+    o1 = o1_fill_verdict(fills_db)
     if use_json:
-        click.echo(json.dumps(summary, indent=2))
+        click.echo(json.dumps({**summary, "o1": o1}, indent=2))
         return
     console = make_console(no_color=no_color)
-    console.print(f"[bold]Real-Fill Experiment:[/bold] {summary['total_filled']}/{summary['total_attempts']} filled")
+    console.print(f"[bold]{o1_progress_line(o1)}[/bold]")
+    console.print(f"[dim]{o1['reason']} · rule: {o1['prereg']} · log with a structure starting 'O1'[/dim]")
+    console.print(f"[bold]Real-Fill Experiment (all structures):[/bold] {summary['total_filled']}/{summary['total_attempts']} filled")
     if summary["groups"]:
         tbl = Table(pad_edge=False)
         tbl.add_column("Broker")

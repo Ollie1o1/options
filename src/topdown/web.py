@@ -5,7 +5,7 @@ The DataFrame builders are pure (no Streamlit) so they can be unit-tested; only
 """
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
@@ -260,7 +260,26 @@ def _render_card(st: Any, card: EvidenceCard) -> None:
         f"Corr w/ {card.ticker}": st.column_config.NumberColumn(format="%.2f"),
         "IV/RV": st.column_config.NumberColumn(format="%.2f"),
     })
-    st.markdown("**6 · Where every number came from**")
+    st.markdown("**6 · Portfolio fit** — what this adds to what you already hold (descriptive, never a gate)")
+    fit = card.fit
+    if fit is None:
+        st.caption("Holdings not checked.")
+    else:
+        by_src: Dict[str, List[str]] = {}
+        for h in fit.holdings:
+            by_src.setdefault(h.source, []).append(h.ticker + (f" {h.weight * 100:.0f}%" if h.weight else ""))
+        lines = ["- You hold: " + (" · ".join(f"{k}: {', '.join(v)}" for k, v in sorted(by_src.items()))
+                                  or "nothing recorded")]
+        lines += [f"- <span style='color:#d6a452'>⚠ {w}</span>" for w in fit.warnings]
+        lines += [f"- {n}" for n in fit.notes]
+        if fit.correlations:
+            lines.append("- Co-movement (126d): " + ", ".join(f"{tk} {r:+.2f}" for tk, r in fit.correlations[:5]))
+        if fit.diversifiers:
+            lines.append("- Least correlated sleeve-universe ETFs: "
+                         + ", ".join(f"{tk} {r:+.2f}" for tk, r in fit.diversifiers) + " (information, not a recommendation)")
+        st.markdown("\n".join(lines), unsafe_allow_html=True)
+        st.caption(fit.method)
+    st.markdown("**7 · Where every number came from**")
     st.dataframe(provenance_frame(card), width="stretch", hide_index=True)
 
 

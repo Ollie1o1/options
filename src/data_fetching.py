@@ -2020,6 +2020,25 @@ def cboe_fallback_enabled() -> bool:
     return _CBOE_FALLBACK_ENABLED
 
 
+# ── Expiration selection ─────────────────────────────────────────────────────
+# "spread" (default) spaces the per-symbol chain requests across the DTE window;
+# "nearest" is the legacy front-of-window behaviour. config.json → expiry_selection.
+_EXPIRY_METHOD = "spread"
+
+
+def set_expiry_selection(method: Optional[str]) -> str:
+    """Set how fetch_options_yfinance picks expirations; returns the method in force."""
+    global _EXPIRY_METHOD
+    from .expiry_selection import METHODS
+    m = str(method or "spread").strip().lower()
+    _EXPIRY_METHOD = m if m in METHODS else "spread"
+    return _EXPIRY_METHOD
+
+
+def expiry_selection() -> str:
+    return _EXPIRY_METHOD
+
+
 def _cboe_frames(symbol: str, expirations: Sequence[str]) -> List["pd.DataFrame"]:
     """CBOE's delayed chain, shaped like the yfinance frames it stands in for.
 
@@ -2313,7 +2332,9 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     _init_yf_session()  # Lazy init curl_cffi session
     _init_request_cache()  # Lazy init: first fetch triggers cache setup, not import
 
-    _cache_key = (symbol, min_dte, max_dte)
+    # max_expiries and the selection method are part of the key: the same
+    # window with a different budget selects a different set of expirations.
+    _cache_key = (symbol, min_dte, max_dte, max_expiries, _EXPIRY_METHOD)
     if _cache_key in _CHAIN_CACHE:
         return _CHAIN_CACHE[_cache_key]
 
@@ -2456,26 +2477,21 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
     if not expirations:
         raise RuntimeError(f"No options expirations available for {symbol}.")
 
-    if min_dte is not None or max_dte is not None:
-        from datetime import datetime as _dt, timezone as _tz
-        _now = _dt.now(_tz.utc).date()
-        _lo = min_dte if min_dte is not None else 0
-        _hi = max_dte if max_dte is not None else 10_000
-        _filtered = []
-        for _e in expirations:
-            try:
-                _d = (pd.Timestamp(_e).date() - _now).days
-            except Exception:
-                continue
-            if _lo <= _d <= _hi:
-                _filtered.append(_e)
-        if _filtered:
-            expirations = _filtered
-
+    # Which expirations to spend the chain requests on: spread across the DTE
+    # window (default), or the legacy nearest-N. See src/expiry_selection.py
+    # for the measurement behind the change.
+    from datetime import datetime as _dt, timezone as _tz
+    from .expiry_selection import select_expirations
+    _now = _dt.now(_tz.utc).date()
     num_expiries_to_fetch = max_expiries
     if max_expiries == 1 and len(expirations) > 1:
         num_expiries_to_fetch = 2
-    expirations_to_scan = expirations[:num_expiries_to_fetch]
+    _windowed = min_dte is not None or max_dte is not None
+    expirations_to_scan = select_expirations(
+        expirations, n=num_expiries_to_fetch, today=_now,
+        min_dte=(min_dte or 0) if _windowed else None,
+        max_dte=max_dte, method=_EXPIRY_METHOD,
+    )
 
     # Serial expiration fetch: relies on global _yf_throttle inside _process_option_chain.
     # Was ThreadPoolExecutor(max_workers=4) — combined with outer workers=3 that gave 12-way

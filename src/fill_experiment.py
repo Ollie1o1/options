@@ -190,3 +190,93 @@ def fill_rate_summary(db_path: str = DEFAULT_FILLS_DB) -> Dict[str, Any]:
         "overall_fill_rate": round(tot_fill / len(rows), 4),
         "groups": groups,
     }
+
+
+# ── Test O1 execution verdict (docs/PREREG_O1_FILL_K_20261125.md) ────────────
+
+O1_TARGET_K = 0.35
+O1_MIN_FILLS = 20
+O1_CAP_FILLS = 40
+O1_PREFIX = "O1"
+
+
+def is_o1_structure(structure: Any) -> bool:
+    """A fill belongs to the Test O1 sample iff its structure starts with 'O1'."""
+    return str(structure or "").strip().upper().startswith(O1_PREFIX)
+
+
+def o1_fill_verdict(db_path: str = DEFAULT_FILLS_DB) -> Dict[str, Any]:
+    """Preregistered O1 verdict: is the mean realized concession k <= 0.35?
+
+    COLLECTING (< 20 filled) · PASS (one-sided 95% upper bound <= 0.35) ·
+    FAIL (lower bound > 0.35) · INCONCLUSIVE (otherwise; cap 40, then re-run
+    the estimator at the measured k). Never raises on a missing DB.
+    """
+    import math as _m
+
+    rows: List[Dict[str, Any]] = []
+    if os.path.exists(db_path):
+        init_fills_db(db_path)
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = [dict(r) for r in con.execute("SELECT * FROM real_fills ORDER BY fill_id").fetchall()]
+        finally:
+            con.close()
+    o1 = [r for r in rows if is_o1_structure(r.get("structure"))]
+    filled = [r for r in o1 if r.get("filled")]
+    ks: List[float] = []
+    for r in filled:
+        px = r["fill_price"] if r.get("fill_price") is not None else r["limit_posted"]
+        ks.append(compute_concession_pct(r["side"], r["bid"], r["ask"], px))
+    n = len(ks)
+    out: Dict[str, Any] = {
+        "attempts": len(o1),
+        "filled": n,
+        "needed": O1_MIN_FILLS,
+        "target_k": O1_TARGET_K,
+        "fill_rate": (n / len(o1)) if o1 else None,
+        "mean_k": None,
+        "median_k": None,
+        "k_lo": None,
+        "k_hi": None,
+        "ks": [round(k, 4) for k in ks],
+        "fill_rate_flag": bool(o1) and n < 0.5 * len(o1),
+        "prereg": "docs/PREREG_O1_FILL_K_20261125.md",
+    }
+    if n:
+        mean = sum(ks) / n
+        srt = sorted(ks)
+        med = srt[n // 2] if n % 2 else 0.5 * (srt[n // 2 - 1] + srt[n // 2])
+        out["mean_k"], out["median_k"] = round(mean, 4), round(med, 4)
+        if n >= 2:
+            from scipy.stats import t as _t
+
+            sd = _m.sqrt(sum((k - mean) ** 2 for k in ks) / (n - 1))
+            half = float(_t.ppf(0.95, n - 1)) * sd / _m.sqrt(n)
+            out["k_lo"], out["k_hi"] = round(mean - half, 4), round(mean + half, 4)
+    if n < O1_MIN_FILLS:
+        out["verdict"] = "COLLECTING"
+        out["reason"] = f"{n}/{O1_MIN_FILLS} filled O1 orders — no verdict before {O1_MIN_FILLS}"
+    elif out["k_hi"] is not None and out["k_hi"] <= O1_TARGET_K:
+        out["verdict"] = "PASS"
+        out["reason"] = f"mean k {out['mean_k']:.2f}, 95% upper bound {out['k_hi']:.2f} <= {O1_TARGET_K}"
+    elif out["k_lo"] is not None and out["k_lo"] > O1_TARGET_K:
+        out["verdict"] = "FAIL"
+        out["reason"] = (f"mean k {out['mean_k']:.2f}, 95% lower bound {out['k_lo']:.2f} > {O1_TARGET_K}"
+                         " — re-run the O1 estimator at the measured k before any further O1 entry")
+    else:
+        out["verdict"] = "INCONCLUSIVE"
+        out["reason"] = (f"mean k {out['mean_k']:.2f}, bounds [{out['k_lo']:.2f}, {out['k_hi']:.2f}] straddle "
+                         f"{O1_TARGET_K}" + (" — at the 40-fill cap: re-run the O1 estimator at the measured k"
+                                            if n >= O1_CAP_FILLS else " — keep collecting (cap 40)"))
+    return out
+
+
+def o1_progress_line(v: Dict[str, Any]) -> str:
+    """One line for the LAB tab / web sidebar / CLI."""
+    k = "—" if v.get("mean_k") is None else f"{v['mean_k']:.2f}"
+    rate = "" if v.get("fill_rate") is None else f" · fill rate {v['fill_rate']:.0%}"
+    flag = " · ⚠ under half of attempts filled" if v.get("fill_rate_flag") else ""
+    return (f"TEST O1 FILLS {v['filled']}/{v['needed']} · mean k {k} (target ≤ {v['target_k']:.2f})"
+            f"{rate} · {v['verdict']}{flag}")
