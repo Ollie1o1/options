@@ -380,9 +380,26 @@ def main() -> None:
             continue
         if choice in ("W", "WEB"):
             _loading("Launching Visual Web Cockpit (Streamlit)…")
+            print(
+                fmt.style("  Press Ctrl+C here when finished to return to the desk menu.", "muted")
+                if HAS_UI
+                else "  Press Ctrl+C here when finished to return to the desk menu.",
+                flush=True,
+            )
             import subprocess
+            proc = None
             try:
-                subprocess.run([sys.executable, "-m", "streamlit", "run", "src/dashboard.py"], check=False)
+                proc = subprocess.Popen([sys.executable, "-m", "streamlit", "run", "src/dashboard.py"])
+                proc.wait()
+            except KeyboardInterrupt:
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                print("\n  Web dashboard closed — returning to desk menu.")
             except Exception as exc:
                 print(f"  Web dashboard unavailable ({exc}) — run `streamlit run src/dashboard.py`.")
             continue

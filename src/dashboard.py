@@ -256,11 +256,11 @@ def render_main() -> None:
     # Sidebar quick actions
     with st.sidebar:
         st.markdown("## 🧭 Daily Desk Controls")
-        if st.button("🔄 Refresh Local Radar", type="primary", use_container_width=True):
+        if st.button("🔄 Refresh Local Radar", type="primary", width="stretch"):
             with st.spinner("Running local scanners…"):
                 st.session_state.radar_snap = provider.get_radar(refresh=True)
             st.success("Radar refreshed.")
-        if st.button("⚡ Scan Live 60–120d ETF Spreads", use_container_width=True):
+        if st.button("⚡ Scan Live 60–120d ETF Spreads", width="stretch"):
             with st.spinner("Scanning live ETF option chains (Test O1)…"):
                 live_opps, warns = provider.get_live_etf_options()
                 from src.radar.engine import merge_confluence
@@ -268,7 +268,7 @@ def render_main() -> None:
                 base = [o for o in st.session_state.radar_snap.opportunities if "LIVE_CHAIN" not in o.badges]
                 st.session_state.radar_snap.opportunities = merge_confluence(base + live_opps)
             st.success(f"Added {len(live_opps)} live 60–120d ETF spread(s).")
-        if st.button("📥 Update Daily OHLCV Prices", use_container_width=True):
+        if st.button("📥 Update Daily OHLCV Prices", width="stretch"):
             with st.spinner("Refreshing Yahoo daily closes…"):
                 res = provider.update_prices(expand_universe=False)
                 st.session_state.radar_snap = provider.get_radar(refresh=True)
@@ -339,7 +339,7 @@ def render_main() -> None:
                     ]
                 )
                 fig_pie.update_layout(template="plotly_dark", height=280, margin=dict(l=10, r=10, t=20, b=10))
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(fig_pie, width="stretch")
             else:
                 st.info("No Core Allocation available yet — click Refresh Local Radar.")
 
@@ -373,7 +373,7 @@ def render_main() -> None:
                         for o in plan.orders
                     ]
                 )
-                st.dataframe(ord_df, use_container_width=True, hide_index=True)
+                st.dataframe(ord_df, width="stretch", hide_index=True)
 
     # ── TAB 2: UNIFIED OPPORTUNITY RADAR ─────────────────────────────────────
     with tab_radar:
@@ -423,7 +423,7 @@ def render_main() -> None:
                 )
                 sel = st.dataframe(
                     rdf,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     selection_mode="single-row",
                     on_select="rerun",
@@ -444,7 +444,7 @@ def render_main() -> None:
             m1.metric("Spot", f"${dos.spot:.2f}" if dos.spot else "N/A", f"{dos.chg_1d_pct:+.2f}%" if dos.chg_1d_pct is not None else None)
             m2.metric("ATM IV / RV20", f"{dos.atm_iv:.1f}%" if dos.atm_iv else "—", f"RV {dos.rv_20_ann:.1f}%" if dos.rv_20_ann else None)
             m3.metric("RSI(2) / 200MA", f"{dos.rsi_2:.1f}" if dos.rsi_2 is not None else "—", f"{dos.dist_sma200_pct:+.1f}%" if dos.dist_sma200_pct is not None else None)
-            st.plotly_chart(build_dossier_price_figure(dos), use_container_width=True)
+            st.plotly_chart(build_dossier_price_figure(dos), width="stretch")
             if dos.headlines:
                 st.markdown("**Recent Headlines:**")
                 for h in dos.headlines[:2]:
@@ -495,14 +495,14 @@ def render_main() -> None:
                 for v in vehicles
             ]
         )
-        st.dataframe(vdf, use_container_width=True, hide_index=True)
+        st.dataframe(vdf, width="stretch", hide_index=True)
 
         p_left, p_right = st.columns(2)
         with p_left:
             rnd_fig, _src = build_rnd_comparison_figure(spot_wb, iv_wb, view_wb)
-            st.plotly_chart(rnd_fig, use_container_width=True)
+            st.plotly_chart(rnd_fig, width="stretch")
         with p_right:
-            st.plotly_chart(build_vehicle_edge_figure(vehicles, float(wb_risk)), use_container_width=True)
+            st.plotly_chart(build_vehicle_edge_figure(vehicles, float(wb_risk)), width="stretch")
 
     # ── TAB 4: BOOK, EXIT ALERTS & REAL-FILL EXPERIMENT ──────────────────────
     with tab_book:
@@ -515,20 +515,20 @@ def render_main() -> None:
             st.markdown("#### Stock & ETF Picks (`data/own_picks.db`)")
             picks = book.get("equity_picks") or []
             if picks:
-                st.dataframe(pd.DataFrame(picks), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(picks), width="stretch", hide_index=True)
             else:
                 st.info("No stock/ETF picks logged yet. Use `opt log` or `[l]` in `opt` TUI.")
             st.markdown("#### Open Paper Option Positions (`paper_trades.db`)")
             p_opts = book.get("paper_options") or []
             if p_opts:
-                st.dataframe(pd.DataFrame(p_opts), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(p_opts), width="stretch", hide_index=True)
             else:
                 st.caption("0 open paper option positions.")
         with b2:
             st.markdown("#### Long-Term Accumulation Plan (`longterm_plan.json`)")
             lt = book.get("longterm_holdings") or []
             if lt:
-                st.dataframe(pd.DataFrame(lt), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(lt), width="stretch", hide_index=True)
             else:
                 st.caption("No long-term tranches configured.")
             st.markdown("#### Log Real Limit-Order Fill (`data/fills.db`)")
@@ -605,7 +605,7 @@ def render_main() -> None:
                     c for c in ["symbol", "type", "strike", "expiration", "bid", "ask", "premium", "impliedVolatility", "delta", "ev_per_contract", "volume", "openInterest"]
                     if c in board.kept.columns
                 ]
-                st.dataframe(board.kept[show_cols], use_container_width=True, hide_index=True)
+                st.dataframe(board.kept[show_cols], width="stretch", hide_index=True)
             else:
                 st.warning("Nothing cleared the friction/EV gates — try Wide 60–120d ETF Spreads or Shares vs Options above.")
 

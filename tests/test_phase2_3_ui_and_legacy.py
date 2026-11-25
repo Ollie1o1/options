@@ -478,6 +478,34 @@ class TestPhase3LegacyAndDashboard(unittest.TestCase):
         self.assertIn("HELP", rows[-2])
         self.assertIn("QUIT", rows[-1])
 
+        # Verify zero deprecated Streamlit use_container_width calls remain
+        dash_src = (Path(__file__).resolve().parent.parent / "src" / "dashboard.py").read_text()
+        self.assertNotIn("use_container_width", dash_src)
+
+        # Verify Ctrl+C exiting [W] WEB returns cleanly to the launcher menu
+        class _FakeProc:
+            def __init__(self):
+                self.terminated = False
+
+            def wait(self, timeout=None):
+                if not self.terminated:
+                    raise KeyboardInterrupt()
+                return 0
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self):
+                self.terminated = True
+
+        fake_proc = _FakeProc()
+        with patch("sys.argv", ["run.py"]), \
+             patch.object(launcher, "_show_menu", side_effect=["W", "Q"]) as show_mock, \
+             patch("subprocess.Popen", return_value=fake_proc):
+            launcher.main()
+        self.assertTrue(fake_proc.terminated)
+        self.assertEqual(show_mock.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
