@@ -46,8 +46,9 @@ class AccountLegalityTest(unittest.TestCase):
                                  f"{r.spec.id} sells naked but is filed as both")
 
     def test_tfsa_setups_are_secured_or_covered(self):
-        allowed = ("short_put", "covered_call", "bull_put", "bear_call",
-                   "iron_condor", "long_call", "long_put")
+        # CRA prohibits margin in a Canadian TFSA — multi-leg spreads (bull_put,
+        # bear_call, iron_condor) are not TFSA-eligible regardless of defined risk.
+        allowed = ("short_put", "covered_call", "long_call", "long_put")
         for r in LIBRARY:
             if "tfsa" in r.accounts or "both" in r.accounts:
                 self.assertIn(r.spec.structure, allowed,

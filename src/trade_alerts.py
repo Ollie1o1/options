@@ -64,11 +64,9 @@ def load_settings(config_path: Path = ROOT / "config.json") -> Dict[str, Any]:
 
 
 def load_env(env_path: Path = ROOT / ".env") -> None:
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(env_path)
-    except ImportError:
-        pass
+    from src.paths import load_project_env
+
+    load_project_env(env_path)
 
 
 def channels() -> Dict[str, Dict[str, str]]:

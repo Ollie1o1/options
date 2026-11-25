@@ -176,3 +176,66 @@ def lab_log_fill(
         db_path=fills_db,
     )
     click.echo(f"✓ Logged fill attempt #{fid} ({broker} {ticker.upper()} {structure}, filled={filled})")
+
+
+CLOSED_STUDY_ARTIFACTS = (
+    ("data/squeeze_prices.db", "CLOSED study: squeeze_equity raw closes (2026-11-24)"),
+    ("data/squeeze_backtest.db", "CLOSED study: squeeze_equity FINRA SI panel (2026-11-24)"),
+    ("data/squeeze_panel.pkl", "CLOSED study: squeeze_equity panel pickle"),
+    ("data/squeeze_panel_partial.pkl", "CLOSED study: squeeze_equity partial pickle"),
+    ("data/catalyst_pit.db", "CLOSED study: biotech_runup ClinicalTrials PIT cache (2026-11-24)"),
+    ("data/paper_trades.db", "Empty 0-byte ghost file (real ledger is ./paper_trades.db)"),
+)
+
+
+@lab_group.command("cleanup")
+@click.option("--confirm", is_flag=True, help="Actually delete listed closed-study caches (default is dry-run).")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def lab_cleanup(ctx: click.Context, confirm: bool, as_json: bool) -> None:
+    """Inspect (or with --confirm, reclaim) disk space used by CLOSED research caches."""
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    no_color = bool((ctx.obj or {}).get("no_color"))
+    found = []
+    total_mb = 0.0
+    for rel, reason in CLOSED_STUDY_ARTIFACTS:
+        p = repo_path(rel)
+        if os.path.exists(p):
+            mb = round(os.path.getsize(p) / (1024 ** 2), 2)
+            # Also count -wal / -shm sidecars if present
+            sidecars = [s for s in (f"{p}-wal", f"{p}-shm") if os.path.exists(s)]
+            total_mb += mb
+            deleted = False
+            if confirm:
+                os.remove(p)
+                for sc in sidecars:
+                    try:
+                        os.remove(sc)
+                    except OSError:
+                        pass
+                deleted = True
+            found.append({"path": rel, "size_mb": mb, "reason": reason, "deleted": deleted})
+
+    payload = {
+        "dry_run": not confirm,
+        "reclaimable_mb": round(total_mb, 2),
+        "files": found,
+    }
+    if use_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    console = make_console(no_color=no_color)
+    if not found:
+        console.print("[#5ec98d]No closed-study cache bloat found.[/]")
+        return
+    tbl = Table(title=f"Closed-Study Cache Inspector ({'DELETED' if confirm else 'DRY RUN'})", pad_edge=False)
+    tbl.add_column("File")
+    tbl.add_column("Size (MB)", justify="right")
+    tbl.add_column("Why Reclaimable")
+    for item in found:
+        tbl.add_row(item["path"], f"{item['size_mb']:.1f}", item["reason"])
+    console.print(tbl)
+    if confirm:
+        console.print(f"[#5ec98d]✓ Reclaimed {total_mb:.1f} MB.[/]")
+    else:
+        console.print(f"[bold]Total reclaimable:[/bold] {total_mb:.1f} MB — run `opt lab cleanup --confirm` to delete.")

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 # src/paths.py -> src/ -> repo root. Same idiom as api.py, backtester.py,
 # ai_cache.py, which anchored themselves individually before this existed.
@@ -66,3 +66,45 @@ def repo_path(path: Union[str, "os.PathLike[str]"]) -> str:
     if text in _SQLITE_KEYWORDS or text.startswith("file:"):
         return text
     return text if os.path.isabs(text) else str(PROJECT_ROOT / text)
+
+
+def load_project_env(
+    env_path: Optional[Union[str, "os.PathLike[str]"]] = None,
+    *,
+    override: bool = False,
+) -> int:
+    """Load key=value pairs from the project's `.env` into `os.environ` (stdlib-only).
+
+    Called at application entrypoints (`opt`, `run.py`, `dashboard.py`,
+    `trade_alerts.py`, `notifications.py`) so keys like `POLYGON_API_KEY`,
+    `ALPHAVANTAGE_API_KEY`, `SEC_EDGAR_CONTACT`, and `DISCORD_WEBHOOK_URL` are
+    available even when AI scoring is disabled. Never overwrites already-set
+    environment variables unless ``override=True``. Returns count of vars set.
+    """
+    target = Path(repo_path(env_path)) if env_path is not None else (PROJECT_ROOT / ".env")
+    if not target.is_file():
+        return 0
+    loaded = 0
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if not key:
+            continue
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if override or key not in os.environ or not os.environ.get(key):
+            os.environ[key] = val
+            loaded += 1
+    return loaded

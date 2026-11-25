@@ -3,7 +3,7 @@
 Base rates are measured, not assumed - see docs/OUTLOOK_FINDINGS.md.
 """
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Tuple
 
 # docs/OUTLOOK_FINDINGS.md: bullish calls hit 66-72%, bearish calls ~30%.
 # The asymmetry is the whole point - bearish views are anti-predictive here.
@@ -105,5 +105,6 @@ class VehicleComparison:
     theta_per_day_usd: float
     delta_dollars: float
     walk_away_label: str
+    walk_away_steps: Tuple[str, ...] = ()
     recommended: bool = False
     caution: str = ""

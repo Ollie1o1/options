@@ -10,8 +10,9 @@ import sys
 import math
 import time
 import logging
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 # ── Resolve project root so load_config("config.json") finds the file ──────
@@ -20,11 +21,14 @@ os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 # ── Internal imports (after chdir so relative paths resolve) ───────────────
+from .paths import load_project_env
 from .options_screener import run_scan, load_config, setup_logging
 from .data_fetching import get_market_context, get_vix_level, determine_vix_regime
+
+load_project_env()
 
 logger = logging.getLogger("api")
 app = FastAPI(title="Options Screener API", version="1.0.0")
@@ -287,3 +291,54 @@ async def scan_watchlist(name: str, n: int = Query(default=10, ge=1, le=50)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Bloomberg × Amber CRT Local Web Cockpit (`/desk`) ──────────────────────
+
+def _build_desk_overview(
+    *,
+    refresh: bool = False,
+    provider: Optional[Any] = None,
+) -> Dict[str, Any]:
+    from .web_terminal import build_desk_overview
+
+    return build_desk_overview(refresh=refresh, provider=provider)
+
+
+def _build_desk_card(
+    ticker: str,
+    *,
+    provider: Optional[Any] = None,
+) -> Dict[str, Any]:
+    from .web_terminal import build_desk_card
+
+    return build_desk_card(ticker, provider=provider)
+
+
+@app.get("/desk", response_class=HTMLResponse)
+async def desk_terminal_page():
+    """Serve the zero-reload Bloomberg × Amber CRT local Web Cockpit."""
+    from .web_terminal import TERMINAL_HTML
+
+    return HTMLResponse(content=TERMINAL_HTML)
+
+
+@app.get("/desk/api/overview")
+async def desk_api_overview(refresh: int = Query(default=0, ge=0, le=1)):
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    payload = await loop.run_in_executor(_executor, lambda: _build_desk_overview(refresh=bool(refresh)))
+    return JSONResponse(payload)
+
+
+@app.get("/desk/api/card/{ticker}")
+async def desk_api_card(ticker: str):
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    try:
+        payload = await loop.run_in_executor(_executor, lambda: _build_desk_card(ticker))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(payload)

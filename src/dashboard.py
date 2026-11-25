@@ -219,6 +219,9 @@ def calculate_payoff(option_row: Dict[str, Any], spot_price: float, range_pct: f
 
 def render_main() -> None:
     import streamlit as st
+    from src.paths import load_project_env
+
+    load_project_env()
 
     st.set_page_config(
         page_title="Options Desk — Unified Visual Cockpit",
@@ -499,13 +502,14 @@ def render_main() -> None:
 
     # ── TAB 3: SHARES VS OPTIONS EXPRESS WORKBENCH ───────────────────────────
     with tab_wb:
-        wc1, wc2, wc3, wc4, wc5, wc6 = st.columns([1, 1, 1, 0.9, 1, 0.9])
+        wc1, wc2, wc3, wc4, wc5, wc6, wc7 = st.columns([0.9, 0.9, 1.0, 0.8, 0.9, 0.9, 0.8])
         wb_tk = wc1.text_input("Ticker", value=st.session_state.focused_ticker).strip().upper() or "SPY"
         wb_dir = wc2.selectbox("Direction", ["BULLISH", "BEARISH", "NEUTRAL"])
         wb_tgt = wc3.slider("Expected Move %", -25, 25, 6 if wb_dir == "BULLISH" else (-6 if wb_dir == "BEARISH" else 0))
         wb_days = wc4.number_input("Horizon (d)", min_value=5, max_value=180, value=30, step=5)
         wb_risk = wc5.number_input("Risk Budget ($)", min_value=50.0, value=500.0, step=50.0)
-        wb_owns = wc6.toggle("Own 100 sh", value=False)
+        wb_acct = wc6.selectbox("Account", ["tfsa", "taxable"], format_func=lambda a: "TFSA (WS)" if a == "tfsa" else "Taxable (IBKR)")
+        wb_owns = wc7.toggle("Own 100 sh", value=False)
 
         dos_wb = provider.get_dossier(wb_tk, fetch_chain=False)
         spot_wb = dos_wb.spot if dos_wb.spot is not None else 100.0
@@ -520,11 +524,17 @@ def render_main() -> None:
             target_move_pct=t_move,
             horizon_days=int(wb_days),
             risk_budget_usd=float(wb_risk),
-            account_type="tfsa",
+            account_type=wb_acct,
             owns_100_shares=bool(wb_owns),
         )
         vehicles = provider.get_express(view_wb, spot=spot_wb, iv=iv_wb)
         st.success(plain_english_vehicle_verdict(vehicles, view_wb))
+        rec_v = next((v for v in vehicles if v.recommended), vehicles[0] if vehicles else None)
+        if rec_v and rec_v.walk_away_steps:
+            st.info(
+                f"**{rec_v.vehicle} — 3-Step Walk-Away Limit Ladder:**\n"
+                + "\n".join(f"- {s}" for s in rec_v.walk_away_steps)
+            )
 
         vdf = pd.DataFrame(
             [
@@ -564,7 +574,60 @@ def render_main() -> None:
             if picks:
                 st.dataframe(pd.DataFrame(picks), width="stretch", hide_index=True)
             else:
-                st.info("No stock/ETF picks logged yet. Use `opt log` or `[l]` in `opt` TUI.")
+                st.info("No stock/ETF picks logged yet — log one below or via `opt log` / TUI `[l]`.")
+            p_form_c1, p_form_c2 = st.columns(2)
+            with p_form_c1:
+                with st.form("log_stock_form", clear_on_submit=True):
+                    st.markdown("**Log Stock/ETF Pick**")
+                    lp_tk = st.text_input("Ticker", value=wb_tk, key="lp_tk").strip().upper()
+                    lp_px = st.number_input("Entry $", min_value=0.01, value=float(spot_wb), step=0.5, key="lp_px")
+                    lp_sh = st.number_input("Shares", min_value=0.01, value=10.0, step=1.0, key="lp_sh")
+                    lp_pb = st.selectbox("Playbook", ["vol_managed_outlook", "equity_pullback", "holdings_buy_zone", "discretionary"], key="lp_pb")
+                    lp_stop = st.number_input("Stop $ (0=none)", min_value=0.0, value=0.0, step=0.5, key="lp_stop")
+                    lp_tgt = st.number_input("Target $ (0=none)", min_value=0.0, value=0.0, step=0.5, key="lp_tgt")
+                    lp_note = st.text_input("Note", value="", key="lp_note")
+                    if st.form_submit_button("Log Pick"):
+                        pid = provider.log_stock_pick(
+                            ticker=lp_tk,
+                            price=float(lp_px),
+                            shares=float(lp_sh),
+                            playbook_id=lp_pb,
+                            stop_price=float(lp_stop) if lp_stop > 0 else None,
+                            target_price=float(lp_tgt) if lp_tgt > 0 else None,
+                            notes=lp_note,
+                        )
+                        st.success(f"Logged pick #{pid} ({lp_tk}).")
+                        st.rerun()
+            with p_form_c2:
+                open_eq_picks = [p for p in picks if str(p.get("status") or "").upper() == "OPEN"]
+                with st.form("close_stock_form", clear_on_submit=True):
+                    st.markdown("**Close Open Pick**")
+                    if open_eq_picks:
+                        pick_opts = {
+                            f"#{p['pick_id']} {p['ticker']} @ ${float(p['entry_price']):.2f}": p
+                            for p in open_eq_picks
+                        }
+                        sel_lbl = st.selectbox("Open Pick", list(pick_opts.keys()), key="cp_sel")
+                        sel_p = pick_opts[sel_lbl]
+                        cp_px = st.number_input(
+                            "Exit $",
+                            min_value=0.01,
+                            value=float(sel_p.get("current_price") or sel_p["entry_price"]),
+                            step=0.5,
+                            key="cp_px",
+                        )
+                        cp_note = st.text_input("Exit Reason", value=str(sel_p.get("exit_signal") or ""), key="cp_note")
+                        if st.form_submit_button("Close Pick"):
+                            provider.close_stock_pick(
+                                pick_id=int(sel_p["pick_id"]),
+                                exit_price=float(cp_px),
+                                notes=cp_note or None,
+                            )
+                            st.success(f"Closed pick #{sel_p['pick_id']} ({sel_p['ticker']}) @ ${cp_px:.2f}.")
+                            st.rerun()
+                    else:
+                        st.caption("No OPEN picks to close.")
+                        st.form_submit_button("Close Pick", disabled=True)
             st.markdown("#### Open Paper Option Positions (`paper_trades.db`)")
             p_opts = book.get("paper_options") or []
             if p_opts:

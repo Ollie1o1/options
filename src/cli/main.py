@@ -5,12 +5,16 @@ import sys
 
 import click
 
-from .book import book_cmd, log_cmd
+from src.paths import load_project_env
+from .alpha import alpha_group
+from .book import book_cmd, close_cmd, log_cmd
 from .check import check_cmd
 from .discover import card_cmd, discover_cmd
 from .express import express_cmd
 from .guide import guide_cmd, refresh_cmd
 from .lab import lab_group
+from .notify import notify_cmd
+from .profile import profile_cmd
 from .radar import radar_cmd
 from .rebalance import rebalance_cmd
 from .today import today_cmd
@@ -22,6 +26,7 @@ from .today import today_cmd
 @click.pass_context
 def cli(ctx: click.Context, as_json: bool, no_color: bool) -> None:
     """opt — Daily Stock + Option Trading Desk (`opt` launches the TUI; `opt today` prints the brief)."""
+    load_project_env()
     ctx.ensure_object(dict)
     ctx.obj["json"] = as_json
     ctx.obj["no_color"] = no_color
@@ -51,6 +56,135 @@ def desk_cmd(tab: str, offline: bool) -> None:
         raise SystemExit(1)
 
 
+@cli.command("web")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host for the local web cockpit.")
+@click.option("--port", type=int, default=8000, show_default=True, help="Bind port for the local web cockpit.")
+@click.option("--no-open", is_flag=True, help="Start server without opening a browser tab.")
+def web_cmd(host: str, port: int, no_open: bool) -> None:
+    """Launch the zero-reload Bloomberg × Amber CRT local Web Cockpit (`/desk`)."""
+    url = f"http://{host}:{port}/desk"
+    click.echo(f"Launching Bloomberg CRT Web Cockpit at {url}  (Ctrl+C to stop)")
+    if not no_open:
+        import threading
+        import time
+        import webbrowser
+
+        def _open() -> None:
+            time.sleep(0.7)
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+        threading.Thread(target=_open, daemon=True).start()
+
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn
+
+        uvicorn.run("src.api:app", host=host, port=port, log_level="warning")
+    except ImportError:
+        from src.web_terminal import serve_web_terminal
+
+        serve_web_terminal(host=host, port=port)
+
+
+@cli.command("commands")
+@click.pass_context
+def commands_cmd(ctx: click.Context) -> None:
+    """Print the complete categorized cheatsheet of `opt` commands, TUI keys & `:` mnemonics."""
+    from rich.panel import Panel
+    from rich.table import Table
+
+    from .render import accent_color, make_console
+
+    no_color = bool((ctx.obj or {}).get("no_color"))
+    console = make_console(no_color=no_color)
+    acc = accent_color()
+
+    sections = [
+        (
+            "Daily Cockpits & Guides",
+            [
+                ("opt", "Launch 6-tab Bloomberg × Amber CRT Textual TUI"),
+                ("opt web", "Launch zero-reload local Web Cockpit at http://127.0.0.1:8000/desk"),
+                ("opt refresh", "Update local prices + FRED credit/rates + Radar cache"),
+                ("opt today", "10-second Morning Action Brief (regime, TFSA Core, top setups)"),
+                ("opt guide", "Zero-memorization step-by-step plain-English coach"),
+            ],
+        ),
+        (
+            "Wealthsimple TFSA Core Loop (PROVEN: VM_OUTLOOK_TOP3 + SGOV)",
+            [
+                ("opt profile --tfsa 10000 --cash-etf SGOV", "Save TFSA balance, cash ETF & risk budget"),
+                ("opt profile --import-ws <activity.csv>", "Idempotently import Wealthsimple Activity CSV"),
+                ("opt rebalance [--apply]", "Compute exact fractional BUY/SELL orders (--apply saves shares)"),
+            ],
+        ),
+        (
+            "Discovery, Research & Trade Planning",
+            [
+                ("opt discover [--sector XLE | --lens opt_skew]", "Top-down ① Market → ② Sectors → ③ Labelled Lenses"),
+                ("opt discover --ledger", "Inspect NULL_LEDGER of ideas tested here that failed"),
+                ("opt card NVDA", "④ Evidence Card: verdict, peers, options odds & provenance"),
+                ("opt radar [--clean | --live-options]", "Unified Stock + Option Opportunity Radar"),
+                ("opt check AAPL", "1-screen Ticker Dossier with Braille 60d tape & levels"),
+                ("opt express AAPL --dir bull --target +8%", "Shares vs Options Workbench + Walk-Away Limit Ladders"),
+            ],
+        ),
+        (
+            "Book & Position Lifecycle",
+            [
+                ("opt book", "Open/closed stock picks, live P&L, exit alerts & scorecard"),
+                ("opt log AAPL --price 210 --shares 5", "Log a manual stock/ETF pick into data/own_picks.db"),
+                ("opt close <ID|TICKER> --price 224.50", "Close an open pick and record realized P&L"),
+            ],
+        ),
+        (
+            "Phase 3 Alpha & Alt-Data Labs (`opt alpha` — WATCHLIST / CONTEXT)",
+            [
+                ("opt alpha skew", "Option-Implied CW IV Spread & Put Smirk -> trade in TFSA shares"),
+                ("opt alpha gex SPY", "Dealer Net GEX, Gamma Flip strike & Call/Put OI Walls"),
+                ("opt alpha edgar [--refresh]", "SEC EDGAR Form 10 spinoffs, 5d 13D activists & XBRL buybacks"),
+                ("opt alpha macro [--refresh]", "4-pt VIX curve, FRED Fed Net Liquidity, CFTC COT & Polymarket"),
+                ("opt alpha premortem NVDA [--ai]", "Pre-Mortem Devil's Advocate bear case & kill-switches"),
+                ("opt alpha archive-chains --limit 60", "Snapshot 60 liquid tickers from free CBOE chains"),
+            ],
+        ),
+        (
+            "Alerts & Mission Lab",
+            [
+                ("opt notify --morning [--dry-run]", "Push daily Morning Dispatch rich embed to Discord"),
+                ("opt notify --check / --pill", "Signal-only Discord + single-slot macOS alert / menu-bar pill"),
+                ("opt notify --test-macos / --test-discord", "Send a quick test alert to verify setup"),
+                ("opt lab health | playbooks | fills", "Per-pipe freshness LEDs, strategy registry & Test O1 fill k"),
+                ("opt lab cleanup [--confirm]", "Preview (or reclaim) disk space from CLOSED studies"),
+            ],
+        ),
+    ]
+
+    for title, rows in sections:
+        tbl = Table(title=title, show_header=False, box=None, pad_edge=False)
+        tbl.add_column("Command", style=f"bold {acc}", width=44)
+        tbl.add_column("Description")
+        for cmd, desc in rows:
+            tbl.add_row(cmd, desc)
+        console.print(tbl)
+        console.print()
+
+    console.print(
+        Panel(
+            "[bold]TUI Tabs:[/] [1] Today  [2] Radar  [3] Workbench  [4] Book  [5] Lab  [6] Discover\n"
+            "[bold]TUI Keys:[/] [:] Cmd Bar · [b] Rebalance · [l] Log Pick · [x] Close Pick · [f] Log Fill · "
+            "[o] Live Opts · [g] Toggle RRG · [a] TFSA/Tax · [[/]] Target ±2% · [-/+] Days ±10 · [t] Theme · [?] Help\n"
+            "[bold]: Mnemonics:[/] NVDA · NVDA WB · REB · SKEW · GEX SPY · EDGAR · MACRO · PM NVDA · CLOSE · THEME amber_crt\n"
+            "[dim]Full reference: docs/COMMANDS.md  ·  Global flags: opt --json / opt --no-color <cmd>[/dim]",
+            title="INTERACTIVE TUI & BLOOMBERG COMMAND BAR",
+            border_style=acc,
+        )
+    )
+
+
 cli.add_command(guide_cmd)
 cli.add_command(refresh_cmd)
 cli.add_command(today_cmd)
@@ -61,8 +195,12 @@ cli.add_command(check_cmd)
 cli.add_command(express_cmd)
 cli.add_command(book_cmd)
 cli.add_command(log_cmd)
+cli.add_command(close_cmd)
 cli.add_command(rebalance_cmd)
+cli.add_command(profile_cmd)
+cli.add_command(alpha_group)
 cli.add_command(lab_group)
+cli.add_command(notify_cmd)
 
 
 if __name__ == "__main__":

@@ -355,6 +355,7 @@ class TestPhase3LegacyAndDashboard(unittest.TestCase):
         buf = io.StringIO()
         with patch.object(cd, "print_comparison_table", side_effect=_capture_table), \
              patch.object(cd, "print_order_ticket"), \
+             patch("sys.stdin.isatty", return_value=False), \
              redirect_stdout(buf):
             cd.print_report(df, 182.40, 0.045, 2, 30, 60, mode="Discovery scan")
 

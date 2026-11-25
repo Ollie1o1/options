@@ -46,13 +46,18 @@ from .discover import (
     lens_tag_legend,
     sector_header,
 )
+from .charts import braille_ghost_race, braille_sector_rrg
 from .state import DeskDataProvider
 from .themes import THEME_ORDER, THEMES, persist_theme_name, saved_theme_name
 from .widgets import (
+    AlphaViewerModal,
+    BloombergCommandModal,
+    ClosePickModal,
     DeskCommandProvider,
     HelpModal,
     LogFillModal,
     QuickLogModal,
+    RebalanceModal,
     format_dossier_markup,
     format_ribbon_markup,
     format_workbench_visual_markup,
@@ -127,10 +132,20 @@ class DeskApp(App[None]):
         Binding("s", "cycle_sort", "Sort", show=True),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
+        Binding("colon", "bloomberg_cmd", "Cmd :", show=True),
+        Binding("b", "rebalance_modal", "Rebal", show=True),
         Binding("l", "quick_log", "Log Pick", show=True),
+        Binding("x", "close_pick", "Close Pick", show=True),
         Binding("f", "log_fill", "Log Fill", show=True),
         Binding("o", "live_options", "Live Opts", show=True),
         Binding("u", "update_prices", "Upd Prices", show=False),
+        Binding("a", "toggle_account", "TFSA/Tax", show=False),
+        Binding("left_square_bracket", "nudge_target(-2)", "Tgt -2%", show=False),
+        Binding("right_square_bracket", "nudge_target(2)", "Tgt +2%", show=False),
+        Binding("minus", "nudge_days(-10)", "Days -10", show=False),
+        Binding("equals_sign", "nudge_days(10)", "Days +10", show=False),
+        Binding("plus", "nudge_days(10)", "Days +10", show=False),
+        Binding("g", "toggle_rrg", "RRG Map", show=False),
         Binding("r", "refresh", "Refresh", show=True),
         Binding("t", "cycle_theme", "Theme", show=True),
         Binding("question_mark", "show_help", "Guide/Help", show=True),
@@ -157,6 +172,9 @@ class DeskApp(App[None]):
         self.focused_playbook: str = "equity_pullback"
         self.focused_opp: Optional[Opportunity] = None
         self._last_vehicles: List[VehicleComparison] = []
+        self._selected_vehicle_idx: int = 0
+        self._book_picks: List[Dict[str, Any]] = []
+        self._focused_pick_id: Optional[int] = None
         self._status_msg: str = ""
         self._wb_loaded_ticker: Optional[str] = None
         self._last_dossier_ticker: Optional[str] = None
@@ -166,6 +184,7 @@ class DeskApp(App[None]):
         self._disc_lens: str = "core_rotation"
         self._disc_sector: str = ""
         self._disc_tickers: List[str] = []
+        self._show_rrg: bool = True
 
     def compose(self) -> ComposeResult:
         yield Static("Loading Daily Trading Desk…", id="market-ribbon")
@@ -174,12 +193,13 @@ class DeskApp(App[None]):
                 with Vertical(id="today-grid"):
                     yield Static("Loading your plain-English daily action plan…", id="today-core-card")
                     with Horizontal(id="today-actions"):
-                        yield Button("Refresh Ideas [r]", id="act-refresh", variant="primary")
-                        yield Button("Live ETF Spreads [o]", id="act-live-opts")
-                        yield Button("Analyze a Stock", id="act-workbench")
+                        yield Button("Refresh [r]", id="act-refresh", variant="primary")
+                        yield Button("Rebalance [b]", id="act-rebal")
+                        yield Button("Cmd [:]", id="act-bcmd")
+                        yield Button("Plan [3]", id="act-workbench")
+                        yield Button("Live Opts [o]", id="act-live-opts")
                         yield Button("Discover [6]", id="act-discover")
-                        yield Button("Log Pick [l]", id="act-log")
-                        yield Button("Log Fill [f]", id="act-fill")
+                        yield Button("Log [l]", id="act-log")
                         yield Button("? Guide", id="act-help")
                     yield DataTable(id="today-top5-table", zebra_stripes=True, cursor_type="row")
 
@@ -204,6 +224,11 @@ class DeskApp(App[None]):
                     yield Input(value="+8%", placeholder="Target", id="wb-target-input")
                     yield Input(value="30", placeholder="Days", id="wb-days-input")
                     yield Input(value="500", placeholder="Risk $", id="wb-risk-input")
+                    yield Select(
+                        [("TFSA", "tfsa"), ("Taxable", "taxable")],
+                        value="tfsa",
+                        id="wb-acct-select",
+                    )
                     yield Label("100sh:")
                     yield Switch(value=False, id="wb-owns-switch")
                     yield Button("Run", id="wb-run-btn", variant="primary")
@@ -218,6 +243,7 @@ class DeskApp(App[None]):
 
             with TabPane("[4] BOOK", id="book"):
                 with Vertical(id="book-container"):
+                    yield Static("Ghost Benchmark Race loading…", id="book-race-box")
                     yield Static("Playbook Scorecard loading…", id="book-scorecard-box")
                     yield DataTable(id="book-picks-table", zebra_stripes=True, cursor_type="row")
                     yield Static("", id="book-extra-box")
@@ -235,6 +261,7 @@ class DeskApp(App[None]):
                         with Vertical(id="disc-left"):
                             yield Static(board_header(), id="disc-board-head")
                             yield DataTable(id="disc-board", zebra_stripes=True, cursor_type="row")
+                            yield Static("", id="disc-rrg-box")
                         with Vertical(id="disc-right"):
                             with Horizontal(id="disc-lens-bar"):
                                 yield Label("③ IDEAS:", id="disc-lens-label")
@@ -445,6 +472,7 @@ class DeskApp(App[None]):
         except ValueError:
             risk = 500.0
         owns_100 = bool(self.query_one("#wb-owns-switch", Switch).value)
+        acct_val = str(self.query_one("#wb-acct-select", Select).value or "tfsa").lower()
 
         view = DetailedView(
             symbol=sym,
@@ -452,11 +480,12 @@ class DeskApp(App[None]):
             target_move_pct=t_move,
             horizon_days=days,
             risk_budget_usd=risk,
-            account_type="tfsa",
+            account_type=acct_val,
             owns_100_shares=owns_100,
         )
         vehicles = self.provider.get_express(view, spot=spot, iv=iv)
         self._last_vehicles = vehicles
+        self._selected_vehicle_idx = 0
         self.query_one("#wb-verdict-box", Static).update(
             f"[bold]{plain_english_vehicle_verdict(vehicles, view)}[/]"
         )
@@ -479,16 +508,30 @@ class DeskApp(App[None]):
                 key=str(idx),
             )
         if vehicles:
-            v0 = next((v for v in vehicles if v.recommended), vehicles[0])
-            self.query_one("#wb-ladder-box", Static).update(
-                f"[bold]Selected Vehicle Execution Ticket ({v0.vehicle}):[/]\n"
-                f"  {v0.walk_away_label}\n"
-                f"  Delta $: ${v0.delta_dollars:+,.0f} · Theta/day: ${v0.theta_per_day_usd:+.2f}"
-                + (f" · [#d6a452]{v0.caution}[/]" if v0.caution else "")
-            )
+            rec_i = next((i for i, v in enumerate(vehicles) if v.recommended), 0)
+            self._selected_vehicle_idx = rec_i
+            self._render_wb_ladder(vehicles[rec_i])
+
+    def _render_wb_ladder(self, v: VehicleComparison) -> None:
+        steps = list(v.walk_away_steps) if v.walk_away_steps else [v.walk_away_label]
+        step_lines = "\n".join(f"  {s}" for s in steps)
+        tfsa_tag = "[#5ec98d]TFSA OK[/]" if v.tfsa_legal else "[#d6a452]TAXABLE / IBKR ONLY (CRA TFSA ban)[/]"
+        self.query_one("#wb-ladder-box", Static).update(
+            f"[bold]Execution Ticket & 3-Step Walk-Away Ladder ({v.vehicle})[/] · {tfsa_tag}\n"
+            f"{step_lines}\n"
+            f"  Delta $: ${v.delta_dollars:+,.0f} · Theta/day: ${v.theta_per_day_usd:+.2f}"
+            + (f" · [#d6a452]{v.caution}[/]" if v.caution else "")
+        )
 
     def _render_book(self) -> None:
         book = self.provider.get_book()
+        race = self.provider.get_ghost_race() if hasattr(self.provider, "get_ghost_race") else None
+        if race is not None and getattr(race, "spy", None):
+            self.query_one("#book-race-box", Static).update(braille_ghost_race(race, width=50, height=5, rich=True))
+        else:
+            self.query_one("#book-race-box", Static).update(
+                "[bold]GHOST BENCHMARK RACE[/] [dim]— Log picks [l] or update OHLCV [u] to race SPY & VM_OUTLOOK+SGOV.[/]"
+            )
         picks = book.get("equity_picks") or []
         sc = book.get("scorecard") or {}
         by_pb = sc.get("by_playbook") or {}
@@ -513,7 +556,8 @@ class DeskApp(App[None]):
 
         bt = self.query_one("#book-picks-table", DataTable)
         bt.clear()
-        for p in picks[:40]:
+        self._book_picks = list(picks[:40])
+        for p in self._book_picks:
             cur_p = p.get("current_price")
             unrl = p.get("unrealized_pct")
             exit_s = p.get("exit_signal") or str(p.get("status", ""))
@@ -527,6 +571,7 @@ class DeskApp(App[None]):
                 f"{float(unrl):+.1f}%" if unrl is not None else "—",
                 f"{float(p['shares']):g}",
                 str(exit_s),
+                key=str(p["pick_id"]),
             )
 
         extra_lines: List[str] = []
@@ -563,8 +608,16 @@ class DeskApp(App[None]):
             o1_str = o1_progress_line(o1)
         else:
             o1_str = "TEST O1 FILLS — unavailable"
+        pipes = h.get("pipes") or {}
+        led_parts: List[str] = []
+        for pname, pinfo in pipes.items():
+            pst = str(pinfo.get("status") or "OK")
+            pcol = "#5ec98d" if pst == "OK" else ("#d6a452" if pst == "WARN" else "#e06c75")
+            led_parts.append(f"[{pcol}]● {pname.upper()}[/] [dim]({pinfo.get('detail', '')})[/]")
+        pipe_line = ("[bold]DATA PIPES:[/] " + "  ".join(led_parts)) if led_parts else ""
         lines = [
             f"[bold]OPS HEALTH:[/] Disk {h.get('disk_free_gb', '?')} GB free [{h.get('worst', 'OK')}]{ohlcv_s}{maint_s}",
+            *([pipe_line] if pipe_line else []),
             f"[bold]EXECUTION:[/] Live OFF · all real limit fills logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)} (press \\[f] to log)",
             f"[bold]{o1_str}[/] · rule: docs/PREREG_O1_FILL_K_20261125.md",
             "[bold]PENDING FORWARD READOUTS:[/] " + "  |  ".join(h.get("readouts") or []),
@@ -677,6 +730,15 @@ class DeskApp(App[None]):
         self.query_one("#disc-crumb", Static).update(crumb_and_freshness(hub, 3 if self._disc_mode == "lens" else 2))
         self.query_one("#disc-market", Static).update(market_panel(hub, compact=True))
         fill_board(self.query_one("#disc-board", DataTable), hub)
+        rrg_box = self.query_one("#disc-rrg-box", Static)
+        if self._show_rrg:
+            rrg_box.display = True
+            rrg_box.update(
+                "[bold]SECTOR ROTATION MAP (RRG · press \\[g] to toggle)[/]\n"
+                + braille_sector_rrg(hub.board.rows, width=42, height=7, rich=True)
+            )
+        else:
+            rrg_box.display = False
         self._render_disc_right()
 
     def _render_disc_right(self) -> None:
@@ -733,7 +795,7 @@ class DeskApp(App[None]):
             self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "wb-dir-select":
+        if event.select.id in ("wb-dir-select", "wb-acct-select"):
             self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
         elif event.select.id == "disc-lens-select" and isinstance(event.value, str):
             self._disc_mode = "lens"
@@ -754,6 +816,10 @@ class DeskApp(App[None]):
             self.action_log_fill()
         elif bid == "act-refresh":
             self.action_refresh()
+        elif bid == "act-rebal":
+            self.action_rebalance_modal()
+        elif bid == "act-bcmd":
+            self.action_bloomberg_cmd()
         elif bid == "act-live-opts":
             self.action_live_options()
         elif bid == "act-workbench":
@@ -787,18 +853,34 @@ class DeskApp(App[None]):
         elif tid == "disc-lens-table" and event.row_key is not None:
             parts = str(event.row_key.value).split("|")
             if len(parts) == 2:
-                self.focused_ticker = parts[1]
-                self._update_disc_hint(parts[1])
+                tk = parts[1]
+                self.focused_ticker = tk
+                self.focused_opp = None
+                if self.hub is not None:
+                    ohlcv = getattr(self.hub, "ohlcv", None) or {}
+                    if tk in ohlcv and len(ohlcv[tk][1]):
+                        self.focused_spot = round(float(ohlcv[tk][1][-1]), 2)
+                    if self._disc_mode == "lens":
+                        res = self.hub.lens(self._disc_lens)
+                        if res is not None:
+                            row = next((r for r in res.rows if r.ticker == tk), None)
+                            if row is not None and row.playbook_id:
+                                self.focused_playbook = row.playbook_id
+                            else:
+                                self.focused_playbook = self._disc_lens
+                    else:
+                        self.focused_playbook = "discretionary"
+                self._update_disc_hint(tk)
+        elif tid == "book-picks-table" and event.row_key is not None:
+            try:
+                self._focused_pick_id = int(str(event.row_key.value))
+            except ValueError:
+                self._focused_pick_id = None
         elif tid == "wb-vehicles-table" and event.row_key is not None:
             try:
                 idx = int(str(event.row_key.value))
-                v = self._last_vehicles[idx]
-                self.query_one("#wb-ladder-box", Static).update(
-                    f"[bold]Selected Vehicle Execution Ticket ({v.vehicle}):[/]\n"
-                    f"  {v.walk_away_label}\n"
-                    f"  Delta $: ${v.delta_dollars:+,.0f} · Theta/day: ${v.theta_per_day_usd:+.2f}"
-                    + (f" · [#d6a452]{v.caution}[/]" if v.caution else "")
-                )
+                self._selected_vehicle_idx = idx
+                self._render_wb_ladder(self._last_vehicles[idx])
             except (ValueError, IndexError):
                 pass
 
@@ -809,6 +891,12 @@ class DeskApp(App[None]):
                 opp = self.filtered_opps[int(str(event.row_key.value))]
                 self.open_workbench(opp.ticker)
             except (ValueError, IndexError):
+                pass
+        elif tid == "book-picks-table" and event.row_key is not None:
+            try:
+                self._focused_pick_id = int(str(event.row_key.value))
+                self.action_close_pick()
+            except ValueError:
                 pass
         elif tid == "today-top5-table" and event.row_key is not None:
             parts = str(event.row_key.value).split("|")
@@ -890,6 +978,156 @@ class DeskApp(App[None]):
     def action_show_help(self) -> None:
         self.push_screen(HelpModal())
 
+    def action_toggle_account(self) -> None:
+        sel = self.query_one("#wb-acct-select", Select)
+        sel.value = "taxable" if str(sel.value) == "tfsa" else "tfsa"
+
+    def action_nudge_target(self, delta_pct: int) -> None:
+        if self.query_one("#main-tabs", TabbedContent).active != "workbench":
+            return
+        inp = self.query_one("#wb-target-input", Input)
+        raw = inp.value.strip().rstrip("%")
+        try:
+            cur = int(round(float(raw)))
+        except ValueError:
+            cur = 6
+        nxt = max(-30, min(30, cur + int(delta_pct)))
+        inp.value = f"{nxt:+d}%"
+        self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
+
+    def action_nudge_days(self, delta_days: int) -> None:
+        if self.query_one("#main-tabs", TabbedContent).active != "workbench":
+            return
+        inp = self.query_one("#wb-days-input", Input)
+        try:
+            cur = int(inp.value.strip())
+        except ValueError:
+            cur = 30
+        nxt = max(5, min(180, cur + int(delta_days)))
+        inp.value = str(nxt)
+        self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
+
+    def action_toggle_rrg(self) -> None:
+        self._show_rrg = not self._show_rrg
+        if self.hub is not None:
+            self._render_discover()
+
+    def action_rebalance_modal(self) -> None:
+        snap = self.snapshot
+        if snap is None or not snap.core_allocation:
+            self._set_status("Core allocation unavailable — refresh first")
+            return
+        from src.equity_playbooks.rebalance import compute_tfsa_rebalance
+        from src.profile import (
+            apply_rebalance_to_profile,
+            estimate_cash_yield_annual,
+            load_profile,
+            rebalance_due_status,
+        )
+
+        prof = load_profile()
+        plan = compute_tfsa_rebalance(
+            snap.core_allocation,
+            account_usd=prof.tfsa_usd,
+            current_shares=prof.core_holdings,
+            fractional=prof.fractional_shares,
+            drift_threshold_pct=prof.drift_threshold_pct,
+        )
+        y_ann, y_lbl = estimate_cash_yield_annual()
+        est_y = plan.estimated_cash_after_usd * y_ann
+        due, due_msg = rebalance_due_status(
+            prof,
+            max_drift_pct=plan.max_drift_pct,
+            rebalance_recommended=plan.rebalance_recommended,
+        )
+        lines = [
+            f"[bold]{'REBALANCE DUE' if due else 'ON TARGET'}[/]: {due_msg}",
+            f"Broker: {prof.broker} · Account: ${plan.account_usd:,.2f} USD · Vol Scale: {plan.vol_scale*100:.0f}%",
+            f"Defensive Buffer ({prof.cash_etf}): ${plan.estimated_cash_after_usd:,.2f} (~${est_y:,.0f}/yr @ {y_lbl})",
+            "─" * 74,
+            f"{'ACTION':<8} {'ETF':<10} {'TGT%':>6} {'NOW%':>6} {'DRIFT':>7} {'ORDER SH':>10} {'DELTA $':>11}",
+        ]
+        target_map: Dict[str, float] = {}
+        for o in plan.orders:
+            if o.action != "RESERVE":
+                target_map[o.ticker] = o.target_shares
+            ord_s = f"{o.delta_shares:+.4g}" if o.action in ("BUY", "SELL") else ("SGOV" if o.action == "RESERVE" else "—")
+            lines.append(
+                f"{o.action:<8} {o.ticker:<10} {o.target_weight_pct:5.1f}% {o.current_weight_pct:5.1f}% "
+                f"{o.drift_pct:+6.1f}% {ord_s:>10} ${o.delta_usd:+10,.2f}"
+            )
+
+        def _after_reb(res: Optional[Dict[str, Any]]) -> None:
+            if res and res.get("apply"):
+                apply_rebalance_to_profile(prof, res["target_shares"])
+                self._set_status("Saved TFSA Core target shares to data/tfsa_profile.json")
+                self._render_today()
+                self._render_book()
+
+        self.push_screen(
+            RebalanceModal(
+                snap=snap,
+                plan_text="\n".join(lines),
+                target_shares=target_map,
+                account_usd=prof.tfsa_usd,
+            ),
+            _after_reb,
+        )
+
+    def action_bloomberg_cmd(self) -> None:
+        def _run_cmd(raw: Optional[str]) -> None:
+            if not raw:
+                return
+            self._execute_bloomberg_mnemonic(raw)
+
+        self.push_screen(BloombergCommandModal(), _run_cmd)
+
+    def _execute_bloomberg_mnemonic(self, raw: str) -> None:
+        parts = raw.strip().split()
+        if not parts:
+            return
+        cmd = parts[0].upper()
+        arg = parts[1].upper() if len(parts) > 1 else ""
+        if cmd in ("REB", "REBAL", "REBALANCE"):
+            self.action_rebalance_modal()
+            return
+        if cmd == "LOG":
+            self.action_quick_log()
+            return
+        if cmd == "CLOSE":
+            self.action_close_pick()
+            return
+        if cmd == "FILL":
+            self.action_log_fill()
+            return
+        if cmd == "THEME" and arg:
+            self.apply_desk_theme(arg.lower())
+            self._set_status(f"Theme: {arg.lower()}")
+            return
+        if cmd in ("TODAY", "RADAR", "WORKBENCH", "BOOK", "LAB", "DISCOVER"):
+            self.action_switch_tab(cmd.lower())
+            return
+        if cmd in ("SKEW", "GEX", "EDGAR", "13D", "SPIN", "BUYBACK", "MACRO", "PM", "PREMORTEM"):
+            self._open_alpha_mnemonic(cmd, arg or self.focused_ticker)
+            return
+        if arg in ("WB", "WORKBENCH", "EXPRESS"):
+            self.open_workbench(cmd)
+            return
+        if arg in ("CARD", "C") or len(parts) == 1:
+            self.open_evidence_card(cmd)
+            return
+        self.open_workbench(cmd)
+
+    def _open_alpha_mnemonic(self, cmd: str, ticker: str) -> None:
+        try:
+            from src.alpha.formatters import format_alpha_screen
+
+            title, body = format_alpha_screen(cmd, ticker=ticker)
+        except Exception as exc:
+            title = f"ALPHA TELEMETRY: {cmd}"
+            body = f"[#d6a452]Telemetry unavailable:[/] {exc}"
+        self.push_screen(AlphaViewerModal(title=title, body=body))
+
     def action_quick_log(self) -> None:
         def _after_modal(res: Optional[Dict[str, Any]]) -> None:
             if not res:
@@ -899,9 +1137,12 @@ class DeskApp(App[None]):
                 price=res["price"],
                 shares=res["shares"],
                 playbook_id=res["playbook_id"],
+                stop_price=res.get("stop_price"),
+                target_price=res.get("target_price"),
                 notes=res["notes"],
             )
             self._render_book()
+            self._set_status(f"Logged pick: {res['ticker']}")
 
         self.push_screen(
             QuickLogModal(
@@ -910,6 +1151,44 @@ class DeskApp(App[None]):
                 playbook_id=self.focused_playbook,
             ),
             _after_modal,
+        )
+
+    def action_close_pick(self) -> None:
+        open_picks = [p for p in self._book_picks if str(p.get("status") or "").upper() == "OPEN"]
+        if not open_picks:
+            book = self.provider.get_book()
+            self._book_picks = list(book.get("equity_picks") or [])
+            open_picks = [p for p in self._book_picks if str(p.get("status") or "").upper() == "OPEN"]
+        if not open_picks:
+            self._set_status("No OPEN stock/ETF picks to close")
+            return
+        pick = next(
+            (p for p in open_picks if self._focused_pick_id is not None and int(p["pick_id"]) == self._focused_pick_id),
+            open_picks[0],
+        )
+
+        def _after_close(res: Optional[Dict[str, Any]]) -> None:
+            if not res:
+                return
+            ok = self.provider.close_stock_pick(
+                pick_id=res["pick_id"],
+                exit_price=res["exit_price"],
+                notes=res.get("notes"),
+            )
+            self._render_book()
+            if ok:
+                self._set_status(f"Closed pick #{res['pick_id']} @ ${res['exit_price']:.2f}")
+
+        self.push_screen(
+            ClosePickModal(
+                pick_id=int(pick["pick_id"]),
+                ticker=str(pick["ticker"]),
+                entry_price=float(pick["entry_price"]),
+                current_price=pick.get("current_price"),
+                shares=float(pick.get("shares") or 1.0),
+                exit_hint=str(pick.get("exit_signal") or ""),
+            ),
+            _after_close,
         )
 
     def action_log_fill(self) -> None:
@@ -923,6 +1202,7 @@ class DeskApp(App[None]):
 
         opp = self.focused_opp
         ex = (opp.extra or {}) if opp is not None else {}
+        active_tab = self.query_one("#main-tabs", TabbedContent).active
         if (opp is not None and opp.playbook_id == "etf_wide_spread" and opp.ticker == self.focused_ticker
                 and ex.get("credit_cross") is not None and ex.get("credit_mid") is not None):
             # Pre-fill the SPREAD's own quote, so k is measured the way Test O1
@@ -936,6 +1216,20 @@ class DeskApp(App[None]):
                 limit_price=float(ex.get("walk_away_limit") or mid),
                 bid=nat,
                 ask=round(2.0 * mid - nat, 2),
+            )
+        elif active_tab == "workbench" and self._last_vehicles and 0 <= self._selected_vehicle_idx < len(self._last_vehicles):
+            v = self._last_vehicles[self._selected_vehicle_idx]
+            is_credit = v.vehicle in ("Wide Credit Spread", "Covered Call")
+            est_px = max(0.05, round((v.max_profit_usd if is_credit else v.capital_at_risk_usd) / 100.0, 2))
+            est_half = max(0.02, round(v.friction_usd / 200.0, 2))
+            struct_lbl = f"O1 {v.description}" if v.vehicle == "Wide Credit Spread" else v.vehicle
+            modal = LogFillModal(
+                ticker=self.focused_ticker,
+                structure=struct_lbl[:48],
+                side="SELL" if is_credit else "BUY",
+                limit_price=est_px,
+                bid=max(0.01, round(est_px - est_half, 2)),
+                ask=round(est_px + est_half, 2),
             )
         else:
             modal = LogFillModal(ticker=self.focused_ticker, structure="Bull Put", side="SELL")

@@ -81,6 +81,8 @@ class LensContext:
     crash_flags: Dict[str, str] = field(default_factory=dict)
     rev_breadth: Dict[str, float] = field(default_factory=dict)
     rev_as_of: Optional[str] = None
+    chain_db: str = "data/chain_archive.db"
+    edgar_db: str = "data/edgar_events.db"
 
     @property
     def spy_above_200d(self) -> Optional[bool]:
@@ -121,6 +123,16 @@ LENSES: Tuple[Lens, ...] = (
          "Where are several insiders buying on the open market?", "WATCHLIST",
          "Descriptive SEC Form 4 overlay; the backtest corpus is still pending.",
          "configs/playbooks.json (insider_cluster)", "Radar order"),
+    Lens("opt_skew", "Option-implied flow -> shares",
+         "Where do archived option IV spreads or put smirks flag informed flow to trade in shares?", "WATCHLIST",
+         "Cremers-Weinbaum (2010) ATM call-put IV spread & Xing-Zhang-Zhao (2010) put smirk from archived CBOE chains; "
+         "harvest in $0-commission TFSA shares rather than paying wide option spreads. OOS preregistration pending.",
+         "src/alpha/options_for_shares.py (data/chain_archive.db)", "Bullish flow first, then CW IV spread"),
+    Lens("edgar_events", "SEC EDGAR forced-flow & buybacks",
+         "Which companies filed Form 10 spinoffs, 5-day 13D activist stakes, or net XBRL share buybacks?", "WATCHLIST",
+         "Free point-in-time SEC EDGAR events targeting forced institutional selling (spinoffs), 5-day activist catalysts "
+         "(13D), and net share reduction after SBC dilution. Unexhausted literature; OOS backtest pending.",
+         "src/alpha/edgar_events.py (data/edgar_events.db)", "Most recent SEC filing date first"),
     Lens("holdings", "Your holdings: buy zones & covered calls",
          "Which of your holdings are near your buy zone, or can write a covered call?", "WATCHLIST",
          "Deterministic proximity to the zones in longterm_plan.json; not a forecast.",
@@ -137,11 +149,13 @@ LENS_BY_ID: Dict[str, Lens] = {lz.id: lz for lz in LENSES}
 # Short tag shown on a ticker that a lens lists (coloured by the lens's label).
 LENS_TAG: Dict[str, str] = {
     "core_rotation": "CORE", "pullbacks": "PULL", "etf_spreads": "SPRD", "leaders": "LEAD",
-    "revisions": "REV", "insiders": "INS", "holdings": "HOLD", "landmines": "MINE",
+    "revisions": "REV", "insiders": "INS", "opt_skew": "OPT", "edgar_events": "EDG",
+    "holdings": "HOLD", "landmines": "MINE",
 }
 LENS_TAG_MEANING: Dict[str, str] = {
     "CORE": "core rotation", "PULL": "uptrend pullback", "SPRD": "ETF option spread", "LEAD": "sector leader",
-    "REV": "estimate revisions", "INS": "insider cluster", "HOLD": "your holding", "MINE": "landmine",
+    "REV": "estimate revisions", "INS": "insider cluster", "OPT": "option-implied skew",
+    "EDG": "SEC EDGAR event", "HOLD": "your holding", "MINE": "landmine",
 }
 
 # Tested here and failed. (idea, result, date, source)
@@ -330,6 +344,63 @@ def _insiders(ctx: LensContext) -> LensResult:
     return res
 
 
+def _opt_skew(ctx: LensContext, *, limit: int = 20) -> LensResult:
+    from src.alpha.options_for_shares import scan_option_signals_for_shares
+
+    res = LensResult(LENS_BY_ID["opt_skew"])
+    sigs = scan_option_signals_for_shares(chain_db=ctx.chain_db)
+    if not sigs:
+        res.note = "No archived option chains in data/chain_archive.db — run `opt alpha archive-chains`."
+        return res
+    interesting = [s for s in sigs if s.signal_label != "NEUTRAL"]
+    chosen = interesting[:limit] if interesting else [s for s in sigs if s.cw_iv_spread_vp is not None][:10]
+    for s in chosen:
+        cw = f"{s.cw_iv_spread_vp:+.2f}vp" if s.cw_iv_spread_vp is not None else "—"
+        sm = f"{s.put_smirk_vp:+.2f}vp" if s.put_smirk_vp is not None else "—"
+        gx = f"GEX {s.net_gex_m:+.1f}M" if s.net_gex_m is not None else ""
+        flags: List[str] = []
+        if s.signal_label == "CRASH_SMIRK_AVOID":
+            flags.append("CRASH_SMIRK_AVOID")
+        if s.gex_regime == "NEGATIVE_GEX":
+            flags.append("NEG_GEX")
+        res.rows.append(
+            LensRow(
+                ticker=s.ticker,
+                sector_etf=get_sector_etf(s.ticker),
+                why=f"{s.signal_label} · CW spread {cw} · Put smirk {sm} {gx}".strip(),
+                metric_label="CW spread vp",
+                metric=s.cw_iv_spread_vp,
+                flags=tuple(flags),
+                as_of=s.snap_date,
+            )
+        )
+    if not interesting:
+        res.note = "No extreme skew triggers today; showing top archived names by Cremers-Weinbaum IV spread."
+    return res
+
+
+def _edgar_events(ctx: LensContext, *, limit: int = 25) -> LensResult:
+    from src.alpha.edgar_events import load_cached_edgar_events
+
+    res = LensResult(LENS_BY_ID["edgar_events"])
+    evs = load_cached_edgar_events(db_path=ctx.edgar_db, limit=limit)
+    for e in evs:
+        res.rows.append(
+            LensRow(
+                ticker=e.ticker,
+                sector_etf=get_sector_etf(e.ticker),
+                why=f"[{e.event_type}] {e.summary}",
+                metric_label="metric",
+                metric=e.metric_value,
+                flags=(),
+                as_of=e.filed_date,
+            )
+        )
+    if not evs:
+        res.note = "No cached SEC EDGAR events yet — run `opt alpha edgar --refresh` (free SEC API)."
+    return res
+
+
 def _holdings(ctx: LensContext) -> LensResult:
     res = LensResult(LENS_BY_ID["holdings"])
     res.rows = _opp_rows(ctx, ("holdings_buy_zone", "covered_call_holdings"))
@@ -357,12 +428,15 @@ def _landmines(ctx: LensContext, *, earn_days: int = 7) -> LensResult:
 _RUNNERS: Dict[str, Callable[[LensContext], LensResult]] = {
     "core_rotation": _core_rotation, "pullbacks": _pullbacks, "etf_spreads": _etf_spreads,
     "leaders": _leaders, "revisions": _revisions, "insiders": _insiders,
+    "opt_skew": _opt_skew, "edgar_events": _edgar_events,
     "holdings": _holdings, "landmines": _landmines,
 }
 
 
 def build_context(ohlcv: OhlcvMap, board: SectorBoard, snapshot: Optional[RadarSnapshot] = None,
-                  *, estimates_db: str = "data/estimates_archive.db") -> LensContext:
+                  *, estimates_db: str = "data/estimates_archive.db",
+                  chain_db: str = "data/chain_archive.db",
+                  edgar_db: str = "data/edgar_events.db") -> LensContext:
     """Collect the shared inputs once (earnings, crash flags, revision breadth). Failure-isolated."""
     from src.radar.scanners import (
         _load_latest_rev_breadth,
@@ -370,7 +444,7 @@ def build_context(ohlcv: OhlcvMap, board: SectorBoard, snapshot: Optional[RadarS
         _load_upcoming_earnings_map,
     )
 
-    ctx = LensContext(ohlcv=ohlcv, board=board, snapshot=snapshot)
+    ctx = LensContext(ohlcv=ohlcv, board=board, snapshot=snapshot, chain_db=chain_db, edgar_db=edgar_db)
     try:
         ctx.earnings_days = {k: int(v) for k, v in (_load_upcoming_earnings_map() or {}).items()}
     except Exception:

@@ -116,7 +116,7 @@ LIBRARY = [
        "The same view bought as a call won 38% of the time in this book; sold "
        "as a put spread it won 66%.",
        {"above_sma50": True, "rsi_min": 50},
-       ["tfsa", "taxable"], _SPREAD_CAPITAL, "directional"),
+       ["taxable"], _SPREAD_CAPITAL, "directional"),
     _r(_s("bearish_trend_call_spread", "bear_call",
           {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "below_sma50": True, "rsi_max": 50}, _MANAGED,
@@ -125,7 +125,7 @@ LIBRARY = [
        "The bearish mirror. Also the cheapest structure to cross at "
        "$0.050/share, so the directional view is not eaten by friction.",
        {"below_sma50": True, "rsi_max": 50},
-       ["tfsa", "taxable"], _SPREAD_CAPITAL, "directional"),
+       ["taxable"], _SPREAD_CAPITAL, "directional"),
     _r(_s("directional_long_call_control", "long_call",
           {"dte": [25, 60], "target_delta": 0.40, "above_sma50": True,
            "rsi_min": 50}, _MANAGED, universe={"strata": ["liquid"]}),
@@ -148,7 +148,7 @@ LIBRARY = [
        "The capital-efficient route to the same premium as wheel_csp_ivr50: "
        "about $500 at risk instead of $21,855. Directly measures what the "
        "affordability cap costs in edge.",
-       {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "candidate"),
+       {"iv_rank_min": 50}, ["taxable"], _SPREAD_CAPITAL, "candidate"),
     _r(_s("put_spread_ivr50_hold", "bull_put",
           {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "iv_rank_min": 50}, _HELD, universe={"strata": ["liquid"]}),
@@ -156,15 +156,15 @@ LIBRARY = [
        "Holding pays only the opening legs and roughly halves the toll — 68% of "
        "credit falls to 34% on measured friction. Paired with the managed "
        "version, this IS the cost experiment.",
-       {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "candidate"),
+       {"iv_rank_min": 50}, ["taxable"], _SPREAD_CAPITAL, "candidate"),
     _r(_s("call_spread_extended", "bear_call",
           {"dte": [25, 60], "short_delta": 0.20, "width": 5.0, "rsi_min": 70},
           _MANAGED, universe={"strata": ["liquid"]}),
        "Call credit spread on an extended name",
        "The defined-risk form of naked_call_extended, and the cheapest measured "
-       "structure to cross at $0.050/share. Legal in a registered account.",
+       "structure to cross at $0.050/share. Requires margin (taxable only in Canada).",
        {"rsi_min": 70, "iv_rank_min": 50},
-       ["tfsa", "taxable"], _SPREAD_CAPITAL, "candidate"),
+       ["taxable"], _SPREAD_CAPITAL, "candidate"),
 
     # ── PROBE: index versus single name ──
     _r(_s("csp_index_only", "bull_put",
@@ -174,7 +174,7 @@ LIBRARY = [
        "Put spread on the index only",
        "Prior VRP research found the index premium positive. This is that claim "
        "as a testable setup rather than folklore.",
-       {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "index_probe",
+       {"iv_rank_min": 50}, ["taxable"], _SPREAD_CAPITAL, "index_probe",
        links=["docs/DOLT_NEXT_STEPS.md"]),
     _r(_s("index_put_spread_w25", "bull_put",
           {"dte": [25, 60], "short_delta": 0.25, "width": 25.0,
@@ -195,7 +195,7 @@ LIBRARY = [
        "which is the shape of an artifact. This setup exists to be tested "
        "against benchmark_unselected on data the search has not already seen, "
        "and it counts as one more trial against every future deflation.",
-       {"iv_rank_min": 50}, ["tfsa", "taxable"],
+       {"iv_rank_min": 50}, ["taxable"],
        "$25 wide on SPY: about $2,250 at risk after credit, which is 56% of a "
        "$4,000 book. max_concurrent is therefore 1 — this is the position-size "
        "ceiling of the account, not a preference. A second concurrent position "
@@ -209,7 +209,7 @@ LIBRARY = [
        "Prior research found single-name equity VRP absent. If this loses while "
        "csp_index_only wins, that result replicates and the desk should stop "
        "selling single-name premium.",
-       {"iv_rank_min": 50}, ["tfsa", "taxable"], _SPREAD_CAPITAL,
+       {"iv_rank_min": 50}, ["taxable"], _SPREAD_CAPITAL,
        "single_name_probe", links=["docs/DOLT_NEXT_STEPS.md"]),
 
     # ── CONTROL: what makes any of the above believable ──
@@ -221,7 +221,7 @@ LIBRARY = [
        "in the profitability analysis, and selectivity degraded results "
        "monotonically. Every signalled setup above must beat THIS or its signal "
        "is decoration.",
-       {}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "benchmark"),
+       {}, ["taxable"], _SPREAD_CAPITAL, "benchmark"),
     _r(_s("null_random_days", "bull_put",
           {"dte": [25, 60], "short_delta": 0.25, "width": 5.0,
            "entry_days": "random"}, _MANAGED, universe={"strata": ["liquid"]}),
@@ -229,14 +229,14 @@ LIBRARY = [
        "Entry days chosen at random. Separates 'the premium exists' from 'our "
        "timing finds it'. Given no stored metric has ever predicted within a "
        "family, expect this to be uncomfortably competitive.",
-       {}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "null_control"),
+       {}, ["taxable"], _SPREAD_CAPITAL, "null_control"),
     _r(_s("null_random_strikes", "bull_put",
           {"dte": [25, 60], "strike_selection": "random", "width": 5.0},
           _MANAGED, universe={"strata": ["liquid"]}),
        "Put spread with random strikes  [NULL CONTROL]",
        "Strike chosen at random within the window. If a delta-targeted setup "
        "cannot beat this, strike selection carries no information.",
-       {}, ["tfsa", "taxable"], _SPREAD_CAPITAL, "null_control"),
+       {}, ["taxable"], _SPREAD_CAPITAL, "null_control"),
     _r(_s("known_negative_long_call", "long_call",
           {"dte": [25, 60], "target_delta": 0.40}, _MANAGED,
           universe={"strata": ["liquid"]}),

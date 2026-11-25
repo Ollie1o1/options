@@ -10,6 +10,7 @@ from rich.text import Text
 
 from src.radar.schema import Opportunity, RadarSnapshot, TickerDossier
 from src.structure.types import VehicleComparison
+from src.tui.charts import braille_price_chart, theme_palette
 
 TIER_STYLE = {
     "VALIDATED": "bold #5ec98d",
@@ -28,24 +29,34 @@ TIER_SHORT = {
 }
 
 
+def accent_color() -> str:
+    """Active primary accent color honoring `settings.json` (e.g. amber_crt `#ffb03b`)."""
+    return theme_palette()["primary"]
+
+
 def make_console(no_color: bool = False) -> Console:
     return Console(no_color=no_color, highlight=False, soft_wrap=False)
 
 
 def render_ribbon(snap: RadarSnapshot) -> Text:
+    pal = theme_palette()
     t = Text()
     spy_s = f"{snap.spy_last:.2f}" if snap.spy_last is not None else "—"
     spy_c = f"{snap.spy_chg_1d_pct:+.1f}%" if snap.spy_chg_1d_pct is not None else ""
     qqq_c = f"{snap.qqq_chg_1d_pct:+.1f}%" if snap.qqq_chg_1d_pct is not None else ""
     vix_s = f"VIX {snap.vix:.1f}" if snap.vix is not None else "VIX —"
+    if snap.vix_term == "BACKWARDATION":
+        vix_s += " ↘"
+    elif snap.vix_term == "CONTANGO":
+        vix_s += " ↗"
     rv = getattr(snap, "spy_rv20", None)
     if rv is not None:
         vix_s += f" · SPY RV20 {rv:.1f}%"
     posture_style = (
-        "bold #5ec98d" if snap.regime_posture == "RISK_ON"
-        else ("bold #e06c75" if snap.regime_posture == "RISK_OFF" else "bold #d6a452")
+        f"bold {pal['good']}" if snap.regime_posture == "RISK_ON"
+        else (f"bold {pal['bad']}" if snap.regime_posture == "RISK_OFF" else f"bold {pal['warn']}")
     )
-    t.append(f"SPY {spy_s} {spy_c}", style="bold")
+    t.append(f"SPY {spy_s} {spy_c}", style=f"bold {pal['primary']}")
     t.append("  |  ", style="dim")
     t.append(f"QQQ {qqq_c or '—'}", style="bold")
     t.append("  |  ", style="dim")
@@ -55,25 +66,27 @@ def render_ribbon(snap: RadarSnapshot) -> Text:
     t.append(f"Macro: {snap.next_macro_event}", style="dim")
     if getattr(snap, "kalshi_macro", None):
         k0 = snap.kalshi_macro[0]
-        t.append(f" · Kalshi {k0['label']} {k0['prob_pct']:.0f}%", style="dim #82aad2")
+        t.append(f" · Kalshi {k0['label']} {k0['prob_pct']:.0f}%", style=f"dim {pal['primary']}")
     if snap.from_cache:
         t.append("  |  cached", style="dim")
     return t
 
 
 def render_core_allocation(snap: RadarSnapshot) -> Table:
+    pal = theme_palette()
     tbl = Table(title="Core TFSA Allocation (VALIDATED: VM_OUTLOOK_TOP3)", box=None, pad_edge=False)
-    tbl.add_column("ETF", style="bold #82aad2")
-    tbl.add_column("Weight", justify="right", style="bold #5ec98d")
+    tbl.add_column("ETF", style=f"bold {pal['primary']}")
+    tbl.add_column("Weight", justify="right", style=f"bold {pal['good']}")
     tbl.add_column("Vol Scale", justify="right")
     tbl.add_column("Spot", justify="right")
     tbl.add_column("12-1m", justify="right")
     for row in snap.core_allocation:
         w = float(row.get("target_weight", 0.0)) * 100.0
         sc = float(row.get("vol_scale", 1.0)) * 100.0
+        tk = "SGOV/CASH" if str(row.get("ticker")) == "CASH" else str(row.get("ticker"))
         spot = f"${float(row['spot']):.2f}" if row.get("ticker") != "CASH" else "—"
         m12 = f"{float(row.get('mom_12_1_pct', 0.0)):+.1f}%" if row.get("ticker") != "CASH" else "T-Bills"
-        tbl.add_row(str(row["ticker"]), f"{w:.0f}%", f"{sc:.0f}%", spot, m12)
+        tbl.add_row(tk, f"{w:.0f}%", f"{sc:.0f}%", spot, m12)
     return tbl
 
 
@@ -172,8 +185,26 @@ def render_dossier(dos: TickerDossier) -> Panel:
         lines.append(f"[bold]Analysts[/bold]   {act_str}")
     if dos.headlines:
         lines.append("[bold]Headlines[/bold]  " + " | ".join(h["title"][:65] for h in dos.headlines[:2]))
+    if dos.closes_60d:
+        sma200_lvl = (
+            dos.spot / (1.0 + dos.dist_sma200_pct / 100.0)
+            if (dos.spot is not None and dos.dist_sma200_pct is not None and (1.0 + dos.dist_sma200_pct / 100.0) > 0.1)
+            else None
+        )
+        chart = braille_price_chart(
+            dos.closes_60d[-60:],
+            supports=dos.supports,
+            resistances=dos.resistances,
+            sma200_level=sma200_lvl,
+            width=46,
+            height=5,
+            rich=True,
+        )
+        if chart:
+            lines.append("[bold]60d Tape[/bold]   [dim](Braille · green=Sup · red=Res · dim=200MA)[/dim]")
+            lines.append(chart)
 
-    return Panel("\n".join(lines), title=f"TICKER DOSSIER: {dos.ticker}", border_style="#82aad2")
+    return Panel("\n".join(lines), title=f"TICKER DOSSIER: {dos.ticker}", border_style=accent_color())
 
 
 def render_express_table(rows: List[VehicleComparison], *, symbol: str, spot: float, view_desc: str) -> Table:

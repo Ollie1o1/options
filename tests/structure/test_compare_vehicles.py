@@ -54,11 +54,20 @@ class TestExecutionPlanAndWorkbench(unittest.TestCase):
         self.assertIn("Wide Credit Spread", names)
         self.assertIn("Covered Call", names)
         self.assertIn("Single Option", names)
-        # Every vehicle must be TFSA-legal on a bullish TFSA view
-        self.assertTrue(all(r.tfsa_legal for r in rows))
+        # CRA TFSA rules: single-leg long options, covered calls, and long shares are legal;
+        # multi-leg spreads (debit/credit verticals) require margin and are NOT TFSA-legal.
+        by_name = {r.vehicle: r for r in rows}
+        for legal_name in ("Shares", "Deep-ITM LEAPS", "Covered Call", "Single Option"):
+            self.assertTrue(by_name[legal_name].tfsa_legal, f"{legal_name} should be TFSA-legal")
+        for illegal_name in ("Debit Vertical", "Wide Credit Spread"):
+            self.assertFalse(by_name[illegal_name].tfsa_legal, f"{illegal_name} is margin-only (not TFSA)")
+            self.assertEqual(len(by_name[illegal_name].walk_away_steps), 3)
+        # On a TFSA view, recommended vehicle must NEVER violate CRA TFSA legality
+        recs = [r for r in rows if r.recommended]
+        self.assertTrue(all(r.tfsa_legal for r in recs))
         # Shares friction should be tiny compared to options
-        shares_row = next(r for r in rows if r.vehicle == "Shares")
-        opt_row = next(r for r in rows if r.vehicle == "Single Option")
+        shares_row = by_name["Shares"]
+        opt_row = by_name["Single Option"]
         self.assertLess(shares_row.friction_pct_of_reward, opt_row.friction_pct_of_reward)
         # Sorted descending by EV(view) net
         evs = [r.ev_view_net_usd for r in rows]
