@@ -207,7 +207,8 @@ def guide_cmd(ctx: click.Context) -> None:
         console.print("  [bold][3][/bold] Find Swing Stock Dips  — Uptrend pullbacks ready to buy in shares")
         console.print("  [bold][4][/bold] Scan Live ETF Spreads  — Live 60–120d wide ETF Bull Puts (Test O1 limit-only)")
         console.print("  [bold][5][/bold] Log Trade / My Results — Record a buy & check if your picks beat SPY")
-        console.print("  [bold][6][/bold] Open Full Dashboard    — Interactive 5-tab keyboard cockpit (`opt`)")
+        console.print("  [bold][6][/bold] TFSA Core Rebalancer   — Exact monthly ETF share orders for your account")
+        console.print("  [bold][7][/bold] Open Full Dashboard    — Interactive 5-tab keyboard cockpit (`opt`)")
         console.print("  [bold][?][/bold] Plain-English Guide    — Explain every strategy & label simply")
         console.print("  [bold][Q][/bold] Quit")
         console.print()
@@ -321,6 +322,34 @@ def guide_cmd(ctx: click.Context) -> None:
                         )
 
         elif choice == "6":
+            from src.equity_playbooks.rebalance import compute_tfsa_rebalance, parse_holdings_spec
+
+            acct_s = Prompt.ask("Total TFSA / core account value ($ USD)", default="5000")
+            hold_s = Prompt.ask("Current ETF shares held (e.g. XLE:10,GLD:5 or blank for all cash)", default="")
+            frac = Confirm.ask("Allow fractional shares (Wealthsimple)?", default=True)
+            try:
+                acct_v = float(acct_s.replace("$", "").replace(",", ""))
+                plan = compute_tfsa_rebalance(
+                    snap.core_allocation,
+                    account_usd=acct_v,
+                    current_holdings=parse_holdings_spec(hold_s),
+                    fractional=frac,
+                )
+                lines = [
+                    f"Account: ${plan.account_usd:,.2f}  |  Target Cash: ${plan.cash_target_usd:,.2f} ({plan.cash_target_weight*100:.0f}%)",
+                    f"Residual Cash After Orders: ${plan.residual_cash_usd:,.2f}",
+                    "",
+                ]
+                for o in plan.orders:
+                    lines.append(
+                        f"  {o.action:<4} {o.delta_shares:+7.2f} sh {o.ticker:<4} @ ${o.spot:7.2f} "
+                        f"({o.delta_usd:+9,.2f} · target {o.target_weight*100:.0f}%)"
+                    )
+                console.print(Panel("\n".join(lines), title="TFSA MONTHLY REBALANCE ORDERS", border_style="#5ec98d"))
+            except Exception as exc:
+                console.print(f"[#e06c75]Could not compute rebalance: {exc}[/#e06c75]")
+
+        elif choice == "7":
             from src.tui.app import run_desk
 
             run_desk()
@@ -328,4 +357,4 @@ def guide_cmd(ctx: click.Context) -> None:
         elif choice == "?":
             console.print(Panel(GLOSSARY_TEXT, title="PLAIN-ENGLISH CHEAT SHEET", border_style="#82aad2"))
         else:
-            console.print("[#d6a452]Please enter 1, 2, 3, 4, 5, 6, ?, or Q.[/#d6a452]")
+            console.print("[#d6a452]Please enter 1, 2, 3, 4, 5, 6, 7, ?, or Q.[/#d6a452]")

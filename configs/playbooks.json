@@ -207,6 +207,26 @@
       },
       "default_friction_bps": 50,
       "notes": "Closed: ClinicalTrials.gov PCD dates show no run-up (-0.32% excess vs XBI)."
+    },
+    {
+      "id": "non_earnings_breakout",
+      "label": "Non-Earnings Volume Breakout (Shares)",
+      "asset_class": "stock",
+      "horizon_days": [5, 20],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CLOSED",
+      "prereg": "docs/PREREG_NON_EARNINGS_BREAKOUT_20261124.md",
+      "result": "docs/RESULT_NON_EARNINGS_BREAKOUT_20261124.md",
+      "stats": {
+        "n": 5156,
+        "pf": 1.186,
+        "ci_lo": 0.892,
+        "ci_hi": 1.579,
+        "mean_ret": 0.00641,
+        "excess_vs_bench": -0.00078
+      },
+      "default_friction_bps": 10,
+      "notes": "Closed: +5% / >=2x vol 20d-high breakouts failed Bonferroni H-A & H-B across 5d/10d/20d on both survivorship-free (5-slot CAGR -8% to -29% vs SPY +20%) and 371-ticker liquid holdouts."
     }
   ]
 }

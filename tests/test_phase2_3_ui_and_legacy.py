@@ -463,6 +463,21 @@ class TestPhase3LegacyAndDashboard(unittest.TestCase):
             self.assertEqual(res["failed"], 0)
             self.assertEqual(res["inserted_bars"], 62)
 
+    def test_phase4_closed_playbook_and_launcher_web_entry(self) -> None:
+        from src import launcher
+        from src.radar.playbooks import list_playbooks
+
+        all_pbs = {p.id: p for p in list_playbooks(include_closed=True)}
+        active_pbs = {p.id: p for p in list_playbooks(include_closed=False)}
+        self.assertIn("non_earnings_breakout", all_pbs)
+        self.assertEqual(all_pbs["non_earnings_breakout"].evidence_tier, "CLOSED")
+        self.assertNotIn("non_earnings_breakout", active_pbs)
+
+        rows = launcher._menu_rows()
+        self.assertTrue(any("[W]" in r and "WEB" in r for r in rows))
+        self.assertIn("HELP", rows[-2])
+        self.assertIn("QUIT", rows[-1])
+
 
 if __name__ == "__main__":
     unittest.main()
