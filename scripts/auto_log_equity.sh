@@ -94,6 +94,9 @@ RC=0
 #    the last run. Never fails the job; no-op until a channel is set in .env.
 with_timeout 600 "$VENV" -m src.trade_alerts || echo "[auto-log-eq] trade alerts failed (ignored)"
 
+# 5b. Modern Desk action-only Discord embeds + zero-clutter macOS alerts (exits / clean TFSA setups / pipe red).
+with_timeout 120 "$VENV" -m src.cli.main notify --check || echo "[auto-log-eq] desk notify failed (ignored)"
+
 # 6. Keep the earnings calendar fresh for the earnings gates. Only symbols
 #    cached >= 7 days ago are re-queried, so most runs fetch nothing; the
 #    cache had silently gone stale from 2026-08-20 to 11-09 without this.

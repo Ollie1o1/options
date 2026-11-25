@@ -390,6 +390,16 @@ if _project_venv_status != "ok":
         _print_rebuild_instructions()
         sys.exit(1)
 
+# Load repo `.env` (stdlib-only, non-overriding) so POLYGON_API_KEY / ALPHAVANTAGE_API_KEY /
+# DISCORD_WEBHOOK_URL / SEC_EDGAR_CONTACT are inherited whether we exec the venv or run in-process.
+try:
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+    from src.paths import load_project_env as _load_project_env
+    _load_project_env()
+except Exception:
+    pass
+
 # If any equity-side flag was provided, dispatch directly to options_screener
 # (preserves cron + every power-user shortcut). With no flags, route through
 # src.launcher which shows the [1] STOCKS [2] CRYPTO menu.

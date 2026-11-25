@@ -42,6 +42,7 @@ import logging
 import sqlite3
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from .paths import repo_path
 from .utils import is_short_position
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,7 @@ def cached_earnings_dates(symbol: str, cache_path: str = DEFAULT_CACHE) -> List[
     if not symbol:
         return []
     try:
-        conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{repo_path(cache_path)}?mode=ro", uri=True)
     except sqlite3.Error:
         return []
     try:
@@ -244,7 +245,7 @@ def reports_after_open_on(symbol: str, day: str,
     if not symbol or not day:
         return False
     try:
-        conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{repo_path(cache_path)}?mode=ro", uri=True)
     except sqlite3.Error:
         return False
     try:

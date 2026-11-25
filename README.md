@@ -2,34 +2,46 @@
 
 [![CI](https://github.com/Ollie1o1/options/actions/workflows/ci.yml/badge.svg)](https://github.com/Ollie1o1/options/actions/workflows/ci.yml)
 
-A Python-based stock + options trading desk combining preregistered, cost-surviving playbooks (`configs/playbooks.json`), a unified multi-asset Opportunity Radar, a Shares-vs-Options Express Workbench with Probability Lab RND & Walk-Away Limit Ladders, a composable `opt` CLI, and an interactive 5-tab Textual TUI.
+A Python-based stock + options trading desk combining preregistered, cost-surviving playbooks (`configs/playbooks.json`), CRA-compliant Wealthsimple USD TFSA portfolio tracking (`VM_OUTLOOK_TOP3` + `SGOV` + Ghost Benchmark Race), a unified multi-asset Opportunity Radar, a Shares-vs-Options Express Workbench with Probability Lab RND & Walk-Away Limit Ladders, Phase 3 free alt-data Alpha Labs (`opt alpha`), Discord + zero-clutter macOS alerts (`opt notify`), a composable `opt` CLI, an interactive 6-tab Bloomberg × Amber CRT Textual TUI, and a zero-reload local Web Cockpit (`opt web`).
 
-### Daily Desk Quick Start (`opt` CLI & Textual TUI)
+### Daily Desk Quick Start (`opt` CLI, Bloomberg TUI & Web Cockpit)
 
-You only need to remember **one** command — everything else is guided in plain English:
+You only need to remember **two** commands — `opt` (the interactive cockpit) and `opt commands` (the full cheatsheet):
 
 ```bash
 pip install -e . --no-deps            # installs the `opt` console script
-opt guide                             # START HERE: step-by-step plain-English coach (zero flags to memorize)
-opt                                   # 6-tab Textual Daily Cockpit (press `?` anytime for Plain-English Guide)
+opt commands                          # FULL CHEATSHEET: every CLI command, TUI key & `:` mnemonic
+opt                                   # 6-tab Bloomberg × Amber CRT TUI (`:` Cmd Bar, `?` Guide, `t` Theme)
+opt web                               # Zero-reload local Bloomberg Web Cockpit (http://127.0.0.1:8000/desk)
+opt guide                             # Step-by-step plain-English coach (zero flags to memorize)
 opt refresh                           # 1-command daily price + FRED update + Radar refresh
-opt today                             # 10-second Morning Action Brief (Market Mood + Core TFSA weights + top setups)
-opt discover                          # Top-down: ① Market → ② Sectors (PROVEN rank) → ③ Ideas (labelled lenses)
-opt card NVDA                         # ④ Evidence Card — verdict, peers, options odds, every number's source & date
-opt discover --forward                # forward record of the lenses (outcomes locked until 2027-05-25, preregistered)
-opt lab fills                         # Test O1 execution check: X/20 real limit fills, mean k vs 0.35
-opt radar --live-options              # Unified Radar (+ optional live 60-120d wide ETF spread scan)
+opt today                             # 10-second Morning Action Brief (Market Mood + Core TFSA + top setups)
 ```
 
-Discover is a research view: only the sector order is PROVEN; every other lens carries its evidence label.
-See [`docs/DISCOVER.md`](docs/DISCOVER.md).
+#### Core Workflow & New Phase 0–3 Commands
 
-Legacy `python run.py` flags (`-ds/-sps/-ics/-ss`, `--auto-log`, `--enforce-exits`) and LaunchAgents remain 100% unchanged; `python run.py` now puts `[G] GUIDE` and `[D] DESK` at the top of the interactive menu.
+| Goal | Command |
+|---|---|
+| **See every command & hotkey** | `opt commands` or [`docs/COMMANDS.md`](docs/COMMANDS.md) |
+| **Configure Wealthsimple USD TFSA** | `opt profile --tfsa 10000 --cash-etf SGOV` · `opt profile --import-ws activity.csv` |
+| **Monthly Core ETF Rebalance** | `opt rebalance` (`--apply` persists target shares & date; or press `b` in TUI) |
+| **Top-Down Discover & Evidence Card** | `opt discover` · `opt discover --lens opt_skew` · `opt card NVDA` · `opt discover --ledger` |
+| **Unified Radar & Trade Planning** | `opt radar --clean` · `opt check AAPL` · `opt express AAPL --dir bull --target +8%` |
+| **Book Lifecycle (Log & Close Picks)** | `opt book` · `opt log AAPL --price 210 --shares 5` · `opt close 1 --price 224.50` |
+| **Phase 3 Alpha Labs (TFSA Shares)** | `opt alpha skew` · `opt alpha gex SPY` · `opt alpha edgar --refresh` · `opt alpha macro --refresh` · `opt alpha premortem NVDA` |
+| **Discord & Quiet macOS Alerts** | `opt notify --morning` · `opt notify --check` · `opt notify --pill` · `opt notify --test-macos` |
+| **Mission Lab & Disk Cleanup** | `opt lab health` · `opt lab playbooks` · `opt lab fills` · `opt lab cleanup` |
+
+> **CRA TFSA Guard:** Multi-leg spreads (`etf_wide_spread`, `etf_bear_call`, debit verticals) are fenced as `[TAXABLE_ONLY]` and are never recommended when your account is set to `tfsa`.
+> **Evidence Honesty:** Only the Core ETF sector rotation (`VM_OUTLOOK_TOP3`) is labelled `PROVEN`. Phase 3 lenses (`opt_skew`, `edgar_events`, `macro`) carry explicit `WATCHLIST` or `CONTEXT` badges and source provenance. See [`docs/DISCOVER.md`](docs/DISCOVER.md) and [`docs/COMMANDS.md`](docs/COMMANDS.md).
+
+Legacy `python run.py` flags (`-ds/-sps/-ics/-ss`, `--auto-log`, `--enforce-exits`) and LaunchAgents remain 100% unchanged; `python run.py` puts `[G] GUIDE` and `[D] DESK` at the top of the interactive menu and auto-loads `.env`.
 
 ---
 
 ## Table of Contents
 
+0. [Complete Command Directory (`docs/COMMANDS.md`)](docs/COMMANDS.md)
 1. [Core Philosophy](#core-philosophy)
 2. [Module Maturity](#module-maturity)
 3. [What You Can Trust Today](#what-you-can-trust-today)
@@ -206,7 +218,9 @@ The technical screener works out of the box — no API keys needed (uses Yahoo F
 
 **Optional — Polygon.io enrichment:** Set `POLYGON_API_KEY` in your `.env` file to enable higher-quality ticker-filtered news, real-time VWAP, and unusual options flow detection. Free API keys are available at [polygon.io/dashboard/signup](https://polygon.io/dashboard/signup). The screener runs identically without this key.
 
-**Optional — SEC EDGAR contact:** the insider-buys overlay calls SEC EDGAR, which asks every client to identify itself with a contact address. Set `SEC_EDGAR_CONTACT` in your `.env` (e.g. `SEC_EDGAR_CONTACT=you@example.com`) to send yours. Unset, the request still identifies the software and the SEC may throttle or refuse it — the overlay fails soft and the screener is unaffected either way.
+**Optional — SEC EDGAR contact:** the insider-buys & Phase 3 SEC EDGAR events (`opt alpha edgar`) call SEC EDGAR, which asks every client to identify itself with a contact address. Set `SEC_EDGAR_CONTACT` in your `.env` (e.g. `SEC_EDGAR_CONTACT=you@example.com`) to send yours. Unset, the request still identifies the software and the SEC may throttle or refuse it — overlays fail soft and the screener is unaffected either way.
+
+**Optional — Discord & zero-clutter macOS alerts:** Set `DISCORD_WEBHOOK_URL` in your `.env` to enable rich Discord Morning Dispatch & signal-only alerts (`opt notify --morning` / `opt notify --check`). On macOS, `opt notify` also supports single-slot coalesced banners (install `brew install terminal-notifier` to replace banners in-place via `-group options-desk`; otherwise falls back to built-in `osascript`) and an optional SwiftBar menu-bar pill (`scripts/menubar_pill.py`). `.env` is auto-loaded by `opt`, `run.py`, `dashboard.py`, `api.py`, and `notifications.py`.
 
 ---
 
@@ -1431,7 +1445,15 @@ options/
     ├── config_ai.py          # AI layer configuration (models, weights, thresholds)
     ├── config_validator.py   # Config.json validation at module load
     ├── types.py              # Shared type definitions and data classes
-    ├── api.py                # FastAPI server (/market, /top, /scan, /watchlist)
+    ├── api.py                # FastAPI server (/market, /top, /scan, /watchlist, /desk Bloomberg Web Cockpit)
+    ├── web_terminal.py       # Zero-reload Bloomberg × Amber CRT SPA + stdlib ThreadingHTTPServer (`opt web`)
+    ├── cli/                  # Composable `opt` CLI (`today`, `radar`, `discover`, `card`, `check`, `express`, `book`, `close`, `profile`, `rebalance`, `alpha`, `notify`, `lab`, `commands`, `web`)
+    ├── tui/                  # 6-tab Textual Daily Cockpit (`app.py`, `charts.py` Braille RRG/RND/Ghost Race, `widgets.py`, `discover.py`, `state.py`)
+    ├── topdown/              # Top-down Discover hub: ① Market → ② 16 Sectors → ③ Labelled Lenses (incl. `opt_skew`, `edgar_events`) → ④ Evidence Card
+    ├── alpha/                # Phase 3 free alt-data labs (`options_for_shares.py` CW skew/GEX, `edgar_events.py`, `macro_plumbing.py`, `premortem.py`)
+    ├── profile.py            # Persistent Wealthsimple USD TFSA profile, SGOV cash yield & idempotent CSV importer
+    ├── notifications.py      # Discord rich embeds + zero-clutter single-slot macOS notifications + menu-bar pill
+    ├── equity_playbooks/     # TFSA Core rebalancer (`rebalance.py`) & Ghost Benchmark Race (`ghost_race.py`)
     ├── bots/
     │   ├── __init__.py
     │   ├── discord_bot.py    # Discord slash commands (/market, /top, /scan, /watchlist)
@@ -1478,6 +1500,8 @@ scripts/
 └── reclassify_legacy_trades.py  # One-shot migration for legacy single-leg rows
 
 docs/
+├── COMMANDS.md                # Master Command Directory — every `opt` CLI, TUI hotkey, `:` mnemonic, Web & legacy command
+├── DISCOVER.md                # Top-down Discover architecture & evidence-label contract
 ├── LOGGING_PLAN.md            # Calibration logging plan — what/when to log, current gate progress
 ├── CALIBRATION_JOURNAL.md     # Append-only changelog of every --calibrate --apply event
 ├── QUANT_RESEARCH_MANUAL.md   # Strategy/architecture reference manual
@@ -1547,6 +1571,10 @@ docs/
 - [x] Leverage module (`src/leverage`, BTC/ETH perp futures) — pre-validation signal/backtest/paper harness, explicitly no edge yet
 - [x] Long-term holdings desk (`src/longterm`) — buy-zone/tranche accumulation tracking, DISCOVER sector scan with BUY NOW / WAIT entry verdict, CDR ticker markers, guided ACTIONS menu, HTML report
 - [x] Quant-desk launcher (`python3 run.py` / `python3 -m src` with no args) — top-level `[1-7]` menu across STOCKS / CRYPTO / LEVERAGE / RESEARCH / HOLDINGS / STRATEGIES / SETTINGS
+- [x] Phase 0 hardening — CRA TFSA regulatory guard, direction-aware Radar confluence, `opt close` pick lifecycle, SQLite FD leak fixes, per-pipe Data LEDs, Discord rich embeds + zero-clutter macOS notifications (`opt notify`) & `opt lab cleanup`
+- [x] Phase 1 Wealthsimple USD TFSA loop — persistent profile (`opt profile`), idempotent Wealthsimple CSV importer, stateful `SGOV`-aware monthly rebalancer (`opt rebalance --apply`) & 3-line Ghost Benchmark Race
+- [x] Phase 2 Bloomberg × Amber CRT cockpit — high-res Braille price/RRG/RND/Ghost Race charts, `:` Bloomberg Command Bar, Workbench keyboard nudges & zero-reload local Web Cockpit (`opt web`)
+- [x] Phase 3 TFSA-legal alpha & alt-data labs (`opt alpha`) — Option-Implied Skew→Shares + Dealer GEX, SEC EDGAR Form 10/13D/XBRL Buybacks, 4-pt VIX + FRED Net Liquidity + CFTC COT + Polymarket Macro Plumbing & Pre-Mortem Devil's Advocate
 - [ ] Spread-bucket calibration (`recommend_weights_for_structure('spread')` — gated by Bear Call ≥ 30)
 - [ ] Iron-condor-bucket calibration (gated by IC ≥ 30)
 - [ ] Fix crypto auto-log / exit-enforcer same-cycle time-exit race (puts opened and time-exited within the same 5-minute interval)

@@ -49,8 +49,12 @@ _COLUMNS = ["symbol", "snap_date", "contract", "type", "strike", "expiration",
 
 def ensure_db(db_path: str = DEFAULT_DB) -> None:
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         conn.executescript(_SCHEMA)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def filter_rows(rows: List[Dict[str, Any]], today: str,
@@ -129,7 +133,8 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
     st: Dict[str, Any] = {"symbols": len(symbols), "already": 0, "archived": 0,
                           "failed": [], "aborted": False}
     streak = 0
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         for sym in symbols:
             sym = sym.upper()
             if max_consecutive_failures and streak >= max_consecutive_failures:
@@ -163,6 +168,8 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                 st["failed"].append(sym)
                 streak += 1
                 continue
+    finally:
+        conn.close()
     if stats is not None:
         stats.update(st)
     return written

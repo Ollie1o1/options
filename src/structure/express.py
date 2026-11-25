@@ -6,7 +6,7 @@ logic instead of obeying a number.
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from .execution_plan import build_walk_away_ladder
+from .execution_plan import build_walk_away_ladder, format_ladder_lines
 from .types import (BEARISH_STRUCTURES, BULLISH_STRUCTURES, CREDIT_STRUCTURES,
                     DEBIT_STRUCTURES, LEG_COUNT, NEUTRAL_STRUCTURES,
                     DetailedView, Expression, Rejection, VehicleComparison, View)
@@ -274,6 +274,10 @@ def compare_vehicles(
                 theta_per_day_usd=0.0,
                 delta_dollars=round(sign * shares * spot, 2),
                 walk_away_label=f"Limit @ ${spot:.2f} (0.05% spread, $0 comm)",
+                walk_away_steps=(
+                    f"Step 1: Post {'BUY' if sign > 0 else 'SELL'} LIMIT @ ${spot:.2f} (0.05% spread, $0 Wealthsimple comm)",
+                    f"Step 2: Set stop alert @ ${stop_px:.2f} ({view.stop_loss_pct*100:.1f}% risk = ${car:,.0f})",
+                ),
             )
         )
 
@@ -341,6 +345,7 @@ def compare_vehicles(
                 theta_per_day_usd=round(th * 100.0, 2),
                 delta_dollars=round(dl * 100.0 * spot, 2),
                 walk_away_label=ladder.abort_label,
+                walk_away_steps=format_ladder_lines(ladder),
                 caution="Over budget" if car > view.risk_budget_usd * 3 else "",
             )
         )
@@ -406,12 +411,17 @@ def compare_vehicles(
             ev_view_gross_per_share=debit_mid + (ev_view + fric) / 100.0,
             exit_half_spread_per_share=half,
         )
+        dv_cautions = []
+        if is_tfsa:
+            dv_cautions.append("Taxable/IBKR margin only (CRA TFSA spread ban)")
+        if (100.0 * fric / max_prof) > 25.0:
+            dv_cautions.append("Friction >25% reward")
         results.append(
             VehicleComparison(
                 vehicle="Debit Vertical",
                 description=f"{dv_dte_lbl} {k_long:g}/{k_short:g} {ot.title()} Debit @ ${debit_mid:.2f}",
                 legs=2,
-                tfsa_legal=True,
+                tfsa_legal=False,
                 capital_at_risk_usd=round(car, 2),
                 cash_outlay_usd=round(car, 2),
                 max_profit_usd=round(max_prof, 2),
@@ -424,25 +434,62 @@ def compare_vehicles(
                 theta_per_day_usd=round((th_l - th_s) * 100.0, 2),
                 delta_dollars=round((dl_l - dl_s) * 100.0 * spot, 2),
                 walk_away_label=ladder.abort_label,
-                caution="Friction >25% reward" if (100.0 * fric / max_prof) > 25.0 else "",
+                walk_away_steps=format_ladder_lines(ladder),
+                caution=" · ".join(dv_cautions),
             )
         )
 
-    # 4. Wide Credit Spread (60-120 DTE 5%-wide — directly reflects Test O1 LEAD geometry!)
+    # 4. Wide Credit Spread (60-120 DTE 5%-wide — shared Test O1 -0.25 delta leg rule)
     ot_cr = "put" if d_upper in ("BULLISH", "NEUTRAL") else "call"
     sl_wide = _get_slice("wide_credit", max(90, h_days), 60, max(120, h_days + 30))
     target_ksh = spot * (0.94 if ot_cr == "put" else 1.06)
-    target_klg = target_ksh + (-0.05 * spot if ot_cr == "put" else 0.05 * spot)
-    real_sh = sl_wide.match_contract(ot_cr, target_ksh, max_rel_dist=0.06) if sl_wide is not None else None
+    real_sh = None
     real_lg = None
-    if real_sh is not None and sl_wide is not None:
-        t_lg_exact = real_sh.strike + (-0.05 * spot if ot_cr == "put" else 0.05 * spot)
-        real_lg = sl_wide.match_contract(ot_cr, t_lg_exact, max_rel_dist=0.06)
-        if real_lg is not None and (
-            (ot_cr == "put" and real_lg.strike >= real_sh.strike)
-            or (ot_cr == "call" and real_lg.strike <= real_sh.strike)
-        ):
-            real_lg = None
+    if sl_wide is not None:
+        from src.radar.wide_spread_rule import LegQuote, select_legs
+
+        side_o1 = "bull_put" if ot_cr == "put" else "bear_call"
+        raw_c = sl_wide.puts if ot_cr == "put" else sl_wide.calls
+        t_sl = max(sl_wide.dte, 30) / 365.0
+        leg_quotes: List[LegQuote] = []
+        by_strike = {}
+        for c in raw_c:
+            dl_c = c.delta
+            if dl_c is None and c.bid > 0 and c.ask >= c.bid:
+                _, dl_c, _ = _bs_px_delta(spot, c.strike, t_sl, r, c.iv or eff_iv, ot_cr)
+            leg_quotes.append(
+                LegQuote(
+                    strike=c.strike,
+                    bid=c.bid,
+                    ask=c.ask,
+                    delta=dl_c,
+                    iv=c.iv,
+                    open_interest=float(c.open_interest),
+                    volume=float(c.volume),
+                )
+            )
+            by_strike[c.strike] = c
+        o1_legs, _o1_reason = select_legs(
+            leg_quotes,
+            spot=spot,
+            side=side_o1,
+            expiration=sl_wide.expiration,
+            dte=float(sl_wide.dte),
+            max_friction_to_credit=1.0,  # evaluate all spreads in Workbench so user sees cost drag
+        )
+        if o1_legs is not None:
+            real_sh = by_strike.get(o1_legs.short.strike)
+            real_lg = by_strike.get(o1_legs.long.strike)
+        if real_sh is None or real_lg is None:
+            real_sh = sl_wide.match_contract(ot_cr, target_ksh, max_rel_dist=0.06)
+            if real_sh is not None:
+                t_lg_exact = real_sh.strike + (-0.05 * spot if ot_cr == "put" else 0.05 * spot)
+                real_lg = sl_wide.match_contract(ot_cr, t_lg_exact, max_rel_dist=0.06)
+                if real_lg is not None and (
+                    (ot_cr == "put" and real_lg.strike >= real_sh.strike)
+                    or (ot_cr == "call" and real_lg.strike <= real_sh.strike)
+                ):
+                    real_lg = None
 
     if real_sh is not None and real_lg is not None and sl_wide is not None and (real_sh.mid - real_lg.mid) > 0.05:
         t_cr = max(sl_wide.dte, 30) / 365.0
@@ -498,12 +545,20 @@ def compare_vehicles(
         p_cross=cr_cross,
         ev_view_gross_per_share=cr_mid,
     )
+    cr_cautions = []
+    if is_tfsa:
+        cr_cautions.append("Taxable/IBKR margin only (CRA TFSA spread ban)")
+    cr_cautions.append(
+        "LIMIT ONLY (k<=0.35)"
+        if (100.0 * fric_cr / max(max_prof_cr, 1.0)) <= 25.0
+        else "Friction >25% credit"
+    )
     results.append(
         VehicleComparison(
             vehicle="Wide Credit Spread",
             description=f"{cr_dte_lbl} {'Bull Put' if ot_cr == 'put' else 'Bear Call'} {k_sh:g}/{k_lg:g} @ ${cr_mid:.2f} cr",
             legs=2,
-            tfsa_legal=True,
+            tfsa_legal=False,
             capital_at_risk_usd=round(car_cr, 2),
             cash_outlay_usd=round(car_cr, 2),
             max_profit_usd=round(max_prof_cr, 2),
@@ -516,7 +571,8 @@ def compare_vehicles(
             theta_per_day_usd=round((-th_sh + th_lg) * 100.0, 2),
             delta_dollars=round((-d_sh + d_lg) * 100.0 * spot, 2),
             walk_away_label=ladder_cr.abort_label,
-            caution="LIMIT ONLY (k<=0.35)" if (100.0 * fric_cr / max(max_prof_cr, 1.0)) <= 25.0 else "Friction >25% credit",
+            walk_away_steps=format_ladder_lines(ladder_cr),
+            caution=" · ".join(cr_cautions),
         )
     )
 
@@ -578,6 +634,7 @@ def compare_vehicles(
                 theta_per_day_usd=round(-th_cc * 100.0, 2),
                 delta_dollars=round(-d_cc * 100.0 * spot, 2),
                 walk_away_label=ladder_cc.abort_label,
+                walk_away_steps=format_ladder_lines(ladder_cc),
             )
         )
 
@@ -640,19 +697,25 @@ def compare_vehicles(
                 theta_per_day_usd=round(th_o * 100.0, 2),
                 delta_dollars=round(d_o * 100.0 * spot, 2),
                 walk_away_label=ladder_o.abort_label,
+                walk_away_steps=format_ladder_lines(ladder_o),
                 caution="Negative EV under view" if ev_view_o <= 0 else "",
             )
         )
 
     # Sort by EV(view) net of friction descending, tie-breaking on lowest friction %
     results.sort(key=lambda v: (-v.ev_view_net_usd, v.friction_pct_of_reward))
-    # Recommend the best positive-EV vehicle that actually fits the user's risk budget
-    # (never crown a $14,000 LEAPS for a $500 budget when an affordable positive-EV vehicle exists).
-    affordable_pos = [
+    # Recommend the best positive-EV vehicle that is legal in the chosen account
+    # AND fits the user's risk budget (never crown a CRA-prohibited spread in a TFSA
+    # or a $14,000 LEAPS for a $500 budget when an affordable positive-EV vehicle exists).
+    eligible_pos = [
         i for i, v in enumerate(results)
-        if v.ev_view_net_usd > 0 and v.capital_at_risk_usd <= view.risk_budget_usd * 1.15
+        if v.ev_view_net_usd > 0 and (not is_tfsa or v.tfsa_legal)
     ]
-    rec_idx = affordable_pos[0] if affordable_pos else (0 if (results and results[0].ev_view_net_usd > 0) else None)
+    affordable_pos = [
+        i for i in eligible_pos
+        if results[i].capital_at_risk_usd <= view.risk_budget_usd * 1.15
+    ]
+    rec_idx = affordable_pos[0] if affordable_pos else (eligible_pos[0] if eligible_pos else None)
     if rec_idx is not None:
         from dataclasses import replace
 

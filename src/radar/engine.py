@@ -37,7 +37,12 @@ DEFAULT_CACHE_PATH = "data/radar_cache.json"
 
 
 def merge_confluence(opportunities: List[Opportunity]) -> List[Opportunity]:
-    """Attach independent secondary playbook tags to overlapping tickers and sort deterministically."""
+    """Attach independent same-direction secondary playbook tags to overlapping tickers and sort deterministically.
+
+    Opposing-direction signals on the same ticker (e.g. Bull Put LONG + Bear Call SHORT)
+    never inflate `confluence_count`; instead they attach `OPPOSING_SIGNAL` to `risk_flags`
+    so the desk never mistakes an accidental Iron Condor for agreement.
+    """
     if not opportunities:
         return []
 
@@ -47,22 +52,34 @@ def merge_confluence(opportunities: List[Opportunity]) -> List[Opportunity]:
 
     merged: List[Opportunity] = []
     for opp in opportunities:
-        peers = by_ticker[opp.ticker]
-        other_sources = sorted(
-            {p.playbook_id for p in peers if p.playbook_id != opp.playbook_id}
-        )
+        peers = [p for p in by_ticker[opp.ticker] if p.playbook_id != opp.playbook_id]
+        same_dir_peers = [
+            p for p in peers
+            if p.direction == opp.direction
+            or opp.direction not in ("LONG", "SHORT")
+            or p.direction not in ("LONG", "SHORT")
+        ]
+        opp_dir_peers = [
+            p for p in peers
+            if opp.direction in ("LONG", "SHORT")
+            and p.direction in ("LONG", "SHORT")
+            and p.direction != opp.direction
+        ]
+        other_sources = sorted({p.playbook_id for p in same_dir_peers})
         other_badges = sorted(
             {
                 b
-                for p in peers
-                if p.playbook_id != opp.playbook_id
+                for p in same_dir_peers
                 for b in p.badges
                 if b not in opp.badges
             }
         )
         tags = tuple(dict.fromkeys(list(opp.confluence_tags) + other_sources + other_badges[:3]))
         c_count = 1 + len(other_sources)
-        merged.append(replace(opp, confluence_count=c_count, confluence_tags=tags))
+        flags = list(opp.risk_flags)
+        if opp_dir_peers and "OPPOSING_SIGNAL" not in flags:
+            flags.append("OPPOSING_SIGNAL")
+        merged.append(replace(opp, confluence_count=c_count, confluence_tags=tags, risk_flags=tuple(flags)))
 
     merged.sort(
         key=lambda o: (
@@ -77,6 +94,9 @@ def merge_confluence(opportunities: List[Opportunity]) -> List[Opportunity]:
     return merged
 
 
+_SHORT_VOL_PLAYBOOKS = frozenset({"etf_wide_spread", "etf_bear_call", "covered_call_holdings"})
+
+
 def enrich_with_portfolio_and_iv(
     opportunities: List[Opportunity],
     ohlcv: Dict[str, Any],
@@ -85,8 +105,9 @@ def enrich_with_portfolio_and_iv(
     own_picks_db: str = "data/own_picks.db",
     paper_db: str = "paper_trades.db",
     longterm_db: str = "data/longterm.db",
+    vix_term: Optional[str] = None,
 ) -> List[Opportunity]:
-    """Attach descriptive portfolio-overlap warnings and IV-vs-RV cheapness badges."""
+    """Attach descriptive portfolio-overlap warnings, VIX-term warnings, and IV-vs-RV badges."""
     if not opportunities:
         return []
 
@@ -106,6 +127,7 @@ def enrich_with_portfolio_and_iv(
     for o in opportunities:
         badges = list(o.badges)
         flags = list(o.risk_flags)
+        is_short_vol = o.playbook_id in _SHORT_VOL_PLAYBOOKS
 
         # Portfolio overlap warnings (skip covered_call_holdings which intentionally targets owned stock)
         if o.playbook_id != "covered_call_holdings":
@@ -118,6 +140,14 @@ def enrich_with_portfolio_and_iv(
                     if tag not in flags:
                         flags.append(tag)
 
+        # VIX backwardation is an active stress warning for index/ETF short-vol spreads
+        if (
+            vix_term == "BACKWARDATION"
+            and o.playbook_id in ("etf_wide_spread", "etf_bear_call")
+            and "VIX_BACKWARDATION" not in flags
+        ):
+            flags.append("VIX_BACKWARDATION")
+
         # IV vs RV cheapness / richness badge from real archived chains
         iv_info = iv_map.get(o.ticker)
         if iv_info and o.ticker in ohlcv and len(ohlcv[o.ticker][1]) >= 25:
@@ -125,8 +155,12 @@ def enrich_with_portfolio_and_iv(
             atm_iv = float(iv_info["atm_iv"])
             if np.isfinite(rv20) and rv20 > 0.02:
                 ratio = atm_iv / rv20
-                if ratio <= 0.90 and "IV_CHEAP" not in badges:
-                    badges.append("IV_CHEAP")
+                if ratio <= 0.90:
+                    if is_short_vol:
+                        if "VOL_CHEAP_FOR_SHORT" not in flags:
+                            flags.append("VOL_CHEAP_FOR_SHORT")
+                    elif "IV_CHEAP" not in badges:
+                        badges.append("IV_CHEAP")
                 elif ratio >= 1.25 and "IV_RICH" not in badges:
                     badges.append("IV_RICH")
 
@@ -255,6 +289,7 @@ def run_radar(
         own_picks_db=own_picks_db,
         paper_db=paper_db,
         longterm_db=longterm_db,
+        vix_term=header.get("vix_term"),
     )
     merged = merge_confluence(enriched)
 

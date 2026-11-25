@@ -327,7 +327,7 @@ def scan_live_etf_wide_spreads_detailed(
         max_risk_usd = (width - ladder.p_walk) * 100.0
         strat_label = "Bull Put" if is_put else "Bear Call"
         short_delta = float(legs.short.delta or 0.0)
-        flags = ["LIMIT_ONLY_NO_MKT"]
+        flags = ["LIMIT_ONLY_NO_MKT", "TAXABLE_ONLY"]
         if sym != "SPY":
             # The LEAD verdict was measured on SPY 2010-2023 only.
             flags.append("TESTED_ON_SPY_ONLY")
@@ -351,7 +351,7 @@ def scan_live_etf_wide_spreads_detailed(
                     f"short Δ{short_delta:+.2f} · "
                     f"Mid ${cr_mid:.2f} · Min Limit ${ladder.p_walk:.2f} · Risk ${max_risk_usd:,.0f}"
                 ),
-                badges=("LIVE_CHAIN", f"DTE:{dte}", f"Δ{short_delta:+.2f}", f"LIMIT>={ladder.p_walk:.2f}", "TP50_21DTE"),
+                badges=("LIVE_CHAIN", f"DTE:{dte}", f"Δ{short_delta:+.2f}", f"LIMIT>={ladder.p_walk:.2f}", "TP50_21DTE", "TAXABLE_ONLY"),
                 risk_flags=tuple(flags),
                 friction_label=f"{fric_ratio*100:.1f}% cr",
                 friction_value=round(fric_ratio, 4),

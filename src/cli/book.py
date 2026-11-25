@@ -11,6 +11,7 @@ from rich.table import Table
 
 from src.own_picks import (
     build_equity_scorecard,
+    close_equity_pick,
     list_equity_picks,
     log_equity_pick,
     log_pick,
@@ -191,3 +192,79 @@ def log_cmd(
         click.echo(json.dumps({"ok": True, "pick_id": pid, "ticker": ticker.upper(), "playbook": playbook}))
     else:
         click.echo(f"✓ Logged pick #{pid}: {side.upper()} {shares:g} {ticker.upper()} @ ${price:.2f} [{playbook}]")
+
+
+@click.command("close")
+@click.argument("target")
+@click.option("--price", type=float, required=True, help="Exit fill price per share.")
+@click.option("--date", "exit_date", default=None, help="Exit date YYYY-MM-DD (defaults to today).")
+@click.option("--note", default=None, help="Optional exit rationale / review note.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON output.")
+@click.pass_context
+def close_cmd(
+    ctx: click.Context,
+    target: str,
+    price: float,
+    exit_date: Optional[str],
+    note: Optional[str],
+    as_json: bool,
+) -> None:
+    """Close an open stock/ETF pick in `own_picks.db` by pick ID or ticker."""
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    own_picks_db = (ctx.obj or {}).get("own_picks_db", "data/own_picks.db")
+    if float(price) <= 0:
+        raise click.UsageError("--price must be positive")
+
+    open_picks = list_equity_picks(status="OPEN", db_path=own_picks_db)
+    match: Optional[Dict[str, Any]] = None
+    raw = target.strip().lstrip("#")
+    if raw.isdigit():
+        pid = int(raw)
+        match = next((p for p in open_picks if int(p["pick_id"]) == pid), None)
+    else:
+        sym = raw.upper()
+        matches = [p for p in open_picks if str(p.get("ticker") or "").upper() == sym]
+        if len(matches) > 1:
+            ids = ", ".join(f"#{m['pick_id']}" for m in matches)
+            raise click.UsageError(f"Multiple OPEN picks for {sym} ({ids}); pass a specific pick ID.")
+        match = matches[0] if matches else None
+
+    if match is None:
+        msg = f"No OPEN pick matching {target!r}."
+        if use_json:
+            click.echo(json.dumps({"ok": False, "error": msg}))
+        else:
+            click.echo(f"✗ {msg}", err=True)
+        raise SystemExit(1)
+
+    pid = int(match["pick_id"])
+    merged_note: Optional[str] = None
+    if note:
+        prev = str(match.get("notes") or "").strip()
+        merged_note = f"{prev} | Exit: {note.strip()}" if prev else f"Exit: {note.strip()}"
+    ok = close_equity_pick(pid, float(price), exit_date=exit_date, notes=merged_note, db_path=own_picks_db)
+    entry_px = float(match.get("entry_price") or 0.0)
+    shares = float(match.get("shares") or 0.0)
+    sign = -1.0 if str(match.get("side") or "LONG").upper() == "SHORT" else 1.0
+    pnl_pct = sign * (float(price) / entry_px - 1.0) * 100.0 if entry_px > 0 else 0.0
+    pnl_usd = sign * (float(price) - entry_px) * shares
+    if use_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": ok,
+                    "pick_id": pid,
+                    "ticker": str(match["ticker"]).upper(),
+                    "entry_price": entry_px,
+                    "exit_price": float(price),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "pnl_usd": round(pnl_usd, 2),
+                },
+                indent=2,
+            )
+        )
+    else:
+        click.echo(
+            f"✓ Closed pick #{pid} ({match['ticker']}): "
+            f"${entry_px:.2f} -> ${float(price):.2f} ({pnl_pct:+.2f}%, ${pnl_usd:+,.2f})"
+        )

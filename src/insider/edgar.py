@@ -35,14 +35,14 @@ _last_request = 0.0
 
 
 def _get(url: str, timeout: int = 20):
-    """Throttled GET with the SEC-required headers."""
+    """Throttled GET with the SEC-required headers (reads SEC_EDGAR_CONTACT dynamically)."""
     global _last_request
     import requests
     wait = THROTTLE_S - (time.time() - _last_request)
     if wait > 0:
         time.sleep(wait)
     _last_request = time.time()
-    resp = requests.get(url, headers=HEADERS, timeout=timeout)
+    resp = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=timeout)
     resp.raise_for_status()
     return resp
 

@@ -53,7 +53,7 @@
       "label": "ETF Bear Call Spread",
       "asset_class": "option",
       "horizon_days": [25, 45],
-      "accounts": ["tfsa", "taxable"],
+      "accounts": ["taxable"],
       "evidence_tier": "LEAD",
       "prereg": "docs/PREREG_EARNINGS_AND_BEAR_CALL_20261109.md",
       "result": "docs/RESULT_EARNINGS_AND_BEAR_CALL_20261109.md",
@@ -66,14 +66,14 @@
         "excess_vs_bench": -0.001
       },
       "default_friction_bps": null,
-      "notes": "Forward confirmation B1-F scheduled >= 2027-01-20. Restrict strictly to tight-spread index/sector ETFs."
+      "notes": "Forward confirmation B1-F scheduled >= 2027-01-20. Restrict strictly to tight-spread index/sector ETFs. Margin/taxable only (CRA prohibits spreads in Canadian TFSAs)."
     },
     {
       "id": "etf_wide_spread",
       "label": "ETF Wide Spread (60-120d)",
       "asset_class": "option",
       "horizon_days": [60, 120],
-      "accounts": ["tfsa", "taxable"],
+      "accounts": ["taxable"],
       "evidence_tier": "LEAD",
       "prereg": "docs/PREREG_OPTIONS_DTE_AND_PRE_EARNINGS_20261124.md",
       "result": "docs/RESULT_ODX_WIDE_60_120_20261124.md",
@@ -89,7 +89,7 @@
         "median_friction": 0.0493
       },
       "default_friction_bps": null,
-      "notes": "Test O1: O1-M (TP50/no-stop/21-DTE, 5%-wide SPY Bull Put) missed full-touch CI by 27 bps (+1.12% [-0.27%, +2.25%]) but PASSED at k=0.35 limit fills (+1.59% [+0.26%, +2.67%], PF 2.41, x_dyn +0.70%). Requires measured limit fills via fill_experiment/IBKR — NEVER market orders."
+      "notes": "Test O1: O1-M (TP50/no-stop/21-DTE, 5%-wide SPY Bull Put) missed full-touch CI by 27 bps (+1.12% [-0.27%, +2.25%]) but PASSED at k=0.35 limit fills (+1.59% [+0.26%, +2.67%], PF 2.41, x_dyn +0.70%). Requires measured limit fills via IBKR taxable/margin (CRA prohibits credit spreads in Canadian TFSAs) — NEVER market orders."
     },
     {
       "id": "pre_earnings_runup",

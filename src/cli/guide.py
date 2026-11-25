@@ -136,33 +136,41 @@ PLAIN-ENGLISH GUIDE TO YOUR TRADING DESK
      Buys strong uptrending stocks that dipped sharply over 3 days (RSI2 < 10).
      Buy SHARES (never wide-spread options), exit when price closes above its 5-day
      average or after 10 trading days. Skip or size tiny when Market Mood is DEFENSIVE.
-   • 60–120 Day Wide ETF Spreads [PROMISING — Limit Orders Only]
+   • 60–120 Day Wide ETF Spreads [PROMISING — Limit Orders Only · TAXABLE / IBKR ONLY]
      Sells a 5%-wide Bull Put on liquid ETFs (SPY/QQQ/XLE/etc.) 60–120 days out,
-     takes profit at 50% of credit, and exits at 21 days left. ONLY works if you use
-     limit orders (IBKR or verified fills) — NEVER use market orders!
+     takes profit at 50% of credit, and exits at 21 days left. CRA prohibits spreads
+     in Canadian TFSAs — keep spreads strictly in a taxable/margin account, and
+     ONLY use limit orders (NEVER market orders).
 
 2. WHAT THE LABELS MEAN
    • PROVEN (VAL)    = Passed full out-of-sample backtest net of real costs.
    • PROMISING (LEAD)= Strong evidence, with a specific rule (shares-only or limit-only).
-   • WATCHLIST (CTX) = Informational (your holdings buy zones, insider buys) — not a signal.
+   • WATCHLIST (CTX) = Informational (holdings buy zones, insiders, option skew, SEC EDGAR) — not yet OOS-proven.
    • TESTING         = A registered test exists but its readout date has not arrived yet.
-   • CONTEXT         = Plain description (trend, breadth, peers). Never tested as a signal.
+   • CONTEXT         = Plain description (trend, breadth, peers, macro plumbing). Never tested as a signal.
    • AVOID           = A measured negative (e.g. post-earnings breakdown) or an imminent event.
    • RETIRED (CLOSED)= Tested and failed — hidden from your daily screen automatically.
    • POST_EARN_CRASH = Stock dropped >=5% on heavy earnings volume; avoid catching the knife.
 
-3. DISCOVER — TOP-DOWN, IN FOUR NUMBERED STEPS  (TUI [6] · `opt discover` · web 🗺️ Discover)
+3. DISCOVER — TOP-DOWN, IN FOUR NUMBERED STEPS  (TUI [6] · `opt discover` · `opt web`)
    ① MARKET   What kind of market is this? VIX curve, trend, credit & rotation ratios. Context only.
    ② SECTORS  The 16 sector/asset ETFs in PROVEN rotation order. FAVOR = held this month.
-              Press Enter on a sector to see its stocks.
+              Press Enter on a sector to see its stocks; press `g` to toggle the 4-quadrant RRG map.
    ③ IDEAS    Lenses ("why look here?"). Each shows its label, the evidence, and how it is sorted.
               `opt discover --ledger` lists ideas already tested here that do NOT work.
    ④ CARD     One ticker: verdict, price structure, closest peers, options odds (says when they
               are a MODEL rather than market-implied), events — and where every number came from.
 
-4. DAILY ROUTINE (2 MINUTES)
-   • Run `opt refresh` once after the close (prices + FRED), then `opt` (dashboard) or `opt guide`.
-   • Never memorize flags — everything is guided from those two commands.
+4. KEYBOARD SHORTCUTS & BLOOMBERG `:` COMMAND BAR
+   • Tabs: 1=Today  2=Radar  3=Workbench  4=Book (Ghost Race)  5=Lab  6=Discover
+   • Power keys: `:` Cmd Bar · `b` TFSA Rebalance · `l` Log Pick · `x` Close Pick · `f` Log Fill
+                 `a` TFSA/Taxable · `g` RRG Map · `[`/`]` Target ±2% · `-`/`+` Days ±10 · `t` Theme
+   • `:` Mnemonics: `NVDA` (Card) · `NVDA WB` (Workbench) · `REB` · `SKEW` · `GEX SPY` ·
+                    `EDGAR` · `MACRO` · `PM NVDA` (Pre-Mortem) · `CLOSE` · `THEME amber_crt`
+
+5. DAILY ROUTINE (2 MINUTES)
+   • Run `opt refresh` once after the close, then `opt` (TUI) or `opt web` (browser cockpit).
+   • Type `opt commands` in your terminal anytime (or read `docs/COMMANDS.md`) to see every command.
 """
 
 

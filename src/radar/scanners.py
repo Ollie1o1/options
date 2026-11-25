@@ -180,12 +180,13 @@ def _load_upcoming_earnings_map(
     dolt_db: str = "data/dolt_options.db",
     horizon_days: int = 10,
 ) -> Dict[str, int]:
-    """Map ticker -> calendar days to next known earnings within horizon_days."""
+    """Map ticker -> calendar days to next known (or cadence-projected) earnings within horizon_days."""
     full = repo_path(dolt_db)
     if not os.path.exists(full):
         return {}
     today = dt.date.today()
     out: Dict[str, int] = {}
+    history_by_sym: Dict[str, List[str]] = {}
     try:
         con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
         try:
@@ -194,13 +195,36 @@ def _load_upcoming_earnings_map(
                 "WHERE date >= ? AND date <= ? GROUP BY symbol",
                 (today.isoformat(), (today + dt.timedelta(days=horizon_days)).isoformat()),
             ).fetchall()
+            hist_rows = con.execute(
+                "SELECT symbol, date FROM earnings_cal WHERE date IS NOT NULL ORDER BY symbol, date"
+            ).fetchall()
         finally:
             con.close()
         for sym, dstr in rows:
             days = (dt.date.fromisoformat(dstr) - today).days
             out[str(sym).upper()] = days
+        for sym, dstr in hist_rows:
+            history_by_sym.setdefault(str(sym).upper(), []).append(str(dstr)[:10])
     except Exception:
         return {}
+
+    # Fallback: for symbols with a regular historical earnings cadence (>=8 quarters)
+    # and no announced future date in cache, project the next report via earnings_gate.
+    try:
+        from src.earnings_gate import project_next_earnings
+
+        for sym, dates in history_by_sym.items():
+            if sym in out:
+                continue
+            if any(d >= today.isoformat() for d in dates):
+                continue
+            proj = project_next_earnings(dates, today=today)
+            if proj:
+                days = (dt.date.fromisoformat(proj) - today).days
+                if 0 <= days <= horizon_days:
+                    out[sym] = days
+    except Exception:
+        pass
     return out
 
 
@@ -871,8 +895,8 @@ def scan_cached_etf_bear_calls(
                     if k_s is not None and k_l is not None
                     else f"Bear Call exp {exp}{cr_str}{ev_str} (scan {scan_day})"
                 ),
-                badges=("ETF_BEAR_CALL", f"DTE:{dte_int}", "LIMIT_ONLY"),
-                risk_flags=("FORWARD_B1F_PENDING",),
+                badges=("ETF_BEAR_CALL", f"DTE:{dte_int}", "LIMIT_ONLY", "TAXABLE_ONLY"),
+                risk_flags=("FORWARD_B1F_PENDING", "TAXABLE_ONLY"),
                 friction_label=f"{fric_val*100:.1f}% cr",
                 friction_value=round(fric_val, 4),
                 confluence_count=1,
@@ -904,6 +928,10 @@ def scan_archived_etf_wide_spreads(
     if not os.path.exists(full):
         return []
 
+    from src.radar.wide_spread_rule import LegQuote, risk_free_rate, select_legs
+    from src.structure.execution_plan import format_ladder_lines
+
+    r_rate, _r_src = risk_free_rate()
     as_of = _now_utc()
     opps: List[Opportunity] = []
     for sym in symbols:
@@ -924,31 +952,48 @@ def scan_archived_etf_wide_spreads(
         if sl is None or len(sl.puts) < 2:
             continue
 
-        valid = [c for c in sl.puts if c.bid > 0 and c.ask >= c.bid and c.mid > 0]
-        if len(valid) < 2:
+        # Share the exact Test O1 -0.25 delta rule (`wide_spread_rule.select_legs`)
+        # with the live scanner and backtest replay.
+        leg_quotes: List[LegQuote] = []
+        t_yr = max(float(sl.dte), 1.0) / 365.0
+        for c in sl.puts:
+            dl = c.delta
+            if dl is None and c.bid > 0 and c.ask >= c.bid and c.mid > 0:
+                from src.data_quality import implied_vol_from_price
+                from src.utils import bs_delta
+
+                iv_sol = c.iv or implied_vol_from_price("put", spot, c.strike, t_yr, r_rate, c.mid, 0.0)
+                if iv_sol is not None:
+                    dl = float(bs_delta("put", spot, c.strike, t_yr, r_rate, iv_sol, 0.0))
+            leg_quotes.append(
+                LegQuote(
+                    strike=c.strike,
+                    bid=c.bid,
+                    ask=c.ask,
+                    delta=dl,
+                    iv=c.iv,
+                    open_interest=float(c.open_interest),
+                    volume=float(c.volume),
+                )
+            )
+        legs, _reason = select_legs(
+            leg_quotes,
+            spot=spot,
+            side="bull_put",
+            expiration=sl.expiration,
+            dte=float(sl.dte),
+            max_friction_to_credit=max_friction_to_credit,
+        )
+        if legs is None:
             continue
 
-        target_short = spot * 0.94
-        short_leg = min(valid, key=lambda c: abs(c.strike - target_short))
-        long_cands = [c for c in valid if c.strike < short_leg.strike]
-        if not long_cands:
-            continue
-        target_long = short_leg.strike - 0.05 * spot
-        long_leg = min(long_cands, key=lambda c: abs(c.strike - target_long))
-        width = short_leg.strike - long_leg.strike
-        if width <= 0:
-            continue
-
-        cr_mid = short_leg.mid - long_leg.mid
-        cr_cross = short_leg.bid - long_leg.ask
-        if cr_mid <= 0 or cr_cross <= 0 or cr_mid >= width:
-            continue
-
-        rt_spread = (short_leg.ask - short_leg.bid) + (long_leg.ask - long_leg.bid)
-        fric_ratio = rt_spread / cr_cross
-        if fric_ratio > max_friction_to_credit:
-            continue
-
+        cr_mid, cr_cross, width, fric_ratio = (
+            legs.credit_mid,
+            legs.credit_cross,
+            legs.width,
+            legs.friction_ratio,
+        )
+        short_delta = float(legs.short.delta or 0.0)
         ladder = build_walk_away_ladder(
             structure="Wide Credit Spread",
             is_credit=True,
@@ -958,6 +1003,11 @@ def scan_archived_etf_wide_spreads(
             max_friction_to_credit=max_friction_to_credit,
         )
         max_risk_usd = (width - ladder.p_walk) * 100.0
+        flags = ["LIMIT_ONLY_NO_MKT", "TAXABLE_ONLY"]
+        if sym_u != "SPY":
+            flags.append("TESTED_ON_SPY_ONLY")
+        if abs(legs.width_pct - 0.05) > 0.01:
+            flags.append(f"WING_{legs.width_pct * 100:.1f}PCT_NOT_5")
         opps.append(
             Opportunity(
                 ticker=sym_u,
@@ -971,12 +1021,12 @@ def scan_archived_etf_wide_spreads(
                 chg_5d_pct=None,
                 horizon_label=f"{sl.dte}d",
                 setup_summary=(
-                    f"Bull Put {short_leg.strike:g}/{long_leg.strike:g} exp {sl.expiration} · "
-                    f"Mid ${cr_mid:.2f} · Min Limit ${ladder.p_walk:.2f} · Risk ${max_risk_usd:,.0f} "
-                    f"(snap {sl.snap_date})"
+                    f"Bull Put {legs.short.strike:g}/{legs.long.strike:g} ({short_delta:+.2f}Δ) "
+                    f"exp {sl.expiration} · Mid ${cr_mid:.2f} · Min Limit ${ladder.p_walk:.2f} "
+                    f"· Risk ${max_risk_usd:,.0f} (snap {sl.snap_date})"
                 ),
-                badges=("ARCHIVE_CHAIN", f"DTE:{sl.dte}", f"LIMIT>={ladder.p_walk:.2f}", "TP50_21DTE"),
-                risk_flags=("LIMIT_ONLY_NO_MKT",),
+                badges=("ARCHIVE_CHAIN", f"DTE:{sl.dte}", f"LIMIT>={ladder.p_walk:.2f}", "TP50_21DTE", "TAXABLE_ONLY"),
+                risk_flags=tuple(flags),
                 friction_label=f"{fric_ratio*100:.1f}% cr",
                 friction_value=round(fric_ratio, 4),
                 confluence_count=1,
@@ -985,11 +1035,14 @@ def scan_archived_etf_wide_spreads(
                     "expiration": sl.expiration,
                     "dte": sl.dte,
                     "snap_date": sl.snap_date,
-                    "short_strike": short_leg.strike,
-                    "long_strike": long_leg.strike,
+                    "short_strike": legs.short.strike,
+                    "long_strike": legs.long.strike,
+                    "short_delta": round(short_delta, 3),
+                    "width_pct": round(legs.width_pct, 4),
                     "credit_mid": round(cr_mid, 2),
                     "credit_cross": round(cr_cross, 2),
                     "walk_away_limit": ladder.p_walk,
+                    "walk_away_steps": list(format_ladder_lines(ladder)),
                     "max_risk_usd": round(max_risk_usd, 2),
                 },
             )

@@ -66,11 +66,11 @@ Screen {
     margin-top: 1;
 }
 
-LogFillModal, QuickLogModal, HelpModal {
+LogFillModal, QuickLogModal, ClosePickModal, BloombergCommandModal, RebalanceModal, AlphaViewerModal, HelpModal {
     align: center middle;
 }
 
-#logfill-dialog, #quicklog-dialog {
+#logfill-dialog, #quicklog-dialog, #closepick-dialog {
     width: 64;
     height: auto;
     border: thick $primary;
@@ -78,7 +78,54 @@ LogFillModal, QuickLogModal, HelpModal {
     padding: 1 2;
 }
 
-#lf-filled-row, #logfill-buttons, #quicklog-buttons {
+#bcmd-dialog {
+    width: 72;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#reb-dialog, #alpha-dialog {
+    width: 86;
+    height: 82%;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#reb-scroll, #alpha-scroll {
+    height: 1fr;
+}
+
+#reb-buttons, #alpha-buttons, #bcmd-buttons {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#book-race-box {
+    height: auto;
+    border: solid $accent;
+    background: $surface;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#disc-rrg-box {
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+.modal-error {
+    height: auto;
+    color: $error;
+}
+
+#lf-filled-row, #logfill-buttons, #quicklog-buttons, #closepick-buttons {
     height: 3;
     align: right middle;
     margin-top: 1;
@@ -194,6 +241,11 @@ Screen.compact #radar-table {
     margin-right: 1;
 }
 
+#wb-acct-select {
+    width: 14;
+    margin-right: 1;
+}
+
 #wb-owns-switch {
     margin-left: 1;
 }
@@ -263,25 +315,6 @@ Screen.compact #wb-right {
     background: $surface;
     padding: 0 1;
     margin-bottom: 1;
-}
-
-/* QuickLogModal */
-QuickLogModal {
-    align: center middle;
-}
-
-#quicklog-dialog {
-    width: 60;
-    height: auto;
-    border: thick $accent;
-    background: $surface;
-    padding: 1 2;
-}
-
-#quicklog-buttons {
-    height: 3;
-    align: right middle;
-    margin-top: 1;
 }
 
 /* [6] DISCOVER — ① market strip on top, ② sectors left, ③ ideas right, ④ card full-screen */

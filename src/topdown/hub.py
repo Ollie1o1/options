@@ -83,6 +83,8 @@ def build_hub(
     estimates_db: str = "data/estimates_archive.db",
     own_picks_db: str = "data/own_picks.db",
     longterm_db: str = "data/longterm.db",
+    chain_db: str = "data/chain_archive.db",
+    edgar_db: str = "data/edgar_events.db",
 ) -> DiscoveryHub:
     """Macro → board → lenses, from local archives only (no network)."""
     t0 = time.perf_counter()
@@ -103,7 +105,7 @@ def build_hub(
     board = build_sector_board(ohlcv)
     timings["board"] = round(time.perf_counter() - t2, 3)
     t3 = time.perf_counter()
-    ctx = build_context(ohlcv, board, snapshot, estimates_db=estimates_db)
+    ctx = build_context(ohlcv, board, snapshot, estimates_db=estimates_db, chain_db=chain_db, edgar_db=edgar_db)
     lenses = run_lenses(ctx)
     timings["lenses"] = round(time.perf_counter() - t3, 3)
     return DiscoveryHub(

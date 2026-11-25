@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from src.paths import repo_path
+
 logger = logging.getLogger(__name__)
 
 EARNINGS_API = "https://www.dolthub.com/api/v1alpha1/post-no-preference/earnings/master"
@@ -35,12 +37,18 @@ CREATE TABLE IF NOT EXISTS earnings_fetched (symbol TEXT PRIMARY KEY, fetched_at
 """
 
 
-def _ensure(db_path: str) -> None:
+def _ensure(db_path: str) -> str:
     import os
-    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    resolved = repo_path(db_path)
+    os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
+    conn = sqlite3.connect(resolved)
+    try:
         conn.execute(_DDL_EARN)
         conn.execute(_DDL_EARN_FETCHED)
+        conn.commit()
+    finally:
+        conn.close()
+    return resolved
 
 
 def _fetch_live(symbol: str) -> List[Dict[str, str]]:
@@ -93,9 +101,10 @@ def earnings_dates(symbol: str, db_path: str = DEFAULT_CACHE,
     leaves the cache exactly as it was — an outage is not new information.
     """
     symbol = symbol.upper()
-    _ensure(db_path)
+    resolved = _ensure(db_path)
     fetch = fetcher or _fetch_live
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(resolved)
+    try:
         row = conn.execute("SELECT fetched_at FROM earnings_fetched WHERE symbol=?",
                            (symbol,)).fetchone()
         if row is None or _is_stale(row[0], max_age_days):
@@ -115,6 +124,8 @@ def earnings_dates(symbol: str, db_path: str = DEFAULT_CACHE,
                 conn.commit()
         cur = conn.execute("SELECT date FROM earnings_cal WHERE symbol=? ORDER BY date", (symbol,))
         return [r[0] for r in cur.fetchall() if r[0]]
+    finally:
+        conn.close()
 
 
 def refresh_symbols(symbols: List[str], db_path: str = DEFAULT_CACHE,
@@ -180,14 +191,14 @@ def scan_universe(config_path: str = "config.json",
     import json
     symbols: set = set()
     try:
-        with open(config_path) as fh:
+        with open(repo_path(config_path)) as fh:
             for value in (json.load(fh).get("watchlists") or {}).values():
                 if isinstance(value, list):
                     symbols.update(str(v).upper() for v in value)
     except Exception:
         pass
-    for path, query in ((ledger_path, "SELECT DISTINCT ticker FROM trades"),
-                        (candidates_path,
+    for path, query in ((repo_path(ledger_path), "SELECT DISTINCT ticker FROM trades"),
+                        (repo_path(candidates_path),
                          "SELECT DISTINCT symbol FROM candidates")):
         try:
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -204,10 +215,13 @@ def scan_universe(config_path: str = "config.json",
 def _fetch_marker(symbol: str, db_path: str) -> Optional[str]:
     """`earnings_fetched.fetched_at` for a symbol, or None if never fetched."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        conn = sqlite3.connect(repo_path(db_path))
+        try:
             row = conn.execute(
                 "SELECT fetched_at FROM earnings_fetched WHERE symbol=?",
                 (symbol.upper(),)).fetchone()
+        finally:
+            conn.close()
         return row[0] if row else None
     except sqlite3.Error:
         return None

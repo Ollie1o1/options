@@ -39,14 +39,17 @@ CREATE TABLE IF NOT EXISTS av_backfill_state (
 
 
 def _api_key() -> Optional[str]:
+    from src.paths import repo_path
+
     key = os.environ.get("ALPHAVANTAGE_API_KEY")
     if key:
         return key
     try:  # mirror ai_scorer's .env convention without requiring dotenv
-        with open(".env") as f:
+        with open(repo_path(".env")) as f:
             for line in f:
                 if line.strip().startswith("ALPHAVANTAGE_API_KEY="):
-                    return line.strip().split("=", 1)[1] or None
+                    val = line.strip().split("=", 1)[1].strip().strip("'\"")
+                    return val or None
     except OSError:
         pass
     return None

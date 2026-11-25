@@ -12,7 +12,7 @@ from rich.panel import Panel
 from src.own_picks import list_equity_picks
 from src.paths import repo_path
 from src.radar import load_cached_radar, run_radar
-from .render import make_console, render_core_allocation, render_radar_table, render_ribbon
+from .render import accent_color, make_console, render_core_allocation, render_radar_table, render_ribbon
 
 
 def _open_paper_count(db_path: str = "paper_trades.db") -> int:
@@ -32,11 +32,19 @@ def _open_paper_count(db_path: str = "paper_trades.db") -> int:
 
 def _ops_health_summary() -> str:
     try:
-        import shutil
+        from src.tui.state import DeskDataProvider
 
-        free_gb = shutil.disk_usage(repo_path(".")).free / (1024 ** 3)
-        tag = "OK" if free_gb >= 15 else ("WARN" if free_gb >= 8 else "LOW DISK")
-        return f"Disk {free_gb:.1f} GB free [{tag}] · Live execution: OFF"
+        h = DeskDataProvider().get_health()
+        free_gb = float(h.get("disk_free_gb") or 0.0)
+        worst = str(h.get("worst") or "OK")
+        pipes = h.get("pipes") or {}
+        bad = [
+            f"{k}:{v.get('status')}"
+            for k, v in pipes.items()
+            if k != "disk" and v.get("status") in ("WARN", "STALE")
+        ]
+        bad_s = f" · Pipes: {', '.join(bad)}" if bad else " · Pipes: ALL OK"
+        return f"Disk {free_gb:.1f} GB free [{worst}]{bad_s} · Live execution: OFF"
     except Exception:
         return "Health check unavailable"
 
@@ -76,7 +84,7 @@ def today_cmd(ctx: click.Context, refresh: bool, as_json: bool) -> None:
     console = make_console(no_color=no_color)
     from .guide import plain_english_action_plan
 
-    console.print(Panel(render_ribbon(snap), title="TODAY · DAILY TRADING DESK", border_style="#82aad2"))
+    console.print(Panel(render_ribbon(snap), title="TODAY · DAILY TRADING DESK", border_style=accent_color()))
     console.print(
         Panel(
             "\n".join(plain_english_action_plan(snap))

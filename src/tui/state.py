@@ -15,7 +15,12 @@ import numpy as np
 
 from src.equity_playbooks.indicators import sma
 from src.fill_experiment import fill_rate_summary, log_real_fill
-from src.own_picks import build_equity_scorecard, list_equity_picks, log_equity_pick
+from src.own_picks import (
+    build_equity_scorecard,
+    close_equity_pick,
+    list_equity_picks,
+    log_equity_pick,
+)
 from src.paths import repo_path
 from src.radar import (
     Opportunity,
@@ -290,6 +295,22 @@ class DeskDataProvider:
             db_path=self.own_picks_db,
         )
 
+    def close_stock_pick(
+        self,
+        *,
+        pick_id: int,
+        exit_price: float,
+        exit_date: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        return close_equity_pick(
+            int(pick_id),
+            float(exit_price),
+            exit_date=exit_date,
+            notes=notes,
+            db_path=self.own_picks_db,
+        )
+
     def log_fill_attempt(
         self,
         *,
@@ -320,6 +341,21 @@ class DeskDataProvider:
 
     def get_playbooks(self) -> List[PlaybookMeta]:
         return list_playbooks(include_closed=True, path=self.playbooks_path)
+
+    def get_ghost_race(self, *, lookback_days: int = 126) -> Optional[Any]:
+        try:
+            from src.equity_playbooks.ghost_race import compute_ghost_race
+            from src.profile import load_profile
+
+            prof = load_profile()
+            return compute_ghost_race(
+                ohlcv_db=self.ohlcv_db,
+                own_picks_db=self.own_picks_db,
+                lookback_days=lookback_days,
+                account_usd=prof.tfsa_usd,
+            )
+        except Exception:
+            return None
 
     def get_health(self) -> Dict[str, Any]:
         free_gb = round(shutil.disk_usage(repo_path(".")).free / (1024 ** 3), 2)
@@ -371,6 +407,18 @@ class DeskDataProvider:
             except Exception:
                 pass
 
+        pipes = self._compute_pipe_health(
+            free_gb=free_gb,
+            ohlcv_syms=ohlcv_syms,
+            ohlcv_last=ohlcv_last,
+        )
+        for pinfo in pipes.values():
+            st_p = pinfo.get("status")
+            if st_p == "STALE":
+                worst = "STALE"
+            elif st_p == "WARN" and worst == "OK":
+                worst = "WARN"
+
         return {
             "disk_free_gb": free_gb,
             "worst": worst,
@@ -380,6 +428,7 @@ class DeskDataProvider:
             "maintenance_summary": maint_summary,
             "ohlcv_symbols": ohlcv_syms,
             "ohlcv_last": ohlcv_last,
+            "pipes": pipes,
             "readouts": [
                 "2027-01-15: Estimate Revisions Arm B + Bull Put §2",
                 "2027-01-20: B1-F ETF Bear Call Forward",
@@ -387,3 +436,114 @@ class DeskDataProvider:
                 "2027-05-25: Discover lens forward read (26 weeks)",
             ],
         }
+
+    def _compute_pipe_health(
+        self,
+        *,
+        free_gb: float,
+        ohlcv_syms: int,
+        ohlcv_last: str,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Per-pipeline freshness LEDs so broken feeds never hide behind disk-only OK."""
+        today = dt.date.today()
+
+        def _age_days(d_str: str) -> Optional[int]:
+            try:
+                return (today - dt.date.fromisoformat(str(d_str)[:10])).days
+            except Exception:
+                return None
+
+        pipes: Dict[str, Dict[str, Any]] = {}
+
+        # 1. OHLCV
+        o_age = _age_days(ohlcv_last)
+        o_st = "OK" if (ohlcv_syms > 0 and o_age is not None and o_age <= 4) else ("WARN" if ohlcv_syms > 0 else "STALE")
+        pipes["ohlcv"] = {"status": o_st, "detail": f"{ohlcv_syms} syms ({ohlcv_last or '—'})", "as_of": ohlcv_last}
+
+        # 2. Chain Archive
+        ch_last = ""
+        ch_syms = 0
+        full_ch = repo_path(self.chain_db)
+        if os.path.exists(full_ch):
+            try:
+                con = sqlite3.connect(f"file:{full_ch}?mode=ro", uri=True)
+                try:
+                    row = con.execute("SELECT MAX(snap_date), COUNT(DISTINCT symbol) FROM chain_snapshots").fetchone()
+                    if row:
+                        ch_last = str(row[0] or "")
+                        ch_syms = int(row[1] or 0)
+                finally:
+                    con.close()
+            except Exception:
+                pass
+        c_age = _age_days(ch_last)
+        c_st = "OK" if (c_age is not None and c_age <= 4) else ("WARN" if (c_age is not None and c_age <= 7) else "STALE")
+        pipes["chains"] = {"status": c_st, "detail": f"{ch_syms} syms ({ch_last or 'missing'})", "as_of": ch_last}
+
+        # 3. Earnings Calendar (future coverage)
+        e_fut = 0
+        full_dolt = repo_path("data/dolt_options.db")
+        if os.path.exists(full_dolt):
+            try:
+                con = sqlite3.connect(f"file:{full_dolt}?mode=ro", uri=True)
+                try:
+                    r_e = con.execute(
+                        "SELECT COUNT(DISTINCT symbol) FROM earnings_cal WHERE date >= ?",
+                        (today.isoformat(),),
+                    ).fetchone()
+                    e_fut = int(r_e[0] or 0) if r_e else 0
+                finally:
+                    con.close()
+            except Exception:
+                pass
+        e_st = "OK" if e_fut >= 25 else ("WARN" if e_fut >= 5 else "STALE")
+        pipes["earnings"] = {"status": e_st, "detail": f"{e_fut} future syms", "as_of": today.isoformat()}
+
+        # 4. Estimates Archive
+        est_last = ""
+        full_est = repo_path("data/estimates_archive.db")
+        if os.path.exists(full_est):
+            try:
+                con = sqlite3.connect(f"file:{full_est}?mode=ro", uri=True)
+                try:
+                    r_es = con.execute("SELECT MAX(snap_date) FROM estimate_snapshots").fetchone()
+                    est_last = str(r_es[0] or "") if r_es and r_es[0] else ""
+                finally:
+                    con.close()
+            except Exception:
+                pass
+        es_age = _age_days(est_last)
+        es_st = "OK" if (es_age is not None and es_age <= 7) else ("WARN" if (es_age is not None and es_age <= 14) else "STALE")
+        pipes["estimates"] = {"status": es_st, "detail": est_last or "missing", "as_of": est_last}
+
+        # 5. FRED Cache
+        full_fred = repo_path("data/fred_cache.json")
+        f_st = "STALE"
+        f_det = "missing"
+        if os.path.exists(full_fred):
+            age_d = (today - dt.date.fromtimestamp(os.path.getmtime(full_fred))).days
+            f_st = "OK" if age_d <= 7 else ("WARN" if age_d <= 14 else "STALE")
+            f_det = f"{age_d}d old"
+        pipes["fred"] = {"status": f_st, "detail": f_det, "as_of": ""}
+
+        # 6. Kalshi Predmarkets
+        pm_last = ""
+        full_pm = repo_path("data/predmarkets.db")
+        if os.path.exists(full_pm):
+            try:
+                con = sqlite3.connect(f"file:{full_pm}?mode=ro", uri=True)
+                try:
+                    r_pm = con.execute("SELECT MAX(archived_at) FROM pm_quotes").fetchone()
+                    pm_last = str(r_pm[0] or "")[:10] if r_pm and r_pm[0] else ""
+                finally:
+                    con.close()
+            except Exception:
+                pass
+        p_age = _age_days(pm_last)
+        p_st = "OK" if (p_age is not None and p_age <= 4) else ("WARN" if (p_age is not None and p_age <= 7) else "STALE")
+        pipes["kalshi"] = {"status": p_st, "detail": pm_last or "missing", "as_of": pm_last}
+
+        # 7. Disk
+        d_st = "OK" if free_gb >= 25 else ("WARN" if free_gb >= 12 else "STALE")
+        pipes["disk"] = {"status": d_st, "detail": f"{free_gb:.1f} GB free", "as_of": ""}
+        return pipes

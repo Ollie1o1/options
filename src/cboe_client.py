@@ -76,11 +76,28 @@ def parse_chain(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _http_get_json(url: str, timeout: int) -> Dict[str, Any]:
+    import time
     import requests
-    resp = requests.get(url, timeout=timeout,
-                        headers={"User-Agent": "options-screener/1.0"})
-    resp.raise_for_status()
-    return resp.json()
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, timeout=timeout,
+                                headers={"User-Agent": "options-screener/1.0"})
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+                time.sleep(0.8)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.8)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    return {}
 
 
 def fetch_chain(symbol: str, timeout: int = 20,
