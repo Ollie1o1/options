@@ -289,7 +289,7 @@ class DeskApp(App[None]):
 
         tbl = self.query_one("#today-top5-table", DataTable)
         tbl.clear()
-        for o in snap.opportunities[:5]:
+        for idx, o in enumerate(snap.opportunities[:5]):
             tbl.add_row(
                 TIER_PLAIN.get(o.evidence_tier, o.evidence_tier),
                 o.ticker,
@@ -298,7 +298,7 @@ class DeskApp(App[None]):
                 str(o.confluence_count),
                 o.friction_label or f"{o.friction_value*100:.2f}%",
                 o.setup_summary[:55],
-                key=f"{o.ticker}|{o.playbook_id}",
+                key=f"{idx}|{o.ticker}|{o.playbook_id}",
             )
 
     def _render_radar(self) -> None:
@@ -544,12 +544,25 @@ class DeskApp(App[None]):
             live_opps, _warns = self.provider.get_live_etf_options()
 
             def _merge() -> None:
-                if self.snapshot is not None:
-                    base = [o for o in self.snapshot.opportunities if "LIVE_CHAIN" not in o.badges]
+                if self.snapshot is not None and live_opps:
+                    # Replace both prior LIVE_CHAIN and archived etf_wide_spread rows so
+                    # fresh live quotes supersede archived ones cleanly without duplicates.
+                    live_tickers = {o.ticker for o in live_opps}
+                    base = [
+                        o
+                        for o in self.snapshot.opportunities
+                        if "LIVE_CHAIN" not in o.badges
+                        and not (o.playbook_id == "etf_wide_spread" and o.ticker in live_tickers)
+                    ]
                     self.snapshot.opportunities = merge_confluence(base + live_opps)
+                    self.query_one("#radar-filter-input", Input).value = "option"
                     self._render_today()
                     self._render_radar()
-                self._set_status(f"Live ETF opts: {len(live_opps)} found")
+                    self._set_status(f"Live ETF spreads: {len(live_opps)} found (showing Options)")
+                elif live_opps:
+                    self._set_status(f"Live ETF spreads: {len(live_opps)} found")
+                else:
+                    self._set_status("Live ETF spreads: 0 cleared <=25% cost (kept cached)")
 
             self.call_from_thread(_merge)
         except Exception as exc:
@@ -650,7 +663,8 @@ class DeskApp(App[None]):
             except (ValueError, IndexError):
                 pass
         elif tid == "today-top5-table" and event.row_key is not None:
-            tk = str(event.row_key.value).split("|")[0]
+            parts = str(event.row_key.value).split("|")
+            tk = parts[1] if len(parts) >= 2 else parts[0]
             self.open_workbench(tk)
 
     # ── Actions ──────────────────────────────────────────────────────────────

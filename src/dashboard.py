@@ -263,11 +263,21 @@ def render_main() -> None:
         if st.button("⚡ Scan Live 60–120d ETF Spreads", width="stretch"):
             with st.spinner("Scanning live ETF option chains (Test O1)…"):
                 live_opps, warns = provider.get_live_etf_options()
-                from src.radar.engine import merge_confluence
+                if live_opps:
+                    from src.radar.engine import merge_confluence
 
-                base = [o for o in st.session_state.radar_snap.opportunities if "LIVE_CHAIN" not in o.badges]
-                st.session_state.radar_snap.opportunities = merge_confluence(base + live_opps)
-            st.success(f"Added {len(live_opps)} live 60–120d ETF spread(s).")
+                    live_tickers = {o.ticker for o in live_opps}
+                    base = [
+                        o
+                        for o in st.session_state.radar_snap.opportunities
+                        if "LIVE_CHAIN" not in o.badges
+                        and not (o.playbook_id == "etf_wide_spread" and o.ticker in live_tickers)
+                    ]
+                    st.session_state.radar_snap.opportunities = merge_confluence(base + live_opps)
+            if live_opps:
+                st.success(f"Updated {len(live_opps)} live 60–120d ETF spread(s).")
+            else:
+                st.warning("0 live ETF spreads cleared <=25% cost (after-hours quotes may be wide); kept cached quotes.")
         if st.button("📥 Update Daily OHLCV Prices", width="stretch"):
             with st.spinner("Refreshing Yahoo daily closes…"):
                 res = provider.update_prices(expand_universe=False)

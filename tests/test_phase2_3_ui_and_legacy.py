@@ -186,13 +186,21 @@ class Phase2FakeProvider(DeskDataProvider):
         return (
             [
                 Opportunity(
+                    ticker="SPY", asset_class="option", playbook_id="etf_wide_spread",
+                    playbook_label="60-120d Wide Bull Put", evidence_tier="LEAD",
+                    direction="LONG", spot=595.0, chg_1d_pct=0.4, chg_5d_pct=1.1,
+                    horizon_label="93d", setup_summary="LIVE Bull Put 560/530 · Mid $4.40",
+                    badges=("LIVE_CHAIN", "TEST_O1"), risk_flags=("LIMIT_ONLY_NO_MKT",),
+                    friction_label="3.1% cr", friction_value=0.031, confluence_count=1,
+                ),
+                Opportunity(
                     ticker="QQQ", asset_class="option", playbook_id="etf_wide_spread",
-                    playbook_label="ETF Wide Spread", evidence_tier="LEAD",
+                    playbook_label="60-120d Wide Bull Put", evidence_tier="LEAD",
                     direction="LONG", spot=510.0, chg_1d_pct=0.6, chg_5d_pct=1.2,
-                    horizon_label="90d", setup_summary="LIVE Bull Put 480/455 · cr $3.80",
-                    badges=("LIVE_CHAIN", "TEST_O1"), risk_flags=(),
-                    friction_label="7.2% of cr", friction_value=0.072, confluence_count=1,
-                )
+                    horizon_label="90d", setup_summary="LIVE Bull Put 480/455 · Mid $3.80",
+                    badges=("LIVE_CHAIN", "TEST_O1"), risk_flags=("LIMIT_ONLY_NO_MKT",),
+                    friction_label="7.2% cr", friction_value=0.072, confluence_count=1,
+                ),
             ],
             [],
         )
@@ -304,6 +312,17 @@ class TestPhase2TuiCockpit(unittest.IsolatedAsyncioTestCase):
                 lab_txt = str(app.query_one("#lab-health-box", Static).render())
                 self.assertIn("OHLCV: 2 syms", lab_txt)
                 self.assertIn("1/1", lab_txt)
+
+                # 7. Live ETF Spreads (`o`) replaces archived SPY without DuplicateKey crash
+                app.action_live_options()
+                await pilot.pause(0.2)
+                self.assertEqual(app.query_one("#main-tabs", TabbedContent).active, "radar")
+                self.assertEqual(app.query_one("#radar-filter-input", Input).value, "option")
+                opt_tickers = [o.ticker for o in app.filtered_opps]
+                self.assertEqual(opt_tickers.count("SPY"), 1)
+                self.assertIn("QQQ", opt_tickers)
+                spy_opt = next(o for o in app.filtered_opps if o.ticker == "SPY")
+                self.assertIn("LIVE_CHAIN", spy_opt.badges)
 
     def test_filter_tokens_actionable_and_clean(self) -> None:
         opps = Phase2FakeProvider().get_radar().opportunities

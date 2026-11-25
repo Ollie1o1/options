@@ -193,12 +193,32 @@ def scan_live_etf_wide_spreads(
     warnings: List[str] = []
     is_put = str(side).lower() != "bear_call"
 
-    for sym in symbols:
-        try:
-            data = fetcher(sym.upper())
-        except Exception as exc:
-            warnings.append(f"{sym}: {exc}")
-            continue
+    sym_list = [s.upper() for s in symbols]
+    fetched: Dict[str, Optional[Dict[str, Any]]] = {}
+    if fetch_fn is None and len(sym_list) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fetch_one(tk: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+            try:
+                return tk, fetcher(tk), None
+            except Exception as exc:
+                return tk, None, f"{tk}: {exc}"
+
+        with ThreadPoolExecutor(max_workers=min(4, len(sym_list))) as ex:
+            for tk, data, err in ex.map(_fetch_one, sym_list):
+                if err:
+                    warnings.append(err)
+                else:
+                    fetched[tk] = data
+    else:
+        for tk in sym_list:
+            try:
+                fetched[tk] = fetcher(tk)
+            except Exception as exc:
+                warnings.append(f"{tk}: {exc}")
+
+    for sym in sym_list:
+        data = fetched.get(sym)
         if not data:
             continue
         spot = float(data.get("spot") or 0.0)
