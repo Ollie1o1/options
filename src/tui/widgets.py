@@ -300,6 +300,18 @@ class ClosePickModal(ModalScreen[Optional[Dict[str, Any]]]):
             if self._exit_hint:
                 yield Static(f"[#d6a452]Signal: {self._exit_hint}[/]")
             yield Input(value=f"{self._exit_default:.2f}", placeholder="Exit Fill Price", id="cp-price")
+            yield Select(
+                [
+                    ("Plan Worked", "PLAN_WORKED"),
+                    ("Bad Fill / Slippage", "BAD_FILL"),
+                    ("Thesis Wrong", "THESIS_WRONG"),
+                    ("Regime Shift", "REGIME_SHIFT"),
+                    ("Broke Rules", "BROKE_RULES"),
+                    ("Time Exit", "TIME_EXIT"),
+                ],
+                value="PLAN_WORKED",
+                id="cp-tag",
+            )
             yield Input(value=self._exit_hint, placeholder="Exit Note / Reason (optional)", id="cp-note")
             yield Static("", id="cp-err", classes="modal-error")
             with Horizontal(id="closepick-buttons"):
@@ -320,10 +332,12 @@ class ClosePickModal(ModalScreen[Optional[Dict[str, Any]]]):
                 if exit_px <= 0:
                     raise ValueError("Exit price must be positive.")
                 note = self.query_one("#cp-note", Input).value.strip()
+                raw_tag = self.query_one("#cp-tag", Select).value
+                tag = str(raw_tag).upper() if raw_tag and str(raw_tag) != "Select.BLANK" else "PLAN_WORKED"
             except ValueError as exc:
                 self.query_one("#cp-err", Static).update(f"[#e06c75]{exc}[/]")
                 return
-            self.dismiss({"pick_id": self._pick_id, "exit_price": exit_px, "notes": note or None})
+            self.dismiss({"pick_id": self._pick_id, "exit_price": exit_px, "notes": note or None, "close_tag": tag})
 
 
 class LogFillModal(ModalScreen[Optional[Dict[str, Any]]]):

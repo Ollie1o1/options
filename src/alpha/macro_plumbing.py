@@ -67,10 +67,54 @@ class MacroPlumbingSnapshot:
         )
 
 
-def _fetch_text(url: str, timeout: int = 15) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "options-screener/2.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+def _fetch_text(url: str, timeout: int = 25) -> str:
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "options-screener/2.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    return ""
+
+
+def _fetch_yf_vix_fallback(missing_keys: List[str]) -> Dict[str, float]:
+    """Fetch VIX curve points via yfinance (`^VIX9D`, `^VIX`, `^VIX3M`, `^VIX6M`) when CBOE CSV fails."""
+    if not missing_keys:
+        return {}
+    yf_map = {"vix9d": "^VIX9D", "vix": "^VIX", "vix3m": "^VIX3M", "vix6m": "^VIX6M"}
+    out: Dict[str, float] = {}
+    try:
+        import math
+        import yfinance as yf
+
+        for key in missing_keys:
+            sym = yf_map.get(key)
+            if not sym:
+                continue
+            try:
+                hist = yf.Ticker(sym).history(period="5d")
+                if hist is not None and not hist.empty:
+                    val = float(hist["Close"].dropna().iloc[-1])
+                    if math.isfinite(val) and val > 0:
+                        out[key] = round(val, 2)
+            except Exception:
+                continue
+        try:
+            from src.cache_release import release_yfinance_caches
+
+            release_yfinance_caches()
+        except Exception:
+            pass
+    except ImportError:
+        pass
+    return out
 
 
 def parse_fred_csv(text: str) -> List[Tuple[str, float]]:
@@ -268,10 +312,11 @@ def refresh_macro_plumbing(
     fetcher: Optional[Callable[[str], str]] = None,
 ) -> MacroPlumbingSnapshot:
     """Refresh 4-point CBOE VIX curve, FRED Fed Net Liquidity, CFTC COT & Polymarket macro odds."""
+    prior = load_macro_plumbing(cache_path=cache_path)
     get = fetcher or _fetch_text
     snap = MacroPlumbingSnapshot(updated_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    # 1. CBOE 4-point VIX curve
+    # 1. CBOE 4-point VIX curve (with yfinance ^VIX* fallback when CBOE CDN returns 403)
     for key, cname in (("vix9d", "VIX9D"), ("vix", "VIX"), ("vix3m", "VIX3M"), ("vix6m", "VIX6M")):
         try:
             txt = get(CBOE_IDX_URL.format(name=cname))
@@ -283,6 +328,14 @@ def refresh_macro_plumbing(
             local_v = _read_local_vix_csv(cname)
             if local_v is not None:
                 snap.vix_curve[key] = local_v
+    if fetcher is None:
+        missing_vix = [k for k in ("vix9d", "vix", "vix3m", "vix6m") if snap.vix_curve.get(k) is None]
+        if missing_vix:
+            for k, v in _fetch_yf_vix_fallback(missing_vix).items():
+                snap.vix_curve[k] = v
+    for k in ("vix9d", "vix", "vix3m", "vix6m"):
+        if snap.vix_curve.get(k) is None and prior.vix_curve.get(k) is not None:
+            snap.vix_curve[k] = prior.vix_curve[k]
     if snap.vix_curve.get("vix") is not None and snap.vix_curve.get("vix3m") is not None:
         snap.vix_term_label = (
             "BACKWARDATION"
@@ -290,7 +343,7 @@ def refresh_macro_plumbing(
             else "CONTANGO"
         )
 
-    # 2. FRED Fed Net Liquidity (WALCL - TGA - RRP)
+    # 2. FRED Fed Net Liquidity (WALCL - TGA - RRP); preserve prior cached value on transient timeout
     try:
         walcl = parse_fred_csv(get(FRED_CSV_URL.format(series_id="WALCL")))
         tga = parse_fred_csv(get(FRED_CSV_URL.format(series_id="WTREGEN")))
@@ -302,6 +355,11 @@ def refresh_macro_plumbing(
         snap.fed_liq_as_of = str(liq.get("fed_liq_as_of") or "")
     except Exception as exc:
         snap.errors.append(f"fred_liq: {exc}")
+        if prior.fed_net_liquidity_b is not None:
+            snap.fed_net_liquidity_b = prior.fed_net_liquidity_b
+            snap.fed_liq_chg_4w_b = prior.fed_liq_chg_4w_b
+            snap.fed_liq_chg_13w_b = prior.fed_liq_chg_13w_b
+            snap.fed_liq_as_of = prior.fed_liq_as_of
 
     # 3. Polymarket Macro Odds (honest spread guard)
     try:
@@ -310,6 +368,8 @@ def refresh_macro_plumbing(
             snap.polymarket_macro = parse_polymarket_macro(raw_pm)
     except Exception as exc:
         snap.errors.append(f"polymarket: {exc}")
+        if prior.polymarket_macro:
+            snap.polymarket_macro = list(prior.polymarket_macro)
 
     # 4. CFTC COT Positioning
     try:
@@ -318,6 +378,8 @@ def refresh_macro_plumbing(
             snap.cot_signals = parse_cftc_cot(raw_cot)
     except Exception as exc:
         snap.errors.append(f"cftc_cot: {exc}")
+        if prior.cot_signals:
+            snap.cot_signals = list(prior.cot_signals)
 
     full = Path(repo_path(cache_path))
     full.parent.mkdir(parents=True, exist_ok=True)

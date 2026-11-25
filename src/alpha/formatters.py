@@ -89,8 +89,14 @@ def format_alpha_screen(cmd: str, *, ticker: str = "SPY") -> Tuple[str, str]:
         )
         return f"DEALER GAMMA EXPOSURE (GEX) // {tk}", body
 
-    if c in ("EDGAR", "13D", "SPIN", "BUYBACK"):
-        emap = {"13D": "ACTIVIST_13D", "SPIN": "SPINOFF_FORM10", "BUYBACK": "NET_BUYBACK_QUALITY"}
+    if c in ("EDGAR", "13D", "SPIN", "BUYBACK", "GUIDANCE", "SUPPLY"):
+        emap = {
+            "13D": "ACTIVIST_13D",
+            "SPIN": "SPINOFF_FORM10",
+            "BUYBACK": "NET_BUYBACK_QUALITY",
+            "GUIDANCE": "GUIDANCE_8K",
+            "SUPPLY": "SUPPLY_CHAIN_10K",
+        }
         ev_type = emap.get(c)
         evs = load_cached_edgar_events(event_type=ev_type, limit=30)
         lines = [
@@ -103,12 +109,49 @@ def format_alpha_screen(cmd: str, *, ticker: str = "SPY") -> Tuple[str, str]:
             lines.append("[dim]No cached EDGAR events yet — run `opt alpha edgar --refresh` (100% free SEC API).[/]")
         return "ALPHA LAB // SEC EDGAR FORCED-FLOW", "\n".join(lines)
 
+    if c == "OCC":
+        from src.occ_archive import scan_occ_uoa
+
+        rows = scan_occ_uoa(limit=25)
+        lines = [
+            "[bold]OCC MARKET-WIDE OPTION VOLUME & OI SURGES[/] [dim][WATCHLIST · data/occ_oi.db][/]",
+            "─" * 78,
+            f"{'TICKER':<7} {'DATE':<11} {'VOLUME':>10} {'OI':>10} {'VOL/OI':>8} {'1D OI%':>8} {'SIGNAL':<16}",
+        ]
+        for r in rows:
+            vo = f"{r.vol_to_oi:.2f}x" if r.vol_to_oi is not None else "—"
+            od = f"{r.oi_delta_pct:+.1f}%" if r.oi_delta_pct is not None else "—"
+            lines.append(f"{r.symbol:<7} {r.trade_date:<11} {r.total_vol:10,.0f} {r.total_oi:10,.0f} {vo:>8} {od:>8} {r.signal_label:<16}")
+        if not rows:
+            lines.append("[dim]No OCC rows yet — run `opt alpha archive-occ`.[/]")
+        return "ALPHA LAB // OCC DAILY VOLUME & OI", "\n".join(lines)
+
+    if c in ("CAL", "CALENDAR"):
+        from src.radar.calendar_spreads import scan_etf_calendar_spreads
+
+        rows = scan_etf_calendar_spreads()
+        lines = [
+            "[bold]TAXABLE ETF CALENDAR SPREADS (FRONT IV > BACK IV)[/] [dim][WATCHLIST · TAXABLE_ONLY][/]",
+            "─" * 78,
+            f"{'ETF':<6} {'TYPE':<5} {'STRIKE':>8} {'FRONT/BACK':<12} {'IV DIFF':>9} {'MID DEB':>9} {'FRIC%':>7}",
+        ]
+        for r in rows:
+            lines.append(
+                f"{r.ticker:<6} {r.opt_type.upper():<5} ${r.strike:7g} {r.front_dte}d/{r.back_dte}d"
+                f"      +{r.iv_diff_vp:5.1f}vp  ${r.net_debit_mid:7.2f} {r.friction_pct*100:6.1f}%"
+            )
+        if not rows:
+            lines.append("[dim]No front-rich ETF calendars right now (requires archived multi-expiry chains).[/]")
+        return "ALPHA LAB // TAXABLE ETF CALENDARS", "\n".join(lines)
+
     if c == "MACRO":
         return "MACRO PLUMBING // VIX CURVE · FED LIQUIDITY · COT · POLYMARKET", format_macro_text(rich=True)
 
     # Default: Pre-Mortem Devil's Advocate (`PM <TICKER>`)
     tk = ticker.upper()
     dos = build_dossier(tk, fetch_chain=False)
+    if dos.spot is None:
+        dos = build_dossier(tk, fetch_chain=False, allow_live_spot=True)
     sk_rows = scan_option_signals_for_shares(symbols=(tk,))
     sk = sk_rows[0] if sk_rows else None
     mac = load_macro_plumbing()

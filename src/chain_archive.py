@@ -106,6 +106,164 @@ def symbols_for_run(config: Dict[str, Any],
     return out
 
 
+def fetch_yfinance_chain(
+    symbol: str,
+    *,
+    max_dte: int = 120,
+    moneyness_band: float = 0.15,
+    max_expirations: int = 6,
+) -> List[Dict[str, Any]]:
+    """Fallback chain snapshot via yfinance + Black-Scholes Greeks when CBOE is unavailable.
+
+    Produces rows matching the exact `chain_snapshots` schema so downstream consumers
+    (`opt alpha skew`, `opt alpha gex`, SVI RND, archived ETF spreads) continue to work
+    even when CBOE returns HTTP 403.
+    """
+    import math
+    from datetime import date, timezone
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return []
+
+    from src.data_quality import implied_vol_from_price
+    from src.radar.wide_spread_rule import risk_free_rate
+    from src.utils import bs_delta, bs_gamma, bs_theta, bs_vega
+
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return []
+    today = date.today()
+    snap_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r_rate, _ = risk_free_rate()
+
+    try:
+        tkr = yf.Ticker(sym)
+        hist = tkr.history(period="5d")
+        if hist is None or hist.empty:
+            return []
+        spot = float(hist["Close"].iloc[-1])
+        if not math.isfinite(spot) or spot <= 0:
+            return []
+        exps = list(tkr.options or ())
+    except Exception:
+        return []
+
+    valid_exps: List[tuple[int, str]] = []
+    for e in exps:
+        try:
+            dte = (date.fromisoformat(str(e)[:10]) - today).days
+        except ValueError:
+            continue
+        if 1 <= dte <= max_dte:
+            valid_exps.append((dte, str(e)[:10]))
+    if not valid_exps:
+        return []
+
+    # Pick a balanced subset covering near-term (~21-35d), medium (~45-65d), and wide (~75-110d)
+    valid_exps.sort()
+    if len(valid_exps) > max_expirations:
+        targets = (14, 30, 45, 60, 90, 115)[:max_expirations]
+        chosen_map: Dict[str, int] = {}
+        for tgt in targets:
+            best = min(valid_exps, key=lambda x: abs(x[0] - tgt))
+            chosen_map[best[1]] = best[0]
+        chosen_exps = sorted((d, e) for e, d in chosen_map.items())
+    else:
+        chosen_exps = valid_exps
+
+    def _f(v: Any) -> Optional[float]:
+        try:
+            x = float(v)
+            return x if math.isfinite(x) else None
+        except (TypeError, ValueError):
+            return None
+
+    rows: List[Dict[str, Any]] = []
+    for dte, exp in chosen_exps:
+        T = max(dte, 1) / 365.0
+        try:
+            ch = tkr.option_chain(exp)
+        except Exception:
+            continue
+        for opt_type, df in (("call", ch.calls), ("put", ch.puts)):
+            if df is None or df.empty:
+                continue
+            for rec in df.to_dict("records"):
+                strike = _f(rec.get("strike"))
+                if strike is None or strike <= 0 or abs(strike / spot - 1.0) > moneyness_band:
+                    continue
+                bid = _f(rec.get("bid"))
+                ask = _f(rec.get("ask"))
+                oi = _f(rec.get("openInterest")) or 0.0
+                vol = _f(rec.get("volume")) or 0.0
+                if oi < 1 and (bid is None or bid <= 0):
+                    continue
+                iv = None
+                if bid is not None and ask is not None and bid > 0 and ask >= bid:
+                    iv = implied_vol_from_price(opt_type, spot, strike, T, r_rate, 0.5 * (bid + ask))
+                if iv is None:
+                    raw_iv = _f(rec.get("impliedVolatility"))
+                    if raw_iv is not None and 0.02 <= raw_iv <= 4.0:
+                        iv = raw_iv
+                delta = gamma = theta = vega = None
+                if iv is not None and 0.02 <= iv <= 4.0:
+                    try:
+                        delta = float(bs_delta(opt_type, spot, strike, T, r_rate, iv))
+                        gamma = float(bs_gamma(spot, strike, T, r_rate, iv))
+                        theta = float(bs_theta(opt_type, spot, strike, T, r_rate, iv))
+                        vega = float(bs_vega(spot, strike, T, r_rate, iv))
+                    except Exception:
+                        pass
+                contract = str(rec.get("contractSymbol") or f"{sym}{exp.replace('-', '')[2:]}{opt_type[0].upper()}{int(round(strike * 1000)):08d}")
+                rows.append({
+                    "symbol": sym,
+                    "contract": contract,
+                    "type": opt_type,
+                    "strike": strike,
+                    "expiration": exp,
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_size": None,
+                    "ask_size": None,
+                    "iv": iv,
+                    "delta": delta,
+                    "gamma": gamma,
+                    "theta": theta,
+                    "vega": vega,
+                    "rho": None,
+                    "open_interest": oi,
+                    "volume": vol,
+                    "last_trade_time": str(rec.get("lastTradeDate") or ""),
+                    "spot": spot,
+                    "snapshot_ts": snap_ts,
+                    "source": "yfinance",
+                })
+    try:
+        from src.cache_release import release_yfinance_caches
+
+        release_yfinance_caches()
+    except Exception:
+        pass
+    return rows
+
+
+def fetch_chain_with_fallback(
+    symbol: str,
+    *,
+    max_dte: int = 120,
+    moneyness_band: float = 0.15,
+) -> List[Dict[str, Any]]:
+    """Try free CBOE delayed chain first; fall back to yfinance + BS Greeks if CBOE returns empty."""
+    from src import cboe_client
+
+    rows = cboe_client.fetch_chain(symbol)
+    if rows:
+        return rows
+    return fetch_yfinance_chain(symbol, max_dte=max_dte, moneyness_band=moneyness_band)
+
+
 def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                     today: Optional[str] = None,
                     fetcher: Optional[Callable] = None,
@@ -125,9 +283,11 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
     2026-11-18 the run fired with the Mac asleep and offline: 1 of 22 symbols
     archived, the day was stamped done, and the other 21 were lost for good.
     """
-    from src import cboe_client
     today = today or datetime.now().strftime("%Y-%m-%d")
-    fetcher = fetcher or cboe_client.fetch_chain
+    if fetcher is None:
+        def _default_fetch(s: str) -> List[Dict[str, Any]]:
+            return fetch_chain_with_fallback(s, max_dte=max_dte, moneyness_band=moneyness_band)
+        fetcher = _default_fetch
     ensure_db(db_path)
     written = 0
     st: Dict[str, Any] = {"symbols": len(symbols), "already": 0, "archived": 0,

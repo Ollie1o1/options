@@ -133,6 +133,7 @@ class DeskApp(App[None]):
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
         Binding("colon", "bloomberg_cmd", "Cmd :", show=True),
+        Binding("m", "morning_ritual", "Ritual", show=True),
         Binding("b", "rebalance_modal", "Rebal", show=True),
         Binding("l", "quick_log", "Log Pick", show=True),
         Binding("x", "close_pick", "Close Pick", show=True),
@@ -193,7 +194,8 @@ class DeskApp(App[None]):
                 with Vertical(id="today-grid"):
                     yield Static("Loading your plain-English daily action plan…", id="today-core-card")
                     with Horizontal(id="today-actions"):
-                        yield Button("Refresh [r]", id="act-refresh", variant="primary")
+                        yield Button("Ritual [m]", id="act-ritual", variant="primary")
+                        yield Button("Refresh [r]", id="act-refresh")
                         yield Button("Rebalance [b]", id="act-rebal")
                         yield Button("Cmd [:]", id="act-bcmd")
                         yield Button("Plan [3]", id="act-workbench")
@@ -442,6 +444,11 @@ class DeskApp(App[None]):
         self._wb_loaded_ticker = sym
         self.query_one("#wb-ticker-input", Input).value = sym
         dos: TickerDossier = self.provider.get_dossier(sym, fetch_chain=False)
+        if dos.spot is None and not self.offline:
+            try:
+                dos = self.provider.get_dossier(sym, fetch_chain=True, allow_live_spot=True)
+            except TypeError:
+                dos = self.provider.get_dossier(sym, fetch_chain=True)
         self.query_one("#wb-left", Static).update(format_dossier_markup(dos))
 
         spot = dos.spot if dos.spot is not None else 100.0
@@ -483,7 +490,11 @@ class DeskApp(App[None]):
             account_type=acct_val,
             owns_100_shares=owns_100,
         )
-        vehicles = self.provider.get_express(view, spot=spot, iv=iv)
+        allow_live_chain = (not self.offline) and (dos.atm_iv is None)
+        try:
+            vehicles = self.provider.get_express(view, spot=spot, iv=iv, allow_live=allow_live_chain)
+        except TypeError:
+            vehicles = self.provider.get_express(view, spot=spot, iv=iv)
         self._last_vehicles = vehicles
         self._selected_vehicle_idx = 0
         self.query_one("#wb-verdict-box", Static).update(
@@ -552,6 +563,43 @@ class DeskApp(App[None]):
                 )
         else:
             lines.append("  [dim]Press [l] anywhere to log your first stock/ETF pick · [f] to log a limit fill.[/dim]")
+
+        # CRA TFSA Safety & 15% US Dividend Tax-Drag Meter
+        try:
+            from src.profile import load_profile
+            from src.tfsa_tax import compute_tfsa_safety_report
+
+            prof = load_profile()
+            safety = compute_tfsa_safety_report(
+                profile=prof,
+                core_allocation=(self.snapshot.core_allocation if self.snapshot else ()),
+                equity_picks=picks,
+            )
+            cra_col = "#5ec98d" if safety.cra_status == "SAFE_INVESTOR" else (
+                "#d6a452" if safety.cra_status == "WATCH_CADENCE" else "#e06c75"
+            )
+            room_part = (
+                f" · Room Left: ${safety.room_remaining_cad:,.0f} CAD"
+                if safety.room_remaining_cad is not None
+                else ""
+            )
+            lines.append(
+                f"[bold]CRA TFSA GUARD:[/] [{cra_col}]{safety.cra_status}[/] ({safety.trades_ytd} YTD trades"
+                + (f", avg hold {safety.avg_hold_days}d" if safety.avg_hold_days is not None else "")
+                + f") · 15% US Div Drag: ~${safety.total_tax_drag_usd_yr:,.0f}/yr ({safety.weighted_tax_drag_bps:.0f} bps){room_part}"
+            )
+        except Exception:
+            pass
+
+        # 10-Second Post-Mortem Mistake Cost Summary
+        mc = book.get("mistake_costs") or {}
+        if mc.get("by_tag"):
+            tag_parts = [
+                f"{r['tag']}: ${r['pnl_usd']:+,.0f} ({r['count']}x, {r['win_rate_pct']:.0f}%W)"
+                for r in mc["by_tag"][:4]
+            ]
+            lines.append("[bold]POST-MORTEM TAGS:[/] " + " · ".join(tag_parts))
+
         self.query_one("#book-scorecard-box", Static).update("\n".join(lines))
 
         bt = self.query_one("#book-picks-table", DataTable)
@@ -615,9 +663,20 @@ class DeskApp(App[None]):
             pcol = "#5ec98d" if pst == "OK" else ("#d6a452" if pst == "WARN" else "#e06c75")
             led_parts.append(f"[{pcol}]● {pname.upper()}[/] [dim]({pinfo.get('detail', '')})[/]")
         pipe_line = ("[bold]DATA PIPES:[/] " + "  ".join(led_parts)) if led_parts else ""
+        mc_line = ""
+        try:
+            bk = self.provider.get_book()
+            mc = (bk.get("mistake_costs") or {}).get("by_tag") or []
+            if mc:
+                mc_line = "[bold]POST-MORTEM MISTAKE COSTS:[/] " + " · ".join(
+                    f"{r['tag']} ${r['pnl_usd']:+,.0f} ({r['count']}x)" for r in mc[:4]
+                )
+        except Exception:
+            pass
         lines = [
             f"[bold]OPS HEALTH:[/] Disk {h.get('disk_free_gb', '?')} GB free [{h.get('worst', 'OK')}]{ohlcv_s}{maint_s}",
             *([pipe_line] if pipe_line else []),
+            *([mc_line] if mc_line else []),
             f"[bold]EXECUTION:[/] Live OFF · all real limit fills logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)} (press \\[f] to log)",
             f"[bold]{o1_str}[/] · rule: docs/PREREG_O1_FILL_K_20261125.md",
             "[bold]PENDING FORWARD READOUTS:[/] " + "  |  ".join(h.get("readouts") or []),
@@ -643,10 +702,17 @@ class DeskApp(App[None]):
     @work(thread=True, exclusive=True, group="live_options")
     def _worker_live_options(self) -> None:
         try:
-            live_opps, _warns = self.provider.get_live_etf_options()
+            live_opps, warns = self.provider.get_live_etf_options()
             skipped: Dict[str, str] = dict(getattr(self.provider, "last_live_skipped", {}) or {})
 
             def _merge() -> None:
+                if warns:
+                    self.notify(
+                        "\n".join(warns[:6]),
+                        title="Live ETF feed warnings",
+                        severity="warning",
+                        timeout=12,
+                    )
                 if skipped:
                     # Say which ETFs produced nothing and why (thin Yahoo quotes vs. the rule).
                     lines = [f"{tk}: {why}" for tk, why in sorted(skipped.items())]
@@ -663,18 +729,29 @@ class DeskApp(App[None]):
                         and not (o.playbook_id == "etf_wide_spread" and o.ticker in live_tickers)
                     ]
                     self.snapshot.opportunities = merge_confluence(base + live_opps)
-                    self.query_one("#radar-filter-input", Input).value = "option"
+                    inp = self.query_one("#radar-filter-input", Input)
+                    if inp.value != "option":
+                        inp.value = "option"
                     self._render_today()
                     self._render_radar()
+                    if self.filtered_opps:
+                        first = self.filtered_opps[0]
+                        self.focused_ticker = first.ticker
+                        self.focused_spot = first.spot
+                        self.focused_playbook = first.playbook_id
+                        self.focused_opp = first
+                        self._update_radar_dossier(first.ticker)
                     self._set_status(f"Live ETF spreads: {len(live_opps)} found (showing Options)")
                 elif live_opps:
                     self._set_status(f"Live ETF spreads: {len(live_opps)} found")
+                elif warns:
+                    self._set_status(f"Live ETF spreads: 0 ({warns[0][:40]})")
                 else:
                     self._set_status("Live ETF spreads: 0 cleared <=25% cost (kept cached)")
 
             self.call_from_thread(_merge)
         except Exception as exc:
-            self.call_from_thread(self._set_status, f"Live opts err: {str(exc)[:30]}")
+            self.call_from_thread(self._set_status, f"Live opts err: {str(exc)[:40]}")
 
     @work(thread=True, exclusive=True, group="price_update")
     def _worker_update_prices(self) -> None:
@@ -814,6 +891,8 @@ class DeskApp(App[None]):
             self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
         elif bid == "wb-fill-btn" or bid == "act-fill":
             self.action_log_fill()
+        elif bid == "act-ritual":
+            self.action_morning_ritual()
         elif bid == "act-refresh":
             self.action_refresh()
         elif bid == "act-rebal":
@@ -1074,6 +1153,16 @@ class DeskApp(App[None]):
             _after_reb,
         )
 
+    def action_morning_ritual(self) -> None:
+        try:
+            from src.cli.morning_ritual import build_morning_ritual, format_morning_ritual_markup
+
+            ritual = build_morning_ritual(provider=self.provider, refresh=False)
+            body = format_morning_ritual_markup(ritual)
+        except Exception as exc:
+            body = f"[#e06c75]Morning Ritual unavailable: {exc}[/]"
+        self.push_screen(AlphaViewerModal(title="60-SECOND MORNING RITUAL", body=body))
+
     def action_bloomberg_cmd(self) -> None:
         def _run_cmd(raw: Optional[str]) -> None:
             if not raw:
@@ -1088,6 +1177,9 @@ class DeskApp(App[None]):
             return
         cmd = parts[0].upper()
         arg = parts[1].upper() if len(parts) > 1 else ""
+        if cmd in ("RITUAL", "MORNING"):
+            self.action_morning_ritual()
+            return
         if cmd in ("REB", "REBAL", "REBALANCE"):
             self.action_rebalance_modal()
             return
@@ -1107,7 +1199,7 @@ class DeskApp(App[None]):
         if cmd in ("TODAY", "RADAR", "WORKBENCH", "BOOK", "LAB", "DISCOVER"):
             self.action_switch_tab(cmd.lower())
             return
-        if cmd in ("SKEW", "GEX", "EDGAR", "13D", "SPIN", "BUYBACK", "MACRO", "PM", "PREMORTEM"):
+        if cmd in ("SKEW", "GEX", "EDGAR", "13D", "SPIN", "BUYBACK", "GUIDANCE", "SUPPLY", "OCC", "CAL", "CALENDAR", "MACRO", "PM", "PREMORTEM"):
             self._open_alpha_mnemonic(cmd, arg or self.focused_ticker)
             return
         if arg in ("WB", "WORKBENCH", "EXPRESS"):
@@ -1170,14 +1262,23 @@ class DeskApp(App[None]):
         def _after_close(res: Optional[Dict[str, Any]]) -> None:
             if not res:
                 return
-            ok = self.provider.close_stock_pick(
-                pick_id=res["pick_id"],
-                exit_price=res["exit_price"],
-                notes=res.get("notes"),
-            )
+            try:
+                ok = self.provider.close_stock_pick(
+                    pick_id=res["pick_id"],
+                    exit_price=res["exit_price"],
+                    notes=res.get("notes"),
+                    close_tag=res.get("close_tag"),
+                )
+            except TypeError:
+                ok = self.provider.close_stock_pick(
+                    pick_id=res["pick_id"],
+                    exit_price=res["exit_price"],
+                    notes=res.get("notes"),
+                )
             self._render_book()
             if ok:
-                self._set_status(f"Closed pick #{res['pick_id']} @ ${res['exit_price']:.2f}")
+                tag_s = f" [{res['close_tag']}]" if res.get("close_tag") else ""
+                self._set_status(f"Closed pick #{res['pick_id']} @ ${res['exit_price']:.2f}{tag_s}")
 
         self.push_screen(
             ClosePickModal(

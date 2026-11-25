@@ -325,7 +325,41 @@ def refresh_edgar_events(
     except Exception as exc:
         errors.append(f"sc13d: {exc}")
 
-    # 3. XBRL Net Share Buyback Yield + GP/A on liquid TFSA universe
+    # 3. Form 8-K Item 2.02 / 7.01 Guidance & Outlook Updates (last 14 days)
+    start_14 = (today - dt.timedelta(days=14)).isoformat()
+    try:
+        q = urllib.parse.urlencode(
+            {
+                "q": '"raises guidance" OR "raises full-year" OR "updates outlook" OR "lowers guidance"',
+                "forms": "8-K",
+                "dateRange": "custom",
+                "startdt": start_14,
+                "enddt": end_d,
+            }
+        )
+        payload = fetch(f"{EFTS_SEARCH_URL}?{q}")
+        all_ev.extend(parse_efts_hits(payload, event_type="GUIDANCE_8K", source_label="SEC EFTS Form 8-K Guidance")[:15])
+    except Exception as exc:
+        errors.append(f"guidance_8k: {exc}")
+
+    # 4. Form 10-K Major Customer / Supply-Chain Concentration Disclosures (last 60 days)
+    start_60 = (today - dt.timedelta(days=60)).isoformat()
+    try:
+        q = urllib.parse.urlencode(
+            {
+                "q": '"accounted for more than 10%" AND "revenue"',
+                "forms": "10-K",
+                "dateRange": "custom",
+                "startdt": start_60,
+                "enddt": end_d,
+            }
+        )
+        payload = fetch(f"{EFTS_SEARCH_URL}?{q}")
+        all_ev.extend(parse_efts_hits(payload, event_type="SUPPLY_CHAIN_10K", source_label="SEC EFTS 10-K Supply Chain")[:10])
+    except Exception as exc:
+        errors.append(f"supply_chain_10k: {exc}")
+
+    # 5. XBRL Net Share Buyback Yield + GP/A on liquid TFSA universe
     try:
         from src.insider.edgar import cik_for
 

@@ -476,6 +476,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 OWN_PICKS_DB = "data/own_picks.db"
 EQUITY_HORIZONS = (1, 3, 5, 10, 21)
 
+POST_MORTEM_TAGS = (
+    "PLAN_WORKED",
+    "BAD_FILL",
+    "THESIS_WRONG",
+    "REGIME_SHIFT",
+    "BROKE_RULES",
+    "TIME_EXIT",
+)
+
 _EQUITY_PICKS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS picks (
     pick_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -491,7 +500,8 @@ CREATE TABLE IF NOT EXISTS picks (
     exit_date TEXT,
     exit_price REAL,
     status TEXT NOT NULL DEFAULT 'OPEN',
-    notes TEXT DEFAULT ''
+    notes TEXT DEFAULT '',
+    close_tag TEXT DEFAULT ''
 );
 """
 
@@ -503,6 +513,9 @@ def _init_equity_picks_db(db_path: str = OWN_PICKS_DB) -> None:
     con = sqlite3.connect(db_path)
     try:
         con.executescript(_EQUITY_PICKS_SCHEMA)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(picks)").fetchall()}
+        if "close_tag" not in cols:
+            con.execute("ALTER TABLE picks ADD COLUMN close_tag TEXT DEFAULT ''")
         con.commit()
     finally:
         con.close()
@@ -566,28 +579,62 @@ def close_equity_pick(
     *,
     exit_date: Optional[str] = None,
     notes: Optional[str] = None,
+    close_tag: Optional[str] = None,
     db_path: str = OWN_PICKS_DB,
 ) -> bool:
     if not os.path.exists(db_path):
         return False
     _init_equity_picks_db(db_path)
     d_str = exit_date or date.today().isoformat()
+    tag_s = str(close_tag or "").upper().strip()
     con = sqlite3.connect(db_path)
     try:
         if notes is not None:
             cur = con.execute(
-                "UPDATE picks SET status='CLOSED', exit_date=?, exit_price=?, notes=? WHERE pick_id=?",
-                (d_str, float(exit_price), str(notes), int(pick_id)),
+                "UPDATE picks SET status='CLOSED', exit_date=?, exit_price=?, notes=?, close_tag=? WHERE pick_id=?",
+                (d_str, float(exit_price), str(notes), tag_s, int(pick_id)),
             )
         else:
             cur = con.execute(
-                "UPDATE picks SET status='CLOSED', exit_date=?, exit_price=? WHERE pick_id=?",
-                (d_str, float(exit_price), int(pick_id)),
+                "UPDATE picks SET status='CLOSED', exit_date=?, exit_price=?, close_tag=? WHERE pick_id=?",
+                (d_str, float(exit_price), tag_s, int(pick_id)),
             )
         con.commit()
         return cur.rowcount > 0
     finally:
         con.close()
+
+
+def build_mistake_cost_report(db_path: str = OWN_PICKS_DB) -> Dict[str, Any]:
+    """Summarize realized $ P&L and win rate grouped by 10-second Post-Mortem `close_tag`."""
+    picks = list_equity_picks(status="CLOSED", db_path=db_path)
+    by_tag: Dict[str, Dict[str, Any]] = {}
+    for p in picks:
+        entry_px = float(p.get("entry_price") or 0.0)
+        exit_px = float(p.get("exit_price") or 0.0)
+        shares = float(p.get("shares") or 0.0)
+        if entry_px <= 0 or exit_px <= 0 or shares <= 0:
+            continue
+        sgn = -1.0 if str(p.get("side") or "LONG").upper() == "SHORT" else 1.0
+        pnl_usd = sgn * (exit_px - entry_px) * shares
+        ret_pct = sgn * (exit_px / entry_px - 1.0) * 100.0
+        tag = str(p.get("close_tag") or "").upper().strip() or "UNTAGGED"
+        slot = by_tag.setdefault(tag, {"tag": tag, "count": 0, "wins": 0, "pnl_usd": 0.0, "_rets": []})
+        slot["count"] += 1
+        if pnl_usd > 0:
+            slot["wins"] += 1
+        slot["pnl_usd"] = round(slot["pnl_usd"] + pnl_usd, 2)
+        slot["_rets"].append(ret_pct)
+
+    rows: List[Dict[str, Any]] = []
+    for tag, slot in by_tag.items():
+        rets = slot.pop("_rets")
+        cnt = int(slot["count"])
+        slot["win_rate_pct"] = round((slot["wins"] / cnt) * 100.0, 1) if cnt else 0.0
+        slot["avg_ret_pct"] = round(sum(rets) / cnt, 2) if cnt else 0.0
+        rows.append(slot)
+    rows.sort(key=lambda r: r["pnl_usd"])
+    return {"total_closed": sum(r["count"] for r in rows), "by_tag": rows}
 
 
 def list_equity_picks(

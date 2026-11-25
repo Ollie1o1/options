@@ -86,8 +86,8 @@ def alpha_gex(ctx: click.Context, ticker: str, as_json: bool) -> None:
 
 
 @alpha_group.command("edgar")
-@click.option("--refresh", is_flag=True, help="Fetch live SEC EDGAR Form 10 spinoffs, 13D activists & XBRL buybacks.")
-@click.option("--type", "ev_type", type=click.Choice(["all", "SPINOFF_FORM10", "ACTIVIST_13D", "NET_BUYBACK_QUALITY"]), default="all")
+@click.option("--refresh", is_flag=True, help="Fetch live SEC EDGAR Form 10 spinoffs, 13D activists, 8-K guidance, 10-K supply chain & XBRL buybacks.")
+@click.option("--type", "ev_type", type=click.Choice(["all", "SPINOFF_FORM10", "ACTIVIST_13D", "GUIDANCE_8K", "SUPPLY_CHAIN_10K", "NET_BUYBACK_QUALITY"]), default="all")
 @click.option("--json", "as_json", is_flag=True)
 @click.pass_context
 def alpha_edgar(ctx: click.Context, refresh: bool, ev_type: str, as_json: bool) -> None:
@@ -180,7 +180,7 @@ def alpha_premortem(ctx: click.Context, ticker: str, account: str, ai: bool, as_
 @alpha_group.command("archive-chains")
 @click.option("--limit", type=int, default=60, help="Number of liquid tickers to snapshot into data/chain_archive.db.")
 def alpha_archive_chains(limit: int) -> None:
-    """Snapshot expanded liquid ETF + large-cap CBOE chains into data/chain_archive.db (free)."""
+    """Snapshot expanded liquid ETF + large-cap chains into data/chain_archive.db (CBOE + Yahoo fallback)."""
     from src.chain_archive import archive_symbols
 
     syms = list(EXPANDED_CHAIN_UNIVERSE[: max(1, int(limit))])
@@ -190,3 +190,56 @@ def alpha_archive_chains(limit: int) -> None:
         f"Chain archive: {written:,} rows written · archived {stats.get('archived', 0)} · "
         f"already {stats.get('already', 0)} · failed {len(stats.get('failed') or [])}"
     )
+
+
+@alpha_group.command("archive-occ")
+@click.option("--date", "trade_date", default=None, help="Trade date YYYY-MM-DD (default: latest trading day).")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def alpha_archive_occ(ctx: click.Context, trade_date: Optional[str], as_json: bool) -> None:
+    """Archive free whole-market OCC daily option volume & open interest into data/occ_oi.db."""
+    from src.occ_archive import archive_occ_daily
+
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    res = archive_occ_daily(trade_date=trade_date)
+    if use_json:
+        click.echo(json.dumps(res, indent=2))
+        return
+    click.echo(
+        f"OCC daily OI ({res['trade_date']}): {res['saved']:,} symbol(s) saved via {res['source']}"
+        + (f" · notes: {', '.join(res['errors'])}" if res["errors"] else "")
+    )
+
+
+@alpha_group.command("occ-uoa")
+@click.option("--limit", type=int, default=20)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def alpha_occ_uoa(ctx: click.Context, limit: int, as_json: bool) -> None:
+    """Rank unusual option volume/OI and 1-day OI surges from data/occ_oi.db [WATCHLIST]."""
+    from src.occ_archive import scan_occ_uoa
+
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    no_color = bool((ctx.obj or {}).get("no_color"))
+    rows = scan_occ_uoa(limit=limit)
+    if use_json:
+        click.echo(json.dumps([r.to_dict() for r in rows], indent=2))
+        return
+    console = make_console(no_color=no_color)
+    tbl = Table(title="OCC Market-Wide Option Volume & OI Surges [WATCHLIST]", pad_edge=False)
+    tbl.add_column("Ticker", style=f"bold {accent_color()}")
+    tbl.add_column("Date")
+    tbl.add_column("Vol", justify="right")
+    tbl.add_column("OI", justify="right")
+    tbl.add_column("Vol/OI", justify="right")
+    tbl.add_column("1d OI Δ%", justify="right")
+    tbl.add_column("Call%", justify="right")
+    tbl.add_column("Read")
+    for r in rows:
+        vo = f"{r.vol_to_oi:.2f}x" if r.vol_to_oi is not None else "—"
+        od = f"{r.oi_delta_pct:+.1f}%" if r.oi_delta_pct is not None else "—"
+        cs = f"{r.call_share_pct:.0f}%" if r.call_share_pct is not None else "—"
+        tbl.add_row(r.symbol, r.trade_date, f"{r.total_vol:,.0f}", f"{r.total_oi:,.0f}", vo, od, cs, r.signal_label)
+    console.print(tbl)
+    if not rows:
+        console.print("[dim]No rows yet — run `opt alpha archive-occ` to populate data/occ_oi.db.[/dim]")

@@ -10,7 +10,9 @@ import click
 from rich.table import Table
 
 from src.own_picks import (
+    POST_MORTEM_TAGS,
     build_equity_scorecard,
+    build_mistake_cost_report,
     close_equity_pick,
     list_equity_picks,
     log_equity_pick,
@@ -198,6 +200,7 @@ def log_cmd(
 @click.argument("target")
 @click.option("--price", type=float, required=True, help="Exit fill price per share.")
 @click.option("--date", "exit_date", default=None, help="Exit date YYYY-MM-DD (defaults to today).")
+@click.option("--tag", "close_tag", type=click.Choice(list(POST_MORTEM_TAGS), case_sensitive=False), default=None, help="10-second Post-Mortem reason tag.")
 @click.option("--note", default=None, help="Optional exit rationale / review note.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON output.")
 @click.pass_context
@@ -206,6 +209,7 @@ def close_cmd(
     target: str,
     price: float,
     exit_date: Optional[str],
+    close_tag: Optional[str],
     note: Optional[str],
     as_json: bool,
 ) -> None:
@@ -242,7 +246,8 @@ def close_cmd(
     if note:
         prev = str(match.get("notes") or "").strip()
         merged_note = f"{prev} | Exit: {note.strip()}" if prev else f"Exit: {note.strip()}"
-    ok = close_equity_pick(pid, float(price), exit_date=exit_date, notes=merged_note, db_path=own_picks_db)
+    tag_u = close_tag.upper() if close_tag else None
+    ok = close_equity_pick(pid, float(price), exit_date=exit_date, notes=merged_note, close_tag=tag_u, db_path=own_picks_db)
     entry_px = float(match.get("entry_price") or 0.0)
     shares = float(match.get("shares") or 0.0)
     sign = -1.0 if str(match.get("side") or "LONG").upper() == "SHORT" else 1.0
@@ -259,12 +264,14 @@ def close_cmd(
                     "exit_price": float(price),
                     "pnl_pct": round(pnl_pct, 2),
                     "pnl_usd": round(pnl_usd, 2),
+                    "close_tag": tag_u or "",
                 },
                 indent=2,
             )
         )
     else:
+        tag_s = f" [{tag_u}]" if tag_u else ""
         click.echo(
             f"✓ Closed pick #{pid} ({match['ticker']}): "
-            f"${entry_px:.2f} -> ${float(price):.2f} ({pnl_pct:+.2f}%, ${pnl_usd:+,.2f})"
+            f"${entry_px:.2f} -> ${float(price):.2f} ({pnl_pct:+.2f}%, ${pnl_usd:+,.2f}){tag_s}"
         )

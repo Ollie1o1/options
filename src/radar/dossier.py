@@ -163,11 +163,32 @@ def build_dossier(
     estimates_db: str = "data/estimates_archive.db",
     predmarkets_db: str = "data/predmarkets.db",
     fetch_chain: bool = False,
+    allow_live_spot: bool = False,
 ) -> TickerDossier:
     """Consolidate price structure, levels, catalysts, real chain IV/SVI RND, and risk flags onto one object."""
     sym = str(ticker).upper().strip()
     as_of = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ohlcv = load_local_ohlcv_safe(ohlcv_db, symbols=[sym])
+
+    # Live price fallback when a user enters a ticker not yet in local equity_ohlcv.db
+    if (sym not in ohlcv or len(ohlcv[sym][1]) < 2) and (allow_live_spot or fetch_chain):
+        try:
+            import yfinance as yf
+
+            hist = yf.Ticker(sym).history(period="1y", auto_adjust=True, timeout=12)
+            if hist is not None and not hist.empty and len(hist) >= 2:
+                ds_live = [idx.strftime("%Y-%m-%d") for idx in hist.index]
+                cs_live = hist["Close"].astype(float).to_numpy()
+                vs_live = hist["Volume"].fillna(0).astype(float).to_numpy()
+                ohlcv[sym] = (ds_live, cs_live, vs_live)
+            try:
+                from src.cache_release import release_yfinance_caches
+
+                release_yfinance_caches()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     spot = chg1 = chg5 = chg21 = mom12_1 = None
     d20 = d50 = d200 = r2 = r14 = rv20 = None
