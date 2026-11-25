@@ -162,7 +162,81 @@ def _finite(value) -> Optional[float]:
     return None if np.isnan(f) or np.isinf(f) else f
 
 
-def _apply_structure_ev(row_out: dict, sold: list, bought: list) -> None:
+def _bs_option_price(spot: float, strike: float, t_years: float, r: float, sigma: float, opt_type: str) -> float:
+    """Standard Black-Scholes European price for skew-shifted EV reporting."""
+    from scipy.stats import norm
+
+    if t_years <= 0 or sigma <= 0 or spot <= 0 or strike <= 0:
+        return max(spot - strike, 0.0) if opt_type == "call" else max(strike - spot, 0.0)
+    sqrt_t = float(np.sqrt(t_years))
+    d1 = (float(np.log(spot / strike)) + (r + 0.5 * sigma * sigma) * t_years) / (sigma * sqrt_t)
+    d2 = d1 - sigma * sqrt_t
+    disc = float(np.exp(-r * t_years))
+    if opt_type == "call":
+        return float(spot * norm.cdf(d1) - strike * disc * norm.cdf(d2))
+    return float(strike * disc * norm.cdf(-d2) - spot * norm.cdf(-d1))
+
+
+def compute_skew_shifted_spread_ev(
+    sold: list,
+    bought: list,
+    *,
+    spot: float,
+    t_years: float,
+    r: float,
+    sigma_rv: float,
+    sigma_atm: float,
+    cost_per_contract: float,
+) -> Optional[Dict[str, float]]:
+    """Compute spread EV preserving per-leg market skew via uniform shift `sigma_leg * (sigma_rv / sigma_atm)`.
+
+    Fixes the flat-RV bias on steep index put skew (where pricing both short and long
+    puts at a single flat realized vol underprices the OTM wing and makes index Bull Puts
+    appear artificially negative-EV relative to single names).
+    """
+    if spot <= 0 or t_years <= 0 or sigma_rv <= 0 or sigma_atm <= 0:
+        return None
+    scale = float(sigma_rv) / float(sigma_atm)
+
+    def _leg_fair_and_mkt(leg) -> Optional[tuple]:
+        iv = _finite(leg.get("impliedVolatility") if leg is not None else None)
+        if iv is None:
+            iv = _finite(leg.get("entry_iv") if leg is not None else None)
+        k = _finite(leg.get("strike") if leg is not None else None)
+        mkt = _finite(leg.get("mid") if leg is not None else None)
+        if mkt is None:
+            mkt = _finite(leg.get("premium") if leg is not None else None)
+        if iv is None or iv <= 0 or k is None or k <= 0 or mkt is None:
+            return None
+        ot = str(leg.get("type", "put")).lower()
+        ot = "call" if "call" in ot else "put"
+        sigma_real = max(1e-4, iv * scale)
+        fair = _bs_option_price(spot, k, t_years, r, sigma_real, ot)
+        return (fair, mkt)
+
+    gross_bought = 0.0
+    gross_sold = 0.0
+    for leg in bought:
+        res = _leg_fair_and_mkt(leg)
+        if res is None:
+            return None
+        gross_bought += (res[0] - res[1]) * 100.0
+    for leg in sold:
+        res = _leg_fair_and_mkt(leg)
+        if res is None:
+            return None
+        gross_sold += (res[0] - res[1]) * 100.0
+
+    gross = float(gross_bought - gross_sold)
+    net = float(gross - float(cost_per_contract))
+    return {
+        "ev_skew_adj_gross_per_contract": gross,
+        "ev_skew_adj_per_contract": net,
+        "ev_skew_vol_scale": scale,
+    }
+
+
+def _apply_structure_ev(row_out: dict, sold: list, bought: list, config: Optional[dict] = None) -> None:
     """Overwrite the dollar EV levels with the multi-leg structure's own.
 
     The per-leg `ev_gross_per_contract` is the edge to a BUYER of that leg
@@ -215,6 +289,34 @@ def _apply_structure_ev(row_out: dict, sold: list, bought: list) -> None:
     row_out["ev_cost_per_contract"] = cost
     row_out["ev_per_contract"] = gross - cost
 
+    # Staged SVI skew-shifted EV diagnostic (Phase 2C, config.auto_log.spread_ev_vol_model).
+    # In 'report' mode, attaches ev_skew_adj_* alongside legacy flat EV without changing refusals.
+    vol_model = str(((config or {}).get("auto_log") or {}).get("spread_ev_vol_model", "flat_rv")).lower()
+    if vol_model in ("report", "svi_shifted"):
+        ref_leg = sold[0] if sold else bought[0]
+        spot = _finite(row_out.get("underlying_price")) or _finite(ref_leg.get("underlying_price")) or _finite(ref_leg.get("spot"))
+        dte = _finite(row_out.get("dte")) or _finite(ref_leg.get("dte")) or _finite(ref_leg.get("days_to_expiration"))
+        sigma_rv = _finite(ref_leg.get("hv_basis")) or _finite(ref_leg.get("realized_vol")) or _finite(ref_leg.get("hv_20"))
+        sigma_atm = _finite(ref_leg.get("atm_iv")) or _finite(ref_leg.get("impliedVolatility"))
+        r_rate = _finite(ref_leg.get("risk_free_rate")) or 0.045
+        if spot and dte and dte > 0 and sigma_rv and sigma_atm:
+            skew_res = compute_skew_shifted_spread_ev(
+                sold,
+                bought,
+                spot=spot,
+                t_years=dte / 365.0,
+                r=r_rate,
+                sigma_rv=sigma_rv,
+                sigma_atm=sigma_atm,
+                cost_per_contract=cost,
+            )
+            if skew_res is not None:
+                row_out["ev_flat_per_contract"] = row_out["ev_per_contract"]
+                row_out.update(skew_res)
+                if vol_model == "svi_shifted":
+                    row_out["ev_gross_per_contract"] = skew_res["ev_skew_adj_gross_per_contract"]
+                    row_out["ev_per_contract"] = skew_res["ev_skew_adj_per_contract"]
+
     # One implementation of the error bar, fed the STRUCTURE's numbers. The
     # copied value was the short leg's, whose vega is larger than the spread's
     # net vega, so it overstated the band and graded every structure harsher
@@ -261,7 +363,7 @@ def enrich_credit_spreads(
                 row_out[dst_col] = short_leg.get(src_col)
 
         # ...but the dollar EV levels are the SPREAD's, not the short leg's.
-        _apply_structure_ev(row_out, sold=[short_leg], bought=[long_leg])
+        _apply_structure_ev(row_out, sold=[short_leg], bought=[long_leg], config=config)
 
         # Spread-specific structural features
         spread_width = abs(float(spread["short_strike"]) - float(spread["long_strike"]))
@@ -348,7 +450,7 @@ def enrich_iron_condors(
 
         # ...except the dollar EV levels, where a MEAN of four legs' edges is
         # nobody's edge. Netting gives the condor's own.
-        _apply_structure_ev(row_out, sold=[sp, sc], bought=[lp, lc])
+        _apply_structure_ev(row_out, sold=[sp, sc], bought=[lp, lc], config=config)
 
         # Greeks taken from short-put leg (canonical entry leg).
         for src_col, dst_col in _GREEK_COL_MAP.items():

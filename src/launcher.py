@@ -63,8 +63,12 @@ def _art_width() -> int:
 def _menu_rows() -> list:
     """The numbered rows of the top menu, in order."""
     rows = []
-    rows.append(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
-    rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
+    rows.append(_row("G", "GUIDE", "step-by-step plain-English coach — zero commands to memorize",
+                     tag="start here"))
+    rows.append(_row("D", "DESK", "interactive 5-tab trading dashboard — radar · shares vs options",
+                     tag="recommended"))
+    rows.append(_row("1", "STOCKS", "legacy equity options screener — discover / spreads / iron / sell"))
+    rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis", tag="lab"))
     rows.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
     rows.append(_row("4", "RESEARCH",
                      "breakout · vol · VRP · catalysts · discovery lab",
@@ -111,7 +115,7 @@ def _show_menu() -> str:
     after.append("")
     # The canonical entry point, stated where a first-time user is already
     # looking. Six things start this project; only one of them needs learning.
-    _front_door = "  Front door: python run.py  ·  new here? [8] HELP, then [1] STOCKS"
+    _front_door = "  Front door: [G] GUIDE (step-by-step) or [D] DESK (`opt`)  ·  [8] HELP"
     after.append(fmt.style(_front_door, "muted") if HAS_UI else _front_door)
     after.append("")
     after.append(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
@@ -312,6 +316,16 @@ def main() -> None:
 
     while True:
         choice = _show_menu()
+        if choice in ("G", "GUIDE"):
+            _loading("Launching Guided Trading Coach…")
+            from src.cli.guide import guide_cmd as _guide_cmd
+            _guide_cmd.main(args=[], standalone_mode=False)
+            continue
+        if choice in ("D", "DESK"):
+            _loading("Launching Daily Trading Desk (Textual TUI)…")
+            from src.tui.app import run_desk as _run_desk
+            _run_desk()
+            continue
         if choice in ("1", "STOCKS", "S"):
             _loading("Loading equity options screener…")
             from src.options_screener import main as _stocks_main

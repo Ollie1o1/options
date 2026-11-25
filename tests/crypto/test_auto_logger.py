@@ -111,6 +111,30 @@ class TestPickWinner(unittest.TestCase):
         picks = {"Long Put": pd.DataFrame(), "Bear Call": pd.DataFrame()}
         self.assertIsNone(auto_logger.pick_winner(picks))
 
+    def test_allowlist_and_blocklist_prevent_long_put_monopoly(self):
+        long_df = pd.DataFrame([{"strategy_score": 0.91, "type": "put", "expiration": "2026-06-15"}])
+        spread_df = pd.DataFrame([{"score": 0.62, "expiration": "2026-06-15"}])
+        picks = {"Long Put": long_df, "Bear Call": spread_df}
+        winner = auto_logger.pick_winner(
+            picks,
+            allowed_strategies=["Bear Call", "Bull Put", "Calendar Put"],
+            blocked_strategies=["Long Put", "Long Call"],
+        )
+        self.assertIsNotNone(winner)
+        self.assertEqual(winner[0], "Bear Call")
+        self.assertAlmostEqual(winner[2], 0.62)
+
+    def test_run_currency_respects_allowed_currencies(self):
+        cfg = {
+            "crypto": {
+                "auto_log_enabled": True,
+                "allowed_currencies": ["BTC"],
+                "allowed_strategies": ["Bear Call"],
+            }
+        }
+        msg = auto_logger.run_currency("ETH", cfg, dry_run=True)
+        self.assertIn("not in allowed_currencies", msg)
+
 
 class TestScoreColumn(unittest.TestCase):
     def test_handles_long_premium_and_others(self):

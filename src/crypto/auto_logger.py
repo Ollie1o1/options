@@ -75,13 +75,28 @@ def _default_db_path() -> str:
     return os.path.join(project_root, "paper_trades_crypto.db")
 
 
-def pick_winner(picks_by_strategy: dict) -> Optional[Tuple[str, pd.Series, float]]:
+def pick_winner(
+    picks_by_strategy: dict,
+    allowed_strategies: Optional[list] = None,
+    blocked_strategies: Optional[list] = None,
+) -> Optional[Tuple[str, pd.Series, float]]:
     """From `_scan_currency()['picks_by_strategy']`, return the single
     (strategy_name, row, score) with the highest top-of-bucket score, or
-    None if no bucket has any rows.
+    None if no eligible bucket has any rows.
+
+    When `allowed_strategies` is provided (non-None), only strategies in that
+    list are eligible. When `blocked_strategies` is provided, any strategy in
+    that list is excluded before score comparison.
     """
+    allowed_set = {str(s) for s in allowed_strategies} if allowed_strategies is not None else None
+    blocked_set = {str(s) for s in blocked_strategies} if blocked_strategies is not None else set()
+
     best: Optional[Tuple[str, pd.Series, float]] = None
     for strategy_name, df in picks_by_strategy.items():
+        if strategy_name in blocked_set:
+            continue
+        if allowed_set is not None and strategy_name not in allowed_set:
+            continue
         if df is None or df.empty:
             continue
         col = _score_column(strategy_name)
@@ -151,6 +166,12 @@ def run_currency(
     if not bool(crypto_cfg.get("auto_log_enabled", False)):
         return f"[auto-log] {currency} skipped: off-switch (auto_log_enabled=false)"
 
+    allowed_currencies = crypto_cfg.get("allowed_currencies")
+    if allowed_currencies is not None:
+        allowed_cur_set = {str(c).upper() for c in allowed_currencies}
+        if currency.upper() not in allowed_cur_set:
+            return f"[auto-log] {currency} skipped: currency not in allowed_currencies ({sorted(allowed_cur_set)})"
+
     open_n = count_open_positions(db_path, currency)
     if open_n >= MAX_OPEN_PER_CURRENCY:
         return f"[auto-log] {currency} skipped: concentration {open_n}/{MAX_OPEN_PER_CURRENCY} open"
@@ -175,9 +196,13 @@ def run_currency(
         return f"[auto-log] {currency} skipped: regime classifier returned None (insufficient history)"
 
     picks = scan.get("picks_by_strategy") or {}
-    winner = pick_winner(picks)
+    winner = pick_winner(
+        picks,
+        allowed_strategies=crypto_cfg.get("allowed_strategies"),
+        blocked_strategies=crypto_cfg.get("blocked_strategies"),
+    )
     if winner is None:
-        return f"[auto-log] {currency} skipped: no surfaced strategy buckets"
+        return f"[auto-log] {currency} skipped: no eligible surfaced strategy buckets"
 
     strategy_name, row, score = winner
     floor = float(crypto_cfg.get("min_auto_log_score", DEFAULT_MIN_SCORE))

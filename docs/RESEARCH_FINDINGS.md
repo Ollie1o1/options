@@ -8,7 +8,21 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
-## 2026-11-10 (newest) — audit of the findings below
+## 2026-11-24 (newest) — Phase 1 equity-first playbooks (low stock friction, 3–50 bps)
+
+Five preregistered stock/ETF studies run to test whether edges that die under options bid-ask spreads survive at Wealthsimple USD share friction (`$0` commission, `3–10 bps` spreads):
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **Vol-Managed Sector/Asset ETF Rotation (`VM_OUTLOOK_TOP3`) PASSED on both 2019–26 and 2006–26.** Monthly top-3 `src/outlook` ETFs scaled by `clip(0.14 / sigma_20, 0.25, 1.00)` at 3 bps/side and 0% cash yield delivered **Sharpe `0.983` / MaxDD `-17.2%`** vs SPY `0.778` / `-32.8%` (2019–26) and **Sharpe `0.819` / MaxDD `-17.3%`** vs SPY `0.685` / `-55.0%` (2006–26). Outperformed `VM_SPY` control (`0.570` / `0.716`), survived 10 bps stress and 2022 bear (`+3.4%` vs SPY `-8.9%`). Caveat: Sharpe difference CIs still span zero, while drawdown compression (`+38pp` with VIX cap, CI `[+1.5pp, +37.4pp]`) is massive and robust. | **VALIDATED** (core TFSA ETF sleeve) | `RESULT_VOL_MANAGED_OUTLOOK_20261124.md` |
+| 2 | **Uptrend Pullback Mean Reversion (`equity_pullback`) PASSED standalone holdout (H-A) at 10 bps, FAILED SPY-excess (H-B).** `Close > SMA200`, `12-1m > 0`, `RSI(2) < 10`, `3d <= -3%`, next-day fill: broad 13,890-symbol holdout (`n=25,629`) `+0.39%` `[+0.04%, +0.73%]`, PF `1.23` `[1.02, 1.50]`; liquid 62-symbol holdout (`n=971`) `+0.55%` `[+0.11%, +1.00%]`, PF `1.43` `[1.08, 1.94]`. Excess vs SPY flat (`+0.01%` / `+0.18%`), lost in 2018 & 2022 bears, and fails at 20 bps friction (confirming shares-only execution). | **LEAD** (shares only, bear-regime flagged) | `RESULT_EQUITY_PULLBACKS_20261124.md` |
+| 3 | **Path-managed Squeeze Momentum (`squeeze_equity`) FAILED CI across all 3 arms (`S1/S2/S3`) and `HOLD42`.** Stops materially improved compounding (`HOLD42` 4-slot CAGR `-1.2%` → `S1 +18.6%` / `S2 +13.7%`), but 61% loss rate and right-tail concentration (`drop top 3` halves mean) left moving-block 98.33% CIs spanning zero (`S2 +2.15% [-1.30%, +6.26%]`). | **CLOSED** | `RESULT_SQUEEZE_PATH_EQUITY_20261124.md` |
+| 4 | **Large-cap PEAD (`pead_breakout`, 20d/40d) FAILED (`+0.04%` excess vs SPY, `n=614`).** Two useful diagnostics: (a) negative earnings breakdowns (`-5% / 2x vol`) lagged SPY by **`-1.16%` `[-2.19%, -0.19%]`** across both halves (retained as Radar **`POST_EARN_CRASH`** avoid badge); (b) non-earnings `+5% / 2x vol` control earned `+3.00%` `[+0.71%, +5.21%]` (PF `1.62`, unpreregistered future lead). Arm B (Estimate Revisions) preregistered & date-gated until `2027-01-15` (`2/4` snapshots collected). | **CLOSED** (PEAD) · **PENDING** (Revisions ≥ 2027-01-15) | `RESULT_PEAD_EQUITY_20261124.md` |
+| 5 | **Funded Biotech Pre-Catalyst Run-Up (`biotech_runup`, `T-45 → T-3`) FAILED (`n=215`, 94 tickers).** Mean `+0.81% [-3.70%, +5.63%]`, excess vs XBI `-0.32% [-4.38%, +3.89%]`. ClinicalTrials.gov `PCD` dates are too noisy compared to exact PDUFA dates. | **CLOSED** | `RESULT_BIOTECH_RUNUP_20261124.md` |
+| 6 | **Test O1 (`60–120 DTE`, `5%`-wide SPY Bull Put, 2010–23, `n=708`, med friction `4.9%`):** Primary full-touch crossed `O1-M` (TP50/no-stop/21-DTE) missed the 97.5% CI by 27 bps (`RoC +4.30%`, `PF 2.24 [1.28, 4.95]`, `x_entry +1.12% [-0.27%, +2.25%]` → **FAIL crossed**), **BUT PASSED at realistic `k=0.35` limit fills** (`x_entry +1.59% [+0.26%, +2.67%]`, `PF 2.41 [1.37, 5.42]`, `x_dyn +0.70%`, positive in 13/14 yrs including 2022). First defined-risk options rule in the repo to clear delta-adjusted excess at `k=0.35` limit fills; strictly requires measured limit execution (`fill_experiment.py` / IBKR). | **LEAD** (limit-only `k <= 0.35`) | `RESULT_ODX_WIDE_60_120_20261124.md` |
+| 7 | **Test O2 (Pre-Earnings Anticipation `T-10 → T-1`, closed strictly before report, `2020–26`):** All 3 claimants FAILED: `O2-EQ` shares `+0.70%` (`-0.01%` excess vs SPY `[-0.34%, +0.31%]`, `n=2,278`), `O2-LC` crossed `-7.55%` (`+8.98%` at mid — 16.5% crossing wall), `O2-ST` crossed `-11.37%` (`+1.69%` at mid, lost in 7/7 years). | **CLOSED** | `RESULT_PRE_EARNINGS_RUNUP_20261124.md` |
+
+## 2026-11-10 — audit of the findings below
 
 Each finding was re-read against the script that produced it, except where a row says otherwise. The Bear Call
 and gate-separation numbers were re-run and reproduce to the digit.
@@ -97,6 +111,6 @@ on our own archive ≥ 2027-03-15.
 | Date | Check | Command / doc |
 |---|---|---|
 | ≥ 2027-01-15 | Bull Put §2 (for the record) | `python -m scripts.delta_matched_benchmark --cache NEW_EMPTY_DIR --exit-through 2027-01-15` |
-| mid-Jan 2027 | Analyst estimate revisions | **not runnable yet: no registration and no estimator.** Write the hypothesis down before opening the archive. |
+| mid-Jan 2027 | Analyst estimate revisions | Registered (`PREREG_PEAD_AND_REVISIONS_20261124.md`), date-gated estimator ready: `python -m scripts.estimate_revisions_test` (`--coverage-only` any time; 2/4 non-overlapping snapshots as of 2026-11-24). |
 | ≥ 2027-01-20 | **B1-F Bear Call forward** | `python -m scripts.bear_call_absolute --cache DIR --forward` (prints the crossed-fill line, Amendment 3) |
 | ≥ 2027-03-15 | E2 earnings forward (own archive) | `python -m scripts.earnings_premium_dolt --forward`; `--coverage` any time. **At risk: 7 events already lost to chain-archive gaps.** |

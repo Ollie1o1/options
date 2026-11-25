@@ -2,7 +2,22 @@
 
 [![CI](https://github.com/Ollie1o1/options/actions/workflows/ci.yml/badge.svg)](https://github.com/Ollie1o1/options/actions/workflows/ci.yml)
 
-A Python-based options screening tool that identifies high-probability trading opportunities through advanced analytics, institutional-level metrics, and dynamic safety filters. Includes an AI-powered scoring layer that enriches top candidates with qualitative analysis and produces a final weighted ranked list.
+A Python-based stock + options trading desk combining preregistered, cost-surviving playbooks (`configs/playbooks.json`), a unified multi-asset Opportunity Radar, a Shares-vs-Options Express Workbench with Probability Lab RND & Walk-Away Limit Ladders, a composable `opt` CLI, and an interactive 5-tab Textual TUI.
+
+### Daily Desk Quick Start (`opt` CLI & Textual TUI)
+
+You only need to remember **one** command — everything else is guided in plain English:
+
+```bash
+pip install -e . --no-deps            # installs the `opt` console script
+opt guide                             # START HERE: step-by-step plain-English coach (zero flags to memorize)
+opt                                   # 5-tab Textual Daily Cockpit (press `?` anytime for Plain-English Guide)
+opt refresh                           # 1-command daily price update + Radar refresh
+opt today                             # 10-second Morning Action Brief (Market Mood + Core TFSA weights + top setups)
+opt radar --live-options              # Unified Radar (+ optional live 60-120d wide ETF spread scan)
+```
+
+Legacy `python run.py` flags (`-ds/-sps/-ics/-ss`, `--auto-log`, `--enforce-exits`) and LaunchAgents remain 100% unchanged; `python run.py` now puts `[G] GUIDE` and `[D] DESK` at the top of the interactive menu.
 
 ---
 

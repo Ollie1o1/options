@@ -471,5 +471,212 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0
 
 
+# ── Stock / ETF Playbook Journal (`data/own_picks.db::picks`) ────────────────
+
+OWN_PICKS_DB = "data/own_picks.db"
+EQUITY_HORIZONS = (1, 3, 5, 10, 21)
+
+_EQUITY_PICKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS picks (
+    pick_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    asset_class TEXT NOT NULL DEFAULT 'stock',
+    side TEXT NOT NULL DEFAULT 'LONG',
+    entry_price REAL NOT NULL,
+    shares REAL NOT NULL DEFAULT 1.0,
+    stop_price REAL,
+    target_price REAL,
+    playbook_id TEXT NOT NULL DEFAULT 'discretionary',
+    exit_date TEXT,
+    exit_price REAL,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    notes TEXT DEFAULT ''
+);
+"""
+
+
+def _init_equity_picks_db(db_path: str = OWN_PICKS_DB) -> None:
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    con = sqlite3.connect(db_path)
+    try:
+        con.executescript(_EQUITY_PICKS_SCHEMA)
+        con.commit()
+    finally:
+        con.close()
+
+
+def log_equity_pick(
+    ticker: str,
+    entry_price: float,
+    *,
+    shares: float = 1.0,
+    side: str = "LONG",
+    asset_class: str = "stock",
+    stop_price: Optional[float] = None,
+    target_price: Optional[float] = None,
+    playbook_id: str = "discretionary",
+    notes: str = "",
+    entry_date: Optional[str] = None,
+    db_path: str = OWN_PICKS_DB,
+) -> int:
+    """Log a manual stock/ETF pick tagged with its Playbook ID into `data/own_picks.db::picks`."""
+    if float(entry_price) <= 0:
+        raise ValueError("entry_price must be positive")
+    if float(shares) <= 0:
+        raise ValueError("shares must be positive")
+    s_side = str(side).upper()
+    if s_side not in ("LONG", "SHORT"):
+        raise ValueError(f"side must be LONG or SHORT, got {side!r}")
+    _init_equity_picks_db(db_path)
+    d_str = entry_date or date.today().isoformat()
+    con = sqlite3.connect(db_path)
+    try:
+        cur = con.execute(
+            """
+            INSERT INTO picks (
+                date, ticker, asset_class, side, entry_price, shares,
+                stop_price, target_price, playbook_id, status, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            """,
+            (
+                d_str,
+                str(ticker).upper(),
+                str(asset_class).lower(),
+                s_side,
+                float(entry_price),
+                float(shares),
+                None if stop_price is None else float(stop_price),
+                None if target_price is None else float(target_price),
+                str(playbook_id or "discretionary"),
+                str(notes or ""),
+            ),
+        )
+        con.commit()
+        return int(cur.lastrowid)
+    finally:
+        con.close()
+
+
+def close_equity_pick(
+    pick_id: int,
+    exit_price: float,
+    *,
+    exit_date: Optional[str] = None,
+    notes: Optional[str] = None,
+    db_path: str = OWN_PICKS_DB,
+) -> bool:
+    if not os.path.exists(db_path):
+        return False
+    _init_equity_picks_db(db_path)
+    d_str = exit_date or date.today().isoformat()
+    con = sqlite3.connect(db_path)
+    try:
+        if notes is not None:
+            cur = con.execute(
+                "UPDATE picks SET status='CLOSED', exit_date=?, exit_price=?, notes=? WHERE pick_id=?",
+                (d_str, float(exit_price), str(notes), int(pick_id)),
+            )
+        else:
+            cur = con.execute(
+                "UPDATE picks SET status='CLOSED', exit_date=?, exit_price=? WHERE pick_id=?",
+                (d_str, float(exit_price), int(pick_id)),
+            )
+        con.commit()
+        return cur.rowcount > 0
+    finally:
+        con.close()
+
+
+def list_equity_picks(
+    *,
+    status: Optional[str] = None,
+    playbook_id: Optional[str] = None,
+    db_path: str = OWN_PICKS_DB,
+) -> List[Dict[str, Any]]:
+    if not os.path.exists(db_path):
+        return []
+    _init_equity_picks_db(db_path)
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(str(status).upper())
+        if playbook_id:
+            clauses.append("playbook_id = ?")
+            params.append(str(playbook_id))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = con.execute(
+            f"SELECT * FROM picks{where} ORDER BY pick_id DESC",
+            tuple(params),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def build_equity_scorecard(
+    *,
+    db_path: str = OWN_PICKS_DB,
+    ohlcv_db: str = "data/equity_ohlcv.db",
+    horizons: Tuple[int, ...] = EQUITY_HORIZONS,
+) -> Dict[str, Any]:
+    """Compute per-playbook cluster-mean SPY-relative returns at horizons (1,3,5,10,21)."""
+    picks = list_equity_picks(db_path=db_path)
+    if not picks:
+        return {"total_picks": 0, "by_playbook": {}}
+
+    closes_by_sym: Dict[str, Dict[str, float]] = {}
+    if os.path.exists(ohlcv_db):
+        from src.equity_playbooks.backtest import load_equity_ohlcv
+
+        ohlcv = load_equity_ohlcv(ohlcv_db)
+        for sym, (ds, cs, _vs) in ohlcv.items():
+            closes_by_sym[sym] = {d: float(c) for d, c in zip(ds, cs)}
+
+    spy_closes = closes_by_sym.get(BENCHMARK, {})
+    by_pb: Dict[str, List[Dict[str, Any]]] = {}
+    for p in picks:
+        by_pb.setdefault(str(p["playbook_id"]), []).append(p)
+
+    out_pb: Dict[str, Any] = {}
+    for pb_id, items in sorted(by_pb.items()):
+        h_stats: Dict[int, Dict[str, Any]] = {}
+        for k in horizons:
+            obs: List[Tuple[Cluster, float]] = []
+            for p in items:
+                sym = str(p["ticker"]).upper()
+                sc = closes_by_sym.get(sym, {})
+                if not sc or not spy_closes:
+                    continue
+                opt_t = "put" if str(p["side"]).upper() == "SHORT" else "call"
+                dr = direction_return(sc, spy_closes, str(p["date"])[:10], k, opt_t)
+                if dr is not None:
+                    obs.append((cluster_key(sym, str(p["date"])[:10]), dr))
+            s = summarize(obs)
+            s["verdict"] = "too few to judge" if s["n_clusters"] < MIN_CLUSTERS else "evaluated"
+            h_stats[k] = s
+
+        closed_rets: List[float] = []
+        for p in items:
+            if p["status"] == "CLOSED" and p["exit_price"] and p["entry_price"]:
+                sgn = -1.0 if str(p["side"]).upper() == "SHORT" else 1.0
+                closed_rets.append(sgn * (float(p["exit_price"]) / float(p["entry_price"]) - 1.0))
+
+        out_pb[pb_id] = {
+            "n_picks": len(items),
+            "n_open": sum(1 for p in items if p["status"] == "OPEN"),
+            "n_closed": len(closed_rets),
+            "closed_mean_ret": (sum(closed_rets) / len(closed_rets)) if closed_rets else None,
+            "horizons": h_stats,
+        }
+    return {"total_picks": len(picks), "by_playbook": out_pb}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
