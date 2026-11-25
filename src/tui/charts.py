@@ -321,7 +321,7 @@ def braille_sector_rrg(
 
     # Place core ETFs first so they never get overwritten by non-core labels
     ordered = sorted(pts, key=lambda p: (0 if p[3] else 1, -abs(p[1])))
-    occupied = set()
+    occupied: set[Tuple[int, int]] = set()
     for etf, x, y, is_core, posture in ordered:
         cx = int(round(((x + max_x) / (2.0 * max_x)) * (w - 6))) + 1
         cy = int(round(((max_y - y) / (2.0 * max_y)) * (h - 1)))
@@ -363,13 +363,13 @@ def braille_sector_rrg(
             cur_c: Optional[str] = None
             buf: List[str] = []
             for c in range(w):
-                col = colors[r][c]
-                if col != cur_c:
+                cell_col: Optional[str] = colors[r][c]
+                if cell_col != cur_c:
                     if buf:
                         s = "".join(buf)
                         segs.append(f"[{cur_c}]{s}[/]" if cur_c else s)
                         buf = []
-                    cur_c = col
+                    cur_c = cell_col
                 buf.append(canvas[r][c])
             if buf:
                 s = "".join(buf)
