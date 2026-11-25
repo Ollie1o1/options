@@ -11,11 +11,16 @@ You only need to remember **one** command — everything else is guided in plain
 ```bash
 pip install -e . --no-deps            # installs the `opt` console script
 opt guide                             # START HERE: step-by-step plain-English coach (zero flags to memorize)
-opt                                   # 5-tab Textual Daily Cockpit (press `?` anytime for Plain-English Guide)
-opt refresh                           # 1-command daily price update + Radar refresh
+opt                                   # 6-tab Textual Daily Cockpit (press `?` anytime for Plain-English Guide)
+opt refresh                           # 1-command daily price + FRED update + Radar refresh
 opt today                             # 10-second Morning Action Brief (Market Mood + Core TFSA weights + top setups)
+opt discover                          # Top-down: ① Market → ② Sectors (PROVEN rank) → ③ Ideas (labelled lenses)
+opt card NVDA                         # ④ Evidence Card — verdict, peers, options odds, every number's source & date
 opt radar --live-options              # Unified Radar (+ optional live 60-120d wide ETF spread scan)
 ```
+
+Discover is a research view: only the sector order is PROVEN; every other lens carries its evidence label.
+See [`docs/DISCOVER.md`](docs/DISCOVER.md).
 
 Legacy `python run.py` flags (`-ds/-sps/-ics/-ss`, `--auto-log`, `--enforce-exits`) and LaunchAgents remain 100% unchanged; `python run.py` now puts `[G] GUIDE` and `[D] DESK` at the top of the interactive menu.
 
