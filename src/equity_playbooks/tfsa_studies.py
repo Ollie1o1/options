@@ -41,8 +41,9 @@ def _perf_stats(monthly_rets: Sequence[float], periods_per_year: float = 12.0) -
     eq = np.cumprod(1.0 + arr)
     years = n / periods_per_year
     cagr = (float(eq[-1]) ** (1.0 / max(years, 1e-6)) - 1.0) * 100.0
-    ann_vol = float(np.std(arr, ddof=1) * math.sqrt(periods_per_year)) * 100.0
-    sharpe = float((np.mean(arr) / max(np.std(arr, ddof=1), 1e-9)) * math.sqrt(periods_per_year))
+    ann_vol = float(np.std(arr, ddof=1)) * math.sqrt(periods_per_year) * 100.0
+    std_val = float(np.std(arr, ddof=1))
+    sharpe = (float(np.mean(arr)) / max(std_val, 1e-9)) * math.sqrt(periods_per_year)
     peaks = np.maximum.accumulate(eq)
     dd = (eq / peaks - 1.0) * 100.0
     max_dd = float(np.min(dd))

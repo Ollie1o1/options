@@ -112,35 +112,38 @@ def format_alpha_screen(cmd: str, *, ticker: str = "SPY") -> Tuple[str, str]:
     if c == "OCC":
         from src.occ_archive import scan_occ_uoa
 
-        rows = scan_occ_uoa(limit=25)
+        occ_rows = scan_occ_uoa(limit=25)
         lines = [
             "[bold]OCC MARKET-WIDE OPTION VOLUME & OI SURGES[/] [dim][WATCHLIST · data/occ_oi.db][/]",
             "─" * 78,
             f"{'TICKER':<7} {'DATE':<11} {'VOLUME':>10} {'OI':>10} {'VOL/OI':>8} {'1D OI%':>8} {'SIGNAL':<16}",
         ]
-        for r in rows:
-            vo = f"{r.vol_to_oi:.2f}x" if r.vol_to_oi is not None else "—"
-            od = f"{r.oi_delta_pct:+.1f}%" if r.oi_delta_pct is not None else "—"
-            lines.append(f"{r.symbol:<7} {r.trade_date:<11} {r.total_vol:10,.0f} {r.total_oi:10,.0f} {vo:>8} {od:>8} {r.signal_label:<16}")
-        if not rows:
+        for occ_r in occ_rows:
+            vo = f"{occ_r.vol_to_oi:.2f}x" if occ_r.vol_to_oi is not None else "—"
+            od = f"{occ_r.oi_delta_pct:+.1f}%" if occ_r.oi_delta_pct is not None else "—"
+            lines.append(
+                f"{occ_r.symbol:<7} {occ_r.trade_date:<11} {occ_r.total_vol:10,.0f} "
+                f"{occ_r.total_oi:10,.0f} {vo:>8} {od:>8} {occ_r.signal_label:<16}"
+            )
+        if not occ_rows:
             lines.append("[dim]No OCC rows yet — run `opt alpha archive-occ`.[/]")
         return "ALPHA LAB // OCC DAILY VOLUME & OI", "\n".join(lines)
 
     if c in ("CAL", "CALENDAR"):
         from src.radar.calendar_spreads import scan_etf_calendar_spreads
 
-        rows = scan_etf_calendar_spreads()
+        cal_rows = scan_etf_calendar_spreads()
         lines = [
             "[bold]TAXABLE ETF CALENDAR SPREADS (FRONT IV > BACK IV)[/] [dim][WATCHLIST · TAXABLE_ONLY][/]",
             "─" * 78,
             f"{'ETF':<6} {'TYPE':<5} {'STRIKE':>8} {'FRONT/BACK':<12} {'IV DIFF':>9} {'MID DEB':>9} {'FRIC%':>7}",
         ]
-        for r in rows:
+        for cal_r in cal_rows:
             lines.append(
-                f"{r.ticker:<6} {r.opt_type.upper():<5} ${r.strike:7g} {r.front_dte}d/{r.back_dte}d"
-                f"      +{r.iv_diff_vp:5.1f}vp  ${r.net_debit_mid:7.2f} {r.friction_pct*100:6.1f}%"
+                f"{cal_r.ticker:<6} {cal_r.opt_type.upper():<5} ${cal_r.strike:7g} {cal_r.front_dte}d/{cal_r.back_dte}d"
+                f"      +{cal_r.iv_diff_vp:5.1f}vp  ${cal_r.net_debit_mid:7.2f} {cal_r.friction_pct*100:6.1f}%"
             )
-        if not rows:
+        if not cal_rows:
             lines.append("[dim]No front-rich ETF calendars right now (requires archived multi-expiry chains).[/]")
         return "ALPHA LAB // TAXABLE ETF CALENDARS", "\n".join(lines)
 
