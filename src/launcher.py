@@ -63,8 +63,13 @@ def _art_width() -> int:
 def _menu_rows() -> list:
     """The numbered rows of the top menu, in order."""
     rows = []
-    rows.append(_row("1", "STOCKS", "equity options — discover / spreads / iron / sell"))
-    rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis"))
+    rows.append(_row("G", "GUIDE", "step-by-step plain-English coach — zero commands to memorize",
+                     tag="start here"))
+    rows.append(_row("D", "DESK", "interactive 6-tab trading dashboard — discover · radar · shares vs options",
+                     tag="recommended"))
+    rows.append(_row("W", "WEB", "visual browser cockpit — Plotly RND charts · TFSA rebalance"))
+    rows.append(_row("1", "STOCKS", "legacy equity options screener — discover / spreads / iron / sell"))
+    rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis", tag="lab"))
     rows.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
     rows.append(_row("4", "RESEARCH",
                      "breakout · vol · VRP · catalysts · discovery lab",
@@ -111,7 +116,7 @@ def _show_menu() -> str:
     after.append("")
     # The canonical entry point, stated where a first-time user is already
     # looking. Six things start this project; only one of them needs learning.
-    _front_door = "  Front door: python run.py  ·  new here? [8] HELP, then [1] STOCKS"
+    _front_door = "  Front door: [G] GUIDE (step-by-step) or [D] DESK (`opt`)  ·  [8] HELP"
     after.append(fmt.style(_front_door, "muted") if HAS_UI else _front_door)
     after.append("")
     after.append(ui.rule(WIDTH) if HAS_UI else "-" * WIDTH)
@@ -254,18 +259,67 @@ def _theme_picker() -> None:
         print(fmt.style(f"  Theme set to {fmt.THEMES[picked]['label']}.", "good"))
 
 
+def _defaults_picker() -> None:
+    """Configure persisted account size & scan preset used by legacy screener and desk."""
+    from src import settings as _settings
+
+    while True:
+        acct = _settings.get_setting("account_size")
+        preset = _settings.get_setting("default_dte_preset", "quick")
+        acct_s = f"${float(acct):,.0f}" if acct else "not set"
+        print()
+        print(ui.rule(WIDTH, "TRADING DEFAULTS"))
+        print(_row("1", "ACCOUNT", f"saved account size: {acct_s}"))
+        print(_row("2", "PRESET", f"legacy scan preset: {preset} (quick / wide_etf / swing)"))
+        print(_row("B", "BACK", "", muted_key=True))
+        print(ui.rule(WIDTH))
+        try:
+            choice = (input("  Choice [B]: ").strip() or "B").upper()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("B", "BACK", "Q", "QUIT", ""):
+            return
+        if choice == "1":
+            try:
+                raw = input("  Account size in USD (or blank to clear): ").strip().replace("$", "").replace(",", "")
+                if not raw:
+                    _settings.set_setting("account_size", None)
+                    print(fmt.style("  Cleared saved account size.", "muted"))
+                else:
+                    val = float(raw)
+                    if val > 0:
+                        _settings.set_setting("account_size", val)
+                        print(fmt.style(f"  Saved account size: ${val:,.0f}.", "good"))
+            except (ValueError, EOFError, KeyboardInterrupt):
+                print("  Invalid amount — unchanged.")
+        elif choice == "2":
+            try:
+                raw = input("  Preset (quick / wide_etf / swing) [quick]: ").strip().lower() or "quick"
+                if raw in ("quick", "wide_etf", "swing"):
+                    _settings.set_setting("default_dte_preset", raw)
+                    print(fmt.style(f"  Saved default scan preset: {raw}.", "good"))
+                else:
+                    print("  Choose quick, wide_etf, or swing.")
+            except (EOFError, KeyboardInterrupt):
+                return
+
+
 def _settings_menu() -> None:
-    """User preferences. THEME today; more settings land here later — add a
-    default in src/settings.py plus one row + handler here."""
+    """User preferences: theme, saved account/preset defaults, and doctor."""
     if not HAS_UI:
         print("  Settings unavailable (UI module failed to load).")
         return
+    from src import settings as _settings
     while True:
         print()
         print(ui.rule(WIDTH, "SETTINGS"))
         current_label = fmt.THEMES[fmt.get_theme()]["label"]
+        acct = _settings.get_setting("account_size")
+        acct_s = f"${float(acct):,.0f}" if acct else "unset"
         print(_row("1", "THEME", f"currently: {current_label}"))
         print(_row("2", "DOCTOR", "check this install: deps · network · config · scheduler"))
+        print(_row("3", "DEFAULTS", f"account size ({acct_s}) · legacy scan preset"))
         print(_row("B", "BACK", "", muted_key=True))
         print(ui.rule(WIDTH))
         try:
@@ -279,8 +333,10 @@ def _settings_menu() -> None:
             _theme_picker()
         elif choice in ("2", "DOCTOR"):
             _run_doctor()
+        elif choice in ("3", "DEFAULTS"):
+            _defaults_picker()
         else:
-            print(f"  Unknown choice: {choice!r} — pick 1, 2 or B")
+            print(f"  Unknown choice: {choice!r} — pick 1, 2, 3 or B")
 
 
 def _run_doctor() -> None:
@@ -312,6 +368,41 @@ def main() -> None:
 
     while True:
         choice = _show_menu()
+        if choice in ("G", "GUIDE"):
+            _loading("Launching Guided Trading Coach…")
+            from src.cli.guide import guide_cmd as _guide_cmd
+            _guide_cmd.main(args=[], standalone_mode=False)
+            continue
+        if choice in ("D", "DESK"):
+            _loading("Launching Daily Trading Desk (Textual TUI)…")
+            from src.tui.app import run_desk as _run_desk
+            _run_desk()
+            continue
+        if choice in ("W", "WEB"):
+            _loading("Launching Visual Web Cockpit (Streamlit)…")
+            print(
+                fmt.style("  Press Ctrl+C here when finished to return to the desk menu.", "muted")
+                if HAS_UI
+                else "  Press Ctrl+C here when finished to return to the desk menu.",
+                flush=True,
+            )
+            import subprocess
+            proc = None
+            try:
+                proc = subprocess.Popen([sys.executable, "-m", "streamlit", "run", "src/dashboard.py"])
+                proc.wait()
+            except KeyboardInterrupt:
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                print("\n  Web dashboard closed — returning to desk menu.")
+            except Exception as exc:
+                print(f"  Web dashboard unavailable ({exc}) — run `streamlit run src/dashboard.py`.")
+            continue
         if choice in ("1", "STOCKS", "S"):
             _loading("Loading equity options screener…")
             from src.options_screener import main as _stocks_main

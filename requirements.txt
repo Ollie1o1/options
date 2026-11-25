@@ -10,6 +10,8 @@ textblob
 colorama>=0.4.6
 tqdm>=4.65.0
 rich>=13.0.0
+click>=8.1.0
+textual>=1.0.0
 openai>=1.0.0
 anthropic>=0.40.0
 python-dotenv>=1.0.0

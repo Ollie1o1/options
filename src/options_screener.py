@@ -1234,6 +1234,14 @@ def _print_refusals(result, board: str) -> None:
     if kept == 0:
         msg = "Nothing here cleared the gates. That is the answer, not an error."
         print("\n  " + (fmt.style(msg, 'emph') if HAS_ENHANCED_CLI else msg))
+        top_reason = result.reasons.most_common(1)[0][0] if result.reasons else ""
+        if top_reason in ("friction", "credit_gone"):
+            hint = "Tip: high bid-ask friction killed these — try Wide 60-120d ETF Spreads (`opt radar --live-options`) or Shares vs Options (`opt express TICKER`)."
+        elif top_reason == "negative_ev":
+            hint = "Tip: options priced rich vs realized vol — try `opt express TICKER` to compare Shares or Wide Credit Spreads."
+        else:
+            hint = "Tip: run `opt today` or `opt guide` for validated ETF & share setups."
+        print("  " + (fmt.style(hint, 'muted') if HAS_ENHANCED_CLI else hint))
     print()
 
 
@@ -3956,7 +3964,57 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
     """
     _cs_cfg = ((config or {}).get("filters", {}) or {}).get("credit_spreads") or {}
     min_c2w = float(_cs_cfg.get("min_credit_to_width", 0.20))
+    _wing_pcts_cfg = _cs_cfg.get("wing_width_pcts")
+    _wing_pcts = (
+        [float(p) for p in _wing_pcts_cfg if float(p) > 0]
+        if isinstance(_wing_pcts_cfg, (list, tuple))
+        else None
+    )
     spreads = []
+
+    def _dte_of_leg(leg) -> Optional[float]:
+        t_yr = leg.get("T_years")
+        if t_yr is not None and pd.notna(t_yr):
+            try:
+                return float(t_yr) * 365.0
+            except (TypeError, ValueError):
+                pass
+        dte_v = leg.get("dte") if "dte" in leg else leg.get("days_to_expiration")
+        if dte_v is not None and pd.notna(dte_v):
+            try:
+                return float(dte_v)
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    def _spot_of_leg(leg) -> float:
+        for col in ("underlying", "underlying_price", "spot"):
+            v = leg.get(col)
+            if v is not None and pd.notna(v):
+                try:
+                    fv = float(v)
+                    if fv > 0:
+                        return fv
+                except (TypeError, ValueError):
+                    pass
+        return float(leg["strike"])
+
+    def _append_pct_wings(short_leg, strikes_ordered: list, potential: list, is_put: bool) -> None:
+        """Add percentage-width long legs (e.g. Test O1 5%-wide wings on 50+ DTE chains)."""
+        dte_val = _dte_of_leg(short_leg)
+        pcts = _wing_pcts if _wing_pcts is not None else ([0.05] if (dte_val is not None and dte_val >= 50.0) else [])
+        if not pcts:
+            return
+        spot_v = _spot_of_leg(short_leg)
+        k_s = float(short_leg["strike"])
+        otm_pool = [k for k in strikes_ordered if (k < k_s if is_put else k > k_s)]
+        if not otm_pool:
+            return
+        for wp in pcts:
+            target_k = k_s - wp * spot_v if is_put else k_s + wp * spot_v
+            nearest = min(otm_pool, key=lambda k: abs(k - target_k))
+            if nearest not in potential:
+                potential.append(nearest)
 
     # --- Bull Put Spreads (Sell a Put, Buy a lower Put) ---
     # Short leg candidates: Delta between -0.15 and -0.40 (Relaxed)
@@ -3966,8 +4024,7 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
     ].copy()
 
     for _, short_leg in short_put_candidates.iterrows():
-        # Find potential long legs (protection) 1 or 2 strikes lower
-        # Find potential long legs (protection) 1 or 2 strikes lower
+        # Find potential long legs (protection) 1 or 2 strikes lower (+ Test O1 5%-wide wing on 50+ DTE)
         strikes = sorted(put_df[
             (put_df['expiration'] == short_leg['expiration']) &
             (put_df['symbol'] == short_leg['symbol'])
@@ -3983,6 +4040,7 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
             potential_long_strikes.append(strikes[current_strike_index + 1])
         if current_strike_index + 2 < len(strikes):
             potential_long_strikes.append(strikes[current_strike_index + 2])
+        _append_pct_wings(short_leg, strikes, potential_long_strikes, is_put=True)
 
         long_leg_candidates = put_df[
             (put_df['expiration'] == short_leg['expiration']) &
@@ -3990,6 +4048,8 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
             (put_df['strike'].isin(potential_long_strikes))
         ]
 
+        _dte_p = _dte_of_leg(short_leg)
+        _spot_p = _spot_of_leg(short_leg)
         for _, long_leg in long_leg_candidates.iterrows():
             strike_width = short_leg['strike'] - long_leg['strike']
             net_credit = short_leg['premium'] - long_leg['premium']
@@ -3997,6 +4057,8 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
             # Profitability Filter: net credit must clear `min_c2w` of the
             # width. See the docstring for why this number decides the board.
             if net_credit > (min_c2w * strike_width):
+                _width_pct = strike_width / _spot_p if _spot_p > 0 else 0.0
+                _is_o1 = bool(_dte_p is not None and 60.0 <= _dte_p <= 120.0 and 0.03 <= _width_pct <= 0.075)
                 spreads.append({
                     "symbol": short_leg['symbol'],
                     "type": "Bull Put",
@@ -4015,6 +4077,7 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
                     "short_bid": short_leg.get('bid'), "short_ask": short_leg.get('ask'),
                     "long_bid": long_leg.get('bid'), "long_ask": long_leg.get('ask'),
                     "spread_width": strike_width,
+                    "is_wide_o1_geometry": _is_o1,
                 })
 
     # --- Bear Call Spreads (Sell a Call, Buy a higher Call) ---
@@ -4025,7 +4088,7 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
     ].copy()
 
     for _, short_leg in short_call_candidates.iterrows():
-        # Find potential long legs (protection) 1 or 2 strikes higher
+        # Find potential long legs (protection) 1 or 2 strikes higher (+ Test O1 5%-wide wing on 50+ DTE)
         strikes = sorted(call_df[
             (call_df['expiration'] == short_leg['expiration']) &
             (call_df['symbol'] == short_leg['symbol'])
@@ -4041,6 +4104,7 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
             potential_long_strikes.append(strikes[current_strike_index + 1])
         if current_strike_index + 2 < len(strikes):
             potential_long_strikes.append(strikes[current_strike_index + 2])
+        _append_pct_wings(short_leg, strikes, potential_long_strikes, is_put=False)
 
         long_leg_candidates = call_df[
             (call_df['expiration'] == short_leg['expiration']) &
@@ -4048,6 +4112,8 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
             (call_df['strike'].isin(potential_long_strikes))
         ]
 
+        _dte_c = _dte_of_leg(short_leg)
+        _spot_c = _spot_of_leg(short_leg)
         for _, long_leg in long_leg_candidates.iterrows():
             strike_width = long_leg['strike'] - short_leg['strike']
             net_credit = short_leg['premium'] - long_leg['premium']
@@ -4055,6 +4121,8 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
             # Profitability Filter: net credit must clear `min_c2w` of the
             # width. See the docstring for why this number decides the board.
             if net_credit > (min_c2w * strike_width):
+                _width_pct = strike_width / _spot_c if _spot_c > 0 else 0.0
+                _is_o1 = bool(_dte_c is not None and 60.0 <= _dte_c <= 120.0 and 0.03 <= _width_pct <= 0.075)
                 spreads.append({
                     "symbol": short_leg['symbol'],
                     "type": "Bear Call",
@@ -4073,6 +4141,7 @@ def find_credit_spreads(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.D
                     "short_bid": short_leg.get('bid'), "short_ask": short_leg.get('ask'),
                     "long_bid": long_leg.get('bid'), "long_ask": long_leg.get('ask'),
                     "spread_width": strike_width,
+                    "is_wide_o1_geometry": _is_o1,
                 })
 
     # Unsorted by design. A producer that stamps an order is claiming to rank,
@@ -6797,27 +6866,35 @@ def main():
             # nothing saying where to begin. One line is the whole fix; the
             # order below is the flow that actually works.
             print(fmt.style(_START_HINT, 'muted'))
-            modes = [
-                ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)"),
-                ("2", "ALL",       "Budget-based multi-stock scan"),
-                ("3", "DISCOVER",  "Curated liquid names / gainers / high IV"),
-                ("4", "SELL",      "Premium Selling \u2014 income via short puts"),
-                ("5", "SPREADS",   "Credit Spread analysis"),
-                ("6", "IRON",      "Iron Condor analysis \u2014 range-bound"),
-                ("7", "PORTFOLIO", "View open position P/L"),
-                ("8", "MY LIST",   _wl_desc),
-                ("9", "LOTTERY",   "Lottery Ticket \u2014 far-OTM plays on extreme moves"),
-                ("10", "INTEL",    "Intel Briefing \u2014 everything before you buy + what to do"),
-                ("11", "SQUEEZE",  "Short-squeeze setups \u2014 high-short-float candidates"),
-                ("12", "PROB LAB", "Risk-neutral density + your-view structure ranking"),
-                ("13", "STRUCTURE", "View → structure expression sized to your account"),
-                ("Q", "QUIT",      "Exit the screener"),
+            mode_groups = [
+                ("CORE SCANS", [
+                    ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)", False),
+                    ("5", "SPREADS",   "Credit Spreads (incl. Test O1 5%-wide on 60-120d)", False),
+                    ("3", "DISCOVER",  "Curated liquid names / gainers / high IV", False),
+                    ("8", "MY LIST",   _wl_desc, False),
+                    ("7", "PORTFOLIO", "View open position P/L", False),
+                ]),
+                ("DECISION TOOLS", [
+                    ("13", "STRUCTURE", "View → structure expression sized to your account", False),
+                    ("12", "PROB LAB",  "Risk-neutral density + your-view structure ranking", False),
+                    ("10", "INTEL",     "Intel Briefing — macro pulse & morning note", False),
+                ]),
+                ("EXPERIMENTAL / LAB", [
+                    ("4", "SELL",      "Premium Selling — short puts [capital-heavy]", True),
+                    ("6", "IRON",      "Iron Condor — broad index only [lab]", True),
+                    ("2", "ALL",       "Budget-based multi-stock scan [lab]", True),
+                    ("11", "SQUEEZE",  "Short-squeeze setups — display-only [lab]", True),
+                    ("9", "LOTTERY",   "Lottery Ticket — far-OTM [negative-EV base rate]", True),
+                    ("Q", "QUIT",      "Exit the screener", True),
+                ]),
             ]
-            for num, cmd, desc in modes:
-                n = fmt.style(f"[{num:>2}]", 'accent')
-                c = fmt.style(f"{cmd:<10}", 'emph', bold=True)
-                d = fmt.style(f"\u2014 {desc}", 'muted')
-                print(f"  {n} {c} {d}")
+            for grp_title, grp_modes in mode_groups:
+                print("  " + fmt.style(grp_title, 'label', bold=True))
+                for num, cmd, desc, is_dim in grp_modes:
+                    n = fmt.style(f"[{num:>2}]", 'muted' if is_dim else 'accent')
+                    c = fmt.style(f"{cmd:<10}", 'muted' if is_dim else 'emph', bold=not is_dim)
+                    d = fmt.style(f"\u2014 {desc}", 'muted')
+                    print(f"  {n} {c} {d}")
             print(_menu_ui.rule(WIDTH))
         else:
             print("\nModes:")
@@ -7121,29 +7198,57 @@ def main():
             max_dte = int(default_max_dte)
             trader_profile = "swing"
         else:
-            try:
-                max_expiries = int(prompt_input("How many nearest expirations to scan",
-                                                _default_expiries))
-            except Exception:
-                print("Invalid number for expirations.")
-                sys.exit(1)
-            try:
-                min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
-                max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
-            except Exception:
-                print("Invalid DTE inputs.")
-                sys.exit(1)
-            profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
-            trader_profile = "day" if profile_choice == "2" else "swing"
-
-        # Account size for position sizing in order tickets
-        if not args.auto:
-            _acct_input = prompt_input("Account size in USD for position sizing (Enter to skip)", "").strip()
-            if _acct_input:
+            # Fast 1-key preset selector eliminates the 5-prompt setup gauntlet while
+            # keeping full customization 1 keystroke away ([C]).
+            _saved_acct = settings.get_setting("account_size") if HAS_ENHANCED_CLI else None
+            _preset_hint = (
+                f"Scan preset: [1] Quick Default ({default_min_dte}-{default_max_dte}d, {_default_expiries} exp)  "
+                f"[2] Test O1 Wide ETF (60-120d)  [3] Swing (30-45d)  [C] Customize"
+            )
+            _preset_choice = prompt_input(_preset_hint, "1").strip().upper()
+            if _preset_choice == "2":
+                max_expiries = max(6, int(_default_expiries))
+                min_dte, max_dte = 60, 120
+                trader_profile = "swing"
+            elif _preset_choice == "3":
+                max_expiries = int(_default_expiries)
+                min_dte, max_dte = 30, 45
+                trader_profile = "swing"
+            elif _preset_choice in ("C", "CUSTOM", "CUSTOMIZE"):
                 try:
-                    config["_account_size"] = float(_acct_input)
-                except ValueError:
-                    pass
+                    max_expiries = int(prompt_input("How many nearest expirations to scan",
+                                                    _default_expiries))
+                except Exception:
+                    print("Invalid number for expirations.")
+                    sys.exit(1)
+                try:
+                    min_dte = int(prompt_input("Minimum days to expiration (DTE)", default_min_dte))
+                    max_dte = int(prompt_input("Maximum days to expiration (DTE)", default_max_dte))
+                except Exception:
+                    print("Invalid DTE inputs.")
+                    sys.exit(1)
+                profile_choice = prompt_input("Enter 1 for Swing or 2 for Day trader", "1").strip()
+                trader_profile = "day" if profile_choice == "2" else "swing"
+                _acct_default = str(_saved_acct) if _saved_acct else ""
+                _acct_input = prompt_input("Account size in USD for position sizing (Enter to skip)", _acct_default).strip()
+                if _acct_input:
+                    try:
+                        _acct_val = float(_acct_input)
+                        config["_account_size"] = _acct_val
+                        if HAS_ENHANCED_CLI:
+                            settings.set_setting("account_size", _acct_val)
+                    except ValueError:
+                        pass
+            else:
+                max_expiries = int(_default_expiries)
+                min_dte = int(default_min_dte)
+                max_dte = int(default_max_dte)
+                trader_profile = "swing"
+                if _saved_acct:
+                    try:
+                        config["_account_size"] = float(_saved_acct)
+                    except (TypeError, ValueError):
+                        pass
 
         _is_single_stock = (mode == "Single-stock")
         _repeat_count = 0

@@ -77,21 +77,28 @@ class TestHolidayCalendarYearGuard(unittest.TestCase):
         self.assertTrue(is_open)
         self.assertNotIn("calendar", msg.lower())
 
+    def test_covered_2027_and_2028_holidays_are_closed(self):
+        # 2027-01-01 (New Year's Day), 2027-06-18 (Juneteenth observed), 2028-07-04
+        for y, m, d in ((2027, 1, 1), (2027, 6, 18), (2027, 12, 24), (2028, 7, 4)):
+            is_open, msg = check_market_hours(now_et=self._et(y, m, d))
+            self.assertFalse(is_open, f"Expected closed on {y}-{m:02d}-{d:02d}")
+            self.assertIn("holiday", msg.lower())
+
     def test_uncovered_year_warns_in_message(self):
-        # Wed 2027-06-09, 10:00 ET — no 2027 calendar maintained yet.
-        is_open, msg = check_market_hours(now_et=self._et(2027, 6, 9))
-        self.assertIn("2027", msg)
+        # Wed 2030-06-12, 10:00 ET — no 2030 calendar maintained yet.
+        is_open, msg = check_market_hours(now_et=self._et(2030, 6, 12))
+        self.assertIn("2030", msg)
         self.assertIn("calendar", msg.lower())
 
     def test_uncovered_year_weekend_still_closed(self):
-        # Sat 2027-06-12: weekday logic must still apply.
-        is_open, msg = check_market_hours(now_et=self._et(2027, 6, 12))
+        # Sat 2030-06-15: weekday logic must still apply.
+        is_open, msg = check_market_hours(now_et=self._et(2030, 6, 15))
         self.assertFalse(is_open)
 
     def test_uncovered_year_new_years_day_warns(self):
-        # 2027-01-01 (Friday) IS a market holiday, but the calendar doesn't
+        # 2030-01-01 (Tuesday) IS a market holiday, but the calendar doesn't
         # know it. The best we can do honestly: report the gap loudly.
-        is_open, msg = check_market_hours(now_et=self._et(2027, 1, 1))
+        is_open, msg = check_market_hours(now_et=self._et(2030, 1, 1))
         self.assertIn("calendar", msg.lower())
 
 

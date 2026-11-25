@@ -1,0 +1,397 @@
+/* Responsive layout for the 6-tab Daily Trading Cockpit (120x36 standard, 80x24 compact). */
+
+Screen {
+    background: $background;
+    color: $foreground;
+}
+
+#market-ribbon {
+    dock: top;
+    height: 1;
+    background: $panel;
+    color: $foreground;
+    padding: 0 1;
+}
+
+#main-tabs {
+    height: 1fr;
+}
+
+/* TODAY */
+#today-grid {
+    layout: vertical;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#today-core-card {
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#today-actions {
+    height: 3;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+#today-actions Button {
+    margin-right: 1;
+}
+
+#wb-verdict-box {
+    height: auto;
+    border: solid $success;
+    background: $surface;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#wb-visual-box {
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#book-extra-box {
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+LogFillModal, QuickLogModal, HelpModal {
+    align: center middle;
+}
+
+#logfill-dialog, #quicklog-dialog {
+    width: 64;
+    height: auto;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#lf-filled-row, #logfill-buttons, #quicklog-buttons {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#help-dialog {
+    width: 82;
+    height: 85%;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#help-scroll {
+    height: 1fr;
+}
+
+#help-buttons {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#today-top5-table {
+    height: 1fr;
+}
+
+/* RADAR split-pane */
+#radar-toolbar {
+    height: 3;
+    padding: 0 1;
+    align: left middle;
+}
+
+#radar-filter-input {
+    width: 28;
+    margin-right: 1;
+}
+
+.preset-btn {
+    min-width: 7;
+    height: 3;
+    margin-right: 1;
+    padding: 0 1;
+}
+
+#radar-pills {
+    width: 1fr;
+    height: 3;
+    content-align: right middle;
+    color: $primary;
+}
+
+#radar-split {
+    layout: horizontal;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#radar-table {
+    width: 62%;
+    height: 1fr;
+}
+
+#radar-dossier-pane {
+    width: 38%;
+    height: 1fr;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-left: 1;
+    overflow-y: auto;
+}
+
+/* Compact mode (<110 cols): hide right-side DossierPane so Radar DataTable never wraps awkwardly */
+Screen.compact #radar-dossier-pane {
+    display: none;
+}
+
+Screen.compact #radar-table {
+    width: 100%;
+}
+
+/* WORKBENCH split-pane */
+#wb-header {
+    height: 3;
+    padding: 0 1;
+    align: left middle;
+}
+
+#wb-ticker-input {
+    width: 14;
+    margin-right: 1;
+}
+
+#wb-dir-select {
+    width: 16;
+    margin-right: 1;
+}
+
+#wb-target-input {
+    width: 10;
+    margin-right: 1;
+}
+
+#wb-days-input {
+    width: 8;
+    margin-right: 1;
+}
+
+#wb-risk-input {
+    width: 10;
+    margin-right: 1;
+}
+
+#wb-owns-switch {
+    margin-left: 1;
+}
+
+#wb-split {
+    layout: horizontal;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#wb-left {
+    width: 44%;
+    height: 1fr;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+#wb-right {
+    width: 56%;
+    height: 1fr;
+    margin-left: 1;
+}
+
+#wb-vehicles-table {
+    height: 1fr;
+}
+
+#wb-ladder-box {
+    height: auto;
+    border: solid $accent;
+    background: $surface;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+Screen.compact #wb-split {
+    layout: vertical;
+}
+
+Screen.compact #wb-left {
+    width: 100%;
+    height: 45%;
+}
+
+Screen.compact #wb-right {
+    width: 100%;
+    height: 55%;
+    margin-left: 0;
+}
+
+/* BOOK & LAB */
+#book-container, #lab-container {
+    height: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+#book-picks-table, #lab-playbooks-table {
+    height: 1fr;
+}
+
+#lab-health-box {
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+/* QuickLogModal */
+QuickLogModal {
+    align: center middle;
+}
+
+#quicklog-dialog {
+    width: 60;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#quicklog-buttons {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+/* [6] DISCOVER — ① market strip on top, ② sectors left, ③ ideas right, ④ card full-screen */
+#disc-root {
+    layout: vertical;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#disc-crumb {
+    height: 1;
+}
+
+#disc-market {
+    height: auto;
+    max-height: 10;
+}
+
+#disc-split {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#disc-left {
+    width: 46%;
+    height: 1fr;
+    border: solid $success;
+    padding: 0 1;
+}
+
+#disc-board-head {
+    height: auto;
+}
+
+#disc-board {
+    height: 1fr;
+}
+
+#disc-right {
+    width: 54%;
+    height: 1fr;
+    margin-left: 1;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+#disc-lens-bar {
+    height: 3;
+    align: left middle;
+}
+
+#disc-lens-label {
+    margin-right: 1;
+    text-style: bold;
+}
+
+#disc-lens-select {
+    width: 1fr;
+}
+
+#disc-lens-head {
+    height: auto;
+    max-height: 7;
+}
+
+#disc-lens-table {
+    height: 1fr;
+}
+
+#disc-hint {
+    height: 2;
+    color: $text-muted;
+}
+
+Screen.compact #disc-split {
+    layout: vertical;
+}
+
+Screen.compact #disc-left {
+    width: 100%;
+    height: 45%;
+}
+
+Screen.compact #disc-right {
+    width: 100%;
+    height: 55%;
+    margin-left: 0;
+}
+
+EvidenceCardScreen {
+    align: center middle;
+}
+
+#card-dialog {
+    width: 96%;
+    height: 94%;
+    border: thick $primary;
+    background: $surface;
+    padding: 0 1;
+}
+
+#card-crumb {
+    height: 1;
+}
+
+#card-scroll {
+    height: 1fr;
+}
+
+#card-keys {
+    height: 1;
+    color: $text-muted;
+}

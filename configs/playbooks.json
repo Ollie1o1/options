@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-24",
+  "playbooks": [
+    {
+      "id": "vol_managed_outlook",
+      "label": "Vol-Managed Sector Rotation",
+      "asset_class": "etf",
+      "horizon_days": [21, 63],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "VALIDATED",
+      "prereg": "docs/PREREG_VOL_MANAGED_OUTLOOK_20261124.md",
+      "result": "docs/RESULT_VOL_MANAGED_OUTLOOK_20261124.md",
+      "stats": {
+        "n": 250,
+        "window": "2006-2026 (aligned 2019-2026)",
+        "sharpe": 0.819,
+        "sharpe_aligned": 0.983,
+        "cagr": 0.099,
+        "cagr_aligned": 0.14,
+        "max_dd": -0.1733,
+        "spy_max_dd": -0.5501,
+        "delta_max_dd_vs_spy": 0.3768
+      },
+      "default_friction_bps": 6,
+      "notes": "Core TFSA allocation sleeve: top-3 Outlook ETFs scaled by clip(0.14/sigma_20, 0.25, 1.00)."
+    },
+    {
+      "id": "equity_pullback",
+      "label": "Uptrend Pullback (Shares)",
+      "asset_class": "stock",
+      "horizon_days": [3, 10],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "LEAD",
+      "prereg": "docs/PREREG_EQUITY_PULLBACKS_20261124.md",
+      "result": "docs/RESULT_EQUITY_PULLBACKS_20261124.md",
+      "stats": {
+        "n": 25629,
+        "n_liquid": 971,
+        "pf": 1.232,
+        "pf_liquid": 1.431,
+        "ci_lo": 1.019,
+        "ci_hi": 1.496,
+        "mean_ret": 0.00388,
+        "excess_vs_bench": 0.00011,
+        "win_rate": 0.603
+      },
+      "default_friction_bps": 10,
+      "notes": "Passed H-A on both broad & liquid holdouts at 10 bps; failed H-B vs SPY and loses in bear years (2018/2022). Trade in shares only."
+    },
+    {
+      "id": "etf_bear_call",
+      "label": "ETF Bear Call Spread",
+      "asset_class": "option",
+      "horizon_days": [25, 45],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "LEAD",
+      "prereg": "docs/PREREG_EARNINGS_AND_BEAR_CALL_20261109.md",
+      "result": "docs/RESULT_EARNINGS_AND_BEAR_CALL_20261109.md",
+      "stats": {
+        "n": 4456,
+        "pf_mid": 1.89,
+        "pf_crossed_etf": 1.41,
+        "ci_lo": 0.69,
+        "ci_hi": 3.14,
+        "excess_vs_bench": -0.001
+      },
+      "default_friction_bps": null,
+      "notes": "Forward confirmation B1-F scheduled >= 2027-01-20. Restrict strictly to tight-spread index/sector ETFs."
+    },
+    {
+      "id": "etf_wide_spread",
+      "label": "ETF Wide Spread (60-120d)",
+      "asset_class": "option",
+      "horizon_days": [60, 120],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "LEAD",
+      "prereg": "docs/PREREG_OPTIONS_DTE_AND_PRE_EARNINGS_20261124.md",
+      "result": "docs/RESULT_ODX_WIDE_60_120_20261124.md",
+      "stats": {
+        "n": 708,
+        "eff_n": 135,
+        "pf_crossed": 2.24,
+        "pf_limit_k35": 2.409,
+        "excess_crossed": 0.0112,
+        "excess_limit_k35": 0.0159,
+        "ci_lo_limit": 0.0026,
+        "ci_hi_limit": 0.0267,
+        "median_friction": 0.0493
+      },
+      "default_friction_bps": null,
+      "notes": "Test O1: O1-M (TP50/no-stop/21-DTE, 5%-wide SPY Bull Put) missed full-touch CI by 27 bps (+1.12% [-0.27%, +2.25%]) but PASSED at k=0.35 limit fills (+1.59% [+0.26%, +2.67%], PF 2.41, x_dyn +0.70%). Requires measured limit fills via fill_experiment/IBKR — NEVER market orders."
+    },
+    {
+      "id": "pre_earnings_runup",
+      "label": "Pre-Earnings Anticipation (T-10..T-1)",
+      "asset_class": "stock",
+      "horizon_days": [8, 10],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CLOSED",
+      "prereg": "docs/PREREG_OPTIONS_DTE_AND_PRE_EARNINGS_20261124.md",
+      "result": "docs/RESULT_PRE_EARNINGS_RUNUP_20261124.md",
+      "stats": {
+        "n_eq": 2278,
+        "excess_eq": -0.0001,
+        "mean_lc_crossed": -0.0755,
+        "mean_st_crossed": -0.1137
+      },
+      "default_friction_bps": 10,
+      "notes": "Closed: O2-EQ excess -0.01% vs SPY; O2-LC -7.55% and O2-ST -11.37% crossed."
+    },
+    {
+      "id": "holdings_buy_zone",
+      "label": "Holdings Buy Zone",
+      "asset_class": "stock",
+      "horizon_days": [60, 365],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CONTEXT",
+      "prereg": null,
+      "result": null,
+      "stats": {},
+      "default_friction_bps": 5,
+      "notes": "Deterministic watchlist/holdings proximity to user-defined buy zones."
+    },
+    {
+      "id": "covered_call_holdings",
+      "label": "Covered Call on Holdings",
+      "asset_class": "option",
+      "horizon_days": [25, 60],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CONTEXT",
+      "prereg": null,
+      "result": null,
+      "stats": {},
+      "default_friction_bps": null,
+      "notes": "25-60 DTE ~0.25d covered call screen on >=100-share holdings above cost basis."
+    },
+    {
+      "id": "insider_cluster",
+      "label": "Insider Cluster Buy",
+      "asset_class": "stock",
+      "horizon_days": [30, 90],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CONTEXT",
+      "prereg": "docs/superpowers/specs/2026-09-21-insider-cluster-backtest-design.md",
+      "result": null,
+      "stats": {},
+      "default_friction_bps": 30,
+      "notes": "Descriptive SEC Form 4 cluster buy overlay; backtest corpus pending."
+    },
+    {
+      "id": "squeeze_equity",
+      "label": "Squeeze Momentum (Shares)",
+      "asset_class": "stock",
+      "horizon_days": [5, 42],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CLOSED",
+      "prereg": "docs/PREREG_SQUEEZE_PATH_EQUITY_20261124.md",
+      "result": "docs/RESULT_SQUEEZE_PATH_EQUITY_20261124.md",
+      "stats": {
+        "n": 1804,
+        "pf": 1.263,
+        "ci_lo": 0.856,
+        "ci_hi": 1.845,
+        "mean_ret": 0.0215,
+        "excess_vs_bench": 0.0085
+      },
+      "default_friction_bps": 40,
+      "notes": "Closed: all 3 path-managed arms failed moving-block 98.33% CI due to right-tail variance."
+    },
+    {
+      "id": "pead_breakout",
+      "label": "Post-Earnings Drift (PEAD)",
+      "asset_class": "stock",
+      "horizon_days": [20, 40],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CLOSED",
+      "prereg": "docs/PREREG_PEAD_AND_REVISIONS_20261124.md",
+      "result": "docs/RESULT_PEAD_EQUITY_20261124.md",
+      "stats": {
+        "n": 614,
+        "pf": 1.296,
+        "ci_lo": 0.86,
+        "ci_hi": 2.011,
+        "mean_ret": 0.011,
+        "excess_vs_bench": 0.0004
+      },
+      "default_friction_bps": 10,
+      "notes": "Closed on large-cap Dolt universe. Negative earnings breakdowns (-1.16% excess vs SPY) retained as POST_EARN_CRASH avoid badge."
+    },
+    {
+      "id": "biotech_runup",
+      "label": "Funded Biotech Pre-Catalyst",
+      "asset_class": "stock",
+      "horizon_days": [15, 42],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CLOSED",
+      "prereg": "docs/PREREG_BIOTECH_RUNUP_AND_INSIDER_20261124.md",
+      "result": "docs/RESULT_BIOTECH_RUNUP_20261124.md",
+      "stats": {
+        "n": 215,
+        "pf": 1.07,
+        "ci_lo": 0.708,
+        "ci_hi": 1.551,
+        "mean_ret": 0.0081,
+        "excess_vs_bench": -0.0032
+      },
+      "default_friction_bps": 50,
+      "notes": "Closed: ClinicalTrials.gov PCD dates show no run-up (-0.32% excess vs XBI)."
+    },
+    {
+      "id": "non_earnings_breakout",
+      "label": "Non-Earnings Volume Breakout (Shares)",
+      "asset_class": "stock",
+      "horizon_days": [5, 20],
+      "accounts": ["tfsa", "taxable"],
+      "evidence_tier": "CLOSED",
+      "prereg": "docs/PREREG_NON_EARNINGS_BREAKOUT_20261124.md",
+      "result": "docs/RESULT_NON_EARNINGS_BREAKOUT_20261124.md",
+      "stats": {
+        "n": 5156,
+        "pf": 1.186,
+        "ci_lo": 0.892,
+        "ci_hi": 1.579,
+        "mean_ret": 0.00641,
+        "excess_vs_bench": -0.00078
+      },
+      "default_friction_bps": 10,
+      "notes": "Closed: +5% / >=2x vol 20d-high breakouts failed Bonferroni H-A & H-B across 5d/10d/20d on both survivorship-free (5-slot CAGR -8% to -29% vs SPY +20%) and 371-ticker liquid holdouts."
+    }
+  ]
+}

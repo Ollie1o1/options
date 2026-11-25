@@ -71,3 +71,39 @@ class Expression:
 class Rejection:
     strategy: str
     reason: str
+
+
+@dataclass(frozen=True)
+class DetailedView:
+    """Instrument-agnostic trade view for Shares-vs-Options Workbench (`compare_vehicles`)."""
+    symbol: str
+    direction: str             # "BULLISH" | "BEARISH" | "NEUTRAL"
+    target_move_pct: float     # e.g. +0.08 for +8%, -0.06 for -6%
+    horizon_days: int          # e.g. 30
+    vol_mult: float = 1.0      # 1.0 = agree with market vol; <1 = expect crush
+    risk_budget_usd: float = 500.0
+    account_type: str = "tfsa" # "tfsa" | "taxable"
+    owns_100_shares: bool = False
+    stop_loss_pct: float = 0.06
+
+
+@dataclass(frozen=True)
+class VehicleComparison:
+    vehicle: str               # "Shares" | "Deep-ITM LEAPS" | "Debit Vertical" | "Wide Credit Spread" | "Covered Call" | "Single Option"
+    description: str           # e.g. "Buy 25 sh @ $200.00 (stop $188.00)" or "Bull Put 190/180 90d"
+    legs: int
+    tfsa_legal: bool
+    capital_at_risk_usd: float
+    cash_outlay_usd: float
+    max_profit_usd: float
+    friction_usd: float
+    friction_pct_of_reward: float
+    ev_mkt_net_usd: float
+    ev_view_net_usd: float
+    pop_view: float
+    rr_ratio: float
+    theta_per_day_usd: float
+    delta_dollars: float
+    walk_away_label: str
+    recommended: bool = False
+    caution: str = ""

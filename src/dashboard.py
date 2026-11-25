@@ -1,710 +1,652 @@
 #!/usr/bin/env python3
+"""Visual Web Cockpit for Options Screener (`streamlit run src/dashboard.py`).
+
+Shares the exact same truth layer (`DeskDataProvider`, `configs/playbooks.json`,
+`src/structure/express.py`, `src/equity_playbooks/rebalance.py`, and
+`src/pick_ranking.gate_board`) as the `opt` CLI and Textual TUI, adding rich
+interactive Plotly visualizations:
+  1. Today & TFSA Core    — Market Mood + Kalshi odds + Interactive TFSA Rebalance Calculator
+  1b. Discover            — ① Market → ② Sectors (PROVEN rank) → ③ Ideas (labelled lenses) → ④ Evidence card
+  2. Opportunity Radar    — Filter presets, sortable table, live Dossier + 60d Price/Levels Chart
+  3. Shares vs Options    — Interactive sliders, Real-Chain Table, Market-vs-View RND & Payoff Overlay
+  4. Book & Track Record  — Stock/ETF Picks (with exit alerts), Paper Options, Holdings & Fill Concession k
+  5. Legacy Option Scan   — Multi-ticker live chain scan properly routed through `gate_board()`
 """
-Streamlit Dashboard for Options Screener
-Professional "Dark Financial" Trading Terminal UI
-"""
+from __future__ import annotations
 
 import sys
-from pathlib import Path
 from datetime import datetime
-import pandas as pd
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
 
-# Add parent directory to sys.path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Ensure repo root is on sys.path when invoked via `streamlit run src/dashboard.py`
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-# Import from the options screener module
-from src.options_screener import run_scan, load_config, get_market_context, setup_logging
-from src.filters import categorize_by_premium, pick_top_per_bucket
-from src.paper_manager import PaperManager
-
-# AI scoring imports (graceful degradation if unavailable)
-_AI_AVAILABLE = False
-try:
-    from src.ai_scorer import AIScorer
-    from src.ranking import combine_scores
-    from src.config_ai import AI_CONFIG
-    _AI_AVAILABLE = True
-except Exception:
-    pass
-
-# --- PAGE CONFIGURATION ---
-st.set_page_config(
-    page_title="Options Terminal",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from src.cli.guide import (
+    TIER_PLAIN,
+    plain_english_action_plan,
+    plain_english_traffic_light,
+    plain_english_vehicle_verdict,
 )
+from src.equity_playbooks.rebalance import compute_tfsa_rebalance, parse_holdings_spec
+from src.probability_lab.view import apply_view
+from src.radar.schema import Opportunity, RadarSnapshot, TickerDossier
+from src.structure.chain_data import load_chain_for_horizon
+from src.structure.express import _build_lognormal_density, compare_vehicles
+from src.structure.types import DetailedView, VehicleComparison
+from src.tui.app import filter_opportunities
+from src.tui.state import DeskDataProvider
 
-# --- CUSTOM CSS (DARK FINANCIAL THEME) ---
-st.markdown("""
-<style>
-    /* Main Background & Font */
-    .stApp {
-        background-color: #0e1117;
-        font-family: 'Roboto Mono', monospace;
-    }
-    
-    /* Hide Streamlit Header/Footer */
-    header {visibility: hidden;}
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* Ticker Tape Styling */
-    .ticker-tape {
-        display: flex;
-        justify-content: space-between;
-        background-color: #161b22;
-        padding: 10px 20px;
-        border-bottom: 1px solid #30363d;
-        margin-bottom: 20px;
-        border-radius: 5px;
-    }
-    .ticker-item {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-    }
-    .ticker-label {
-        font-size: 0.8rem;
-        color: #8b949e;
-        text-transform: uppercase;
-    }
-    .ticker-value {
-        font-size: 1.1rem;
-        font-weight: bold;
-        color: #e6edf3;
-    }
-    .ticker-value.positive { color: #3fb950; }
-    .ticker-value.negative { color: #f85149; }
-    .ticker-value.neutral { color: #e6edf3; }
-    .ticker-value.warning { color: #d29922; }
 
-    /* Sidebar Styling */
-    [data-testid="stSidebar"] {
-        background-color: #0d1117;
-        border-right: 1px solid #30363d;
-    }
-    
-    /* Tabs Styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2px;
-        background-color: #0d1117;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #161b22;
-        border-radius: 4px 4px 0px 0px;
-        gap: 1px;
-        padding-top: 10px;
-        padding-bottom: 10px;
-        color: #8b949e;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #21262d;
-        color: #58a6ff;
-        border-bottom: 2px solid #58a6ff;
-    }
-    
-    /* Metric Cards */
-    div[data-testid="stMetricValue"] {
-        font-family: 'Roboto Mono', monospace;
-    }
-    
-    /* Dataframe Styling */
-    [data-testid="stDataFrame"] {
-        border: 1px solid #30363d;
-    }
-</style>
-""", unsafe_allow_html=True)
+# ── Pure Plotly Chart Builders (100% unit-testable without Streamlit runtime) ──
 
-# --- SESSION STATE INITIALIZATION ---
-if 'market_context_loaded' not in st.session_state:
-    st.session_state.market_context_loaded = False
-    st.session_state.market_trend = "Unknown"
-    st.session_state.volatility_regime = "Unknown"
-    st.session_state.macro_risk_active = False
-    st.session_state.tnx_change_pct = 0.0
 
-if 'scan_results' not in st.session_state:
-    st.session_state.scan_results = None
+def build_dossier_price_figure(dos: TickerDossier) -> go.Figure:
+    """Interactive 60-session price tape with support/resistance horizontal levels."""
+    fig = go.Figure()
+    closes = dos.closes_60d or []
+    if closes:
+        xs = list(range(-len(closes) + 1, 1))
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=closes,
+                mode="lines",
+                name=f"{dos.ticker} Close",
+                line=dict(color="#58a6ff", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(88,166,255,0.08)",
+            )
+        )
+        for sup in dos.supports[:2]:
+            fig.add_hline(
+                y=float(sup["level"]),
+                line_dash="dot",
+                line_color="#3fb950",
+                annotation_text=f"Sup ${float(sup['level']):.2f}",
+            )
+        for res in dos.resistances[:2]:
+            fig.add_hline(
+                y=float(res["level"]),
+                line_dash="dot",
+                line_color="#f85149",
+                annotation_text=f"Res ${float(res['level']):.2f}",
+            )
+    fig.update_layout(
+        template="plotly_dark",
+        height=300,
+        margin=dict(l=20, r=20, t=30, b=20),
+        xaxis_title="Sessions Ago",
+        yaxis_title="Price ($)",
+        title=f"{dos.ticker} 60-Session Structure & Levels",
+    )
+    return fig
 
-if 'ai_results' not in st.session_state:
-    st.session_state.ai_results = None
 
-if 'ai_status' not in st.session_state:
-    st.session_state.ai_status = None  # None | "ok" | "error" | "disabled"
+def build_rnd_comparison_figure(
+    spot: float,
+    iv: float,
+    view: DetailedView,
+    *,
+    chain_db: str = "data/chain_archive.db",
+) -> Tuple[go.Figure, str]:
+    """Compare Market-Implied RND (SVI when available) vs User's Tilted View Density."""
+    t_h = max(int(view.horizon_days), 5) / 365.0
+    sl = load_chain_for_horizon(
+        view.symbol,
+        target_dte=view.horizon_days,
+        min_dte=max(7, view.horizon_days - 20),
+        max_dte=view.horizon_days + 30,
+        spot=spot,
+        chain_db=chain_db,
+        allow_live=False,
+        build_rnd=True,
+    )
+    if sl is not None and sl.rnd_density is not None:
+        q_mkt = sl.rnd_density
+        src_lbl = f"{sl.source}/{sl.rnd_source} ({sl.dte}d)"
+    else:
+        q_mkt = _build_lognormal_density(spot, iv, t_h, 0.045)
+        src_lbl = f"lognormal proxy ({view.horizon_days}d)"
 
-if 'selected_option' not in st.session_state:
-    st.session_state.selected_option = None
+    q_view = apply_view(q_mkt, drift_pct=view.target_move_pct, vol_mult=view.vol_mult)
 
-if 'scan_params_hash' not in st.session_state:
-    st.session_state.scan_params_hash = None
+    lo = spot * 0.72
+    hi = spot * 1.28
+    mask = (q_mkt.K >= lo) & (q_mkt.K <= hi)
+    ks = q_mkt.K[mask]
 
-# --- GLOBAL CONFIG & MANAGERS ---
-config = load_config("config.json")
-pm = PaperManager(config_path="config.json")
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=ks,
+            y=q_mkt.pdf[mask],
+            mode="lines",
+            name="Market Implied RND",
+            line=dict(color="#8b949e", width=2, dash="dash"),
+            fill="tozeroy",
+            fillcolor="rgba(139,148,158,0.10)",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=ks,
+            y=q_view.pdf[mask],
+            mode="lines",
+            name=f"Your View ({view.target_move_pct*100:+.1f}%)",
+            line=dict(color="#3fb950" if view.target_move_pct >= 0 else "#f85149", width=2.5),
+            fill="tozeroy",
+            fillcolor="rgba(63,185,80,0.12)" if view.target_move_pct >= 0 else "rgba(248,81,73,0.12)",
+        )
+    )
+    fig.add_vline(x=spot, line_dash="dot", line_color="#e6edf3", annotation_text=f"Spot ${spot:.2f}")
+    target_px = spot * (1.0 + view.target_move_pct)
+    if abs(view.target_move_pct) > 0.005:
+        fig.add_vline(
+            x=target_px,
+            line_dash="dot",
+            line_color="#58a6ff",
+            annotation_text=f"Target ${target_px:.2f}",
+        )
+    fig.update_layout(
+        template="plotly_dark",
+        height=310,
+        margin=dict(l=20, r=20, t=35, b=20),
+        xaxis_title=f"{view.symbol} Price at Horizon ($)",
+        yaxis_title="Probability Density",
+        title=f"Market Implied RND vs Your View [{src_lbl}]",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
+    return fig, src_lbl
 
-# --- HELPER FUNCTIONS ---
-def load_market_data():
-    """Loads market context if not already loaded."""
-    if not st.session_state.market_context_loaded:
-        try:
-            market_trend, volatility_regime, macro_risk_active, tnx_change_pct = get_market_context()
-            st.session_state.market_trend = market_trend
-            st.session_state.volatility_regime = volatility_regime
-            st.session_state.macro_risk_active = macro_risk_active
-            st.session_state.tnx_change_pct = tnx_change_pct
-            st.session_state.market_context_loaded = True
-        except Exception as e:
-            st.error(f"Market Data Error: {e}")
 
-def render_ticker_tape():
-    """Renders the top ticker tape with market context."""
-    load_market_data()
-    
-    trend = st.session_state.market_trend
-    vix = st.session_state.volatility_regime
-    macro = st.session_state.macro_risk_active
-    tnx = st.session_state.tnx_change_pct
-    
-    # Determine colors
-    trend_class = "positive" if "Bull" in trend else ("negative" if "Bear" in trend else "neutral")
-    macro_class = "negative" if macro else "positive"
-    macro_text = "RISK ON" if not macro else "RISK OFF"
-    tnx_class = "negative" if tnx > 0.025 else "neutral"
-    tnx_text = f"{tnx:+.2%}"
-    
-    st.markdown(f"""
-    <div class="ticker-tape">
-        <div class="ticker-item">
-            <span class="ticker-label">SPY Trend</span>
-            <span class="ticker-value {trend_class}">{trend}</span>
-        </div>
-        <div class="ticker-item">
-            <span class="ticker-label">VIX Regime</span>
-            <span class="ticker-value neutral">{vix}</span>
-        </div>
-        <div class="ticker-item">
-            <span class="ticker-label">Macro Cond.</span>
-            <span class="ticker-value {macro_class}">{macro_text}</span>
-        </div>
-        <div class="ticker-item">
-            <span class="ticker-label">10Y Yield Δ</span>
-            <span class="ticker-value {tnx_class}">{tnx_text}</span>
-        </div>
-        <div class="ticker-item">
-            <span class="ticker-label">Terminal Time</span>
-            <span class="ticker-value neutral">{datetime.now().strftime('%H:%M:%S')}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+def build_vehicle_edge_figure(vehicles: List[VehicleComparison], risk_budget: float) -> go.Figure:
+    """Horizontal bar comparison of Net EV(View) vs Friction across candidate vehicles."""
+    fig = go.Figure()
+    if vehicles:
+        labels = [
+            ("★ " if v.recommended else "") + v.vehicle + (" [OVER]" if v.capital_at_risk_usd > risk_budget * 1.15 else "")
+            for v in vehicles
+        ]
+        evs = [v.ev_view_net_usd for v in vehicles]
+        colors = ["#3fb950" if e > 0 else "#f85149" for e in evs]
+        fig.add_trace(
+            go.Bar(
+                y=labels,
+                x=evs,
+                orientation="h",
+                marker_color=colors,
+                text=[f"${e:+,.0f} (cost {v.friction_pct_of_reward:.1f}%)" for e, v in zip(evs, vehicles)],
+                textposition="auto",
+                name="Net EV (Your View)",
+            )
+        )
+    fig.update_layout(
+        template="plotly_dark",
+        height=310,
+        margin=dict(l=20, r=20, t=35, b=20),
+        xaxis_title="Expected P&L Net of Friction ($)",
+        title=f"Vehicle Edge After Crossing Costs (Risk Budget ${risk_budget:,.0f})",
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig
 
-def calculate_payoff(option_row, spot_price, range_pct=0.2):
-    """Calculates P/L curve for the selected option."""
-    strike = float(option_row['strike'])
-    premium = float(option_row['premium'])
-    op_type = option_row['type'].lower()
-    
-    # Generate price range
-    lower_bound = spot_price * (1 - range_pct)
-    upper_bound = spot_price * (1 + range_pct)
-    prices = np.linspace(lower_bound, upper_bound, 100)
-    
-    # Calculate P/L at expiration
+
+def calculate_payoff(option_row: Dict[str, Any], spot_price: float, range_pct: float = 0.20):
+    """Calculates expiration P/L curve for a single long/short option contract."""
+    strike = float(option_row["strike"])
+    premium = float(option_row["premium"])
+    op_type = str(option_row["type"]).lower()
+    is_short = "short" in str(option_row.get("strategy_name", "")).lower()
+
+    prices = np.linspace(spot_price * (1.0 - range_pct), spot_price * (1.0 + range_pct), 100)
     pnl = []
     for p in prices:
-        if op_type == 'call':
-            intrinsic = max(0, p - strike)
-        else:
-            intrinsic = max(0, strike - p)
-            
-        profit = intrinsic - premium
-        pnl.append(profit * 100) # Per contract
-        
+        intrinsic = max(0.0, p - strike) if op_type == "call" else max(0.0, strike - p)
+        profit = (premium - intrinsic) if is_short else (intrinsic - premium)
+        pnl.append(profit * 100.0)
     return prices, pnl
 
-# --- SIDEBAR ---
-def render_sidebar():
-    st.sidebar.markdown("## ⚙️ CONTROL PANEL")
-    
-    # 1. Scan Settings
-    with st.sidebar.expander("SCAN SETTINGS", expanded=True):
-        scan_mode = st.selectbox(
-            "Strategy",
-            ["Discovery scan", "Single-stock", "Budget scan", "Premium Selling", "Long Gamma"],
-            index=0
-        )
-        
-        tickers = []
-        budget = None
-        num_tickers = 20
-        
-        if scan_mode == "Single-stock":
-            ticker_input = st.text_input("Ticker", value="SPY").upper()
-            tickers = [ticker_input] if ticker_input else []
-        elif scan_mode == "Budget scan":
-            budget = st.number_input("Budget ($)", min_value=50.0, value=500.0, step=50.0)
-            num_tickers = st.number_input("Universe Size", 10, 100, 20)
-        else:
-            num_tickers = st.number_input("Universe Size", 10, 100, 20)
-            
-    # 2. Filters
-    with st.sidebar.expander("FILTERS", expanded=False):
-        min_dte = st.slider("Min DTE", 0, 90, 7)
-        max_dte = st.slider("Max DTE", 0, 180, 45)
-        max_expiries = st.slider("Max Expiries", 1, 5, 3)
-        dte_bucket_filter = st.selectbox(
-            "DTE Bucket",
-            ["All", "Short (7-14 DTE)", "Standard (15-30 DTE)", "Swing (31-45 DTE)"],
-            index=0,
-        )
-        
-    # 3. Weights
-    with st.sidebar.expander("ALGO WEIGHTS", expanded=False):
-        default_weights = config.get('composite_weights', {})
 
-        w_pop = st.slider("PoP", 0.0, 1.0, default_weights.get('pop', 0.18))
-        w_liq = st.slider("Liquidity", 0.0, 1.0, default_weights.get('liquidity', 0.15))
-        w_rr = st.slider("Risk/Reward", 0.0, 1.0, default_weights.get('rr', 0.15))
+# ── Streamlit Web UI ─────────────────────────────────────────────────────────
 
-        custom_weights = default_weights.copy()
-        custom_weights.update({'pop': w_pop, 'liquidity': w_liq, 'rr': w_rr})
 
-    # 4. AI Settings
-    ai_enabled = False
-    ai_weight_override = None
-    with st.sidebar.expander("AI SCORING", expanded=True):
-        if _AI_AVAILABLE:
-            ai_enabled = st.toggle("Enable AI Analysis", value=True)
-            if ai_enabled:
-                default_ai_weight = AI_CONFIG.get("ai_weight", 0.30)
-                ai_weight_override = st.slider(
-                    "AI Weight", 0.05, 0.80, float(default_ai_weight), step=0.05,
-                    help="How much the AI score influences the final rank"
-                )
-                model_name = AI_CONFIG.get("model", "").split("/")[-1]
-                st.caption(f"Model: {model_name}")
-            # Show last AI run status
-            if st.session_state.ai_status == "ok":
-                st.success("AI: Active", icon="✅")
-            elif st.session_state.ai_status == "error":
-                st.warning("AI: Unavailable (tech-only)", icon="⚠️")
-            elif st.session_state.ai_status == "disabled":
-                st.info("AI: Disabled", icon="ℹ️")
-        else:
-            st.caption("AI module not installed")
+def render_main() -> None:
+    import streamlit as st
 
-    # Run Button
-    import hashlib as _hashlib
-    _params_str = f"{scan_mode}|{sorted(tickers)}|{budget}|{max_expiries}|{min_dte}|{max_dte}|{sorted(custom_weights.items())}"
-    _new_hash = _hashlib.md5(_params_str.encode()).hexdigest()
+    st.set_page_config(
+        page_title="Options Desk — Unified Visual Cockpit",
+        page_icon="📈",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
-    st.sidebar.divider()
-    if st.sidebar.button("🚀 RUN SCANNER", type="primary", use_container_width=True):
-        if _new_hash != st.session_state.scan_params_hash:
-            with st.spinner("Scanning Market..."):
-                if scan_mode != "Single-stock":
-                    tickers = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "AMZN", "GOOGL",
-                               "META", "NFLX", "JPM", "GS", "V", "MA", "COIN", "INTC", "PYPL", "XYZ"][:num_tickers]
-
-                logger = setup_logging()
-                try:
-                    results = run_scan(
-                        mode=scan_mode,
-                        tickers=tickers,
-                        budget=budget,
-                        max_expiries=max_expiries,
-                        min_dte=min_dte,
-                        max_dte=max_dte,
-                        trader_profile="swing",
-                        logger=logger,
-                        market_trend=st.session_state.market_trend,
-                        volatility_regime=st.session_state.volatility_regime,
-                        macro_risk_active=st.session_state.macro_risk_active,
-                        tnx_change_pct=st.session_state.tnx_change_pct,
-                        verbose=False,
-                        custom_weights=custom_weights
-                    )
-                    st.session_state.scan_results = results
-                    st.session_state.ai_results = None
-                except Exception as e:
-                    st.error(f"Scan Failed: {e}")
-                    return budget, dte_bucket_filter
-            st.session_state.scan_params_hash = _new_hash
-        else:
-            st.info("Params unchanged — showing cached results.")
-
-        # AI Scoring — runs automatically after technical scan
-        if ai_enabled and _AI_AVAILABLE and st.session_state.scan_results:
-            picks = st.session_state.scan_results.picks
-            if not picks.empty:
-                with st.spinner("Running AI analysis..."):
-                    try:
-                        vix_regime_map = {"Low": "low", "Normal": "normal", "High": "high"}
-                        vix_regime = vix_regime_map.get(str(st.session_state.volatility_regime), "normal")
-                        ai_cfg = {"ai_weight": ai_weight_override} if ai_weight_override is not None else None
-                        scorer = AIScorer(config=ai_cfg)
-                        ticker_contexts = st.session_state.scan_results.ticker_contexts
-                        ai_df = scorer.score_candidates(picks, ticker_contexts=ticker_contexts)
-                        kwargs = {}
-                        if ai_weight_override is not None:
-                            kwargs["ai_weight"] = ai_weight_override
-                            kwargs["technical_weight"] = 1.0 - ai_weight_override
-                        ranked = combine_scores(picks, ai_df, vix_regime=vix_regime, **kwargs)
-                        st.session_state.ai_results = ranked
-                        st.session_state.ai_status = "ok"
-                    except Exception as e:
-                        st.session_state.ai_status = "error"
-                        logger.warning("AI scoring failed: %s", e)
-            else:
-                st.session_state.ai_status = "disabled"
-        elif not ai_enabled:
-            st.session_state.ai_status = "disabled"
-
-        st.success("Scan Complete")
-
-    if st.sidebar.button("🗑️ Clear Cache", use_container_width=True):
-        st.session_state.scan_params_hash = None
-        st.session_state.scan_results = None
-        st.session_state.ai_results = None
-        st.session_state.ai_status = None
-        st.rerun()
-
-    return budget, dte_bucket_filter
-
-# --- SCANNER TAB CONTENT ---
-def render_scanner_tab(budget, dte_bucket_filter="All"):
-    if st.session_state.scan_results:
-        results = st.session_state.scan_results
-        picks_df = results.picks
-
-        # Merge AI scores onto picks_df if available
-        ai_ranked = st.session_state.ai_results
-        has_ai = ai_ranked is not None and not ai_ranked.empty
-
-        # Apply DTE bucket filter
-        if not picks_df.empty and dte_bucket_filter != "All" and "T_years" in picks_df.columns:
-            _dte_vals = picks_df["T_years"] * 365.0
-            if dte_bucket_filter == "Short (7-14 DTE)":
-                picks_df = picks_df[(_dte_vals >= 7) & (_dte_vals <= 14)].copy()
-            elif dte_bucket_filter == "Standard (15-30 DTE)":
-                picks_df = picks_df[(_dte_vals > 14) & (_dte_vals <= 30)].copy()
-            elif dte_bucket_filter == "Swing (31-45 DTE)":
-                picks_df = picks_df[(_dte_vals > 30) & (_dte_vals <= 45)].copy()
-
-        if not picks_df.empty:
-            picks_df = categorize_by_premium(picks_df, budget=budget)
-            top_picks_df = pick_top_per_bucket(picks_df, per_bucket=3, diversify_tickers=True)
-
-            # Merge AI columns into display frames when available
-            ai_merge_cols = ['symbol', 'type', 'strike', 'expiration', 'ai_score', 'ai_confidence',
-                             'final_score', 'catalyst_risk', 'ai_reasoning', 'ai_flags', 'rank']
-            if has_ai:
-                ai_sub = ai_ranked[[c for c in ai_merge_cols if c in ai_ranked.columns]].copy()
-                picks_df = picks_df.merge(ai_sub, on=['symbol', 'type', 'strike', 'expiration'], how='left')
-                top_picks_df = top_picks_df.merge(ai_sub, on=['symbol', 'type', 'strike', 'expiration'], how='left')
-
-            if not top_picks_df.empty:
-                best = top_picks_df.iloc[0]
-                ai_badge = ""
-                if has_ai and pd.notna(best.get('ai_score')):
-                    ai_badge = f"<span style='color:#58a6ff'> | AI: {best['ai_score']:.0f}</span>"
-                st.markdown(f"""
-                <div style="padding: 1rem; background-color: #1f2937; border-radius: 0.5rem; border: 1px solid #374151; margin-bottom: 1rem;">
-                    <h3 style="margin: 0; color: #fbbf24;">🏆 Top Pick: {best['symbol']} {best['type'].upper()} ${best['strike']}</h3>
-                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.9rem; color: #d1d5db;">
-                        <span><b>Exp:</b> {best['expiration']}</span>
-                        <span><b>Prem:</b> ${best['premium']:.2f}</span>
-                        <span><b>PoP:</b> {best['prob_profit']:.1%}</span>
-                        <span><b>Score:</b> {best['quality_score'] * 100:.1f}{ai_badge}</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            subtab_names = ["🏆 Top Picks", "🟢 Low Premium", "🟡 Medium Premium", "🔴 High Premium", "📋 All Results"]
-            subtabs = st.tabs(subtab_names)
-
-            base_cols = ['symbol', 'type', 'strike', 'expiration', 'premium', 'prob_profit',
-                         'quality_score', 'impliedVolatility', 'delta', 'volume', 'openInterest', 'price_bucket']
-            ai_display_cols = ['ai_score', 'ai_confidence', 'final_score', 'catalyst_risk'] if has_ai else []
-            common_cols = base_cols + [c for c in ai_display_cols if c in picks_df.columns]
-
-            col_rename = {
-                'symbol': 'Ticker', 'type': 'Type', 'strike': 'Strike', 'expiration': 'Exp',
-                'premium': 'Price', 'prob_profit': 'PoP', 'quality_score': 'Tech Score',
-                'impliedVolatility': 'IV', 'delta': 'Delta', 'volume': 'Vol',
-                'openInterest': 'OI', 'price_bucket': 'Bucket',
-                'ai_score': 'AI Score', 'ai_confidence': 'AI Conf', 'final_score': 'Final',
-                'catalyst_risk': 'Catalyst'
+    st.markdown(
+        """
+        <style>
+            .stApp { background-color: #0e1117; font-family: 'Inter', -apple-system, sans-serif; }
+            .ribbon-bar {
+                display: flex; flex-wrap: wrap; gap: 1.5rem; justify-content: space-between;
+                background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+                padding: 0.7rem 1.1rem; margin-bottom: 1rem;
             }
-            # Long Gamma mode: surface squeeze/strategy signals first
-            if scan_mode == 'Long Gamma':
-                lg_priority = [
-                    'recommended_strategy', 'long_gamma_score', 'symbol', 'type', 'strike',
-                    'expiration', 'bb_width_pct', 'is_squeezing', 'iv_rank', 'rvol',
-                    'rsi_14', 'adx_14', 'premium', 'volume',
-                ]
-                existing_priority = [c for c in lg_priority if c in picks_df.columns]
-                remaining = [c for c in picks_df.columns if c not in existing_priority]
-                picks_df = picks_df[existing_priority + remaining].copy()
-                common_cols = existing_priority
-                col_rename['recommended_strategy'] = 'Strategy'
-                col_rename['long_gamma_score'] = 'LG Score'
-                col_rename['bb_width_pct'] = 'BB Width%'
-                col_rename['is_squeezing'] = 'Squeeze'
-                col_rename['rvol'] = 'RVOL'
-                col_rename['rsi_14'] = 'RSI'
-                col_rename['adx_14'] = 'ADX'
+            .ribbon-item { display: flex; flex-direction: column; }
+            .ribbon-lbl { font-size: 0.72rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.04em; }
+            .ribbon-val { font-size: 1.05rem; font-weight: 700; color: #e6edf3; font-family: monospace; }
+            .good { color: #3fb950 !important; }
+            .bad { color: #f85149 !important; }
+            .warn { color: #d29922 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-            sort_col = 'final_score' if (has_ai and 'final_score' in picks_df.columns) else 'quality_score'
-            column_config = {
-                "Tech Score": st.column_config.NumberColumn("Tech Score (0-100)", format="%.1f"),
-                "AI Score": st.column_config.NumberColumn("AI Score", format="%.0f"),
-                "Final": st.column_config.ProgressColumn("Final Score", format="%.2f", min_value=0, max_value=1),
-                "PoP": st.column_config.ProgressColumn("Prob. Profit", format="%.2f", min_value=0, max_value=1),
-                "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
-            }
+    provider = DeskDataProvider()
+    if "radar_snap" not in st.session_state:
+        st.session_state.radar_snap = provider.get_radar(refresh=False)
+    if "focused_ticker" not in st.session_state:
+        opps0 = st.session_state.radar_snap.opportunities
+        st.session_state.focused_ticker = opps0[0].ticker if opps0 else "SPY"
 
-            def render_df(df, key_suffix):
-                cols = [c for c in common_cols if c in df.columns]
-                d = df[cols].copy()
-                # Normalize quality_score 0-1 → 0-100 for display parity with AI Score
-                if "quality_score" in d.columns:
-                    d["quality_score"] = (d["quality_score"] * 100).round(1)
-                d.rename(columns=col_rename, inplace=True)
-                sc = col_rename.get(sort_col, sort_col)
-                if sc in d.columns:
-                    d = d.sort_values(sc, ascending=False)
-                event = st.dataframe(d, use_container_width=True, hide_index=True,
-                                     column_config=column_config, selection_mode="single-row",
-                                     on_select="rerun", height=400, key=f"df_{key_suffix}")
-                if len(event.selection['rows']) > 0:
-                    selected_row_idx = event.selection['rows'][0]
-                    selected_row_data = d.iloc[selected_row_idx]
-                    ticker_col = col_rename.get('symbol', 'symbol')
-                    type_col = col_rename.get('type', 'type')
-                    strike_col = col_rename.get('strike', 'strike')
-                    exp_col = col_rename.get('expiration', 'expiration')
-                    mask = (
-                        (picks_df['symbol'] == selected_row_data[ticker_col]) &
-                        (picks_df['type'] == selected_row_data[type_col]) &
-                        (picks_df['strike'] == selected_row_data[strike_col]) &
-                        (picks_df['expiration'] == selected_row_data[exp_col])
-                    )
-                    match = picks_df[mask]
-                    if not match.empty:
-                        st.session_state.selected_option = match.iloc[0]
+    # Sidebar quick actions
+    with st.sidebar:
+        st.markdown("## 🧭 Daily Desk Controls")
+        if st.button("🔄 Refresh Local Radar", type="primary", width="stretch"):
+            with st.spinner("Running local scanners…"):
+                st.session_state.radar_snap = provider.get_radar(refresh=True)
+                st.session_state.pop("topdown_hub", None)
+                st.session_state.pop("topdown_cards", None)
+            st.success("Radar refreshed.")
+        if st.button("⚡ Scan Live 60–120d ETF Spreads", width="stretch"):
+            with st.spinner("Scanning live ETF option chains (Test O1)…"):
+                live_opps, warns = provider.get_live_etf_options()
+                if live_opps:
+                    from src.radar.engine import merge_confluence
 
-            with subtabs[0]:
-                render_df(top_picks_df, "top")
-            with subtabs[1]:
-                render_df(picks_df[picks_df['price_bucket'] == 'LOW'], "low")
-            with subtabs[2]:
-                render_df(picks_df[picks_df['price_bucket'] == 'MEDIUM'], "med")
-            with subtabs[3]:
-                render_df(picks_df[picks_df['price_bucket'] == 'HIGH'], "high")
-            with subtabs[4]:
-                render_df(picks_df, "all")
-
-            # AI Ticker Regime Summary (from Pass 1 ticker analysis)
-            ticker_contexts = results.ticker_contexts
-            regime_rows = []
-            for ticker, ctx in ticker_contexts.items():
-                regime = ctx.get("regime")
-                cat = ctx.get("catalyst_risk")
-                bias = ctx.get("directional_bias")
-                summary = ctx.get("summary")
-                if all(v is not None for v in [regime, cat, bias, summary]):
-                    regime_rows.append({
-                        "Ticker": ticker,
-                        "Regime": regime,
-                        "Catalyst Risk": cat,
-                        "Directional Bias": bias,
-                        "Summary": summary,
-                    })
-            with st.expander("AI Ticker Regime Summary"):
-                if regime_rows:
-                    st.dataframe(
-                        pd.DataFrame(regime_rows).set_index("Ticker"),
-                        use_container_width=True,
-                    )
-                else:
-                    st.caption("Run with AI enabled to see ticker regime analysis.")
-
-            # Action Buttons
-            if st.session_state.selected_option is not None:
-                opt = st.session_state.selected_option
-                btn_col, csv_col = st.columns([1, 1])
-                with btn_col:
-                    if st.button(f"📝 Paper Trade {opt['symbol']} ${opt['strike']} {opt['type'].upper()}"):
-                        ask_val = opt.get("ask")
-                        entry_px = (ask_val if (ask_val is not None and float(ask_val) > 0)
-                                    else opt.get("lastPrice") or opt.get("premium", 0.0))
-                        trade_dict = {
-                            "ticker": opt["symbol"],
-                            "expiration": opt["expiration"],
-                            "strike": opt["strike"],
-                            "type": opt["type"],
-                            "entry_price": float(entry_px) if entry_px else 0.0,
-                            "quality_score": opt["quality_score"],
-                            "strategy_name": f"Short {opt['type'].capitalize()}"
-                        }
-                        pm.log_trade(trade_dict)
-                        st.success(f"Logged paper trade for {opt['symbol']}")
-                with csv_col:
-                    export_df = (st.session_state.ai_results
-                                 if st.session_state.ai_results is not None and not st.session_state.ai_results.empty
-                                 else picks_df)
-                    csv_bytes = export_df.to_csv(index=False).encode()
-                    ts = datetime.now().strftime("%Y%m%d_%H%M")
-                    st.download_button("⬇️ Export CSV", data=csv_bytes,
-                                       file_name=f"options_picks_{ts}.csv",
-                                       mime="text/csv")
-        else:
-            st.warning("No results found. Try adjusting filters.")
-    else:
-        st.info("👈 Configure and Run Scan to see results.")
-
-def render_visualizer_tab():
-    if st.session_state.selected_option is not None:
-        opt = st.session_state.selected_option
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            st.markdown("### 📉 Payoff Diagram")
-            spot = opt['underlying']
-            prices, pnl = calculate_payoff(opt, spot)
-            fig_payoff = go.Figure()
-            fig_payoff.add_trace(go.Scatter(x=prices, y=pnl, mode='lines', name='P/L', fill='tozeroy'))
-            fig_payoff.add_vline(x=spot, line_dash="dash", line_color="white", annotation_text="Current")
-            fig_payoff.add_vline(x=opt['strike'], line_dash="dot", line_color="yellow", annotation_text="Strike")
-            fig_payoff.update_layout(template="plotly_dark", xaxis_title="Price", yaxis_title="P/L ($)", height=400)
-            st.plotly_chart(fig_payoff, use_container_width=True)
-        with col2:
-            st.markdown("### 🕸️ Quality Radar")
-            categories = ['Liquidity', 'PoP', 'Theta', 'IV Rank', 'Risk/Reward']
-            values = [min(opt.get('volume', 0) / 1000, 1.0), opt.get('prob_profit', 0.5), min(abs(opt.get('theta', 0)) * 10, 1.0), min(opt.get('impliedVolatility', 0.2) * 2, 1.0), min(opt.get('rr_ratio', 1.0) / 3, 1.0)]
-            fig_radar = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself', line_color='#58a6ff'))
-            fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), template="plotly_dark", height=400)
-            st.plotly_chart(fig_radar, use_container_width=True)
-
-        # Score Breakdown Panel
-        _sd = opt.get("score_drivers", "")
-        if _sd:
-            st.markdown("### Score Breakdown")
-            _sd_str = str(_sd)
-            _pos = [p for p in _sd_str.split() if p.startswith("+") and p != "|"]
-            _neg = [p for p in _sd_str.split() if p.startswith("-") and p != "|"]
-            _bd_col1, _bd_col2 = st.columns(2)
-            with _bd_col1:
-                st.markdown("**Positives**")
-                for _p in _pos:
-                    st.markdown(f"- `{_p}`")
-            with _bd_col2:
-                st.markdown("**Negatives**")
-                for _n in _neg:
-                    st.markdown(f"- `{_n}`")
-
-        # AI Reasoning Panel
-        ai_ranked = st.session_state.ai_results
-        if ai_ranked is not None and not ai_ranked.empty:
-            st.markdown("### 🤖 AI Analysis")
-            mask = (
-                (ai_ranked['symbol'] == opt['symbol']) &
-                (ai_ranked['type'] == opt['type']) &
-                (ai_ranked['strike'] == opt['strike']) &
-                (ai_ranked['expiration'] == opt['expiration'])
-            )
-            ai_row = ai_ranked[mask]
-            if not ai_row.empty:
-                row = ai_row.iloc[0]
-                a1, a2, a3, a4 = st.columns(4)
-                a1.metric("AI Score", f"{row.get('ai_score', 0):.0f}/100")
-                a2.metric("Confidence", f"{row.get('ai_confidence', 0):.1f}/10")
-                a3.metric("Catalyst Risk", str(row.get('catalyst_risk', 'medium')).upper())
-                a4.metric("Final Score", f"{row.get('final_score', 0):.3f}")
-
-                reasoning = row.get('ai_reasoning', '')
-                if reasoning:
-                    st.markdown(f"> {reasoning}")
-                flags = row.get('ai_flags', '')
-                if flags:
-                    flag_list = flags if isinstance(flags, list) else str(flags).split(',')
-                    st.markdown(" ".join([f"`{f.strip()}`" for f in flag_list if f.strip()]))
+                    live_tickers = {o.ticker for o in live_opps}
+                    base = [
+                        o
+                        for o in st.session_state.radar_snap.opportunities
+                        if "LIVE_CHAIN" not in o.badges
+                        and not (o.playbook_id == "etf_wide_spread" and o.ticker in live_tickers)
+                    ]
+                    st.session_state.radar_snap.opportunities = merge_confluence(base + live_opps)
+            if live_opps:
+                st.success(f"Updated {len(live_opps)} live 60–120d ETF spread(s).")
             else:
-                st.caption("No AI data for this contract.")
-    else:
-        st.info("Select a row in the Scanner tab to view analysis.")
+                st.warning("0 live ETF spreads cleared <=25% cost (after-hours quotes may be wide); kept cached quotes.")
+        if st.button("📥 Update Daily OHLCV Prices", width="stretch"):
+            with st.spinner("Refreshing Yahoo daily closes…"):
+                res = provider.update_prices(expand_universe=False)
+                st.session_state.radar_snap = provider.get_radar(refresh=True)
+                st.session_state.pop("topdown_hub", None)
+                st.session_state.pop("topdown_cards", None)
+            st.info(f"Checked {res['symbols']} symbols ({res['updated']} updated, {res['failed']} failed).")
 
-# --- PAPER PORTFOLIO TAB CONTENT ---
-def render_paper_portfolio_tab():
-    st.markdown("### 📈 Forward Testing Portfolio")
-    
-    # Action Header
-    col_a, col_b = st.columns([1, 5])
-    if col_a.button("🔄 Refresh Prices", use_container_width=True):
-        with st.spinner("Updating positions..."):
-            pm.update_positions()
-        st.success("Positions updated.")
-        st.rerun()
-    
-    # Performance Metrics
-    summary = pm.get_performance_summary()
-    if not summary.empty:
-        df_paper = pm.get_all_trades()
-        open_count = len(df_paper[df_paper["status"] == "OPEN"])
-        closed_df = df_paper[df_paper["status"] == "CLOSED"]
-        # pnl_pct is already sign-corrected for short/credit positions by update_positions()
-        total_pnl_usd = (closed_df["pnl_pct"].fillna(0) * closed_df["entry_price"].fillna(0) * 100).sum() if not closed_df.empty else 0.0
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total PnL ($)", f"${total_pnl_usd:,.2f}")
-        m2.metric("Win Rate", summary["Win Rate"].iloc[0])
-        m3.metric("Open Positions", open_count)
-        m4.metric("Avg Return", summary["Avg Return"].iloc[0])
-        
         st.divider()
-        
-        # Positions Display
-        st.markdown("#### 📂 Open Positions")
-        open_df = df_paper[df_paper["status"] == "OPEN"].copy()
-        if not open_df.empty:
-            st.dataframe(open_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No open positions.")
-            
-        st.markdown("#### 📜 Trade History")
-        closed_df_display = df_paper[df_paper["status"] == "CLOSED"].copy()
-        if not closed_df_display.empty:
-            st.dataframe(closed_df_display.sort_values("exit_date", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.info("No closed trades yet.")
-    else:
-        st.info("Start paper trading from the Scanner tab to see results here.")
+        health = provider.get_health()
+        st.caption(f"OHLCV: {health.get('ohlcv_symbols', 0)} syms ({health.get('ohlcv_last', '—')})")
+        st.caption(f"Disk Free: {health.get('disk_free_gb', '?')} GB [{health.get('worst', 'OK')}]")
+        fills = health.get("fills") or {}
+        st.caption(f"Real Fills Logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)}")
+        st.caption("Live Execution: OFF (research/manual only)")
 
-# --- MAIN RENDERER ---
-def render_main():
-    render_ticker_tape()
-    
-    # Top-level Navigation
-    tab_scanner, tab_portfolio = st.tabs(["🔍 Options Scanner", "📈 Paper Portfolio"])
-    
-    with tab_scanner:
-        budget, dte_bucket_filter = render_sidebar()
-        
-        # Sub-navigation for Scanner
-        s_tab1, s_tab2 = st.tabs(["📋 Results", "📊 Deep Analysis"])
-        with s_tab1:
-            render_scanner_tab(budget, dte_bucket_filter)
-        with s_tab2:
-            render_visualizer_tab()
-            
-    with tab_portfolio:
-        render_paper_portfolio_tab()
+    snap: RadarSnapshot = st.session_state.radar_snap
+    posture_cls = "good" if snap.regime_posture == "RISK_ON" else ("bad" if snap.regime_posture == "RISK_OFF" else "warn")
+    kalshi_txt = (
+        f"{snap.kalshi_macro[0]['label']} ({snap.kalshi_macro[0]['prob_pct']:.0f}%)"
+        if snap.kalshi_macro
+        else "—"
+    )
+    spy_txt = f"${snap.spy_last:.2f} ({snap.spy_chg_1d_pct:+.1f}%)" if snap.spy_last is not None else "—"
+    qqq_txt = f"{snap.qqq_chg_1d_pct:+.1f}%" if snap.qqq_chg_1d_pct is not None else "—"
+    vix_txt = f"VIX {snap.vix:.1f}" if snap.vix is not None else "VIX —"
+    if getattr(snap, "spy_rv20", None) is not None:
+        vix_txt += f" · RV20 {snap.spy_rv20:.0f}%"
 
-# --- APP ENTRY POINT ---
+    st.markdown(
+        f"""
+        <div class="ribbon-bar">
+            <div class="ribbon-item"><span class="ribbon-lbl">SPY</span><span class="ribbon-val">{spy_txt}</span></div>
+            <div class="ribbon-item"><span class="ribbon-lbl">QQQ 1d</span><span class="ribbon-val">{qqq_txt}</span></div>
+            <div class="ribbon-item"><span class="ribbon-lbl">Market Regime</span><span class="ribbon-val {posture_cls}">{snap.regime_posture} ({vix_txt})</span></div>
+            <div class="ribbon-item"><span class="ribbon-lbl">Next Macro</span><span class="ribbon-val">{snap.next_macro_event}</span></div>
+            <div class="ribbon-item"><span class="ribbon-lbl">Kalshi Odds</span><span class="ribbon-val">{kalshi_txt}</span></div>
+            <div class="ribbon-item"><span class="ribbon-lbl">Updated</span><span class="ribbon-val">{datetime.now().strftime('%H:%M')}</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_today, tab_disc, tab_radar, tab_wb, tab_book, tab_legacy = st.tabs(
+        [
+            "🧭 Today & TFSA Core",
+            "🗺️ Discover",
+            "📡 Opportunity Radar",
+            "⚖️ Shares vs Options",
+            "📘 Book & Fills",
+            "🔬 Legacy Gated Scan",
+        ]
+    )
+
+    # ── TAB 1: TODAY & TFSA CORE REBALANCE ───────────────────────────────────
+    with tab_today:
+        st.markdown("### Your Plain-English Daily Action Plan")
+        for step in plain_english_action_plan(snap):
+            st.markdown(f"- {step}")
+
+        col_alloc, col_reb = st.columns([1, 1.3])
+        with col_alloc:
+            st.markdown("#### Core TFSA Weights (`VALIDATED: VM_OUTLOOK_TOP3`)")
+            if snap.core_allocation:
+                df_alloc = pd.DataFrame(snap.core_allocation)
+                fig_pie = go.Figure(
+                    data=[
+                        go.Pie(
+                            labels=df_alloc["ticker"],
+                            values=[round(float(w) * 100.0, 1) for w in df_alloc["target_weight"]],
+                            hole=0.45,
+                            textinfo="label+percent",
+                        )
+                    ]
+                )
+                fig_pie.update_layout(template="plotly_dark", height=280, margin=dict(l=10, r=10, t=20, b=10))
+                st.plotly_chart(fig_pie, width="stretch")
+            else:
+                st.info("No Core Allocation available yet — click Refresh Local Radar.")
+
+        with col_reb:
+            st.markdown("#### Interactive TFSA Rebalance Calculator")
+            r_c1, r_c2, r_c3 = st.columns([1, 1.4, 0.8])
+            acct_usd = r_c1.number_input("TFSA Core USD ($)", min_value=100.0, value=5000.0, step=250.0)
+            cur_spec = r_c2.text_input("Current Shares (optional)", placeholder="e.g. XLE:10,XLV:5")
+            frac = r_c3.toggle("Fractional", value=True)
+            if snap.core_allocation:
+                plan = compute_tfsa_rebalance(
+                    snap.core_allocation,
+                    account_usd=float(acct_usd),
+                    current_shares=parse_holdings_spec(cur_spec),
+                    fractional=bool(frac),
+                )
+                if plan.rebalance_recommended:
+                    st.success(f"Rebalance recommended — max drift {plan.max_drift_pct:.1f}% · Cash/SGOV after: ${plan.estimated_cash_after_usd:,.2f}")
+                else:
+                    st.info(f"On target — max drift {plan.max_drift_pct:.1f}% (< {plan.drift_threshold_pct:.0f}% threshold).")
+                ord_df = pd.DataFrame(
+                    [
+                        {
+                            "Action": o.action,
+                            "Ticker": o.ticker,
+                            "Target %": f"{o.target_weight_pct:.1f}%",
+                            "Spot": f"${o.spot:.2f}" if o.ticker != "CASH/SGOV" else "—",
+                            "Order Sh": f"{o.delta_shares:+.4g}" if o.action in ("BUY", "SELL") else "—",
+                            "Delta $": f"${o.delta_usd:+,.2f}",
+                        }
+                        for o in plan.orders
+                    ]
+                )
+                st.dataframe(ord_df, width="stretch", hide_index=True)
+
+    # ── TAB 1b: TOP-DOWN DISCOVER (① market → ② sectors → ③ ideas → ④ evidence card) ──
+    with tab_disc:
+        from src.topdown.web import render_discover
+
+        if st.button("Rebuild Discover from local archives", key="disc-rebuild"):
+            st.session_state.pop("topdown_hub", None)
+            st.session_state.pop("topdown_cards", None)
+        if "topdown_hub" not in st.session_state:
+            with st.spinner("Building the top-down view (local data only)…"):
+                st.session_state.topdown_hub = provider.get_hub(refresh=True)
+        cards = st.session_state.setdefault("topdown_cards", {})
+        hub = st.session_state.topdown_hub
+
+        def _card(tk: str):
+            if tk not in cards:
+                cards[tk] = hub.card(tk, dossier=provider.get_dossier(tk, fetch_chain=False))
+            return cards[tk]
+
+        render_discover(st, hub, get_card=_card, default_ticker=st.session_state.get("focused_ticker"))
+
+    # ── TAB 2: UNIFIED OPPORTUNITY RADAR ─────────────────────────────────────
+    with tab_radar:
+        fc1, fc2, fc3 = st.columns([1.4, 1.8, 1])
+        preset = fc1.selectbox(
+            "Filter Preset",
+            ["All", "Proven + Promising", "Stocks Only", "Options Only", "Clean (0 Flags)", "Confluence >= 2"],
+        )
+        preset_map = {
+            "All": "",
+            "Proven + Promising": "actionable",
+            "Stocks Only": "stock",
+            "Options Only": "option",
+            "Clean (0 Flags)": "clean",
+            "Confluence >= 2": "conf>=2",
+        }
+        custom_q = fc2.text_input("Search / Micro-query", placeholder="e.g. SPY, pullback, fric<10%")
+        sort_by = fc3.selectbox("Sort By", ["Evidence Tier", "Confluence", "Lowest Friction", "Ticker"])
+
+        full_q = f"{preset_map[preset]} {custom_q}".strip()
+        filtered = filter_opportunities(snap.opportunities, full_q)
+        if sort_by == "Confluence":
+            filtered.sort(key=lambda o: (-o.confluence_count, o.friction_value, o.ticker))
+        elif sort_by == "Lowest Friction":
+            filtered.sort(key=lambda o: (o.friction_value, o.ticker))
+        elif sort_by == "Ticker":
+            filtered.sort(key=lambda o: (o.ticker, o.playbook_id))
+
+        left_r, right_r = st.columns([1.45, 1])
+        with left_r:
+            st.markdown(f"#### Radar Setups ({len(filtered)} / {len(snap.opportunities)})")
+            if filtered:
+                rdf = pd.DataFrame(
+                    [
+                        {
+                            "Evidence": TIER_PLAIN.get(o.evidence_tier, o.evidence_tier),
+                            "Ticker": o.ticker,
+                            "Strategy": o.playbook_label,
+                            "Dir": o.direction,
+                            "Match": o.confluence_count,
+                            "Cost": o.friction_label or f"{o.friction_value*100:.2f}%",
+                            "Flags": ", ".join(o.risk_flags) or "—",
+                            "Setup": o.setup_summary,
+                        }
+                        for o in filtered
+                    ]
+                )
+                sel = st.dataframe(
+                    rdf,
+                    width="stretch",
+                    hide_index=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
+                    height=380,
+                )
+                if sel.selection.get("rows"):
+                    st.session_state.focused_ticker = filtered[sel.selection["rows"][0]].ticker
+            else:
+                st.info("No setups match your current filter.")
+
+        with right_r:
+            tk_focus = st.session_state.focused_ticker
+            dos = provider.get_dossier(tk_focus, fetch_chain=False)
+            light, reason = plain_english_traffic_light(dos)
+            st.markdown(f"#### Dossier: `{dos.ticker}` — {light}")
+            st.caption(reason)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Spot", f"${dos.spot:.2f}" if dos.spot else "N/A", f"{dos.chg_1d_pct:+.2f}%" if dos.chg_1d_pct is not None else None)
+            m2.metric("ATM IV / RV20", f"{dos.atm_iv:.1f}%" if dos.atm_iv else "—", f"RV {dos.rv_20_ann:.1f}%" if dos.rv_20_ann else None)
+            m3.metric("RSI(2) / 200MA", f"{dos.rsi_2:.1f}" if dos.rsi_2 is not None else "—", f"{dos.dist_sma200_pct:+.1f}%" if dos.dist_sma200_pct is not None else None)
+            st.plotly_chart(build_dossier_price_figure(dos), width="stretch")
+            if dos.headlines:
+                st.markdown("**Recent Headlines:**")
+                for h in dos.headlines[:2]:
+                    st.markdown(f"- {h['title']} _({h.get('date', '')})_")
+
+    # ── TAB 3: SHARES VS OPTIONS EXPRESS WORKBENCH ───────────────────────────
+    with tab_wb:
+        wc1, wc2, wc3, wc4, wc5, wc6 = st.columns([1, 1, 1, 0.9, 1, 0.9])
+        wb_tk = wc1.text_input("Ticker", value=st.session_state.focused_ticker).strip().upper() or "SPY"
+        wb_dir = wc2.selectbox("Direction", ["BULLISH", "BEARISH", "NEUTRAL"])
+        wb_tgt = wc3.slider("Expected Move %", -25, 25, 6 if wb_dir == "BULLISH" else (-6 if wb_dir == "BEARISH" else 0))
+        wb_days = wc4.number_input("Horizon (d)", min_value=5, max_value=180, value=30, step=5)
+        wb_risk = wc5.number_input("Risk Budget ($)", min_value=50.0, value=500.0, step=50.0)
+        wb_owns = wc6.toggle("Own 100 sh", value=False)
+
+        dos_wb = provider.get_dossier(wb_tk, fetch_chain=False)
+        spot_wb = dos_wb.spot if dos_wb.spot is not None else 100.0
+        iv_wb = (dos_wb.atm_iv / 100.0) if dos_wb.atm_iv is not None else ((dos_wb.rv_20_ann / 100.0) if dos_wb.rv_20_ann else 0.25)
+        t_move = 0.0 if wb_dir == "NEUTRAL" else (float(wb_tgt) / 100.0)
+        if wb_dir == "BEARISH" and t_move > 0:
+            t_move = -t_move
+
+        view_wb = DetailedView(
+            symbol=wb_tk,
+            direction=wb_dir,
+            target_move_pct=t_move,
+            horizon_days=int(wb_days),
+            risk_budget_usd=float(wb_risk),
+            account_type="tfsa",
+            owns_100_shares=bool(wb_owns),
+        )
+        vehicles = provider.get_express(view_wb, spot=spot_wb, iv=iv_wb)
+        st.success(plain_english_vehicle_verdict(vehicles, view_wb))
+
+        vdf = pd.DataFrame(
+            [
+                {
+                    "Vehicle": ("★ " if v.recommended else "") + v.vehicle,
+                    "Structure": v.description,
+                    "TFSA": "Yes" if v.tfsa_legal else "No",
+                    "Max Risk $": f"${v.capital_at_risk_usd:,.0f}",
+                    "Spread %": f"{v.friction_pct_of_reward:.1f}%",
+                    "Market EV": f"${v.ev_mkt_net_usd:+,.0f}",
+                    "Your View EV": f"${v.ev_view_net_usd:+,.0f}",
+                    "Win Odds": f"{v.pop_view*100:.0f}%",
+                    "Walk-Away Limit": v.walk_away_label,
+                }
+                for v in vehicles
+            ]
+        )
+        st.dataframe(vdf, width="stretch", hide_index=True)
+
+        p_left, p_right = st.columns(2)
+        with p_left:
+            rnd_fig, _src = build_rnd_comparison_figure(spot_wb, iv_wb, view_wb)
+            st.plotly_chart(rnd_fig, width="stretch")
+        with p_right:
+            st.plotly_chart(build_vehicle_edge_figure(vehicles, float(wb_risk)), width="stretch")
+
+    # ── TAB 4: BOOK, EXIT ALERTS & REAL-FILL EXPERIMENT ──────────────────────
+    with tab_book:
+        book = provider.get_book()
+        if book.get("exit_alerts"):
+            for al in book["exit_alerts"]:
+                st.warning(f"EXIT ALERT — {al}")
+        b1, b2 = st.columns([1.4, 1])
+        with b1:
+            st.markdown("#### Stock & ETF Picks (`data/own_picks.db`)")
+            picks = book.get("equity_picks") or []
+            if picks:
+                st.dataframe(pd.DataFrame(picks), width="stretch", hide_index=True)
+            else:
+                st.info("No stock/ETF picks logged yet. Use `opt log` or `[l]` in `opt` TUI.")
+            st.markdown("#### Open Paper Option Positions (`paper_trades.db`)")
+            p_opts = book.get("paper_options") or []
+            if p_opts:
+                st.dataframe(pd.DataFrame(p_opts), width="stretch", hide_index=True)
+            else:
+                st.caption("0 open paper option positions.")
+        with b2:
+            st.markdown("#### Long-Term Accumulation Plan (`longterm_plan.json`)")
+            lt = book.get("longterm_holdings") or []
+            if lt:
+                st.dataframe(pd.DataFrame(lt), width="stretch", hide_index=True)
+            else:
+                st.caption("No long-term tranches configured.")
+            st.markdown("#### Log Real Limit-Order Fill (`data/fills.db`)")
+            with st.form("fill_form", clear_on_submit=True):
+                ff_broker = st.selectbox("Broker", ["ibkr", "wealthsimple"])
+                ff_tk = st.text_input("Ticker", value=wb_tk).strip().upper()
+                ff_struct = st.text_input("Structure", value="Bull Put")
+                ff_side = st.selectbox("Side", ["SELL", "BUY"])
+                fc_a, fc_b, fc_c = st.columns(3)
+                ff_bid = fc_a.number_input("Bid", min_value=0.01, value=4.00, step=0.05)
+                ff_ask = fc_b.number_input("Ask", min_value=0.01, value=4.20, step=0.05)
+                ff_lim = fc_c.number_input("Limit", min_value=0.01, value=4.12, step=0.05)
+                ff_filled = st.checkbox("Filled?", value=True)
+                if st.form_submit_button("Save Fill Attempt"):
+                    provider.log_fill_attempt(
+                        broker=ff_broker,
+                        ticker=ff_tk,
+                        structure=ff_struct,
+                        side=ff_side,
+                        bid=float(ff_bid),
+                        ask=float(ff_ask),
+                        limit_price=float(ff_lim),
+                        filled=bool(ff_filled),
+                        fill_price=float(ff_lim) if ff_filled else None,
+                    )
+                    st.success(f"Recorded fill attempt for {ff_tk}.")
+
+    # ── TAB 5: LEGACY OPTIONS SCANNER (PROPERLY GATED) ───────────────────────
+    with tab_legacy:
+        st.markdown("#### Live Multi-Ticker Options Scan (Routed Through `gate_board()`)")
+        st.caption(
+            "Every contract passes the repo's friction (<=25% reward), negative-EV consistency, and top-quintile gates. "
+            "No quality_score '#1' ranking is claimed."
+        )
+        lc1, lc2, lc3, lc4 = st.columns([1.2, 1.5, 0.8, 0.8])
+        scan_mode = lc1.selectbox("Scan Mode", ["Single-stock", "Discovery scan", "Premium Selling"])
+        tk_in = lc2.text_input("Ticker(s) (comma-separated)", value="SPY,QQQ,AAPL")
+        min_dte = lc3.number_input("Min DTE", min_value=7, max_value=120, value=30)
+        max_dte = lc4.number_input("Max DTE", min_value=14, max_value=180, value=60)
+
+        if st.button("🚀 Run Gated Live Option Scan"):
+            from src.options_screener import get_market_context, run_scan, setup_logging
+            from src.pick_ranking import gate_board
+
+            tickers = [t.strip().upper() for t in tk_in.split(",") if t.strip()]
+            if scan_mode == "Single-stock" and tickers:
+                tickers = [tickers[0]]
+            with st.spinner(f"Scanning {', '.join(tickers)}…"):
+                trend, vreg, macro_r, tnx = get_market_context()
+                res = run_scan(
+                    mode=scan_mode,
+                    tickers=tickers,
+                    budget=None,
+                    max_expiries=4,
+                    min_dte=int(min_dte),
+                    max_dte=int(max_dte),
+                    trader_profile="swing",
+                    logger=setup_logging(),
+                    market_trend=trend,
+                    volatility_regime=vreg,
+                    macro_risk_active=macro_r,
+                    tnx_change_pct=tnx,
+                    verbose=False,
+                )
+                board = gate_board(res.picks)
+                st.session_state.legacy_board = board
+                st.session_state.legacy_mode = scan_mode
+
+        board = st.session_state.get("legacy_board")
+        if board is not None:
+            st.caption(f"Scanned {board.scanned} contracts · {len(board.kept)} cleared gates · {len(board.refused)} refused ({dict(board.reasons)})")
+            if not board.kept.empty:
+                show_cols = [
+                    c for c in ["symbol", "type", "strike", "expiration", "bid", "ask", "premium", "impliedVolatility", "delta", "ev_per_contract", "volume", "openInterest"]
+                    if c in board.kept.columns
+                ]
+                st.dataframe(board.kept[show_cols], width="stretch", hide_index=True)
+            else:
+                st.warning("Nothing cleared the friction/EV gates — try Wide 60–120d ETF Spreads or Shares vs Options above.")
+
+
 if __name__ == "__main__":
     render_main()

@@ -211,7 +211,9 @@ class TimingAndProviderTests(unittest.TestCase):
                  (datetime(2026, 11, 26, 19), "2026-11-25"),
                  (datetime(2026, 11, 29, 19), "2026-11-27"),
                  (datetime(2026, 7, 3, 23, tzinfo=timezone.utc), "2026-07-02"),
-                 (datetime(2027, 7, 3, 23, tzinfo=timezone.utc), None)]
+                 (datetime(2027, 7, 3, 23, tzinfo=timezone.utc), "2027-07-02"),
+                 # first year with no maintained holiday calendar stays unknown
+                 (datetime(2029, 7, 3, 23, tzinfo=timezone.utc), None)]
         for now, expected in cases:
             self.assertEqual(completed_session(now), expected)
 
@@ -238,7 +240,7 @@ class TimingAndProviderTests(unittest.TestCase):
         self.assertTrue(collection.due({}, datetime(2026, 11, 24, 18)))
         self.assertFalse(collection.due({"last_discovery_prices": "2026-11-24"}, datetime(2026, 11, 24, 19)))
         self.assertFalse(collection.due({}, datetime(2026, 11, 26, 19)))
-        self.assertFalse(collection.due({}, datetime(2027, 6, 1, 19)))
+        self.assertFalse(collection.due({}, datetime(2029, 6, 1, 19)))  # calendar not maintained for 2029
 
 
 class CollectionIntegrationTests(unittest.TestCase):

@@ -588,7 +588,36 @@ def format_decision_zone(row: pd.Series, config: Optional[Dict] = None) -> list:
     else:
         do_line = "  DO         " + do_text
 
-    return [x for x in (verdict, worth_line, do_line) if x]
+    # Optional Walk-Away Limit price when live bid/ask quotes are present
+    limit_line = None
+    try:
+        bid_v = float(row.get("bid") or 0.0)
+        ask_v = float(row.get("ask") or 0.0)
+        if bid_v > 0 and ask_v >= bid_v:
+            from .structure.execution_plan import build_walk_away_ladder
+
+            mid_v = 0.5 * (bid_v + ask_v)
+            p_cross = bid_v if is_short else ask_v
+            half_sp = max(0.0, 0.5 * (ask_v - bid_v))
+            ev_gross_ps = mid_v + (float(ev) / 100.0) + half_sp
+            lad = build_walk_away_ladder(
+                structure=str(row.get("strategy_name") or "Option"),
+                is_credit=is_short,
+                p_mid=mid_v,
+                p_cross=p_cross,
+                ev_view_gross_per_share=ev_gross_ps,
+                exit_half_spread_per_share=half_sp,
+            )
+            lim_txt = f"mid ${lad.p_mid:.2f} → step ${lad.p_step25:.2f} → abort ${lad.p_walk:.2f}"
+            limit_line = (
+                ui.kv_line("LIMIT", fmt.style(lim_txt, "muted"))
+                if HAS_ENHANCED_CLI
+                else "  LIMIT      " + lim_txt
+            )
+    except Exception:
+        limit_line = None
+
+    return [x for x in (verdict, worth_line, do_line, limit_line) if x]
 
 
 _CAL_CACHE: Dict[str, Any] = {}
@@ -1935,9 +1964,9 @@ def print_report(df_picks: pd.DataFrame, underlying_price: float, rfr: float, nu
     # ── Best Setup Callout ────────────────────────────────────────────────────
     print_best_setup_callout(df_picks, WIDTH)
 
-    # ── Rank all picks by quality_score ──────────────────────────────────────
+    # ── Number picks in actual board order (never silently re-sort by quality_score) ──
     df_picks = df_picks.copy()
-    df_picks["_rank"] = df_picks["quality_score"].rank(ascending=False, method="first").astype(int)
+    df_picks["_rank"] = range(1, len(df_picks) + 1)
     total_picks = len(df_picks)
 
     # ── Term-structure sparkline (display-only) ──────────────────────────────
