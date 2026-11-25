@@ -50,8 +50,38 @@ Screen {
     margin-bottom: 1;
 }
 
-HelpModal {
+#wb-visual-box {
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#book-extra-box {
+    height: auto;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+LogFillModal, QuickLogModal, HelpModal {
     align: center middle;
+}
+
+#logfill-dialog, #quicklog-dialog {
+    width: 64;
+    height: auto;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#lf-filled-row, #logfill-buttons, #quicklog-buttons {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
 }
 
 #help-dialog {
@@ -84,14 +114,21 @@ HelpModal {
 }
 
 #radar-filter-input {
-    width: 36;
+    width: 28;
     margin-right: 1;
+}
+
+.preset-btn {
+    min-width: 7;
+    height: 3;
+    margin-right: 1;
+    padding: 0 1;
 }
 
 #radar-pills {
     width: 1fr;
     height: 3;
-    content-align: left middle;
+    content-align: right middle;
     color: $primary;
 }
 

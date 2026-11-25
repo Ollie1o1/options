@@ -10,7 +10,25 @@ _SETTINGS_PATH = "settings.json"
 
 DEFAULT_SETTINGS = {
     "theme": "quant_desk",
+    "account_size": None,
+    "default_budget": None,
+    "default_dte_preset": "quick",
+    "default_watchlist": "liquid_large_cap",
 }
+
+
+def get_setting(key: str, default=None):
+    """Read one persisted user preference."""
+    return load_settings().get(key, default)
+
+
+def set_setting(key: str, value) -> None:
+    """Persist one user preference key."""
+    if key not in DEFAULT_SETTINGS:
+        return
+    settings = load_settings()
+    settings[key] = value
+    save_settings(settings)
 
 
 def load_settings() -> dict:

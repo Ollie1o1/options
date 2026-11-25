@@ -2,15 +2,16 @@
 
 Tabs:
   [1] TODAY      — Core TFSA Allocation (VM_OUTLOOK_TOP3) + Top 5 Radar Setups
-  [2] RADAR      — Filterable, sortable unified Opportunity Radar + live DossierPane
-  [3] WORKBENCH  — Full Ticker Dossier + Shares-vs-Options Express + Walk-Away Ladder
-  [4] BOOK       — Stock/ETF Picks + Per-Playbook Scorecard
-  [5] LAB        — Ops Health, Forward Readout Countdowns, Playbook Evidence Registry
+  [2] RADAR      — Filterable (presets + query), sortable unified Opportunity Radar + live DossierPane
+  [3] WORKBENCH  — Full Ticker Dossier + Visual RND/Edge Bars + Shares-vs-Options + Walk-Away Ladder
+  [4] BOOK       — Stock/ETF Picks (live P&L + exit alerts), Paper Options, Holdings & Scorecard
+  [5] LAB        — Real Ops Health, OHLCV Freshness, Fill Concession `k`, Forward Readouts & Playbooks
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -28,6 +29,7 @@ from textual.widgets import (
 )
 
 from src.cli.guide import TIER_PLAIN, plain_english_action_plan, plain_english_vehicle_verdict
+from src.radar.engine import merge_confluence
 from src.radar.schema import Opportunity, RadarSnapshot, TickerDossier
 from src.structure.types import DetailedView, VehicleComparison
 from .state import DeskDataProvider
@@ -35,16 +37,27 @@ from .themes import THEME_ORDER, THEMES, persist_theme_name, saved_theme_name
 from .widgets import (
     DeskCommandProvider,
     HelpModal,
+    LogFillModal,
     QuickLogModal,
     format_dossier_markup,
     format_ribbon_markup,
+    format_workbench_visual_markup,
 )
 
 SORT_MODES = ("tier", "confluence", "friction", "ticker")
 
+FILTER_PRESETS = (
+    ("preset-all", "All", ""),
+    ("preset-act", "Proven+Lead", "actionable"),
+    ("preset-stk", "Stocks", "stock"),
+    ("preset-opt", "Options", "option"),
+    ("preset-cln", "Clean", "clean"),
+    ("preset-cnf", "Conf>=2", "conf>=2"),
+)
+
 
 def filter_opportunities(opps: List[Opportunity], query: str) -> List[Opportunity]:
-    """Client-side micro-query filter (`stock`, `option`, `validated`, `conf>=2`, or substring)."""
+    """Client-side micro-query filter (`stock`, `option`, `validated`, `actionable`, `clean`, `conf>=2`, `fric<10%`, or substring)."""
     q = query.strip().lower()
     if not q:
         return list(opps)
@@ -57,6 +70,10 @@ def filter_opportunities(opps: List[Opportunity], query: str) -> List[Opportunit
                 ok = o.asset_class.lower() == tok
             elif tok in ("validated", "lead", "context", "research"):
                 ok = o.evidence_tier.lower() == tok
+            elif tok == "actionable":
+                ok = o.evidence_tier.upper() in ("VALIDATED", "LEAD")
+            elif tok == "clean":
+                ok = len(o.risk_flags) == 0
             elif tok.startswith("conf>="):
                 try:
                     ok = o.confluence_count >= int(tok[6:])
@@ -94,7 +111,10 @@ class DeskApp(App[None]):
         Binding("s", "cycle_sort", "Sort", show=True),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
-        Binding("l", "quick_log", "Log Trade", show=True),
+        Binding("l", "quick_log", "Log Pick", show=True),
+        Binding("f", "log_fill", "Log Fill", show=True),
+        Binding("o", "live_options", "Live Opts", show=True),
+        Binding("u", "update_prices", "Upd Prices", show=False),
         Binding("r", "refresh", "Refresh", show=True),
         Binding("t", "cycle_theme", "Theme", show=True),
         Binding("question_mark", "show_help", "Guide/Help", show=True),
@@ -120,6 +140,7 @@ class DeskApp(App[None]):
         self.focused_spot: float = 100.0
         self.focused_playbook: str = "equity_pullback"
         self._last_vehicles: List[VehicleComparison] = []
+        self._status_msg: str = ""
 
     def compose(self) -> ComposeResult:
         yield Static("Loading Daily Trading Desk…", id="market-ribbon")
@@ -128,16 +149,20 @@ class DeskApp(App[None]):
                 with Vertical(id="today-grid"):
                     yield Static("Loading your plain-English daily action plan…", id="today-core-card")
                     with Horizontal(id="today-actions"):
-                        yield Button("Refresh Ideas", id="act-refresh", variant="primary")
+                        yield Button("Refresh Ideas [r]", id="act-refresh", variant="primary")
+                        yield Button("Live ETF Spreads [o]", id="act-live-opts")
                         yield Button("Analyze a Stock", id="act-workbench")
-                        yield Button("Log a Trade", id="act-log")
-                        yield Button("? Plain-English Guide", id="act-help")
+                        yield Button("Log Pick [l]", id="act-log")
+                        yield Button("Log Fill [f]", id="act-fill")
+                        yield Button("? Guide", id="act-help")
                     yield DataTable(id="today-top5-table", zebra_stripes=True, cursor_type="row")
 
             with TabPane("[2] RADAR", id="radar"):
                 with Horizontal(id="radar-toolbar"):
-                    yield Input(placeholder="Filter (e.g. pullback, stock, conf>=2)…", id="radar-filter-input")
-                    yield Static("Sort: tier  |  Enter: Workbench  |  l: Quick Log", id="radar-pills")
+                    yield Input(placeholder="Filter (e.g. pullback, clean, conf>=2)…", id="radar-filter-input")
+                    for pid, plabel, _pq in FILTER_PRESETS:
+                        yield Button(plabel, id=pid, classes="preset-btn")
+                    yield Static("Sort: tier [s]", id="radar-pills")
                 with Horizontal(id="radar-split"):
                     yield DataTable(id="radar-table", zebra_stripes=True, cursor_type="row")
                     yield Static("Select a row to inspect Ticker Dossier.", id="radar-dossier-pane")
@@ -156,10 +181,12 @@ class DeskApp(App[None]):
                     yield Label("100sh:")
                     yield Switch(value=False, id="wb-owns-switch")
                     yield Button("Run", id="wb-run-btn", variant="primary")
+                    yield Button("Log Fill [f]", id="wb-fill-btn")
                 with Horizontal(id="wb-split"):
                     yield Static("Enter a ticker to load Dossier.", id="wb-left")
                     with Vertical(id="wb-right"):
                         yield Static("Plain-English recommendation will appear here.", id="wb-verdict-box")
+                        yield Static("", id="wb-visual-box")
                         yield DataTable(id="wb-vehicles-table", zebra_stripes=True, cursor_type="row")
                         yield Static("Select a vehicle row to inspect Walk-Away Limit Ladder.", id="wb-ladder-box")
 
@@ -167,6 +194,7 @@ class DeskApp(App[None]):
                 with Vertical(id="book-container"):
                     yield Static("Playbook Scorecard loading…", id="book-scorecard-box")
                     yield DataTable(id="book-picks-table", zebra_stripes=True, cursor_type="row")
+                    yield Static("", id="book-extra-box")
 
             with TabPane("[5] LAB", id="lab"):
                 with Vertical(id="lab-container"):
@@ -203,14 +231,19 @@ class DeskApp(App[None]):
         vt.add_columns("Vehicle", "Trade Plan", "TFSA?", "Max Risk", "Spread%", "Mkt EV", "Your Edge", "Win Odds")
 
         bt = self.query_one("#book-picks-table", DataTable)
-        bt.add_columns("ID", "Date", "Ticker", "Strategy", "Side", "Entry", "Shares", "Status")
+        bt.add_columns("ID", "Date", "Ticker", "Strategy", "Entry", "Now", "P&L%", "Shares", "Exit / Status")
 
         lt = self.query_one("#lab-playbooks-table", DataTable)
         lt.add_columns("Evidence", "Strategy ID", "Asset", "Horizon", "Notes")
 
-    def _load_all_data(self, *, refresh: bool = False) -> None:
-        self.snapshot = self.provider.get_radar(refresh=refresh)
-        self.health = self.provider.get_health()
+    def _set_status(self, msg: str) -> None:
+        self._status_msg = msg
+        self._render_ribbon()
+
+    def _apply_snapshot(self, snap: RadarSnapshot, health: Dict[str, Any]) -> None:
+        self.snapshot = snap
+        self.health = health
+        self._status_msg = ""
         self._render_ribbon()
         self._render_today()
         self._render_radar()
@@ -223,6 +256,11 @@ class DeskApp(App[None]):
             self.focused_playbook = first.playbook_id
             self._update_radar_dossier(first.ticker)
         self._compute_workbench(self.focused_ticker)
+
+    def _load_all_data(self, *, refresh: bool = False) -> None:
+        snap = self.provider.get_radar(refresh=refresh)
+        health = self.provider.get_health()
+        self._apply_snapshot(snap, health)
         try:
             from src.cache_release import release_yfinance_caches
 
@@ -232,7 +270,7 @@ class DeskApp(App[None]):
 
     def _render_ribbon(self) -> None:
         self.query_one("#market-ribbon", Static).update(
-            format_ribbon_markup(self.snapshot, self.health)
+            format_ribbon_markup(self.snapshot, self.health, status_msg=self._status_msg)
         )
 
     def _render_today(self) -> None:
@@ -274,7 +312,7 @@ class DeskApp(App[None]):
         self.filtered_opps = rows
 
         self.query_one("#radar-pills", Static).update(
-            f"Sort: [bold]{mode}[/] ([s]) · Showing {len(rows)}/{len(snap.opportunities)} · Enter: Workbench"
+            f"Sort: [bold]{mode}[/] ([s]) · {len(rows)}/{len(snap.opportunities)}"
         )
         tbl = self.query_one("#radar-table", DataTable)
         tbl.clear()
@@ -304,7 +342,11 @@ class DeskApp(App[None]):
 
         spot = dos.spot if dos.spot is not None else 100.0
         self.focused_spot = spot
-        iv = (dos.rv_20_ann / 100.0) if dos.rv_20_ann else 0.25
+        iv = (
+            (dos.atm_iv / 100.0)
+            if dos.atm_iv is not None
+            else ((dos.rv_20_ann / 100.0) if dos.rv_20_ann else 0.25)
+        )
 
         dir_val = str(self.query_one("#wb-dir-select", Select).value or "BULLISH")
         raw_t = self.query_one("#wb-target-input", Input).value.strip().rstrip("%")
@@ -341,6 +383,9 @@ class DeskApp(App[None]):
         self.query_one("#wb-verdict-box", Static).update(
             f"[bold]{plain_english_vehicle_verdict(vehicles, view)}[/]"
         )
+        self.query_one("#wb-visual-box", Static).update(
+            format_workbench_visual_markup(vehicles, dos, view)
+        )
 
         vt = self.query_one("#wb-vehicles-table", DataTable)
         vt.clear()
@@ -357,7 +402,7 @@ class DeskApp(App[None]):
                 key=str(idx),
             )
         if vehicles:
-            v0 = vehicles[0]
+            v0 = next((v for v in vehicles if v.recommended), vehicles[0])
             self.query_one("#wb-ladder-box", Static).update(
                 f"[bold]Selected Vehicle Execution Ticket ({v0.vehicle}):[/]\n"
                 f"  {v0.walk_away_label}\n"
@@ -370,7 +415,13 @@ class DeskApp(App[None]):
         picks = book.get("equity_picks") or []
         sc = book.get("scorecard") or {}
         by_pb = sc.get("by_playbook") or {}
+        alerts = book.get("exit_alerts") or []
+        paper_opts = book.get("paper_options") or []
+        lt_holdings = book.get("longterm_holdings") or []
+
         lines = [f"[bold]OWN PICKS SCORECARD[/]  (Total stock/ETF picks: {sc.get('total_picks', 0)})"]
+        if alerts:
+            lines.append("[bold #d6a452]EXIT ALERTS:[/] " + "  |  ".join(alerts[:4]))
         if by_pb:
             for pb_id, info in by_pb.items():
                 h5 = (info.get("horizons") or {}).get(5) or {}
@@ -380,29 +431,63 @@ class DeskApp(App[None]):
                     f"5d excess {m5} · {h5.get('verdict', '')}"
                 )
         else:
-            lines.append("  [dim]Press [l] anywhere to log your first stock/ETF pick.[/dim]")
+            lines.append("  [dim]Press [l] anywhere to log your first stock/ETF pick · [f] to log a limit fill.[/dim]")
         self.query_one("#book-scorecard-box", Static).update("\n".join(lines))
 
         bt = self.query_one("#book-picks-table", DataTable)
         bt.clear()
         for p in picks[:40]:
+            cur_p = p.get("current_price")
+            unrl = p.get("unrealized_pct")
+            exit_s = p.get("exit_signal") or str(p.get("status", ""))
             bt.add_row(
                 str(p["pick_id"]),
                 str(p["date"])[:10],
                 str(p["ticker"]),
                 str(p["playbook_id"]),
-                str(p["side"]),
                 f"${float(p['entry_price']):.2f}",
+                f"${float(cur_p):.2f}" if cur_p is not None else "—",
+                f"{float(unrl):+.1f}%" if unrl is not None else "—",
                 f"{float(p['shares']):g}",
-                str(p["status"]),
+                str(exit_s),
             )
+
+        extra_lines: List[str] = []
+        if paper_opts:
+            opt_str = " · ".join(
+                f"{r['ticker']} {r['strategy_name']} ${r.get('strike') or ''} exp {str(r.get('expiration') or '')[:10]}"
+                for r in paper_opts[:5]
+            )
+            extra_lines.append(f"[bold]OPEN PAPER OPTIONS ({len(paper_opts)}):[/] {opt_str}")
+        else:
+            extra_lines.append("[bold]OPEN PAPER OPTIONS:[/] [dim]0 open in paper_trades.db[/dim]")
+        if lt_holdings:
+            lt_str = " · ".join(
+                f"{h['ticker']} ({h['tranches_filled']}/{h['tranches_total']} tranches"
+                + (f", next ${h['next_level']:g}" if h.get("next_level") is not None else "")
+                + ")"
+                for h in lt_holdings[:6]
+            )
+            extra_lines.append(f"[bold]LONG-TERM PLAN:[/] {lt_str}")
+        self.query_one("#book-extra-box", Static).update("\n".join(extra_lines))
 
     def _render_lab(self) -> None:
         h = self.health
         fills = h.get("fills") or {}
+        maint = h.get("maintenance_summary") or ""
+        ohlcv_n = h.get("ohlcv_symbols")
+        ohlcv_last = h.get("ohlcv_last")
+        ohlcv_s = f" · OHLCV: {ohlcv_n} syms ({ohlcv_last})" if ohlcv_n else ""
+        maint_s = f" · {maint}" if maint else ""
+        k_groups = fills.get("groups") or []
+        k_str = ""
+        if k_groups:
+            med_k = k_groups[0].get("median_k")
+            if med_k is not None:
+                k_str = f" (med k={med_k:.2f}, goal <=0.35)"
         lines = [
-            f"[bold]OPS HEALTH:[/] Disk {h.get('disk_free_gb', '?')} GB free [{h.get('worst', 'OK')}] · "
-            f"Live Execution: OFF · Real Fills Logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)}",
+            f"[bold]OPS HEALTH:[/] Disk {h.get('disk_free_gb', '?')} GB free [{h.get('worst', 'OK')}]{ohlcv_s}{maint_s}",
+            f"[bold]EXECUTION:[/] Live OFF · Real Limit Fills Logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)}{k_str} (press [f] to log)",
             "[bold]PENDING FORWARD READOUTS:[/] " + "  |  ".join(h.get("readouts") or []),
         ]
         self.query_one("#lab-health-box", Static).update("\n".join(lines))
@@ -411,6 +496,49 @@ class DeskApp(App[None]):
         lt.clear()
         for pb in self.provider.get_playbooks():
             lt.add_row(pb.evidence_tier, pb.id, pb.asset_class, pb.horizon_label, pb.notes[:72])
+
+    # ── Background Workers (non-blocking UI) ─────────────────────────────────
+
+    @work(thread=True, exclusive=True, group="radar_refresh")
+    def _worker_refresh_radar(self) -> None:
+        try:
+            snap = self.provider.get_radar(refresh=True)
+            health = self.provider.get_health()
+            self.call_from_thread(self._apply_snapshot, snap, health)
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"Refresh err: {str(exc)[:30]}")
+
+    @work(thread=True, exclusive=True, group="live_options")
+    def _worker_live_options(self) -> None:
+        try:
+            live_opps, _warns = self.provider.get_live_etf_options()
+
+            def _merge() -> None:
+                if self.snapshot is not None:
+                    base = [o for o in self.snapshot.opportunities if "LIVE_CHAIN" not in o.badges]
+                    self.snapshot.opportunities = merge_confluence(base + live_opps)
+                    self._render_today()
+                    self._render_radar()
+                self._set_status(f"Live ETF opts: {len(live_opps)} found")
+
+            self.call_from_thread(_merge)
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"Live opts err: {str(exc)[:30]}")
+
+    @work(thread=True, exclusive=True, group="price_update")
+    def _worker_update_prices(self) -> None:
+        try:
+            res = self.provider.update_prices(expand_universe=False)
+            snap = self.provider.get_radar(refresh=True)
+            health = self.provider.get_health()
+
+            def _done() -> None:
+                self._apply_snapshot(snap, health)
+                self._set_status(f"Prices updated ({res.get('updated', 0)}/{res.get('symbols', 0)})")
+
+            self.call_from_thread(_done)
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"Price update err: {str(exc)[:30]}")
 
     # ── Events ───────────────────────────────────────────────────────────────
 
@@ -434,14 +562,24 @@ class DeskApp(App[None]):
         bid = event.button.id
         if bid == "wb-run-btn":
             self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
+        elif bid == "wb-fill-btn" or bid == "act-fill":
+            self.action_log_fill()
         elif bid == "act-refresh":
             self.action_refresh()
+        elif bid == "act-live-opts":
+            self.action_live_options()
         elif bid == "act-workbench":
             self.open_workbench(self.focused_ticker)
         elif bid == "act-log":
             self.action_quick_log()
         elif bid == "act-help":
             self.action_show_help()
+        else:
+            for pid, _label, pq in FILTER_PRESETS:
+                if bid == pid:
+                    self.query_one("#radar-filter-input", Input).value = pq
+                    self._render_radar()
+                    break
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         tid = event.data_table.id
@@ -485,6 +623,10 @@ class DeskApp(App[None]):
     def open_workbench(self, ticker: str) -> None:
         self.query_one("#main-tabs", TabbedContent).active = "workbench"
         self._compute_workbench(ticker)
+        try:
+            self.query_one("#wb-vehicles-table", DataTable).focus()
+        except Exception:
+            pass
 
     def action_switch_tab(self, tab_id: str) -> None:
         self.query_one("#main-tabs", TabbedContent).active = tab_id
@@ -506,7 +648,23 @@ class DeskApp(App[None]):
             self.focused.action_cursor_up()
 
     def action_refresh(self) -> None:
-        self._load_all_data(refresh=True)
+        self._set_status("Refreshing Radar…")
+        self._worker_refresh_radar()
+
+    def action_live_options(self) -> None:
+        if self.offline:
+            self._set_status("Offline mode — live options skipped")
+            return
+        self.query_one("#main-tabs", TabbedContent).active = "radar"
+        self._set_status("Scanning live 60-120d ETF spreads…")
+        self._worker_live_options()
+
+    def action_update_prices(self) -> None:
+        if self.offline:
+            self._set_status("Offline mode — price update skipped")
+            return
+        self._set_status("Updating daily OHLCV prices…")
+        self._worker_update_prices()
 
     def apply_desk_theme(self, name: str) -> None:
         if name in THEMES:
@@ -541,6 +699,20 @@ class DeskApp(App[None]):
                 playbook_id=self.focused_playbook,
             ),
             _after_modal,
+        )
+
+    def action_log_fill(self) -> None:
+        def _after_fill(res: Optional[Dict[str, Any]]) -> None:
+            if not res:
+                return
+            self.provider.log_fill_attempt(**res)
+            self.health = self.provider.get_health()
+            self._render_lab()
+            self._set_status(f"Fill logged for {res['ticker']}")
+
+        self.push_screen(
+            LogFillModal(ticker=self.focused_ticker, structure="Bull Put", side="SELL"),
+            _after_fill,
         )
 
 

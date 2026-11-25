@@ -50,6 +50,9 @@ def render_ribbon(snap: RadarSnapshot) -> Text:
     t.append(f"[{snap.regime_posture}]", style=posture_style)
     t.append("  |  ", style="dim")
     t.append(f"Macro: {snap.next_macro_event}", style="dim")
+    if getattr(snap, "kalshi_macro", None):
+        k0 = snap.kalshi_macro[0]
+        t.append(f" · Kalshi {k0['label']} {k0['prob_pct']:.0f}%", style="dim #82aad2")
     if snap.from_cache:
         t.append("  |  cached", style="dim")
     return t
@@ -137,19 +140,33 @@ def render_dossier(dos: TickerDossier) -> Panel:
 
     rv_s = f"{dos.rv_20_ann:.1f}%" if dos.rv_20_ann is not None else "—"
     iv_s = f"{dos.atm_iv:.1f}%" if dos.atm_iv is not None else "—"
+    iv_rv_s = f" (IV/RV {dos.iv_vs_rv_ratio:.2f}x)" if getattr(dos, "iv_vs_rv_ratio", None) is not None else ""
+    sk_s = f" · 25Δ skew {dos.skew_25d_vp:+.1f}vp" if getattr(dos, "skew_25d_vp", None) is not None else ""
     im_s = f"±{dos.implied_move_1s_pct:.1f}%" if dos.implied_move_1s_pct is not None else "—"
     p5 = (
         f"P(>+5%)={dos.rnd_prob_up_5pct*100:.0f}% / P(<-5%)={dos.rnd_prob_dn_5pct*100:.0f}%"
         if dos.rnd_prob_up_5pct is not None and dos.rnd_prob_dn_5pct is not None
         else "—"
     )
-    lines.append(f"[bold]Vol / RND[/bold]  RV20 {rv_s} · ATM IV {iv_s} · 30d 1σ {im_s} · {p5}")
+    src_tag = f" [{dos.chain_source}/{dos.rnd_source}]" if getattr(dos, "chain_source", None) else ""
+    lines.append(f"[bold]Vol / RND[/bold]  RV20 {rv_s} · ATM IV {iv_s}{iv_rv_s}{sk_s} · 1σ {im_s} · {p5}{src_tag}")
 
+    if getattr(dos, "kalshi_macro", None):
+        k_str = " · ".join(f"{k['label']} {k['prob_pct']:.0f}%" for k in dos.kalshi_macro[:2])
+        lines.append(f"[bold]Kalshi[/bold]     {k_str}")
+    if getattr(dos, "open_position_note", None):
+        lines.append(f"[bold #d6a452]Exposure[/bold #d6a452]   {dos.open_position_note}")
     if dos.risk_flags:
         lines.append(f"[bold #e06c75]Risk Flags[/bold #e06c75] {', '.join(dos.risk_flags)}")
     if dos.active_signals:
         sigs = " · ".join(f"[{s.evidence_tier}] {s.playbook_label}" for s in dos.active_signals)
         lines.append(f"[bold #5ec98d]Radar[/bold #5ec98d]      {sigs}")
+    if getattr(dos, "analyst_actions", None):
+        act_str = " | ".join(
+            f"{a['firm']} {a['action']}→{a['to_grade']}" + (f" PT ${a['current_pt']:.0f}" if a.get("current_pt") else "")
+            for a in dos.analyst_actions[:2]
+        )
+        lines.append(f"[bold]Analysts[/bold]   {act_str}")
     if dos.headlines:
         lines.append("[bold]Headlines[/bold]  " + " | ".join(h["title"][:65] for h in dos.headlines[:2]))
 

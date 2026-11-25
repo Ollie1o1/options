@@ -30,6 +30,7 @@ def _parse_pct(raw: str) -> float:
 @click.option("--owns-shares", is_flag=True, help="Include Covered Call comparison (owns >=100 shares).")
 @click.option("--spot", type=float, default=None, help="Override spot price (default: local OHLCV close).")
 @click.option("--iv", type=float, default=None, help="Override implied vol decimal (e.g. 0.25).")
+@click.option("--live", is_flag=True, help="Fetch live option chains instead of using local chain_archive.db.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON output.")
 @click.pass_context
 def express_cmd(
@@ -44,6 +45,7 @@ def express_cmd(
     owns_shares: bool,
     spot: Optional[float],
     iv: Optional[float],
+    live: bool,
     as_json: bool,
 ) -> None:
     """Compare Shares, LEAPS, Debit Spread, Wide Credit Spread, Covered Call & Single Option side-by-side."""
@@ -51,11 +53,20 @@ def express_cmd(
     no_color = bool((ctx.obj or {}).get("no_color"))
     ohlcv_db = (ctx.obj or {}).get("ohlcv_db", "data/equity_ohlcv.db")
     cache_path = (ctx.obj or {}).get("cache_path", "data/radar_cache.json")
+    chain_db = (ctx.obj or {}).get("chain_db", "data/chain_archive.db")
 
     sym = ticker.upper().strip()
-    dos = build_dossier(sym, ohlcv_db=ohlcv_db, cache_path=cache_path, fetch_chain=False)
+    dos = build_dossier(sym, ohlcv_db=ohlcv_db, cache_path=cache_path, chain_db=chain_db, fetch_chain=live)
     use_spot = spot if spot is not None else (dos.spot if dos.spot is not None else 100.0)
-    use_iv = iv if iv is not None else ((dos.rv_20_ann / 100.0) if dos.rv_20_ann else 0.25)
+    use_iv = (
+        iv
+        if iv is not None
+        else (
+            (dos.atm_iv / 100.0)
+            if dos.atm_iv is not None
+            else ((dos.rv_20_ann / 100.0) if dos.rv_20_ann else 0.25)
+        )
+    )
 
     dir_map = {"bull": "BULLISH", "bear": "BEARISH", "neutral": "NEUTRAL"}
     d_full = dir_map[direction.lower()]
@@ -75,7 +86,7 @@ def express_cmd(
         account_type=account.lower(),
         owns_100_shares=owns_shares,
     )
-    rows = compare_vehicles(view, spot=use_spot, iv=use_iv)
+    rows = compare_vehicles(view, spot=use_spot, iv=use_iv, chain_db=chain_db, allow_live=live)
 
     if use_json:
         click.echo(

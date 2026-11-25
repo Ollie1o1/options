@@ -97,7 +97,7 @@ def plain_english_vehicle_verdict(rows: List[VehicleComparison], view: DetailedV
     """Summarize the Shares-vs-Options table in 2 plain-English sentences."""
     if not rows:
         return "No valid trade structures found for this view."
-    best = rows[0]
+    best = next((r for r in rows if r.recommended), rows[0])
     shares = next((r for r in rows if r.vehicle == "Shares"), None)
     if best.ev_view_net_usd <= 0:
         return (
@@ -149,16 +149,26 @@ PLAIN-ENGLISH GUIDE TO YOUR TRADING DESK
 
 
 @click.command("refresh")
+@click.option(
+    "--expand",
+    is_flag=True,
+    help="Expand data/equity_ohlcv.db to the curated ~250+ liquid stock/ETF universe (audited Yahoo refresh).",
+)
 @click.pass_context
-def refresh_cmd(ctx: click.Context) -> None:
+def refresh_cmd(ctx: click.Context, expand: bool) -> None:
     """Update local stock/ETF prices and refresh today's Radar ideas in one command."""
     no_color = bool((ctx.obj or {}).get("no_color"))
     ohlcv_db = (ctx.obj or {}).get("ohlcv_db", "data/equity_ohlcv.db")
     cache_path = (ctx.obj or {}).get("cache_path", "data/radar_cache.json")
     console = make_console(no_color=no_color)
-    console.print("[bold]Step 1/2:[/bold] Updating daily prices from Yahoo Finance…")
+    step_msg = (
+        "Updating & expanding daily prices (~250+ liquid stocks/ETFs) from Yahoo Finance…"
+        if expand
+        else "Updating daily prices from Yahoo Finance…"
+    )
+    console.print(f"[bold]Step 1/2:[/bold] {step_msg}")
     try:
-        res = refresh_local_prices(ohlcv_db)
+        res = refresh_local_prices(ohlcv_db, expand_universe=expand)
         console.print(
             f"  Done — {res['symbols']} symbols checked "
             f"({res['updated']} updated, {res['current']} already current, {res['failed']} failed)."
@@ -239,12 +249,16 @@ def guide_cmd(ctx: click.Context) -> None:
                 risk = float(Prompt.ask("Max dollars you want to risk?", default="500"))
                 owns = Confirm.ask(f"Do you already own 100+ shares of {tk}?", default=False)
                 spot = dos.spot if dos.spot is not None else float(Prompt.ask(f"Current price of {tk}?"))
-                iv = (dos.rv_20_ann / 100.0) if dos.rv_20_ann else 0.25
+                iv = (
+                    (dos.atm_iv / 100.0)
+                    if dos.atm_iv is not None
+                    else ((dos.rv_20_ann / 100.0) if dos.rv_20_ann else 0.25)
+                )
                 view = DetailedView(
                     symbol=tk, direction=d_map[d_choice], target_move_pct=tgt,
                     horizon_days=days, risk_budget_usd=risk, account_type="tfsa", owns_100_shares=owns,
                 )
-                rows = compare_vehicles(view, spot=spot, iv=iv)
+                rows = compare_vehicles(view, spot=spot, iv=iv, chain_db="data/chain_archive.db")
                 console.print(Panel(plain_english_vehicle_verdict(rows, view), title="PLAIN-ENGLISH RECOMMENDATION", border_style="#5ec98d"))
                 console.print(render_express_table(rows, symbol=tk, spot=spot, view_desc=f"{d_map[d_choice]} {tgt*100:+.1f}% / {days}d"))
 

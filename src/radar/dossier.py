@@ -11,17 +11,22 @@ import numpy as np
 from src.equity_playbooks.indicators import mom_12_1_series, sma, trailing_rv, wilder_rsi
 from src.levels import support_resistance_levels
 from src.paths import repo_path
+from src.structure.chain_data import load_chain_for_horizon
 from .engine import load_cached_radar
 from .scanners import (
-    SECTOR_MAP_FALLBACK,
     _load_latest_rev_breadth,
     _load_recent_post_earnings_crashes,
+    _next_verified_macro_event,
+    get_sector_etf,
+    load_kalshi_macro_pulse,
     load_local_ohlcv_safe,
+    load_open_exposure_map,
 )
 from .schema import Opportunity, TickerDossier
 
 
 def _read_recent_headlines(ticker: str, news_db: str = "data/news_archive.db", limit: int = 3) -> List[Dict[str, Any]]:
+    """Read recent deduplicated headlines from `data/news_archive.db` (`news_archive` or `articles`)."""
     full = repo_path(news_db)
     if not os.path.exists(full):
         return []
@@ -30,19 +35,29 @@ def _read_recent_headlines(ticker: str, news_db: str = "data/news_archive.db", l
         con.row_factory = sqlite3.Row
         try:
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "articles" not in tables:
+            tbl = "news_archive" if "news_archive" in tables else ("articles" if "articles" in tables else None)
+            if tbl is None:
                 return []
-            cols = {r["name"] for r in con.execute("PRAGMA table_info(articles)")}
-            sym_col = "ticker" if "ticker" in cols else ("symbol" if "symbol" in cols else None)
-            title_col = "title" if "title" in cols else ("headline" if "headline" in cols else None)
-            date_col = "published_at" if "published_at" in cols else ("date" if "date" in cols else None)
+            cols = {r["name"] for r in con.execute(f"PRAGMA table_info({tbl})")}
+            sym_col = "symbol" if "symbol" in cols else ("ticker" if "ticker" in cols else None)
+            title_col = "headline" if "headline" in cols else ("title" if "title" in cols else None)
+            date_col = (
+                "published"
+                if "published" in cols
+                else ("published_at" if "published_at" in cols else ("archived_at" if "archived_at" in cols else ("date" if "date" in cols else None)))
+            )
+            sent_col = "sentiment" if "sentiment" in cols else None
             if not sym_col or not title_col:
                 return []
+            select_parts = [f"{title_col} AS title"]
+            if date_col:
+                select_parts.append(f"{date_col} AS dt")
+            if sent_col:
+                select_parts.append(f"{sent_col} AS sentiment")
             order = f"ORDER BY {date_col} DESC" if date_col else ""
             rows = con.execute(
-                f"SELECT {title_col} AS title{', ' + date_col + ' AS dt' if date_col else ''} "
-                f"FROM articles WHERE UPPER({sym_col}) = ? {order} LIMIT ?",
-                (ticker.upper(), limit * 2),
+                f"SELECT {', '.join(select_parts)} FROM {tbl} WHERE UPPER({sym_col}) = ? {order} LIMIT ?",
+                (ticker.upper(), limit * 3),
             ).fetchall()
             seen = set()
             out: List[Dict[str, Any]] = []
@@ -51,9 +66,63 @@ def _read_recent_headlines(ticker: str, news_db: str = "data/news_archive.db", l
                 if not t or t.lower() in seen:
                     continue
                 seen.add(t.lower())
-                out.append({"title": t, "date": str(r["dt"]) if "dt" in r.keys() and r["dt"] else ""})
+                item: Dict[str, Any] = {
+                    "title": t,
+                    "date": str(r["dt"])[:10] if "dt" in r.keys() and r["dt"] else "",
+                }
+                if "sentiment" in r.keys() and r["sentiment"] is not None:
+                    try:
+                        item["sentiment"] = round(float(r["sentiment"]), 2)
+                    except (TypeError, ValueError):
+                        pass
+                out.append(item)
                 if len(out) >= limit:
                     break
+            return out
+        finally:
+            con.close()
+    except Exception:
+        return []
+
+
+def _read_recent_analyst_actions(
+    ticker: str,
+    estimates_db: str = "data/estimates_archive.db",
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """Read latest analyst grade/price-target actions from `data/estimates_archive.db`."""
+    full = repo_path(estimates_db)
+    if not os.path.exists(full):
+        return []
+    try:
+        con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        try:
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "analyst_actions" not in tables:
+                return []
+            rows = con.execute(
+                """
+                SELECT grade_date, firm, action, to_grade, current_pt, prior_pt
+                FROM analyst_actions
+                WHERE UPPER(symbol) = ?
+                ORDER BY grade_date DESC
+                LIMIT ?
+                """,
+                (ticker.upper(), limit),
+            ).fetchall()
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                out.append(
+                    {
+                        "date": str(r["grade_date"] or "")[:10],
+                        "firm": str(r["firm"] or ""),
+                        "action": str(r["action"] or ""),
+                        "to_grade": str(r["to_grade"] or ""),
+                        "current_pt": float(r["current_pt"]) if r["current_pt"] is not None else None,
+                        "prior_pt": float(r["prior_pt"]) if r["prior_pt"] is not None else None,
+                    }
+                )
             return out
         finally:
             con.close()
@@ -89,9 +158,13 @@ def build_dossier(
     *,
     ohlcv_db: str = "data/equity_ohlcv.db",
     cache_path: str = "data/radar_cache.json",
+    chain_db: str = "data/chain_archive.db",
+    news_db: str = "data/news_archive.db",
+    estimates_db: str = "data/estimates_archive.db",
+    predmarkets_db: str = "data/predmarkets.db",
     fetch_chain: bool = False,
 ) -> TickerDossier:
-    """Consolidate price structure, levels, catalysts, risk flags, and optional RND onto one object."""
+    """Consolidate price structure, levels, catalysts, real chain IV/SVI RND, and risk flags onto one object."""
     sym = str(ticker).upper().strip()
     as_of = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ohlcv = load_local_ohlcv_safe(ohlcv_db)
@@ -146,13 +219,17 @@ def build_dossier(
     except Exception:
         pass
 
-    sector_etf = SECTOR_MAP_FALLBACK.get(sym)
+    sector_etf = get_sector_etf(sym)
     sector_posture = None
     active_signals: List[Opportunity] = []
     cached = load_cached_radar(cache_path)
-    next_macro = "none"
+    next_macro = _next_verified_macro_event()
+    kalshi_macro = load_kalshi_macro_pulse(predmarkets_db=predmarkets_db)
     if cached is not None:
-        next_macro = cached.next_macro_event
+        if cached.next_macro_event and cached.next_macro_event != "none":
+            next_macro = cached.next_macro_event
+        if not kalshi_macro and cached.kalshi_macro:
+            kalshi_macro = list(cached.kalshi_macro)
         active_signals = [o for o in cached.opportunities if o.ticker == sym]
         if sector_etf:
             top_etfs = {c["ticker"] for c in cached.core_allocation if c.get("ticker") != "CASH"}
@@ -160,11 +237,25 @@ def build_dossier(
                 sector_posture = "FAVOR"
 
     days_earn, earn_date, earn_src = _next_earnings_info(sym)
-    rev_map = _load_latest_rev_breadth()
+    rev_map = _load_latest_rev_breadth(db_path=estimates_db)
     rev_b = round(rev_map[sym], 3) if sym in rev_map else None
     crash_map = _load_recent_post_earnings_crashes(ohlcv)
     post_crash = sym in crash_map
-    headlines = _read_recent_headlines(sym)
+    headlines = _read_recent_headlines(sym, news_db=news_db)
+    analyst_actions = _read_recent_analyst_actions(sym, estimates_db=estimates_db)
+
+    # Open portfolio overlap note
+    open_position_note: Optional[str] = None
+    try:
+        exp_map = load_open_exposure_map()
+        held_srcs = exp_map["tickers"].get(sym)
+        if held_srcs:
+            open_position_note = f"Open in {', '.join(held_srcs)}"
+        elif sector_etf and exp_map["sector_counts"].get(sector_etf, 0) >= 2:
+            cnt = exp_map["sector_counts"][sector_etf]
+            open_position_note = f"{cnt} open {sector_etf} sector position(s)"
+    except Exception:
+        pass
 
     risk_flags: List[str] = []
     if days_earn is not None and days_earn <= 7:
@@ -174,30 +265,55 @@ def build_dossier(
     if d200 is not None and d200 < 0:
         risk_flags.append("BELOW_200MA")
 
-    # Optional lognormal / RND implied distribution (30-day horizon)
+    # Real chain IV + SVI Risk-Neutral Density (archived instant, live when fetch_chain=True)
     atm_iv = iv_rank = imp_move = p_up5 = p_dn5 = None
-    if rv20 is not None and spot is not None and spot > 0:
-        sigma = (rv20 / 100.0)
+    iv_vs_rv = skew_25d = None
+    chain_source = "rv_proxy"
+    chain_as_of: Optional[str] = None
+    rnd_source = "lognormal"
+
+    chain_slice = None
+    if spot is not None and spot > 0:
+        chain_slice = load_chain_for_horizon(
+            sym,
+            target_dte=30,
+            min_dte=14,
+            max_dte=65,
+            spot=spot,
+            chain_db=chain_db,
+            allow_live=fetch_chain,
+            build_rnd=True,
+        )
+
+    if chain_slice is not None and spot is not None and spot > 0:
+        chain_source = chain_slice.source
+        chain_as_of = chain_slice.snap_date
+        if chain_slice.atm_iv is not None:
+            atm_iv = round(chain_slice.atm_iv * 100.0, 1)
+            if rv20 is not None and rv20 > 0:
+                iv_vs_rv = round(atm_iv / rv20, 2)
+        skew_25d = chain_slice.skew_25d_vp
+        if chain_slice.rnd_density is not None:
+            dens = chain_slice.rnd_density
+            rnd_source = chain_slice.rnd_source
+            p_up5 = round(dens.prob_above(spot * 1.05), 3)
+            p_dn5 = round(dens.prob_below(spot * 0.95), 3)
+            t_slice = max(chain_slice.dte, 1) / 365.0
+            if chain_slice.atm_iv is not None:
+                imp_move = round(chain_slice.atm_iv * float(np.sqrt(t_slice)) * 100.0, 2)
+
+    # Clean lognormal RV20 fallback whenever chain RND isn't available
+    if (p_up5 is None or p_dn5 is None) and rv20 is not None and spot is not None and spot > 0:
+        sigma = (atm_iv / 100.0) if atm_iv is not None else (rv20 / 100.0)
         t_30 = 30.0 / 365.0
-        imp_move = round(sigma * float(np.sqrt(t_30)) * 100.0, 2)
+        if imp_move is None:
+            imp_move = round(sigma * float(np.sqrt(t_30)) * 100.0, 2)
         from scipy.stats import norm
 
         mu = -0.5 * sigma * sigma * t_30
         sd = max(sigma * float(np.sqrt(t_30)), 1e-6)
         p_up5 = round(float(1.0 - norm.cdf((np.log(1.05) - mu) / sd)), 3)
         p_dn5 = round(float(norm.cdf((np.log(0.95) - mu) / sd)), 3)
-
-    if fetch_chain and spot is not None:
-        try:
-            from src.probability_lab.rnd import rnd_from_smile
-            from src.data_fetcher import fetch_option_chain_for_ticker  # pragma: no cover
-
-            chain_info = fetch_option_chain_for_ticker(sym)
-            if chain_info and chain_info.get("atm_iv"):
-                atm_iv = round(float(chain_info["atm_iv"]) * 100.0, 1)
-                iv_rank = chain_info.get("iv_rank")
-        except Exception:
-            pass
 
     return TickerDossier(
         ticker=sym,
@@ -233,4 +349,12 @@ def build_dossier(
         active_signals=active_signals,
         risk_flags=risk_flags,
         closes_60d=closes_60d,
+        chain_source=chain_source,
+        chain_as_of=chain_as_of,
+        rnd_source=rnd_source,
+        iv_vs_rv_ratio=iv_vs_rv,
+        skew_25d_vp=skew_25d,
+        kalshi_macro=kalshi_macro,
+        analyst_actions=analyst_actions,
+        open_position_note=open_position_note,
     )

@@ -78,6 +78,9 @@ class RadarSnapshot:
     opportunities: List[Opportunity] = field(default_factory=list)
     degraded_scanners: List[str] = field(default_factory=list)
     from_cache: bool = False
+    kalshi_macro: List[Dict[str, Any]] = field(default_factory=list)
+    ohlcv_as_of: Optional[str] = None
+    ohlcv_symbol_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -94,6 +97,9 @@ class RadarSnapshot:
             "opportunities": [o.to_dict() for o in self.opportunities],
             "degraded_scanners": list(self.degraded_scanners),
             "from_cache": bool(self.from_cache),
+            "kalshi_macro": list(self.kalshi_macro),
+            "ohlcv_as_of": self.ohlcv_as_of,
+            "ohlcv_symbol_count": int(self.ohlcv_symbol_count),
         }
 
     @classmethod
@@ -112,6 +118,9 @@ class RadarSnapshot:
             opportunities=[Opportunity.from_dict(x) for x in (d.get("opportunities") or [])],
             degraded_scanners=list(d.get("degraded_scanners") or []),
             from_cache=from_cache,
+            kalshi_macro=list(d.get("kalshi_macro") or []),
+            ohlcv_as_of=d.get("ohlcv_as_of"),
+            ohlcv_symbol_count=int(d.get("ohlcv_symbol_count") or 0),
         )
 
 
@@ -150,6 +159,14 @@ class TickerDossier:
     active_signals: List[Opportunity] = field(default_factory=list)
     risk_flags: List[str] = field(default_factory=list)
     closes_60d: List[float] = field(default_factory=list)
+    chain_source: str = "rv_proxy"
+    chain_as_of: Optional[str] = None
+    rnd_source: str = "lognormal"
+    iv_vs_rv_ratio: Optional[float] = None
+    skew_25d_vp: Optional[float] = None
+    kalshi_macro: List[Dict[str, Any]] = field(default_factory=list)
+    analyst_actions: List[Dict[str, Any]] = field(default_factory=list)
+    open_position_note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)

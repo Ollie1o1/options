@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import os
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.radar.schema import Opportunity
@@ -13,22 +14,110 @@ DEFAULT_LIQUID_ETFS: Tuple[str, ...] = (
 )
 
 
-def refresh_local_prices(db_path: str = "data/equity_ohlcv.db") -> Dict[str, Any]:
-    """Update all symbols currently stored in `data/equity_ohlcv.db` via the audited Yahoo refresher."""
+def _detect_settled_yahoo_session(default_through: Optional[str]) -> Optional[str]:
+    """Return latest trading date where Yahoo Finance has a finite SPY Close & Adj Close.
+
+    After 18:00 ET Yahoo occasionally emits today's row with `Close = NaN` / `Adj Close = NaN`
+    before EOD settlement completes. Falling back one trading day avoids rejecting the entire
+    universe without ever fabricating a price.
+    """
+    if default_through is None:
+        return None
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker("SPY").history(period="7d", auto_adjust=False, actions=True, repair=False, timeout=15)
+        if hist is None or hist.empty:
+            return default_through
+        settled_dates = []
+        for idx, rec in hist.iterrows():
+            d_str = idx.strftime("%Y-%m-%d")
+            if d_str > default_through:
+                continue
+            c = float(rec.get("Close", math.nan))
+            ac = float(rec.get("Adj Close", math.nan))
+            if math.isfinite(c) and math.isfinite(ac) and c > 0 and ac > 0:
+                settled_dates.append(d_str)
+        if settled_dates:
+            return max(settled_dates)
+    except Exception:
+        pass
+    return default_through
+
+
+def refresh_local_prices(
+    db_path: str = "data/equity_ohlcv.db",
+    *,
+    expand_universe: bool = False,
+    extra_symbols: Optional[Sequence[str]] = None,
+    through: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Update all symbols in `data/equity_ohlcv.db` (and optionally expand to ~250+ liquid stocks/ETFs)."""
     import sqlite3
-    from src.breakout.refresh import refresh_universe
+    from src.breakout.refresh import completed_session, refresh_universe
     from src.paths import repo_path
 
     full = repo_path(db_path)
-    con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
-    try:
-        syms = [r[0] for r in con.execute("SELECT DISTINCT ticker FROM ohlcv ORDER BY ticker").fetchall()]
-    finally:
-        con.close()
+    existing_max: Dict[str, str] = {}
+    if os.path.exists(full):
+        con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
+        try:
+            for tk, mx in con.execute("SELECT ticker, MAX(date) FROM ohlcv GROUP BY ticker").fetchall():
+                existing_max[str(tk).upper()] = str(mx or "")
+        finally:
+            con.close()
+
+    sym_set = set(existing_max.keys())
+    if expand_universe:
+        from src.equity_playbooks.universe import build_expanded_universe
+
+        sym_set.update(build_expanded_universe())
+    if extra_symbols:
+        sym_set.update(str(s).upper().strip() for s in extra_symbols if s)
+    syms = sorted(sym_set)
 
     if not syms:
-        return {"updated": 0, "failed": 0, "symbols": 0}
-    res = refresh_universe(syms, db_path=full)
+        return {"updated": 0, "failed": 0, "symbols": 0, "current": 0, "expanded": expand_universe}
+
+    eff_through = through or _detect_settled_yahoo_session(completed_session())
+
+    # Skip symbols already at/beyond eff_through so we never trigger spurious errors
+    already_current = [
+        s for s in syms if eff_through and existing_max.get(s, "") >= eff_through
+    ]
+    to_fetch = [s for s in syms if s not in set(already_current)]
+
+    updated_n = 0
+    current_n = len(already_current)
+    failed_n = 0
+    inserted_bars = 0
+
+    # Refresh in chunks of 25 so an isolated delisted symbol cannot starve 300 healthy ones,
+    # while a genuine network outage (all 25 fail) still halts cleanly.
+    chunk_size = 25
+    for i in range(0, len(to_fetch), chunk_size):
+        chunk = to_fetch[i : i + chunk_size]
+        res = refresh_universe(full, chunk, through=eff_through, pause=0.15)
+        sym_map = res.get("symbols") if isinstance(res.get("symbols"), dict) else {}
+        inserted_bars += int(res.get("inserted") or 0)
+        chunk_ok = 0
+        for v in sym_map.values():
+            if not isinstance(v, dict):
+                continue
+            st = v.get("status")
+            if st in ("updated", "quality_review"):
+                chunk_ok += 1
+                if (v.get("inserted") or 0) > 0:
+                    updated_n += 1
+                else:
+                    current_n += 1
+            else:
+                failed_n += 1
+        if chunk and chunk_ok == 0:
+            # Whole chunk failed — stop early rather than hammering an unreachable feed
+            failed_n += len(to_fetch) - (i + len(chunk))
+            break
+
     try:
         from src.cache_release import release_yfinance_caches
 
@@ -37,9 +126,12 @@ def refresh_local_prices(db_path: str = "data/equity_ohlcv.db") -> Dict[str, Any
         pass
     return {
         "symbols": len(syms),
-        "updated": len(res.get("updated") or []),
-        "current": len(res.get("current") or []),
-        "failed": len(res.get("failed") or []),
+        "updated": updated_n,
+        "current": current_n,
+        "failed": failed_n,
+        "inserted_bars": inserted_bars,
+        "through": eff_through,
+        "expanded": expand_universe,
     }
 
 

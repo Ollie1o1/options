@@ -1,16 +1,19 @@
 """Failure-isolated scanner adapters feeding the Unified Radar Engine.
 
-All default adapters operate on local SQLite caches (`data/equity_ohlcv.db`,
-`data/dolt_options.db`, `data/estimates_archive.db`, `data/longterm.db`,
-`data/catalysts.db`) so interactive startup completes in <1s without network hangs.
-Live option scans are opt-in (`allow_network=True`).
+All default adapters operate on local SQLite/JSON caches (`data/equity_ohlcv.db`,
+`data/chain_archive.db`, `data/candidates.db`, `data/dolt_options.db`,
+`data/estimates_archive.db`, `data/longterm.db`, `data/insider_cache.json`,
+`data/predmarkets.db`, `longterm_plan.json`) so interactive startup completes in
+<1s without network hangs. Live option scans remain opt-in (`allow_network=True`).
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
+import math
 import os
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -23,6 +26,8 @@ from src.equity_playbooks.indicators import (
     wilder_rsi,
 )
 from src.paths import repo_path
+from src.structure.chain_data import load_archived_chain_slice
+from src.structure.execution_plan import build_walk_away_ladder
 from .playbooks import PlaybookMeta
 from .schema import Opportunity
 
@@ -30,6 +35,10 @@ OUTLOOK_ETFS = [
     "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLY", "XLB", "XLU", "XLRE",
     "XLC", "SMH", "GLD", "TLT", "IWM", "QQQ",
 ]
+
+LIQUID_ETF_UNIVERSE = frozenset(OUTLOOK_ETFS) | frozenset(
+    {"SPY", "DIA", "EEM", "EFA", "HYG", "KRE", "SLV", "GDX", "XBI"}
+)
 
 SECTOR_MAP_FALLBACK: Dict[str, str] = {
     "AAPL": "XLK", "MSFT": "XLK", "NVDA": "SMH", "AVGO": "SMH", "AMD": "SMH",
@@ -40,6 +49,29 @@ SECTOR_MAP_FALLBACK: Dict[str, str] = {
     "XOM": "XLE", "CVX": "XLE", "UNH": "XLV", "LLY": "XLV", "JNJ": "XLV",
     "PG": "XLP", "KO": "XLP", "WMT": "XLP", "COST": "XLP", "CAT": "XLI", "BA": "XLI",
 }
+
+_FULL_SECTOR_MAP: Optional[Dict[str, str]] = None
+
+
+def get_sector_map() -> Dict[str, str]:
+    """Return full ~180-ticker sector ETF map (data_fetching.SECTOR_MAP + SMH overrides)."""
+    global _FULL_SECTOR_MAP
+    if _FULL_SECTOR_MAP is None:
+        merged: Dict[str, str] = {}
+        try:
+            from src.data_fetching import SECTOR_MAP as _DF_SECTOR_MAP
+
+            merged.update({str(k).upper(): str(v).upper() for k, v in _DF_SECTOR_MAP.items()})
+        except Exception:
+            pass
+        # Preserve SMH overrides for major semis so Outlook SMH posture flows cleanly
+        merged.update(SECTOR_MAP_FALLBACK)
+        _FULL_SECTOR_MAP = merged
+    return _FULL_SECTOR_MAP
+
+
+def get_sector_etf(symbol: str) -> Optional[str]:
+    return get_sector_map().get(str(symbol).upper().strip())
 
 
 def _now_utc() -> str:
@@ -95,7 +127,6 @@ def _load_recent_post_earnings_crashes(
         if len(ds) < 30:
             continue
         amc = str(whn or "").lower().startswith("after")
-        # Find reaction session index
         idx = None
         for i in range(max(21, len(ds) - lookback_sessions - 2), len(ds)):
             if (amc and ds[i] > ev_date) or (not amc and ds[i] >= ev_date):
@@ -136,6 +167,202 @@ def _load_upcoming_earnings_map(
     except Exception:
         return {}
     return out
+
+
+def load_kalshi_macro_pulse(
+    predmarkets_db: str = "data/predmarkets.db",
+    *,
+    max_items: int = 3,
+) -> List[Dict[str, Any]]:
+    """Read latest Kalshi macro probabilities (FOMC, CPI, Recession) from `data/predmarkets.db`."""
+    full = repo_path(predmarkets_db)
+    if not os.path.exists(full):
+        return []
+    try:
+        con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        try:
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "pm_quotes" not in tables:
+                return []
+            latest_row = con.execute("SELECT MAX(archived_at) FROM pm_quotes").fetchone()
+            if not latest_row or not latest_row[0]:
+                return []
+            latest_ts = str(latest_row[0])
+            rows = con.execute(
+                """
+                SELECT series, ticker, title, yes_bid, yes_ask, last, open_interest, close_time
+                FROM pm_quotes
+                WHERE archived_at = ?
+                ORDER BY open_interest DESC
+                """,
+                (latest_ts,),
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return []
+
+    def _prob_of(r: sqlite3.Row) -> Optional[float]:
+        b, a, last = r["yes_bid"], r["yes_ask"], r["last"]
+        if b is not None and a is not None and a >= b:
+            return float(0.5 * (float(b) + float(a)))
+        if last is not None:
+            return float(last)
+        return None
+
+    # Group by series and pick the most informative/highest-probability upcoming contract
+    by_series: Dict[str, List[Dict[str, Any]]] = {}
+    today_iso = dt.date.today().isoformat()
+    for r in rows:
+        close_t = str(r["close_time"] or "")
+        if close_t and close_t[:10] < today_iso:
+            continue
+        p = _prob_of(r)
+        if p is None or not (0.0 <= p <= 1.0):
+            continue
+        ser = str(r["series"] or "").upper()
+        by_series.setdefault(ser, []).append(
+            {
+                "series": ser,
+                "ticker": str(r["ticker"] or ""),
+                "title": str(r["title"] or ""),
+                "prob": p,
+                "open_interest": float(r["open_interest"] or 0.0),
+                "close_date": close_t[:10] if close_t else "",
+                "archived_at": latest_ts,
+            }
+        )
+
+    out: List[Dict[str, Any]] = []
+    # 1. Next FOMC decision: pick the modal (highest-prob) outcome for the earliest upcoming meeting
+    fomc_rows = by_series.get("KXFEDDECISION") or []
+    if fomc_rows:
+        earliest_close = min(x["close_date"] for x in fomc_rows if x["close_date"])
+        near_fomc = [x for x in fomc_rows if x["close_date"] == earliest_close] or fomc_rows
+        best = max(near_fomc, key=lambda x: (x["prob"], x["open_interest"]))
+        code = best["ticker"].split("-")[-1]
+        code_map = {
+            "H0": "Hold 0bp",
+            "H25": "Hike +25bp",
+            "H26": "Hike >25bp",
+            "C25": "Cut -25bp",
+            "C26": "Cut >25bp",
+        }
+        action = code_map.get(code, best["title"][:32])
+        out.append(
+            {
+                "series": "KXFEDDECISION",
+                "label": f"FOMC {earliest_close[5:]} {action}",
+                "prob_pct": round(best["prob"] * 100.0, 0),
+                "close_date": earliest_close,
+                "archived_at": latest_ts,
+            }
+        )
+
+    # 2. Next CPI threshold with highest OI
+    cpi_rows = by_series.get("KXCPI") or []
+    if cpi_rows:
+        # Pick contract nearest 50% (most informative) among top-OI contracts
+        top_cpi = sorted(cpi_rows, key=lambda x: -x["open_interest"])[:6]
+        best = min(top_cpi, key=lambda x: abs(x["prob"] - 0.5))
+        thresh = best["ticker"].split("-")[-1].lstrip("T")
+        out.append(
+            {
+                "series": "KXCPI",
+                "label": f"CPI >{thresh}% ({best['close_date'][5:]})",
+                "prob_pct": round(best["prob"] * 100.0, 0),
+                "close_date": best["close_date"],
+                "archived_at": latest_ts,
+            }
+        )
+
+    # 3. Recession odds (prefer active forward year with meaningful probability > 3%)
+    rec_rows = by_series.get("KXRECSSNBER") or []
+    if rec_rows:
+        # Prefer the next-year or highest-prob meaningful recession contract
+        meaningful = [x for x in rec_rows if x["prob"] >= 0.03] or rec_rows
+        best = max(meaningful, key=lambda x: (x["open_interest"] if x["prob"] >= 0.05 else 0.0, x["prob"]))
+        yr = best["ticker"].split("-")[-1]
+        out.append(
+            {
+                "series": "KXRECSSNBER",
+                "label": f"Recession 20{yr}" if len(yr) == 2 and yr.isdigit() else f"Recession {yr}",
+                "prob_pct": round(best["prob"] * 100.0, 0),
+                "close_date": best["close_date"],
+                "archived_at": latest_ts,
+            }
+        )
+
+    return out[:max_items]
+
+
+def load_open_exposure_map(
+    *,
+    own_picks_db: str = "data/own_picks.db",
+    paper_db: str = "paper_trades.db",
+    longterm_db: str = "data/longterm.db",
+) -> Dict[str, Any]:
+    """Collect currently open stock/ETF/option tickers and sector counts for overlap warnings."""
+    held_tickers: Dict[str, List[str]] = {}
+    sector_counts: Dict[str, int] = {}
+
+    def _add(sym: str, src_label: str) -> None:
+        s = str(sym).upper().strip()
+        if not s:
+            return
+        held_tickers.setdefault(s, [])
+        if src_label not in held_tickers[s]:
+            held_tickers[s].append(src_label)
+        sec = get_sector_etf(s)
+        if sec:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+
+    # 1. Manual stock/ETF picks (data/own_picks.db)
+    full_own = repo_path(own_picks_db)
+    if os.path.exists(full_own):
+        try:
+            con = sqlite3.connect(f"file:{full_own}?mode=ro", uri=True)
+            try:
+                tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "equity_picks" in tables:
+                    for (tk,) in con.execute("SELECT ticker FROM equity_picks WHERE status = 'OPEN'").fetchall():
+                        _add(tk, "own_pick")
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+    # 2. Long-term TFSA fills (data/longterm.db)
+    full_lt = repo_path(longterm_db)
+    if os.path.exists(full_lt):
+        try:
+            from src.longterm.fills import book as lt_book
+
+            for tk, slot in lt_book(full_lt).items():
+                if float(slot.get("shares") or 0.0) > 0:
+                    _add(tk, "longterm")
+        except Exception:
+            pass
+
+    # 3. Open paper options (paper_trades.db)
+    full_pm = repo_path(paper_db)
+    if os.path.exists(full_pm) and os.path.getsize(full_pm) > 0:
+        try:
+            con = sqlite3.connect(f"file:{full_pm}?mode=ro", uri=True)
+            try:
+                tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "trades" in tables:
+                    for (tk,) in con.execute(
+                        "SELECT DISTINCT ticker FROM trades WHERE status = 'OPEN'"
+                    ).fetchall():
+                        _add(tk, "paper_opt")
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+    return {"tickers": held_tickers, "sector_counts": sector_counts}
 
 
 def scan_vol_managed_outlook(
@@ -213,7 +440,6 @@ def scan_vol_managed_outlook(
         else:
             posture_map[sym] = "NEUTRAL"
 
-    # Top-3 equal-weighted scaled by vol_scale (remainder in CASH/T-bills)
     top3 = scored[:3]
     each_w = round(vol_scale / max(len(top3), 1), 4)
     core_alloc: List[Dict[str, Any]] = []
@@ -295,6 +521,7 @@ def scan_equity_pullbacks(
     earnings_map = earnings_map or {}
     crash_flags = crash_flags or {}
     rev_breadth = rev_breadth or {}
+    sector_map = get_sector_map()
     opps: List[Opportunity] = []
 
     for sym, (ds, cs, vs) in sorted(ohlcv.items()):
@@ -338,7 +565,7 @@ def scan_equity_pullbacks(
             badges.append("STRICT_PULLBACK")
         else:
             badges.append("NEAR_PULLBACK")
-        sec = SECTOR_MAP_FALLBACK.get(sym)
+        sec = sector_map.get(sym)
         if sec and posture_map.get(sec) == "FAVOR":
             badges.append(f"FAVOR:{sec}")
         if sym in rev_breadth and rev_breadth[sym] >= 0.35:
@@ -358,7 +585,7 @@ def scan_equity_pullbacks(
         opps.append(
             Opportunity(
                 ticker=sym,
-                asset_class="etf" if sym in OUTLOOK_ETFS else "stock",
+                asset_class="etf" if sym in LIQUID_ETF_UNIVERSE else "stock",
                 playbook_id=pb.id,
                 playbook_label=pb.label,
                 evidence_tier=pb.evidence_tier if strict_hit else "CONTEXT",
@@ -389,24 +616,48 @@ def scan_holdings_buy_zones(
     ohlcv: Dict[str, Tuple[List[str], np.ndarray, np.ndarray]],
     registry: Dict[str, PlaybookMeta],
     *,
-    plan_path: str = "configs/longterm_plan.json",
+    plan_path: Optional[str] = None,
     fills_db: str = "data/longterm.db",
 ) -> List[Opportunity]:
-    """Emit CONTEXT alerts for long-term plan holdings in or near buy zones."""
+    """Emit CONTEXT alerts for long-term plan holdings in or near unfilled buy-zone tranches."""
     pb = registry.get("holdings_buy_zone")
     if pb is None or not pb.is_default_radar_eligible:
         return []
-    full_plan = repo_path(plan_path)
-    if not os.path.exists(full_plan):
+
+    # Default path is repo-root `longterm_plan.json` (src/longterm/plan.py::DEFAULT_PATH)
+    candidates_paths = (
+        [plan_path]
+        if plan_path is not None
+        else ["longterm_plan.json", "configs/longterm_plan.json"]
+    )
+    resolved_plan: Optional[str] = None
+    for p in candidates_paths:
+        full = repo_path(p)
+        if os.path.exists(full):
+            resolved_plan = full
+            break
+    if resolved_plan is None:
         return []
+
     as_of = _now_utc()
     opps: List[Opportunity] = []
     try:
         from src.longterm.plan import load_plan
 
-        plan = load_plan(full_plan)
+        plan = load_plan(resolved_plan)
     except Exception:
         return []
+
+    filled_by_ticker: Dict[str, set] = {}
+    full_fills = repo_path(fills_db)
+    if os.path.exists(full_fills):
+        try:
+            from src.longterm.fills import filled_levels
+
+            for n in plan.names:
+                filled_by_ticker[n.ticker.upper()] = filled_levels(n.ticker.upper(), db_path=full_fills)
+        except Exception:
+            pass
 
     for name in plan.names:
         sym = name.ticker.upper()
@@ -418,8 +669,13 @@ def scan_holdings_buy_zones(
         spot = float(cs[-1])
         ret1 = float(cs[-1] / cs[-2] - 1.0) * 100.0
         ret5 = float(cs[-1] / cs[-6] - 1.0) * 100.0
-        levels = sorted(t.level for t in name.tranches)
-        top_level = levels[-1]
+        already = filled_by_ticker.get(sym, set())
+        open_levels = sorted(
+            t.level for t in name.tranches if not any(math.isclose(t.level, fl, rel_tol=1e-4) for fl in already)
+        )
+        if not open_levels:
+            continue
+        top_level = open_levels[-1]
         dist_pct = (spot / top_level - 1.0) * 100.0
         if dist_pct <= 5.0:
             state = "IN_ZONE" if spot <= top_level else "NEAR_ZONE"
@@ -449,11 +705,29 @@ def scan_holdings_buy_zones(
     return opps
 
 
+def _parse_strikes_from_contract_key(contract_key: Any) -> Tuple[Optional[float], Optional[float]]:
+    """Parse short/long strikes from `SYM|EXP|Bear Call|124/125` style keys."""
+    if not contract_key:
+        return (None, None)
+    parts = str(contract_key).split("|")
+    if len(parts) < 4:
+        return (None, None)
+    strike_part = parts[-1]
+    if "/" not in strike_part:
+        return (None, None)
+    a, b = strike_part.split("/", 1)
+    try:
+        return (float(a), float(b))
+    except ValueError:
+        return (None, None)
+
+
 def scan_cached_etf_bear_calls(
     registry: Dict[str, PlaybookMeta],
     *,
+    ohlcv: Optional[Dict[str, Tuple[List[str], np.ndarray, np.ndarray]]] = None,
     candidates_db: str = "data/candidates.db",
-    max_age_days: int = 5,
+    max_age_days: int = 7,
 ) -> List[Opportunity]:
     """Read recent gate-passed ETF Bear Calls (LEAD playbook, B1-F pending 2027-01-20) from candidates.db."""
     pb = registry.get("etf_bear_call")
@@ -463,29 +737,51 @@ def scan_cached_etf_bear_calls(
     if not os.path.exists(full):
         return []
     as_of = _now_utc()
-    etf_set = set(OUTLOOK_ETFS) | {"SPY", "DIA", "EEM", "EFA", "HYG", "KRE", "SLV", "GDX", "XBI"}
-    cutoff = (dt.date.today() - dt.timedelta(days=max_age_days)).isoformat()
+    today = dt.date.today()
+    cutoff = (today - dt.timedelta(days=max_age_days)).isoformat()
     opps: List[Opportunity] = []
+    rows: List[Dict[str, Any]] = []
+
     try:
         con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         try:
             cols = {r["name"] for r in con.execute("PRAGMA table_info(candidates)")}
-            if not {"symbol", "strategy", "gate_passed", "scan_date"}.issubset(cols):
-                return []
-            rows = con.execute(
+            if {"symbol", "strategy_name", "ts"}.issubset(cols):
+                # Real production candidates.db schema
+                etf_placeholders = ",".join("?" for _ in LIQUID_ETF_UNIVERSE)
+                sql = f"""
+                    SELECT symbol, ts, expiration, strike, contract_key,
+                           premium, ev_net, ev_cost, round_trip_pct, gate_passed, refused_by
+                    FROM candidates
+                    WHERE strategy_name = 'Bear Call'
+                      AND UPPER(symbol) IN ({etf_placeholders})
+                      AND ts >= ?
+                      AND (gate_passed = 1 OR refused_by IS NULL)
+                    ORDER BY ts DESC
+                    LIMIT 120
                 """
-                SELECT symbol, scan_date, expiration, strike, long_strike, entry_price,
-                       underlying_price, dte, friction_to_credit
-                FROM candidates
-                WHERE strategy = 'Bear Call'
-                  AND gate_passed = 1
-                  AND scan_date >= ?
-                ORDER BY scan_date DESC
-                LIMIT 40
-                """,
-                (cutoff,),
-            ).fetchall()
+                params = list(sorted(LIQUID_ETF_UNIVERSE)) + [cutoff]
+                for r in con.execute(sql, params).fetchall():
+                    rows.append(dict(r))
+            elif {"symbol", "strategy", "gate_passed", "scan_date"}.issubset(cols):
+                # Legacy/test simplified schema
+                for r in con.execute(
+                    """
+                    SELECT symbol, scan_date AS ts, expiration, strike, long_strike,
+                           entry_price AS premium, underlying_price, dte, friction_to_credit AS round_trip_pct
+                    FROM candidates
+                    WHERE strategy = 'Bear Call'
+                      AND gate_passed = 1
+                      AND scan_date >= ?
+                    ORDER BY scan_date DESC
+                    LIMIT 60
+                    """,
+                    (cutoff,),
+                ).fetchall():
+                    rows.append(dict(r))
+            else:
+                return []
         finally:
             con.close()
     except Exception:
@@ -493,17 +789,52 @@ def scan_cached_etf_bear_calls(
 
     seen = set()
     for r in rows:
-        sym = str(r["symbol"]).upper()
-        if sym not in etf_set or sym in seen:
+        sym = str(r.get("symbol") or "").upper()
+        if sym not in LIQUID_ETF_UNIVERSE or sym in seen:
             continue
+        k_s = r.get("strike")
+        k_l = r.get("long_strike")
+        if k_s is None or k_l is None:
+            ps, pl = _parse_strikes_from_contract_key(r.get("contract_key"))
+            k_s = ps if k_s is None else k_s
+            k_l = pl if k_l is None else k_l
+
+        exp = str(r.get("expiration") or "")
+        dte = r.get("dte")
+        if dte is None and exp:
+            try:
+                dte = (dt.date.fromisoformat(exp[:10]) - today).days
+            except ValueError:
+                dte = 30
+        dte_int = int(dte or 30)
+        if dte_int < 5:
+            continue
+
+        spot = float(r.get("underlying_price") or 0.0)
+        if spot <= 0 and ohlcv and sym in ohlcv and len(ohlcv[sym][1]):
+            spot = float(ohlcv[sym][1][-1])
+        if spot <= 0 and k_s is not None:
+            spot = float(k_s)
+
+        prem = r.get("premium")
+        fric = r.get("round_trip_pct")
+        if fric is None:
+            ev_cost = r.get("ev_cost")
+            if ev_cost is not None and prem and float(prem) > 0:
+                fric = float(ev_cost) / (float(prem) * 100.0)
+            else:
+                fric = 0.15
+        fric_val = float(fric)
+        if fric_val > 1.5:
+            fric_val = fric_val / 100.0
+        if fric_val > 0.25 or spot <= 0:
+            continue
+
         seen.add(sym)
-        spot = float(r["underlying_price"] or 0.0)
-        fric = float(r["friction_to_credit"] or 0.15)
-        if fric > 0.25 or spot <= 0:
-            continue
-        k_s = r["strike"]
-        k_l = r["long_strike"]
-        dte = int(r["dte"] or 30)
+        scan_day = str(r.get("ts") or "")[:10]
+        cr_str = f" · cr ${float(prem):.2f}" if prem is not None and float(prem) > 0 else ""
+        ev_net = r.get("ev_net")
+        ev_str = f" · EV ${float(ev_net):+.0f}" if ev_net is not None else ""
         opps.append(
             Opportunity(
                 ticker=sym,
@@ -515,18 +846,310 @@ def scan_cached_etf_bear_calls(
                 spot=round(spot, 2),
                 chg_1d_pct=None,
                 chg_5d_pct=None,
-                horizon_label=f"{dte}d",
+                horizon_label=f"{dte_int}d",
                 setup_summary=(
-                    f"Bear Call {k_s}/{k_l} exp {r['expiration']} · cr ${float(r['entry_price'] or 0):.2f} "
-                    f"(from {r['scan_date']})"
+                    f"Bear Call {k_s:g}/{k_l:g} exp {exp}{cr_str}{ev_str} (scan {scan_day})"
+                    if k_s is not None and k_l is not None
+                    else f"Bear Call exp {exp}{cr_str}{ev_str} (scan {scan_day})"
                 ),
-                badges=("ETF_BEAR_CALL", f"DTE:{dte}", "LIMIT_ONLY"),
+                badges=("ETF_BEAR_CALL", f"DTE:{dte_int}", "LIMIT_ONLY"),
                 risk_flags=("FORWARD_B1F_PENDING",),
-                friction_label=f"{fric*100:.1f}% cr",
-                friction_value=fric,
+                friction_label=f"{fric_val*100:.1f}% cr",
+                friction_value=round(fric_val, 4),
                 confluence_count=1,
                 as_of=as_of,
-                extra={"expiration": r["expiration"], "short_strike": k_s, "long_strike": k_l},
+                extra={"expiration": exp, "short_strike": k_s, "long_strike": k_l, "scan_date": scan_day},
+            )
+        )
+    return opps
+
+
+def scan_archived_etf_wide_spreads(
+    registry: Dict[str, PlaybookMeta],
+    ohlcv: Dict[str, Tuple[List[str], np.ndarray, np.ndarray]],
+    *,
+    symbols: Sequence[str] = ("SPY", "QQQ", "IWM", "XLE", "XLV", "XLP", "XLK", "XLF", "SMH", "GLD", "TLT"),
+    chain_db: str = "data/chain_archive.db",
+    max_friction_to_credit: float = 0.25,
+    max_snap_age_days: int = 21,
+) -> List[Opportunity]:
+    """Offline/instant Test O1 scanner (`60-120 DTE`, `5%-wide` ETF Bull Puts) from `data/chain_archive.db`.
+
+    Surfaces cost-surviving wide ETF spreads immediately on `opt` / `opt radar` without
+    blocking on live Yahoo calls, tagged `ARCHIVE_CHAIN` with the exact Walk-Away Limit Price.
+    """
+    pb = registry.get("etf_wide_spread")
+    if pb is None or not pb.is_default_radar_eligible:
+        return []
+    full = repo_path(chain_db)
+    if not os.path.exists(full):
+        return []
+
+    as_of = _now_utc()
+    opps: List[Opportunity] = []
+    for sym in symbols:
+        sym_u = str(sym).upper()
+        spot = float(ohlcv[sym_u][1][-1]) if sym_u in ohlcv and len(ohlcv[sym_u][1]) else None
+        if spot is None or spot <= 0:
+            continue
+        sl = load_archived_chain_slice(
+            sym_u,
+            target_dte=90,
+            min_dte=60,
+            max_dte=120,
+            spot=spot,
+            chain_db=chain_db,
+            max_snap_age_days=max_snap_age_days,
+            build_rnd=False,
+        )
+        if sl is None or len(sl.puts) < 2:
+            continue
+
+        valid = [c for c in sl.puts if c.bid > 0 and c.ask >= c.bid and c.mid > 0]
+        if len(valid) < 2:
+            continue
+
+        target_short = spot * 0.94
+        short_leg = min(valid, key=lambda c: abs(c.strike - target_short))
+        long_cands = [c for c in valid if c.strike < short_leg.strike]
+        if not long_cands:
+            continue
+        target_long = short_leg.strike - 0.05 * spot
+        long_leg = min(long_cands, key=lambda c: abs(c.strike - target_long))
+        width = short_leg.strike - long_leg.strike
+        if width <= 0:
+            continue
+
+        cr_mid = short_leg.mid - long_leg.mid
+        cr_cross = short_leg.bid - long_leg.ask
+        if cr_mid <= 0 or cr_cross <= 0 or cr_mid >= width:
+            continue
+
+        rt_spread = (short_leg.ask - short_leg.bid) + (long_leg.ask - long_leg.bid)
+        fric_ratio = rt_spread / cr_cross
+        if fric_ratio > max_friction_to_credit:
+            continue
+
+        ladder = build_walk_away_ladder(
+            structure="Wide Credit Spread",
+            is_credit=True,
+            p_mid=cr_mid,
+            p_cross=cr_cross,
+            ev_view_gross_per_share=cr_mid,
+            max_friction_to_credit=max_friction_to_credit,
+        )
+        max_risk_usd = (width - ladder.p_walk) * 100.0
+        opps.append(
+            Opportunity(
+                ticker=sym_u,
+                asset_class="option",
+                playbook_id=pb.id,
+                playbook_label=pb.label,
+                evidence_tier=pb.evidence_tier,
+                direction="LONG",
+                spot=round(spot, 2),
+                chg_1d_pct=None,
+                chg_5d_pct=None,
+                horizon_label=f"{sl.dte}d",
+                setup_summary=(
+                    f"Bull Put {short_leg.strike:g}/{long_leg.strike:g} exp {sl.expiration} · "
+                    f"Mid ${cr_mid:.2f} · Min Limit ${ladder.p_walk:.2f} · Risk ${max_risk_usd:,.0f} "
+                    f"(snap {sl.snap_date})"
+                ),
+                badges=("ARCHIVE_CHAIN", f"DTE:{sl.dte}", f"LIMIT>={ladder.p_walk:.2f}", "TP50_21DTE"),
+                risk_flags=("LIMIT_ONLY_NO_MKT",),
+                friction_label=f"{fric_ratio*100:.1f}% cr",
+                friction_value=round(fric_ratio, 4),
+                confluence_count=1,
+                as_of=as_of,
+                extra={
+                    "expiration": sl.expiration,
+                    "dte": sl.dte,
+                    "snap_date": sl.snap_date,
+                    "short_strike": short_leg.strike,
+                    "long_strike": long_leg.strike,
+                    "credit_mid": round(cr_mid, 2),
+                    "credit_cross": round(cr_cross, 2),
+                    "walk_away_limit": ladder.p_walk,
+                    "max_risk_usd": round(max_risk_usd, 2),
+                },
+            )
+        )
+    return opps
+
+
+def scan_covered_call_holdings(
+    registry: Dict[str, PlaybookMeta],
+    ohlcv: Dict[str, Tuple[List[str], np.ndarray, np.ndarray]],
+    *,
+    longterm_db: str = "data/longterm.db",
+    own_picks_db: str = "data/own_picks.db",
+    chain_db: str = "data/chain_archive.db",
+    earnings_map: Optional[Dict[str, int]] = None,
+) -> List[Opportunity]:
+    """Scan >=100-share holdings in longterm.db / own_picks.db for 25-60 DTE ~0.25d Covered Calls.
+
+    Implements the registered `covered_call_holdings` CONTEXT playbook (TFSA-legal).
+    Always requires strike >= cost basis and strike > spot so calls never lock in a loss.
+    """
+    pb = registry.get("covered_call_holdings")
+    if pb is None or not pb.is_default_radar_eligible:
+        return []
+    earnings_map = earnings_map or {}
+    as_of = _now_utc()
+
+    # Aggregate >=100-share lots from longterm.db and open own_picks.db
+    lots: Dict[str, Dict[str, float]] = {}
+    full_lt = repo_path(longterm_db)
+    if os.path.exists(full_lt):
+        try:
+            from src.longterm.fills import book as lt_book
+
+            for tk, slot in lt_book(full_lt).items():
+                sh = float(slot.get("shares") or 0.0)
+                if sh > 0:
+                    entry = lots.setdefault(tk.upper(), {"shares": 0.0, "cost": 0.0})
+                    entry["shares"] += sh
+                    entry["cost"] += float(slot.get("cost") or 0.0)
+        except Exception:
+            pass
+
+    full_own = repo_path(own_picks_db)
+    if os.path.exists(full_own):
+        try:
+            con = sqlite3.connect(f"file:{full_own}?mode=ro", uri=True)
+            try:
+                tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "equity_picks" in tables:
+                    for tk, sh, px in con.execute(
+                        "SELECT ticker, shares, entry_price FROM equity_picks WHERE status = 'OPEN' AND side = 'LONG'"
+                    ).fetchall():
+                        sh_f = float(sh or 0.0)
+                        px_f = float(px or 0.0)
+                        if sh_f > 0 and px_f > 0:
+                            entry = lots.setdefault(str(tk).upper(), {"shares": 0.0, "cost": 0.0})
+                            entry["shares"] += sh_f
+                            entry["cost"] += sh_f * px_f
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+    opps: List[Opportunity] = []
+    for sym, info in sorted(lots.items()):
+        contracts = int(info["shares"] // 100)
+        if contracts < 1:
+            continue
+        avg_cost = info["cost"] / info["shares"] if info["shares"] > 0 else 0.0
+        spot = float(ohlcv[sym][1][-1]) if sym in ohlcv and len(ohlcv[sym][1]) else avg_cost
+        if spot <= 0:
+            continue
+
+        min_strike = max(spot * 1.02, avg_cost)
+        sl = load_archived_chain_slice(
+            sym,
+            target_dte=40,
+            min_dte=25,
+            max_dte=60,
+            spot=spot,
+            chain_db=chain_db,
+            build_rnd=False,
+        )
+
+        chosen_k: Optional[float] = None
+        exp = ""
+        dte = 40
+        cr_mid = 0.0
+        cr_cross = 0.0
+        delta_s = 0.25
+        source_tag = "ARCHIVE_CHAIN"
+
+        if sl is not None and sl.calls:
+            cand = sl.match_by_delta("call", 0.25, min_strike=min_strike, min_bid=0.05)
+            if cand is None:
+                cands = [c for c in sl.calls if c.strike >= min_strike and c.bid >= 0.05 and c.ask >= c.bid]
+                if cands:
+                    cand = min(cands, key=lambda c: abs(c.strike - max(min_strike, spot * 1.05)))
+            if cand is not None:
+                chosen_k = cand.strike
+                exp = sl.expiration
+                dte = sl.dte
+                cr_mid = cand.mid
+                cr_cross = cand.bid
+                delta_s = abs(cand.delta) if cand.delta is not None else 0.25
+
+        if chosen_k is None:
+            # Clean BS estimate fallback when symbol isn't in chain_archive.db
+            from src.structure.express import _bs_px_delta
+
+            rv = 0.25
+            if sym in ohlcv and len(ohlcv[sym][1]) >= 25:
+                rv_val = float(trailing_rv(ohlcv[sym][1], 20)[-1])
+                if np.isfinite(rv_val) and rv_val > 0.05:
+                    rv = rv_val
+            step = 1.0 if spot < 50 else (2.5 if spot < 150 else 5.0)
+            chosen_k = math.ceil(max(min_strike, spot * 1.05) / step) * step
+            px, dl, _ = _bs_px_delta(spot, chosen_k, 40.0 / 365.0, 0.045, rv, "call")
+            cr_mid = px
+            cr_cross = max(0.05, px * 0.96)
+            delta_s = abs(dl)
+            exp = (dt.date.today() + dt.timedelta(days=40)).isoformat()
+            dte = 40
+            source_tag = "EST_BS"
+
+        if cr_cross <= 0:
+            continue
+
+        ann_yield_pct = (cr_cross / spot) * (365.0 / max(dte, 1)) * 100.0
+        half_sp = max(0.0, cr_mid - cr_cross)
+        fric_ratio = (half_sp / cr_cross) if cr_cross > 0 else 0.20
+        ladder = build_walk_away_ladder(
+            structure="Covered Call",
+            is_credit=True,
+            p_mid=cr_mid,
+            p_cross=cr_cross,
+            ev_view_gross_per_share=cr_mid,
+            max_friction_to_credit=0.25,
+        )
+        risk_flags: List[str] = []
+        if sym in earnings_map and earnings_map[sym] <= dte:
+            risk_flags.append(f"EARN:{earnings_map[sym]}d")
+        if source_tag == "EST_BS":
+            risk_flags.append("NO_ARCHIVED_CHAIN")
+
+        opps.append(
+            Opportunity(
+                ticker=sym,
+                asset_class="option",
+                playbook_id=pb.id,
+                playbook_label=pb.label,
+                evidence_tier=pb.evidence_tier,
+                direction="NEUTRAL",
+                spot=round(spot, 2),
+                chg_1d_pct=None,
+                chg_5d_pct=None,
+                horizon_label=f"{dte}d",
+                setup_summary=(
+                    f"Sell {contracts}x {chosen_k:g}C exp {exp} (~{delta_s:.2f}Δ) · "
+                    f"Mid ${cr_mid:.2f} · Min ${ladder.p_walk:.2f} · ~{ann_yield_pct:.1f}% ann"
+                ),
+                badges=("COVERED_CALL", "TFSA_OK", source_tag, f"LOTS:{contracts}"),
+                risk_flags=tuple(risk_flags),
+                friction_label=f"{fric_ratio*100:.1f}% cr",
+                friction_value=round(fric_ratio, 4),
+                confluence_count=1,
+                as_of=as_of,
+                extra={
+                    "contracts": contracts,
+                    "avg_cost": round(avg_cost, 2),
+                    "strike": chosen_k,
+                    "expiration": exp,
+                    "dte": dte,
+                    "credit_mid": round(cr_mid, 2),
+                    "walk_away_limit": ladder.p_walk,
+                    "ann_yield_pct": round(ann_yield_pct, 1),
+                    "source": source_tag,
+                },
             )
         )
     return opps
@@ -536,19 +1159,67 @@ def scan_cached_insider_clusters(
     registry: Dict[str, PlaybookMeta],
     ohlcv: Dict[str, Tuple[List[str], np.ndarray, np.ndarray]],
     *,
+    insider_json: str = "data/insider_cache.json",
     insider_db: str = "data/insider_cache.db",
 ) -> List[Opportunity]:
-    """Read cached SEC Form 4 cluster buys without blocking on live EDGAR crawls."""
+    """Read cached SEC Form 4 cluster buys (`data/insider_cache.json`, with optional SQLite fallback)."""
     pb = registry.get("insider_cluster")
     if pb is None or not pb.is_default_radar_eligible:
         return []
-    full = repo_path(insider_db)
-    if not os.path.exists(full):
-        return []
     as_of = _now_utc()
     opps: List[Opportunity] = []
+
+    # Primary live cache format: data/insider_cache.json
+    full_json = repo_path(insider_json)
+    if os.path.exists(full_json):
+        try:
+            with open(full_json, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if isinstance(raw, dict):
+                hits = []
+                for sym, payload in raw.items():
+                    if not isinstance(payload, dict):
+                        continue
+                    summ = payload.get("summary") or {}
+                    n_buyers = int(summ.get("n_buyers") or 0)
+                    buy_val = float(summ.get("buy_value") or 0.0)
+                    if n_buyers >= 2:
+                        hits.append((n_buyers, buy_val, str(sym).upper(), str(payload.get("as_of") or "")))
+                hits.sort(key=lambda x: (-x[0], -x[1], x[2]))
+                for n_buyers, buy_val, sym, seen_dt in hits[:15]:
+                    spot = float(ohlcv[sym][1][-1]) if sym in ohlcv and len(ohlcv[sym][1]) else 0.0
+                    opps.append(
+                        Opportunity(
+                            ticker=sym,
+                            asset_class="stock",
+                            playbook_id=pb.id,
+                            playbook_label=pb.label,
+                            evidence_tier=pb.evidence_tier,
+                            direction="LONG",
+                            spot=round(spot, 2),
+                            chg_1d_pct=None,
+                            chg_5d_pct=None,
+                            horizon_label=pb.horizon_label,
+                            setup_summary=f"{n_buyers} insiders bought ${buy_val:,.0f} (as of {seen_dt})",
+                            badges=(f"INSIDERx{n_buyers}",),
+                            risk_flags=(),
+                            friction_label="0.30% stk",
+                            friction_value=0.0030,
+                            confluence_count=1,
+                            as_of=as_of,
+                            extra={"buyer_count": n_buyers, "buy_value_usd": buy_val, "seen_date": seen_dt},
+                        )
+                    )
+                return opps
+        except Exception:
+            pass
+
+    # Fallback: legacy SQLite schema if explicitly present
+    full_db = repo_path(insider_db)
+    if not os.path.exists(full_db):
+        return []
     try:
-        con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{full_db}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         try:
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -590,19 +1261,47 @@ def scan_cached_insider_clusters(
     return opps
 
 
+def _next_verified_macro_event(today: Optional[dt.date] = None) -> str:
+    """Return the nearest upcoming verified FOMC/CPI/NFP event from `src.macro_analyzer`."""
+    ref = today or dt.date.today()
+    try:
+        from src.macro_analyzer import _DEFAULT_EVENTS
+
+        upcoming: List[Tuple[int, str, str]] = []
+        for ev in _DEFAULT_EVENTS:
+            try:
+                ev_dt = dt.date.fromisoformat(str(ev["date"]))
+            except (KeyError, ValueError):
+                continue
+            delta = (ev_dt - ref).days
+            if 0 <= delta <= 45:
+                upcoming.append((delta, str(ev["name"]), str(ev["date"])))
+        if upcoming:
+            upcoming.sort()
+            days, name, dstr = upcoming[0]
+            return f"{name} {dstr} ({days}d)"
+    except Exception:
+        pass
+    return "none"
+
+
 def compute_regime_header(
     ohlcv: Dict[str, Tuple[List[str], np.ndarray, np.ndarray]],
+    *,
+    predmarkets_db: str = "data/predmarkets.db",
 ) -> Dict[str, Any]:
-    """Build deterministic macro/regime header from local SPY/QQQ + optional VIX/macro calendar."""
+    """Build deterministic macro/regime header from local SPY/QQQ + verified macro calendar + Kalshi odds."""
     spy = ohlcv.get("SPY")
     qqq = ohlcv.get("QQQ")
     spy_last = spy_chg = qqq_chg = None
+    ohlcv_as_of: Optional[str] = None
     posture = "NEUTRAL"
     vix = vix_3m = None
     vix_term = "UNKNOWN"
 
     if spy is not None and len(spy[1]) >= 200:
-        cs = spy[1]
+        ds, cs, _ = spy
+        ohlcv_as_of = str(ds[-1]) if ds else None
         spy_last = round(float(cs[-1]), 2)
         spy_chg = round(float(cs[-1] / cs[-2] - 1.0) * 100.0, 2)
         s200 = float(np.mean(cs[-200:]))
@@ -613,23 +1312,14 @@ def compute_regime_header(
             posture = "RISK_OFF"
         else:
             posture = "NEUTRAL"
-        # Proxy implied vol when live VIX isn't queried offline
         vix = round(rv20 * 100.0, 1)
 
     if qqq is not None and len(qqq[1]) >= 2:
         qcs = qqq[1]
         qqq_chg = round(float(qcs[-1] / qcs[-2] - 1.0) * 100.0, 2)
 
-    next_macro = "none"
-    try:
-        from src.macro_calendar import upcoming_events
-
-        evs = upcoming_events(days_ahead=14)
-        if evs:
-            ev0 = evs[0]
-            next_macro = f"{ev0.get('event', ev0.get('name', 'Macro'))} {ev0.get('date', '')}".strip()
-    except Exception:
-        pass
+    next_macro = _next_verified_macro_event()
+    kalshi_macro = load_kalshi_macro_pulse(predmarkets_db=predmarkets_db)
 
     return {
         "regime_posture": posture,
@@ -640,6 +1330,9 @@ def compute_regime_header(
         "spy_chg_1d_pct": spy_chg,
         "qqq_chg_1d_pct": qqq_chg,
         "next_macro_event": next_macro,
+        "kalshi_macro": kalshi_macro,
+        "ohlcv_as_of": ohlcv_as_of,
+        "ohlcv_symbol_count": len(ohlcv),
     }
 
 

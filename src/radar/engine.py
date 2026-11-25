@@ -1,4 +1,4 @@
-"""Concurrent Radar aggregator, confluence merger, and atomic JSON cache."""
+"""Concurrent Radar aggregator, confluence merger, portfolio/IV enrichment, and atomic JSON cache."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -6,18 +6,26 @@ import datetime as dt
 import json
 import os
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
+
+from src.equity_playbooks.indicators import trailing_rv
 from src.paths import repo_path
+from src.structure.chain_data import load_latest_atm_iv_map
 from .playbooks import TIER_RANK, PlaybookMeta, load_playbooks
 from .scanners import (
     _load_latest_rev_breadth,
     _load_recent_post_earnings_crashes,
     _load_upcoming_earnings_map,
     compute_regime_header,
+    get_sector_etf,
     load_local_ohlcv_safe,
+    load_open_exposure_map,
+    scan_archived_etf_wide_spreads,
     scan_cached_etf_bear_calls,
     scan_cached_insider_clusters,
+    scan_covered_call_holdings,
     scan_equity_pullbacks,
     scan_holdings_buy_zones,
     scan_vol_managed_outlook,
@@ -68,6 +76,63 @@ def merge_confluence(opportunities: List[Opportunity]) -> List[Opportunity]:
     return merged
 
 
+def enrich_with_portfolio_and_iv(
+    opportunities: List[Opportunity],
+    ohlcv: Dict[str, Any],
+    *,
+    chain_db: str = "data/chain_archive.db",
+    own_picks_db: str = "data/own_picks.db",
+    paper_db: str = "paper_trades.db",
+    longterm_db: str = "data/longterm.db",
+) -> List[Opportunity]:
+    """Attach descriptive portfolio-overlap warnings and IV-vs-RV cheapness badges."""
+    if not opportunities:
+        return []
+
+    exposure = load_open_exposure_map(
+        own_picks_db=own_picks_db,
+        paper_db=paper_db,
+        longterm_db=longterm_db,
+    )
+    held_tickers = exposure.get("tickers") or {}
+    sector_counts = exposure.get("sector_counts") or {}
+
+    unique_syms = sorted({o.ticker for o in opportunities})
+    spots = {o.ticker: o.spot for o in opportunities if o.spot > 0}
+    iv_map = load_latest_atm_iv_map(unique_syms, spots, chain_db=chain_db)
+
+    out: List[Opportunity] = []
+    for o in opportunities:
+        badges = list(o.badges)
+        flags = list(o.risk_flags)
+
+        # Portfolio overlap warnings (skip covered_call_holdings which intentionally targets owned stock)
+        if o.playbook_id != "covered_call_holdings":
+            if o.ticker in held_tickers and "HOLDING_ALREADY" not in flags:
+                flags.append("HOLDING_ALREADY")
+            else:
+                sec = get_sector_etf(o.ticker)
+                if sec and sector_counts.get(sec, 0) >= 2:
+                    tag = f"SECTOR_OVERLAP:{sec}"
+                    if tag not in flags:
+                        flags.append(tag)
+
+        # IV vs RV cheapness / richness badge from real archived chains
+        iv_info = iv_map.get(o.ticker)
+        if iv_info and o.ticker in ohlcv and len(ohlcv[o.ticker][1]) >= 25:
+            rv20 = float(trailing_rv(ohlcv[o.ticker][1], 20)[-1])
+            atm_iv = float(iv_info["atm_iv"])
+            if np.isfinite(rv20) and rv20 > 0.02:
+                ratio = atm_iv / rv20
+                if ratio <= 0.90 and "IV_CHEAP" not in badges:
+                    badges.append("IV_CHEAP")
+                elif ratio >= 1.25 and "IV_RICH" not in badges:
+                    badges.append("IV_RICH")
+
+        out.append(replace(o, badges=tuple(badges), risk_flags=tuple(flags)))
+    return out
+
+
 def save_radar_cache(snapshot: RadarSnapshot, cache_path: str = DEFAULT_CACHE_PATH) -> str:
     full = repo_path(cache_path)
     parent = os.path.dirname(full)
@@ -97,13 +162,20 @@ def run_radar(
     ohlcv_db: str = "data/equity_ohlcv.db",
     playbooks_path: str = "configs/playbooks.json",
     cache_path: Optional[str] = DEFAULT_CACHE_PATH,
+    chain_db: str = "data/chain_archive.db",
+    candidates_db: str = "data/candidates.db",
+    predmarkets_db: str = "data/predmarkets.db",
+    own_picks_db: str = "data/own_picks.db",
+    paper_db: str = "paper_trades.db",
+    longterm_db: str = "data/longterm.db",
+    plan_path: Optional[str] = None,
     timeout_s: float = 10.0,
     extra_adapters: Optional[Dict[str, Callable[[], List[Opportunity]]]] = None,
 ) -> RadarSnapshot:
-    """Execute all failure-isolated scanners concurrently, merge confluence, and persist cache."""
+    """Execute all failure-isolated scanners concurrently, enrich, merge confluence, and persist cache."""
     registry: Dict[str, PlaybookMeta] = load_playbooks(playbooks_path)
     ohlcv = load_local_ohlcv_safe(ohlcv_db)
-    header = compute_regime_header(ohlcv)
+    header = compute_regime_header(ohlcv, predmarkets_db=predmarkets_db)
     degraded: List[str] = []
 
     core_alloc: List[Dict[str, Any]] = []
@@ -121,7 +193,7 @@ def run_radar(
     crash_flags = _load_recent_post_earnings_crashes(ohlcv)
     rev_breadth = _load_latest_rev_breadth()
 
-    # Step 2: Run remaining adapters concurrently with strict per-adapter timeout isolation
+    # Step 2: Run remaining local adapters concurrently with strict per-adapter timeout isolation
     adapters: Dict[str, Callable[[], List[Opportunity]]] = {
         "equity_pullback": lambda: scan_equity_pullbacks(
             ohlcv,
@@ -132,14 +204,29 @@ def run_radar(
             rev_breadth=rev_breadth,
             regime_posture=header["regime_posture"],
         ),
-        "holdings_buy_zone": lambda: scan_holdings_buy_zones(ohlcv, registry),
-        "etf_bear_call": lambda: scan_cached_etf_bear_calls(registry),
+        "holdings_buy_zone": lambda: scan_holdings_buy_zones(
+            ohlcv, registry, plan_path=plan_path, fills_db=longterm_db
+        ),
+        "covered_call_holdings": lambda: scan_covered_call_holdings(
+            registry,
+            ohlcv,
+            longterm_db=longterm_db,
+            own_picks_db=own_picks_db,
+            chain_db=chain_db,
+            earnings_map=earnings_map,
+        ),
+        "etf_wide_spread": lambda: scan_archived_etf_wide_spreads(
+            registry, ohlcv, chain_db=chain_db
+        ),
+        "etf_bear_call": lambda: scan_cached_etf_bear_calls(
+            registry, ohlcv=ohlcv, candidates_db=candidates_db
+        ),
         "insider_cluster": lambda: scan_cached_insider_clusters(registry, ohlcv),
     }
     if extra_adapters:
         adapters.update(extra_adapters)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(adapters)))) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(adapters)))) as pool:
         futs = {name: pool.submit(fn) for name, fn in adapters.items()}
         for name, fut in futs.items():
             try:
@@ -153,7 +240,15 @@ def run_radar(
 
     # Enforce registry invariant: never leak CLOSED playbooks into default Radar
     filtered = [o for o in all_opps if o.evidence_tier != "CLOSED"]
-    merged = merge_confluence(filtered)
+    enriched = enrich_with_portfolio_and_iv(
+        filtered,
+        ohlcv,
+        chain_db=chain_db,
+        own_picks_db=own_picks_db,
+        paper_db=paper_db,
+        longterm_db=longterm_db,
+    )
+    merged = merge_confluence(enriched)
 
     snap = RadarSnapshot(
         generated_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -169,6 +264,9 @@ def run_radar(
         opportunities=merged,
         degraded_scanners=degraded,
         from_cache=False,
+        kalshi_macro=header.get("kalshi_macro") or [],
+        ohlcv_as_of=header.get("ohlcv_as_of"),
+        ohlcv_symbol_count=int(header.get("ohlcv_symbol_count") or 0),
     )
     if cache_path:
         try:
