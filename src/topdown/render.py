@@ -435,8 +435,8 @@ def card_renderable(card: EvidenceCard) -> Group:
         v.append("  1d ")
         v.append_text(signed(d.chg_1d_pct, "{:+.2f}%"))
     vb: List[Any] = [v]
-    for r in card.reasons:
-        vb.append(Text("• " + r))
+    for reason in card.reasons:
+        vb.append(Text("• " + reason))
     for w in card.warnings:
         vb.append(Text("⚠ " + w, style=AMBER))
     if card.lens_hits:
@@ -481,13 +481,13 @@ def card_renderable(card: EvidenceCard) -> Group:
     for c, j in (("Ticker", "left"), (f"Corr w/ {card.ticker}", "right"), ("Beta vs SPY", "right"), ("1m", "right"), ("3m", "right"),
                  ("12-1m", "right"), ("Vol 20d", "right"), ("vs 200d", "right"), ("IV/RV", "right")):
         pt.add_column(c, justify=j)  # type: ignore[arg-type]
-    for r in card.peers.rows:
-        name = Text(("▶ " if r.is_subject else "  ") + r.ticker + ("" if r.in_sector else " ·"),
-                    style="bold" if r.is_subject else "")
-        ivrv = _num(r.iv_rv, "{:.2f}") + (f" ({r.iv_as_of[5:]})" if r.iv_rv is not None and r.iv_as_of else "")
-        pt.add_row(name, _num(r.corr_126d, "{:.2f}"), _num(r.beta_126d, "{:.2f}"), signed(r.ret_21d_pct),
-                   signed(r.ret_63d_pct), signed(r.ret_12_1_pct, "{:+.0f}%"), _num(r.rv20_pct, "{:.0f}%"),
-                   signed(r.vs_200d_pct), ivrv)
+    for pr in card.peers.rows:
+        name = Text(("▶ " if pr.is_subject else "  ") + pr.ticker + ("" if pr.in_sector else " ·"),
+                    style="bold" if pr.is_subject else "")
+        ivrv = _num(pr.iv_rv, "{:.2f}") + (f" ({pr.iv_as_of[5:]})" if pr.iv_rv is not None and pr.iv_as_of else "")
+        pt.add_row(name, _num(pr.corr_126d, "{:.2f}"), _num(pr.beta_126d, "{:.2f}"), signed(pr.ret_21d_pct),
+                   signed(pr.ret_63d_pct), signed(pr.ret_12_1_pct, "{:+.0f}%"), _num(pr.rv20_pct, "{:.0f}%"),
+                   signed(pr.vs_200d_pct), ivrv)
     standing = Text("Rank among these (1 = highest): ", style="dim")
     names = {"ret_21d_pct": "1m", "ret_63d_pct": "3m", "ret_12_1_pct": "12-1m", "rv20_pct": "vol", "vs_200d_pct": "vs 200d"}
     standing.append("  ".join(f"{names[k]} {v}" for k, v in card.peers.standing.items() if k in names) or "—")
