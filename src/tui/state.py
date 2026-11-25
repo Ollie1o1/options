@@ -57,8 +57,11 @@ class DeskDataProvider:
         self.longterm_db = longterm_db
         self.plan_path = plan_path
         self.playbooks_path = playbooks_path
+        self._dossier_cache: Dict[str, TickerDossier] = {}
 
     def get_radar(self, *, refresh: bool = False) -> RadarSnapshot:
+        if refresh:
+            self._dossier_cache.clear()
         snap = None if refresh else load_cached_radar(self.cache_path)
         if snap is None:
             snap = run_radar(
@@ -76,16 +79,25 @@ class DeskDataProvider:
         return scan_live_etf_wide_spreads()
 
     def update_prices(self, *, expand_universe: bool = False) -> Dict[str, Any]:
+        self._dossier_cache.clear()
         return refresh_local_prices(self.ohlcv_db, expand_universe=expand_universe)
 
+    def get_cached_dossier(self, ticker: str) -> Optional[TickerDossier]:
+        return self._dossier_cache.get(str(ticker).upper().strip())
+
     def get_dossier(self, ticker: str, *, fetch_chain: bool = False) -> TickerDossier:
-        return build_dossier(
-            ticker,
+        sym = str(ticker).upper().strip()
+        if not fetch_chain and sym in self._dossier_cache:
+            return self._dossier_cache[sym]
+        dos = build_dossier(
+            sym,
             ohlcv_db=self.ohlcv_db,
             cache_path=self.cache_path,
             chain_db=self.chain_db,
             fetch_chain=fetch_chain,
         )
+        self._dossier_cache[sym] = dos
+        return dos
 
     def get_express(
         self,
@@ -161,7 +173,21 @@ class DeskDataProvider:
     def get_book(self) -> Dict[str, Any]:
         picks = list_equity_picks(db_path=self.own_picks_db)
         scorecard = build_equity_scorecard(db_path=self.own_picks_db, ohlcv_db=self.ohlcv_db)
-        ohlcv = load_local_ohlcv_safe(self.ohlcv_db)
+        needed_syms = {str(p.get("ticker") or "").upper() for p in picks if p.get("ticker")}
+        full_plan = repo_path(self.plan_path)
+        if os.path.exists(full_plan):
+            try:
+                from src.longterm.plan import load_plan
+
+                for n in load_plan(full_plan).names:
+                    needed_syms.add(n.ticker.upper())
+            except Exception:
+                pass
+        ohlcv = (
+            load_local_ohlcv_safe(self.ohlcv_db, symbols=sorted(needed_syms), lookback_days=45)
+            if needed_syms
+            else {}
+        )
         today = dt.date.today()
 
         enriched_picks: List[Dict[str, Any]] = []
@@ -294,10 +320,17 @@ class DeskDataProvider:
             try:
                 con = sqlite3.connect(f"file:{full_ohlcv}?mode=ro", uri=True)
                 try:
-                    row = con.execute("SELECT COUNT(DISTINCT ticker), MAX(date) FROM ohlcv").fetchone()
-                    if row:
-                        ohlcv_syms = int(row[0] or 0)
-                        ohlcv_last = str(row[1] or "")
+                    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    if "price_state" in tables:
+                        r_cnt = con.execute("SELECT COUNT(*) FROM price_state").fetchone()
+                        r_dt = con.execute("SELECT MAX(date) FROM ohlcv WHERE ticker = 'SPY'").fetchone()
+                        ohlcv_syms = int(r_cnt[0] or 0) if r_cnt else 0
+                        ohlcv_last = str(r_dt[0] or "") if r_dt and r_dt[0] else ""
+                    if ohlcv_syms == 0:
+                        row = con.execute("SELECT COUNT(DISTINCT ticker), MAX(date) FROM ohlcv").fetchone()
+                        if row:
+                            ohlcv_syms = int(row[0] or 0)
+                            ohlcv_last = str(row[1] or "")
                 finally:
                     con.close()
             except Exception:

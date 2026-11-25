@@ -78,18 +78,28 @@ def _now_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_REV_BREADTH_CACHE: Dict[Tuple[str, float], Dict[str, float]] = {}
+
+
 def _load_latest_rev_breadth(db_path: str = "data/estimates_archive.db") -> Dict[str, float]:
     full = repo_path(db_path)
     if not os.path.exists(full):
         return {}
     try:
+        mtime = os.path.getmtime(full)
+        ck = (full, mtime)
+        if ck in _REV_BREADTH_CACHE:
+            return _REV_BREADTH_CACHE[ck]
         from scripts.estimate_revisions_test import compute_rev_breadth_30d
 
         by_date = compute_rev_breadth_30d(full)
         if not by_date:
+            _REV_BREADTH_CACHE[ck] = {}
             return {}
         latest = max(by_date.keys())
-        return by_date[latest]
+        res = by_date[latest]
+        _REV_BREADTH_CACHE[ck] = res
+        return res
     except Exception:
         return {}
 
@@ -1336,8 +1346,29 @@ def compute_regime_header(
     }
 
 
-def load_local_ohlcv_safe(ohlcv_db: str = "data/equity_ohlcv.db") -> Dict[str, Tuple[List[str], np.ndarray, np.ndarray]]:
+def load_local_ohlcv_safe(
+    ohlcv_db: str = "data/equity_ohlcv.db",
+    *,
+    symbols: Optional[Sequence[str]] = None,
+    lookback_days: Optional[int] = 450,
+) -> Dict[str, Tuple[List[str], np.ndarray, np.ndarray]]:
     full = repo_path(ohlcv_db)
     if not os.path.exists(full):
         return {}
-    return load_equity_ohlcv(full)
+    since_date: Optional[str] = None
+    if lookback_days is not None and lookback_days > 0:
+        try:
+            con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
+            try:
+                probe_tk = str(symbols[0]).upper() if symbols else "SPY"
+                row = con.execute("SELECT MAX(date) FROM ohlcv WHERE ticker = ?", (probe_tk,)).fetchone()
+                if not row or not row[0]:
+                    row = con.execute("SELECT MAX(date) FROM ohlcv").fetchone()
+                if row and row[0]:
+                    mx = dt.date.fromisoformat(str(row[0])[:10])
+                    since_date = (mx - dt.timedelta(days=int(lookback_days))).isoformat()
+            finally:
+                con.close()
+        except Exception:
+            since_date = None
+    return load_equity_ohlcv(full, symbols=symbols, since_date=since_date)

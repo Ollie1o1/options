@@ -56,7 +56,7 @@ def _read_recent_headlines(ticker: str, news_db: str = "data/news_archive.db", l
                 select_parts.append(f"{sent_col} AS sentiment")
             order = f"ORDER BY {date_col} DESC" if date_col else ""
             rows = con.execute(
-                f"SELECT {', '.join(select_parts)} FROM {tbl} WHERE UPPER({sym_col}) = ? {order} LIMIT ?",
+                f"SELECT {', '.join(select_parts)} FROM {tbl} WHERE {sym_col} = ? {order} LIMIT ?",
                 (ticker.upper(), limit * 3),
             ).fetchall()
             seen = set()
@@ -105,7 +105,7 @@ def _read_recent_analyst_actions(
                 """
                 SELECT grade_date, firm, action, to_grade, current_pt, prior_pt
                 FROM analyst_actions
-                WHERE UPPER(symbol) = ?
+                WHERE symbol = ?
                 ORDER BY grade_date DESC
                 LIMIT ?
                 """,
@@ -139,7 +139,7 @@ def _next_earnings_info(ticker: str, dolt_db: str = "data/dolt_options.db") -> t
         con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
         try:
             row = con.execute(
-                "SELECT MIN(date) FROM earnings_cal WHERE UPPER(symbol) = ? AND date >= ?",
+                "SELECT MIN(date) FROM earnings_cal WHERE symbol = ? AND date >= ?",
                 (ticker.upper(), today),
             ).fetchone()
         finally:
@@ -167,7 +167,7 @@ def build_dossier(
     """Consolidate price structure, levels, catalysts, real chain IV/SVI RND, and risk flags onto one object."""
     sym = str(ticker).upper().strip()
     as_of = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    ohlcv = load_local_ohlcv_safe(ohlcv_db)
+    ohlcv = load_local_ohlcv_safe(ohlcv_db, symbols=[sym])
 
     spot = chg1 = chg5 = chg21 = mom12_1 = None
     d20 = d50 = d200 = r2 = r14 = rv20 = None

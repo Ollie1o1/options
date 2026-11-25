@@ -86,21 +86,41 @@ class BenchmarkSeries:
 def load_equity_ohlcv(
     db_path: str = "data/equity_ohlcv.db",
     symbols: Optional[Iterable[str]] = None,
+    *,
+    since_date: Optional[str] = None,
 ) -> Dict[str, Tuple[List[str], np.ndarray, np.ndarray]]:
-    """Load `{ticker: (dates, closes, volumes)}` from `data/equity_ohlcv.db`."""
+    """Load `{ticker: (dates, closes, volumes)}` from `data/equity_ohlcv.db`.
+
+    Uses indexed SQL filtering (`WHERE ticker IN (...)` / `date >= ?`) so single-ticker
+    and recent-window lookups avoid scanning millions of historical bars.
+    """
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        keep = {s.upper() for s in symbols} if symbols is not None else None
-        cur = con.execute(
-            "SELECT ticker, date, close, volume FROM ohlcv ORDER BY ticker, date"
-        )
+        keep_list = sorted({str(s).upper() for s in symbols if s}) if symbols is not None else None
+        if keep_list is not None and not keep_list:
+            return {}
+
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        if keep_list is not None:
+            placeholders = ",".join("?" for _ in keep_list)
+            where_clauses.append(f"ticker IN ({placeholders})")
+            params.extend(keep_list)
+        if since_date:
+            where_clauses.append("date >= ?")
+            params.append(str(since_date))
+
+        sql = "SELECT ticker, date, close, volume FROM ohlcv"
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
+        sql += " ORDER BY ticker, date"
+
+        cur = con.execute(sql, params)
         dates: Dict[str, List[str]] = {}
         closes: Dict[str, List[float]] = {}
         vols: Dict[str, List[float]] = {}
         for sym, d, c, v in cur:
             s = str(sym).upper()
-            if keep is not None and s not in keep:
-                continue
             dates.setdefault(s, []).append(str(d))
             closes.setdefault(s, []).append(float(c))
             vols.setdefault(s, []).append(float(v) if v is not None else 0.0)

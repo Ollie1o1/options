@@ -141,6 +141,8 @@ class DeskApp(App[None]):
         self.focused_playbook: str = "equity_pullback"
         self._last_vehicles: List[VehicleComparison] = []
         self._status_msg: str = ""
+        self._wb_loaded_ticker: Optional[str] = None
+        self._last_dossier_ticker: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         yield Static("Loading Daily Trading Desk…", id="market-ribbon")
@@ -244,6 +246,7 @@ class DeskApp(App[None]):
         self.snapshot = snap
         self.health = health
         self._status_msg = ""
+        self._last_dossier_ticker = None
         self._render_ribbon()
         self._render_today()
         self._render_radar()
@@ -255,7 +258,9 @@ class DeskApp(App[None]):
             self.focused_spot = first.spot
             self.focused_playbook = first.playbook_id
             self._update_radar_dossier(first.ticker)
-        self._compute_workbench(self.focused_ticker)
+        self._wb_loaded_ticker = None
+        if self.query_one("#main-tabs", TabbedContent).active == "workbench":
+            self._compute_workbench(self.focused_ticker)
 
     def _load_all_data(self, *, refresh: bool = False) -> None:
         snap = self.provider.get_radar(refresh=refresh)
@@ -330,12 +335,37 @@ class DeskApp(App[None]):
             )
 
     def _update_radar_dossier(self, ticker: str) -> None:
-        dos = self.provider.get_dossier(ticker, fetch_chain=False)
-        self.query_one("#radar-dossier-pane", Static).update(format_dossier_markup(dos))
+        sym = str(ticker).upper().strip()
+        cached = self.provider.get_cached_dossier(sym)
+        if cached is not None:
+            self._last_dossier_ticker = sym
+            self.query_one("#radar-dossier-pane", Static).update(format_dossier_markup(cached))
+            return
+        if self._last_dossier_ticker == sym:
+            return
+        self._last_dossier_ticker = sym
+        self.query_one("#radar-dossier-pane", Static).update(
+            f"[bold]TICKER DOSSIER: {sym}[/]\n[dim]Loading price structure, chain IV & news…[/dim]"
+        )
+        self._worker_load_dossier(sym)
+
+    @work(thread=True, exclusive=True, group="radar_dossier")
+    def _worker_load_dossier(self, ticker: str) -> None:
+        try:
+            dos = self.provider.get_dossier(ticker, fetch_chain=False)
+
+            def _apply() -> None:
+                if self.focused_ticker == ticker:
+                    self.query_one("#radar-dossier-pane", Static).update(format_dossier_markup(dos))
+
+            self.call_from_thread(_apply)
+        except Exception:
+            pass
 
     def _compute_workbench(self, ticker: str) -> None:
         sym = ticker.upper().strip() or "SPY"
         self.focused_ticker = sym
+        self._wb_loaded_ticker = sym
         self.query_one("#wb-ticker-input", Input).value = sym
         dos: TickerDossier = self.provider.get_dossier(sym, fetch_chain=False)
         self.query_one("#wb-left", Static).update(format_dossier_markup(dos))
@@ -541,6 +571,11 @@ class DeskApp(App[None]):
             self.call_from_thread(self._set_status, f"Price update err: {str(exc)[:30]}")
 
     # ── Events ───────────────────────────────────────────────────────────────
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        pane_id = event.pane.id if event.pane is not None else ""
+        if pane_id == "workbench" and self._wb_loaded_ticker != self.focused_ticker:
+            self._compute_workbench(self.focused_ticker)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "radar-filter-input":

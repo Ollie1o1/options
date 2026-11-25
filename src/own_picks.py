@@ -635,7 +635,8 @@ def build_equity_scorecard(
     if os.path.exists(ohlcv_db):
         from src.equity_playbooks.backtest import load_equity_ohlcv
 
-        ohlcv = load_equity_ohlcv(ohlcv_db)
+        needed = sorted({str(p["ticker"]).upper() for p in picks if p.get("ticker")} | {BENCHMARK})
+        ohlcv = load_equity_ohlcv(ohlcv_db, symbols=needed)
         for sym, (ds, cs, _vs) in ohlcv.items():
             closes_by_sym[sym] = {d: float(c) for d, c in zip(ds, cs)}
 
