@@ -27,6 +27,19 @@ class DiscoveryHub:
     ohlcv: OhlcvMap
     snapshot: Optional[RadarSnapshot] = None
     timings: Dict[str, float] = field(default_factory=dict)
+    own_picks_db: str = "data/own_picks.db"
+    longterm_db: str = "data/longterm.db"
+    _holdings: Optional[List[Any]] = None
+
+    def holdings(self) -> List[Any]:
+        """Real-money holdings (own picks, long-term fills, core-sleeve targets), loaded once."""
+        held = self._holdings
+        if held is None:
+            from .portfolio_fit import load_holdings
+
+            held = load_holdings(own_picks_db=self.own_picks_db, longterm_db=self.longterm_db, board=self.board)
+            self._holdings = held
+        return held
 
     def freshness(self) -> Dict[str, Any]:
         """How current the price archive is: SPY's last bar and how many symbols lag it."""
@@ -39,6 +52,7 @@ class DiscoveryHub:
         return next((r for r in self.lenses if r.lens.id == lens_id), None)
 
     def card(self, ticker: str, **kw: Any) -> EvidenceCard:
+        kw.setdefault("holdings", self.holdings())
         return build_evidence_card(
             ticker, ohlcv=self.ohlcv, board=self.board, lens_results=self.lenses,
             snapshot=self.snapshot, estimates_as_of=self.ctx.rev_as_of, **kw,
@@ -67,6 +81,8 @@ def build_hub(
     fred_path: str = "data/fred_cache.json",
     cboe_dir: str = "data/discovery",
     estimates_db: str = "data/estimates_archive.db",
+    own_picks_db: str = "data/own_picks.db",
+    longterm_db: str = "data/longterm.db",
 ) -> DiscoveryHub:
     """Macro → board → lenses, from local archives only (no network)."""
     t0 = time.perf_counter()
@@ -93,6 +109,7 @@ def build_hub(
     return DiscoveryHub(
         built_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         macro=macro, board=board, lenses=lenses, ctx=ctx, ohlcv=ohlcv, snapshot=snapshot, timings=timings,
+        own_picks_db=own_picks_db, longterm_db=longterm_db,
     )
 
 

@@ -226,16 +226,20 @@ class LogFillModal(ModalScreen[Optional[Dict[str, Any]]]):
         structure: str = "Bull Put",
         side: str = "SELL",
         limit_price: float = 1.00,
+        bid: Optional[float] = None,
+        ask: Optional[float] = None,
     ) -> None:
         super().__init__()
         self._ticker = ticker.upper()
         self._structure = structure
         self._side = side.upper()
         self._limit = limit_price
+        self._bid = max(0.05, limit_price - 0.10) if bid is None else float(bid)
+        self._ask = (limit_price + 0.10) if ask is None else float(ask)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="logfill-dialog"):
-            yield Label(f"Log Limit-Order Fill Experiment — {self._ticker} (measures k <= 0.35)")
+            yield Label(f"Log Limit-Order Fill — {self._ticker} (structure starting 'O1' counts toward the Test O1 k <= 0.35 check)")
             yield Select(
                 [("IBKR", "ibkr"), ("Wealthsimple", "wealthsimple")],
                 value="ibkr",
@@ -244,8 +248,8 @@ class LogFillModal(ModalScreen[Optional[Dict[str, Any]]]):
             yield Input(value=self._ticker, placeholder="Ticker", id="lf-ticker")
             yield Input(value=self._structure, placeholder="Structure (e.g. Bull Put)", id="lf-structure")
             yield Select([("SELL (Credit)", "SELL"), ("BUY (Debit)", "BUY")], value=self._side, id="lf-side")
-            yield Input(value=f"{max(0.05, self._limit - 0.10):.2f}", placeholder="Bid", id="lf-bid")
-            yield Input(value=f"{self._limit + 0.10:.2f}", placeholder="Ask", id="lf-ask")
+            yield Input(value=f"{self._bid:.2f}", placeholder="Bid (spread: natural credit)", id="lf-bid")
+            yield Input(value=f"{self._ask:.2f}", placeholder="Ask (spread: far side)", id="lf-ask")
             yield Input(value=f"{self._limit:.2f}", placeholder="Limit Posted", id="lf-limit")
             with Horizontal(id="lf-filled-row"):
                 yield Label("Order Filled?")

@@ -266,7 +266,8 @@ class HubAndRenderingTests(unittest.TestCase):
         with _NO_EARN, _NO_CRASH, _NO_REV:
             return build_hub(ohlcv=synthetic_ohlcv(), snapshot=snapshot or _snapshot([_opp("XOM")]),
                              fred_path=os.path.join(td, "fred.json"), cboe_dir=os.path.join(td, "cboe"),
-                             estimates_db=os.path.join(td, "est.db"))
+                             estimates_db=os.path.join(td, "est.db"),
+                             own_picks_db=os.path.join(td, "picks.db"), longterm_db=os.path.join(td, "lt.db"))
 
     @staticmethod
     def _text(renderable: Any, width: int = 150) -> str:
@@ -307,7 +308,7 @@ class HubAndRenderingTests(unittest.TestCase):
                             chain_db="/nonexistent.db", with_peer_iv=False)
             out = self._text(R.card_renderable(card))
         for needle in ("1 Verdict", "2 Price structure", "3 Peers", "4 Options", "5 Events",
-                       "6 Where every number came from", "TESTED SETUP", "Corr w/ XOM", "Beta vs SPY",
+                       "7 Where every number came from", "6 Portfolio fit", "TESTED SETUP", "Corr w/ XOM", "Beta vs SPY",
                        "MODEL, not market-implied"):
             self.assertIn(needle, out)
 

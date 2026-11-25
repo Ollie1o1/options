@@ -16,6 +16,8 @@ opt refresh                           # 1-command daily price + FRED update + Ra
 opt today                             # 10-second Morning Action Brief (Market Mood + Core TFSA weights + top setups)
 opt discover                          # Top-down: ① Market → ② Sectors (PROVEN rank) → ③ Ideas (labelled lenses)
 opt card NVDA                         # ④ Evidence Card — verdict, peers, options odds, every number's source & date
+opt discover --forward                # forward record of the lenses (outcomes locked until 2027-05-25, preregistered)
+opt lab fills                         # Test O1 execution check: X/20 real limit fills, mean k vs 0.35
 opt radar --live-options              # Unified Radar (+ optional live 60-120d wide ETF spread scan)
 ```
 

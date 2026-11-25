@@ -565,13 +565,15 @@ class TestDriftHealthLines(unittest.TestCase):
         conn.commit(); conn.close()
         return path
 
-    def _cfg(self, d, ledger_path, window=None, **allocation):
+    def _cfg(self, d, ledger_path, window=None, blocked=None, **allocation):
         import json, os
         allocation.setdefault("enabled", True)
         allocation.setdefault("eligible_strategies",
                               ["Bull Put", "Long Call", "Long Put", "Short Put"])
         allocation.setdefault("ledger_path", ledger_path)
         cfg = {"auto_log": {"allocation": allocation}}
+        if blocked is not None:
+            cfg["auto_log"]["blocked_strategies"] = list(blocked)
         path = os.path.join(d, "config.json")
         with open(path, "w") as fh:
             json.dump(cfg, fh)
@@ -629,6 +631,49 @@ class TestDriftHealthLines(unittest.TestCase):
             lines = sa.drift_health_lines(ledger, cfg, window=5)
             self.assertIn("[OK]", lines[0])
             self.assertIn("too few", lines[0].lower())
+
+    def test_a_blocked_structure_is_dropped_and_the_window_starts_after_it(self):
+        # 2026-11-25: Bull Put blocked by config; the window was 20 pre-block
+        # Bull Puts + 10 post-block entries, judged against weights that still
+        # held Bull Put at ~70% — the survivors read as "over-represented".
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            recent = ["Bull Put"] * 20 + ["Long Put"] * 4 + ["Long Call"] * 3 + ["Short Put"] * 3
+            ledger = self._ledger(d, recent)
+            lines = sa.drift_health_lines(ledger, self._cfg(d, ledger, blocked=["Bull Put"]), window=30)
+            self.assertIn("since Bull Put blocked", lines[0])
+            self.assertIn("10 of last 30", lines[0])
+            self.assertFalse(any("Bull Put:" in ln for ln in lines[1:]))
+            unblocked = sa.drift_health_lines(ledger, self._cfg(d, ledger), window=30)
+            self.assertNotIn("blocked", unblocked[0])
+
+    def test_survivor_flag_names_structures_with_no_entries(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            recent = ["Bull Put"] * 5 + ["Long Put"] * 12
+            ledger = self._ledger(d, recent)
+            lines = sa.drift_health_lines(ledger, self._cfg(d, ledger, blocked=["Bull Put"]), window=30)
+            if "[OK]" in lines[0]:
+                self.skipTest("posterior put Long Put on top; nothing to flag")
+            self.assertTrue(any("0 entries from" in ln and "Short Put" in ln for ln in lines[1:]))
+
+    def test_too_few_entries_since_the_block_stays_quiet(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ledger = self._ledger(d, ["Bull Put"] * 25 + ["Long Put"] * 5)
+            lines = sa.drift_health_lines(ledger, self._cfg(d, ledger, blocked=["Bull Put"]), window=30)
+            self.assertIn("[OK]", lines[0])
+            self.assertIn("too few", lines[0].lower())
+            self.assertIn("since Bull Put blocked", lines[0])
+
+    def test_every_structure_blocked_is_ok(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ledger = self._ledger(d, ["Bull Put"] * 12)
+            allb = ["Bull Put", "Long Call", "Long Put", "Short Put"]
+            lines = sa.drift_health_lines(ledger, self._cfg(d, ledger, blocked=allb), window=30)
+            self.assertIn("[OK]", lines[0])
+            self.assertIn("blocked", lines[0])
 
 
 if __name__ == "__main__":

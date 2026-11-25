@@ -280,7 +280,11 @@ def render_main() -> None:
             if live_opps:
                 st.success(f"Updated {len(live_opps)} live 60–120d ETF spread(s).")
             else:
-                st.warning("0 live ETF spreads cleared <=25% cost (after-hours quotes may be wide); kept cached quotes.")
+                st.warning("0 live ETF spreads passed the Test O1 rule; kept cached quotes.")
+            skipped = dict(getattr(provider, "last_live_skipped", {}) or {})
+            if skipped:
+                with st.expander(f"Not shown ({len(skipped)}), and why"):
+                    st.markdown("\n".join(f"- **{tk}** — {why}" for tk, why in sorted(skipped.items())))
         if st.button("📥 Update Daily OHLCV Prices", width="stretch"):
             with st.spinner("Refreshing Yahoo daily closes…"):
                 res = provider.update_prices(expand_universe=False)
@@ -295,6 +299,11 @@ def render_main() -> None:
         st.caption(f"Disk Free: {health.get('disk_free_gb', '?')} GB [{health.get('worst', 'OK')}]")
         fills = health.get("fills") or {}
         st.caption(f"Real Fills Logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)}")
+        o1 = health.get("o1_fills") or {}
+        if o1:
+            from src.fill_experiment import o1_progress_line
+
+            st.caption(o1_progress_line(o1) + " · rule: docs/PREREG_O1_FILL_K_20261125.md")
         st.caption("Live Execution: OFF (research/manual only)")
 
     snap: RadarSnapshot = st.session_state.radar_snap

@@ -7051,6 +7051,13 @@ def main():
             set_cboe_fallback(not _broad_sweep)
         except Exception:
             pass
+        try:
+            # "spread" (default): the per-symbol expiration budget is spaced
+            # across the DTE window instead of spent on its front few dates.
+            from .data_fetching import set_expiry_selection
+            set_expiry_selection(config.get("expiry_selection", "spread"))
+        except Exception:
+            pass
 
         if is_my_list_mode:
             mode = "Discovery scan"
@@ -7216,7 +7223,7 @@ def main():
                 trader_profile = "swing"
             elif _preset_choice in ("C", "CUSTOM", "CUSTOMIZE"):
                 try:
-                    max_expiries = int(prompt_input("How many nearest expirations to scan",
+                    max_expiries = int(prompt_input("How many expirations to scan (spread across the DTE window)",
                                                     _default_expiries))
                 except Exception:
                     print("Invalid number for expirations.")

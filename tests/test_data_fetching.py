@@ -4,13 +4,15 @@
 def test_chain_cache_hit_returns_cached():
     """fetch_options_yfinance should return the cached value without re-fetching.
 
-    The cache key is the tuple ``(symbol, min_dte, max_dte)``; a plain-string
-    key would miss the cache and trigger a live network fetch.
+    The cache key is the tuple ``(symbol, min_dte, max_dte, max_expiries,
+    expiry_method)`` — the same window with a different expiration budget or
+    selection method selects different expirations. A plain-string key would
+    miss the cache and trigger a live network fetch.
     """
-    from src.data_fetching import fetch_options_yfinance, clear_chain_cache, _CHAIN_CACHE
+    from src.data_fetching import fetch_options_yfinance, clear_chain_cache, _CHAIN_CACHE, expiry_selection
     clear_chain_cache()
     sentinel = {"df": "cached_value", "context": {"test": True}}
-    _CHAIN_CACHE[("TEST_SYMBOL", None, None)] = sentinel
+    _CHAIN_CACHE[("TEST_SYMBOL", None, None, 2, expiry_selection())] = sentinel
     try:
         result = fetch_options_yfinance("TEST_SYMBOL", 2)
         assert result is sentinel

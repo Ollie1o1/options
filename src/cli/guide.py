@@ -9,7 +9,7 @@ from rich.prompt import Confirm, Prompt
 
 from src.own_picks import list_equity_picks, log_equity_pick
 from src.radar import RadarSnapshot, TickerDossier, build_dossier, load_cached_radar, run_radar
-from src.radar.live_options import refresh_local_prices, scan_live_etf_wide_spreads
+from src.radar.live_options import refresh_local_prices
 from src.structure.express import compare_vehicles
 from src.structure.types import DetailedView, VehicleComparison
 from .render import make_console, render_core_allocation, render_dossier, render_express_table, render_radar_table
@@ -307,7 +307,10 @@ def guide_cmd(ctx: click.Context) -> None:
 
         elif choice == "4":
             console.print("[bold]Scanning live 60–120 day option chains on liquid ETFs…[/bold]")
-            live_opps, warns = scan_live_etf_wide_spreads()
+            from src.radar.live_options import scan_live_etf_wide_spreads_detailed
+
+            live_res = scan_live_etf_wide_spreads_detailed()
+            live_opps, warns = live_res.opportunities, live_res.warnings
             if live_opps:
                 console.print(
                     Panel(
@@ -320,6 +323,14 @@ def guide_cmd(ctx: click.Context) -> None:
                 console.print(render_radar_table(live_opps, title="Live 60–120d ETF Spreads (Sorted by Lowest Friction)"))
             else:
                 console.print("[#d6a452]No live ETF spreads cleared the <=25% spread-cost filter right now.[/#d6a452]")
+            if live_res.skipped:
+                console.print("[bold]Not shown, and why:[/bold]")
+                for tk, why in sorted(live_res.skipped.items()):
+                    console.print(f"  [dim]{tk:<5}[/dim] {why}")
+            console.print(
+                "[dim]Rule (Test O1, measured on SPY 2010-23): nearest 90 DTE in 60-120, short leg nearest "
+                f"0.25 delta, long leg 5% of spot further out · deltas from mid-implied IV, r = {live_res.rate_source}[/dim]"
+            )
             if warns:
                 console.print(f"[dim]Notes: {', '.join(warns[:3])}[/dim]")
 

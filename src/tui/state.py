@@ -59,6 +59,7 @@ class DeskDataProvider:
         self.playbooks_path = playbooks_path
         self._dossier_cache: Dict[str, TickerDossier] = {}
         self._hub: Optional[Any] = None
+        self.last_live_skipped: Dict[str, str] = {}
 
     def get_radar(self, *, refresh: bool = False) -> RadarSnapshot:
         if refresh:
@@ -78,7 +79,12 @@ class DeskDataProvider:
         return snap
 
     def get_live_etf_options(self) -> Tuple[List[Opportunity], List[str]]:
-        return scan_live_etf_wide_spreads()
+        from src.radar.live_options import scan_live_etf_wide_spreads_detailed
+
+        res = scan_live_etf_wide_spreads_detailed()
+        # ticker -> plain-English reason it produced no spread (shown by the desk)
+        self.last_live_skipped = dict(res.skipped)
+        return res.opportunities, res.warnings
 
     def update_prices(self, *, expand_universe: bool = False) -> Dict[str, Any]:
         self._dossier_cache.clear()
@@ -319,6 +325,12 @@ class DeskDataProvider:
         free_gb = round(shutil.disk_usage(repo_path(".")).free / (1024 ** 3), 2)
         worst = "OK" if free_gb >= 15 else ("WARN" if free_gb >= 8 else "STALE")
         fills = fill_rate_summary(db_path=self.fills_db)
+        try:
+            from src.fill_experiment import o1_fill_verdict
+
+            o1 = o1_fill_verdict(self.fills_db)
+        except Exception:
+            o1 = {}
 
         # Read real maintenance health + OHLCV freshness when available
         maint_summary = ""
@@ -364,6 +376,7 @@ class DeskDataProvider:
             "worst": worst,
             "live_execution": False,
             "fills": fills,
+            "o1_fills": o1,
             "maintenance_summary": maint_summary,
             "ohlcv_symbols": ohlcv_syms,
             "ohlcv_last": ohlcv_last,
@@ -371,5 +384,6 @@ class DeskDataProvider:
                 "2027-01-15: Estimate Revisions Arm B + Bull Put §2",
                 "2027-01-20: B1-F ETF Bear Call Forward",
                 "2027-03-15: E2 Earnings Forward",
+                "2027-05-25: Discover lens forward read (26 weeks)",
             ],
         }

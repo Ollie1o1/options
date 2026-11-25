@@ -59,6 +59,7 @@ class EvidenceCard:
     lens_hits: List[Tuple[str, str]] = field(default_factory=list)
     provenance: List[Provenance] = field(default_factory=list)
     prob_label: str = ""
+    fit: Optional[Any] = None          # portfolio_fit.PortfolioFit when holdings were supplied
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class EvidenceCard:
             "lens_hits": [list(x) for x in self.lens_hits],
             "provenance": [asdict(p) for p in self.provenance],
             "prob_label": self.prob_label,
+            "portfolio_fit": self.fit.to_dict() if self.fit is not None else None,
         }
 
 
@@ -114,6 +116,7 @@ def build_evidence_card(
     estimates_as_of: Optional[str] = None,
     with_peer_iv: bool = True,
     today: Optional[dt.date] = None,
+    holdings: Optional[Sequence[Any]] = None,
 ) -> EvidenceCard:
     sym = ticker.upper().strip()
     today = today or dt.date.today()
@@ -189,6 +192,18 @@ def build_evidence_card(
     gen = snapshot.generated_at[:10] if snapshot is not None else None
     prov.append(Provenance("Active playbook signals", os.path.basename(cache_path), gen or _mtime_date(cache_path),
                            "Radar snapshot"))
+    fit: Optional[Any] = None
+    if holdings is not None:
+        from src.outlook.backtest import DEFAULT_UNIVERSE
+        from src.radar.scanners import get_sector_etf
+
+        from .portfolio_fit import portfolio_fit
+
+        fit = portfolio_fit(sym, holdings=holdings, ohlcv=ohlcv, sector_of=get_sector_etf,
+                            universe=DEFAULT_UNIVERSE)
+        srcs = sorted({h.source for h in holdings}) or ["none recorded"]
+        prov.append(Provenance("Portfolio fit", "own_picks.db · longterm.db · sleeve targets", last_bar,
+                               "holdings: " + ", ".join(srcs)))
     for p in prov:
         p.age_days = _age(p.as_of, today)
 
@@ -197,7 +212,7 @@ def build_evidence_card(
         built_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         verdict=verdict, verdict_style=VERDICT_STYLE[verdict],
         reasons=reasons, warnings=warnings, dossier=dossier, sector=sector_row, peers=strip,
-        lens_hits=hits, provenance=prov, prob_label=probability_label(dossier),
+        lens_hits=hits, provenance=prov, prob_label=probability_label(dossier), fit=fit,
     )
 
 

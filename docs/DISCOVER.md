@@ -47,6 +47,16 @@ Green/red on numbers only ever means up/down, never buy/sell.
 `opt discover --ledger` lists the ideas already tested here that do **not** work
 (analyst actions, news types, PEAD, breakouts, pre-earnings run-ups, …) so they are not re-chased.
 
+### Forward record — how a label can change
+
+Every trading day after the close, maintenance records what each lens listed
+(`data/lens_forward.db`, keyed on each row's own data date, so a stale cache counts once).
+`opt discover --forward` shows the record; outcomes stay **locked until 2027-05-25** and 26
+complete lens-weeks, then are read by the rule frozen in
+[PREREG_DISCOVER_LENS_FORWARD_20261125.md](PREREG_DISCOVER_LENS_FORWARD_20261125.md)
+(one lens-week = one observation, excess vs SPY net of 10 bps, Bonferroni 99.17% CI). A read
+*proposes* a label change; a human makes it. `opt discover --record` records by hand.
+
 ## Card verdicts
 
 `TESTED SETUP` (a PROVEN/PROMISING playbook fired, nothing flags it) · `SETUP + WARNINGS` ·
@@ -54,6 +64,12 @@ Green/red on numbers only ever means up/down, never buy/sell.
 when the stock's sector ETF is held by the sleeve, the card says owning the ETF is the tested way
 to hold that exposure). The ±5% odds say whether they are **market-implied** (SVI density from an
 archived chain) or a **MODEL** (lognormal on IV or realized vol).
+
+Card sections: 1 Verdict · 2 Price structure · 3 Peers · 4 Options & market-implied odds ·
+5 Events, revisions & news · **6 Portfolio fit** (same-sector count and 126-session co-movement
+with what you hold — own picks, long-term fills, and the core sleeve's target ETFs — plus the
+least-correlated sleeve ETFs; descriptive, thresholds are rules of thumb) · 7 Where every number
+came from.
 
 ## Data & freshness
 

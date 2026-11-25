@@ -155,6 +155,7 @@ class DeskApp(App[None]):
         self.focused_ticker: str = "SPY"
         self.focused_spot: float = 100.0
         self.focused_playbook: str = "equity_pullback"
+        self.focused_opp: Optional[Opportunity] = None
         self._last_vehicles: List[VehicleComparison] = []
         self._status_msg: str = ""
         self._wb_loaded_ticker: Optional[str] = None
@@ -299,6 +300,7 @@ class DeskApp(App[None]):
             self.focused_ticker = first.ticker
             self.focused_spot = first.spot
             self.focused_playbook = first.playbook_id
+            self.focused_opp = first
             self._update_radar_dossier(first.ticker)
         self._wb_loaded_ticker = None
         active = self.query_one("#main-tabs", TabbedContent).active
@@ -554,15 +556,17 @@ class DeskApp(App[None]):
         ohlcv_last = h.get("ohlcv_last")
         ohlcv_s = f" · OHLCV: {ohlcv_n} syms ({ohlcv_last})" if ohlcv_n else ""
         maint_s = f" · {maint}" if maint else ""
-        k_groups = fills.get("groups") or []
-        k_str = ""
-        if k_groups:
-            med_k = k_groups[0].get("median_k")
-            if med_k is not None:
-                k_str = f" (med k={med_k:.2f}, goal <=0.35)"
+        o1 = h.get("o1_fills") or {}
+        if o1:
+            from src.fill_experiment import o1_progress_line
+
+            o1_str = o1_progress_line(o1)
+        else:
+            o1_str = "TEST O1 FILLS — unavailable"
         lines = [
             f"[bold]OPS HEALTH:[/] Disk {h.get('disk_free_gb', '?')} GB free [{h.get('worst', 'OK')}]{ohlcv_s}{maint_s}",
-            f"[bold]EXECUTION:[/] Live OFF · Real Limit Fills Logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)}{k_str} (press [f] to log)",
+            f"[bold]EXECUTION:[/] Live OFF · all real limit fills logged: {fills.get('total_filled', 0)}/{fills.get('total_attempts', 0)} (press \\[f] to log)",
+            f"[bold]{o1_str}[/] · rule: docs/PREREG_O1_FILL_K_20261125.md",
             "[bold]PENDING FORWARD READOUTS:[/] " + "  |  ".join(h.get("readouts") or []),
         ]
         self.query_one("#lab-health-box", Static).update("\n".join(lines))
@@ -587,8 +591,14 @@ class DeskApp(App[None]):
     def _worker_live_options(self) -> None:
         try:
             live_opps, _warns = self.provider.get_live_etf_options()
+            skipped: Dict[str, str] = dict(getattr(self.provider, "last_live_skipped", {}) or {})
 
             def _merge() -> None:
+                if skipped:
+                    # Say which ETFs produced nothing and why (thin Yahoo quotes vs. the rule).
+                    lines = [f"{tk}: {why}" for tk, why in sorted(skipped.items())]
+                    self.notify("\n".join(lines[:11]), title="Live ETF spreads — not shown, and why",
+                                severity="information", timeout=15)
                 if self.snapshot is not None and live_opps:
                     # Replace both prior LIVE_CHAIN and archived etf_wide_spread rows so
                     # fresh live quotes supersede archived ones cleanly without duplicates.
@@ -770,6 +780,7 @@ class DeskApp(App[None]):
                 self.focused_ticker = opp.ticker
                 self.focused_spot = opp.spot
                 self.focused_playbook = opp.playbook_id
+                self.focused_opp = opp
                 self._update_radar_dossier(opp.ticker)
             except (ValueError, IndexError):
                 pass
@@ -910,10 +921,25 @@ class DeskApp(App[None]):
             self._render_lab()
             self._set_status(f"Fill logged for {res['ticker']}")
 
-        self.push_screen(
-            LogFillModal(ticker=self.focused_ticker, structure="Bull Put", side="SELL"),
-            _after_fill,
-        )
+        opp = self.focused_opp
+        ex = (opp.extra or {}) if opp is not None else {}
+        if (opp is not None and opp.playbook_id == "etf_wide_spread" and opp.ticker == self.focused_ticker
+                and ex.get("credit_cross") is not None and ex.get("credit_mid") is not None):
+            # Pre-fill the SPREAD's own quote, so k is measured the way Test O1
+            # assumed it: bid = natural credit, ask = the far side.
+            nat, mid = float(ex["credit_cross"]), float(ex["credit_mid"])
+            kind = "Bull Put" if opp.direction == "LONG" else "Bear Call"
+            modal = LogFillModal(
+                ticker=opp.ticker,
+                structure=f"O1 {kind} {ex.get('short_strike', 0):g}/{ex.get('long_strike', 0):g} {ex.get('expiration', '')}",
+                side="SELL",
+                limit_price=float(ex.get("walk_away_limit") or mid),
+                bid=nat,
+                ask=round(2.0 * mid - nat, 2),
+            )
+        else:
+            modal = LogFillModal(ticker=self.focused_ticker, structure="Bull Put", side="SELL")
+        self.push_screen(modal, _after_fill)
 
 
 def run_desk(*, initial_tab: str = "today", offline: bool = False) -> None:

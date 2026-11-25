@@ -110,6 +110,10 @@ def main(argv: list[str]) -> int:
     os.environ.setdefault(
         "OPTIONS_CANDIDATE_DB",
         os.path.join(tempfile.gettempdir(), "options_test_candidates.db"))
+    # Same for the Discover lens forward record (src/topdown/forward_log.py).
+    os.environ.setdefault(
+        "OPTIONS_LENS_FORWARD_DB",
+        os.path.join(tempfile.gettempdir(), "options_test_lens_forward.db"))
 
     pattern = argv[1] if len(argv) > 1 else ""
     paths = sorted(

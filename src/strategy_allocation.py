@@ -378,21 +378,24 @@ MIN_WINDOW_FOR_DRIFT = 10
 
 
 def _entered_mix(db_path: str, eligible: Sequence[str],
-                 window: int) -> Dict[str, int]:
+                 window: int, after_entry_id: Optional[int] = None) -> Dict[str, int]:
     """Strategy counts over the most recent `window` allocation-eligible
     entries, open or closed — a still-open position was still a pick, and
-    excluding it would make the check blind to the days closest to now."""
+    excluding it would make the check blind to the days closest to now.
+    `after_entry_id` limits the window to entries made after that one."""
     eligible = [str(s) for s in eligible]
     if not eligible:
         return {}
     placeholders = ",".join("?" * len(eligible))
+    after_sql = " AND entry_id > ?" if after_entry_id is not None else ""
     sql = (f"SELECT strategy_name FROM trades "
-          f"WHERE strategy_name IN ({placeholders}) "
+          f"WHERE strategy_name IN ({placeholders}){after_sql} "
           f"ORDER BY entry_id DESC LIMIT ?")
+    params: tuple = (*eligible, *(() if after_entry_id is None else (int(after_entry_id),)), window)
     conn: Optional[sqlite3.Connection] = None
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        rows = conn.execute(sql, (*eligible, window)).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     except Exception:
         log.warning("strategy allocation drift: ledger unreadable at %s",
                    db_path, exc_info=True)
@@ -506,13 +509,65 @@ def drift_health_lines(db_path: str = "paper_trades.db",
         return [f"  {label:<14} no posterior yet — allowlist stands"
                f"{'':<10}[OK]"]
 
-    counts = _entered_mix(db_path, eligible, window)
+    # A structure in auto_log.blocked_strategies is dropped BEFORE the
+    # allocation is consulted (options_screener._auto_log_decision), so every
+    # other structure's admission is unchanged — but its share of the entered
+    # mix is not. Comparing the post-block mix against weights that still
+    # include the blocked structure flagged the survivors as "over-represented"
+    # (2026-11-25: Bull Put blocked 10-15 → Long Put 10/30 vs 16% WARN, the
+    # 30 being 20 pre-block Bull Puts + 10 Long Puts). So: drop blocked
+    # structures, renormalise the rest, and count only entries made after the
+    # last blocked-structure entry.
+    blocked = [s for s in ((cfg.get("auto_log") or {}).get("blocked_strategies") or [])
+               if s in eligible]
+    weights = dict(alloc.weights)
+    after_id: Optional[int] = None
+    note = ""
+    if blocked:
+        active = [s for s in eligible if s not in blocked]
+        total = sum(w for s, w in weights.items() if s in active)
+        if not active or total <= 0:
+            return [f"  {label:<14} every eligible structure is blocked "
+                   f"({', '.join(blocked)}){'':<10}[OK]"]
+        weights = {s: w / total for s, w in weights.items() if s in active}
+        eligible = active
+        after_id = _last_entry_id(db_path, blocked)
+        note = f" since {', '.join(blocked)} blocked (rest renormalised)"
+
+    counts = _entered_mix(db_path, eligible, window, after_entry_id=after_id)
     n = sum(counts.values())
     if n < MIN_WINDOW_FOR_DRIFT:
-        return [f"  {label:<14} only {n} of the last {window} entries are "
-               f"allocation-eligible — too few to read{'':<3}[OK]"]
+        return [f"  {label:<14} only {n} allocation-eligible entries{note or f' in the last {window}'}"
+               f" — too few to read{'':<3}[OK]"]
 
-    sev, detail = drift_severity(alloc.weights, counts)
-    header = (f"  {label:<14} {n} of last {window} eligible entries vs "
+    sev, detail = drift_severity(weights, counts)
+    header = (f"  {label:<14} {n} of last {window} eligible entries{note} vs "
              f"target weights{'':<5}[{sev}]")
+    absent = [s for s in eligible if counts.get(s, 0) == 0 and weights.get(s, 0) > 0]
+    if sev != "OK" and absent:
+        # Supply and allocation look the same from the ledger: a structure
+        # whose candidates never clear the other gates enters nothing, and the
+        # survivors' share rises with no allocation defect at all.
+        detail.append(f"     0 entries from {', '.join(absent)} — if none of their candidates "
+                      "clear the other gates, the rest's share rises without any allocation defect")
     return [header] + detail
+
+
+def _last_entry_id(db_path: str, strategies: Sequence[str]) -> Optional[int]:
+    """Highest entry_id among `strategies`, or None (ledger unreadable / none entered)."""
+    strategies = [str(s) for s in strategies]
+    if not strategies:
+        return None
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        row = conn.execute(
+            f"SELECT MAX(entry_id) FROM trades WHERE strategy_name IN ({','.join('?' * len(strategies))})",
+            strategies).fetchone()
+    except Exception:
+        log.warning("strategy allocation drift: ledger unreadable at %s", db_path, exc_info=True)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    return None if not row or row[0] is None else int(row[0])
