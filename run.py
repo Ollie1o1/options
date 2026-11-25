@@ -35,8 +35,8 @@ import subprocess
 # fine, just invisible until an ~8KB buffer fills or the process exits.
 # Force line buffering unconditionally so prompts and progress always show
 # immediately, regardless of how this process ends up connected to a tty.
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
+sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 
@@ -192,8 +192,9 @@ _STAMP_PATH = os.path.join(_project_root, "venv", ".provenance_probe_ok")
 #                     in ~1-3s; a provenance-poisoned venv takes 15-60s+. Anything
 #                     above 6s is already a poor user experience.
 #   _PROBE_TIMEOUT_S — hard ceiling. Beyond this we abort the subprocess.
-_PROBE_BUDGET_S = 6.0
-_PROBE_TIMEOUT_S = 15.0
+# Windows module loading is naturally slower (antivirus, NTFS) — allow more headroom.
+_PROBE_BUDGET_S = 15.0 if sys.platform == "win32" else 6.0
+_PROBE_TIMEOUT_S = 30.0 if sys.platform == "win32" else 15.0
 
 _FALLBACK_VENV = os.path.expanduser("~/.venvs/options/bin/python")
 # Both probe verdicts are cached. Freshness is anchored on pyvenv.cfg (rewritten
@@ -255,12 +256,14 @@ def _probe_stamp_fresh(path: str) -> bool:
 
 def _venv_status() -> str:
     """Return "ok"|"error"|"slow"|"timeout" for the project venv (cached both ways)."""
-    if sys.platform != "darwin":
-        # Non-Darwin: skip the cache + slow check, just probe import success.
+    if sys.platform not in ("darwin", "win32"):
+        # Other non-Darwin platforms: skip the cache + slow check, just probe import success.
         _say_checking()
         status, _ = _probe_imports(_venv_python)
         return status
-    if not os.path.isdir(os.path.join(_project_root, "venv", "lib")):
+    # macOS: quick sanity check that the venv has a lib tree.
+    # Windows uses "Lib" (capital L); skip this check there.
+    if sys.platform == "darwin" and not os.path.isdir(os.path.join(_project_root, "venv", "lib")):
         return "error"
     if _probe_stamp_fresh(_STAMP_PATH):
         return "ok"
@@ -333,14 +336,28 @@ def _alternative_interpreters() -> list:
 
 def _print_rebuild_instructions():
     print()
-    print("Fix (run from Terminal.app / iTerm / Ghostty — NOT a coding-CLI):")
-    print(f"  cd {_project_root}")
-    if os.path.isdir(os.path.join(_project_root, "venv")):
-        print("  rm -rf venv")
-    print("  python3 -m venv venv")
-    print("  venv/bin/pip install -r requirements-lock.txt")
-    print()
-    print("Verify by re-running: python3 run.py")
+    _win = sys.platform == "win32"
+    # requirements-lock.txt pins numpy 2.4.3+ which requires Python 3.11+;
+    # fall back to the loose requirements.txt on older interpreters.
+    _lock = "requirements-lock.txt" if sys.version_info >= (3, 11) else "requirements.txt"
+    if _win:
+        print("Fix (run from PowerShell or CMD — NOT a coding-CLI):")
+        print(f"  cd \"{_project_root}\"")
+        if os.path.isdir(os.path.join(_project_root, "venv")):
+            print("  rmdir /s /q venv")
+        print("  python -m venv venv")
+        print(f"  venv\\Scripts\\pip install -r {_lock}")
+        print()
+        print("Verify by re-running: python run.py")
+    else:
+        print("Fix (run from Terminal.app / iTerm / Ghostty — NOT a coding-CLI):")
+        print(f"  cd {_project_root}")
+        if os.path.isdir(os.path.join(_project_root, "venv")):
+            print("  rm -rf venv")
+        print("  python3 -m venv venv")
+        print(f"  venv/bin/pip install -r {_lock}")
+        print()
+        print("Verify by re-running: python3 run.py")
 
 _project_venv_status = _venv_status() if os.path.isfile(_venv_python) else "missing"
 
@@ -367,9 +384,14 @@ if _project_venv_status != "ok":
             "timeout": "timing out on imports",
         }.get(_project_venv_status, _project_venv_status)
         print(f"NOTICE: project venv is {reason} — falling back to {_fb_python}")
-        print("        Rebuild venv/ from your own Terminal when convenient:")
-        print(f"          cd {_project_root} && rm -rf venv && python3 -m venv venv")
-        print("          venv/bin/pip install -r requirements-lock.txt")
+        print("        Rebuild venv/ when convenient (see README Setup section).")
+        _lock_fb = "requirements-lock.txt" if sys.version_info >= (3, 11) else "requirements.txt"
+        if sys.platform == "win32":
+            print(f"          cd \"{_project_root}\" && rmdir /s /q venv && python -m venv venv")
+            print(f"          venv\\Scripts\\pip install -r {_lock_fb}")
+        else:
+            print(f"          cd {_project_root} && rm -rf venv && python3 -m venv venv")
+            print(f"          venv/bin/pip install -r {_lock_fb}")
         _venv_python = _fb_python
     else:
         if _project_venv_status == "missing":
@@ -377,14 +399,20 @@ if _project_venv_status != "ok":
             print("       Looked for: venv/, .venv/, an activated venv, ~/.venvs/options.")
             print("       First-time setup is three commands:")
         elif _project_venv_status in ("slow", "timeout"):
-            print("ERROR: venv imports are slow or hanging — macOS provenance poisoning.")
-            print()
-            print("Cause: this venv was created by a sandboxed shell, so every")
-            print("site-packages file carries the kernel-set com.apple.provenance xattr.")
-            print("macOS Gatekeeper does a per-file security check on import; with")
-            print("~10k files in the venv that adds up to 5-60s+ of pure overhead at")
-            print("every startup. The xattr cannot be removed (kernel-protected) — the")
-            print("only durable fix is to recreate the venv from a non-sandboxed shell.")
+            if sys.platform == "darwin":
+                print("ERROR: venv imports are slow or hanging — macOS provenance poisoning.")
+                print()
+                print("Cause: this venv was created by a sandboxed shell, so every")
+                print("site-packages file carries the kernel-set com.apple.provenance xattr.")
+                print("macOS Gatekeeper does a per-file security check on import; with")
+                print("~10k files in the venv that adds up to 5-60s+ of pure overhead at")
+                print("every startup. The xattr cannot be removed (kernel-protected) — the")
+                print("only durable fix is to recreate the venv from a non-sandboxed shell.")
+            else:
+                print("ERROR: venv imports are slow or hanging — the venv may be broken.")
+                print()
+                print("Cause: the installed packages may be corrupt or incompatible.")
+                print("Recreating the venv is the fastest fix.")
         else:
             print("ERROR: project venv imports fail (broken install).")
         _print_rebuild_instructions()
@@ -413,9 +441,12 @@ _target_module = "src.launcher" if not _argv else "src.options_screener"
 # venv is active" ran the screener inside whatever venv happened to be
 # activated, including one the probe above had just found broken.
 if os.path.abspath(_venv_python) != os.path.abspath(sys.executable):
+    _env = os.environ.copy()
+    _env.setdefault("PYTHONIOENCODING", "utf-8")
     sys.exit(subprocess.call(
         [_venv_python, "-u", "-m", _target_module] + _argv,
         cwd=_project_root,
+        env=_env,
     ))
 
 sys.argv = [sys.argv[0]] + _argv

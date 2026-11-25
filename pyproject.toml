@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "options-desk"
 version = "2.0.0"
 description = "Daily Stock + Option Trading Desk with Unified Radar, Express Workbench, and Textual TUI"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 [project.scripts]
 opt = "src.cli.main:cli"

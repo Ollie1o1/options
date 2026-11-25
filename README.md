@@ -204,15 +204,41 @@ CI runs the suite on **3.11 and 3.12**; it is also developed and run daily on
 **3.14**. 3.10 is not tested — the code may well run on it, but nothing here
 verifies that.
 
+> **Python 3.10 users:** `requirements-lock.txt` pins `numpy==2.4.3` which requires Python ≥ 3.11.
+> Use `requirements.txt` instead (loose bounds, works on 3.10).
+
+**Mac/Linux:**
 ```bash
 git clone https://github.com/Ollie1o1/options.git
 cd options
 python3 -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements-lock.txt   # pinned, reproducible — recommended
 ```
 
-Install from **`requirements-lock.txt`** (frozen, exact versions) rather than the loose `requirements.txt`. yfinance and several other dependencies routinely break between minor/major versions, so the pinned lock file is the only reproducible install path; `requirements.txt` is a loose fallback for development only.
+**Windows (PowerShell or CMD):**
+```bat
+git clone https://github.com/Ollie1o1/options.git
+cd options
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements-lock.txt
+```
+
+Install from **`requirements-lock.txt`** (frozen, exact versions) rather than the loose `requirements.txt`. yfinance and several other dependencies routinely break between minor/major versions, so the pinned lock file is the only reproducible install path; `requirements.txt` is a loose fallback for Python 3.10 or development only.
+
+### First-time data bootstrap (required after a fresh clone)
+
+The system stores daily price history locally in `data/equity_ohlcv.db`. This file is **not included in the repo** — without it the Radar, dashboard, and all scans produce empty results. After installing dependencies, run this once:
+
+```bash
+opt refresh --expand   # first time: downloads the full ~250 stock/ETF universe + FRED rates (~2–5 min)
+opt refresh            # daily: updates only symbols already in the database
+```
+
+On the **web dashboard** (`streamlit run src/dashboard.py`), press **"📥 Update Daily OHLCV Prices"** in the sidebar — that is the GUI equivalent. After it completes the dashboard will populate automatically.
+
+You only need `--expand` once on a fresh clone; from then on plain `opt refresh` (or the dashboard button) keeps prices current.
 
 The technical screener works out of the box — no API keys needed (uses Yahoo Finance). The AI layer requires an OpenRouter API key (see [Setup](#setup)).
 
@@ -238,6 +264,8 @@ That is the front door. It finds the right interpreter, sets the working
 directory, opens the launcher menu, and forwards every flag through to the
 screener — so `python run.py -ds` and `python run.py --ticker AAPL --auto`
 work the same way. Nothing else needs activating first.
+
+> **Fresh clone?** Run `opt refresh` once first to download price data — see [First-time data bootstrap](#first-time-data-bootstrap-required-after-a-fresh-clone) above. Without it the Radar and dashboard will show empty results.
 
 If something misbehaves, ask the install to describe itself:
 
