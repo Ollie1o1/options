@@ -112,11 +112,11 @@ def compute_tfsa_rebalance(
     deployed_after = 0.0
 
     for tk in all_etfs:
-        row = target_by_ticker.get(tk)
-        t_weight = float(row.get("target_weight", 0.0)) if row else 0.0
+        t_row: Optional[Dict[str, Any]] = target_by_ticker.get(tk)
+        t_weight = float(t_row.get("target_weight", 0.0)) if t_row else 0.0
         spot = (
-            float(row["spot"])
-            if (row and row.get("spot") and float(row["spot"]) > 0)
+            float(t_row["spot"])
+            if (t_row and t_row.get("spot") and float(t_row["spot"]) > 0)
             else extra_spots.get(tk, 0.0)
         )
         cur_sh = cur_map.get(tk, 0.0)

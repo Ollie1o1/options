@@ -177,12 +177,12 @@ def cluster_bootstrap_stats(
         return out
 
     # Pre-aggregate per cluster for O(n_boot * k) speed even with 100k+ trades!
-    c_n = np.empty(k, dtype=float)
-    c_sum_r = np.empty(k, dtype=float)
-    c_pos_r = np.empty(k, dtype=float)
-    c_neg_r = np.empty(k, dtype=float)
-    c_nx = np.empty(k, dtype=float)
-    c_sum_x = np.empty(k, dtype=float)
+    c_n: np.ndarray = np.empty(k, dtype=float)
+    c_sum_r: np.ndarray = np.empty(k, dtype=float)
+    c_pos_r: np.ndarray = np.empty(k, dtype=float)
+    c_neg_r: np.ndarray = np.empty(k, dtype=float)
+    c_nx: np.ndarray = np.empty(k, dtype=float)
+    c_sum_x: np.ndarray = np.empty(k, dtype=float)
 
     for idx, key in enumerate(keys):
         ct = by_cluster[key]
@@ -207,12 +207,17 @@ def cluster_bootstrap_stats(
 
     lo_q = 100.0 * (alpha / 2.0)
     hi_q = 100.0 * (1.0 - alpha / 2.0)
-    pf_method = "nearest" if np.any(np.isinf(boot_pf)) else "linear"
     out["mean_ret_ci"] = (float(np.percentile(boot_mean, lo_q)), float(np.percentile(boot_mean, hi_q)))
-    out["pf_ci"] = (
-        float(np.percentile(boot_pf, lo_q, method=pf_method)),
-        float(np.percentile(boot_pf, hi_q, method=pf_method)),
-    )
+    if np.any(np.isinf(boot_pf)):
+        out["pf_ci"] = (
+            float(np.percentile(boot_pf, lo_q, method="nearest")),
+            float(np.percentile(boot_pf, hi_q, method="nearest")),
+        )
+    else:
+        out["pf_ci"] = (
+            float(np.percentile(boot_pf, lo_q, method="linear")),
+            float(np.percentile(boot_pf, hi_q, method="linear")),
+        )
 
     tot_nx = np.sum(c_nx[idx_mat], axis=1)
     if np.all(tot_nx > 0):
@@ -254,12 +259,12 @@ def moving_block_bootstrap_stats(
     if k < min_clusters:
         return base
 
-    c_n = np.empty(k, dtype=float)
-    c_sum_r = np.empty(k, dtype=float)
-    c_pos_r = np.empty(k, dtype=float)
-    c_neg_r = np.empty(k, dtype=float)
-    c_nx = np.empty(k, dtype=float)
-    c_sum_x = np.empty(k, dtype=float)
+    c_n: np.ndarray = np.empty(k, dtype=float)
+    c_sum_r: np.ndarray = np.empty(k, dtype=float)
+    c_pos_r: np.ndarray = np.empty(k, dtype=float)
+    c_neg_r: np.ndarray = np.empty(k, dtype=float)
+    c_nx: np.ndarray = np.empty(k, dtype=float)
+    c_sum_x: np.ndarray = np.empty(k, dtype=float)
     for idx, key in enumerate(keys):
         ct = by_cluster[key]
         rs = np.array([t.net_return for t in ct], dtype=float)
@@ -288,12 +293,17 @@ def moving_block_bootstrap_stats(
 
     lo_q = 100.0 * (alpha / 2.0)
     hi_q = 100.0 * (1.0 - alpha / 2.0)
-    pf_method = "nearest" if np.any(np.isinf(boot_pf)) else "linear"
     base["mean_ret_ci"] = (float(np.percentile(boot_mean, lo_q)), float(np.percentile(boot_mean, hi_q)))
-    base["pf_ci"] = (
-        float(np.percentile(boot_pf, lo_q, method=pf_method)),
-        float(np.percentile(boot_pf, hi_q, method=pf_method)),
-    )
+    if np.any(np.isinf(boot_pf)):
+        base["pf_ci"] = (
+            float(np.percentile(boot_pf, lo_q, method="nearest")),
+            float(np.percentile(boot_pf, hi_q, method="nearest")),
+        )
+    else:
+        base["pf_ci"] = (
+            float(np.percentile(boot_pf, lo_q, method="linear")),
+            float(np.percentile(boot_pf, hi_q, method="linear")),
+        )
     tot_nx = np.sum(c_nx[idx_mat], axis=1)
     if np.all(tot_nx > 0):
         boot_ex = np.sum(c_sum_x[idx_mat], axis=1) / tot_nx

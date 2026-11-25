@@ -120,7 +120,7 @@ def log_real_fill(
             ),
         )
         con.commit()
-        return int(cur.lastrowid)
+        return int(cur.lastrowid or 0)
     finally:
         con.close()
 

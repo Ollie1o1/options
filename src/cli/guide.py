@@ -332,18 +332,18 @@ def guide_cmd(ctx: click.Context) -> None:
                 plan = compute_tfsa_rebalance(
                     snap.core_allocation,
                     account_usd=acct_v,
-                    current_holdings=parse_holdings_spec(hold_s),
+                    current_shares=parse_holdings_spec(hold_s),
                     fractional=frac,
                 )
                 lines = [
-                    f"Account: ${plan.account_usd:,.2f}  |  Target Cash: ${plan.cash_target_usd:,.2f} ({plan.cash_target_weight*100:.0f}%)",
-                    f"Residual Cash After Orders: ${plan.residual_cash_usd:,.2f}",
+                    f"Account: ${plan.account_usd:,.2f}  |  Vol Scale: {plan.vol_scale*100:.0f}%  |  Max Drift: {plan.max_drift_pct:.1f}%",
+                    f"Estimated Cash After Orders: ${plan.estimated_cash_after_usd:,.2f}",
                     "",
                 ]
                 for o in plan.orders:
                     lines.append(
-                        f"  {o.action:<4} {o.delta_shares:+7.2f} sh {o.ticker:<4} @ ${o.spot:7.2f} "
-                        f"({o.delta_usd:+9,.2f} · target {o.target_weight*100:.0f}%)"
+                        f"  {o.action:<7} {o.delta_shares:+7.2f} sh {o.ticker:<4} @ ${o.spot:7.2f} "
+                        f"({o.delta_usd:+9,.2f} · target {o.target_weight_pct:.0f}%)"
                     )
                 console.print(Panel("\n".join(lines), title="TFSA MONTHLY REBALANCE ORDERS", border_style="#5ec98d"))
             except Exception as exc:

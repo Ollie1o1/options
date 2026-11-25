@@ -4,7 +4,7 @@ Five filters, each recording WHY it rejected something - the user learns the
 logic instead of obeying a number.
 """
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .execution_plan import build_walk_away_ladder
 from .types import (BEARISH_STRUCTURES, BULLISH_STRUCTURES, CREDIT_STRUCTURES,

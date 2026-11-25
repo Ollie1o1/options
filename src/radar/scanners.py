@@ -382,10 +382,10 @@ def scan_vol_managed_outlook(
     if len(spy_cs) < 252:
         return [], [], {}
     spy_63 = float(spy_cs[-1] / spy_cs[-64] - 1.0)
-    spy_rv20 = trailing_rv(spy_cs, window=20)[-1]
+    spy_rv20 = float(trailing_rv(spy_cs, window=20)[-1])
     if not np.isfinite(spy_rv20) or spy_rv20 <= 0:
         spy_rv20 = sigma_target
-    vol_scale = float(np.clip(sigma_target / float(spy_rv20), 0.25, 1.00))
+    vol_scale = float(np.clip(sigma_target / spy_rv20, 0.25, 1.00))
 
     raw_factors: Dict[str, Dict[str, Optional[float]]] = {}
     etf_meta: Dict[str, Dict[str, float]] = {}

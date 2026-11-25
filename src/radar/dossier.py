@@ -207,7 +207,7 @@ def build_dossier(
         if np.isfinite(r14_arr[-1]):
             r14 = round(float(r14_arr[-1]), 1)
 
-        lv = support_resistance_levels(cs, current=spot)
+        lv = support_resistance_levels(cs.tolist(), current=spot)
         supports = (lv.get("supports") or [])[:2]
         resistances = (lv.get("resistances") or [])[:2]
 

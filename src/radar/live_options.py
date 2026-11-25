@@ -98,7 +98,8 @@ def refresh_local_prices(
     for i in range(0, len(to_fetch), chunk_size):
         chunk = to_fetch[i : i + chunk_size]
         res = refresh_universe(full, chunk, through=eff_through, pause=0.15)
-        sym_map = res.get("symbols") if isinstance(res.get("symbols"), dict) else {}
+        raw_sym = res.get("symbols")
+        sym_map: Dict[str, Any] = raw_sym if isinstance(raw_sym, dict) else {}
         inserted_bars += int(res.get("inserted") or 0)
         chunk_ok = 0
         for v in sym_map.values():
