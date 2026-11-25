@@ -14,6 +14,18 @@ from src.structure.types import DetailedView, VehicleComparison
 from .themes import THEME_ORDER
 
 
+def vol_label(snap: RadarSnapshot) -> str:
+    """'VIX 26.6 (inverted) · SPY RV20 31.8%' — the real VIX and SPY's realized vol, never conflated."""
+    parts = []
+    if snap.vix is not None:
+        term = " (inverted)" if snap.vix_term == "BACKWARDATION" else ""
+        parts.append(f"[bold]VIX[/] {snap.vix:.1f}{term}")
+    rv = getattr(snap, "spy_rv20", None)
+    if rv is not None:
+        parts.append(f"[bold]SPY RV20[/] {rv:.1f}%")
+    return " · ".join(parts) or "[bold]VIX[/] —"
+
+
 def format_ribbon_markup(
     snap: Optional[RadarSnapshot],
     health: Optional[Dict[str, Any]] = None,
@@ -25,7 +37,7 @@ def format_ribbon_markup(
     spy_s = f"{snap.spy_last:.2f}" if snap.spy_last is not None else "—"
     spy_c = f"{snap.spy_chg_1d_pct:+.1f}%" if snap.spy_chg_1d_pct is not None else ""
     qqq_c = f"{snap.qqq_chg_1d_pct:+.1f}%" if snap.qqq_chg_1d_pct is not None else "—"
-    vix_s = f"{snap.vix:.1f}" if snap.vix is not None else "—"
+    vix_s = vol_label(snap)
     p_col = "#5ec98d" if snap.regime_posture == "RISK_ON" else ("#e06c75" if snap.regime_posture == "RISK_OFF" else "#d6a452")
     lab_dot = ""
     if health and health.get("worst") in ("WARN", "STALE"):
@@ -39,7 +51,7 @@ def format_ribbon_markup(
     status_tag = f"  |  [bold #d6a452]{status_msg}[/]" if status_msg else ""
     return (
         f"[bold]SPY[/] {spy_s} {spy_c}  |  [bold]QQQ[/] {qqq_c}  |  "
-        f"[bold]RV/VIX[/] {vix_s} [bold {p_col}][{snap.regime_posture}][/]  |  "
+        f"{vix_s} [bold {p_col}][{snap.regime_posture}][/]  |  "
         f"Next: {snap.next_macro_event}{kalshi_tag}{lab_dot}{cache_tag}{status_tag}"
     )
 

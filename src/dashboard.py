@@ -6,6 +6,7 @@ Shares the exact same truth layer (`DeskDataProvider`, `configs/playbooks.json`,
 `src/pick_ranking.gate_board`) as the `opt` CLI and Textual TUI, adding rich
 interactive Plotly visualizations:
   1. Today & TFSA Core    — Market Mood + Kalshi odds + Interactive TFSA Rebalance Calculator
+  1b. Discover            — ① Market → ② Sectors (PROVEN rank) → ③ Ideas (labelled lenses) → ④ Evidence card
   2. Opportunity Radar    — Filter presets, sortable table, live Dossier + 60d Price/Levels Chart
   3. Shares vs Options    — Interactive sliders, Real-Chain Table, Market-vs-View RND & Payoff Overlay
   4. Book & Track Record  — Stock/ETF Picks (with exit alerts), Paper Options, Holdings & Fill Concession k
@@ -259,6 +260,8 @@ def render_main() -> None:
         if st.button("🔄 Refresh Local Radar", type="primary", width="stretch"):
             with st.spinner("Running local scanners…"):
                 st.session_state.radar_snap = provider.get_radar(refresh=True)
+                st.session_state.pop("topdown_hub", None)
+                st.session_state.pop("topdown_cards", None)
             st.success("Radar refreshed.")
         if st.button("⚡ Scan Live 60–120d ETF Spreads", width="stretch"):
             with st.spinner("Scanning live ETF option chains (Test O1)…"):
@@ -282,6 +285,8 @@ def render_main() -> None:
             with st.spinner("Refreshing Yahoo daily closes…"):
                 res = provider.update_prices(expand_universe=False)
                 st.session_state.radar_snap = provider.get_radar(refresh=True)
+                st.session_state.pop("topdown_hub", None)
+                st.session_state.pop("topdown_cards", None)
             st.info(f"Checked {res['symbols']} symbols ({res['updated']} updated, {res['failed']} failed).")
 
         st.divider()
@@ -301,7 +306,9 @@ def render_main() -> None:
     )
     spy_txt = f"${snap.spy_last:.2f} ({snap.spy_chg_1d_pct:+.1f}%)" if snap.spy_last is not None else "—"
     qqq_txt = f"{snap.qqq_chg_1d_pct:+.1f}%" if snap.qqq_chg_1d_pct is not None else "—"
-    vix_txt = f"{snap.vix:.1f}%" if snap.vix is not None else "—"
+    vix_txt = f"VIX {snap.vix:.1f}" if snap.vix is not None else "VIX —"
+    if getattr(snap, "spy_rv20", None) is not None:
+        vix_txt += f" · RV20 {snap.spy_rv20:.0f}%"
 
     st.markdown(
         f"""
@@ -317,9 +324,10 @@ def render_main() -> None:
         unsafe_allow_html=True,
     )
 
-    tab_today, tab_radar, tab_wb, tab_book, tab_legacy = st.tabs(
+    tab_today, tab_disc, tab_radar, tab_wb, tab_book, tab_legacy = st.tabs(
         [
             "🧭 Today & TFSA Core",
+            "🗺️ Discover",
             "📡 Opportunity Radar",
             "⚖️ Shares vs Options",
             "📘 Book & Fills",
@@ -384,6 +392,26 @@ def render_main() -> None:
                     ]
                 )
                 st.dataframe(ord_df, width="stretch", hide_index=True)
+
+    # ── TAB 1b: TOP-DOWN DISCOVER (① market → ② sectors → ③ ideas → ④ evidence card) ──
+    with tab_disc:
+        from src.topdown.web import render_discover
+
+        if st.button("Rebuild Discover from local archives", key="disc-rebuild"):
+            st.session_state.pop("topdown_hub", None)
+            st.session_state.pop("topdown_cards", None)
+        if "topdown_hub" not in st.session_state:
+            with st.spinner("Building the top-down view (local data only)…"):
+                st.session_state.topdown_hub = provider.get_hub(refresh=True)
+        cards = st.session_state.setdefault("topdown_cards", {})
+        hub = st.session_state.topdown_hub
+
+        def _card(tk: str):
+            if tk not in cards:
+                cards[tk] = hub.card(tk, dossier=provider.get_dossier(tk, fetch_chain=False))
+            return cards[tk]
+
+        render_discover(st, hub, get_card=_card, default_ticker=st.session_state.get("focused_ticker"))
 
     # ── TAB 2: UNIFIED OPPORTUNITY RADAR ─────────────────────────────────────
     with tab_radar:

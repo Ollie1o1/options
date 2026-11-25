@@ -20,6 +20,7 @@ from .scanners import (
     _load_upcoming_earnings_map,
     compute_regime_header,
     get_sector_etf,
+    get_sector_map,
     load_local_ohlcv_safe,
     load_open_exposure_map,
     scan_archived_etf_wide_spreads,
@@ -189,6 +190,13 @@ def run_radar(
     except Exception as exc:
         degraded.append(f"vol_managed_outlook: {exc}")
 
+    # The first get_sector_map() call imports src.data_fetching (~1s of NLP
+    # imports). Pay it here, not inside an adapter's timeout budget.
+    try:
+        get_sector_map()
+    except Exception:
+        pass
+
     earnings_map = _load_upcoming_earnings_map()
     crash_flags = _load_recent_post_earnings_crashes(ohlcv)
     rev_breadth = _load_latest_rev_breadth()
@@ -267,6 +275,8 @@ def run_radar(
         kalshi_macro=header.get("kalshi_macro") or [],
         ohlcv_as_of=header.get("ohlcv_as_of"),
         ohlcv_symbol_count=int(header.get("ohlcv_symbol_count") or 0),
+        spy_rv20=header.get("spy_rv20"),
+        vix_as_of=header.get("vix_as_of"),
     )
     if cache_path:
         try:

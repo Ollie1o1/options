@@ -8,7 +8,15 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
-## 2026-11-24 (newest) — Phase 1 equity-first playbooks (low stock friction, 3–50 bps)
+## 2026-11-25 (newest) — the live VALIDATED sleeve was not the validated rule
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **The Radar's `vol_managed_outlook` allocation (the TFSA core sleeve shown as VALIDATED) differed from the rule `scripts/backtest_vol_managed_outlook.py` validated, in three ways:** it scaled by **SPY's** 20d vol instead of the **selected basket's** (SPY-vol scaling is the `VM_SPY` control's rule, which FAILED), it held the top 3 even with a non-positive composite (the backtest holds only positive scores), and it used a different trend factor (`close/SMA200 − 1 + 0.5·(SMA50/SMA200 − 1)` vs `close/SMA200 − 1`). On 2026-11-24 the live sleeve said XLE/XLV/XLP **14.7% each, 56% cash**; the validated rule says **26.2% each, 21.5% cash** (basket RV20 17.8% vs SPY 31.8%). **Fixed:** `src/outlook/vm_rotation.py` is now the one implementation; `tests/outlook/test_vm_rotation_parity.py` replays the estimator's own `_simulate_arms` period-by-period (1e-12). Sector FAVOR now means "held by the sleeve"; AVOID means the regime-gated BEARISH Outlook call. | **FIXED** (live) | `src/outlook/vm_rotation.py` |
+| 2 | The market ribbon's "RV/VIX" number was SPY's 20d realized vol, not VIX. The snapshot now carries the real Cboe VIX (`vix`, from `data/discovery/VIX_History.csv`) and `spy_rv20` separately; legacy caches are read as RV20. | **FIXED** | `src/radar/schema.py` |
+| 3 | Top-down Discover (`opt discover`, TUI [6], web 🗺️) added as a **research tool**: every lens carries its evidence label and source; the ideas already tested null here are listed so they are not re-chased. It authorises nothing new. | BASELINE | `docs/DISCOVER.md` |
+
+## 2026-11-24 — Phase 1 equity-first playbooks (low stock friction, 3–50 bps)
 
 Five preregistered stock/ETF studies run to test whether edges that die under options bid-ask spreads survive at Wealthsimple USD share friction (`$0` commission, `3–10 bps` spreads):
 

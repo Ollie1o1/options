@@ -58,10 +58,12 @@ class DeskDataProvider:
         self.plan_path = plan_path
         self.playbooks_path = playbooks_path
         self._dossier_cache: Dict[str, TickerDossier] = {}
+        self._hub: Optional[Any] = None
 
     def get_radar(self, *, refresh: bool = False) -> RadarSnapshot:
         if refresh:
             self._dossier_cache.clear()
+            self._hub = None
         snap = None if refresh else load_cached_radar(self.cache_path)
         if snap is None:
             snap = run_radar(
@@ -80,7 +82,28 @@ class DeskDataProvider:
 
     def update_prices(self, *, expand_universe: bool = False) -> Dict[str, Any]:
         self._dossier_cache.clear()
-        return refresh_local_prices(self.ohlcv_db, expand_universe=expand_universe)
+        self._hub = None
+        res = refresh_local_prices(self.ohlcv_db, expand_universe=expand_universe)
+        try:  # FRED credit/curve context for ① MARKET; never blocks a price update
+            from src.topdown.macro import refresh_fred_cache
+
+            res["fred"] = refresh_fred_cache()
+        except Exception as exc:
+            res["fred"] = f"error: {exc}"
+        return res
+
+    def get_hub(self, *, refresh: bool = False) -> Any:
+        """Top-down Discover bundle (① market, ② sector board, ③ lenses), built once per refresh."""
+        if refresh or self._hub is None:
+            from src.topdown.hub import build_hub
+
+            self._hub = build_hub(ohlcv_db=self.ohlcv_db, cache_path=self.cache_path)
+        return self._hub
+
+    def get_card(self, ticker: str) -> Any:
+        """④ Evidence Card for one ticker (reuses the cached Dossier when present)."""
+        hub = self.get_hub()
+        return hub.card(ticker, dossier=self.get_dossier(ticker, fetch_chain=False), chain_db=self.chain_db)
 
     def get_cached_dossier(self, ticker: str) -> Optional[TickerDossier]:
         return self._dossier_cache.get(str(ticker).upper().strip())

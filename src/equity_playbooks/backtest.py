@@ -99,31 +99,50 @@ def load_equity_ohlcv(
         keep_list = sorted({str(s).upper() for s in symbols if s}) if symbols is not None else None
         if keep_list is not None and not keep_list:
             return {}
+        if keep_list is None and since_date:
+            # A bare `date >= ?` cannot use the (ticker, date) primary key and
+            # full-scans every bar (5.4s on the 3.08M-bar archive). Enumerate
+            # the tickers with an index skip-scan instead (one seek per
+            # ticker), then range-scan each — identical rows, ~8x faster.
+            keep_list = [
+                str(r[0]) for r in con.execute(
+                    "WITH RECURSIVE t(tk) AS ("
+                    " SELECT MIN(ticker) FROM ohlcv"
+                    " UNION ALL"
+                    " SELECT (SELECT MIN(ticker) FROM ohlcv WHERE ticker > t.tk) FROM t WHERE t.tk IS NOT NULL"
+                    ") SELECT tk FROM t WHERE tk IS NOT NULL"
+                )
+            ]
+            if not keep_list:
+                return {}
 
-        where_clauses: List[str] = []
-        params: List[Any] = []
-        if keep_list is not None:
-            placeholders = ",".join("?" for _ in keep_list)
-            where_clauses.append(f"ticker IN ({placeholders})")
-            params.extend(keep_list)
-        if since_date:
-            where_clauses.append("date >= ?")
-            params.append(str(since_date))
-
-        sql = "SELECT ticker, date, close, volume FROM ohlcv"
-        if where_clauses:
-            sql += " WHERE " + " AND ".join(where_clauses)
-        sql += " ORDER BY ticker, date"
-
-        cur = con.execute(sql, params)
+        chunks: List[Optional[List[str]]] = (
+            [keep_list[i: i + 900] for i in range(0, len(keep_list), 900)] if keep_list is not None else [None]
+        )
         dates: Dict[str, List[str]] = {}
         closes: Dict[str, List[float]] = {}
         vols: Dict[str, List[float]] = {}
-        for sym, d, c, v in cur:
-            s = str(sym).upper()
-            dates.setdefault(s, []).append(str(d))
-            closes.setdefault(s, []).append(float(c))
-            vols.setdefault(s, []).append(float(v) if v is not None else 0.0)
+        for chunk in chunks:
+            where_clauses: List[str] = []
+            params: List[Any] = []
+            if chunk is not None:
+                placeholders = ",".join("?" for _ in chunk)
+                where_clauses.append(f"ticker IN ({placeholders})")
+                params.extend(chunk)
+            if since_date:
+                where_clauses.append("date >= ?")
+                params.append(str(since_date))
+
+            sql = "SELECT ticker, date, close, volume FROM ohlcv"
+            if where_clauses:
+                sql += " WHERE " + " AND ".join(where_clauses)
+            sql += " ORDER BY ticker, date"
+
+            for sym, d, c, v in con.execute(sql, params):
+                s = str(sym).upper()
+                dates.setdefault(s, []).append(str(d))
+                closes.setdefault(s, []).append(float(c))
+                vols.setdefault(s, []).append(float(v) if v is not None else 0.0)
     finally:
         con.close()
     return {

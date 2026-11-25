@@ -283,3 +283,115 @@ QuickLogModal {
     align: right middle;
     margin-top: 1;
 }
+
+/* [6] DISCOVER — ① market strip on top, ② sectors left, ③ ideas right, ④ card full-screen */
+#disc-root {
+    layout: vertical;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#disc-crumb {
+    height: 1;
+}
+
+#disc-market {
+    height: auto;
+    max-height: 10;
+}
+
+#disc-split {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#disc-left {
+    width: 46%;
+    height: 1fr;
+    border: solid $success;
+    padding: 0 1;
+}
+
+#disc-board-head {
+    height: auto;
+}
+
+#disc-board {
+    height: 1fr;
+}
+
+#disc-right {
+    width: 54%;
+    height: 1fr;
+    margin-left: 1;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+#disc-lens-bar {
+    height: 3;
+    align: left middle;
+}
+
+#disc-lens-label {
+    margin-right: 1;
+    text-style: bold;
+}
+
+#disc-lens-select {
+    width: 1fr;
+}
+
+#disc-lens-head {
+    height: auto;
+    max-height: 7;
+}
+
+#disc-lens-table {
+    height: 1fr;
+}
+
+#disc-hint {
+    height: 2;
+    color: $text-muted;
+}
+
+Screen.compact #disc-split {
+    layout: vertical;
+}
+
+Screen.compact #disc-left {
+    width: 100%;
+    height: 45%;
+}
+
+Screen.compact #disc-right {
+    width: 100%;
+    height: 55%;
+    margin-left: 0;
+}
+
+EvidenceCardScreen {
+    align: center middle;
+}
+
+#card-dialog {
+    width: 96%;
+    height: 94%;
+    border: thick $primary;
+    background: $surface;
+    padding: 0 1;
+}
+
+#card-crumb {
+    height: 1;
+}
+
+#card-scroll {
+    height: 1fr;
+}
+
+#card-keys {
+    height: 1;
+    color: $text-muted;
+}

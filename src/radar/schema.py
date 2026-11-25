@@ -81,6 +81,10 @@ class RadarSnapshot:
     kalshi_macro: List[Dict[str, Any]] = field(default_factory=list)
     ohlcv_as_of: Optional[str] = None
     ohlcv_symbol_count: int = 0
+    # SPY 20d realized vol (annualised %). Until 2026-11-25 this number was
+    # stored in `vix` and shown as "RV/VIX"; `vix` is now the real Cboe VIX close.
+    spy_rv20: Optional[float] = None
+    vix_as_of: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -100,14 +104,19 @@ class RadarSnapshot:
             "kalshi_macro": list(self.kalshi_macro),
             "ohlcv_as_of": self.ohlcv_as_of,
             "ohlcv_symbol_count": int(self.ohlcv_symbol_count),
+            "spy_rv20": self.spy_rv20,
+            "vix_as_of": self.vix_as_of,
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any], *, from_cache: bool = False) -> "RadarSnapshot":
+        legacy = "spy_rv20" not in d  # pre-2026-11-25 caches stored SPY RV20 under "vix"
+        vix_raw = None if legacy else d.get("vix")
+        rv_raw = d.get("vix") if legacy else d.get("spy_rv20")
         return cls(
             generated_at=str(d.get("generated_at", "")),
             regime_posture=str(d.get("regime_posture", "NEUTRAL")),
-            vix=None if d.get("vix") is None else float(d["vix"]),
+            vix=None if vix_raw is None else float(vix_raw),
             vix_3m=None if d.get("vix_3m") is None else float(d["vix_3m"]),
             vix_term=str(d.get("vix_term", "UNKNOWN")),
             spy_last=None if d.get("spy_last") is None else float(d["spy_last"]),
@@ -121,6 +130,8 @@ class RadarSnapshot:
             kalshi_macro=list(d.get("kalshi_macro") or []),
             ohlcv_as_of=d.get("ohlcv_as_of"),
             ohlcv_symbol_count=int(d.get("ohlcv_symbol_count") or 0),
+            spy_rv20=None if rv_raw is None else float(rv_raw),
+            vix_as_of=d.get("vix_as_of"),
         )
 
 

@@ -37,7 +37,10 @@ def render_ribbon(snap: RadarSnapshot) -> Text:
     spy_s = f"{snap.spy_last:.2f}" if snap.spy_last is not None else "—"
     spy_c = f"{snap.spy_chg_1d_pct:+.1f}%" if snap.spy_chg_1d_pct is not None else ""
     qqq_c = f"{snap.qqq_chg_1d_pct:+.1f}%" if snap.qqq_chg_1d_pct is not None else ""
-    vix_s = f"{snap.vix:.1f}" if snap.vix is not None else "—"
+    vix_s = f"VIX {snap.vix:.1f}" if snap.vix is not None else "VIX —"
+    rv = getattr(snap, "spy_rv20", None)
+    if rv is not None:
+        vix_s += f" · SPY RV20 {rv:.1f}%"
     posture_style = (
         "bold #5ec98d" if snap.regime_posture == "RISK_ON"
         else ("bold #e06c75" if snap.regime_posture == "RISK_OFF" else "bold #d6a452")
@@ -46,7 +49,7 @@ def render_ribbon(snap: RadarSnapshot) -> Text:
     t.append("  |  ", style="dim")
     t.append(f"QQQ {qqq_c or '—'}", style="bold")
     t.append("  |  ", style="dim")
-    t.append(f"RV/VIX {vix_s} ", style="bold")
+    t.append(f"{vix_s} ", style="bold")
     t.append(f"[{snap.regime_posture}]", style=posture_style)
     t.append("  |  ", style="dim")
     t.append(f"Macro: {snap.next_macro_event}", style="dim")

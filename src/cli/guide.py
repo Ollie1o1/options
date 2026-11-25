@@ -25,20 +25,26 @@ TIER_PLAIN = {
 
 def plain_english_regime(snap: RadarSnapshot) -> Tuple[str, str]:
     """Return `(headline, advice)` explaining market conditions without quant jargon."""
-    v = f"{snap.vix:.0f}%" if snap.vix is not None else "unknown"
+    rv = getattr(snap, "spy_rv20", None)
+    if snap.vix is not None:
+        v = f"VIX {snap.vix:.0f}"
+    elif rv is not None:
+        v = f"SPY realized vol {rv:.0f}%"
+    else:
+        v = "volatility unknown"
     if snap.regime_posture == "RISK_OFF":
         return (
-            f"DEFENSIVE MARKET (Volatility {v}, SPY below 200-day trend)",
+            f"DEFENSIVE MARKET ({v}, SPY below 200-day trend)",
             "Play defense today: keep the suggested cash % in T-bills/CASH, lean into defensive ETFs, "
             "and avoid aggressive dip-buying until SPY reclaims its 200-day average.",
         )
     if snap.regime_posture == "RISK_ON":
         return (
-            f"HEALTHY UPTREND (Volatility {v}, SPY above 200-day trend)",
+            f"HEALTHY UPTREND ({v}, SPY above 200-day trend)",
             "Green light for both Core ETFs and short-term Uptrend Pullback stock buys (in shares).",
         )
     return (
-        f"MIXED / NEUTRAL MARKET (Volatility {v})",
+        f"MIXED / NEUTRAL MARKET ({v})",
         "Be selective: stick mainly to your Core ETF allocation and only take high-conviction setups with zero earnings warnings.",
     )
 
@@ -139,11 +145,23 @@ PLAIN-ENGLISH GUIDE TO YOUR TRADING DESK
    • PROVEN (VAL)    = Passed full out-of-sample backtest net of real costs.
    • PROMISING (LEAD)= Strong evidence, with a specific rule (shares-only or limit-only).
    • WATCHLIST (CTX) = Informational (your holdings buy zones, insider buys) — not a signal.
+   • TESTING         = A registered test exists but its readout date has not arrived yet.
+   • CONTEXT         = Plain description (trend, breadth, peers). Never tested as a signal.
+   • AVOID           = A measured negative (e.g. post-earnings breakdown) or an imminent event.
    • RETIRED (CLOSED)= Tested and failed — hidden from your daily screen automatically.
    • POST_EARN_CRASH = Stock dropped >=5% on heavy earnings volume; avoid catching the knife.
 
-3. DAILY ROUTINE (2 MINUTES)
-   • Run `opt` (full interactive dashboard) or `opt guide` (step-by-step menu).
+3. DISCOVER — TOP-DOWN, IN FOUR NUMBERED STEPS  (TUI [6] · `opt discover` · web 🗺️ Discover)
+   ① MARKET   What kind of market is this? VIX curve, trend, credit & rotation ratios. Context only.
+   ② SECTORS  The 16 sector/asset ETFs in PROVEN rotation order. FAVOR = held this month.
+              Press Enter on a sector to see its stocks.
+   ③ IDEAS    Lenses ("why look here?"). Each shows its label, the evidence, and how it is sorted.
+              `opt discover --ledger` lists ideas already tested here that do NOT work.
+   ④ CARD     One ticker: verdict, price structure, closest peers, options odds (says when they
+              are a MODEL rather than market-implied), events — and where every number came from.
+
+4. DAILY ROUTINE (2 MINUTES)
+   • Run `opt refresh` once after the close (prices + FRED), then `opt` (dashboard) or `opt guide`.
    • Never memorize flags — everything is guided from those two commands.
 """
 
@@ -175,6 +193,14 @@ def refresh_cmd(ctx: click.Context, expand: bool) -> None:
         )
     except Exception as exc:
         console.print(f"  [#d6a452]Price update skipped ({exc}) — using existing local prices.[/#d6a452]")
+    try:
+        from src.topdown.macro import refresh_fred_cache
+
+        fred = refresh_fred_cache()
+        ok = sum(1 for v in fred.values() if v == "ok")
+        console.print(f"  FRED credit/curve series: {ok}/{len(fred)} refreshed.")
+    except Exception as exc:
+        console.print(f"  [#d6a452]FRED refresh skipped ({exc}).[/#d6a452]")
     console.print("[bold]Step 2/2:[/bold] Refreshing Unified Radar…")
     snap = run_radar(ohlcv_db=ohlcv_db, cache_path=cache_path)
     console.print(f"  [#5ec98d]Ready![/#5ec98d] {len(snap.opportunities)} active ideas cached. Run `opt` or `opt guide` to view.")

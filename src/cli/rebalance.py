@@ -81,7 +81,9 @@ def rebalance_cmd(
         if plan.rebalance_recommended
         else f"[bold #82aad2]HOLD / ON TARGET[/bold #82aad2] (max drift {plan.max_drift_pct:.1f}% < {plan.drift_threshold_pct:.1f}%)"
     )
-    rv_str = f" · SPY RV20 {plan.spy_rv20*100:.1f}%" if plan.spy_rv20 is not None else ""
+    rv_str = f" · Basket RV20 {plan.basket_rv20*100:.1f}%" if plan.basket_rv20 is not None else ""
+    if plan.spy_rv20 is not None:
+        rv_str += f" (SPY {plan.spy_rv20*100:.1f}%)"
     console.print(
         Panel(
             f"{verdict}\n"

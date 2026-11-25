@@ -7,6 +7,7 @@ import click
 
 from .book import book_cmd, log_cmd
 from .check import check_cmd
+from .discover import card_cmd, discover_cmd
 from .express import express_cmd
 from .guide import guide_cmd, refresh_cmd
 from .lab import lab_group
@@ -37,7 +38,7 @@ def cli(ctx: click.Context, as_json: bool, no_color: bool) -> None:
 
 
 @cli.command("desk")
-@click.option("--tab", type=click.Choice(["today", "radar", "workbench", "book", "lab"]), default="today")
+@click.option("--tab", type=click.Choice(["today", "radar", "workbench", "book", "lab", "discover"]), default="today")
 @click.option("--offline", is_flag=True, help="Start in cache-only offline mode.")
 def desk_cmd(tab: str, offline: bool) -> None:
     """Launch the interactive 5-tab Textual Daily Trading Cockpit."""
@@ -54,6 +55,8 @@ cli.add_command(guide_cmd)
 cli.add_command(refresh_cmd)
 cli.add_command(today_cmd)
 cli.add_command(radar_cmd)
+cli.add_command(discover_cmd)
+cli.add_command(card_cmd)
 cli.add_command(check_cmd)
 cli.add_command(express_cmd)
 cli.add_command(book_cmd)

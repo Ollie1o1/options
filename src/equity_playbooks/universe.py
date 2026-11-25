@@ -22,6 +22,8 @@ CORE_ETFS: Sequence[str] = (
     # Commodities, Bonds & International
     "GLD", "SLV", "GDX", "USO", "UNG", "DBC", "TLT", "IEF", "SHY", "SGOV", "HYG", "LQD",
     "EFA", "EEM", "FXI", "EWJ", "EWZ", "INDA",
+    # Cross-asset rotation gauges for `opt discover` (src/topdown/macro.py ROTATION_PAIRS)
+    "SPHB", "SPLV", "CPER", "UUP",
 )
 
 LIQUID_MEGA_LARGE_CAPS: Sequence[str] = (

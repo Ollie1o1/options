@@ -1,4 +1,4 @@
-"""Interactive 5-tab Textual Daily Trading Cockpit (`src/tui/app.py`).
+"""Interactive 6-tab Textual Daily Trading Cockpit (`src/tui/app.py`).
 
 Tabs:
   [1] TODAY      — Core TFSA Allocation (VM_OUTLOOK_TOP3) + Top 5 Radar Setups
@@ -6,6 +6,7 @@ Tabs:
   [3] WORKBENCH  — Full Ticker Dossier + Visual RND/Edge Bars + Shares-vs-Options + Walk-Away Ladder
   [4] BOOK       — Stock/ETF Picks (live P&L + exit alerts), Paper Options, Holdings & Scorecard
   [5] LAB        — Real Ops Health, OHLCV Freshness, Fill Concession `k`, Forward Readouts & Playbooks
+  [6] DISCOVER   — Top-down: ① Market → ② Sectors (PROVEN rank) → ③ Ideas (labelled lenses) → ④ Evidence Card
 """
 from __future__ import annotations
 
@@ -32,6 +33,19 @@ from src.cli.guide import TIER_PLAIN, plain_english_action_plan, plain_english_v
 from src.radar.engine import merge_confluence
 from src.radar.schema import Opportunity, RadarSnapshot, TickerDossier
 from src.structure.types import DetailedView, VehicleComparison
+from .discover import (
+    LENS_OPTIONS,
+    BOARD_COLUMNS,
+    EvidenceCardScreen,
+    board_header,
+    crumb_and_freshness,
+    fill_board,
+    fill_lens,
+    fill_sector,
+    lens_header,
+    lens_tag_legend,
+    sector_header,
+)
 from .state import DeskDataProvider
 from .themes import THEME_ORDER, THEMES, persist_theme_name, saved_theme_name
 from .widgets import (
@@ -96,7 +110,7 @@ def filter_opportunities(opps: List[Opportunity], query: str) -> List[Opportunit
 
 
 class DeskApp(App[None]):
-    """5-Tab Daily Stock + Option Trading Desk."""
+    """6-Tab Daily Stock + Option Trading Desk."""
 
     CSS_PATH = "styles.tcss"
     COMMANDS = App.COMMANDS | {DeskCommandProvider}
@@ -107,6 +121,8 @@ class DeskApp(App[None]):
         Binding("3", "switch_tab('workbench')", "Workbench", show=True),
         Binding("4", "switch_tab('book')", "Book", show=True),
         Binding("5", "switch_tab('lab')", "Lab", show=True),
+        Binding("6", "switch_tab('discover')", "Discover", show=True),
+        Binding("d", "switch_tab('discover')", "Discover", show=False),
         Binding("slash", "focus_filter", "Filter", show=True),
         Binding("s", "cycle_sort", "Sort", show=True),
         Binding("j", "cursor_down", "Down", show=False),
@@ -143,6 +159,12 @@ class DeskApp(App[None]):
         self._status_msg: str = ""
         self._wb_loaded_ticker: Optional[str] = None
         self._last_dossier_ticker: Optional[str] = None
+        self.hub: Optional[Any] = None
+        self._hub_loading: bool = False
+        self._disc_mode: str = "lens"          # "lens" | "sector"
+        self._disc_lens: str = "core_rotation"
+        self._disc_sector: str = ""
+        self._disc_tickers: List[str] = []
 
     def compose(self) -> ComposeResult:
         yield Static("Loading Daily Trading Desk…", id="market-ribbon")
@@ -203,6 +225,23 @@ class DeskApp(App[None]):
                     yield Static("Ops Health loading…", id="lab-health-box")
                     yield DataTable(id="lab-playbooks-table", zebra_stripes=True, cursor_type="row")
 
+            with TabPane("[6] DISCOVER", id="discover"):
+                with Vertical(id="disc-root"):
+                    yield Static("① MARKET › ② SECTORS › ③ IDEAS › ④ EVIDENCE", id="disc-crumb")
+                    yield Static("① MARKET — loading…", id="disc-market")
+                    with Horizontal(id="disc-split"):
+                        with Vertical(id="disc-left"):
+                            yield Static(board_header(), id="disc-board-head")
+                            yield DataTable(id="disc-board", zebra_stripes=True, cursor_type="row")
+                        with Vertical(id="disc-right"):
+                            with Horizontal(id="disc-lens-bar"):
+                                yield Label("③ IDEAS:", id="disc-lens-label")
+                                yield Select(LENS_OPTIONS, value="core_rotation", allow_blank=True,
+                                             prompt="Pick a lens…", id="disc-lens-select")
+                            yield Static("", id="disc-lens-head")
+                            yield DataTable(id="disc-lens-table", zebra_stripes=True, cursor_type="row")
+                            yield Static("", id="disc-hint")
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -238,6 +277,8 @@ class DeskApp(App[None]):
         lt = self.query_one("#lab-playbooks-table", DataTable)
         lt.add_columns("Evidence", "Strategy ID", "Asset", "Horizon", "Notes")
 
+        self.query_one("#disc-board", DataTable).add_columns(*BOARD_COLUMNS)
+
     def _set_status(self, msg: str) -> None:
         self._status_msg = msg
         self._render_ribbon()
@@ -259,8 +300,11 @@ class DeskApp(App[None]):
             self.focused_playbook = first.playbook_id
             self._update_radar_dossier(first.ticker)
         self._wb_loaded_ticker = None
-        if self.query_one("#main-tabs", TabbedContent).active == "workbench":
+        active = self.query_one("#main-tabs", TabbedContent).active
+        if active == "workbench":
             self._compute_workbench(self.focused_ticker)
+        elif active == "discover":
+            self._ensure_hub()
 
     def _load_all_data(self, *, refresh: bool = False) -> None:
         snap = self.provider.get_radar(refresh=refresh)
@@ -583,12 +627,91 @@ class DeskApp(App[None]):
         except Exception as exc:
             self.call_from_thread(self._set_status, f"Price update err: {str(exc)[:30]}")
 
+    # ── [6] DISCOVER ─────────────────────────────────────────────────────────
+
+    def _ensure_hub(self, *, refresh: bool = False) -> None:
+        if self._hub_loading:
+            return
+        if self.hub is not None and not refresh:
+            self._render_discover()
+            return
+        self._hub_loading = True
+        self.query_one("#disc-market", Static).update("① MARKET — building the top-down view from local archives…")
+        self._worker_build_hub(refresh)
+
+    @work(thread=True, exclusive=True, group="discover_hub")
+    def _worker_build_hub(self, refresh: bool) -> None:
+        try:
+            hub = self.provider.get_hub(refresh=refresh)
+
+            def _apply() -> None:
+                self.hub = hub
+                self._hub_loading = False
+                self._render_discover()
+
+            self.call_from_thread(_apply)
+        except Exception as exc:
+            def _fail() -> None:
+                self._hub_loading = False
+                self.query_one("#disc-market", Static).update(f"[#e06c75]Discover unavailable: {exc}[/]")
+
+            self.call_from_thread(_fail)
+
+    def _render_discover(self) -> None:
+        hub = self.hub
+        if hub is None:
+            return
+        from src.topdown.render import market_panel
+
+        self.query_one("#disc-crumb", Static).update(crumb_and_freshness(hub, 3 if self._disc_mode == "lens" else 2))
+        self.query_one("#disc-market", Static).update(market_panel(hub, compact=True))
+        fill_board(self.query_one("#disc-board", DataTable), hub)
+        self._render_disc_right()
+
+    def _render_disc_right(self) -> None:
+        hub = self.hub
+        if hub is None:
+            return
+        tbl = self.query_one("#disc-lens-table", DataTable)
+        head = self.query_one("#disc-lens-head", Static)
+        if self._disc_mode == "sector" and self._disc_sector:
+            head.update(sector_header(hub, self._disc_sector))
+            self._disc_tickers = fill_sector(tbl, hub, self._disc_sector)
+        else:
+            res = hub.lens(self._disc_lens)
+            if res is None:
+                return
+            head.update(lens_header(res))
+            self._disc_tickers = fill_lens(tbl, res, hub.lenses)
+        self._update_disc_hint()
+
+    def _update_disc_hint(self, ticker: Optional[str] = None) -> None:
+        tk = ticker or (self._disc_tickers[0] if self._disc_tickers else None)
+        if tk:
+            msg = f"[b]Enter[/b] = ④ Evidence Card for [b]{tk}[/b] · [b]l[/b] log pick · [b]r[/b] refresh"
+        else:
+            msg = "Nothing listed here right now — pick another lens or sector."
+        legend = lens_tag_legend()
+        self.query_one("#disc-hint", Static).update(f"{msg}\n[dim]{legend.plain}[/dim]")
+
+    def open_evidence_card(self, ticker: str) -> None:
+        sym = str(ticker).upper().strip()
+        self.focused_ticker = sym
+
+        def _after(res: Optional[str]) -> None:
+            if res:
+                self.open_workbench(res)
+
+        self.push_screen(EvidenceCardScreen(sym, self.provider.get_card), _after)
+
     # ── Events ───────────────────────────────────────────────────────────────
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         pane_id = event.pane.id if event.pane is not None else ""
         if pane_id == "workbench" and self._wb_loaded_ticker != self.focused_ticker:
             self._compute_workbench(self.focused_ticker)
+        elif pane_id == "discover":
+            self._ensure_hub()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "radar-filter-input":
@@ -601,6 +724,12 @@ class DeskApp(App[None]):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "wb-dir-select":
             self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
+        elif event.select.id == "disc-lens-select" and isinstance(event.value, str):
+            self._disc_mode = "lens"
+            self._disc_lens = event.value
+            if self.hub is not None:
+                self.query_one("#disc-crumb", Static).update(crumb_and_freshness(self.hub, 3))
+            self._render_disc_right()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "wb-owns-switch":
@@ -641,6 +770,11 @@ class DeskApp(App[None]):
                 self._update_radar_dossier(opp.ticker)
             except (ValueError, IndexError):
                 pass
+        elif tid == "disc-lens-table" and event.row_key is not None:
+            parts = str(event.row_key.value).split("|")
+            if len(parts) == 2:
+                self.focused_ticker = parts[1]
+                self._update_disc_hint(parts[1])
         elif tid == "wb-vehicles-table" and event.row_key is not None:
             try:
                 idx = int(str(event.row_key.value))
@@ -666,6 +800,19 @@ class DeskApp(App[None]):
             parts = str(event.row_key.value).split("|")
             tk = parts[1] if len(parts) >= 2 else parts[0]
             self.open_workbench(tk)
+        elif tid == "disc-board" and event.row_key is not None:
+            self._disc_mode = "sector"
+            self._disc_sector = str(event.row_key.value)
+            # blank the lens picker so choosing ANY lens (even the previous one) fires a change
+            self.query_one("#disc-lens-select", Select).clear()
+            if self.hub is not None:
+                self.query_one("#disc-crumb", Static).update(crumb_and_freshness(self.hub, 2))
+            self._render_disc_right()
+            self.query_one("#disc-lens-table", DataTable).focus()
+        elif tid == "disc-lens-table" and event.row_key is not None:
+            parts = str(event.row_key.value).split("|")
+            if len(parts) == 2:
+                self.open_evidence_card(parts[1])
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -698,6 +845,7 @@ class DeskApp(App[None]):
 
     def action_refresh(self) -> None:
         self._set_status("Refreshing Radar…")
+        self.hub = None
         self._worker_refresh_radar()
 
     def action_live_options(self) -> None:

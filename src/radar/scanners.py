@@ -52,9 +52,32 @@ SECTOR_MAP_FALLBACK: Dict[str, str] = {
 
 _FULL_SECTOR_MAP: Optional[Dict[str, str]] = None
 
+# GICS sector (as its SPDR ETF) for liquid names added by the 2026-11-24 universe
+# expansion (`src/equity_playbooks/universe.py`) that `data_fetching.SECTOR_MAP`
+# never covered. Without these, 71 of 371 archived names had no sector, so
+# sector breadth and the sector posture badge silently skipped them.
+# Semiconductors map to SMH, matching the existing NVDA/AVGO/AMD/INTC/QCOM override.
+SECTOR_MAP_SUPPLEMENT: Dict[str, str] = {
+    "ADI": "SMH", "ARM": "SMH", "ASML": "SMH", "MCHP": "SMH", "NXPI": "SMH", "RMBS": "SMH", "TSM": "SMH",
+    "ANET": "XLK", "APP": "XLK", "CDNS": "XLK", "HUBS": "XLK", "MSTR": "XLK", "NET": "XLK", "RGTI": "XLK",
+    "SHOP": "XLK", "SNPS": "XLK", "TEAM": "XLK", "WDAY": "XLK",
+    "AIG": "XLF", "AON": "XLF", "APO": "XLF", "BRK-B": "XLF", "BX": "XLF", "CB": "XLF", "HOOD": "XLF",
+    "KKR": "XLF", "MET": "XLF", "PGR": "XLF", "PRU": "XLF", "SOFI": "XLF", "TRV": "XLF",
+    "CARR": "XLI", "GEV": "XLI", "GWW": "XLI", "ITW": "XLI", "PWR": "XLI", "TDG": "XLI", "TT": "XLI", "VRT": "XLI",
+    "AZO": "XLY", "CMG": "XLY", "CVNA": "XLY", "DECK": "XLY", "GME": "XLY", "HLT": "XLY", "LULU": "XLY",
+    "MAR": "XLY", "ORLY": "XLY",
+    "DG": "XLP", "DLTR": "XLP", "KMB": "XLP", "KR": "XLP", "MNST": "XLP",
+    "COR": "XLV", "DHR": "XLV", "HCA": "XLV", "MCK": "XLV", "NVO": "XLV", "ZTS": "XLV",
+    "KMI": "XLE", "OKE": "XLE", "TRGP": "XLE", "WMB": "XLE",
+    "CEG": "XLU", "SRE": "XLU", "VST": "XLU",
+    "MLM": "XLB", "VMC": "XLB",
+    "SPOT": "XLC",
+    "VICI": "XLRE",
+}
+
 
 def get_sector_map() -> Dict[str, str]:
-    """Return full ~180-ticker sector ETF map (data_fetching.SECTOR_MAP + SMH overrides)."""
+    """Return the full sector ETF map (data_fetching.SECTOR_MAP + expansion supplement + SMH overrides)."""
     global _FULL_SECTOR_MAP
     if _FULL_SECTOR_MAP is None:
         merged: Dict[str, str] = {}
@@ -64,6 +87,8 @@ def get_sector_map() -> Dict[str, str]:
             merged.update({str(k).upper(): str(v).upper() for k, v in _DF_SECTOR_MAP.items()})
         except Exception:
             pass
+        for k, v in SECTOR_MAP_SUPPLEMENT.items():
+            merged.setdefault(k, v)
         # Preserve SMH overrides for major semis so Outlook SMH posture flows cleanly
         merged.update(SECTOR_MAP_FALLBACK)
         _FULL_SECTOR_MAP = merged
@@ -381,91 +406,70 @@ def scan_vol_managed_outlook(
     *,
     sigma_target: float = 0.14,
 ) -> Tuple[List[Dict[str, Any]], List[Opportunity], Dict[str, str]]:
-    """Compute Validated Playbook 2 (VM_OUTLOOK_TOP3) target allocation + sector posture map."""
+    """Validated Playbook `vol_managed_outlook` (VM_OUTLOOK_TOP3): target allocation + posture map.
+
+    The weights come from `src.outlook.vm_rotation`, the one implementation the
+    backtest parity test pins to `scripts/backtest_vol_managed_outlook.py`:
+    top-3 Outlook ETFs with a positive composite, 1/3 each, scaled by
+    clip(0.14 / RV20(selected basket), 0.25, 1.00). Posture: FAVOR = held by
+    the sleeve; AVOID = a regime-gated BEARISH outlook call; else NEUTRAL.
+    """
+    from src.outlook.vm_rotation import TOP_K, align_closes, latest_complete_index, target_weights
+
     pb = registry.get("vol_managed_outlook")
     as_of = _now_utc()
-    spy_tuple = ohlcv.get("SPY")
-    if spy_tuple is None:
+    if "SPY" not in ohlcv:
+        return [], [], {}
+    dates, cols = align_closes(ohlcv, OUTLOOK_ETFS)
+    t = latest_complete_index(cols, OUTLOOK_ETFS)
+    if t is None:
+        return [], [], {}
+    tgt = target_weights(dates, cols, t, universe=OUTLOOK_ETFS, target_vol=sigma_target)
+    if tgt is None:
         return [], [], {}
 
-    spy_ds, spy_cs, _ = spy_tuple
-    if len(spy_cs) < 252:
-        return [], [], {}
-    spy_63 = float(spy_cs[-1] / spy_cs[-64] - 1.0)
-    spy_rv20 = float(trailing_rv(spy_cs, window=20)[-1])
-    if not np.isfinite(spy_rv20) or spy_rv20 <= 0:
-        spy_rv20 = sigma_target
-    vol_scale = float(np.clip(sigma_target / spy_rv20, 0.25, 1.00))
-
-    raw_factors: Dict[str, Dict[str, Optional[float]]] = {}
-    etf_meta: Dict[str, Dict[str, float]] = {}
-    for sym in OUTLOOK_ETFS:
-        if sym not in ohlcv:
-            continue
-        ds, cs, _ = ohlcv[sym]
-        if len(cs) < 253:
-            continue
-        m12_1 = float(cs[-22] / cs[-253] - 1.0)
-        s50 = float(np.mean(cs[-50:]))
-        s200 = float(np.mean(cs[-200:]))
-        trend = (float(cs[-1]) / s200 - 1.0) + 0.5 * (s50 / s200 - 1.0)
-        rel_str = float(cs[-1] / cs[-64] - 1.0) - spy_63
-        rev_1m = -float(cs[-1] / cs[-22] - 1.0)
-        raw_factors[sym] = {
-            "mom_12_1": m12_1,
-            "trend_score": trend,
-            "relative_strength": rel_str,
-            "reversal_1m": rev_1m,
-        }
-        etf_meta[sym] = {
-            "spot": float(cs[-1]),
-            "chg_1d": float(cs[-1] / cs[-2] - 1.0) * 100.0,
-            "chg_5d": float(cs[-1] / cs[-6] - 1.0) * 100.0,
-            "mom_12_1": m12_1 * 100.0,
-            "above_200": float(cs[-1] > s200),
-        }
-
-    if not raw_factors:
-        return [], [], {}
-
-    from src.outlook.engine import zscore_map
-
-    weights = {"mom_12_1": 0.35, "trend_score": 0.30, "relative_strength": 0.20, "reversal_1m": 0.15}
-    z_by_factor = {
-        fname: zscore_map({sym: vals[fname] for sym, vals in raw_factors.items()})
-        for fname in weights
-    }
-    scored: List[Tuple[str, float]] = []
-    for sym in raw_factors:
-        comp = sum(weights[f] * z_by_factor[f].get(sym, 0.0) for f in weights)
-        scored.append((sym, comp))
-    scored.sort(key=lambda x: x[1], reverse=True)
+    spy_rv_arr = trailing_rv(cols["SPY"][: t + 1], window=20)
+    spy_rv20 = float(spy_rv_arr[-1]) if len(spy_rv_arr) and np.isfinite(spy_rv_arr[-1]) else None
+    n_ranked = len(tgt.ranked)
 
     posture_map: Dict[str, str] = {}
-    for idx, (sym, comp) in enumerate(scored):
-        if idx < 4 and comp >= 0.25:
+    for r in tgt.ranked:
+        sym = str(r["ticker"])
+        if sym in tgt.weights:
             posture_map[sym] = "FAVOR"
-        elif comp <= -0.35:
+        elif r.get("direction") == "BEARISH":
             posture_map[sym] = "AVOID"
         else:
             posture_map[sym] = "NEUTRAL"
 
-    top3 = scored[:3]
-    each_w = round(vol_scale / max(len(top3), 1), 4)
+    def _meta(sym: str) -> Dict[str, float]:
+        cs = cols[sym][: t + 1]
+        return {
+            "spot": float(cs[-1]),
+            "chg_1d": float(cs[-1] / cs[-2] - 1.0) * 100.0,
+            "chg_5d": float(cs[-1] / cs[-6] - 1.0) * 100.0,
+            "mom_12_1": float(cs[-22] / cs[-253] - 1.0) * 100.0,
+        }
+
     core_alloc: List[Dict[str, Any]] = []
     opps: List[Opportunity] = []
-    for rank, (sym, comp) in enumerate(top3, 1):
-        m = etf_meta[sym]
+    rank_of = {str(r["ticker"]): i for i, r in enumerate(tgt.ranked, 1)}
+    for sym, w in sorted(tgt.weights.items(), key=lambda kv: rank_of[kv[0]]):
+        rank = rank_of[sym]
+        comp = float(next(r["score"] for r in tgt.ranked if r["ticker"] == sym))
+        m = _meta(sym)
         core_alloc.append(
             {
                 "ticker": sym,
                 "rank": rank,
-                "target_weight": each_w,
-                "vol_scale": round(vol_scale, 3),
-                "spy_rv20": round(float(spy_rv20), 4),
+                "target_weight": round(w, 4),
+                "vol_scale": round(tgt.scale, 3),
+                "basket_rv20": None if tgt.basket_rv20 is None else round(tgt.basket_rv20, 4),
+                "spy_rv20": None if spy_rv20 is None else round(spy_rv20, 4),
                 "composite": round(comp, 3),
                 "spot": round(m["spot"], 2),
                 "mom_12_1_pct": round(m["mom_12_1"], 1),
+                "as_of": tgt.as_of,
             }
         )
         if pb and pb.is_default_radar_eligible:
@@ -482,30 +486,35 @@ def scan_vol_managed_outlook(
                     chg_5d_pct=round(m["chg_5d"], 2),
                     horizon_label=pb.horizon_label,
                     setup_summary=(
-                        f"Rank #{rank}/16 · Weight {each_w*100:.0f}% (scale {vol_scale*100:.0f}%) "
-                        f"· 12-1m {m['mom_12_1']:+.1f}%"
+                        f"Rank #{rank}/{n_ranked} · Weight {w*100:.0f}% (scale {tgt.scale*100:.0f}% "
+                        f"of 1/{TOP_K}) · 12-1m {m['mom_12_1']:+.1f}%"
                     ),
-                    badges=(f"FAVOR:{sym}", f"WEIGHT:{each_w*100:.0f}%", "TFSA_OK"),
-                    risk_flags=("VOL_SCALED_DOWN",) if vol_scale < 0.75 else (),
+                    badges=(f"FAVOR:{sym}", f"WEIGHT:{w*100:.0f}%", "TFSA_OK"),
+                    risk_flags=("VOL_SCALED_DOWN",) if tgt.scale < 0.75 else (),
                     friction_label="0.06% etf",
                     friction_value=0.0006,
                     confluence_count=1,
                     as_of=as_of,
-                    extra={"rank": rank, "target_weight": each_w, "vol_scale": vol_scale},
+                    extra={
+                        "rank": rank, "target_weight": w, "vol_scale": tgt.scale,
+                        "basket_rv20": tgt.basket_rv20, "prices_as_of": tgt.as_of,
+                    },
                 )
             )
-    cash_w = round(max(0.0, 1.0 - each_w * len(top3)), 4)
+    cash_w = round(tgt.cash, 4)
     if cash_w > 0.005:
         core_alloc.append(
             {
                 "ticker": "CASH",
                 "rank": 0,
                 "target_weight": cash_w,
-                "vol_scale": round(vol_scale, 3),
-                "spy_rv20": round(float(spy_rv20), 4),
+                "vol_scale": round(tgt.scale, 3),
+                "basket_rv20": None if tgt.basket_rv20 is None else round(tgt.basket_rv20, 4),
+                "spy_rv20": None if spy_rv20 is None else round(spy_rv20, 4),
                 "composite": 0.0,
                 "spot": 1.0,
                 "mom_12_1_pct": 0.0,
+                "as_of": tgt.as_of,
             }
         )
     return core_alloc, opps, posture_map
@@ -1307,6 +1316,7 @@ def compute_regime_header(
     ohlcv_as_of: Optional[str] = None
     posture = "NEUTRAL"
     vix = vix_3m = None
+    spy_rv20: Optional[float] = None
     vix_term = "UNKNOWN"
 
     if spy is not None and len(spy[1]) >= 200:
@@ -1322,7 +1332,20 @@ def compute_regime_header(
             posture = "RISK_OFF"
         else:
             posture = "NEUTRAL"
-        vix = round(rv20 * 100.0, 1)
+        spy_rv20 = round(rv20 * 100.0, 1)
+
+    # Real Cboe VIX / VIX3M (archived daily histories); never SPY's realized vol.
+    vix_as_of: Optional[str] = None
+    try:
+        from src.topdown.macro import vol_regime
+
+        vr = vol_regime()
+        if vr.get("vix") is not None and not vr.get("stale"):
+            vix, vix_3m = vr.get("vix"), vr.get("vix3m")
+            vix_term = str(vr.get("term") or "UNKNOWN")
+            vix_as_of = vr.get("as_of")
+    except Exception:
+        pass
 
     if qqq is not None and len(qqq[1]) >= 2:
         qcs = qqq[1]
@@ -1343,6 +1366,8 @@ def compute_regime_header(
         "kalshi_macro": kalshi_macro,
         "ohlcv_as_of": ohlcv_as_of,
         "ohlcv_symbol_count": len(ohlcv),
+        "spy_rv20": spy_rv20,
+        "vix_as_of": vix_as_of,
     }
 
 

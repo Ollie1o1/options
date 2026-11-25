@@ -21,21 +21,22 @@ class SettingsTestCase(unittest.TestCase):
         fmt.set_theme("quant_desk")
 
     def test_load_defaults_when_file_missing(self):
-        self.assertEqual(settings.load_settings(), {"theme": "quant_desk"})
+        self.assertEqual(settings.load_settings(), settings.DEFAULT_SETTINGS)
+        self.assertEqual(settings.load_settings()["theme"], "quant_desk")
 
     def test_save_then_load_round_trips(self):
         settings.save_settings({"theme": "matrix_terminal"})
-        self.assertEqual(settings.load_settings(), {"theme": "matrix_terminal"})
+        self.assertEqual(settings.load_settings(), {**settings.DEFAULT_SETTINGS, "theme": "matrix_terminal"})
 
     def test_load_falls_back_to_defaults_on_corrupt_file(self):
         with open(settings._SETTINGS_PATH, "w") as f:
             f.write("{not valid json")
-        self.assertEqual(settings.load_settings(), {"theme": "quant_desk"})
+        self.assertEqual(settings.load_settings(), settings.DEFAULT_SETTINGS)
 
     def test_load_fills_missing_keys_with_defaults(self):
         with open(settings._SETTINGS_PATH, "w") as f:
             f.write("{}")
-        self.assertEqual(settings.load_settings(), {"theme": "quant_desk"})
+        self.assertEqual(settings.load_settings(), settings.DEFAULT_SETTINGS)
 
     def test_get_theme_reads_persisted_value(self):
         settings.save_settings({"theme": "amber_crt"})

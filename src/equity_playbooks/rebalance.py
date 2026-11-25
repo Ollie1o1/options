@@ -36,6 +36,9 @@ class RebalancePlan:
     drift_threshold_pct: float
     fractional_shares: bool
     estimated_cash_after_usd: float
+    # RV20 of the selected basket — the number that actually sets vol_scale
+    # (clip(0.14 / basket_rv20, 0.25, 1.00)). spy_rv20 is shown for context only.
+    basket_rv20: Optional[float] = None
     orders: List[RebalanceOrder] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -43,6 +46,7 @@ class RebalancePlan:
             "account_usd": self.account_usd,
             "vol_scale": self.vol_scale,
             "spy_rv20": self.spy_rv20,
+            "basket_rv20": self.basket_rv20,
             "max_drift_pct": self.max_drift_pct,
             "rebalance_recommended": self.rebalance_recommended,
             "drift_threshold_pct": self.drift_threshold_pct,
@@ -91,6 +95,7 @@ def compute_tfsa_rebalance(
     target_by_ticker: Dict[str, Dict[str, Any]] = {}
     vol_scale = 1.0
     spy_rv20: Optional[float] = None
+    basket_rv20: Optional[float] = None
     for row in core_allocation:
         tk = str(row.get("ticker", "")).upper()
         if not tk:
@@ -100,6 +105,8 @@ def compute_tfsa_rebalance(
             vol_scale = float(row["vol_scale"])
         if row.get("spy_rv20") is not None:
             spy_rv20 = float(row["spy_rv20"])
+        if row.get("basket_rv20") is not None:
+            basket_rv20 = float(row["basket_rv20"])
 
     # Include any currently held ETFs that dropped out of the top-3 (must be SOLD)
     all_etfs: List[str] = [tk for tk in target_by_ticker if tk != "CASH"]
@@ -209,5 +216,6 @@ def compute_tfsa_rebalance(
         drift_threshold_pct=drift_threshold_pct,
         fractional_shares=fractional,
         estimated_cash_after_usd=round(est_cash_after, 2),
+        basket_rv20=round(basket_rv20, 4) if basket_rv20 is not None else None,
         orders=orders,
     )
