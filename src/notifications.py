@@ -834,7 +834,11 @@ def send_discord_embed(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return int(resp.status) < 300
-    except (urllib.error.URLError, OSError, ValueError):
+    except urllib.error.HTTPError as exc:
+        print(f"[discord] Webhook HTTP error: {exc.code} {exc.reason}", file=sys.stderr)
+        return False
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        print(f"[discord] Webhook delivery failed: {type(exc).__name__}", file=sys.stderr)
         return False
 
 

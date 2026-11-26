@@ -154,6 +154,8 @@ def notify_cmd(
             else:
                 ok_o = out_opt.get("discord_sent")
                 click.echo(f"{'✓' if ok_o else '✗'} Options Discord dispatch ({len(selected_rows)}/{len(rows)} setups · {embed_note})")
+            if not dry_run and not out_opt.get("discord_sent"):
+                raise SystemExit(1)
             if not morning and not check:
                 return
 
@@ -223,3 +225,6 @@ def notify_cmd(
         d_ok = result.get("discord_sent")
         m_ok = result.get("macos_sent")
         click.echo(f"Notify ({result['mode']}): discord={'sent' if d_ok else 'skipped'} · macos={'sent' if m_ok else 'quiet'}")
+
+    if not dry_run and "discord_sent" in result and not result.get("discord_sent"):
+        raise SystemExit(1)
