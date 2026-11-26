@@ -361,7 +361,8 @@ def fill_options_intel_table(tbl: DataTable, intel: OptionsIntelBundle, *, mode:
         for u in intel.uoa_rows[:15]:
             sym = str(u.get("symbol") or "").upper()
             n_u = int(u.get("unusual_count") or len(u.get("unusual") or []))
-            c_sh = float(u.get("net_call_share") if u.get("net_call_share") is not None else 0.5)
+            raw_cs = u.get("net_call_share")
+            c_sh = float(raw_cs) if raw_cs is not None else 0.5
             bar = flow_split_bar(c_sh, width=10, rich=False)
             c_prem = float(u.get("call_premium_added") or 0.0) / 1e6
             p_prem = float(u.get("put_premium_added") or 0.0) / 1e6
@@ -463,7 +464,8 @@ def format_intel_inspector(item: Optional[Dict[str, Any]]) -> str:
         "─" * 54,
     ]
     if feed == "UOA":
-        c_sh = float(raw.get("net_call_share") if raw.get("net_call_share") is not None else 0.5)
+        raw_cs_i = raw.get("net_call_share")
+        c_sh = float(raw_cs_i) if raw_cs_i is not None else 0.5
         lines.append(f"Flow Split: {flow_split_bar(c_sh, width=18, rich=True)}")
         lines.append(
             f"Call OI Added: {float(raw.get('call_oi_added') or 0):,.0f}  ·  "

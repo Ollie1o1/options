@@ -1093,8 +1093,8 @@ def load_chain_matrix(
     pair_rows: List[ChainPairRow] = []
     smile_pts: List[Tuple[float, float]] = []
     for k in all_strikes:
-        c = calls_by_k.get(k)
-        p = puts_by_k.get(k)
+        call_c: Optional[ChainContract] = calls_by_k.get(k)
+        put_c: Optional[ChainContract] = puts_by_k.get(k)
         tags: List[str] = []
         if k == spot_k:
             tags.append("SPOT")
@@ -1111,14 +1111,14 @@ def load_chain_matrix(
         pair_rows.append(
             ChainPairRow(
                 strike=k,
-                call=c,
-                put=p,
+                call=call_c,
+                put=put_c,
                 gex_m=round(gex_by_k.get(k, 0.0), 2),
                 tags=tuple(tags),
             )
         )
         # OTM smile IV
-        otm_c = p if k < spot else c
+        otm_c = put_c if k < spot else call_c
         if otm_c is not None and otm_c.iv is not None and 0.02 <= otm_c.iv <= 3.5:
             smile_pts.append((k, round(otm_c.iv * 100.0, 1)))
 
