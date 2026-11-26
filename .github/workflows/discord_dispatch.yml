@@ -2,10 +2,12 @@ name: Discord Desk Dispatch (24/7 Cloud)
 
 on:
   schedule:
-    # Weekday Morning Desk Brief (~8:45 AM EST / 9:45 AM EDT)
+    # 1) Weekday Morning Desk Brief (~8:45 AM EST / 9:45 AM EDT) — 1 calm daily brief
     - cron: "45 13 * * 1-5"
-    # Weekday Market-Hours Live Options Scan (~11:00 AM EST / 12:00 PM EDT)
+    # 2) Weekday Mid-Morning Live Options Scan (~11:00 AM EST / 12:00 PM EDT) — signal-only (--only-if-good)
     - cron: "0 16 * * 1-5"
+    # 3) Weekday Afternoon Signal + Exit Sweep (~2:30 PM EST / 3:30 PM EDT) — signal-only + action check
+    - cron: "30 19 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -16,6 +18,7 @@ on:
           - options
           - morning
           - both
+          - check
       strategy:
         description: "Options strategy filter"
         type: choice
@@ -32,6 +35,10 @@ on:
         description: "Optional comma-separated tickers (leave blank for liquid ETFs + leaders)"
         required: false
         default: ""
+      only_if_good:
+        description: "Only ping Discord if setups clear strict friction & edge criteria"
+        type: boolean
+        default: false
 
 jobs:
   dispatch:
@@ -61,9 +68,16 @@ jobs:
           MODE="${{ github.event.inputs.mode || 'options' }}"
           STRAT="${{ github.event.inputs.strategy || 'all' }}"
           TICKERS="${{ github.event.inputs.tickers || '' }}"
+          ONLY_GOOD="${{ github.event.inputs.only_if_good || 'false' }}"
 
           if [ "${{ github.event.schedule }}" = "45 13 * * 1-5" ]; then
-            MODE="both"
+            MODE="morning"
+          elif [ "${{ github.event.schedule }}" = "0 16 * * 1-5" ]; then
+            MODE="options"
+            ONLY_GOOD="true"
+          elif [ "${{ github.event.schedule }}" = "30 19 * * 1-5" ]; then
+            MODE="afternoon"
+            ONLY_GOOD="true"
           fi
 
           if [ "$MODE" = "morning" ] || [ "$MODE" = "both" ]; then
@@ -71,10 +85,18 @@ jobs:
             python -m src.cli.main notify --morning
           fi
 
-          if [ "$MODE" = "options" ] || [ "$MODE" = "both" ]; then
-            if [ -n "$TICKERS" ]; then
-              python -m src.cli.main notify --options --live --strategy "$STRAT" --tickers "$TICKERS"
-            else
-              python -m src.cli.main notify --options --live --strategy "$STRAT"
+          if [ "$MODE" = "options" ] || [ "$MODE" = "both" ] || [ "$MODE" = "afternoon" ]; then
+            OPTS_ARGS=(notify --options --live --strategy "$STRAT")
+            if [ "$ONLY_GOOD" = "true" ]; then
+              OPTS_ARGS+=(--only-if-good)
             fi
+            if [ -n "$TICKERS" ]; then
+              OPTS_ARGS+=(--tickers "$TICKERS")
+            fi
+            python -m src.cli.main "${OPTS_ARGS[@]}"
+          fi
+
+          if [ "$MODE" = "check" ] || [ "$MODE" = "afternoon" ]; then
+            python -m src.cli.main refresh || true
+            python -m src.cli.main notify --check
           fi

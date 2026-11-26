@@ -2,9 +2,12 @@
 Discord slash-command bot for the options screener API.
 
 Commands:
-  /market   — current market context
-  /top      — top 10 picks from liquid_large_cap watchlist
-  /scan     — scan a single ticker
+  /morning   — full Desk Morning Brief (regime, Core TFSA sleeve, radar & exits)
+  /options   — `[7] OPTIONS` multi-strategy scan (Bull Put, TFSA Long Call/Put, etc.)
+  /chain     — T-shaped Chain Matrix + Dealer GEX, OI walls & ±1σ expected move
+  /market    — current market context
+  /top       — top 10 picks from liquid_large_cap watchlist
+  /scan      — scan a single ticker
   /watchlist — scan a named watchlist from config.json
 
 Environment variables required (in .env):
@@ -13,10 +16,11 @@ Environment variables required (in .env):
   API_BASE_URL        — defaults to http://127.0.0.1:8000
 """
 
+import logging
 import os
 import sys
-import logging
 from pathlib import Path
+from typing import Any, Dict
 
 from dotenv import load_dotenv
 
@@ -25,6 +29,12 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 import discord
 from discord import app_commands
 import httpx
+
+from src.notifications import (
+    build_chain_api_embed,
+    build_morning_api_embed,
+    build_options_scan_api_embed,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,10 +45,6 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 API_BASE = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
-
-if not TOKEN:
-    logger.error("DISCORD_BOT_TOKEN not set. Set it in .env and restart.")
-    sys.exit(1)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -291,9 +297,86 @@ async def cmd_watchlist(interaction: discord.Interaction, name: str, n: int = 10
     await interaction.followup.send(embed=embed)
 
 
+@tree.command(name="morning", description="Full Options Desk Morning Brief (regime, Core TFSA, setups, exits)")
+@app_commands.describe(refresh="Recompute local radar before sending (default False)")
+async def cmd_morning(interaction: discord.Interaction, refresh: bool = False) -> None:
+    await interaction.response.defer()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http:
+            resp = await http.get(f"{API_BASE}/desk/api/overview", params={"refresh": 1 if refresh else 0})
+            resp.raise_for_status()
+            data: Dict[str, Any] = resp.json()
+    except Exception as exc:
+        await interaction.followup.send(f"Desk API error: {exc}")
+        return
+    embed_dict = build_morning_api_embed(data)
+    await interaction.followup.send(embed=discord.Embed.from_dict(embed_dict))
+
+
+@tree.command(name="options", description="Scan `[7] OPTIONS` setups (Bull Put, TFSA Long Call/Put, Calendars)")
+@app_commands.describe(
+    strategy="Strategy filter: all, bull_put, long_call, long_put, calendar, iron_condor, bear_call",
+    query="Optional filter query (e.g. tfsa, SPY, fric<10, dte>30)",
+    live="Pull live Yahoo option chains (slower; default False uses fast archive)",
+)
+async def cmd_options(
+    interaction: discord.Interaction,
+    strategy: str = "all",
+    query: str = "",
+    live: bool = False,
+) -> None:
+    await interaction.response.defer()
+    strat = (strategy or "all").strip().lower()
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as http:
+            resp = await http.get(
+                f"{API_BASE}/desk/api/options/scan",
+                params={"strategy": strat, "q": query.strip(), "live": 1 if live else 0},
+            )
+            resp.raise_for_status()
+            data: Dict[str, Any] = resp.json()
+    except Exception as exc:
+        await interaction.followup.send(f"Options scan error: {exc}")
+        return
+    embed_dict = build_options_scan_api_embed(data, strategy=strat, query=query)
+    await interaction.followup.send(embed=discord.Embed.from_dict(embed_dict))
+
+
+@tree.command(name="chain", description="Inspect a ticker's Option Chain Matrix, Dealer GEX, OI walls & ±1σ move")
+@app_commands.describe(
+    symbol="Ticker symbol, e.g. SPY, QQQ, NVDA, AAPL",
+    expiration="Optional YYYY-MM-DD expiration (blank picks optimal 30-45d expiry)",
+    live="Pull live Yahoo option chain (default False uses instant archive)",
+)
+async def cmd_chain(
+    interaction: discord.Interaction,
+    symbol: str,
+    expiration: str = "",
+    live: bool = False,
+) -> None:
+    await interaction.response.defer()
+    tk = symbol.upper().strip()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http:
+            resp = await http.get(
+                f"{API_BASE}/desk/api/options/chain",
+                params={"ticker": tk, "exp": expiration.strip(), "live": 1 if live else 0},
+            )
+            resp.raise_for_status()
+            data: Dict[str, Any] = resp.json()
+    except Exception as exc:
+        await interaction.followup.send(f"Chain lookup error for {tk}: {exc}")
+        return
+    embed_dict = build_chain_api_embed(data)
+    await interaction.followup.send(embed=discord.Embed.from_dict(embed_dict))
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
+    if not TOKEN:
+        logger.error("DISCORD_BOT_TOKEN not set. Set it in .env and restart.")
+        sys.exit(1)
     client.run(TOKEN, log_handler=None)
 
 
