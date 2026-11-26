@@ -470,6 +470,14 @@ def _safe_float(val: Any) -> Optional[float]:
     return None
 
 
+def _as_dict(val: Any) -> Dict[str, Any]:
+    return val if isinstance(val, dict) else {}
+
+
+def _as_list(val: Any) -> List[Any]:
+    return val if isinstance(val, list) else []
+
+
 def build_options_scan_api_embed(
     payload: Dict[str, Any],
     *,
@@ -606,15 +614,15 @@ def build_chain_api_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     ladder_lines: List[str] = []
     for pr in sorted_near:
         k = _safe_float(pr.get("strike")) or 0.0
-        c_obj = pr.get("call") if isinstance(pr.get("call"), dict) else None
-        p_obj = pr.get("put") if isinstance(pr.get("put"), dict) else None
+        c_obj = _as_dict(pr.get("call"))
+        p_obj = _as_dict(pr.get("put"))
         c_mid = _safe_float(c_obj.get("mid")) if c_obj else None
         p_mid = _safe_float(p_obj.get("mid")) if p_obj else None
         c_del = _safe_float(c_obj.get("delta")) if c_obj else None
         p_del = _safe_float(p_obj.get("delta")) if p_obj else None
         c_s = f"${c_mid:5.2f} Δ{c_del:+.2f}" if (c_mid is not None and c_del is not None) else (f"${c_mid:5.2f}" if c_mid is not None else "  —  ")
         p_s = f"${p_mid:5.2f} Δ{p_del:+.2f}" if (p_mid is not None and p_del is not None) else (f"${p_mid:5.2f}" if p_mid is not None else "  —  ")
-        tags = pr.get("tags") if isinstance(pr.get("tags"), list) else []
+        tags = _as_list(pr.get("tags"))
         mark = "*" if "SPOT" in tags else " "
         ladder_lines.append(f"{mark}C {c_s:<13} | {k:6.1f} | P {p_s}")
 
@@ -642,10 +650,10 @@ def build_chain_api_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_morning_api_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Build a Discord embed dict from `GET /desk/api/overview` JSON (used by `/morning`)."""
-    snap = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
-    book = payload.get("book") if isinstance(payload.get("book"), dict) else {}
+    snap = _as_dict(payload.get("snapshot"))
+    book = _as_dict(payload.get("book"))
     posture = str(snap.get("regime_posture") or "NEUTRAL")
-    exits = book.get("exit_alerts") if isinstance(book.get("exit_alerts"), list) else []
+    exits = _as_list(book.get("exit_alerts"))
 
     spy_last = _safe_float(snap.get("spy_last"))
     spy_chg = _safe_float(snap.get("spy_chg_1d_pct"))
@@ -657,7 +665,7 @@ def build_morning_api_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     vix_s = f"{vix:.1f} ({snap.get('vix_term') or '—'})" if vix is not None else "—"
     rv_s = f"{rv20:.1f}%" if rv20 is not None else "—"
 
-    core_raw = snap.get("core_allocation") if isinstance(snap.get("core_allocation"), list) else []
+    core_raw = _as_list(snap.get("core_allocation"))
     core_lines: List[str] = []
     for c in core_raw:
         if not isinstance(c, dict):
@@ -667,19 +675,19 @@ def build_morning_api_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
         core_lines.append(f"**{tk}** `{wt:.0f}%`")
     core_txt = " · ".join(core_lines) if core_lines else "Run `opt refresh`"
 
-    opps_raw = snap.get("opportunities") if isinstance(snap.get("opportunities"), list) else []
+    opps_raw = _as_list(snap.get("opportunities"))
     tfsa_lines: List[str] = []
     for o in opps_raw:
         if not isinstance(o, dict):
             continue
-        rflags = o.get("risk_flags") if isinstance(o.get("risk_flags"), list) else []
+        rflags = _as_list(o.get("risk_flags"))
         pb_id = str(o.get("playbook_id") or "")
         if "TAXABLE_ONLY" in rflags or pb_id in ("vol_managed_outlook", "etf_wide_spread", "etf_bear_call"):
             continue
         tfsa_lines.append(f"• **{o.get('ticker', '?')}** ({o.get('playbook_label', '')}) — {str(o.get('setup_summary') or '')[:70]}")
     setup_txt = "\n".join(tfsa_lines[:4]) if tfsa_lines else "No satellite TFSA setups firing — stay in Core ETF sleeve."
 
-    eq_picks = book.get("equity_picks") if isinstance(book.get("equity_picks"), list) else []
+    eq_picks = _as_list(book.get("equity_picks"))
     open_eq = [p for p in eq_picks if isinstance(p, dict) and str(p.get("status") or "").upper() == "OPEN"]
     book_txt = "**EXIT ALERTS:**\n" + "\n".join(f"• {a}" for a in exits[:4]) if exits else f"{len(open_eq)} open stock/ETF pick(s) · 0 exit alerts"
 
