@@ -234,7 +234,7 @@ def _load_local_ohlcv_stats(
                 if math.isfinite(c1):
                     chg_map[tk] = round(c1, 2)
             if len(cs) >= 22:
-                rv = float(trailing_rv(cs, 20)[-1])
+                rv = float(trailing_rv(np.asarray(cs, dtype=float), 20)[-1])
                 if math.isfinite(rv) and rv > 0.01:
                     rv_map[tk] = rv
     except Exception:
@@ -293,7 +293,7 @@ def _fetch_live_ohlcv_stats(
                 if math.isfinite(c1):
                     chg_map[tk] = round(c1, 2)
             if len(cs) >= 22:
-                rv = float(trailing_rv(cs, 20)[-1])
+                rv = float(trailing_rv(np.asarray(cs, dtype=float), 20)[-1])
                 if math.isfinite(rv) and rv > 0.01:
                     rv_map[tk] = rv
     except Exception:
