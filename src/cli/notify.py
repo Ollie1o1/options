@@ -12,6 +12,7 @@ from src.notifications import (
     DEFAULT_STATE_PATH,
     build_events_embed,
     build_morning_embed,
+    build_options_embed,
     detect_action_events,
     filter_unsent_events,
     format_status_pill,
@@ -27,6 +28,10 @@ from src.tui.state import DeskDataProvider
 
 @click.command("notify")
 @click.option("--morning", is_flag=True, help="Send the daily Morning Desk Dispatch to Discord (+ macOS only if exits/issues).")
+@click.option("--options", "send_options", is_flag=True, help="Send top `[7] OPTIONS` setups (Bull Puts, TFSA Long Calls/Puts, etc.) to Discord.")
+@click.option("--strategy", default="all", show_default=True, help="Strategy filter for --options (all, bull_put, long_call, long_put, calendar, iron_condor).")
+@click.option("--live", is_flag=True, help="With --options: pull live Yahoo option chains (ideal for GitHub Actions / cloud runs).")
+@click.option("--tickers", default="", help="With --options: comma-separated tickers (e.g. SPY,QQQ,NVDA,AAPL).")
 @click.option("--check", is_flag=True, help="Check for new action-only events (open pick exits, clean TFSA setups, stale pipes).")
 @click.option("--pill", is_flag=True, help="Print compact 1-line status pill for macOS menu bar / prompt.")
 @click.option("--test-macos", is_flag=True, help="Send one clean test macOS notification.")
@@ -37,6 +42,10 @@ from src.tui.state import DeskDataProvider
 def notify_cmd(
     ctx: click.Context,
     morning: bool,
+    send_options: bool,
+    strategy: str,
+    live: bool,
+    tickers: str,
     check: bool,
     pill: bool,
     test_macos: bool,
@@ -77,6 +86,27 @@ def notify_cmd(
         if not ok:
             raise SystemExit(1)
         return
+
+    if send_options:
+        from src.tui.options_engine import scan_options_desk
+
+        sym_list = [s.strip().upper() for s in tickers.split(",") if s.strip()] or None
+        rows, note = scan_options_desk(
+            strategy=strategy,
+            symbols=sym_list,
+            live=live,
+        )
+        embed = build_options_embed(rows, note=note, strategy=strategy)
+        out_opt: Dict[str, Any] = {"mode": "options", "count": len(rows), "note": note, "dry_run": dry_run, "discord_embed": embed}
+        if not dry_run:
+            out_opt["discord_sent"] = send_discord_embed(embed)
+        if use_json or dry_run:
+            click.echo(json.dumps(out_opt, indent=2, default=str))
+        else:
+            ok_o = out_opt.get("discord_sent")
+            click.echo(f"{'✓' if ok_o else '✗'} Options Discord dispatch ({len(rows)} candidates · {note})")
+        if not morning and not check:
+            return
 
     provider = DeskDataProvider(
         ohlcv_db=(ctx.obj or {}).get("ohlcv_db", "data/equity_ohlcv.db"),

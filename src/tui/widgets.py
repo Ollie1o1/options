@@ -548,6 +548,26 @@ class DeskCommandProvider(Provider):
                 help="Log a paper option or spread directly into paper_trades.db",
             )
 
+        if not ql or "discord" in ql or "notify" in ql or "send" in ql or "alert" in ql:
+            yield Hit(
+                0.83,
+                "Discord: Send Morning Dispatch",
+                lambda: app._dispatch_discord("morning"),  # type: ignore[attr-defined]
+                help="Post today's Bloomberg Morning Dispatch embed to DISCORD_WEBHOOK_URL",
+            )
+            yield Hit(
+                0.82,
+                "Discord: Send Top Options Setups",
+                lambda: app._dispatch_discord("options"),  # type: ignore[attr-defined]
+                help="Post top [7] OPTIONS Scanner Bull Puts & TFSA setups to Discord",
+            )
+            yield Hit(
+                0.81,
+                "Discord: Send Selected Option / Staged Spread Ticket",
+                lambda: app._dispatch_discord("ticket"),  # type: ignore[attr-defined]
+                help="Post your focused option or staged Chain Matrix spread to Discord",
+            )
+
         if not ql or "log" in ql or "pick" in ql:
             yield Hit(
                 0.85,

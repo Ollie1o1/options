@@ -309,6 +309,119 @@ def build_events_embed(events: Sequence[AlertEvent]) -> Dict[str, Any]:
     }
 
 
+def build_options_embed(
+    rows: Sequence[Any],
+    *,
+    note: str = "",
+    strategy: str = "all",
+    title_prefix: str = "Options Desk · Top Setups",
+) -> Dict[str, Any]:
+    """Build a crisp Discord Rich Embed from `[7] OPTIONS` Scanner rows (`OptionScanRow`)."""
+    today_str = dt.date.today().isoformat()
+    promising = [r for r in rows if getattr(r, "evidence_badge", "") == "PROMISING"]
+    tfsa_rows = [r for r in rows if getattr(r, "tfsa_legal", False)]
+    other_rows = [r for r in rows if r not in promising and r not in tfsa_rows]
+
+    def _fmt_row(r: Any) -> str:
+        side_s = f"+${r.mid_price:.2f} cr" if r.is_credit else f"-${r.mid_price:.2f} deb"
+        ivrv = f" · IV/RV `{r.iv_vs_rv:.2f}x`" if getattr(r, "iv_vs_rv", None) is not None else ""
+        acct = "TFSA OK" if r.tfsa_legal else "TAXABLE"
+        return (
+            f"• **{r.ticker}** {r.strategy} `{r.strikes_label}` ({r.dte}d) — "
+            f"`{side_s}` · Limit `${r.walk_away_limit:.2f}` · Fric `{r.friction_pct*100:.1f}%` · "
+            f"Risk `${r.max_risk_usd:,.0f}`{ivrv} · `{acct}`"
+        )
+
+    fields: List[Dict[str, Any]] = []
+    if promising:
+        fields.append(
+            {
+                "name": f"Promising Defined-Risk Spreads ({len(promising)})",
+                "value": "\n".join(_fmt_row(r) for r in promising[:5])[:1000],
+                "inline": False,
+            }
+        )
+    if tfsa_rows:
+        fields.append(
+            {
+                "name": f"TFSA-Legal Single-Leg Options ({len(tfsa_rows)})",
+                "value": "\n".join(_fmt_row(r) for r in tfsa_rows[:5])[:1000],
+                "inline": False,
+            }
+        )
+    if not fields and other_rows:
+        fields.append(
+            {
+                "name": f"Watchlist / Caution Candidates ({len(other_rows)})",
+                "value": "\n".join(_fmt_row(r) for r in other_rows[:6])[:1000],
+                "inline": False,
+            }
+        )
+    if not fields:
+        fields.append(
+            {
+                "name": "No Setups Cleared Filters",
+                "value": "0 candidates passed friction/liquidity rules right now (markets may be closed or spreads too wide).",
+                "inline": False,
+            }
+        )
+
+    return {
+        "title": f"{title_prefix} · {today_str} ({strategy.upper()})",
+        "color": COLOR_GOOD if promising else (COLOR_INFO if tfsa_rows else COLOR_WARN),
+        "description": note or f"{len(rows)} candidate(s) scanned · limit orders only · live execution OFF",
+        "fields": fields,
+        "footer": {"text": "Options Desk · Run `opt desk --tab options` for Chain Matrix & 2D Heatmap"},
+    }
+
+
+def build_option_ticket_embed(
+    ticker: str,
+    structure_name: str,
+    *,
+    spot: float,
+    legs_summary: str,
+    net_label: str,
+    friction_pct: float,
+    max_risk_usd: float,
+    tfsa_legal: bool,
+    greeks_line: str = "",
+    ladder_lines: Sequence[str] = (),
+    flags: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """Build a mobile-ready Discord trade ticket embed for one selected option or staged multi-leg spread."""
+    acct = "TFSA OK" if tfsa_legal else "TAXABLE / IBKR ONLY (CRA TFSA ban)"
+    fields: List[Dict[str, Any]] = [
+        {
+            "name": "Structure & Legs",
+            "value": f"Spot `${spot:.2f}` · `{acct}`\n{legs_summary}",
+            "inline": False,
+        },
+        {
+            "name": "Pricing & Risk",
+            "value": f"{net_label} · Friction `{friction_pct*100:.1f}%` · Max Risk `${max_risk_usd:,.0f}`"
+            + (f"\n{greeks_line}" if greeks_line else ""),
+            "inline": False,
+        },
+    ]
+    if ladder_lines:
+        fields.append(
+            {
+                "name": "Walk-Away Limit Ladder (Never Chase)",
+                "value": "\n".join(f"• {ln}" for ln in ladder_lines)[:1000],
+                "inline": False,
+            }
+        )
+    if flags:
+        fields.append({"name": "Flags", "value": ", ".join(f"`{f}`" for f in flags), "inline": False})
+    return {
+        "title": f"Trade Ticket · {ticker.upper()} {structure_name}",
+        "color": COLOR_GOOD if friction_pct <= 0.15 else (COLOR_WARN if friction_pct <= 0.25 else COLOR_BAD),
+        "fields": fields,
+        "footer": {"text": f"Options Desk · {dt.datetime.now().strftime('%Y-%m-%d %H:%M')} · Paper/Limit discipline"},
+    }
+
+
 def send_discord_embed(
     embed: Dict[str, Any],
     *,
