@@ -85,6 +85,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
           SEC_EDGAR_CONTACT: ${{ secrets.SEC_EDGAR_CONTACT }}
+          OPTIONS_DESK_CLOUD_DISPATCH: "1"
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "ERROR: Add DISCORD_WEBHOOK_URL under Settings -> Secrets and variables -> Actions."

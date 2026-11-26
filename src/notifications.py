@@ -163,9 +163,13 @@ def detect_action_events(
         pass
 
     # 4. Critical Data Pipe Failures (STALE only — avoids noisy WARN flapping).
-    # On ephemeral cloud runners (GitHub Actions), local-only archives (chains/earnings)
-    # are not persisted, so only monitor OHLCV and disk there to prevent daily false alarms.
-    is_cloud = (os.environ.get("GITHUB_ACTIONS", "").lower() == "true") if cloud_mode is None else bool(cloud_mode)
+    # On ephemeral cloud dispatch runners (OPTIONS_DESK_CLOUD_DISPATCH=1), local-only
+    # archives (chains/earnings) are not persisted, so only monitor OHLCV and disk there.
+    is_cloud = (
+        os.environ.get("OPTIONS_DESK_CLOUD_DISPATCH", "").strip().lower() in ("1", "true", "yes")
+        if cloud_mode is None
+        else bool(cloud_mode)
+    )
     monitored_pipes = ("ohlcv", "disk") if is_cloud else ("ohlcv", "chains", "earnings", "disk")
     pipes = health.get("pipes") or {}
     stale_names = [k for k, v in pipes.items() if k in monitored_pipes and v.get("status") == "STALE"]
