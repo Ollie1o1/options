@@ -2,11 +2,11 @@ name: Discord Desk Dispatch (24/7 Cloud)
 
 on:
   schedule:
-    # 1) Weekday Morning Desk Brief (~8:45 AM EST / 9:45 AM EDT) — 1 calm daily brief
+    # 1) Weekday Morning Desk Brief (~8:45 AM EST / 9:45 AM EDT) — 1 calm daily brief (regime, Core TFSA, radar)
     - cron: "45 13 * * 1-5"
-    # 2) Weekday Mid-Morning Live Options Scan (~11:00 AM EST / 12:00 PM EDT) — signal-only (--only-if-good)
+    # 2) Weekday Mid-Morning Broad Market Sweep (~11:00 AM EST / 12:00 PM EDT) — all 60 ETFs & leaders (--only-if-good)
     - cron: "0 16 * * 1-5"
-    # 3) Weekday Afternoon Signal + Exit Sweep (~2:30 PM EST / 3:30 PM EDT) — signal-only + action check
+    # 3) Weekday Afternoon Pre-Close Sweep (~2:30 PM EST / 3:30 PM EDT) — all 60 ETFs & leaders + exit check
     - cron: "30 19 * * 1-5"
   workflow_dispatch:
     inputs:
@@ -31,8 +31,17 @@ on:
           - calendar
           - iron_condor
           - bear_call
+      session:
+        description: "Session framing label"
+        type: choice
+        default: "auto"
+        options:
+          - auto
+          - midday
+          - afternoon
+          - manual
       tickers:
-        description: "Optional comma-separated tickers (leave blank for liquid ETFs + leaders)"
+        description: "Optional comma-separated tickers (leave blank to scan all 60 ETFs & leaders)"
         required: false
         default: ""
       only_if_good:
@@ -67,6 +76,7 @@ jobs:
           fi
           MODE="${{ github.event.inputs.mode || 'options' }}"
           STRAT="${{ github.event.inputs.strategy || 'all' }}"
+          SESSION="${{ github.event.inputs.session || 'auto' }}"
           TICKERS="${{ github.event.inputs.tickers || '' }}"
           ONLY_GOOD="${{ github.event.inputs.only_if_good || 'false' }}"
 
@@ -74,9 +84,11 @@ jobs:
             MODE="morning"
           elif [ "${{ github.event.schedule }}" = "0 16 * * 1-5" ]; then
             MODE="options"
+            SESSION="midday"
             ONLY_GOOD="true"
           elif [ "${{ github.event.schedule }}" = "30 19 * * 1-5" ]; then
             MODE="afternoon"
+            SESSION="afternoon"
             ONLY_GOOD="true"
           fi
 
@@ -86,7 +98,7 @@ jobs:
           fi
 
           if [ "$MODE" = "options" ] || [ "$MODE" = "both" ] || [ "$MODE" = "afternoon" ]; then
-            OPTS_ARGS=(notify --options --live --strategy "$STRAT")
+            OPTS_ARGS=(notify --options --live --strategy "$STRAT" --session "$SESSION")
             if [ "$ONLY_GOOD" = "true" ]; then
               OPTS_ARGS+=(--only-if-good)
             fi

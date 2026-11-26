@@ -31,8 +31,9 @@ from src.tui.state import DeskDataProvider
 @click.option("--morning", is_flag=True, help="Send the daily Morning Desk Dispatch to Discord (+ macOS only if exits/issues).")
 @click.option("--options", "send_options", is_flag=True, help="Send top `[7] OPTIONS` setups (Bull Puts, TFSA Long Calls/Puts, etc.) to Discord.")
 @click.option("--strategy", default="all", show_default=True, help="Strategy filter for --options (all, bull_put, long_call, long_put, calendar, iron_condor).")
-@click.option("--live", is_flag=True, help="With --options: pull live Yahoo option chains (ideal for GitHub Actions / cloud runs).")
-@click.option("--tickers", default="", help="With --options: comma-separated tickers (e.g. SPY,QQQ,NVDA,AAPL).")
+@click.option("--live", is_flag=True, help="With --options: pull live Yahoo option chains across all 60 ETFs & leaders.")
+@click.option("--tickers", default="", help="With --options: comma-separated tickers (leave blank for full 60-ticker market scan).")
+@click.option("--session", default="auto", show_default=True, type=click.Choice(["auto", "morning", "midday", "afternoon", "manual"], case_sensitive=False), help="With --options: session framing for the Discord brief.")
 @click.option("--only-if-good", is_flag=True, help="With --options: only ping Discord when setups clear strict friction & edge criteria (silent on dead days).")
 @click.option("--check", is_flag=True, help="Check for new action-only events (open pick exits, clean TFSA setups, stale pipes).")
 @click.option("--pill", is_flag=True, help="Print compact 1-line status pill for macOS menu bar / prompt.")
@@ -48,6 +49,7 @@ def notify_cmd(
     strategy: str,
     live: bool,
     tickers: str,
+    session: str,
     only_if_good: bool,
     check: bool,
     pill: bool,
@@ -94,15 +96,18 @@ def notify_cmd(
         from src.tui.options_engine import scan_options_desk
 
         sym_list = [s.strip().upper() for s in tickers.split(",") if s.strip()] or None
+        pulse: Dict[str, Any] = {}
         rows, note = scan_options_desk(
             strategy=strategy,
             symbols=sym_list,
             live=live,
+            pulse_out=pulse,
         )
         selected_rows = filter_good_option_alerts(rows) if only_if_good else rows
         if only_if_good and not selected_rows:
             out_quiet: Dict[str, Any] = {
                 "mode": "options",
+                "session": session,
                 "only_if_good": True,
                 "scanned": len(rows),
                 "count": 0,
@@ -124,9 +129,17 @@ def notify_cmd(
                 else note
             )
             title_prefix = "Options Desk · High-Conviction Alert" if only_if_good else "Options Desk · Top Setups"
-            embed = build_options_embed(selected_rows, note=embed_note, strategy=strategy, title_prefix=title_prefix)
+            embed = build_options_embed(
+                selected_rows,
+                note=embed_note,
+                strategy=strategy,
+                title_prefix=title_prefix,
+                session=session,
+                market_pulse=pulse or None,
+            )
             out_opt: Dict[str, Any] = {
                 "mode": "options",
+                "session": session,
                 "only_if_good": only_if_good,
                 "scanned": len(rows),
                 "count": len(selected_rows),

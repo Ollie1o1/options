@@ -351,18 +351,76 @@ def filter_good_option_alerts(
     return good
 
 
+SESSION_TITLES: Dict[str, Tuple[str, str]] = {
+    "morning": ("Morning Desk Sweep", "Pre-market & open radar across liquid ETFs & leaders"),
+    "midday": ("Mid-Morning Market Sweep", "11:00 AM ET · Opening dust settled, tightest intraday spreads"),
+    "afternoon": ("Afternoon Pre-Close Sweep", "2:30 PM ET · Late-session leadership & overnight swing setups"),
+    "manual": ("On-Demand Market Sweep", "Live broad-market scan across ETFs & large-cap leaders"),
+}
+
+
+def resolve_market_session(session: str = "auto", now_utc: Optional[dt.datetime] = None) -> str:
+    """Resolve `auto` into `morning` / `midday` / `afternoon` / `manual` using US Eastern hours."""
+    s = (session or "auto").strip().lower()
+    if s in SESSION_TITLES:
+        return s
+    now = now_utc or dt.datetime.now(dt.timezone.utc)
+    # Approximate ET (UTC-5 EST / UTC-4 EDT — close enough for session bucketing)
+    et_hour = (now.hour - 5) % 24
+    if 6 <= et_hour < 10:
+        return "morning"
+    if 10 <= et_hour < 14:
+        return "midday"
+    if 14 <= et_hour < 17:
+        return "afternoon"
+    return "manual"
+
+
+def _dedupe_by_ticker(rows: Sequence[Any], limit: int = 5) -> List[Any]:
+    """Keep at most 1 top-ranked setup per ticker so Discord shows broad market diversity."""
+    out: List[Any] = []
+    seen: set[str] = set()
+    for r in rows:
+        tk = str(getattr(r, "ticker", "") or "").upper()
+        if not tk or tk in seen:
+            continue
+        seen.add(tk)
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def build_options_embed(
     rows: Sequence[Any],
     *,
     note: str = "",
     strategy: str = "all",
     title_prefix: str = "Options Desk · Top Setups",
+    session: str = "",
+    market_pulse: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build a crisp Discord Rich Embed from `[7] OPTIONS` Scanner rows (`OptionScanRow`)."""
+    """Build a broad-market, session-aware Discord Rich Embed from `[7] OPTIONS` Scanner rows."""
     today_str = dt.date.today().isoformat()
-    promising = [r for r in rows if getattr(r, "evidence_badge", "") == "PROMISING"]
-    tfsa_rows = [r for r in rows if getattr(r, "tfsa_legal", False)]
-    other_rows = [r for r in rows if r not in promising and r not in tfsa_rows]
+    promising_all = [r for r in rows if getattr(r, "evidence_badge", "") == "PROMISING"]
+    tfsa_all = [r for r in rows if getattr(r, "tfsa_legal", False)]
+    other_all = [r for r in rows if r not in promising_all and r not in tfsa_all]
+
+    # Rank TFSA single-legs by cheap IV/RV first, then tightest bid-ask friction
+    tfsa_ranked = sorted(
+        tfsa_all,
+        key=lambda r: (
+            getattr(r, "iv_vs_rv", None) is None,
+            float(getattr(r, "iv_vs_rv", 9.9) or 9.9),
+            float(getattr(r, "friction_pct", 1.0) or 1.0),
+        ),
+    )
+    promising_top = _dedupe_by_ticker(promising_all, limit=5)
+    tfsa_top = _dedupe_by_ticker(tfsa_ranked, limit=5)
+    other_top = _dedupe_by_ticker(other_all, limit=6)
+
+    distinct_promising = len({str(getattr(r, "ticker", "")).upper() for r in promising_all})
+    distinct_tfsa = len({str(getattr(r, "ticker", "")).upper() for r in tfsa_all})
 
     def _fmt_row(r: Any) -> str:
         side_s = f"+${r.mid_price:.2f} cr" if r.is_credit else f"-${r.mid_price:.2f} deb"
@@ -375,31 +433,70 @@ def build_options_embed(
         )
 
     fields: List[Dict[str, Any]] = []
-    if promising:
+
+    if isinstance(market_pulse, dict) and int(market_pulse.get("breadth_total") or 0) > 0:
+        pulse_parts: List[str] = []
+        for idx_lbl, key in (("SPY", "spy_chg"), ("QQQ", "qqq_chg"), ("IWM", "iwm_chg")):
+            val = _safe_float(market_pulse.get(key))
+            if val is not None:
+                pulse_parts.append(f"{idx_lbl} `{val:+.1f}%`")
+        adv = int(market_pulse.get("advancers") or 0)
+        dec = int(market_pulse.get("decliners") or 0)
+        pulse_parts.append(f"Breadth `{adv}↑ / {dec}↓`")
+        lines: List[str] = [" · ".join(pulse_parts)]
+        leaders = _as_list(market_pulse.get("leaders"))
+        laggards = _as_list(market_pulse.get("laggards"))
+        if leaders:
+            ld_txt = ", ".join(f"**{tk}** `{float(ch):+.1f}%`" for tk, ch in leaders[:3])
+            lg_txt = ", ".join(f"**{tk}** `{float(ch):+.1f}%`" for tk, ch in laggards[:3])
+            lines.append(f"Leaders: {ld_txt}" + (f" · Laggards: {lg_txt}" if lg_txt else ""))
+        fields.append({"name": "Market Pulse & Breadth", "value": "\n".join(lines)[:1000], "inline": False})
+
+    if promising_top:
         fields.append(
             {
-                "name": f"Promising Defined-Risk Spreads ({len(promising)})",
-                "value": "\n".join(_fmt_row(r) for r in promising[:5])[:1000],
+                "name": f"Best Defined-Risk Spreads ({distinct_promising} tickers · Top {len(promising_top)})",
+                "value": "\n".join(_fmt_row(r) for r in promising_top)[:1000],
                 "inline": False,
             }
         )
-    if tfsa_rows:
+    if tfsa_top:
         fields.append(
             {
-                "name": f"TFSA-Legal Single-Leg Options ({len(tfsa_rows)})",
-                "value": "\n".join(_fmt_row(r) for r in tfsa_rows[:5])[:1000],
+                "name": f"Best TFSA-Legal Options ({distinct_tfsa} tickers · Top {len(tfsa_top)})",
+                "value": "\n".join(_fmt_row(r) for r in tfsa_top)[:1000],
                 "inline": False,
             }
         )
-    if not fields and other_rows:
+    if not promising_top and not tfsa_top and other_top:
         fields.append(
             {
-                "name": f"Watchlist / Caution Candidates ({len(other_rows)})",
-                "value": "\n".join(_fmt_row(r) for r in other_rows[:6])[:1000],
+                "name": f"Watchlist / Caution Candidates ({len(other_all)})",
+                "value": "\n".join(_fmt_row(r) for r in other_top)[:1000],
                 "inline": False,
             }
         )
-    if not fields:
+
+    # Cross-market vol extremes (cheapest IV/RV for buyers vs richest IV/RV for sellers)
+    iv_by_tk: Dict[str, float] = {}
+    for r in rows:
+        iv_v = _safe_float(getattr(r, "iv_vs_rv", None))
+        tk = str(getattr(r, "ticker", "") or "").upper()
+        if tk and iv_v is not None and tk not in iv_by_tk:
+            iv_by_tk[tk] = iv_v
+    if len(iv_by_tk) >= 4:
+        sorted_iv = sorted(iv_by_tk.items(), key=lambda x: x[1])
+        cheap_s = ", ".join(f"**{tk}** `{v:.2f}x`" for tk, v in sorted_iv[:3])
+        rich_s = ", ".join(f"**{tk}** `{v:.2f}x`" for tk, v in reversed(sorted_iv[-3:]))
+        fields.append(
+            {
+                "name": "Cross-Market Vol Extremes (IV / RV20)",
+                "value": f"Cheapest (buy vol): {cheap_s}\nRichest (sell vol): {rich_s}",
+                "inline": False,
+            }
+        )
+
+    if not promising_top and not tfsa_top and not other_top:
         fields.append(
             {
                 "name": "No Setups Cleared Filters",
@@ -408,12 +505,20 @@ def build_options_embed(
             }
         )
 
+    sess_key = resolve_market_session(session) if session else ""
+    sess_title, sess_desc = SESSION_TITLES.get(sess_key, ("", ""))
+    if sess_title:
+        tag = "High-Conviction · " if "High-Conviction" in title_prefix else ""
+        final_title = f"Options Desk · {tag}{sess_title} · {today_str} ({strategy.upper()})"
+    else:
+        final_title = f"{title_prefix} · {today_str} ({strategy.upper()})"
+    desc_parts = [p for p in (sess_desc, note) if p]
     return {
-        "title": f"{title_prefix} · {today_str} ({strategy.upper()})",
-        "color": COLOR_GOOD if promising else (COLOR_INFO if tfsa_rows else COLOR_WARN),
-        "description": note or f"{len(rows)} candidate(s) scanned · limit orders only · live execution OFF",
+        "title": final_title,
+        "color": COLOR_GOOD if promising_top else (COLOR_INFO if tfsa_top else COLOR_WARN),
+        "description": " · ".join(desc_parts) or f"{len(rows)} candidate(s) scanned · limit orders only · live execution OFF",
         "fields": fields,
-        "footer": {"text": "Options Desk · Run `opt desk --tab options` for Chain Matrix & 2D Heatmap"},
+        "footer": {"text": "Options Desk · Best 1 setup per ticker across full market · Run `opt desk --tab options` for full cockpit"},
     }
 
 
