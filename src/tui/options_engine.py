@@ -12,6 +12,7 @@ Design invariants:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
 import math
 import os
@@ -21,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from src.alpha.options_for_shares import EXPANDED_CHAIN_UNIVERSE
 from src.paths import repo_path
 from src.structure.chain_data import (
     ChainContract,
@@ -194,10 +196,8 @@ SCAN_STRATEGIES: Tuple[Tuple[str, str], ...] = (
     ("Short Puts [TAXABLE]", "short_put"),
 )
 
-DEFAULT_LIVE_SCAN_UNIVERSE: Tuple[str, ...] = (
-    "SPY", "QQQ", "IWM", "SMH", "XLK", "XLE", "XLF", "XLV", "GLD", "TLT",
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD",
-)
+# Full 60-ticker broad-market liquid universe (24 Macro/Sector ETFs + 36 Large-Cap Leaders)
+DEFAULT_LIVE_SCAN_UNIVERSE: Tuple[str, ...] = EXPANDED_CHAIN_UNIVERSE
 
 
 def _clean_float(val: Any) -> Optional[float]:
@@ -210,24 +210,126 @@ def _clean_float(val: Any) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
-def _load_rv20_map(ohlcv_db: str, symbols: Sequence[str]) -> Dict[str, float]:
-    """Return `{TICKER: rv20_decimal}` from local OHLCV DB (fast, zero network)."""
+def _load_local_ohlcv_stats(
+    ohlcv_db: str,
+    symbols: Sequence[str],
+) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    """Return `(spot_map, rv20_map, chg1d_pct_map)` from local OHLCV DB (fast, zero network)."""
+    spots: Dict[str, float] = {}
+    rv_map: Dict[str, float] = {}
+    chg_map: Dict[str, float] = {}
     if not symbols:
-        return {}
+        return spots, rv_map, chg_map
     try:
         from src.equity_playbooks.indicators import trailing_rv
         from src.radar.scanners import load_local_ohlcv_safe
 
         ohlcv = load_local_ohlcv_safe(ohlcv_db, symbols=list(symbols), lookback_days=40)
-        out: Dict[str, float] = {}
         for sym, (_ds, cs, _vs) in ohlcv.items():
+            tk = sym.upper()
+            if len(cs) >= 1 and math.isfinite(float(cs[-1])) and float(cs[-1]) > 0:
+                spots[tk] = float(cs[-1])
+            if len(cs) >= 2 and float(cs[-2]) > 0:
+                c1 = (float(cs[-1]) / float(cs[-2]) - 1.0) * 100.0
+                if math.isfinite(c1):
+                    chg_map[tk] = round(c1, 2)
             if len(cs) >= 22:
-                rv = float(trailing_rv(cs, 20)[-1])
+                rv = float(trailing_rv(np.asarray(cs, dtype=float), 20)[-1])
                 if math.isfinite(rv) and rv > 0.01:
-                    out[sym.upper()] = rv
-        return out
+                    rv_map[tk] = rv
     except Exception:
-        return {}
+        pass
+    return spots, rv_map, chg_map
+
+
+def _fetch_live_ohlcv_stats(
+    symbols: Sequence[str],
+) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    """Batched live Yahoo 2-month close download -> `(spot_map, rv20_map, chg1d_pct_map)`."""
+    spots: Dict[str, float] = {}
+    rv_map: Dict[str, float] = {}
+    chg_map: Dict[str, float] = {}
+    uniq = sorted({s.upper().strip() for s in symbols if s and s.strip()})
+    if not uniq:
+        return spots, rv_map, chg_map
+    try:
+        import yfinance as yf
+        from src.equity_playbooks.indicators import trailing_rv
+
+        df = yf.download(
+            tickers=uniq if len(uniq) > 1 else uniq[0],
+            period="2mo",
+            auto_adjust=False,
+            progress=False,
+            threads=True,
+        )
+        if df is None or df.empty:
+            return spots, rv_map, chg_map
+
+        def _extract_closes(tk: str) -> List[float]:
+            try:
+                if hasattr(df.columns, "nlevels") and int(df.columns.nlevels) > 1:
+                    if ("Close", tk) in df.columns:
+                        ser = df[("Close", tk)]
+                    elif (tk, "Close") in df.columns:
+                        ser = df[(tk, "Close")]
+                    else:
+                        return []
+                else:
+                    if "Close" not in df.columns or len(uniq) != 1:
+                        return []
+                    ser = df["Close"]
+                vals = [float(x) for x in ser.dropna().tolist() if math.isfinite(float(x)) and float(x) > 0]
+                return vals
+            except Exception:
+                return []
+
+        for tk in uniq:
+            cs = _extract_closes(tk)
+            if len(cs) >= 1:
+                spots[tk] = cs[-1]
+            if len(cs) >= 2 and cs[-2] > 0:
+                c1 = (cs[-1] / cs[-2] - 1.0) * 100.0
+                if math.isfinite(c1):
+                    chg_map[tk] = round(c1, 2)
+            if len(cs) >= 22:
+                rv = float(trailing_rv(np.asarray(cs, dtype=float), 20)[-1])
+                if math.isfinite(rv) and rv > 0.01:
+                    rv_map[tk] = rv
+    except Exception:
+        pass
+    return spots, rv_map, chg_map
+
+
+def _build_market_pulse(
+    chg_map: Dict[str, float],
+    *,
+    universe_size: int,
+    scanned_ok: int,
+) -> Dict[str, Any]:
+    """Summarize broad-market breadth, index moves, and top leaders/laggards."""
+    items = [(tk, chg) for tk, chg in chg_map.items() if math.isfinite(chg)]
+    adv = sum(1 for _, c in items if c > 0.0)
+    dec = sum(1 for _, c in items if c < 0.0)
+    by_chg = sorted(items, key=lambda x: x[1], reverse=True)
+    return {
+        "universe_size": universe_size,
+        "scanned_ok": scanned_ok,
+        "breadth_total": len(items),
+        "advancers": adv,
+        "decliners": dec,
+        "spy_chg": chg_map.get("SPY"),
+        "qqq_chg": chg_map.get("QQQ"),
+        "iwm_chg": chg_map.get("IWM"),
+        "leaders": by_chg[:3],
+        "laggards": list(reversed(by_chg[-3:])) if len(by_chg) >= 3 else [],
+    }
+
+
+def _load_rv20_map(ohlcv_db: str, symbols: Sequence[str]) -> Dict[str, float]:
+    """Return `{TICKER: rv20_decimal}` from local OHLCV DB (fast, zero network)."""
+    _spots, rv_map, _chg = _load_local_ohlcv_stats(ohlcv_db, symbols)
+    return rv_map
 
 
 def _load_earnings_map() -> Dict[str, int]:
@@ -646,10 +748,13 @@ def scan_options_desk(
     max_dte: int = 125,
     live: bool = False,
     max_friction_pct: float = 0.28,
+    max_workers: int = 6,
+    pulse_out: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[OptionScanRow], str]:
     """Scan local `chain_archive.db` (instant) or live Yahoo chains into `OptionScanRow`s.
 
-    Returns `(rows, status_note)`.
+    Returns `(rows, status_note)`. If `pulse_out` is provided, populates it in-place with
+    broad-market breadth, index moves, and top leaders/laggards without extra network calls.
     """
     strat = (strategy or "all").lower().strip()
     earnings = _load_earnings_map()
@@ -707,10 +812,15 @@ def scan_options_desk(
 
     # Determine symbols & latest spots
     if live:
-        scan_syms = [s.upper() for s in (symbols or DEFAULT_LIVE_SCAN_UNIVERSE[:10])]
-        rv_map = _load_rv20_map(ohlcv_db, scan_syms)
+        scan_syms = [s.upper() for s in (symbols or DEFAULT_LIVE_SCAN_UNIVERSE)]
+        loc_spots, rv_map, chg_map = _load_local_ohlcv_stats(ohlcv_db, scan_syms)
+        live_spots, live_rv, live_chg = _fetch_live_ohlcv_stats(scan_syms)
+        spot_map: Dict[str, float] = {**loc_spots, **live_spots}
+        rv_map = {**rv_map, **live_rv}
+        chg_map = {**chg_map, **live_chg}
         eff_target = 90 if strat == "bull_put" else target_dte
-        for tk in scan_syms:
+
+        def _scan_one_live(tk: str) -> Tuple[bool, List[OptionScanRow]]:
             sl = load_live_chain_slice(
                 tk,
                 target_dte=eff_target,
@@ -719,28 +829,45 @@ def scan_options_desk(
                 build_rnd=False,
             )
             if sl is None:
-                continue
-            # Estimate spot from near-ATM call/put strikes if not carried on slice
-            all_k = [c.strike for c in sl.calls + sl.puts if c.delta is not None]
-            spot_est = 0.0
-            if sl.calls:
-                atm_c = min(sl.calls, key=lambda c: abs(abs(c.delta or 0.5) - 0.5))
-                spot_est = atm_c.strike
-            elif all_k:
-                spot_est = float(np.median(all_k))
+                return False, []
+            spot_est = spot_map.get(tk, 0.0)
             if spot_est <= 0:
-                continue
-            rows.extend(
-                _build_candidates_for_slice(
-                    sl,
-                    spot_est,
-                    rv20=rv_map.get(tk),
-                    earnings_days=earnings.get(tk),
-                    strategy_filter=strat,
-                    max_friction_pct=max_friction_pct,
-                )
+                all_k = [c.strike for c in sl.calls + sl.puts if c.delta is not None]
+                if sl.calls:
+                    atm_c = min(sl.calls, key=lambda c: abs(abs(c.delta or 0.5) - 0.5))
+                    spot_est = atm_c.strike
+                elif all_k:
+                    spot_est = float(np.median(all_k))
+            if spot_est <= 0:
+                return False, []
+            built = _build_candidates_for_slice(
+                sl,
+                spot_est,
+                rv20=rv_map.get(tk),
+                earnings_days=earnings.get(tk),
+                strategy_filter=strat,
+                max_friction_pct=max_friction_pct,
             )
-        note = f"Live Yahoo scan: {len(rows)} candidates across {len(scan_syms)} tickers"
+            return True, built
+
+        scanned_ok = 0
+        workers = max(1, min(int(max_workers), len(scan_syms)))
+        if workers == 1:
+            for tk in scan_syms:
+                ok_one, cands = _scan_one_live(tk)
+                if ok_one:
+                    scanned_ok += 1
+                    rows.extend(cands)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                for ok_one, cands in pool.map(_scan_one_live, scan_syms):
+                    if ok_one:
+                        scanned_ok += 1
+                        rows.extend(cands)
+        if pulse_out is not None:
+            pulse_out.clear()
+            pulse_out.update(_build_market_pulse(chg_map, universe_size=len(scan_syms), scanned_ok=scanned_ok))
+        note = f"Live Yahoo scan: {len(rows)} candidates across {scanned_ok}/{len(scan_syms)} tickers"
     else:
         full = repo_path(chain_db)
         if not os.path.exists(full):
@@ -772,7 +899,10 @@ def scan_options_desk(
         except Exception as exc:
             return rows, f"Archive read err: {exc}"
 
-        rv_map = _load_rv20_map(ohlcv_db, list(spots.keys()))
+        _loc_sp, rv_map, chg_map = _load_local_ohlcv_stats(ohlcv_db, list(spots.keys()))
+        if pulse_out is not None:
+            pulse_out.clear()
+            pulse_out.update(_build_market_pulse(chg_map, universe_size=len(spots), scanned_ok=len(spots)))
         # Scan both a 35d swing slice and a 90d O1 wide-spread slice when strat is all/bull_put
         dte_targets = [(90, 60, 125)] if strat == "bull_put" else (
             [(35, 14, 58), (90, 60, 125)] if strat == "all" else [(target_dte, min_dte, max_dte)]

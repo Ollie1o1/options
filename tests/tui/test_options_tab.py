@@ -392,9 +392,72 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
         with patch("src.tui.options_engine.scan_options_desk", return_value=([good_bp, noisy_bp], "mock scan")):
             res_hit = runner.invoke(cli, ["notify", "--options", "--only-if-good", "--dry-run"])
             self.assertEqual(res_hit.exit_code, 0, res_hit.output)
-            self.assertIn("High-Conviction Alert", res_hit.output)
+            self.assertIn("High-Conviction", res_hit.output)
             self.assertIn("SPY", res_hit.output)
             self.assertNotIn("NVDA", res_hit.output)
+
+        # Broad-market universe + session-aware embed + distinct-ticker diversity + market pulse
+        from src.notifications import build_options_embed, resolve_market_session
+        from src.tui.options_engine import DEFAULT_LIVE_SCAN_UNIVERSE
+
+        self.assertGreaterEqual(len(DEFAULT_LIVE_SCAN_UNIVERSE), 50)
+        for core_tk in ("SPY", "QQQ", "SMH", "XLE", "NVDA", "AAPL", "JPM", "LLY"):
+            self.assertIn(core_tk, DEFAULT_LIVE_SCAN_UNIVERSE)
+
+        self.assertEqual(resolve_market_session("midday"), "midday")
+        self.assertEqual(resolve_market_session("afternoon"), "afternoon")
+
+        dup_tfsa = OptionScanRow(
+            ticker="QQQ",
+            strategy="Long Put",
+            strategy_key="long_put",
+            expiration="2026-12-18",
+            dte=40,
+            strikes_label="$495P",
+            spot=505.0,
+            short_delta=0.40,
+            mid_price=10.00,
+            is_credit=False,
+            walk_away_limit=10.10,
+            friction_pct=0.05,
+            max_risk_usd=1000.0,
+            max_profit_usd=5000.0,
+            ror_pct=None,
+            iv_pct=19.0,
+            iv_vs_rv=0.92,
+            skew_vp=2.0,
+            min_oi=300,
+            total_vol=100,
+            tfsa_legal=True,
+            evidence_badge="WATCHLIST",
+            risk_flags=(),
+        )
+        pulse_sample = {
+            "universe_size": 60,
+            "scanned_ok": 58,
+            "breadth_total": 60,
+            "advancers": 42,
+            "decliners": 18,
+            "spy_chg": 0.75,
+            "qqq_chg": 1.15,
+            "iwm_chg": 0.40,
+            "leaders": [("NVDA", 3.2), ("SMH", 2.1), ("PLTR", 1.8)],
+            "laggards": [("TLT", -0.8), ("XLU", -0.5), ("GLD", -0.2)],
+        }
+        sess_emb = build_options_embed(
+            [good_bp, good_tfsa, dup_tfsa, rich_tfsa, noisy_bp],
+            note="Live Yahoo scan: 5 candidates across 58/60 tickers",
+            strategy="all",
+            session="midday",
+            market_pulse=pulse_sample,
+        )
+        self.assertIn("Mid-Morning Market Sweep", sess_emb["title"])
+        field_names = [f["name"] for f in sess_emb["fields"]]
+        self.assertTrue(any("Market Pulse" in n for n in field_names))
+        self.assertTrue(any("Vol Extremes" in n for n in field_names))
+        tfsa_field = next(f["value"] for f in sess_emb["fields"] if "TFSA-Legal" in f["name"])
+        # Distinct-ticker dedupe: QQQ should only appear once in TFSA-Legal field
+        self.assertEqual(tfsa_field.count("**QQQ**"), 1)
 
         # Discord slash command embed builders (/options, /chain, /morning)
         with tempfile.TemporaryDirectory() as td:
