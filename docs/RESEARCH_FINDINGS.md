@@ -8,6 +8,13 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
+## 2026-11-26 — paired paper study: generic selector vs liquidity-first baseline
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **Registered before any outcome:** the generic bull-put selector against a matched liquidity-first baseline (same ticker, session, expiration; short \|delta\| ±0.05, width ±25%; lowest round-trip bid-ask / mid credit). Primary: paired net return on capital at risk, crossed bid/ask plus fees, one observation per ISO week. First local session (11-25, captured 18:20-18:40 ET after the close): 40/40 symbols captured, 6 selector picks, 6 comparable baselines (4 with identical legs), all open. 21 of the 34 symbols with no pick failed the selector's own 28% friction cap on post-close quotes. | **PENDING** (≥ 2027-03-01, ≥ 12 weeks, ≥ 40 pairs) | `PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md` |
+| 2 | The chain archive now records each symbol's archive attempt (`archive_attempts`: archived / no_rows / error / feed_down), so a missing snapshot says whether the provider failed. | BASELINE | `src/chain_archive.py` |
+
 ## 2026-11-25 (newest, later) — the option-contract search, and the live O1 rule
 
 | # | Finding | Status | Detail |
@@ -134,4 +141,5 @@ on our own archive ≥ 2027-03-15.
 | ≥ 2027-01-15 | Bull Put §2 (for the record) | `python -m scripts.delta_matched_benchmark --cache NEW_EMPTY_DIR --exit-through 2027-01-15` |
 | mid-Jan 2027 | Analyst estimate revisions | Registered (`PREREG_PEAD_AND_REVISIONS_20261124.md`), date-gated estimator ready: `python -m scripts.estimate_revisions_test` (`--coverage-only` any time; 2/4 non-overlapping snapshots as of 2026-11-24). |
 | ≥ 2027-01-20 | **B1-F Bear Call forward** | `python -m scripts.bear_call_absolute --cache DIR --forward` (prints the crossed-fill line, Amendment 3) |
+| ≥ 2027-03-01 | Selector vs liquidity-first baseline (paper, paired) | `opt lab study readout` (counts only until then; `PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md`) |
 | ≥ 2027-03-15 | E2 earnings forward (own archive) | `python -m scripts.earnings_premium_dolt --forward`; `--coverage` any time. **At risk: 7 events already lost to chain-archive gaps.** |

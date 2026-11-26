@@ -41,6 +41,8 @@ Green/red on numbers only ever means up/down, never buy/sell.
 | Sector leaders (LEAD) | CONTEXT | top-5 Outlook sectors, above 200d, 12-1m > 0 | 12-1 month return |
 | Estimate revisions (REV) | TESTING (≥ 2027-01-15) | `estimates_archive.db` 30d breadth ≥ 0.35 | breadth |
 | Insider clusters (INS) | WATCHLIST | Radar `insider_cluster` | Radar order |
+| Option skew (opt_skew) | WATCHLIST | Archived calls, puts and modeled gamma exposure | Skew flags, then call-put IV spread |
+| EDGAR events (edgar_events) | WATCHLIST | Cached SEC filings | Filing date |
 | Your holdings (HOLD) | WATCHLIST | buy zones & covered calls | Radar order |
 | Landmines (MINE) | AVOID | post-earnings breakdowns; earnings ≤ 7 days | crash flags, then days |
 
@@ -49,13 +51,29 @@ Green/red on numbers only ever means up/down, never buy/sell.
 
 ### Forward record — how a label can change
 
-Every trading day after the close, maintenance records what each lens listed
+After 18:00 ET on trading days with settled equity data and a current Radar board, maintenance records what each lens listed
 (`data/lens_forward.db`, keyed on each row's own data date, so a stale cache counts once).
 `opt discover --forward` shows the record; outcomes stay **locked until 2027-05-25** and 26
 complete lens-weeks, then are read by the rule frozen in
 [PREREG_DISCOVER_LENS_FORWARD_20261125.md](PREREG_DISCOVER_LENS_FORWARD_20261125.md)
 (one lens-week = one observation, excess vs SPY net of 10 bps, Bonferroni 99.17% CI). A read
 *proposes* a label change; a human makes it. `opt discover --record` records by hand.
+
+For a contract-search audit, run `opt lab scan-audit --ticker SPY`. Add
+`--out scan.json` to save per-ticker coverage, every displayed row, the alert
+screen's decision, and the quote slices sent to the contract selector.
+`opt lab scan-replay scan.json` compares generic contract selections on those
+same inputs. Calendar rows carry their own quotes and stay outside the replay.
+The default uses the local archive. Add
+`--live` to request Yahoo data and report listed, eligible and checked expirations.
+Yahoo request time and last trade time give no bid/ask update time. Audit files
+are paper-research inputs and contain no measured fills.
+
+The next step after a reproducible selection is a paired paper comparison:
+`opt lab study run` captures each archived session, builds the generic bull-put
+pick and a matched liquidity-first alternative from the same quotes, records
+later archived marks for both, and prints the readout. Rules, read date and
+evidence threshold: [PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md](PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md).
 
 ## Card verdicts
 

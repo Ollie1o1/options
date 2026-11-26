@@ -6,6 +6,16 @@ startup maintenance; also `opt discover --record`).
 **Report:** `opt discover --forward` (counts only until the read date — the code refuses to
 compute outcomes earlier).
 
+## Collection correction before the first readout
+
+Scheduled snapshots wait for settled prices after 18:00 ET. A stale or degraded
+board stays retryable. Outcome entry uses the first session after the later of
+the row's data date and the date it was first recorded. The data date still
+defines the cohort week and deduplication key. A week with a missing price path
+for a listed ticker is incomplete. These changes address data availability;
+the registered horizons, benchmarks, costs and statistical thresholds still
+apply.
+
 ## Why
 
 Every Discover lens carries an evidence label (PROVEN / PROMISING / TESTING / WATCHLIST / CONTEXT
@@ -17,7 +27,7 @@ exists.
 
 One row per (lens, ticker, data date of that row) — `INSERT OR IGNORE`, so a cached input that is
 re-recorded on later days (a stale Radar snapshot) counts once, on its own date. Empty lens runs
-are recorded too (an empty list is data). Lenses recorded: all eight. Lenses evaluated:
+are recorded too (an empty list is data). Newly added lenses can be recorded without entering this evaluation. Lenses evaluated:
 
 | Lens | Label at registration | Horizon H (sessions) | Why this horizon |
 |---|---|---:|---|
@@ -33,7 +43,7 @@ are recorded but not evaluated here.
 
 ## Outcome (frozen)
 
-- **Entry:** close of the first session strictly after the row's data date (no look-ahead).
+- **Entry:** close of the first session strictly after both the row's data date and the first recorded date.
 - **Exit:** H sessions after entry. Prices: `data/equity_ohlcv.db` closes.
 - **Excess:** log return of the ticker minus log return of SPY over the same window, minus 10 bps
   round-trip cost.

@@ -131,7 +131,8 @@ def build_evidence_card(
     hits = lens_hits(sym, lens_results)
 
     # ── verdict ──
-    setups = [s for s in dossier.active_signals if s.evidence_tier in ("VALIDATED", "LEAD")]
+    setups = [s for s in dossier.active_signals
+              if s.evidence_tier in ("VALIDATED", "LEAD") and "TESTED_ON_SPY_ONLY" not in s.risk_flags]
     warnings: List[str] = []
     avoid: List[str] = []
     if dossier.days_to_earnings is not None and dossier.days_to_earnings <= 7:
@@ -148,7 +149,7 @@ def build_evidence_card(
         if sc[-1] < float(np.mean(sc[-200:])) and any(s.playbook_id == "equity_pullback" for s in setups):
             warnings.append("SPY below its 200d: uptrend pullbacks lost money in 2018 and 2022")
     reasons = [f"{_tier_word(s.evidence_tier)} · {s.playbook_label}: {s.setup_summary}" for s in setups]
-    if setups and not avoid:
+    if setups and not (avoid or warnings):
         verdict = "TESTED SETUP"
     elif setups:
         verdict = "SETUP + WARNINGS"

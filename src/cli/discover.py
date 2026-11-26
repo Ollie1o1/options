@@ -21,7 +21,7 @@ def _hub(ctx: click.Context):
 @click.command("discover")
 @click.option("--sector", "sector", default=None, help="Drill into one sector ETF's constituents (e.g. XLE, SMH).")
 @click.option("--lens", "lens_id", default=None,
-              help="Open one lens in full: core_rotation, pullbacks, etf_spreads, leaders, revisions, insiders, holdings, landmines.")
+              help="Open one lens in full. Includes opt_skew and edgar_events. An invalid ID lists all choices.")
 @click.option("--ledger", is_flag=True, help="Show ideas already tested here that did NOT work.")
 @click.option("--refresh-macro", is_flag=True, help="Fetch FRED credit-spread / yield-curve series first (network).")
 @click.option("--record", is_flag=True, help="Record today's idea lists to the forward log (maintenance does this daily).")

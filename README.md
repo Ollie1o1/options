@@ -445,7 +445,7 @@ Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (
 |---------|------|--------------|
 | `AAPL` (any ticker) | Single-stock | Deep analysis of one symbol across all expiries |
 | `ALL` | Budget scan | Multi-ticker scan filtered to a per-contract dollar budget |
-| `DISCOVER` | Discovery | Choose curated liquid names (static list), Finviz gainers, or high-IV stocks |
+| `DISCOVER` | Discovery | Choose curated liquid names, Finviz gainers, or stocks with wide four-week price ranges |
 | `SELL` | Premium Selling | Short put candidates ranked by return-on-risk |
 | `SPREADS` | Credit Spreads | Bull Put and Bear Call spread opportunities — full detail cards with thesis, breakevens, top components, execution guidance + comparison table |
 | `IRON` | Iron Condors | Delta-neutral range-bound strategies — same detail-card pipeline as singles + spreads |

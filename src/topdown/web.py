@@ -48,6 +48,7 @@ def lens_frame(res: LensResult, all_results: List[LensResult]) -> pd.DataFrame:
     tags = tags_by_ticker(all_results)
     return pd.DataFrame([{
         "Ticker": r.ticker, "Sector": r.sector_etf or "", "Listed in": " ".join(t for t, _ in tags.get(r.ticker, [])),
+        "Evidence": r.evidence_label or res.lens.label,
         "Warnings": ", ".join(r.flags), "Why it is listed": r.why, "As of": r.as_of or "",
     } for r in res.rows])
 

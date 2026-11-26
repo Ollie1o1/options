@@ -1164,7 +1164,8 @@ def safe_float(x, default=None):
 # --- Core Data Fetching Functions ---
 
 @retry_with_backoff(retries=3, backoff_in_seconds=2, error_types=(RuntimeError, URLError, ConnectionError, OSError))
-def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
+def get_dynamic_tickers(scan_type: str, max_tickers: int = 50, *,
+                        on_fallback: Optional[Callable[[str], None]] = None) -> List[str]:
     """
     Fetches a list of tickers from Finviz based on a given scan type.
     Falls back to a hardcoded list if fetching fails.
@@ -1184,13 +1185,17 @@ def get_dynamic_tickers(scan_type: str, max_tickers: int = 50) -> List[str]:
         tickers = finviz_tickers(f_params, order=order, limit=max_tickers)
 
         if not tickers:
-            logging.warning("Finviz returned no tickers. Using backup tickers.")
-            return BACKUP_TICKERS[:max_tickers]
-
-        return tickers
-    except Exception as e:
-        logging.warning(f"Could not fetch '{scan_type}' from Finviz: {e}. Using backup tickers.")
-        return BACKUP_TICKERS[:max_tickers]
+            reason = "Finviz returned no tickers. Showing the curated backup list."
+        else:
+            return tickers
+    except Exception as exc:
+        logging.debug("Finviz %s fetch failed", scan_type, exc_info=exc)
+        reason = "Finviz was unavailable. Showing the curated backup list."
+    if on_fallback is None:
+        logging.warning(reason)
+    else:
+        on_fallback(reason)
+    return BACKUP_TICKERS[:max_tickers]
 
 def get_underlying_price(ticker: Any) -> Optional[float]:
     # Try fast_info, then info, then last close
@@ -2082,6 +2087,7 @@ def _cboe_frames(symbol: str, expirations: Sequence[str]) -> List["pd.DataFrame"
             "openInterest": r.get("open_interest"),
             "impliedVolatility": _cboe_iv(r.get("iv")),
             "lastTradeDate": r.get("last_trade_time"),
+            "quote_snapshot_at": r.get("snapshot_ts"),
             "delta": r.get("delta"),
             "gamma": r.get("gamma"),
             "theta": r.get("theta"),
@@ -2521,21 +2527,16 @@ def fetch_options_yfinance(symbol: str, max_expiries: int,
 
     df = pd.concat(frames, ignore_index=True)
 
-    # --- Data provenance: capture per-contract quote freshness fields --------
-    # quote_as_of = yfinance's lastTradeDate (UTC) when the contract last printed.
-    # quote_age_min = minutes between that print and this fetch.
-    # These thread through scoring/display so the user sees how stale a quote is.
-    _fetched_at = datetime.now(timezone.utc)
-    df["data_fetched_at"] = _fetched_at.isoformat()
+    # The last trade, chain snapshot and bid/ask update are distinct events.
+    df["data_fetched_at"] = datetime.now(timezone.utc).isoformat()
     if "quote_source" not in df.columns:
         df["quote_source"] = "yfinance"
     if "lastTradeDate" in df.columns:
-        _qa = pd.to_datetime(df["lastTradeDate"], errors="coerce", utc=True)
-        df["quote_as_of"] = _qa.dt.strftime("%Y-%m-%dT%H:%M:%S%z")
-        df["quote_age_min"] = (_fetched_at - _qa).dt.total_seconds() / 60.0
-    else:
-        df["quote_as_of"] = pd.NA
-        df["quote_age_min"] = np.nan
+        df["last_trade_as_of"] = pd.to_datetime(
+            df["lastTradeDate"], errors="coerce", utc=True,
+        ).dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+    df["quote_as_of"] = pd.NA
+    df["quote_age_min"] = np.nan
 
     # Option RVOL: contract-level volume relative to OI-normalized baseline
     _oi_vals = pd.to_numeric(df["openInterest"], errors="coerce").fillna(1)

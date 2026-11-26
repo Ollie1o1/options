@@ -21,3 +21,7 @@ os.environ.setdefault(
 os.environ.setdefault(
     "OPTIONS_LENS_FORWARD_DB",
     os.path.join(tempfile.gettempdir(), "options_test_lens_forward.db"))
+# Same for the paper selector study (src/selector_study/db.py), which maintenance records.
+os.environ.setdefault(
+    "OPTIONS_SELECTOR_STUDY_DB",
+    os.path.join(tempfile.gettempdir(), "options_test_selector_study.db"))

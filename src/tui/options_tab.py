@@ -30,7 +30,7 @@ OPT_SCAN_COLUMNS = (
     "Exp (DTE)",
     "Strikes",
     "Mid",
-    "Limit",
+    "Ref Price",
     "Fric%",
     "Risk $",
     "IV/RV",
@@ -113,7 +113,7 @@ def format_scan_inspector(
     if row is None:
         return (
             "[bold]OPTIONS INSPECTOR[/]\n"
-            "[dim]Select any candidate row to inspect its 2D Risk Surface, Walk-Away Limit Ladder, "
+            "[dim]Select any candidate row to inspect its 2D Risk Surface, quoted reference price, "
             "and Greeks.\nPress [b]c[/b] for Chain Matrix · [b]w[/b] for Workbench · [b]p[/b] to Paper-Log.[/]"
         )
 
@@ -121,17 +121,23 @@ def format_scan_inspector(
     b_col = "#5ec98d" if row.evidence_badge == "PROMISING" else ("#e06c75" if row.evidence_badge == "CAUTION" else "#d6a452")
     iv_s = f"{row.iv_pct:.1f}%" if row.iv_pct is not None else "—"
     ivrv_s = f" · IV/RV {row.iv_vs_rv:.2f}x" if row.iv_vs_rv is not None else ""
+    data_s = "Yahoo request · quote time unknown" if row.source == "live" else row.source
     sk_s = f" · 25Δ Skew {row.skew_vp:+.1f}vp" if row.skew_vp is not None else ""
-    ror_s = f" · ROR {row.ror_pct:.1f}%" if row.ror_pct is not None else ""
+    ror_s = f" · Max payoff/risk {row.ror_pct:.1f}%" if row.ror_pct is not None else ""
+    risk_label = "Debit at Mid" if row.strategy_key == "calendar" else "Max Risk at Mid"
+    if row.max_profit_usd is None:
+        profit_s = "Unbounded" if row.strategy_key == "long_call" else "Depends on spot and IV at front expiry"
+    else:
+        profit_s = f"${row.max_profit_usd:,.0f}"
     flags_s = ", ".join(row.risk_flags) if row.risk_flags else "Clean (no earnings/edge flags)"
 
     lines: List[str] = [
         f"[bold]{row.ticker} {row.strategy}[/]  [{b_col}][{row.evidence_badge}][/]  ·  {tfsa_s}",
-        f"Spot ${row.spot:.2f} · Exp {row.expiration} ({row.dte}d) · {row.strikes_label}  [dim][{row.source} {row.as_of}][/]",
+        f"Spot ${row.spot:.2f} · Exp {row.expiration} ({row.dte}d) · {row.strikes_label}  [dim][{data_s} {row.as_of}][/]",
         "─" * 56,
         f"[bold]Pricing[/]   {'Credit' if row.is_credit else 'Debit'} Mid ${row.mid_price:.2f} · "
-        f"Walk-Away ${row.walk_away_limit:.2f} · Friction {row.friction_pct * 100:.1f}%",
-        f"[bold]Risk/Rew[/]  Max Risk ${row.max_risk_usd:,.0f} · Max Profit ${row.max_profit_usd:,.0f}{ror_s}",
+        f"Ref Price ${row.walk_away_limit:.2f} · Friction {row.friction_pct * 100:.1f}%",
+        f"[bold]Risk/Rew[/]  {risk_label} ${row.max_risk_usd:,.0f} · Max Profit {profit_s}{ror_s}",
         f"[bold]Vol/Liq[/]   IV {iv_s}{ivrv_s}{sk_s} · Min OI {row.min_oi:,} · Vol {row.total_vol:,}",
         f"[bold]Flags[/]     [#d6a452]{flags_s}[/]" if row.risk_flags else f"[bold]Flags[/]     [#5ec98d]{flags_s}[/]",
     ]
@@ -163,11 +169,6 @@ def format_scan_inspector(
                     rich=True,
                 )
             )
-            lines.append("")
-            lines.append("[bold]Walk-Away Limit Ladder:[/]")
-            lines.append(f"  {an.ladder.step1_label}")
-            lines.append(f"  {an.ladder.step2_label}")
-            lines.append(f"  {an.ladder.abort_label}")
         except Exception:
             pass
 

@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -59,7 +60,7 @@ def _path(db_path: Optional[str]) -> str:
 def ensure_db(db_path: Optional[str] = None) -> str:
     full = _path(db_path)
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
-    with sqlite3.connect(full) as con:
+    with closing(sqlite3.connect(full)) as con:
         con.executescript(_SCHEMA)
     return full
 
@@ -80,8 +81,10 @@ def record_results(results: Sequence[Any], *, db_path: Optional[str] = None, rec
                 as_of = str(row.as_of or board_as_of or rd)[:10]
                 cur = con.execute(
                     "INSERT OR IGNORE INTO lens_rows VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (lz.id, str(row.ticker).upper(), as_of, lz.label, row.sector_etf, row.metric_label,
-                     row.metric, json.dumps(list(row.flags or ())), row.playbook_id, row.why, rd))
+                    (lz.id, str(row.ticker).upper(), as_of, row.evidence_label or lz.label,
+                     row.sector_etf, row.metric_label, row.metric, json.dumps(list(row.flags or ())),
+                     row.playbook_id, row.why, rd),
+                )
                 seen += 1
                 new += int(cur.rowcount or 0)
         con.commit()
@@ -96,22 +99,39 @@ def record_hub(hub: Any, *, db_path: Optional[str] = None, record_date: Optional
 
 
 def due(state: Optional[dict], today: str, hhmm: int) -> bool:
-    """Once per trading day, after the close (>= 16:30, after the price refresh)."""
-    if hhmm < 1630:
+    """Once per supported trading day, after settled daily prices are eligible."""
+    if hhmm < 1800:
         return False
-    from src.data_quality import is_trading_day
+    from src.data_quality import holiday_calendar_covers, is_trading_day
 
-    if not is_trading_day(today):
+    if not is_trading_day(today) or not holiday_calendar_covers(int(today[:4])):
         return False
     return (state or {}).get("last_lens_snapshot") != today
 
 
-def run_snapshot(*, db_path: Optional[str] = None, record_date: Optional[str] = None, **hub_kwargs: Any) -> Dict[str, int]:
-    """Build the Discover hub from local archives (no network) and record it."""
+def run_snapshot(*, db_path: Optional[str] = None, record_date: Optional[str] = None,
+                 expected_session: Optional[str] = None, **hub_kwargs: Any) -> Dict[str, Any]:
+    """Record the hub only once the expected session is available for scheduled runs."""
     from src.topdown.hub import build_hub
 
     hub = build_hub(**hub_kwargs)
-    return record_hub(hub, db_path=db_path, record_date=record_date)
+    if expected_session:
+        if hub.board.as_of != expected_session or any(
+            not series[0] or series[0][-1] != expected_session for series in hub.ohlcv.values()
+        ):
+            return {"complete": False, "reason": "equity archive has not settled for the expected session"}
+        if hub.snapshot is None or hub.snapshot.ohlcv_as_of != expected_session or hub.snapshot.degraded_scanners:
+            from src.radar.engine import run_radar
+
+            snapshot = run_radar(
+                ohlcv_db=hub_kwargs.get("ohlcv_db", "data/equity_ohlcv.db"),
+                chain_db=hub_kwargs.get("chain_db", "data/chain_archive.db"),
+                cache_path=None,
+            )
+            if snapshot.ohlcv_as_of != expected_session or snapshot.degraded_scanners:
+                return {"complete": False, "reason": "Radar could not build a complete current snapshot"}
+            hub = build_hub(**{**hub_kwargs, "ohlcv": hub.ohlcv, "snapshot": snapshot})
+    return {**record_hub(hub, db_path=db_path, record_date=record_date), "complete": True}
 
 
 # ── reading ──────────────────────────────────────────────────────────────────
@@ -122,21 +142,22 @@ def _iso_week(day: str) -> str:
 
 
 def lens_weeks(db_path: Optional[str] = None) -> Dict[str, Dict[str, Dict[str, Tuple[str, Optional[str]]]]]:
-    """{lens: {iso_week: {ticker: (first data date in that week, sector_etf)}}}."""
+    """Group by data week. Entry cannot precede the first recorded observation."""
     full = _path(db_path)
     out: Dict[str, Dict[str, Dict[str, Tuple[str, Optional[str]]]]] = {}
     if not os.path.exists(full):
         return out
     con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
     try:
-        rows = con.execute("SELECT lens_id, ticker, row_as_of, sector_etf FROM lens_rows "
+        rows = con.execute("SELECT lens_id, ticker, row_as_of, sector_etf, record_date FROM lens_rows "
                            "ORDER BY lens_id, row_as_of, ticker").fetchall()
     finally:
         con.close()
-    for lens_id, tk, as_of, sec in rows:
+    for lens_id, tk, as_of, sec, recorded in rows:
         wk = out.setdefault(lens_id, {}).setdefault(_iso_week(as_of), {})
-        if tk not in wk:
-            wk[tk] = (as_of, sec)
+        entry_anchor = max(as_of, recorded)
+        if tk not in wk or entry_anchor < wk[tk][0]:
+            wk[tk] = (entry_anchor, sec)
     return out
 
 
@@ -168,8 +189,8 @@ def _excess_for_week(hits: Dict[str, Tuple[str, Optional[str]]], H: int, ohlcv: 
     ex: List[float] = []
     ex_sec: List[float] = []
     complete = True
-    for tk, (as_of, sec) in hits.items():
-        i = bisect.bisect_right(cal, as_of[:10])      # first session strictly after the data date
+    for tk, (entry_anchor, sec) in hits.items():
+        i = bisect.bisect_right(cal, entry_anchor[:10])
         j = i + H
         if j >= len(cal):
             complete = False
@@ -177,10 +198,12 @@ def _excess_for_week(hits: Dict[str, Tuple[str, Optional[str]]], H: int, ohlcv: 
         d0, d1 = cal[i], cal[j]
         series = ohlcv.get(tk)
         if series is None:
+            complete = False
             continue
         px = dict(zip(series[0], series[1]))
         p0, p1 = px.get(d0), px.get(d1)
-        if not p0 or not p1 or p0 <= 0 or p1 <= 0:
+        if not p0 or not p1 or not math.isfinite(p0) or not math.isfinite(p1) or p0 <= 0 or p1 <= 0:
+            complete = False
             continue
         r = math.log(p1 / p0)
         ex.append(r - math.log(spy[d1] / spy[d0]) - COST)

@@ -117,6 +117,9 @@ All Phase 3 lenses are free public feeds labelled `WATCHLIST` or `CONTEXT` (neve
 | `opt lab log-fill --broker ibkr --ticker SPY --structure "Bull Put" --side SELL --bid 3.90 --ask 4.10 --limit 4.00 --filled` | Log one real broker limit-order attempt into `data/fills.db` |
 | `opt lab cleanup` | Dry-run report of reclaimable disk space from `CLOSED` research studies (deletes nothing) |
 | `opt lab cleanup --confirm` | Actually reclaim disk space from `CLOSED` research studies |
+| `opt lab study run` | Paper study: capture every archived session, build the generic bull-put selector and its matched liquidity-first baseline, record later marks, print the readout ([prereg](PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md)) |
+| `opt lab study capture` / `mark` / `readout` | The same three steps one at a time (`--session`, `--json`, `--study-db`, `--chain-db`) |
+| `opt lab study demo --dir FOLDER` | The whole workflow on **synthetic** data in a scratch folder; never touches `data/` |
 
 *Global flags on any `opt` command:* `opt --json <subcommand>` (machine-readable JSON), `opt --no-color <subcommand>` (plain text for scripts/pipes).
 

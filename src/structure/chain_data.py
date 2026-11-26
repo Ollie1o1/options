@@ -32,6 +32,9 @@ class ChainContract:
     theta: Optional[float] = None
     open_interest: int = 0
     volume: int = 0
+    last_trade_as_of: Optional[str] = None
+    snapshot_at: Optional[str] = None
+    source: Optional[str] = None
 
     @property
     def half_spread(self) -> float:
@@ -56,6 +59,7 @@ class ChainSlice:
     median_half_spread_pct: Optional[float] = None
     rnd_density: Any = None
     rnd_source: str = "lognormal"
+    spot: Optional[float] = None
 
     def contracts(self, opt_type: str) -> List[ChainContract]:
         return self.calls if opt_type.lower().startswith("c") else self.puts
@@ -189,8 +193,12 @@ def load_archived_chain_slice(
     chain_db: str = "data/chain_archive.db",
     max_snap_age_days: int = 21,
     build_rnd: bool = True,
+    snap_date: Optional[str] = None,
 ) -> Optional[ChainSlice]:
-    """Load the nearest-horizon real option slice from `data/chain_archive.db`."""
+    """Load the nearest-horizon real option slice from `data/chain_archive.db`.
+
+    `snap_date` reads that archived session instead of the latest one; the
+    age limit then does not apply, because the caller chose the session."""
     full = repo_path(chain_db)
     if not os.path.exists(full):
         return None
@@ -198,16 +206,19 @@ def load_archived_chain_slice(
     try:
         con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
         try:
-            row = con.execute(
-                "SELECT MAX(snap_date) FROM chain_snapshots WHERE symbol = ?",
-                (sym,),
-            ).fetchone()
-            if not row or not row[0]:
-                return None
-            snap_date = str(row[0])
-            snap_dt = dt.date.fromisoformat(snap_date[:10])
-            if (dt.date.today() - snap_dt).days > max_snap_age_days:
-                return None
+            if snap_date is None:
+                row = con.execute(
+                    "SELECT MAX(snap_date) FROM chain_snapshots WHERE symbol = ?",
+                    (sym,),
+                ).fetchone()
+                if not row or not row[0]:
+                    return None
+                snap_date = str(row[0])
+                snap_dt = dt.date.fromisoformat(snap_date[:10])
+                if (dt.date.today() - snap_dt).days > max_snap_age_days:
+                    return None
+            else:
+                snap_dt = dt.date.fromisoformat(snap_date[:10])
 
             exps = [
                 str(r[0])
@@ -230,9 +241,14 @@ def load_archived_chain_slice(
             scored_exps.sort()
             _, chosen_dte, chosen_exp = scored_exps[0]
 
+            columns = {str(row[1]) for row in con.execute("PRAGMA table_info(chain_snapshots)")}
+            provenance = ", ".join(
+                name if name in columns else "NULL"
+                for name in ("last_trade_time", "snapshot_ts", "source")
+            )
             rows = con.execute(
-                """
-                SELECT strike, type, bid, ask, iv, delta, theta, open_interest, volume
+                f"""
+                SELECT strike, type, bid, ask, iv, delta, theta, open_interest, volume, {provenance}
                 FROM chain_snapshots
                 WHERE symbol = ? AND snap_date = ? AND expiration = ?
                 """,
@@ -245,7 +261,7 @@ def load_archived_chain_slice(
 
     calls: List[ChainContract] = []
     puts: List[ChainContract] = []
-    for k_raw, t_raw, b_raw, a_raw, iv_raw, dl_raw, th_raw, oi_raw, vol_raw in rows:
+    for k_raw, t_raw, b_raw, a_raw, iv_raw, dl_raw, th_raw, oi_raw, vol_raw, trade_at, snapshot_at, source in rows:
         k = _clean_float(k_raw)
         b = _clean_float(b_raw)
         a = _clean_float(a_raw)
@@ -267,6 +283,9 @@ def load_archived_chain_slice(
             theta=_clean_float(th_raw),
             open_interest=int(oi_raw or 0),
             volume=int(vol_raw or 0),
+            last_trade_as_of=trade_at,
+            snapshot_at=snapshot_at,
+            source=source,
         )
         if ot == "call":
             calls.append(c)
@@ -297,8 +316,10 @@ def load_live_chain_slice(
     max_dte: int = 150,
     spot: Optional[float] = None,
     build_rnd: bool = True,
+    max_expiry_checks: int = 1,
+    diagnostics: Optional[Dict[str, int]] = None,
 ) -> Optional[ChainSlice]:
-    """Opt-in live Yahoo Finance option-chain fetch matching `target_dte`."""
+    """Fetch eligible Yahoo expiries in order of proximity, within a request budget."""
     try:
         import yfinance as yf
     except ImportError:
@@ -309,6 +330,8 @@ def load_live_chain_slice(
     try:
         tkr = yf.Ticker(sym)
         exps = list(tkr.options or ())
+        if diagnostics is not None:
+            diagnostics.update(listed=len(exps), eligible=0, checked=0, two_sided=0)
         if not exps:
             return None
         scored: List[Tuple[int, int, str]] = []
@@ -319,23 +342,21 @@ def load_live_chain_slice(
                 continue
             if min_dte <= dte <= max_dte:
                 scored.append((abs(dte - target_dte), dte, e))
+        if diagnostics is not None:
+            diagnostics["eligible"] = len(scored)
         if not scored:
             return None
         scored.sort()
-        _, chosen_dte, chosen_exp = scored[0]
 
         if spot is None:
             hist = tkr.history(period="5d")
             if hist is not None and not hist.empty:
                 spot = float(hist["Close"].iloc[-1])
 
-        ch = tkr.option_chain(chosen_exp)
-        calls_raw = ch.calls.to_dict("records") if ch.calls is not None else []
-        puts_raw = ch.puts.to_dict("records") if ch.puts is not None else []
     except Exception:
         return None
 
-    def _parse(records: Sequence[Dict[str, Any]], ot: str) -> List[ChainContract]:
+    def _parse(records: Sequence[Dict[str, Any]], ot: str, chosen_dte: int) -> List[ChainContract]:
         from src.data_quality import implied_vol_from_price
         from src.radar.wide_spread_rule import risk_free_rate
         from src.utils import bs_delta, bs_theta
@@ -378,31 +399,40 @@ def load_live_chain_slice(
                     theta=th,
                     open_interest=int(oi),
                     volume=int(vol),
+                    last_trade_as_of=str(r["lastTradeDate"]) if r.get("lastTradeDate") is not None else None,
+                    source="yfinance",
                 )
             )
         out.sort(key=lambda x: x.strike)
         return out
 
-    calls = _parse(calls_raw, "call")
-    puts = _parse(puts_raw, "put")
-    if not calls and not puts:
-        return None
-    sl = ChainSlice(
-        symbol=sym,
-        expiration=chosen_exp,
-        dte=chosen_dte,
-        snap_date=today.isoformat(),
-        source="live",
-        calls=calls,
-        puts=puts,
-    )
+    sl = None
+    for _, chosen_dte, chosen_exp in scored[:max(1, max_expiry_checks)]:
+        if diagnostics is not None:
+            diagnostics["checked"] += 1
+        try:
+            chain = tkr.option_chain(chosen_exp)
+            calls = _parse(chain.calls.to_dict("records"), "call", chosen_dte) if chain.calls is not None else []
+            puts = _parse(chain.puts.to_dict("records"), "put", chosen_dte) if chain.puts is not None else []
+        except Exception:
+            continue
+        two_sided = sum(c.bid > 0 for c in calls + puts)
+        if diagnostics is not None:
+            diagnostics["two_sided"] += two_sided
+        if not (calls or puts) or (max_expiry_checks > 1 and not two_sided):
+            continue
+        sl = ChainSlice(
+            symbol=sym, expiration=chosen_exp, dte=chosen_dte, snap_date=today.isoformat(),
+            source="live", calls=calls, puts=puts, spot=spot,
+        )
+        break
     try:
         from src.cache_release import release_yfinance_caches
 
         release_yfinance_caches()
     except Exception:
         pass
-    return _summarize_slice(sl, spot=spot, build_rnd=build_rnd)
+    return _summarize_slice(sl, spot=spot, build_rnd=build_rnd) if sl is not None else None
 
 
 def load_chain_for_horizon(

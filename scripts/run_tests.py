@@ -114,6 +114,10 @@ def main(argv: list[str]) -> int:
     os.environ.setdefault(
         "OPTIONS_LENS_FORWARD_DB",
         os.path.join(tempfile.gettempdir(), "options_test_lens_forward.db"))
+    # Same for the paper selector study (src/selector_study/db.py).
+    os.environ.setdefault(
+        "OPTIONS_SELECTOR_STUDY_DB",
+        os.path.join(tempfile.gettempdir(), "options_test_selector_study.db"))
 
     pattern = argv[1] if len(argv) > 1 else ""
     paths = sorted(

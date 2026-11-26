@@ -158,12 +158,41 @@ class OptionsDeskProvider(FakeProvider):
 
 
 class TestOptionsEngineAndCharts(unittest.TestCase):
+    def test_live_chain_falls_back_after_an_expiry_without_two_sided_quotes(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        import pandas as pd
+
+        from src.structure.chain_data import load_live_chain_slice
+
+        today = dt.date.today()
+        expiry = [(today + dt.timedelta(days=d)).isoformat() for d in (45, 46, 47)]
+        ticker = Mock(options=expiry)
+        ticker.option_chain.side_effect = [
+            SimpleNamespace(calls=pd.DataFrame([{"strike": 100, "bid": 0, "ask": 1}]), puts=pd.DataFrame()),
+            SimpleNamespace(calls=pd.DataFrame([{"strike": 100, "bid": 4, "ask": 5}]), puts=pd.DataFrame()),
+        ]
+        diagnostics: dict = {}
+        with patch("yfinance.Ticker", return_value=ticker):
+            sl = load_live_chain_slice("SPY", target_dte=45, spot=100.0, build_rnd=False,
+                                       max_expiry_checks=2, diagnostics=diagnostics)
+
+        self.assertIsNotNone(sl)
+        assert sl is not None
+        self.assertEqual(sl.expiration, expiry[1])
+        self.assertEqual(diagnostics, {"listed": 3, "eligible": 3, "checked": 2, "two_sided": 1})
+
     def test_scanner_chain_matrix_and_multileg_math(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             ch_db = os.path.join(td, "chain_archive.db")
             exp_35 = _seed_chain_archive(ch_db)
 
-            rows, note = scan_options_desk(strategy="all", chain_db=ch_db, ohlcv_db=os.path.join(td, "none.db"))
+            from src.tui.options_engine import replay_option_scan
+
+            captured: list[dict] = []
+            rows, note = scan_options_desk(strategy="all", chain_db=ch_db, ohlcv_db=os.path.join(td, "none.db"),
+                                           research_inputs=captured)
             self.assertGreater(len(rows), 4)
             self.assertIn("Archive scan", note)
 
@@ -171,6 +200,13 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
             tfsa = filter_option_rows(rows, "tfsa")
             self.assertGreater(len(bp), 0)
             self.assertTrue(all(r.strategy_key == "bull_put" and not r.tfsa_legal for r in bp))
+            self.assertTrue(all(r.evidence_badge == "WATCHLIST" for r in bp))
+            self.assertTrue(all(r.max_profit_usd is None for r in rows if r.strategy_key == "long_call"))
+            comparison = replay_option_scan({
+                "captured_at": "test", "rows": [row.to_dict() for row in rows], "selector_inputs": captured,
+            })
+            self.assertGreater(comparison["matched"], 0)
+            self.assertEqual((comparison["added"], comparison["removed"]), ([], []))
             self.assertGreater(len(tfsa), 0)
             self.assertTrue(all(r.tfsa_legal for r in tfsa))
 
@@ -379,7 +415,10 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
             risk_flags=("IV_RICH_FOR_LONG",),
         )
 
-        filtered = filter_good_option_alerts([good_bp, noisy_bp, good_tfsa, rich_tfsa])
+        from dataclasses import replace
+
+        flagged = [replace(good_bp, risk_flags=(flag,)) for flag in ("EARN_2d", "EARN_UNKNOWN", "EARN:3d")]
+        filtered = filter_good_option_alerts([good_bp, noisy_bp, good_tfsa, rich_tfsa, *flagged])
         self.assertEqual([r.ticker for r in filtered], ["SPY", "QQQ"])
 
         # CLI --only-if-good skips Discord quietly when nothing qualifies
@@ -392,7 +431,7 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
         with patch("src.tui.options_engine.scan_options_desk", return_value=([good_bp, noisy_bp], "mock scan")):
             res_hit = runner.invoke(cli, ["notify", "--options", "--only-if-good", "--dry-run"])
             self.assertEqual(res_hit.exit_code, 0, res_hit.output)
-            self.assertIn("High-Conviction", res_hit.output)
+            self.assertIn("Passed Screen", res_hit.output)
             self.assertIn("SPY", res_hit.output)
             self.assertNotIn("NVDA", res_hit.output)
 

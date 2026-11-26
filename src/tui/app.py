@@ -1728,12 +1728,11 @@ class DeskApp(App[None]):
                 elif self._opt_selected_scan is not None:
                     r = self._opt_selected_scan
                     greeks_s = ""
-                    lad_lines: Tuple[str, ...] = (f"Walk-away limit: ${r.walk_away_limit:.2f}",)
+                    lad_lines: Tuple[str, ...] = (f"Screen reference price: ${r.walk_away_limit:.2f}",)
                     if r.legs and r.spot > 0:
                         an = analyze_custom_legs(r.ticker, r.spot, r.legs, days_elapsed=self._days_elapsed, iv_shock_pct=self._iv_shock_pct)
                         be_s = ", ".join(f"${b:.2f}" for b in an.breakevens) or "—"
                         greeks_s = f"Δ$ `{an.delta_dollars:+,.0f}` · Θ/d `${an.theta_per_day_usd:+.2f}` · Mkt PoP `{an.pop_mkt*100:.0f}%` · BE `{be_s}`"
-                        lad_lines = (an.ladder.step1_label, an.ladder.step2_label, an.ladder.abort_label)
                     embed = build_option_ticket_embed(
                         r.ticker,
                         r.strategy,

@@ -58,9 +58,20 @@ class RecordTests(unittest.TestCase):
 
     def test_due_after_close_on_trading_days_once(self) -> None:
         self.assertFalse(F.due({}, "2026-11-25", 1500))
-        self.assertTrue(F.due({}, "2026-11-25", 1700))
-        self.assertFalse(F.due({"last_lens_snapshot": "2026-11-25"}, "2026-11-25", 1700))
-        self.assertFalse(F.due({}, "2026-11-28", 1700))  # Saturday
+        self.assertFalse(F.due({}, "2026-11-25", 1759))
+        self.assertTrue(F.due({}, "2026-11-25", 1800))
+        self.assertFalse(F.due({"last_lens_snapshot": "2026-11-25"}, "2026-11-25", 1800))
+        self.assertFalse(F.due({}, "2026-11-28", 1800))  # Saturday
+
+    def test_scheduled_snapshot_rejects_stale_prices_without_writing(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        hub = SimpleNamespace(board=SimpleNamespace(as_of="2026-11-24"))
+        with patch("src.topdown.hub.build_hub", return_value=hub):
+            outcome = F.run_snapshot(db_path=self.db, expected_session="2026-11-25")
+        self.assertFalse(outcome["complete"])
+        self.assertFalse(os.path.exists(self.db))
 
 
 class ReadTests(unittest.TestCase):
@@ -118,6 +129,13 @@ class ReadTests(unittest.TestCase):
         self.assertTrue(rep["leaders"].locked)
         self.assertIn(f"5/{F.MIN_WEEKS}", rep["leaders"].lock_reason)
         self.assertIn("read unlocks", F.status_line(list(rep.values())))
+
+    def test_late_capture_cannot_use_an_earlier_entry_date(self) -> None:
+        db = os.path.join(self._tmp.name, "late.db")
+        F.record_results([_res("leaders", [("AAA", "2026-11-20")])],
+                         db_path=db, record_date="2026-11-23")
+        week = F.lens_weeks(db)["leaders"][F._iso_week("2026-11-20")]
+        self.assertEqual(week["AAA"], ("2026-11-23", "XLK"))
 
     def test_bonferroni_level(self) -> None:
         self.assertTrue(math.isclose(F.BONFERRONI_LEVEL, 1 - 0.05 / 6))

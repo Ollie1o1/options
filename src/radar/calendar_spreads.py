@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from src.paths import repo_path
-from src.structure.chain_data import load_archived_chain_slice
+from src.structure.chain_data import ChainContract, load_archived_chain_slice
 
 CALENDAR_ETF_UNIVERSE = (
     "SPY", "QQQ", "IWM", "XLE", "XLF", "XLK", "XLV", "XLP", "SMH", "GLD", "TLT",
@@ -41,6 +41,9 @@ class CalendarCandidate:
     net_debit_cross: float
     friction_pct: float
     term_regime: str            # "FRONT_RICH_INVERTED" | "FLAT" | "CONTANGO"
+    front_quote: ChainContract
+    back_quote: ChainContract
+    snap_date: str
     evidence_label: str = "WATCHLIST"
     accounts: str = "TAXABLE_ONLY"
 
@@ -89,7 +92,7 @@ def scan_etf_calendar_spreads(
         back = load_archived_chain_slice(
             sym, target_dte=90, min_dte=60, max_dte=130, spot=sp, chain_db=chain_db, build_rnd=False
         )
-        if front is None or back is None or front.expiration == back.expiration:
+        if front is None or back is None or front.expiration == back.expiration or front.snap_date != back.snap_date:
             continue
         if front.atm_iv is None or back.atm_iv is None:
             continue
@@ -131,6 +134,9 @@ def scan_etf_calendar_spreads(
                     net_debit_cross=debit_cross,
                     friction_pct=round(fric, 4),
                     term_regime=regime,
+                    front_quote=fc,
+                    back_quote=bc,
+                    snap_date=front.snap_date,
                 )
             )
             break

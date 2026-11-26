@@ -24,6 +24,7 @@ import numpy as np
 
 from src.alpha.options_for_shares import EXPANDED_CHAIN_UNIVERSE
 from src.paths import repo_path
+from src.radar.scanners import LIQUID_ETF_UNIVERSE
 from src.structure.chain_data import (
     ChainContract,
     ChainSlice,
@@ -54,6 +55,9 @@ class OptionLeg:
     open_interest: int = 0
     volume: int = 0
     qty: int = 1
+    last_trade_as_of: Optional[str] = None
+    snapshot_at: Optional[str] = None
+    source: Optional[str] = None
 
     @property
     def signed_qty(self) -> int:
@@ -77,8 +81,8 @@ class OptionScanRow:
     walk_away_limit: float
     friction_pct: float         # round-trip spread cost / reward or debit (0.12 = 12%)
     max_risk_usd: float
-    max_profit_usd: float
-    ror_pct: Optional[float]    # max_profit / max_risk * 100 (or None if unbounded)
+    max_profit_usd: Optional[float]
+    ror_pct: Optional[float]    # maximum payoff / maximum risk when defined
     iv_pct: Optional[float]
     iv_vs_rv: Optional[float]   # ATM IV / RV20 ratio
     skew_vp: Optional[float]
@@ -365,6 +369,9 @@ def _contract_to_leg(
         open_interest=int(c.open_interest or 0),
         volume=int(c.volume or 0),
         qty=1,
+        last_trade_as_of=c.last_trade_as_of,
+        snapshot_at=c.snapshot_at,
+        source=c.source,
     )
 
 
@@ -390,10 +397,12 @@ def _build_candidates_for_slice(
     base_flags: List[str] = []
     if earnings_days is not None and 0 <= earnings_days <= sl.dte:
         base_flags.append(f"EARN_{earnings_days}d")
+    elif earnings_days is None and sl.symbol not in LIQUID_ETF_UNIVERSE:
+        base_flags.append("EARN_UNKNOWN")
 
     want_all = strategy_filter == "all"
 
-    # A) Bull Put Credit Spread (highest historically validated credit edge in repo)
+    # A) Generic bull-put screen. The O1 research rule lives in Radar.
     if want_all or strategy_filter == "bull_put":
         sp = sl.match_by_delta("put", 0.25, min_bid=0.10)
         if sp is not None:
@@ -421,7 +430,7 @@ def _build_candidates_for_slice(
                             flags.append("WIDE_SPREAD")
                         if iv_vs_rv is not None and iv_vs_rv < 0.90:
                             flags.append("VOL_CHEAP_SHORT")
-                        badge = "PROMISING" if (60 <= sl.dte <= 120 and fric <= 0.25) else "WATCHLIST"
+                        badge = "WATCHLIST"
                         bp_legs: Tuple[OptionLeg, ...] = (
                             _contract_to_leg(sp, side="SELL", expiration=sl.expiration, dte=sl.dte, fallback_iv=atm_iv or 0.25),
                             _contract_to_leg(lp, side="BUY", expiration=sl.expiration, dte=sl.dte, fallback_iv=atm_iv or 0.25),
@@ -524,14 +533,6 @@ def _build_candidates_for_slice(
         if lc is not None and lc.mid > 0.15:
             fric = (lc.ask - lc.bid) / lc.mid
             if fric <= max_friction_pct:
-                lad = build_walk_away_ladder(
-                    structure="Long Call",
-                    is_credit=False,
-                    p_mid=lc.mid,
-                    p_cross=lc.ask,
-                    ev_view_gross_per_share=lc.mid * 1.15,
-                    exit_half_spread_per_share=lc.half_spread,
-                )
                 flags = list(base_flags)
                 if iv_vs_rv is not None and iv_vs_rv >= 1.25:
                     flags.append("IV_RICH_FOR_LONG")
@@ -551,10 +552,10 @@ def _build_candidates_for_slice(
                         short_delta=round(abs(lc.delta or 0.45), 2),
                         mid_price=round(lc.mid, 2),
                         is_credit=False,
-                        walk_away_limit=lad.p_step25,
+                        walk_away_limit=round(lc.mid, 2),
                         friction_pct=round(fric, 4),
                         max_risk_usd=round(lc.mid * 100.0, 0),
-                        max_profit_usd=round(spot * 0.20 * 100.0, 0),
+                        max_profit_usd=None,
                         ror_pct=None,
                         iv_pct=round((lc.iv or atm_iv or 0.0) * 100.0, 1) if (lc.iv or atm_iv) else None,
                         iv_vs_rv=iv_vs_rv,
@@ -577,14 +578,6 @@ def _build_candidates_for_slice(
         if lp is not None and lp.mid > 0.15:
             fric = (lp.ask - lp.bid) / lp.mid
             if fric <= max_friction_pct:
-                lad = build_walk_away_ladder(
-                    structure="Long Put",
-                    is_credit=False,
-                    p_mid=lp.mid,
-                    p_cross=lp.ask,
-                    ev_view_gross_per_share=lp.mid * 1.15,
-                    exit_half_spread_per_share=lp.half_spread,
-                )
                 flags = list(base_flags)
                 if iv_vs_rv is not None and iv_vs_rv >= 1.25:
                     flags.append("IV_RICH_FOR_LONG")
@@ -601,7 +594,7 @@ def _build_candidates_for_slice(
                         short_delta=round(abs(lp.delta or 0.40), 2),
                         mid_price=round(lp.mid, 2),
                         is_credit=False,
-                        walk_away_limit=lad.p_step25,
+                        walk_away_limit=round(lp.mid, 2),
                         friction_pct=round(fric, 4),
                         max_risk_usd=round(lp.mid * 100.0, 0),
                         max_profit_usd=round(max(0.0, lp.strike - lp.mid) * 100.0, 0),
@@ -750,28 +743,42 @@ def scan_options_desk(
     max_friction_pct: float = 0.28,
     max_workers: int = 6,
     pulse_out: Optional[Dict[str, Any]] = None,
+    research_inputs: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[OptionScanRow], str]:
     """Scan local `chain_archive.db` (instant) or live Yahoo chains into `OptionScanRow`s.
 
     Returns `(rows, status_note)`. If `pulse_out` is provided, populates it in-place with
     broad-market breadth, index moves, and top leaders/laggards without extra network calls.
+    If requested, `research_inputs` receives the exact chain slices and inputs used by the
+    generic selector. Calendar candidates carry their own legs.
     """
     strat = (strategy or "all").lower().strip()
     earnings = _load_earnings_map()
     rows: List[OptionScanRow] = []
+    if pulse_out is not None:
+        pulse_out.clear()
+    if research_inputs is not None:
+        research_inputs.clear()
+
+    if strat == "calendar" and live:
+        return rows, "Calendars use synchronized archived front and back expiries."
 
     # Calendar spreads handled via the dedicated term-structure scanner
     if strat in ("all", "calendar") and not live:
         try:
-            from src.radar.calendar_spreads import scan_etf_calendar_spreads
+            from src.radar.calendar_spreads import CALENDAR_ETF_UNIVERSE, scan_etf_calendar_spreads
 
-            cals = scan_etf_calendar_spreads(chain_db=chain_db, max_friction_pct=max_friction_pct)
+            requested = {s.upper() for s in symbols} if symbols else None
+            calendar_symbols = tuple(s for s in CALENDAR_ETF_UNIVERSE if requested is None or s in requested)
+            cals = scan_etf_calendar_spreads(
+                symbols=calendar_symbols, chain_db=chain_db, max_friction_pct=max_friction_pct,
+            )
             for c in cals:
-                iv_f = c.front_iv_pct / 100.0
-                iv_b = c.back_iv_pct / 100.0
                 legs = (
-                    OptionLeg(c.opt_type, "SELL", c.strike, c.front_exp, c.front_dte, 0.0, 0.0, 0.0, iv_f),
-                    OptionLeg(c.opt_type, "BUY", c.strike, c.back_exp, c.back_dte, c.net_debit_mid, c.net_debit_cross, c.net_debit_mid, iv_b),
+                    _contract_to_leg(c.front_quote, side="SELL", expiration=c.front_exp, dte=c.front_dte,
+                                     fallback_iv=c.front_iv_pct / 100.0),
+                    _contract_to_leg(c.back_quote, side="BUY", expiration=c.back_exp, dte=c.back_dte,
+                                     fallback_iv=c.back_iv_pct / 100.0),
                 )
                 rows.append(
                     OptionScanRow(
@@ -782,25 +789,25 @@ def scan_options_desk(
                         dte=c.front_dte,
                         strikes_label=f"${c.strike:g}{c.opt_type[0].upper()} {c.front_dte}d/{c.back_dte}d",
                         spot=c.spot,
-                        short_delta=0.50,
+                        short_delta=abs(c.front_quote.delta) if c.front_quote.delta is not None else None,
                         mid_price=c.net_debit_mid,
                         is_credit=False,
                         walk_away_limit=c.net_debit_mid,
                         friction_pct=round(c.friction_pct, 4),
                         max_risk_usd=round(c.net_debit_mid * 100.0, 0),
-                        max_profit_usd=round(c.net_debit_mid * 65.0, 0),
-                        ror_pct=65.0,
+                        max_profit_usd=None,
+                        ror_pct=None,
                         iv_pct=c.front_iv_pct,
                         iv_vs_rv=None,
                         skew_vp=round(c.iv_diff_vp, 1),
-                        min_oi=0,
-                        total_vol=0,
+                        min_oi=min(c.front_quote.open_interest, c.back_quote.open_interest),
+                        total_vol=c.front_quote.volume + c.back_quote.volume,
                         tfsa_legal=False,
                         evidence_badge="WATCHLIST",
                         risk_flags=("TAXABLE_ONLY", c.term_regime),
                         legs=legs,
                         source="chain_archive",
-                        as_of="",
+                        as_of=c.snap_date,
                         summary=f"Sell {c.front_dte}d / Buy {c.back_dte}d ${c.strike:g}{c.opt_type[0].upper()} · Front +{c.iv_diff_vp:.1f}vp",
                     )
                 )
@@ -820,26 +827,29 @@ def scan_options_desk(
         chg_map = {**chg_map, **live_chg}
         eff_target = 90 if strat == "bull_put" else target_dte
 
-        def _scan_one_live(tk: str) -> Tuple[bool, List[OptionScanRow]]:
+        def _scan_one_live(tk: str) -> Tuple[Dict[str, Any], List[OptionScanRow], Optional[ChainSlice]]:
+            expiry_counts: Dict[str, int] = {}
             sl = load_live_chain_slice(
                 tk,
                 target_dte=eff_target,
                 min_dte=min_dte,
                 max_dte=max_dte,
                 build_rnd=False,
+                max_expiry_checks=2,
+                diagnostics=expiry_counts,
             )
+            coverage: Dict[str, Any] = {"ticker": tk, **expiry_counts, "candidates": 0}
             if sl is None:
-                return False, []
-            spot_est = spot_map.get(tk, 0.0)
+                coverage["status"] = (
+                    "provider unavailable" if "listed" not in expiry_counts else
+                    "no eligible expiration" if not expiry_counts["eligible"] else
+                    "no usable two-sided quotes"
+                )
+                return coverage, [], None
+            spot_est = sl.spot or spot_map.get(tk, 0.0)
             if spot_est <= 0:
-                all_k = [c.strike for c in sl.calls + sl.puts if c.delta is not None]
-                if sl.calls:
-                    atm_c = min(sl.calls, key=lambda c: abs(abs(c.delta or 0.5) - 0.5))
-                    spot_est = atm_c.strike
-                elif all_k:
-                    spot_est = float(np.median(all_k))
-            if spot_est <= 0:
-                return False, []
+                return {**coverage, "status": "missing underlying spot"}, [], None
+            sl.spot = spot_est
             built = _build_candidates_for_slice(
                 sl,
                 spot_est,
@@ -848,26 +858,27 @@ def scan_options_desk(
                 strategy_filter=strat,
                 max_friction_pct=max_friction_pct,
             )
-            return True, built
+            return {**coverage, "status": "scanned", "candidates": len(built), "expiration": sl.expiration}, built, sl
 
-        scanned_ok = 0
         workers = max(1, min(int(max_workers), len(scan_syms)))
-        if workers == 1:
-            for tk in scan_syms:
-                ok_one, cands = _scan_one_live(tk)
-                if ok_one:
-                    scanned_ok += 1
-                    rows.extend(cands)
-        else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                for ok_one, cands in pool.map(_scan_one_live, scan_syms):
-                    if ok_one:
-                        scanned_ok += 1
-                        rows.extend(cands)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            outcomes = list(pool.map(_scan_one_live, scan_syms))
+        coverage_rows = [coverage for coverage, _, _ in outcomes]
+        for _, candidates, sl in outcomes:
+            rows.extend(candidates)
+            if research_inputs is not None and sl is not None:
+                research_inputs.append(_selector_inputs(sl, rv_map.get(sl.symbol), earnings.get(sl.symbol),
+                                                        strat, max_friction_pct))
+        scanned_ok = sum(coverage["status"] == "scanned" for coverage in coverage_rows)
+        expiries_checked = sum(coverage.get("checked", 0) for coverage in coverage_rows)
         if pulse_out is not None:
             pulse_out.clear()
             pulse_out.update(_build_market_pulse(chg_map, universe_size=len(scan_syms), scanned_ok=scanned_ok))
-        note = f"Live Yahoo scan: {len(rows)} candidates across {scanned_ok}/{len(scan_syms)} tickers"
+            pulse_out["coverage"] = coverage_rows
+        note = (
+            f"Yahoo scan (quote times unknown): {len(rows)} candidates across {scanned_ok}/{len(scan_syms)} tickers"
+            f" · {expiries_checked} expirations checked"
+        )
     else:
         full = repo_path(chain_db)
         if not os.path.exists(full):
@@ -900,16 +911,19 @@ def scan_options_desk(
             return rows, f"Archive read err: {exc}"
 
         _loc_sp, rv_map, chg_map = _load_local_ohlcv_stats(ohlcv_db, list(spots.keys()))
-        if pulse_out is not None:
-            pulse_out.clear()
-            pulse_out.update(_build_market_pulse(chg_map, universe_size=len(spots), scanned_ok=len(spots)))
+        archive_coverage: List[Dict[str, Any]] = []
         # Scan both a 35d swing slice and a 90d O1 wide-spread slice when strat is all/bull_put
         dte_targets = [(90, 60, 125)] if strat == "bull_put" else (
             [(35, 14, 58), (90, 60, 125)] if strat == "all" else [(target_dte, min_dte, max_dte)]
         )
         seen_keys: set[Tuple[str, str, str, str]] = set()
-        for tk, sp in spots.items():
-            for tgt, lo_d, hi_d in dte_targets:
+        for tk in dict.fromkeys(sym_list):
+            sp = spots.get(tk)
+            start_count = len(rows)
+            calendars_found = sum(r.ticker == tk and r.strategy_key == "calendar" for r in rows)
+            expiries: List[str] = []
+            two_sided = 0
+            for tgt, lo_d, hi_d in (dte_targets if sp is not None else []):
                 sl = load_archived_chain_slice(
                     tk,
                     target_dte=tgt,
@@ -919,8 +933,14 @@ def scan_options_desk(
                     chain_db=chain_db,
                     build_rnd=False,
                 )
-                if sl is None:
+                if sl is None or sp is None:
                     continue
+                expiries.append(sl.expiration)
+                two_sided += sum(c.bid > 0 for c in sl.calls + sl.puts)
+                if research_inputs is not None:
+                    sl.spot = sp
+                    research_inputs.append(_selector_inputs(sl, rv_map.get(tk), earnings.get(tk),
+                                                            strat, max_friction_pct))
                 for cand in _build_candidates_for_slice(
                     sl,
                     sp,
@@ -933,7 +953,18 @@ def scan_options_desk(
                     if key not in seen_keys:
                         seen_keys.add(key)
                         rows.append(cand)
-        note = f"Archive scan: {len(rows)} candidates across {len(spots)} archived chains"
+            status = "scanned" if two_sided else "no eligible two-sided quotes" if sp is not None else "no archived spot"
+            archive_coverage.append({
+                "ticker": tk, "status": status, "expirations": expiries,
+                "checked": len(expiries), "two_sided": two_sided,
+                "candidates": len(rows) - start_count + calendars_found,
+                "calendar_candidates": calendars_found,
+            })
+        scanned_ok = sum(coverage["status"] == "scanned" for coverage in archive_coverage)
+        if pulse_out is not None:
+            pulse_out.update(_build_market_pulse(chg_map, universe_size=len(sym_list), scanned_ok=scanned_ok))
+            pulse_out["coverage"] = archive_coverage
+        note = f"Archive scan: {len(rows)} candidates across {scanned_ok}/{len(sym_list)} tickers with usable quotes"
 
     # Evidence-first deterministic ordering: PROMISING > WATCHLIST > CAUTION, then low friction, then liquidity
     badge_rank = {"PROMISING": 0, "WATCHLIST": 1, "CAUTION": 2, "EXPERIMENTAL": 3}
@@ -947,6 +978,49 @@ def scan_options_desk(
         )
     )
     return rows, note
+
+
+def _selector_inputs(sl: ChainSlice, rv20: Optional[float], earnings_days: Optional[int],
+                     strategy: str, max_friction_pct: float) -> Dict[str, Any]:
+    """Persist the quotes the selector received, including contracts it passed over."""
+    return {
+        "chain": asdict(sl),
+        "rv20": rv20,
+        "earnings_days": earnings_days,
+        "strategy": strategy,
+        "max_friction_pct": max_friction_pct,
+    }
+
+
+def replay_option_scan(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Compare candidate identities generated from the same captured quotes and inputs."""
+    def identity(row: Dict[str, Any]) -> str:
+        return " | ".join(str(row[key]) for key in ("ticker", "strategy_key", "expiration", "strikes_label"))
+
+    before = {identity(row) for row in snapshot["rows"] if row["strategy_key"] != "calendar"}
+    after: set[str] = set()
+    for item in snapshot["selector_inputs"]:
+        raw = item["chain"]
+        sl = ChainSlice(**{
+            **raw,
+            "calls": [ChainContract(**quote) for quote in raw["calls"]],
+            "puts": [ChainContract(**quote) for quote in raw["puts"]],
+        })
+        if sl.spot is None or not math.isfinite(sl.spot) or sl.spot <= 0:
+            raise ValueError(f"Invalid archived spot for {sl.symbol}.")
+        rows = _build_candidates_for_slice(
+            sl, sl.spot, rv20=item["rv20"], earnings_days=item["earnings_days"],
+            strategy_filter=item["strategy"], max_friction_pct=item["max_friction_pct"],
+        )
+        after.update(identity(row.to_dict()) for row in rows)
+
+    return {
+        "scope": "Generic contract selection on captured quotes. Calendars and performance are outside this comparison.",
+        "captured_at": snapshot["captured_at"],
+        "matched": len(before & after),
+        "added": sorted(after - before),
+        "removed": sorted(before - after),
+    }
 
 
 def filter_option_rows(rows: Sequence[OptionScanRow], query: str) -> List[OptionScanRow]:
