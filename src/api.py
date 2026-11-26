@@ -477,3 +477,62 @@ async def desk_api_rebalance_apply():
         return JSONResponse(run_desk_apply_rebalance())
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/desk/api/options/scan")
+async def desk_api_options_scan(
+    strategy: str = Query(default="all"),
+    q: str = Query(default=""),
+    live: int = Query(default=0, ge=0, le=1),
+):
+    import asyncio
+    from .web_terminal import build_desk_options_scan
+
+    try:
+        data = await asyncio.to_thread(build_desk_options_scan, strategy=strategy, query=q, live=bool(live))
+        return JSONResponse(data)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/desk/api/options/chain")
+async def desk_api_options_chain(
+    ticker: str = Query(default="SPY"),
+    exp: str = Query(default=""),
+    band: float = Query(default=0.12),
+    live: int = Query(default=0, ge=0, le=1),
+):
+    import asyncio
+    from .web_terminal import build_desk_options_chain
+
+    try:
+        data = await asyncio.to_thread(
+            build_desk_options_chain,
+            ticker=ticker,
+            expiration=exp or None,
+            band_pct=band,
+            live=bool(live),
+        )
+        return JSONResponse(data)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/desk/api/options/analyze")
+async def desk_api_options_analyze(body: Dict[str, Any] = Body(...)):
+    from .web_terminal import run_desk_options_analyze
+
+    try:
+        return JSONResponse(run_desk_options_analyze(body))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/desk/api/options/paper-log")
+async def desk_api_options_paper_log(body: Dict[str, Any] = Body(...)):
+    from .web_terminal import run_desk_paper_log_option
+
+    try:
+        return JSONResponse(run_desk_paper_log_option(body))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

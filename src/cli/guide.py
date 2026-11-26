@@ -162,11 +162,14 @@ PLAIN-ENGLISH GUIDE TO YOUR TRADING DESK
               are a MODEL rather than market-implied), events — and where every number came from.
 
 4. KEYBOARD SHORTCUTS & BLOOMBERG `:` COMMAND BAR
-   • Tabs: 1=Today  2=Radar  3=Workbench  4=Book (Ghost Race)  5=Lab  6=Discover
-   • Power keys: `:` Cmd Bar · `b` TFSA Rebalance · `l` Log Pick · `x` Close Pick · `f` Log Fill
-                 `a` TFSA/Taxable · `g` RRG Map · `[`/`]` Target ±2% · `-`/`+` Days ±10 · `t` Theme
-   • `:` Mnemonics: `NVDA` (Card) · `NVDA WB` (Workbench) · `REB` · `SKEW` · `GEX SPY` ·
-                    `EDGAR` · `MACRO` · `PM NVDA` (Pre-Mortem) · `CLOSE` · `THEME amber_crt`
+   • Tabs: 1=Today  2=Radar  3=Workbench  4=Book (Ghost Race & Options)  5=Lab  6=Discover  7=Options
+   • Options Power: `7` Options Hub (Scanner · T-Shaped Chain Matrix + Leg Composer · Flow & Vol Intel)
+                    `c` Chain Matrix for focused ticker · `h` 2D Risk Surface Heatmap · `{`/`}` IV Shock ±5%
+                    `p` Paper-Log Option (`paper_trades.db`) · `o` Live 60-120d ETF Spreads
+   • Desk Keys: `:` Cmd Bar · `b` TFSA Rebalance · `l` Log Pick · `x` Close Pick · `f` Log Fill
+                `a` TFSA/Taxable · `g` RRG Map · `[`/`]` Target ±2% · `-`/`+` Days ±10 · `t` Theme
+   • `:` Mnemonics: `NVDA` (Card) · `CHAIN NVDA` (Chain Matrix) · `SCAN [bull_put]` · `FLOW` · `VOL` ·
+                    `SURF NVDA` (2D Heatmap) · `NVDA WB` · `REB` · `SKEW` · `GEX SPY` · `MACRO` · `PM NVDA`
 
 5. DAILY ROUTINE (2 MINUTES)
    • Run `opt refresh` once after the close, then `opt` (TUI) or `opt web` (browser cockpit).

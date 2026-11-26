@@ -66,16 +66,26 @@ Screen {
     margin-top: 1;
 }
 
-LogFillModal, QuickLogModal, ClosePickModal, BloombergCommandModal, RebalanceModal, AlphaViewerModal, HelpModal {
+LogFillModal, QuickLogModal, ClosePickModal, BloombergCommandModal, RebalanceModal, AlphaViewerModal, HelpModal, PaperOptionModal {
     align: center middle;
 }
 
-#logfill-dialog, #quicklog-dialog, #closepick-dialog {
-    width: 64;
+#logfill-dialog, #quicklog-dialog, #closepick-dialog, #paperopt-dialog {
+    width: 68;
     height: auto;
     border: thick $primary;
     background: $surface;
     padding: 1 2;
+}
+
+.po-row {
+    height: 3;
+    margin-bottom: 0;
+}
+
+.po-row Input, .po-row Select {
+    width: 1fr;
+    margin-right: 1;
 }
 
 #bcmd-dialog {
@@ -125,7 +135,7 @@ LogFillModal, QuickLogModal, ClosePickModal, BloombergCommandModal, RebalanceMod
     color: $error;
 }
 
-#lf-filled-row, #logfill-buttons, #quicklog-buttons, #closepick-buttons {
+#lf-filled-row, #logfill-buttons, #quicklog-buttons, #closepick-buttons, #paperopt-buttons {
     height: 3;
     align: right middle;
     margin-top: 1;
@@ -427,4 +437,156 @@ EvidenceCardScreen {
 #card-keys {
     height: 1;
     color: $text-muted;
+}
+
+/* BOOK upgraded split tables (Stock/ETF picks + Open Paper Options) */
+#book-tables-split {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#book-picks-table {
+    width: 56%;
+    height: 1fr;
+}
+
+#book-options-pane {
+    width: 44%;
+    height: 1fr;
+    margin-left: 1;
+}
+
+#book-options-head {
+    height: 1;
+    color: $primary;
+    text-style: bold;
+}
+
+#book-options-table {
+    height: 1fr;
+}
+
+Screen.compact #book-tables-split {
+    layout: vertical;
+}
+
+Screen.compact #book-picks-table {
+    width: 100%;
+    height: 55%;
+}
+
+Screen.compact #book-options-pane {
+    width: 100%;
+    height: 45%;
+    margin-left: 0;
+}
+
+/* [7] OPTIONS — Scanner · Chain Matrix · Flow & Vol Intel */
+#opt-root {
+    layout: vertical;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#opt-subnav {
+    height: 3;
+    align: left middle;
+    margin-bottom: 0;
+}
+
+#opt-subnav Button {
+    margin-right: 1;
+}
+
+#opt-status {
+    width: 1fr;
+    height: 3;
+    content-align: right middle;
+    color: $primary;
+}
+
+.opt-view {
+    height: 1fr;
+}
+
+#opt-scan-bar, #opt-chain-bar, #opt-chain-legbar, #opt-intel-bar {
+    height: 3;
+    align: left middle;
+    margin-bottom: 0;
+}
+
+#opt-leg-label {
+    margin-right: 1;
+    text-style: bold;
+    color: $primary;
+}
+
+#opt-strat-select {
+    width: 30;
+    margin-right: 1;
+}
+
+#opt-filter-input {
+    width: 24;
+    margin-right: 1;
+}
+
+#opt-chain-ticker {
+    width: 12;
+    margin-right: 1;
+}
+
+#opt-chain-exp {
+    width: 22;
+    margin-right: 1;
+}
+
+#opt-chain-band {
+    width: 14;
+    margin-right: 1;
+}
+
+#opt-chain-bar Button, #opt-intel-bar Button, #opt-scan-bar Button {
+    margin-right: 1;
+}
+
+#opt-scan-split, #opt-chain-split, #opt-intel-split {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#opt-scan-table, #opt-chain-table, #opt-intel-table {
+    width: 58%;
+    height: 1fr;
+}
+
+#opt-scan-inspector, #opt-chain-inspector, #opt-intel-inspector {
+    width: 42%;
+    height: 1fr;
+    border: solid $primary;
+    background: $surface;
+    padding: 0 1;
+    margin-left: 1;
+    overflow-y: auto;
+}
+
+Screen.compact #opt-scan-split,
+Screen.compact #opt-chain-split,
+Screen.compact #opt-intel-split {
+    layout: vertical;
+}
+
+Screen.compact #opt-scan-table,
+Screen.compact #opt-chain-table,
+Screen.compact #opt-intel-table {
+    width: 100%;
+    height: 52%;
+}
+
+Screen.compact #opt-scan-inspector,
+Screen.compact #opt-chain-inspector,
+Screen.compact #opt-intel-inspector {
+    width: 100%;
+    height: 48%;
+    margin-left: 0;
 }

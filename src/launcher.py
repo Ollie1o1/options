@@ -65,9 +65,9 @@ def _menu_rows() -> list:
     rows = []
     rows.append(_row("G", "GUIDE", "step-by-step plain-English coach — zero commands to memorize",
                      tag="start here"))
-    rows.append(_row("D", "DESK", "interactive 6-tab trading dashboard — discover · radar · shares vs options",
+    rows.append(_row("D", "DESK", "interactive 7-tab trading dashboard — options · chain · radar · discover",
                      tag="recommended"))
-    rows.append(_row("W", "WEB", "visual browser cockpit — Plotly RND charts · TFSA rebalance"))
+    rows.append(_row("W", "WEB", "zero-reload Bloomberg Web Cockpit — options hub · chain · TFSA rebalance"))
     rows.append(_row("1", "STOCKS", "legacy equity options screener — discover / spreads / iron / sell"))
     rows.append(_row("2", "CRYPTO", "BTC/ETH options on Deribit + perp funding/basis", tag="lab"))
     rows.append(_row("3", "LEVERAGE", "BTC/ETH perp futures strategy", tag="no edge yet"))
@@ -379,7 +379,7 @@ def main() -> None:
             _run_desk()
             continue
         if choice in ("W", "WEB"):
-            _loading("Launching Visual Web Cockpit (Streamlit)…")
+            _loading("Launching Bloomberg CRT Web Cockpit (http://127.0.0.1:8000/desk)…")
             print(
                 fmt.style("  Press Ctrl+C here when finished to return to the desk menu.", "muted")
                 if HAS_UI
@@ -389,7 +389,7 @@ def main() -> None:
             import subprocess
             proc = None
             try:
-                proc = subprocess.Popen([sys.executable, "-m", "streamlit", "run", "src/dashboard.py"])
+                proc = subprocess.Popen([sys.executable, "-m", "src.cli.main", "web"])
                 proc.wait()
             except KeyboardInterrupt:
                 if proc is not None and proc.poll() is None:
@@ -399,9 +399,9 @@ def main() -> None:
                     except subprocess.TimeoutExpired:
                         proc.kill()
                         proc.wait()
-                print("\n  Web dashboard closed — returning to desk menu.")
+                print("\n  Web cockpit closed — returning to desk menu.")
             except Exception as exc:
-                print(f"  Web dashboard unavailable ({exc}) — run `streamlit run src/dashboard.py`.")
+                print(f"  Web cockpit unavailable ({exc}) — run `opt web`.")
             continue
         if choice in ("1", "STOCKS", "S"):
             _loading("Loading equity options screener…")

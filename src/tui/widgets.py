@@ -133,8 +133,12 @@ def format_workbench_visual_markup(
     vehicles: List[VehicleComparison],
     dos: Optional[TickerDossier],
     view: DetailedView,
+    *,
+    show_heatmap: bool = False,
+    iv_shock_pct: float = 0.0,
+    selected_idx: int = 0,
 ) -> str:
-    """High-res Braille RND bell curve + Unicode EV vs Cost visual for Workbench."""
+    """High-res Braille RND bell curve + Unicode EV vs Cost + optional 2D Price×IV Risk Heatmap."""
     lines: List[str] = []
     spot = dos.spot if (dos is not None and dos.spot is not None) else None
     iv = (
@@ -142,9 +146,59 @@ def format_workbench_visual_markup(
         if (dos is not None and dos.atm_iv is not None)
         else ((dos.rv_20_ann / 100.0) if (dos is not None and dos.rv_20_ann) else 0.25)
     )
+    eff_iv = max(0.05, iv * (1.0 + iv_shock_pct / 100.0))
+    rec = (
+        vehicles[selected_idx]
+        if (vehicles and 0 <= selected_idx < len(vehicles))
+        else (next((v for v in vehicles if v.recommended), vehicles[0] if vehicles else None))
+    )
+
+    if show_heatmap and spot is not None and spot > 0 and rec is not None:
+        from .charts import risk_heatmap_grid
+        from .options_engine import OptionLeg, analyze_custom_legs
+
+        # Synthesize representative legs for the selected Workbench vehicle so the 2D surface is authentic BS
+        dte = max(7, int(view.horizon_days))
+        is_bull = view.direction != "BEARISH"
+        opt_t = "call" if is_bull else "put"
+        vname = rec.vehicle
+        legs: List[OptionLeg] = []
+        if "Credit Spread" in vname:
+            sh_k = round(spot * (0.95 if is_bull else 1.05), 1)
+            lg_k = round(spot * (0.90 if is_bull else 1.10), 1)
+            st = "put" if is_bull else "call"
+            legs = [
+                OptionLeg(st, "SELL", sh_k, "", dte, 0.0, 0.0, max(0.20, rec.max_profit_usd / 100.0 + 0.50), eff_iv),
+                OptionLeg(st, "BUY", lg_k, "", dte, 0.0, 0.0, 0.50, eff_iv),
+            ]
+        elif "Debit Vertical" in vname:
+            lg_k = round(spot, 1)
+            sh_k = round(spot * (1.07 if is_bull else 0.93), 1)
+            legs = [
+                OptionLeg(opt_t, "BUY", lg_k, "", dte, 0.0, 0.0, max(0.25, rec.capital_at_risk_usd / 100.0 + 0.40), eff_iv),
+                OptionLeg(opt_t, "SELL", sh_k, "", dte, 0.0, 0.0, 0.40, eff_iv),
+            ]
+        elif vname != "Shares":
+            k_atm = round(spot * (0.92 if "LEAPS" in vname else 1.0), 1)
+            eff_dte = max(dte, 180) if "LEAPS" in vname else dte
+            legs = [
+                OptionLeg(opt_t, "BUY", k_atm, "", eff_dte, 0.0, 0.0, max(0.25, rec.capital_at_risk_usd / 100.0), eff_iv),
+            ]
+        if legs:
+            an = analyze_custom_legs(view.symbol, spot, legs, days_elapsed=0, iv_shock_pct=iv_shock_pct)
+            lines.append(
+                risk_heatmap_grid(
+                    an.grid_price_shocks,
+                    an.grid_iv_shocks,
+                    an.grid_pnl,
+                    title=f"2D RISK SURFACE: {rec.vehicle} (IV base {eff_iv*100:.0f}% · press [h] for RND · [{{/}}] IV shock)",
+                    rich=True,
+                )
+            )
+            return "\n".join(lines)
+
     if spot is not None and spot > 0:
-        rec = next((v for v in vehicles if v.recommended), vehicles[0] if vehicles else None)
-        rnd_art = braille_payoff_and_rnd(spot, iv, view, rec, width=44, height=4, rich=True)
+        rnd_art = braille_payoff_and_rnd(spot, eff_iv, view, rec, width=44, height=4, rich=True)
         if rnd_art:
             lines.append(rnd_art)
 
@@ -162,7 +216,10 @@ def format_workbench_visual_markup(
 
     if vehicles:
         max_abs_ev = max(max(abs(v.ev_view_net_usd) for v in vehicles), 1.0)
-        lines.append(f"[bold]Edge vs Cost (Risk Budget ${view.risk_budget_usd:,.0f} · {view.account_type.upper()}):[/]")
+        iv_tag = f" · IV shock {iv_shock_pct:+.0f}%" if abs(iv_shock_pct) >= 0.5 else ""
+        lines.append(
+            f"[bold]Edge vs Cost (Risk ${view.risk_budget_usd:,.0f} · {view.account_type.upper()}{iv_tag} · \\[h] Heatmap):[/]"
+        )
         for v in vehicles[:5]:
             bar_w = max(1, int(round(abs(v.ev_view_net_usd) / max_abs_ev * 14)))
             col = "#5ec98d" if v.ev_view_net_usd > 0 else "#e06c75"
@@ -461,9 +518,35 @@ class DeskCommandProvider(Provider):
                     yield Hit(
                         0.83,
                         lbl,
-                        lambda c=cmd: app._open_alpha_modal(c, getattr(app, "focused_ticker", "SPY")),  # type: ignore[attr-defined]
+                        lambda c=cmd: app._open_alpha_mnemonic(c, getattr(app, "focused_ticker", "SPY")),  # type: ignore[attr-defined]
                         help=desc,
                     )
+
+        if not ql or "chain" in ql or "option" in ql or "scan" in ql or "flow" in ql or "vol" in ql or "paper" in ql:
+            yield Hit(
+                0.87,
+                f"Options Chain Matrix: {getattr(app, 'focused_ticker', 'SPY')}",
+                lambda: app.open_options_chain(getattr(app, "focused_ticker", "SPY")),  # type: ignore[attr-defined]
+                help="Open T-shaped Calls/Puts Chain, IV Smile, Term Structure & Dealer GEX",
+            )
+            yield Hit(
+                0.86,
+                "Options Scanner (Multi-Strategy)",
+                lambda: app.open_options_view("scanner"),  # type: ignore[attr-defined]
+                help="Screen Bull Puts, Long Calls/Puts, Calendars & Iron Condors with real friction",
+            )
+            yield Hit(
+                0.85,
+                "Options Flow & Vol Intel Hub (UOA / OCC / VRP)",
+                lambda: app.open_options_view("intel"),  # type: ignore[attr-defined]
+                help="View Unusual Options Activity, OCC surges, VRP cheap/rich vol & Skew",
+            )
+            yield Hit(
+                0.84,
+                "Paper-Log Option Trade (paper_trades.db)",
+                lambda: app.action_paper_log_option(),  # type: ignore[attr-defined]
+                help="Log a paper option or spread directly into paper_trades.db",
+            )
 
         if not ql or "log" in ql or "pick" in ql:
             yield Hit(
@@ -524,20 +607,19 @@ class DeskCommandProvider(Provider):
 
 
 class BloombergCommandModal(ModalScreen[Optional[str]]):
-    """Bloomberg-style `:` mnemonic command bar (`NVDA`, `NVDA WB`, `REB`, `SKEW`, `GEX SPY`, `EDGAR`, `MACRO`, `PM AAPL`)."""
+    """Bloomberg-style `:` mnemonic command bar (`NVDA`, `NVDA WB`, `CHAIN SPY`, `SCAN`, `FLOW`, `VOL`, `REB`, `SKEW`, `GEX SPY`)."""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="bcmd-dialog"):
             yield Label("BLOOMBERG COMMAND BAR  [dim](Enter to run · Esc to cancel)[/]")
             yield Input(
                 value="",
-                placeholder="NVDA | NVDA WB | REB | SKEW | GEX SPY | EDGAR | MACRO | PM AAPL | CLOSE | THEME amber_crt",
+                placeholder="NVDA | CHAIN SPY | SCAN | FLOW | VOL | NVDA WB | REB | SKEW | GEX SPY | MACRO | PM AAPL",
                 id="bcmd-input",
             )
             yield Static(
-                "[dim]Mnemonics:[/] [b]<TICKER>[/] Card · [b]<TICKER> WB[/] Workbench · [b]REB[/] TFSA Rebal · "
-                "[b]SKEW[/] Opt-Skew Shares · [b]GEX <TK>[/] Dealer Gamma · [b]EDGAR[/] 13D/Spinoffs · "
-                "[b]MACRO[/] Plumbing · [b]PM <TK>[/] Pre-Mortem · [b]CLOSE[/] Close Pick",
+                "[dim]Mnemonics:[/] [b]<TK>[/] Card · [b]CHAIN <TK>[/] Chain Matrix · [b]SCAN [strat][/] Opts Scanner · "
+                "[b]FLOW[/]/[b]VOL[/] Intel Hub · [b]<TK> WB[/] Workbench · [b]REB[/] TFSA · [b]GEX <TK>[/] · [b]PM <TK>[/]",
             )
             with Horizontal(id="bcmd-buttons"):
                 yield Button("Cancel (Esc)", id="bcmd-cancel")
@@ -614,3 +696,121 @@ class AlphaViewerModal(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "alpha-close":
             self.dismiss(None)
+
+
+class PaperOptionModal(ModalScreen[Optional[Dict[str, Any]]]):
+    """1-keystroke (`p`) modal to log a paper option or spread directly into `paper_trades.db`."""
+
+    def __init__(
+        self,
+        *,
+        ticker: str = "SPY",
+        strategy_name: str = "Bull Put",
+        expiration: str = "",
+        strike: float = 100.0,
+        opt_type: str = "put",
+        entry_price: float = 1.00,
+        quantity: float = 1.0,
+        long_strike: Optional[float] = None,
+        max_loss_usd: Optional[float] = None,
+        entry_iv: Optional[float] = None,
+        entry_delta: Optional[float] = None,
+        warning_text: str = "",
+    ) -> None:
+        super().__init__()
+        self._ticker = ticker.upper()
+        self._strategy = strategy_name
+        self._expiration = expiration
+        self._strike = float(strike)
+        self._opt_type = opt_type.lower()
+        self._entry_price = max(0.05, float(entry_price))
+        self._quantity = max(1.0, float(quantity))
+        self._long_strike = long_strike
+        self._max_loss_usd = max_loss_usd
+        self._entry_iv = entry_iv
+        self._entry_delta = entry_delta
+        self._warning = warning_text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="paperopt-dialog"):
+            yield Label(f"Paper-Log Option Trade — {self._ticker} (writes to paper_trades.db)")
+            if self._warning:
+                yield Static(f"[#d6a452]Note: {self._warning}[/]")
+            with Horizontal(classes="po-row"):
+                yield Input(value=self._ticker, placeholder="Ticker", id="po-ticker")
+                yield Select(
+                    [
+                        ("Bull Put", "Bull Put"),
+                        ("Bear Call", "Bear Call"),
+                        ("Long Call", "Long Call"),
+                        ("Long Put", "Long Put"),
+                        ("Iron Condor", "Iron Condor"),
+                        ("Short Put", "Short Put"),
+                        ("Calendar", "Calendar"),
+                    ],
+                    value=self._strategy if self._strategy in (
+                        "Bull Put", "Bear Call", "Long Call", "Long Put", "Iron Condor", "Short Put", "Calendar"
+                    ) else "Long Call",
+                    id="po-strategy",
+                )
+            with Horizontal(classes="po-row"):
+                yield Input(value=self._expiration, placeholder="Expiration YYYY-MM-DD", id="po-exp")
+                yield Select(
+                    [("PUT", "put"), ("CALL", "call")],
+                    value=self._opt_type if self._opt_type in ("put", "call") else "put",
+                    id="po-type",
+                )
+            with Horizontal(classes="po-row"):
+                yield Input(value=f"{self._strike:g}", placeholder="Primary / Short Strike", id="po-strike")
+                yield Input(
+                    value=f"{self._long_strike:g}" if self._long_strike else "",
+                    placeholder="Long Wing (optional)",
+                    id="po-long-strike",
+                )
+            with Horizontal(classes="po-row"):
+                yield Input(value=f"{self._entry_price:.2f}", placeholder="Entry Mid ($/sh)", id="po-price")
+                yield Input(value=f"{self._quantity:g}", placeholder="Contracts", id="po-qty")
+            yield Static("", id="po-err", classes="modal-error")
+            with Horizontal(id="paperopt-buttons"):
+                yield Button("Cancel (Esc)", id="po-cancel")
+                yield Button("Log Paper Option", variant="primary", id="po-confirm")
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "po-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "po-confirm":
+            try:
+                tk = self.query_one("#po-ticker", Input).value.strip().upper()
+                strat = str(self.query_one("#po-strategy", Select).value or self._strategy)
+                exp = self.query_one("#po-exp", Input).value.strip()
+                k = float(self.query_one("#po-strike", Input).value.strip())
+                raw_lk = self.query_one("#po-long-strike", Input).value.strip()
+                lk = float(raw_lk) if raw_lk else None
+                ot = str(self.query_one("#po-type", Select).value or self._opt_type)
+                px = float(self.query_one("#po-price", Input).value.strip())
+                qty = float(self.query_one("#po-qty", Input).value.strip())
+                if not tk or not exp or k <= 0 or px <= 0 or qty <= 0:
+                    raise ValueError("Ticker, expiration, positive strike, price, and quantity required.")
+            except ValueError as exc:
+                self.query_one("#po-err", Static).update(f"[#e06c75]{exc}[/]")
+                return
+            self.dismiss(
+                {
+                    "ticker": tk,
+                    "strategy_name": strat,
+                    "expiration": exp,
+                    "strike": k,
+                    "long_strike": lk,
+                    "opt_type": ot,
+                    "entry_price": px,
+                    "quantity": qty,
+                    "max_loss_usd": self._max_loss_usd,
+                    "entry_iv": self._entry_iv,
+                    "entry_delta": self._entry_delta,
+                }
+            )

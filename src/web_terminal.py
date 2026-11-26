@@ -549,6 +549,107 @@ def run_desk_apply_rebalance() -> Dict[str, Any]:
     return _clean_json({"ok": True, "last_rebalance_date": updated.last_rebalance_date, "core_holdings": updated.core_holdings})
 
 
+def build_desk_options_scan(
+    *,
+    strategy: str = "all",
+    query: str = "",
+    live: bool = False,
+    provider: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Multi-strategy options scan (archive-first or opt-in live Yahoo) for Web Cockpit `[8] OPTIONS HUB`."""
+    from src.tui.options_engine import describe_cal_pop_for_row, filter_option_rows
+    from src.tui.state import DeskDataProvider
+
+    prov = provider or DeskDataProvider()
+    rows, note = prov.scan_options(strategy=strategy, live=live)
+    filtered = filter_option_rows(rows, query)
+    serialized: List[Dict[str, Any]] = []
+    for r in filtered[:80]:
+        d = r.to_dict()
+        d["cal_pop_note"] = describe_cal_pop_for_row(r)
+        serialized.append(d)
+    return _clean_json({"count": len(serialized), "total": len(rows), "note": note, "rows": serialized})
+
+
+def build_desk_options_chain(
+    *,
+    ticker: str = "SPY",
+    expiration: Optional[str] = None,
+    band_pct: float = 0.12,
+    live: bool = False,
+    provider: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """T-shaped Call | Strike | Put Chain Matrix + GEX + IV Smile + Term Structure."""
+    from src.tui.state import DeskDataProvider
+
+    prov = provider or DeskDataProvider()
+    mat = prov.get_chain_matrix(
+        ticker,
+        expiration=expiration or None,
+        band_pct=band_pct,
+        allow_live=live,
+    )
+    if mat is None:
+        return _clean_json({"found": False, "ticker": ticker.upper(), "error": f"No chain found for {ticker.upper()}"})
+    return _clean_json({"found": True, "chain": asdict(mat)})
+
+
+def run_desk_options_analyze(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Price 1-4 custom option legs with live Greeks, Walk-Away Ladder, Payoff curves & 2D Risk Surface."""
+    from src.tui.options_engine import OptionLeg, analyze_custom_legs
+
+    tk = str(payload.get("ticker") or "SPY").upper().strip()
+    spot = float(payload.get("spot") or 100.0)
+    days_elapsed = int(payload.get("days_elapsed") or 0)
+    iv_shock_pct = float(payload.get("iv_shock_pct") or 0.0)
+    raw_legs = payload.get("legs") or []
+    legs: List[OptionLeg] = []
+    for lg in raw_legs[:4]:
+        legs.append(
+            OptionLeg(
+                opt_type=str(lg.get("opt_type") or "put").lower(),
+                side=str(lg.get("side") or "BUY").upper(),
+                strike=float(lg["strike"]),
+                expiration=str(lg.get("expiration") or ""),
+                dte=max(1, int(lg.get("dte") or 30)),
+                bid=float(lg.get("bid") or 0.0),
+                ask=float(lg.get("ask") or 0.0),
+                mid=float(lg.get("mid") or 0.05),
+                iv=float(lg.get("iv") or 0.25),
+                delta=float(lg.get("delta") or 0.0),
+                theta=float(lg.get("theta") or 0.0),
+                open_interest=int(lg.get("open_interest") or 0),
+                volume=int(lg.get("volume") or 0),
+                qty=max(1, int(lg.get("qty") or 1)),
+            )
+        )
+    if not legs:
+        raise ValueError("At least one option leg is required")
+    an = analyze_custom_legs(tk, spot, legs, days_elapsed=days_elapsed, iv_shock_pct=iv_shock_pct)
+    return _clean_json({"ok": True, "analysis": asdict(an)})
+
+
+def run_desk_paper_log_option(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Log a paper option or spread straight into `paper_trades.db` from Web Cockpit."""
+    from src.tui.state import DeskDataProvider
+
+    prov = DeskDataProvider()
+    ok = prov.log_paper_option(
+        ticker=str(payload["ticker"]).upper().strip(),
+        strategy_name=str(payload["strategy_name"]),
+        expiration=str(payload["expiration"])[:10],
+        strike=float(payload["strike"]),
+        opt_type=str(payload.get("opt_type") or "put").lower(),
+        entry_price=float(payload["entry_price"]),
+        quantity=float(payload.get("quantity") or 1.0),
+        long_strike=float(payload["long_strike"]) if payload.get("long_strike") not in (None, "") else None,
+        max_loss_usd=float(payload["max_loss_usd"]) if payload.get("max_loss_usd") not in (None, "") else None,
+        entry_iv=float(payload["entry_iv"]) if payload.get("entry_iv") not in (None, "") else None,
+        entry_delta=float(payload["entry_delta"]) if payload.get("entry_delta") not in (None, "") else None,
+    )
+    return _clean_json({"ok": bool(ok)})
+
+
 def serve_web_terminal(host: str = "127.0.0.1", port: int = 8000) -> None:
     """Zero-dependency stdlib ThreadingHTTPServer serving `/desk` and all live JSON endpoints."""
 
@@ -621,6 +722,29 @@ def serve_web_terminal(host: str = "127.0.0.1", port: int = 8000) -> None:
                 except Exception as exc:
                     self._send(500, json.dumps({"error": str(exc)}).encode("utf-8"), "application/json")
                 return
+            if path == "/desk/api/options/scan":
+                try:
+                    data = build_desk_options_scan(
+                        strategy=qs.get("strategy", ["all"])[0],
+                        query=qs.get("q", [""])[0],
+                        live=qs.get("live", ["0"])[0] in ("1", "true", "yes"),
+                    )
+                    self._send(200, json.dumps(data).encode("utf-8"), "application/json")
+                except Exception as exc:
+                    self._send(500, json.dumps({"error": str(exc)}).encode("utf-8"), "application/json")
+                return
+            if path == "/desk/api/options/chain":
+                try:
+                    data = build_desk_options_chain(
+                        ticker=qs.get("ticker", ["SPY"])[0],
+                        expiration=qs.get("exp", [""])[0] or None,
+                        band_pct=float(qs.get("band", ["0.12"])[0]),
+                        live=qs.get("live", ["0"])[0] in ("1", "true", "yes"),
+                    )
+                    self._send(200, json.dumps(data).encode("utf-8"), "application/json")
+                except Exception as exc:
+                    self._send(500, json.dumps({"error": str(exc)}).encode("utf-8"), "application/json")
+                return
             if path.startswith("/desk/api/card/"):
                 tk = urllib.parse.unquote(path.split("/desk/api/card/", 1)[1]).strip()
                 try:
@@ -650,6 +774,10 @@ def serve_web_terminal(host: str = "127.0.0.1", port: int = 8000) -> None:
                     data = run_desk_update_profile(self._read_json())
                 elif path == "/desk/api/rebalance-apply":
                     data = run_desk_apply_rebalance()
+                elif path == "/desk/api/options/analyze":
+                    data = run_desk_options_analyze(self._read_json())
+                elif path == "/desk/api/options/paper-log":
+                    data = run_desk_paper_log_option(self._read_json())
                 else:
                     self._send(404, b'{"error":"not found"}', "application/json")
                     return
@@ -806,6 +934,7 @@ svg { width: 100%; height: auto; display: block; }
   <button class="btn" data-tab="lab" onclick="showTab('lab')">[5] MISSION LAB</button>
   <button class="btn" data-tab="card" onclick="showTab('card')">[6] EVIDENCE CARD</button>
   <button class="btn" data-tab="sandbox" onclick="showTab('sandbox'); runSandbox()">[7] PAYOFF SANDBOX</button>
+  <button class="btn" data-tab="options" onclick="showTab('options'); loadOptionsScan(false)">[8] OPTIONS HUB</button>
   <span id="status-toast" class="toast">Ready</span>
 </div>
 
@@ -987,6 +1116,76 @@ svg { width: 100%; height: auto; display: block; }
       </div>
     </div>
   </div>
+
+  <!-- [8] OPTIONS HUB (Multi-Strategy Scanner + T-Shaped Chain Matrix + 2D Risk Surface) -->
+  <div id="tab-options" class="tab">
+    <div class="grid">
+      <div class="card c12">
+        <h3>
+          <span>Multi-Strategy Options Scanner &amp; T-Shaped Chain Matrix</span>
+          <span>
+            <button class="btn active" id="oh-btn-scan" onclick="showOptSub('scan')">Scanner</button>
+            <button class="btn" id="oh-btn-chain" onclick="showOptSub('chain')">Chain Matrix</button>
+          </span>
+        </h3>
+        <div id="oh-pane-scan">
+          <div class="form-row">
+            <select id="oh-strat" class="inp" onchange="loadOptionsScan(false)">
+              <option value="all">All Strategies</option>
+              <option value="bull_put">Bull Put [PROMISING · TAX]</option>
+              <option value="long_call">Long Call [TFSA OK]</option>
+              <option value="long_put">Long Put [TFSA OK]</option>
+              <option value="calendar">Calendar [WATCHLIST · TAX]</option>
+              <option value="bear_call">Bear Call [CAUTION · TAX]</option>
+              <option value="iron_condor">Iron Condor [CAUTION · TAX]</option>
+              <option value="short_put">Short Put [TAXABLE]</option>
+            </select>
+            <input id="oh-q" class="inp" style="width:240px" placeholder="Filter: bull_put tfsa clean fric<12% dte>=30" oninput="renderOptScanRows()"/>
+            <button class="btn" onclick="document.getElementById('oh-q').value='bull_put clean';renderOptScanRows()">BullPut Clean</button>
+            <button class="btn" onclick="document.getElementById('oh-q').value='tfsa';renderOptScanRows()">TFSA OK</button>
+            <button class="btn" onclick="document.getElementById('oh-q').value='fric<12%';renderOptScanRows()">Fric&lt;12%</button>
+            <button class="btn" onclick="loadOptionsScan(false)">Archive Scan</button>
+            <button class="btn good-btn" onclick="loadOptionsScan(true)">Live Yahoo Scan</button>
+            <span id="oh-scan-note" class="muted"></span>
+          </div>
+          <div class="grid">
+            <div class="c7" style="overflow-x:auto">
+              <table id="oh-scan-tbl"><thead><tr><th>Badge</th><th>Ticker</th><th>Strategy</th><th>Exp</th><th>Strikes</th><th class="num">Mid</th><th class="num">Limit</th><th class="num">Fric%</th><th class="num">Risk$</th><th>TFSA</th></tr></thead><tbody></tbody></table>
+            </div>
+            <div class="c5">
+              <div id="oh-scan-insp" class="card" style="background:var(--panel)"><span class="muted">Click any candidate row to inspect its 2D Price×IV Risk Heatmap, Greeks, Walk-Away Ladder, or jump to its Chain Matrix.</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="oh-pane-chain" style="display:none">
+          <div class="form-row">
+            <input id="oh-ch-tk" class="inp" style="width:82px" value="SPY" placeholder="Ticker"/>
+            <select id="oh-ch-exp" class="inp" onchange="loadWebChain(false)"><option value="">Default (~35d)</option></select>
+            <select id="oh-ch-band" class="inp" onchange="loadWebChain(false)">
+              <option value="0.12">±12%</option><option value="0.20">±20%</option><option value="0.0">All</option>
+            </select>
+            <button class="btn" onclick="loadWebChain(false)">Load Archive</button>
+            <button class="btn good-btn" onclick="loadWebChain(true)">Live Yahoo</button>
+            <button class="btn" onclick="clearWebLegs()">Clear Legs</button>
+            <span id="oh-ch-meta" class="muted"></span>
+          </div>
+          <div class="grid">
+            <div class="c7" style="max-height:520px;overflow-y:auto">
+              <table id="oh-ch-tbl"><thead><tr><th>Stage C</th><th class="num">C.OI</th><th class="num">C.IV</th><th class="num">C.Δ</th><th class="num">C.Bid/Ask</th><th style="text-align:center">STRIKE</th><th class="num">P.Bid/Ask</th><th class="num">P.Δ</th><th class="num">P.IV</th><th class="num">P.OI</th><th>Stage P</th></tr></thead><tbody></tbody></table>
+            </div>
+            <div class="c5">
+              <div class="form-row">
+                <label>T+<span id="oh-t-v">0</span>d <input id="oh-t-sl" type="range" min="0" max="60" value="0" oninput="document.getElementById('oh-t-v').textContent=this.value" onchange="analyzeWebLegs()"/></label>
+                <label>IV <span id="oh-iv-v">0</span>% <input id="oh-iv-sl" type="range" min="-30" max="30" value="0" oninput="document.getElementById('oh-iv-v').textContent=(this.value>=0?'+':'')+this.value" onchange="analyzeWebLegs()"/></label>
+              </div>
+              <div id="oh-ch-insp" class="card" style="background:var(--panel)"><span class="muted">Load a ticker to view IV Smile, Dealer GEX walls, or click +B/+S on strikes to build a live multi-leg payoff &amp; 2D Risk Surface.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Post-Mortem Close Pick Modal -->
@@ -1052,8 +1251,8 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape') document.activeElement.blur();
     return;
   }
-  const map = {'0':'ritual','1':'today','2':'sectors','3':'alpha','4':'book','5':'lab','6':'card','7':'sandbox'};
-  if (map[e.key]) { showTab(map[e.key]); if (e.key === '7') runSandbox(); }
+  const map = {'0':'ritual','1':'today','2':'sectors','3':'alpha','4':'book','5':'lab','6':'card','7':'sandbox','8':'options'};
+  if (map[e.key]) { showTab(map[e.key]); if (e.key === '7') runSandbox(); if (e.key === '8') loadOptionsScan(false); }
   else if (e.key === ':' || e.key === '/') { e.preventDefault(); document.getElementById('cmd-in').focus(); }
   else if (e.key === 't' || e.key === 'T') cycleTheme();
   else if (e.key === 'r') loadAll(true);
@@ -1071,6 +1270,19 @@ async function runCmd() {
   const arg = (parts[1] || '').toUpperCase();
   if (['RITUAL','MORNING'].includes(cmd)) { showTab('ritual'); return; }
   if (['TODAY','SECTORS','ALPHA','BOOK','LAB'].includes(cmd)) { showTab(cmd.toLowerCase()); return; }
+  if (['OPTIONS','OPT','SCAN'].includes(cmd)) {
+    showTab('options'); showOptSub('scan');
+    if (arg) document.getElementById('oh-strat').value = arg.toLowerCase();
+    await loadOptionsScan(false); return;
+  }
+  if (cmd === 'CHAIN') {
+    if (arg) document.getElementById('oh-ch-tk').value = arg;
+    showTab('options'); showOptSub('chain'); await loadWebChain(false); return;
+  }
+  if (arg === 'CHAIN') {
+    document.getElementById('oh-ch-tk').value = cmd;
+    showTab('options'); showOptSub('chain'); await loadWebChain(false); return;
+  }
   if (['SKEW','GEX','EDGAR','MACRO','OCC'].includes(cmd)) { showTab('alpha'); return; }
   if (['REB','REBAL'].includes(cmd)) { showTab('book'); return; }
   if (arg === 'WB' || arg === 'SANDBOX') {
@@ -1554,6 +1766,237 @@ async function loadAll(refresh = false) {
   document.querySelector('#l-playbooks tbody').innerHTML = (STATE.playbooks || []).map(p => `<tr>
     <td><span class="pill ${p.evidence_tier==='VALIDATED'?'good':p.evidence_tier==='LEAD'?'info':'warn'}">${esc(p.evidence_tier)}</span></td>
     <td><b>${esc(p.id)}</b></td><td>${esc((p.accounts||[]).join(', '))}</td><td>${esc(p.horizon_label)}</td></tr>`).join('');
+}
+
+// ── [8] OPTIONS HUB (Scanner + T-Shaped Chain Matrix + 2D Heatmap) ──
+let OH_SCAN_ROWS = [];
+let OH_CHAIN = null;
+let OH_LEGS = [];
+
+function showOptSub(sub) {
+  document.getElementById('oh-pane-scan').style.display = sub === 'scan' ? 'block' : 'none';
+  document.getElementById('oh-pane-chain').style.display = sub === 'chain' ? 'block' : 'none';
+  document.getElementById('oh-btn-scan').classList.toggle('active', sub === 'scan');
+  document.getElementById('oh-btn-chain').classList.toggle('active', sub === 'chain');
+  if (sub === 'chain' && !OH_CHAIN) loadWebChain(false);
+}
+
+async function loadOptionsScan(live = false) {
+  const strat = document.getElementById('oh-strat').value || 'all';
+  setToast(live ? 'Running live Yahoo options scan…' : 'Scanning archived chains…');
+  try {
+    const resp = await fetch(`/desk/api/options/scan?strategy=${encodeURIComponent(strat)}&live=${live ? 1 : 0}`);
+    const d = await resp.json();
+    OH_SCAN_ROWS = d.rows || [];
+    document.getElementById('oh-scan-note').textContent = d.note || '';
+    renderOptScanRows();
+    setToast(`Options scan: ${OH_SCAN_ROWS.length} candidates`);
+  } catch (err) {
+    setToast('Options scan error: ' + err);
+  }
+}
+
+function renderOptScanRows() {
+  const q = (document.getElementById('oh-q').value || '').trim().toLowerCase();
+  const toks = q ? q.split(/\\s+/) : [];
+  const filtered = OH_SCAN_ROWS.filter(r => toks.every(t => {
+    if (['bull_put','bear_call','long_call','long_put','iron_condor','calendar','short_put'].includes(t)) return r.strategy_key === t;
+    if (t === 'tfsa') return !!r.tfsa_legal;
+    if (t === 'taxable') return !r.tfsa_legal;
+    if (t === 'clean') return !(r.risk_flags||[]).some(f => f.startsWith('EARN_') || f === 'WIDE_SPREAD' || f === 'HIST_WEAK_EDGE');
+    if (t.startsWith('fric<')) { const lim = parseFloat(t.slice(5)) / (t.includes('%') ? 100 : 1); return r.friction_pct <= lim; }
+    if (t.startsWith('dte>=')) return r.dte >= parseInt(t.slice(5), 10);
+    if (t.startsWith('risk<')) return r.max_risk_usd <= parseFloat(t.slice(5));
+    return `${r.ticker} ${r.strategy} ${r.strikes_label} ${r.expiration} ${(r.risk_flags||[]).join(' ')}`.toLowerCase().includes(t);
+  }));
+  window._OH_VIEW_ROWS = filtered;
+  document.querySelector('#oh-scan-tbl tbody').innerHTML = filtered.slice(0, 60).map((r, i) => `<tr class="clickable" onclick="inspectOptRow(${i})">
+    <td><span class="pill ${r.evidence_badge==='PROMISING'?'good':r.evidence_badge==='CAUTION'?'bad':'warn'}">${esc(r.evidence_badge)}</span></td>
+    <td><b>${esc(r.ticker)}</b></td><td>${esc(r.strategy)}</td><td>${esc((r.expiration||'').slice(5))} (${r.dte}d)</td>
+    <td>${esc(r.strikes_label)}</td>
+    <td class="num ${r.is_credit?'good':''}">${r.is_credit?'+':'-'}$${Number(r.mid_price||0).toFixed(2)}</td>
+    <td class="num">$${Number(r.walk_away_limit||0).toFixed(2)}</td>
+    <td class="num ${r.friction_pct<=0.12?'good':r.friction_pct<=0.22?'warn':'bad'}">${(Number(r.friction_pct||0)*100).toFixed(1)}%</td>
+    <td class="num">$${Number(r.max_risk_usd||0).toLocaleString()}</td>
+    <td class="${r.tfsa_legal?'good':'warn'}">${r.tfsa_legal?'OK':'TAX'}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">No candidates matched.</td></tr>';
+  if (filtered.length) inspectOptRow(0);
+}
+
+function renderHeatmapHTML(an) {
+  const ps = an.grid_price_shocks || [], ivs = an.grid_iv_shocks || [], grid = an.grid_pnl || [];
+  if (!grid.length) return '';
+  const flat = grid.flat().map(Math.abs);
+  const mx = Math.max(1, ...flat);
+  let h = '<table><thead><tr><th>IV\\Px</th>' + ps.map(p => `<th class="num">${p>=0?'+':''}${Math.round(p*100)}%</th>`).join('') + '</tr></thead><tbody>';
+  ivs.forEach((iv, ri) => {
+    h += `<tr><td class="muted">${iv>=0?'+':''}${Math.round(iv*100)}%</td>`;
+    (grid[ri] || []).forEach(v => {
+      const f = v / mx;
+      const cls = f > 0.08 ? 'good' : (f < -0.08 ? 'bad' : 'muted');
+      const bg = f > 0.08 ? `rgba(94,201,141,${Math.min(0.28, f*0.28).toFixed(2)})` : (f < -0.08 ? `rgba(224,108,117,${Math.min(0.28, -f*0.28).toFixed(2)})` : 'transparent');
+      h += `<td class="num ${cls}" style="background:${bg}">${v>=0?'+':''}${Math.round(v)}</td>`;
+    });
+    h += '</tr>';
+  });
+  return h + '</tbody></table>';
+}
+
+async function inspectOptRow(idx) {
+  const r = (window._OH_VIEW_ROWS || [])[idx];
+  if (!r) return;
+  const box = document.getElementById('oh-scan-insp');
+  let heatHtml = '', ladHtml = '', greekHtml = '';
+  if (r.legs && r.legs.length) {
+    try {
+      const resp = await fetch('/desk/api/options/analyze', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ ticker: r.ticker, spot: r.spot, legs: r.legs, days_elapsed: 0, iv_shock_pct: 0 }),
+      });
+      const d = await resp.json();
+      if (d.ok && d.analysis) {
+        const an = d.analysis;
+        greekHtml = `<p class="muted">Δ$ ${an.delta_dollars} · Θ/d $${an.theta_per_day_usd} · Vega $${an.vega_per_1pct_usd} · Mkt PoP ${Math.round(an.pop_mkt*100)}% · BE ${(an.breakevens||[]).map(b=>'$'+b).join(', ')}</p>`;
+        heatHtml = `<h4 style="margin:8px 0 4px;color:var(--primary)">2D Price × IV Risk Surface ($)</h4>` + renderHeatmapHTML(an);
+        ladHtml = `<pre class="mono-pre" style="margin-top:8px;font-size:11px">${esc(an.ladder.step1_label)}\\n${esc(an.ladder.step2_label)}\\n${esc(an.ladder.abort_label)}</pre>`;
+      }
+    } catch {}
+  }
+  const calHtml = r.cal_pop_note ? `<p class="good" style="font-size:12px">${esc(r.cal_pop_note)}</p>` : '';
+  box.innerHTML = `
+    <div class="form-row" style="justify-content:space-between">
+      <b>${esc(r.ticker)} ${esc(r.strategy)} ${esc(r.strikes_label)}</b>
+      <span>
+        <button class="btn" onclick="openWebChainFromScan('${esc(r.ticker)}','${esc((r.expiration||'').slice(0,10))}')">Open Chain</button>
+        <button class="btn good-btn" onclick="paperLogWebScan(${idx})">Paper Log</button>
+      </span>
+    </div>
+    <p class="muted">Spot $${r.spot} · Exp ${esc(r.expiration)} (${r.dte}d) · ${r.tfsa_legal?'<span class="good">TFSA OK</span>':'<span class="warn">TAXABLE ONLY</span>'} · Flags: ${esc((r.risk_flags||[]).join(', ')||'Clean')}</p>
+    ${calHtml}${greekHtml}${heatHtml}${ladHtml}`;
+}
+
+function openWebChainFromScan(tk, exp) {
+  document.getElementById('oh-ch-tk').value = tk;
+  showOptSub('chain');
+  loadWebChain(false, exp);
+}
+
+async function paperLogWebScan(idx) {
+  const r = (window._OH_VIEW_ROWS || [])[idx];
+  if (!r) return;
+  const legs = r.legs || [];
+  const primary = legs.find(l => l.side === 'SELL') || legs[0] || { strike: r.spot, opt_type: 'put' };
+  const wing = legs.find(l => l !== primary) || null;
+  const resp = await fetch('/desk/api/options/paper-log', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      ticker: r.ticker, strategy_name: r.strategy, expiration: (r.expiration||'').slice(0,10),
+      strike: primary.strike, long_strike: wing ? wing.strike : null, opt_type: primary.opt_type,
+      entry_price: r.mid_price, quantity: 1, max_loss_usd: r.max_risk_usd,
+      entry_iv: r.iv_pct ? r.iv_pct/100 : null, entry_delta: r.short_delta,
+    }),
+  });
+  const d = await resp.json();
+  setToast(d.ok ? `Paper-logged ${r.ticker} ${r.strategy} into paper_trades.db` : ('Paper log err: ' + (d.error||'')));
+}
+
+async function loadWebChain(live = false, forceExp = null) {
+  const tk = (document.getElementById('oh-ch-tk').value || 'SPY').trim().toUpperCase();
+  const exp = forceExp != null ? forceExp : (document.getElementById('oh-ch-exp').value || '');
+  const band = document.getElementById('oh-ch-band').value || '0.12';
+  setToast(`Loading ${tk} ${live?'live':'archived'} chain…`);
+  try {
+    const url = `/desk/api/options/chain?ticker=${encodeURIComponent(tk)}&exp=${encodeURIComponent(exp)}&band=${band}&live=${live?1:0}`;
+    const resp = await fetch(url);
+    const d = await resp.json();
+    if (!d.found) {
+      document.getElementById('oh-ch-meta').textContent = d.error || 'Chain unavailable';
+      document.querySelector('#oh-ch-tbl tbody').innerHTML = '<tr><td colspan="11" class="muted">No archived chain — click Live Yahoo.</td></tr>';
+      return;
+    }
+    OH_CHAIN = d.chain;
+    OH_LEGS = [];
+    const expSel = document.getElementById('oh-ch-exp');
+    expSel.innerHTML = (OH_CHAIN.available_expirations || []).map(([e, dt]) =>
+      `<option value="${esc(e)}" ${e === OH_CHAIN.expiration ? 'selected' : ''}>${esc(e)} (${dt}d)</option>`
+    ).join('');
+    document.getElementById('oh-ch-meta').textContent =
+      `${OH_CHAIN.ticker} $${OH_CHAIN.spot} · ATM IV ${OH_CHAIN.atm_iv_pct ?? '—'}% · 1σ ±${OH_CHAIN.expected_move_pct ?? '—'}% · Net GEX $${OH_CHAIN.net_gex_m ?? '—'}M [${OH_CHAIN.source}]`;
+    document.querySelector('#oh-ch-tbl tbody').innerHTML = (OH_CHAIN.rows || []).map((row, ri) => {
+      const c = row.call, p = row.put;
+      const tags = (row.tags || []).join('·');
+      const isSpot = (row.tags || []).includes('SPOT');
+      return `<tr style="${isSpot ? 'background:var(--panel);font-weight:700' : ''}">
+        <td>${c ? `<button class="btn" onclick="stageWebLeg(${ri},'call','BUY')">+B</button><button class="btn" onclick="stageWebLeg(${ri},'call','SELL')">-S</button>` : ''}</td>
+        <td class="num">${c ? c.open_interest.toLocaleString() : '—'}</td>
+        <td class="num">${c && c.iv!=null ? Math.round(c.iv*100)+'%' : '—'}</td>
+        <td class="num">${c && c.delta!=null ? c.delta.toFixed(2) : '—'}</td>
+        <td class="num">${c ? c.bid.toFixed(2)+'/'+c.ask.toFixed(2) : '—'}</td>
+        <td style="text-align:center;color:${isSpot?'var(--primary)':'var(--ink-strong)'}"><b>${row.strike}</b> ${tags ? `<span class="muted" style="font-size:10px">${esc(tags)}</span>` : ''}</td>
+        <td class="num">${p ? p.bid.toFixed(2)+'/'+p.ask.toFixed(2) : '—'}</td>
+        <td class="num">${p && p.delta!=null ? p.delta.toFixed(2) : '—'}</td>
+        <td class="num">${p && p.iv!=null ? Math.round(p.iv*100)+'%' : '—'}</td>
+        <td class="num">${p ? p.open_interest.toLocaleString() : '—'}</td>
+        <td>${p ? `<button class="btn" onclick="stageWebLeg(${ri},'put','BUY')">+B</button><button class="btn" onclick="stageWebLeg(${ri},'put','SELL')">-S</button>` : ''}</td></tr>`;
+    }).join('');
+    renderWebChainDefaultInspector();
+    setToast(`Loaded ${OH_CHAIN.ticker} (${(OH_CHAIN.rows||[]).length} strikes)`);
+  } catch (err) {
+    setToast('Chain error: ' + err);
+  }
+}
+
+function renderWebChainDefaultInspector() {
+  if (!OH_CHAIN) return;
+  const gex = (OH_CHAIN.gex_by_strike || []).slice(0, 8);
+  const mxG = Math.max(0.1, ...gex.map(g => Math.abs(g.gex_m || 0)));
+  const gexHtml = gex.map(g => {
+    const pct = Math.min(100, Math.round(Math.abs(g.gex_m) / mxG * 100));
+    const col = g.gex_m >= 0 ? 'var(--good)' : 'var(--bad)';
+    return `<div style="margin:3px 0;font-size:11px">$${g.strike} <span style="float:right;color:${col}">${g.gex_m>=0?'+':''}$${g.gex_m}M</span><div class="bar-wrap"><div class="bar-fill" style="width:${pct}%;background:${col}"></div></div></div>`;
+  }).join('') || '<div class="muted">GEX profile unavailable.</div>';
+  const term = (OH_CHAIN.term_points || []).map(([d, iv]) => `${d}d: <b>${iv}%</b>`).join(' · ');
+  document.getElementById('oh-ch-insp').innerHTML = `
+    <b>${esc(OH_CHAIN.ticker)} Dealer GEX &amp; Term Structure</b>
+    <p class="muted" style="font-size:11px">Flip: $${OH_CHAIN.gamma_flip ?? '—'} · Call Wall: $${OH_CHAIN.call_wall ?? '—'} · Put Wall: $${OH_CHAIN.put_wall ?? '—'}</p>
+    <p style="font-size:11px">Term IV: ${term || '—'}</p>
+    ${gexHtml}
+    <p class="muted" style="margin-top:8px;font-size:11px">Click +B / -S on any strike row to stage 1–4 legs and simulate live T+Nd &amp; IV-shocked 2D Risk Surface.</p>`;
+}
+
+function clearWebLegs() { OH_LEGS = []; renderWebChainDefaultInspector(); setToast('Cleared staged legs'); }
+
+function stageWebLeg(rowIdx, optType, side) {
+  if (!OH_CHAIN || OH_LEGS.length >= 4) return;
+  const row = OH_CHAIN.rows[rowIdx];
+  const c = optType === 'call' ? row.call : row.put;
+  if (!c) return;
+  OH_LEGS.push({
+    opt_type: optType, side, strike: c.strike, expiration: OH_CHAIN.expiration, dte: OH_CHAIN.dte,
+    bid: c.bid, ask: c.ask, mid: c.mid, iv: c.iv || (OH_CHAIN.atm_iv_pct ? OH_CHAIN.atm_iv_pct/100 : 0.25),
+    delta: c.delta || 0, theta: c.theta || 0, open_interest: c.open_interest || 0, volume: c.volume || 0, qty: 1,
+  });
+  analyzeWebLegs();
+}
+
+async function analyzeWebLegs() {
+  if (!OH_CHAIN || !OH_LEGS.length) { renderWebChainDefaultInspector(); return; }
+  const days = parseInt(document.getElementById('oh-t-sl').value || '0', 10);
+  const ivShk = parseFloat(document.getElementById('oh-iv-sl').value || '0');
+  const resp = await fetch('/desk/api/options/analyze', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ticker: OH_CHAIN.ticker, spot: OH_CHAIN.spot, legs: OH_LEGS, days_elapsed: days, iv_shock_pct: ivShk }),
+  });
+  const d = await resp.json();
+  if (!d.ok || !d.analysis) return;
+  const an = d.analysis;
+  const legLines = OH_LEGS.map(l => `<span class="pill ${l.side==='BUY'?'good':'bad'}">${l.side} ${l.strike}${l.opt_type[0].toUpperCase()}</span>`).join(' ');
+  document.getElementById('oh-ch-insp').innerHTML = `
+    <div><b>${esc(an.structure_name)}</b> ${an.tfsa_legal?'<span class="pill good">TFSA OK</span>':'<span class="pill warn">TAXABLE</span>'}</div>
+    <div style="margin:6px 0">${legLines}</div>
+    <p class="muted" style="font-size:12px">Net ${an.is_credit?'Credit':'Debit'} <b>$${an.net_mid}</b> · Fric ${(an.friction_pct*100).toFixed(1)}% · Risk $${Number(an.max_risk_usd).toLocaleString()} · BE ${(an.breakevens||[]).map(b=>'$'+b).join(', ')||'—'}<br>
+    Δ$ ${an.delta_dollars} · Θ/d $${an.theta_per_day_usd} · Vega $${an.vega_per_1pct_usd} · Mkt PoP ${Math.round(an.pop_mkt*100)}%</p>
+    ${renderHeatmapHTML(an)}
+    <pre class="mono-pre" style="margin-top:6px;font-size:11px">${esc(an.ladder.abort_label)}</pre>`;
 }
 loadAll(false);
 </script>
