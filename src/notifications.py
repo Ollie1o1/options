@@ -95,6 +95,8 @@ def detect_action_events(
     snap: RadarSnapshot,
     book: Dict[str, Any],
     health: Dict[str, Any],
+    *,
+    cloud_mode: Optional[bool] = None,
 ) -> List[AlertEvent]:
     """Identify genuinely actionable events worthy of pushing to Discord / macOS."""
     events: List[AlertEvent] = []
@@ -160,9 +162,13 @@ def detect_action_events(
     except Exception:
         pass
 
-    # 4. Critical Data Pipe Failures (STALE only — avoids noisy WARN flapping)
+    # 4. Critical Data Pipe Failures (STALE only — avoids noisy WARN flapping).
+    # On ephemeral cloud runners (GitHub Actions), local-only archives (chains/earnings)
+    # are not persisted, so only monitor OHLCV and disk there to prevent daily false alarms.
+    is_cloud = (os.environ.get("GITHUB_ACTIONS", "").lower() == "true") if cloud_mode is None else bool(cloud_mode)
+    monitored_pipes = ("ohlcv", "disk") if is_cloud else ("ohlcv", "chains", "earnings", "disk")
     pipes = health.get("pipes") or {}
-    stale_names = [k for k, v in pipes.items() if k in ("ohlcv", "chains", "earnings", "disk") and v.get("status") == "STALE"]
+    stale_names = [k for k, v in pipes.items() if k in monitored_pipes and v.get("status") == "STALE"]
     if stale_names:
         details = " · ".join(f"{k.upper()}: {pipes[k].get('detail', 'stale')}" for k in stale_names)
         events.append(
@@ -205,6 +211,33 @@ def _pipe_led_str(health: Dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _load_fred_telemetry_snippet() -> str:
+    """Return compact cached FRED credit & yield-curve snippet (zero network I/O)."""
+    try:
+        from src.topdown.macro import load_fred_cache
+
+        cache = load_fred_cache()
+        parts: List[str] = []
+        hy_obs = _as_list(_as_dict(cache.get("BAMLH0A0HYM2")).get("obs"))
+        if hy_obs and isinstance(hy_obs[-1], (list, tuple)) and len(hy_obs[-1]) >= 2:
+            parts.append(f"HY OAS `{float(hy_obs[-1][1]):.2f}%`")
+        yc_obs = _as_list(_as_dict(cache.get("T10Y2Y")).get("obs"))
+        if yc_obs and isinstance(yc_obs[-1], (list, tuple)) and len(yc_obs[-1]) >= 2:
+            parts.append(f"10Y-2Y `{float(yc_obs[-1][1]):+.2f}%`")
+        return " · ".join(parts)
+    except Exception:
+        return ""
+
+
+def _regime_directive(posture: str, rv20: Optional[float]) -> str:
+    rv_tag = f"SPY RV20 {rv20:.1f}%" if rv20 is not None else "elevated vol"
+    if posture == "RISK_ON":
+        return "Desk Stance: Full Core TFSA allocation active · selective pullback longs & rich-vol credit spreads permitted."
+    if posture == "RISK_OFF":
+        return f"Desk Stance: Defensive ({rv_tag}) · no unhedged longs; stay in Core TFSA defensive sleeve & cheap-vol hedges."
+    return "Desk Stance: Selective · enforce walk-away limits and avoid chasing extended breakouts."
+
+
 def build_morning_embed(
     snap: RadarSnapshot,
     book: Dict[str, Any],
@@ -220,12 +253,20 @@ def build_morning_embed(
     spy_s = f"${snap.spy_last:.2f} ({snap.spy_chg_1d_pct:+.1f}%)" if snap.spy_last is not None else "—"
     qqq_s = f"{snap.qqq_chg_1d_pct:+.1f}%" if snap.qqq_chg_1d_pct is not None else "—"
     vix_s = f"{snap.vix:.1f} ({snap.vix_term or '—'})" if snap.vix is not None else "—"
-    rv_s = f"{snap.spy_rv20:.1f}%" if getattr(snap, "spy_rv20", None) is not None else "—"
+    rv20_val = getattr(snap, "spy_rv20", None)
+    rv_s = f"{rv20_val:.1f}%" if rv20_val is not None else "—"
     kalshi_s = (
         f" · Kalshi: {snap.kalshi_macro[0]['label']} ({snap.kalshi_macro[0]['prob_pct']:.0f}%)"
         if snap.kalshi_macro
         else ""
     )
+    fred_s = _load_fred_telemetry_snippet()
+    as_of_s = getattr(snap, "ohlcv_as_of", None)
+    macro_line = f"Next: `{snap.next_macro_event}`{kalshi_s}"
+    if fred_s:
+        macro_line = f"{fred_s} · {macro_line}"
+    if as_of_s:
+        macro_line += f"\n_Data as of `{as_of_s}` close_"
 
     core_lines = []
     for c in snap.core_allocation or []:
@@ -238,12 +279,20 @@ def build_morning_embed(
         if "TAXABLE_ONLY" not in o.risk_flags
         and o.playbook_id not in ("vol_managed_outlook", "etf_wide_spread", "etf_bear_call")
     ]
-    if tfsa_opps:
+    clean_opps = [o for o in tfsa_opps if "BEAR_REGIME" not in o.risk_flags]
+    blocked_opps = [o for o in tfsa_opps if "BEAR_REGIME" in o.risk_flags]
+    if clean_opps:
         setup_txt = "\n".join(
             f"• **{o.ticker}** ({o.playbook_label}) — {o.setup_summary[:70]}"
             + (f" ⚠ `{','.join(o.risk_flags[:2])}`" if o.risk_flags else "")
-            for o in tfsa_opps[:4]
+            for o in clean_opps[:4]
         )
+    elif blocked_opps:
+        blocked_lines = [
+            f"• ~~**{o.ticker}**~~ — {o.setup_summary[:76]}"
+            for o in blocked_opps[:3]
+        ]
+        setup_txt = "_Blocked by `BEAR_REGIME` (watchlist only — do not force longs):_\n" + "\n".join(blocked_lines)
     else:
         setup_txt = "No satellite TFSA setups firing today — stay in Core ETF sleeve."
 
@@ -257,10 +306,11 @@ def build_morning_embed(
     return {
         "title": f"Options Desk Dispatch · {today_str} · [{posture}]",
         "color": color,
+        "description": _regime_directive(posture, rv20_val),
         "fields": [
             {
                 "name": "Market Telemetry",
-                "value": f"SPY `{spy_s}` · QQQ `{qqq_s}` · VIX `{vix_s}` · RV20 `{rv_s}`\nNext: `{snap.next_macro_event}`{kalshi_s}",
+                "value": f"SPY `{spy_s}` · QQQ `{qqq_s}` · VIX `{vix_s}` · RV20 `{rv_s}`\n{macro_line}",
                 "inline": False,
             },
             {
@@ -316,17 +366,19 @@ def filter_good_option_alerts(
     rows: Sequence[Any],
     *,
     max_spread_friction: float = 0.20,
-    max_tfsa_friction: float = 0.12,
+    max_tfsa_friction: float = 0.08,
     max_tfsa_iv_vs_rv: float = 0.95,
-    min_oi: int = 50,
+    min_oi: int = 100,
 ) -> List[Any]:
     """Return only high-conviction options setups worthy of an automated Discord ping.
 
-    Rules (no spam on dead/choppy sessions):
+    Rules (quant execution discipline — zero spam on dead/wide sessions):
       - Rejects any candidate carrying earnings or execution/edge red flags
         (`EARNINGS*`, `HIST_WEAK_EDGE`, `WIDE_SPREAD`, `IV_RICH_FOR_LONG`).
       - Rejects thin contracts (`min_oi < min_oi`).
-      - Keeps `PROMISING` defined-risk spreads with `friction_pct <= max_spread_friction`.
+      - For defined-risk spreads: rejects `VOL_CHEAP_SHORT` (never sell cheap vol),
+        keeps `PROMISING` spreads with `friction_pct <= max_spread_friction`, plus
+        tight rich-vol Bull Puts (`friction_pct <= 0.15`, `iv_vs_rv >= 1.00`, `ror_pct >= 12%`).
       - Keeps TFSA-legal single-leg options (`tfsa_legal=True`) with tight spreads
         (`friction_pct <= max_tfsa_friction`) AND cheap/fair implied vol
         (`iv_vs_rv` present and `<= max_tfsa_iv_vs_rv`).
@@ -343,8 +395,24 @@ def filter_good_option_alerts(
         badge = str(getattr(r, "evidence_badge", "") or "").upper()
         tfsa_ok = bool(getattr(r, "tfsa_legal", False))
         iv_rv = getattr(r, "iv_vs_rv", None)
+        is_cr = bool(getattr(r, "is_credit", False))
+        strat_key = str(getattr(r, "strategy_key", "") or "").lower()
+        ror = _safe_float(getattr(r, "ror_pct", None))
+
+        if is_cr and "VOL_CHEAP_SHORT" in flags:
+            continue
 
         if badge == "PROMISING" and fric <= max_spread_friction:
+            good.append(r)
+        elif (
+            strat_key == "bull_put"
+            and is_cr
+            and fric <= 0.15
+            and iv_rv is not None
+            and float(iv_rv) >= 1.00
+            and ror is not None
+            and ror >= 12.0
+        ):
             good.append(r)
         elif tfsa_ok and fric <= max_tfsa_friction and iv_rv is not None and float(iv_rv) <= max_tfsa_iv_vs_rv:
             good.append(r)
@@ -376,19 +444,81 @@ def resolve_market_session(session: str = "auto", now_utc: Optional[dt.datetime]
     return "manual"
 
 
-def _dedupe_by_ticker(rows: Sequence[Any], limit: int = 5) -> List[Any]:
-    """Keep at most 1 top-ranked setup per ticker so Discord shows broad market diversity."""
+def _lookup_sector(ticker: str) -> Optional[str]:
+    try:
+        from src.radar.scanners import get_sector_etf
+
+        return get_sector_etf(ticker)
+    except Exception:
+        return None
+
+
+def _dedupe_by_ticker(rows: Sequence[Any], limit: int = 5, *, max_per_sector: int = 2) -> List[Any]:
+    """Keep at most 1 setup per ticker and cap correlated sector concentration."""
     out: List[Any] = []
     seen: set[str] = set()
+    sector_counts: Dict[str, int] = {}
+    overflow: List[Any] = []
     for r in rows:
         tk = str(getattr(r, "ticker", "") or "").upper()
         if not tk or tk in seen:
             continue
         seen.add(tk)
+        sec = _lookup_sector(tk)
+        if sec and max_per_sector > 0 and sector_counts.get(sec, 0) >= max_per_sector:
+            overflow.append(r)
+            continue
+        if sec:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
         out.append(r)
         if len(out) >= limit:
+            return out
+    for r in overflow:
+        if len(out) >= limit:
             break
+        out.append(r)
     return out
+
+
+def _fmt_short_exp(exp_str: str) -> str:
+    try:
+        d = dt.date.fromisoformat(str(exp_str)[:10])
+        return d.strftime("%b%d")
+    except ValueError:
+        return ""
+
+
+def _fmt_oi_compact(oi: int) -> str:
+    if oi >= 1000:
+        return f"{oi / 1000.0:.1f}k"
+    return str(oi)
+
+
+def _single_leg_breakeven(r: Any) -> Optional[Tuple[float, float]]:
+    """Compute (breakeven_price, pct_move_from_spot) for single-leg long calls/puts."""
+    spot = _safe_float(getattr(r, "spot", None))
+    if spot is None or spot <= 0:
+        return None
+    strat = str(getattr(r, "strategy_key", "") or "").lower()
+    if strat not in ("long_call", "long_put"):
+        return None
+    strike: Optional[float] = None
+    legs = getattr(r, "legs", None) or ()
+    if legs:
+        strike = _safe_float(getattr(legs[0], "strike", None))
+    if strike is None:
+        raw_lbl = str(getattr(r, "strikes_label", "") or "").strip().lstrip("$")
+        num = "".join(ch for ch in raw_lbl if ch.isdigit() or ch == ".")
+        try:
+            strike = float(num) if num else None
+        except ValueError:
+            strike = None
+    if strike is None or strike <= 0:
+        return None
+    cost = _safe_float(getattr(r, "walk_away_limit", None)) or _safe_float(getattr(r, "mid_price", None)) or 0.0
+    be = (strike + cost) if strat == "long_call" else (strike - cost)
+    pct = (be / spot - 1.0) * 100.0
+    return be, pct
 
 
 def build_options_embed(
@@ -399,37 +529,82 @@ def build_options_embed(
     title_prefix: str = "Options Desk · Top Setups",
     session: str = "",
     market_pulse: Optional[Dict[str, Any]] = None,
+    all_rows: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
     """Build a broad-market, session-aware Discord Rich Embed from `[7] OPTIONS` Scanner rows."""
     today_str = dt.date.today().isoformat()
-    promising_all = [r for r in rows if getattr(r, "evidence_badge", "") == "PROMISING"]
+    promising_all = [
+        r for r in rows
+        if getattr(r, "evidence_badge", "") == "PROMISING"
+        or (bool(getattr(r, "is_credit", False)) and not bool(getattr(r, "tfsa_legal", False)))
+    ]
     tfsa_all = [r for r in rows if getattr(r, "tfsa_legal", False)]
     other_all = [r for r in rows if r not in promising_all and r not in tfsa_all]
 
-    # Rank TFSA single-legs by cheap IV/RV first, then tightest bid-ask friction
+    # Rank spreads by tightest friction + highest RoR; TFSA single-legs by cheap IV/RV + tight friction
+    promising_ranked = sorted(
+        promising_all,
+        key=lambda r: (
+            getattr(r, "evidence_badge", "") != "PROMISING",
+            float(getattr(r, "friction_pct", 1.0) or 1.0),
+            -(_safe_float(getattr(r, "ror_pct", None)) or 0.0),
+        ),
+    )
     tfsa_ranked = sorted(
         tfsa_all,
         key=lambda r: (
             getattr(r, "iv_vs_rv", None) is None,
-            float(getattr(r, "iv_vs_rv", 9.9) or 9.9),
-            float(getattr(r, "friction_pct", 1.0) or 1.0),
+            float(getattr(r, "iv_vs_rv", 9.9) or 9.9) + 2.5 * float(getattr(r, "friction_pct", 1.0) or 1.0),
+            -int(getattr(r, "min_oi", 0) or 0),
         ),
     )
-    promising_top = _dedupe_by_ticker(promising_all, limit=5)
-    tfsa_top = _dedupe_by_ticker(tfsa_ranked, limit=5)
-    other_top = _dedupe_by_ticker(other_all, limit=6)
+    promising_top = _dedupe_by_ticker(promising_ranked, limit=5, max_per_sector=2)
+    tfsa_top = _dedupe_by_ticker(tfsa_ranked, limit=5, max_per_sector=2)
+    other_top = _dedupe_by_ticker(other_all, limit=5, max_per_sector=2)
 
     distinct_promising = len({str(getattr(r, "ticker", "")).upper() for r in promising_all})
     distinct_tfsa = len({str(getattr(r, "ticker", "")).upper() for r in tfsa_all})
 
-    def _fmt_row(r: Any) -> str:
-        side_s = f"+${r.mid_price:.2f} cr" if r.is_credit else f"-${r.mid_price:.2f} deb"
-        ivrv = f" · IV/RV `{r.iv_vs_rv:.2f}x`" if getattr(r, "iv_vs_rv", None) is not None else ""
-        acct = "TFSA OK" if r.tfsa_legal else "TAXABLE"
+    def _fmt_row(r: Any, *, show_acct: bool = False) -> str:
+        exp_short = _fmt_short_exp(str(getattr(r, "expiration", "") or ""))
+        exp_lbl = f"{exp_short} ({r.dte}d)" if exp_short else f"({r.dte}d)"
+        spot = _safe_float(getattr(r, "spot", None))
+        spot_s = f" `${spot:.2f}`" if spot is not None and spot > 0 else ""
+        iv_pct = _safe_float(getattr(r, "iv_pct", None))
+        iv_rv = _safe_float(getattr(r, "iv_vs_rv", None))
+        if iv_pct is not None and iv_rv is not None:
+            vol_s = f" · IV `{iv_pct:.0f}%` (`{iv_rv:.2f}x` RV)"
+        elif iv_rv is not None:
+            vol_s = f" · IV/RV `{iv_rv:.2f}x`"
+        else:
+            vol_s = ""
+        oi_i = int(getattr(r, "min_oi", 0) or 0)
+        oi_s = f" · OI `{_fmt_oi_compact(oi_i)}`" if oi_i > 0 else ""
+        acct_s = (" · `TFSA OK`" if r.tfsa_legal else " · `TAXABLE`") if show_acct else ""
+
+        if r.is_credit:
+            sd = _safe_float(getattr(r, "short_delta", None))
+            delta_s = f" · Δ`{sd:.2f}` (≈`{(1.0 - abs(sd)) * 100:.0f}%` PoP)" if sd is not None else ""
+            ror = _safe_float(getattr(r, "ror_pct", None))
+            ror_s = f" · RoR `{ror:.0f}%`" if ror is not None else ""
+            return (
+                f"• **{r.ticker}**{spot_s} · {r.strategy} `{r.strikes_label}` {exp_lbl}{delta_s}\n"
+                f"  Cr `+${r.mid_price:.2f}` (Min `${r.walk_away_limit:.2f}`){ror_s} · "
+                f"Risk `${r.max_risk_usd:,.0f}` · Fric `{r.friction_pct*100:.1f}%`{vol_s}{oi_s}{acct_s}"
+            )
+
+        sd = _safe_float(getattr(r, "short_delta", None))
+        strat_k = str(getattr(r, "strategy_key", "") or "").lower()
+        if sd is not None:
+            signed_d = -abs(sd) if "put" in strat_k else abs(sd)
+            delta_s = f" · Δ`{signed_d:+.2f}`"
+        else:
+            delta_s = ""
+        be_info = _single_leg_breakeven(r)
+        be_s = f" · BE `${be_info[0]:.2f}` (`{be_info[1]:+.1f}%`)" if be_info is not None else ""
         return (
-            f"• **{r.ticker}** {r.strategy} `{r.strikes_label}` ({r.dte}d) — "
-            f"`{side_s}` · Limit `${r.walk_away_limit:.2f}` · Fric `{r.friction_pct*100:.1f}%` · "
-            f"Risk `${r.max_risk_usd:,.0f}`{ivrv} · `{acct}`"
+            f"• **{r.ticker}**{spot_s} · {r.strategy} `{r.strikes_label}` {exp_lbl}{delta_s}{be_s}\n"
+            f"  Limit `${r.walk_away_limit:.2f}` · Fric `{r.friction_pct*100:.1f}%`{vol_s}{oi_s}{acct_s}"
         )
 
     fields: List[Dict[str, Any]] = []
@@ -453,17 +628,19 @@ def build_options_embed(
         fields.append({"name": "Market Pulse & Breadth", "value": "\n".join(lines)[:1000], "inline": False})
 
     if promising_top:
+        tk_word = "ticker" if distinct_promising == 1 else "tickers"
         fields.append(
             {
-                "name": f"Best Defined-Risk Spreads ({distinct_promising} tickers · Top {len(promising_top)})",
+                "name": f"Best Defined-Risk Spreads · TAXABLE ({distinct_promising} {tk_word} · Top {len(promising_top)})",
                 "value": "\n".join(_fmt_row(r) for r in promising_top)[:1000],
                 "inline": False,
             }
         )
     if tfsa_top:
+        tk_word = "ticker" if distinct_tfsa == 1 else "tickers"
         fields.append(
             {
-                "name": f"Best TFSA-Legal Options ({distinct_tfsa} tickers · Top {len(tfsa_top)})",
+                "name": f"Best TFSA-Legal Options ({distinct_tfsa} {tk_word} · Top {len(tfsa_top)})",
                 "value": "\n".join(_fmt_row(r) for r in tfsa_top)[:1000],
                 "inline": False,
             }
@@ -472,26 +649,37 @@ def build_options_embed(
         fields.append(
             {
                 "name": f"Watchlist / Caution Candidates ({len(other_all)})",
-                "value": "\n".join(_fmt_row(r) for r in other_top)[:1000],
+                "value": "\n".join(_fmt_row(r, show_acct=True) for r in other_top)[:1000],
                 "inline": False,
             }
         )
 
-    # Cross-market vol extremes (cheapest IV/RV for buyers vs richest IV/RV for sellers)
+    # Cross-market vol extremes computed across the FULL scanned universe (never post-filtered subset!)
+    vol_universe = all_rows if all_rows is not None else rows
     iv_by_tk: Dict[str, float] = {}
-    for r in rows:
+    for r in vol_universe:
         iv_v = _safe_float(getattr(r, "iv_vs_rv", None))
         tk = str(getattr(r, "ticker", "") or "").upper()
         if tk and iv_v is not None and tk not in iv_by_tk:
             iv_by_tk[tk] = iv_v
     if len(iv_by_tk) >= 4:
         sorted_iv = sorted(iv_by_tk.items(), key=lambda x: x[1])
-        cheap_s = ", ".join(f"**{tk}** `{v:.2f}x`" for tk, v in sorted_iv[:3])
-        rich_s = ", ".join(f"**{tk}** `{v:.2f}x`" for tk, v in reversed(sorted_iv[-3:]))
+        cheap = [(tk, v) for tk, v in sorted_iv if v <= 0.95][:3]
+        rich = [(tk, v) for tk, v in reversed(sorted_iv) if v >= 1.05][:3]
+        cheap_s = (
+            ", ".join(f"**{tk}** `{v:.2f}x`" for tk, v in cheap)
+            if cheap
+            else "None ≤ 0.95x (vol priced rich across board)"
+        )
+        rich_s = (
+            ", ".join(f"**{tk}** `{v:.2f}x`" for tk, v in rich)
+            if rich
+            else "None ≥ 1.05x (vol priced below realized)"
+        )
         fields.append(
             {
-                "name": "Cross-Market Vol Extremes (IV / RV20)",
-                "value": f"Cheapest (buy vol): {cheap_s}\nRichest (sell vol): {rich_s}",
+                "name": f"Cross-Market Vol Extremes · IV/RV20 ({len(iv_by_tk)} tickers)",
+                "value": f"Cheapest (buy vol ≤0.95x): {cheap_s}\nRichest (sell vol ≥1.05x): {rich_s}",
                 "inline": False,
             }
         )
@@ -518,7 +706,7 @@ def build_options_embed(
         "color": COLOR_GOOD if promising_top else (COLOR_INFO if tfsa_top else COLOR_WARN),
         "description": " · ".join(desc_parts) or f"{len(rows)} candidate(s) scanned · limit orders only · live execution OFF",
         "fields": fields,
-        "footer": {"text": "Options Desk · Best 1 setup per ticker across full market · Run `opt desk --tab options` for full cockpit"},
+        "footer": {"text": "Options Desk · Sector-diversified (max 2/sector) · Limit orders only · Live execution OFF"},
     }
 
 

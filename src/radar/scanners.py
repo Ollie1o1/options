@@ -1387,16 +1387,24 @@ def compute_regime_header(
             posture = "NEUTRAL"
         spy_rv20 = round(rv20 * 100.0, 1)
 
-    # Real Cboe VIX / VIX3M (archived daily histories); never SPY's realized vol.
+    # Real Cboe VIX / VIX3M (archived daily histories); fallback to FRED VIXCLS when Cboe CSV is missing/stale.
     vix_as_of: Optional[str] = None
     try:
-        from src.topdown.macro import vol_regime
+        from src.topdown.macro import load_fred_cache, vol_regime
 
         vr = vol_regime()
         if vr.get("vix") is not None and not vr.get("stale"):
             vix, vix_3m = vr.get("vix"), vr.get("vix3m")
             vix_term = str(vr.get("term") or "UNKNOWN")
             vix_as_of = vr.get("as_of")
+        else:
+            fred_cache = load_fred_cache()
+            vix_obs = (fred_cache.get("VIXCLS") or {}).get("obs") or []
+            if vix_obs:
+                vd, vv = vix_obs[-1]
+                vix = round(float(vv), 2)
+                vix_as_of = str(vd)[:10]
+                vix_term = "FRED"
     except Exception:
         pass
 

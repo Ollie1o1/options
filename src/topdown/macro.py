@@ -54,6 +54,7 @@ FRED_SERIES: Tuple[Tuple[str, str, str], ...] = (
     ("T10Y2Y", "10y minus 2y Treasury", "%"),
     ("T10Y3M", "10y minus 3m Treasury", "%"),
     ("NFCI", "Chicago Fed financial conditions (weekly; >0 tighter than avg)", "idx"),
+    ("VIXCLS", "Cboe VIX daily close", "pts"),
 )
 
 

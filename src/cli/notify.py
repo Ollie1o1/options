@@ -93,71 +93,97 @@ def notify_cmd(
         return
 
     if send_options:
+        from src.data_quality import holiday_calendar_covers, is_trading_day
         from src.tui.options_engine import scan_options_desk
 
-        sym_list = [s.strip().upper() for s in tickers.split(",") if s.strip()] or None
-        pulse: Dict[str, Any] = {}
-        rows, note = scan_options_desk(
-            strategy=strategy,
-            symbols=sym_list,
-            live=live,
-            pulse_out=pulse,
-        )
-        selected_rows = filter_good_option_alerts(rows) if only_if_good else rows
-        if only_if_good and not selected_rows:
-            out_quiet: Dict[str, Any] = {
+        today_d = dt.date.today()
+        market_closed = holiday_calendar_covers(today_d.year) and not is_trading_day(today_d)
+        if market_closed and only_if_good and session.lower() in ("midday", "afternoon"):
+            out_hol: Dict[str, Any] = {
                 "mode": "options",
                 "session": session,
                 "only_if_good": True,
-                "scanned": len(rows),
+                "scanned": 0,
                 "count": 0,
                 "skipped_quiet": True,
+                "market_closed": True,
                 "discord_sent": False,
-                "note": note,
+                "note": f"US market closed ({today_d.isoformat()}) — intraday sweep skipped",
                 "dry_run": dry_run,
             }
             if use_json or dry_run:
-                click.echo(json.dumps(out_quiet, indent=2, default=str))
+                click.echo(json.dumps(out_hol, indent=2, default=str))
             else:
-                click.echo(f"· Quiet: 0/{len(rows)} setups cleared --only-if-good filter (Discord skipped)")
+                click.echo(f"· Quiet: US market closed ({today_d.isoformat()}) — intraday options sweep skipped")
             if not morning and not check:
                 return
         else:
-            embed_note = (
-                f"Signal-only filter: {len(selected_rows)}/{len(rows)} high-conviction setup(s) · {note}"
-                if only_if_good
-                else note
-            )
-            title_prefix = "Options Desk · High-Conviction Alert" if only_if_good else "Options Desk · Top Setups"
-            embed = build_options_embed(
-                selected_rows,
-                note=embed_note,
+            sym_list = [s.strip().upper() for s in tickers.split(",") if s.strip()] or None
+            pulse: Dict[str, Any] = {}
+            rows, note = scan_options_desk(
                 strategy=strategy,
-                title_prefix=title_prefix,
-                session=session,
-                market_pulse=pulse or None,
+                symbols=sym_list,
+                live=live,
+                pulse_out=pulse,
             )
-            out_opt: Dict[str, Any] = {
-                "mode": "options",
-                "session": session,
-                "only_if_good": only_if_good,
-                "scanned": len(rows),
-                "count": len(selected_rows),
-                "note": embed_note,
-                "dry_run": dry_run,
-                "discord_embed": embed,
-            }
-            if not dry_run:
-                out_opt["discord_sent"] = send_discord_embed(embed)
-            if use_json or dry_run:
-                click.echo(json.dumps(out_opt, indent=2, default=str))
+            if market_closed:
+                note = f"US Market Closed (prior close quotes) · {note}"
+            selected_rows = filter_good_option_alerts(rows) if only_if_good else rows
+            if only_if_good and not selected_rows:
+                out_quiet: Dict[str, Any] = {
+                    "mode": "options",
+                    "session": session,
+                    "only_if_good": True,
+                    "scanned": len(rows),
+                    "count": 0,
+                    "skipped_quiet": True,
+                    "discord_sent": False,
+                    "note": note,
+                    "dry_run": dry_run,
+                }
+                if use_json or dry_run:
+                    click.echo(json.dumps(out_quiet, indent=2, default=str))
+                else:
+                    click.echo(f"· Quiet: 0/{len(rows)} setups cleared --only-if-good filter (Discord skipped)")
+                if not morning and not check:
+                    return
             else:
-                ok_o = out_opt.get("discord_sent")
-                click.echo(f"{'✓' if ok_o else '✗'} Options Discord dispatch ({len(selected_rows)}/{len(rows)} setups · {embed_note})")
-            if not dry_run and not out_opt.get("discord_sent"):
-                raise SystemExit(1)
-            if not morning and not check:
-                return
+                embed_note = (
+                    f"Signal-only filter: {len(selected_rows)}/{len(rows)} high-conviction setup(s) · {note}"
+                    if only_if_good
+                    else note
+                )
+                title_prefix = "Options Desk · High-Conviction Alert" if only_if_good else "Options Desk · Top Setups"
+                embed = build_options_embed(
+                    selected_rows,
+                    note=embed_note,
+                    strategy=strategy,
+                    title_prefix=title_prefix,
+                    session=session,
+                    market_pulse=pulse or None,
+                    all_rows=rows,
+                )
+                out_opt: Dict[str, Any] = {
+                    "mode": "options",
+                    "session": session,
+                    "only_if_good": only_if_good,
+                    "scanned": len(rows),
+                    "count": len(selected_rows),
+                    "note": embed_note,
+                    "dry_run": dry_run,
+                    "discord_embed": embed,
+                }
+                if not dry_run:
+                    out_opt["discord_sent"] = send_discord_embed(embed)
+                if use_json or dry_run:
+                    click.echo(json.dumps(out_opt, indent=2, default=str))
+                else:
+                    ok_o = out_opt.get("discord_sent")
+                    click.echo(f"{'✓' if ok_o else '✗'} Options Discord dispatch ({len(selected_rows)}/{len(rows)} setups · {embed_note})")
+                if not dry_run and not out_opt.get("discord_sent"):
+                    raise SystemExit(1)
+                if not morning and not check:
+                    return
 
     provider = DeskDataProvider(
         ohlcv_db=(ctx.obj or {}).get("ohlcv_db", "data/equity_ohlcv.db"),

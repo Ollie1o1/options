@@ -567,6 +567,104 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
             res_ok = runner.invoke(cli, ["notify", "--options"])
             self.assertEqual(res_ok.exit_code, 0, res_ok.output)
 
+        # 4. Quant embed upgrades: full-universe vol extremes, breakeven/delta formatting, cloud pipe filter
+        from src.notifications import build_options_embed, detect_action_events
+        from src.radar.schema import RadarSnapshot
+
+        rich_vol_row = OptionScanRow(
+            ticker="KO",
+            strategy="Bull Put",
+            strategy_key="bull_put",
+            expiration="2027-01-15",
+            dte=50,
+            strikes_label="65/60P",
+            spot=68.5,
+            short_delta=0.25,
+            mid_price=0.80,
+            is_credit=True,
+            walk_away_limit=0.76,
+            friction_pct=0.06,
+            max_risk_usd=420.0,
+            max_profit_usd=80.0,
+            ror_pct=19.0,
+            iv_pct=21.0,
+            iv_vs_rv=1.22,
+            skew_vp=2.0,
+            min_oi=2500,
+            total_vol=400,
+            tfsa_legal=False,
+            evidence_badge="WATCHLIST",
+            risk_flags=("TAXABLE_ONLY",),
+        )
+        cheap_tfsa = OptionScanRow(
+            ticker="NVDA",
+            strategy="Long Put",
+            strategy_key="long_put",
+            expiration="2027-01-15",
+            dte=50,
+            strikes_label="$145P",
+            spot=150.0,
+            short_delta=0.40,
+            mid_price=12.00,
+            is_credit=False,
+            walk_away_limit=12.10,
+            friction_pct=0.012,
+            max_risk_usd=1200.0,
+            max_profit_usd=13300.0,
+            ror_pct=None,
+            iv_pct=67.0,
+            iv_vs_rv=0.52,
+            skew_vp=3.0,
+            min_oi=32500,
+            total_vol=4000,
+            tfsa_legal=True,
+            evidence_badge="WATCHLIST",
+            risk_flags=(),
+        )
+        other_rows = [
+            cheap_tfsa,
+            rich_vol_row,
+            OptionScanRow(**{**cheap_tfsa.to_dict(), "ticker": "AMD", "iv_vs_rv": 0.61, "legs": ()}),
+            OptionScanRow(**{**rich_vol_row.to_dict(), "ticker": "COST", "iv_vs_rv": 1.17, "legs": ()}),
+        ]
+        q_emb = build_options_embed([cheap_tfsa, rich_vol_row], all_rows=other_rows, session="midday")
+        tfsa_val = next(f["value"] for f in q_emb["fields"] if "TFSA-Legal" in f["name"])
+        self.assertIn("$150.00", tfsa_val)
+        self.assertIn("BE `$132.90`", tfsa_val)
+        self.assertIn("32.5k", tfsa_val)
+        spread_val = next(f["value"] for f in q_emb["fields"] if "Defined-Risk" in f["name"])
+        self.assertIn("RoR `19%`", spread_val)
+        self.assertIn("75%` PoP", spread_val)
+        vol_val = next(f["value"] for f in q_emb["fields"] if "Vol Extremes" in f["name"])
+        self.assertIn("**KO** `1.22x`", vol_val)
+        self.assertIn("**NVDA** `0.52x`", vol_val)
+
+        # Cloud mode suppresses local-only EARNINGS/CHAINS stale false alarms
+        dummy_snap = RadarSnapshot(
+            generated_at="2026-11-26T10:00:00Z",
+            regime_posture="RISK_OFF",
+            vix=26.4,
+            vix_3m=None,
+            vix_term="FRED",
+            spy_last=718.0,
+            spy_chg_1d_pct=-0.5,
+            qqq_chg_1d_pct=-2.0,
+            next_macro_event="NFP",
+            kalshi_macro=[],
+            core_allocation=[],
+            opportunities=[],
+            degraded_scanners=[],
+        )
+        h_cloud = {
+            "pipes": {
+                "ohlcv": {"status": "OK", "detail": "375 syms"},
+                "earnings": {"status": "STALE", "detail": "0 future syms"},
+                "chains": {"status": "STALE", "detail": "missing"},
+            }
+        }
+        self.assertEqual(detect_action_events(dummy_snap, {}, h_cloud, cloud_mode=True), [])
+        self.assertEqual(len(detect_action_events(dummy_snap, {}, h_cloud, cloud_mode=False)), 1)
+
 
 class TestOptionsTabPilot(unittest.IsolatedAsyncioTestCase):
     async def test_options_scanner_chain_composer_intel_heatmap_and_paper_log(self) -> None:
