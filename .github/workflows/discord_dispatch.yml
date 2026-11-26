@@ -2,12 +2,14 @@ name: Discord Desk Dispatch (24/7 Cloud)
 
 on:
   schedule:
-    # 1) Weekday Morning Desk Brief (~8:45 AM EST / 9:45 AM EDT) — 1 calm daily brief (regime, Core TFSA, radar)
-    - cron: "45 13 * * 1-5"
-    # 2) Weekday Mid-Morning Broad Market Sweep (~11:00 AM EST / 12:00 PM EDT) — all 60 ETFs & leaders (--only-if-good)
-    - cron: "0 16 * * 1-5"
-    # 3) Weekday Afternoon Pre-Close Sweep (~2:30 PM EST / 3:30 PM EDT) — all 60 ETFs & leaders + exit check
-    - cron: "30 19 * * 1-5"
+    # Off-peak UTC fallback schedule (silenced automatically once external exact-time
+    # cron sets repo variable EXTERNAL_CRON_ACTIVE=true via scripts/setup_cloud_cron.py).
+    # 1) Weekday Morning Desk Brief (~8:27 AM EST / 9:27 AM EDT) — 1 calm daily brief
+    - cron: "27 13 * * 1-5"
+    # 2) Weekday Mid-Morning Broad Market Sweep (~11:03 AM EST / 12:03 PM EDT) — all 60 ETFs & leaders
+    - cron: "3 16 * * 1-5"
+    # 3) Weekday Afternoon Pre-Close Sweep (~2:28 PM EST / 3:28 PM EDT) — all 60 ETFs & leaders + exit check
+    - cron: "28 19 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -17,6 +19,7 @@ on:
         options:
           - options
           - morning
+          - afternoon
           - both
           - check
       strategy:
@@ -37,6 +40,7 @@ on:
         default: "auto"
         options:
           - auto
+          - morning
           - midday
           - afternoon
           - manual
@@ -52,8 +56,9 @@ on:
 jobs:
   dispatch:
     name: Discord Dispatch
+    if: ${{ github.event_name != 'schedule' || vars.EXTERNAL_CRON_ACTIVE != 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -64,6 +69,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-lock.txt
+      - name: Restore cached desk data (OHLCV, FRED & dedupe state)
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/equity_ohlcv.db
+            data/fred_cache.json
+            data/radar_cache.json
+            data/notify_state.json
+          key: desk-data-${{ github.run_id }}
+          restore-keys: |
+            desk-data-
       - name: Send Discord Dispatch
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -80,20 +96,29 @@ jobs:
           TICKERS="${{ github.event.inputs.tickers || '' }}"
           ONLY_GOOD="${{ github.event.inputs.only_if_good || 'false' }}"
 
-          if [ "${{ github.event.schedule }}" = "45 13 * * 1-5" ]; then
+          if [ "${{ github.event.schedule }}" = "27 13 * * 1-5" ]; then
             MODE="morning"
-          elif [ "${{ github.event.schedule }}" = "0 16 * * 1-5" ]; then
+          elif [ "${{ github.event.schedule }}" = "3 16 * * 1-5" ]; then
             MODE="options"
             SESSION="midday"
             ONLY_GOOD="true"
-          elif [ "${{ github.event.schedule }}" = "30 19 * * 1-5" ]; then
+          elif [ "${{ github.event.schedule }}" = "28 19 * * 1-5" ]; then
             MODE="afternoon"
             SESSION="afternoon"
             ONLY_GOOD="true"
           fi
 
+          refresh_desk_data() {
+            if [ ! -f data/equity_ohlcv.db ]; then
+              echo "Cold cloud cache — seeding data/equity_ohlcv.db via refresh --expand..."
+              python -m src.cli.main refresh --expand || true
+            else
+              python -m src.cli.main refresh || true
+            fi
+          }
+
           if [ "$MODE" = "morning" ] || [ "$MODE" = "both" ]; then
-            python -m src.cli.main refresh || true
+            refresh_desk_data
             python -m src.cli.main notify --morning
           fi
 
@@ -109,6 +134,6 @@ jobs:
           fi
 
           if [ "$MODE" = "check" ] || [ "$MODE" = "afternoon" ]; then
-            python -m src.cli.main refresh || true
+            refresh_desk_data
             python -m src.cli.main notify --check
           fi

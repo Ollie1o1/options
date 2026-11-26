@@ -492,6 +492,81 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
             self.assertIn("RISK_ON", morn_emb["title"])
             self.assertIn("QQQ", morn_emb["fields"][1]["value"])
 
+    def test_cloud_cron_setup_and_notify_failure_exit_code(self) -> None:
+        from pathlib import Path
+        from unittest.mock import patch
+        from click.testing import CliRunner
+
+        from scripts.setup_cloud_cron import build_cronjob_org_payload, build_dispatch_specs
+        from src.cli.main import cli
+        from src.tui.options_engine import OptionScanRow
+
+        # 1. Exact-time cloud cron specs cover 8:30 AM, 11:00 AM, 2:30 PM ET (Mon-Fri)
+        specs = build_dispatch_specs()
+        self.assertEqual([(s["hour"], s["minute"]) for s in specs], [(8, 30), (11, 0), (14, 30)])
+        self.assertTrue(all(s["timezone"] == "America/New_York" for s in specs))
+        self.assertTrue(all(s["wdays"] == [1, 2, 3, 4, 5] for s in specs))
+        modes = [s["body"]["inputs"]["mode"] for s in specs]
+        self.assertEqual(modes, ["morning", "options", "afternoon"])
+
+        payload = build_cronjob_org_payload(specs[0], github_pat="test_pat")
+        self.assertEqual(payload["job"]["requestMethod"], 1)
+        self.assertEqual(payload["job"]["schedule"]["hours"], [8])
+        self.assertEqual(payload["job"]["schedule"]["minutes"], [30])
+        self.assertTrue(payload["job"]["notification"]["onFailure"])
+        self.assertEqual(
+            payload["job"]["extendedData"]["headers"]["Authorization"],
+            "Bearer test_pat",
+        )
+
+        # 2. GitHub workflow accepts afternoon dispatch, caches OHLCV, and guards fallback schedule
+        wf_text = (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "discord_dispatch.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- afternoon", wf_text)
+        self.assertIn("EXTERNAL_CRON_ACTIVE", wf_text)
+        self.assertIn("data/equity_ohlcv.db", wf_text)
+        self.assertIn("refresh --expand", wf_text)
+
+        # 3. `opt notify --options` exits non-zero when Discord delivery fails (no silent CI greens)
+        sample_row = OptionScanRow(
+            ticker="SPY",
+            strategy="Bull Put",
+            strategy_key="bull_put",
+            expiration="2026-12-18",
+            dte=40,
+            strikes_label="580/565P",
+            spot=595.0,
+            short_delta=0.25,
+            mid_price=3.0,
+            is_credit=True,
+            walk_away_limit=2.9,
+            friction_pct=0.05,
+            max_risk_usd=1200.0,
+            max_profit_usd=300.0,
+            ror_pct=0.25,
+            iv_pct=18.0,
+            iv_vs_rv=1.1,
+            skew_vp=2.5,
+            min_oi=500,
+            total_vol=200,
+            tfsa_legal=False,
+            evidence_badge="PROMISING",
+            risk_flags=(),
+        )
+        runner = CliRunner()
+        with patch("src.tui.options_engine.scan_options_desk", return_value=([sample_row], "mock")), patch(
+            "src.cli.notify.send_discord_embed", return_value=False
+        ):
+            res_fail = runner.invoke(cli, ["notify", "--options"])
+            self.assertEqual(res_fail.exit_code, 1, res_fail.output)
+
+        with patch("src.tui.options_engine.scan_options_desk", return_value=([sample_row], "mock")), patch(
+            "src.cli.notify.send_discord_embed", return_value=True
+        ):
+            res_ok = runner.invoke(cli, ["notify", "--options"])
+            self.assertEqual(res_ok.exit_code, 0, res_ok.output)
+
 
 class TestOptionsTabPilot(unittest.IsolatedAsyncioTestCase):
     async def test_options_scanner_chain_composer_intel_heatmap_and_paper_log(self) -> None:
