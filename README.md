@@ -31,6 +31,7 @@ opt today                             # 10-second Morning Action Brief (Market M
 | **Phase 3 Alpha Labs (TFSA Shares)** | `opt alpha skew` · `opt alpha gex SPY` · `opt alpha edgar --refresh` · `opt alpha macro --refresh` · `opt alpha premortem NVDA` |
 | **Discord & Quiet macOS Alerts** | `opt notify --morning` · `opt notify --check` · `opt notify --pill` · `opt notify --test-macos` |
 | **Mission Lab & Disk Cleanup** | `opt lab health` · `opt lab playbooks` · `opt lab fills` · `opt lab cleanup` |
+| **Paper Selector Study** | `opt lab scan-audit --out scan.json` · `opt lab scan-replay scan.json` · `opt lab study run` · `opt lab study history` · `opt lab study demo --dir /tmp/demo` |
 
 > **CRA TFSA Guard:** Multi-leg spreads (`etf_wide_spread`, `etf_bear_call`, debit verticals) are fenced as `[TAXABLE_ONLY]` and are never recommended when your account is set to `tfsa`.
 > **Evidence Honesty:** Only the Core ETF sector rotation (`VM_OUTLOOK_TOP3`) is labelled `PROVEN`. Phase 3 lenses (`opt_skew`, `edgar_events`, `macro`) carry explicit `WATCHLIST` or `CONTEXT` badges and source provenance. See [`docs/DISCOVER.md`](docs/DISCOVER.md) and [`docs/COMMANDS.md`](docs/COMMANDS.md).

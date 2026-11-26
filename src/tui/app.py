@@ -1096,13 +1096,23 @@ class DeskApp(App[None]):
 
     def _run_options_scan(self, *, live: bool = False) -> None:
         if live and self.offline:
-            self.query_one("#opt-status", Static).update("Offline mode — live scan skipped")
+            self._set_opt_status("Offline mode — live scan skipped")
             return
         strat = str(self.query_one("#opt-strat-select", Select).value or "all")
-        self.query_one("#opt-status", Static).update(
+        self._set_opt_status(
             f"Scanning {'live Yahoo' if live else 'archived'} chains ({strat})…"
         )
         self._worker_scan_options(strat, live)
+
+    def _set_opt_status(self, text: str) -> None:
+        """Update the Options status line; a no-op once the tab is unmounted.
+
+        Workers report back after the screen may be gone (app exit, test teardown).
+        A missing widget must not turn a finished worker into a WorkerFailed."""
+        try:
+            self.query_one("#opt-status", Static).update(text)
+        except NoMatches:
+            pass
 
     @work(thread=True, exclusive=True, group="options_scan")
     def _worker_scan_options(self, strategy: str, live: bool) -> None:
@@ -1112,13 +1122,13 @@ class DeskApp(App[None]):
             def _apply() -> None:
                 self._opt_scan_all = list(rows)
                 self._opt_scan_loaded = True
-                self.query_one("#opt-status", Static).update(note)
+                self._set_opt_status(note)
                 self._render_options_scanner()
 
             self.call_from_thread(_apply)
         except Exception as exc:
             self.call_from_thread(
-                self.query_one("#opt-status", Static).update,
+                self._set_opt_status,
                 f"[#e06c75]Scan error: {str(exc)[:48]}[/]",
             )
 
@@ -1150,14 +1160,14 @@ class DeskApp(App[None]):
         live: bool = False,
     ) -> None:
         if live and self.offline:
-            self.query_one("#opt-status", Static).update("Offline mode — live chain skipped")
+            self._set_opt_status("Offline mode — live chain skipped")
             return
         sym = str(ticker or "SPY").upper().strip() or "SPY"
         try:
             band = float(str(self.query_one("#opt-chain-band", Select).value or "0.12"))
         except ValueError:
             band = 0.12
-        self.query_one("#opt-status", Static).update(
+        self._set_opt_status(
             f"Loading {sym} {'live Yahoo' if live else 'archived'} option chain…"
         )
         self._worker_load_chain(sym, expiration, band, live)
@@ -1183,7 +1193,7 @@ class DeskApp(App[None]):
                 self._opt_chain_row_idx = 0
                 if mat is None:
                     self.query_one("#opt-chain-table", DataTable).clear()
-                    self.query_one("#opt-status", Static).update(
+                    self._set_opt_status(
                         f"No archived chain for {ticker} — click Live to fetch from Yahoo"
                     )
                     self.query_one("#opt-chain-inspector", Static).update(
@@ -1203,14 +1213,14 @@ class DeskApp(App[None]):
                 finally:
                     self._opt_chain_syncing_exp = False
                 self._render_chain_matrix()
-                self.query_one("#opt-status", Static).update(
+                self._set_opt_status(
                     f"{mat.ticker} ${mat.spot:.2f} · {mat.expiration} ({mat.dte}d) · {len(mat.rows)} strikes [{mat.source}]"
                 )
 
             self.call_from_thread(_apply)
         except Exception as exc:
             self.call_from_thread(
-                self.query_one("#opt-status", Static).update,
+                self._set_opt_status,
                 f"[#e06c75]Chain err: {str(exc)[:48]}[/]",
             )
 
@@ -1245,12 +1255,12 @@ class DeskApp(App[None]):
         pair = mat.rows[idx]
         contract = pair.call if opt_type == "call" else pair.put
         if contract is None:
-            self.query_one("#opt-status", Static).update(
+            self._set_opt_status(
                 f"No {opt_type} quoted at strike ${pair.strike:g}"
             )
             return
         if len(self._opt_staged_legs) >= 4:
-            self.query_one("#opt-status", Static).update("Max 4 legs staged — click Clear to reset")
+            self._set_opt_status("Max 4 legs staged — click Clear to reset")
             return
         iv = contract.iv if (contract.iv is not None and 0.02 <= contract.iv <= 4.0) else ((mat.atm_iv_pct or 25.0) / 100.0)
         leg = OptionLeg(
@@ -1270,7 +1280,7 @@ class DeskApp(App[None]):
         )
         self._opt_staged_legs.append(leg)
         sname, _ = classify_legs(self._opt_staged_legs)
-        self.query_one("#opt-status", Static).update(
+        self._set_opt_status(
             f"Staged {side.upper()} {opt_type.upper()} ${contract.strike:g} → {sname} ({len(self._opt_staged_legs)} legs)"
         )
         self.query_one("#opt-chain-inspector", Static).update(
@@ -1291,12 +1301,12 @@ class DeskApp(App[None]):
         short_pair = mat.rows[idx]
         sp = short_pair.put
         if sp is None:
-            self.query_one("#opt-status", Static).update(f"No put quoted at ${short_pair.strike:g}")
+            self._set_opt_status(f"No put quoted at ${short_pair.strike:g}")
             return
         target_long_k = sp.strike - max(1.0, mat.spot * 0.05)
         put_candidates = [r.put for r in mat.rows if r.put is not None and r.strike < sp.strike]
         if not put_candidates:
-            self.query_one("#opt-status", Static).update("No lower put strike available for wing")
+            self._set_opt_status("No lower put strike available for wing")
             return
         lp = min(put_candidates, key=lambda c: abs(c.strike - target_long_k))
         fallback_iv = (mat.atm_iv_pct or 25.0) / 100.0
@@ -1314,7 +1324,7 @@ class DeskApp(App[None]):
                 float(lp.delta or 0.0), float(lp.theta or 0.0), lp.open_interest, lp.volume,
             ),
         ]
-        self.query_one("#opt-status", Static).update(
+        self._set_opt_status(
             f"Staged 5%-wide Bull Put {sp.strike:g}/{lp.strike:g}P ({mat.dte}d)"
         )
         self.query_one("#opt-chain-inspector", Static).update(
@@ -1327,7 +1337,7 @@ class DeskApp(App[None]):
         )
 
     def _load_options_intel(self) -> None:
-        self.query_one("#opt-status", Static).update("Loading UOA, OCC, Vol-Intel & Skew…")
+        self._set_opt_status("Loading UOA, OCC, Vol-Intel & Skew…")
         self._worker_load_intel()
 
     @work(thread=True, exclusive=True, group="options_intel")
@@ -1342,7 +1352,7 @@ class DeskApp(App[None]):
             self.call_from_thread(_apply)
         except Exception as exc:
             self.call_from_thread(
-                self.query_one("#opt-status", Static).update,
+                self._set_opt_status,
                 f"[#e06c75]Intel err: {str(exc)[:48]}[/]",
             )
 
@@ -1359,7 +1369,7 @@ class DeskApp(App[None]):
             self.query_one(bid, Button).variant = "primary" if self._opt_intel_mode == key else "default"
         tbl = self.query_one("#opt-intel-table", DataTable)
         self._opt_intel_items = fill_options_intel_table(tbl, intel, mode=self._opt_intel_mode)
-        self.query_one("#opt-status", Static).update(
+        self._set_opt_status(
             f"Intel Hub: {len(self._opt_intel_items)} rows · UOA {len(intel.uoa_rows)} · "
             f"OCC {len(intel.occ_rows)} · VRP {len(intel.vol_rows)} · Skew {len(intel.skew_rows)}"
         )
@@ -1496,7 +1506,7 @@ class DeskApp(App[None]):
                         iv_shock_pct=self._iv_shock_pct,
                     )
                 )
-            self.query_one("#opt-status", Static).update("Cleared staged legs")
+            self._set_opt_status("Cleared staged legs")
         elif bid in ("opt-intel-all", "opt-intel-flow", "opt-intel-vol", "opt-intel-skew"):
             self._opt_intel_mode = bid.replace("opt-intel-", "")
             self._render_options_intel()
