@@ -239,6 +239,31 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
             self.assertEqual(an["analysis"]["days_elapsed"], 5)
             self.assertEqual(len(an["analysis"]["grid_pnl"]), 5)
 
+    def test_discord_options_and_ticket_embeds(self) -> None:
+        from src.notifications import build_option_ticket_embed, build_options_embed
+
+        with tempfile.TemporaryDirectory() as td:
+            prov = OptionsDeskProvider(td)
+            rows, note = prov.scan_options(strategy="all", live=False)
+            emb = build_options_embed(rows, note=note, strategy="all")
+            self.assertIn("Options Desk", emb["title"])
+            self.assertGreaterEqual(len(emb["fields"]), 1)
+
+            r = rows[0]
+            t_emb = build_option_ticket_embed(
+                r.ticker,
+                r.strategy,
+                spot=r.spot,
+                legs_summary=r.summary,
+                net_label=f"${r.mid_price:.2f}",
+                friction_pct=r.friction_pct,
+                max_risk_usd=r.max_risk_usd,
+                tfsa_legal=r.tfsa_legal,
+                ladder_lines=("Step 1", "Step 2", "Abort"),
+            )
+            self.assertIn(r.ticker, t_emb["title"])
+            self.assertGreaterEqual(len(t_emb["fields"]), 3)
+
 
 class TestOptionsTabPilot(unittest.IsolatedAsyncioTestCase):
     async def test_options_scanner_chain_composer_intel_heatmap_and_paper_log(self) -> None:

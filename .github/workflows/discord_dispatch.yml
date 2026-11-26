@@ -1,0 +1,80 @@
+name: Discord Desk Dispatch (24/7 Cloud)
+
+on:
+  schedule:
+    # Weekday Morning Desk Brief (~8:45 AM EST / 9:45 AM EDT)
+    - cron: "45 13 * * 1-5"
+    # Weekday Market-Hours Live Options Scan (~11:00 AM EST / 12:00 PM EDT)
+    - cron: "0 16 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to send to Discord"
+        type: choice
+        default: "options"
+        options:
+          - options
+          - morning
+          - both
+      strategy:
+        description: "Options strategy filter"
+        type: choice
+        default: "all"
+        options:
+          - all
+          - bull_put
+          - long_call
+          - long_put
+          - calendar
+          - iron_condor
+          - bear_call
+      tickers:
+        description: "Optional comma-separated tickers (leave blank for liquid ETFs + leaders)"
+        required: false
+        default: ""
+
+jobs:
+  dispatch:
+    name: Discord Dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+      - name: Send Discord Dispatch
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          SEC_EDGAR_CONTACT: ${{ secrets.SEC_EDGAR_CONTACT }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "ERROR: Add DISCORD_WEBHOOK_URL under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          MODE="${{ github.event.inputs.mode || 'options' }}"
+          STRAT="${{ github.event.inputs.strategy || 'all' }}"
+          TICKERS="${{ github.event.inputs.tickers || '' }}"
+
+          if [ "${{ github.event.schedule }}" = "45 13 * * 1-5" ]; then
+            MODE="both"
+          fi
+
+          if [ "$MODE" = "morning" ] || [ "$MODE" = "both" ]; then
+            python -m src.cli.main refresh || true
+            python -m src.cli.main notify --morning
+          fi
+
+          if [ "$MODE" = "options" ] || [ "$MODE" = "both" ]; then
+            if [ -n "$TICKERS" ]; then
+              python -m src.cli.main notify --options --live --strategy "$STRAT" --tickers "$TICKERS"
+            else
+              python -m src.cli.main notify --options --live --strategy "$STRAT"
+            fi
+          fi

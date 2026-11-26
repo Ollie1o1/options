@@ -12,7 +12,7 @@ Tabs:
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -154,6 +154,7 @@ class DeskApp(App[None]):
         Binding("6", "switch_tab('discover')", "Discover", show=True),
         Binding("7", "switch_tab('options')", "Options", show=True),
         Binding("d", "switch_tab('discover')", "Discover", show=False),
+        Binding("D", "discord_push", "Discord", show=True),
         Binding("c", "open_chain", "Chain", show=True),
         Binding("slash", "focus_filter", "Filter", show=True),
         Binding("s", "cycle_sort", "Sort", show=True),
@@ -253,6 +254,7 @@ class DeskApp(App[None]):
                         yield Button("Cmd [:]", id="act-bcmd")
                         yield Button("Plan [3]", id="act-workbench")
                         yield Button("Options [7]", id="act-options")
+                        yield Button("Discord [D]", id="act-discord")
                         yield Button("Live Opts [o]", id="act-live-opts")
                         yield Button("Discover [6]", id="act-discover")
                         yield Button("Log [l]", id="act-log")
@@ -340,6 +342,7 @@ class DeskApp(App[None]):
                         yield Button("Scanner", id="opt-nav-scanner", variant="primary")
                         yield Button("Chain Matrix", id="opt-nav-chain")
                         yield Button("Flow & Vol Intel", id="opt-nav-intel")
+                        yield Button("Send Discord [D]", id="opt-discord-btn")
                         yield Static("Archive-first · instant", id="opt-status")
 
                     with Vertical(id="opt-view-scanner", classes="opt-view"):
@@ -1444,6 +1447,10 @@ class DeskApp(App[None]):
             self.action_bloomberg_cmd()
         elif bid == "act-options":
             self.open_options_view("scanner")
+        elif bid == "act-discord":
+            self._dispatch_discord("morning")
+        elif bid == "opt-discord-btn":
+            self.action_discord_push()
         elif bid == "act-live-opts":
             self.action_live_options()
         elif bid == "act-workbench":
@@ -1656,6 +1663,113 @@ class DeskApp(App[None]):
 
     def action_open_chain(self) -> None:
         self.open_options_chain(self.focused_ticker or "SPY")
+
+    def action_discord_push(self) -> None:
+        """Context-aware 1-key Discord push (staged/selected option ticket on Options tab, else Morning Dispatch)."""
+        active = self.query_one("#main-tabs", TabbedContent).active
+        if active == "options":
+            if (self._opt_view == "chain" and self._opt_staged_legs) or (
+                self._opt_view == "scanner" and self._opt_selected_scan is not None
+            ):
+                self._dispatch_discord("ticket")
+                return
+            self._dispatch_discord("options")
+            return
+        self._dispatch_discord("morning")
+
+    def _dispatch_discord(self, mode: str = "morning") -> None:
+        if self.offline:
+            self._set_status("Offline mode — Discord push skipped")
+            return
+        self._set_status(f"Sending {mode} to Discord…")
+        self._worker_discord_push(mode)
+
+    @work(thread=True, exclusive=True, group="discord_push")
+    def _worker_discord_push(self, mode: str) -> None:
+        try:
+            from src.notifications import (
+                build_morning_embed,
+                build_option_ticket_embed,
+                build_options_embed,
+                send_discord_embed,
+            )
+            from src.tui.options_engine import analyze_custom_legs
+
+            embed: Optional[Dict[str, Any]] = None
+            label = mode
+            if mode == "ticket":
+                if self._opt_view == "chain" and self._opt_staged_legs and self._opt_chain_matrix is not None:
+                    mat = self._opt_chain_matrix
+                    an = analyze_custom_legs(
+                        mat.ticker,
+                        mat.spot,
+                        self._opt_staged_legs,
+                        days_elapsed=self._days_elapsed,
+                        iv_shock_pct=self._iv_shock_pct,
+                    )
+                    legs_s = "\n".join(
+                        f"• `{lg.side}` {lg.opt_type.upper()} `${lg.strike:g}` ({lg.expiration} · {lg.dte}d) @ `${lg.mid:.2f}`"
+                        for lg in self._opt_staged_legs
+                    )
+                    be_s = ", ".join(f"${b:.2f}" for b in an.breakevens) or "—"
+                    embed = build_option_ticket_embed(
+                        mat.ticker,
+                        an.structure_name,
+                        spot=mat.spot,
+                        legs_summary=legs_s,
+                        net_label=f"{'Credit' if an.is_credit else 'Debit'} `${an.net_mid:.2f}`",
+                        friction_pct=an.friction_pct,
+                        max_risk_usd=an.max_risk_usd,
+                        tfsa_legal=an.tfsa_legal,
+                        greeks_line=f"Δ$ `{an.delta_dollars:+,.0f}` · Θ/d `${an.theta_per_day_usd:+.2f}` · Mkt PoP `{an.pop_mkt*100:.0f}%` · BE `{be_s}`",
+                        ladder_lines=(an.ladder.step1_label, an.ladder.step2_label, an.ladder.abort_label),
+                    )
+                    label = f"{mat.ticker} {an.structure_name}"
+                elif self._opt_selected_scan is not None:
+                    r = self._opt_selected_scan
+                    greeks_s = ""
+                    lad_lines: Tuple[str, ...] = (f"Walk-away limit: ${r.walk_away_limit:.2f}",)
+                    if r.legs and r.spot > 0:
+                        an = analyze_custom_legs(r.ticker, r.spot, r.legs, days_elapsed=self._days_elapsed, iv_shock_pct=self._iv_shock_pct)
+                        be_s = ", ".join(f"${b:.2f}" for b in an.breakevens) or "—"
+                        greeks_s = f"Δ$ `{an.delta_dollars:+,.0f}` · Θ/d `${an.theta_per_day_usd:+.2f}` · Mkt PoP `{an.pop_mkt*100:.0f}%` · BE `{be_s}`"
+                        lad_lines = (an.ladder.step1_label, an.ladder.step2_label, an.ladder.abort_label)
+                    embed = build_option_ticket_embed(
+                        r.ticker,
+                        r.strategy,
+                        spot=r.spot,
+                        legs_summary=f"`{r.strikes_label}` · Exp `{r.expiration}` ({r.dte}d)\n{r.summary}",
+                        net_label=f"{'Credit' if r.is_credit else 'Debit'} `${r.mid_price:.2f}`",
+                        friction_pct=r.friction_pct,
+                        max_risk_usd=r.max_risk_usd,
+                        tfsa_legal=r.tfsa_legal,
+                        greeks_line=greeks_s,
+                        ladder_lines=lad_lines,
+                        flags=r.risk_flags,
+                    )
+                    label = f"{r.ticker} {r.strategy}"
+            elif mode == "options":
+                rows = list(self._opt_scan_filtered or self._opt_scan_all)
+                note = f"{len(rows)} setups from TUI [7] OPTIONS"
+                if not rows:
+                    rows, note = self.provider.scan_options(strategy="all", live=False)
+                embed = build_options_embed(rows, note=note, strategy="all")
+                label = f"Options board ({len(rows)})"
+            else:
+                snap = self.snapshot or self.provider.get_radar(refresh=False)
+                book = self.provider.get_book()
+                health = self.health or self.provider.get_health()
+                embed = build_morning_embed(snap, book, health)
+                label = "Morning Dispatch"
+
+            if embed is None:
+                self.call_from_thread(self._set_status, "Nothing selected to send to Discord")
+                return
+            ok = send_discord_embed(embed)
+            msg = f"Discord sent: {label}" if ok else "Discord failed (check DISCORD_WEBHOOK_URL in .env)"
+            self.call_from_thread(self._set_status, msg)
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"Discord err: {str(exc)[:36]}")
 
     def action_toggle_heatmap(self) -> None:
         self._wb_show_heatmap = not self._wb_show_heatmap
@@ -1902,6 +2016,10 @@ class DeskApp(App[None]):
         if cmd == "SURF":
             self._wb_show_heatmap = True
             self.open_workbench(arg or self.focused_ticker or "SPY")
+            return
+        if cmd in ("DISCORD", "DISC", "SEND"):
+            sub = "options" if arg in ("OPT", "OPTIONS", "SCAN") else ("ticket" if arg in ("THIS", "TICKET", "LEG") else "morning")
+            self._dispatch_discord(sub)
             return
         if cmd in ("SKEW", "GEX", "EDGAR", "13D", "SPIN", "BUYBACK", "GUIDANCE", "SUPPLY", "OCC", "CAL", "CALENDAR", "MACRO", "PM", "PREMORTEM"):
             self._open_alpha_mnemonic(cmd, arg or self.focused_ticker)
