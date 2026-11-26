@@ -128,9 +128,14 @@ All Phase 3 lenses are free public feeds labelled `WATCHLIST` or `CONTEXT` (neve
 
 | Key | Action |
 |---|---|
-| `1` – `6` | Switch tabs: `[1] TODAY`, `[2] RADAR`, `[3] WORKBENCH`, `[4] BOOK`, `[5] LAB`, `[6] DISCOVER` |
+| `1` – `7` | Switch tabs: `[1] TODAY`, `[2] RADAR`, `[3] WORKBENCH`, `[4] BOOK`, `[5] LAB`, `[6] DISCOVER`, `[7] OPTIONS` |
 | `:` | Open **Bloomberg Command Bar** (see mnemonics below) |
-| `Ctrl+P` | Open Textual Command Palette (fuzzy search actions, tickers & themes) |
+| `Ctrl+P` | Open Textual Command Palette (fuzzy search actions, tickers, chain, scanner & themes) |
+| `c` | Jump straight to the **Interactive T-Shaped Options Chain Matrix** for the focused ticker |
+| `p` | Paper-log an option or spread directly into `paper_trades.db` (`PaperOptionModal`) |
+| `h` | Toggle **2D Price × IV Shock Risk Surface Heatmap** inside Workbench |
+| `,` / `.` | Scrub scenario time `-5d` / `+5d` (`T+Nd` theta decay preview in Options & Leg Composer) |
+| `{` / `}` | Shock scenario IV `-5%` / `+5%` live across Workbench, Scanner & Leg Composer |
 | `b` | Open **TFSA Core Rebalance Modal** (`VM_OUTLOOK_TOP3` + `SGOV` reserve + one-click Apply) |
 | `t` | Cycle Desk Theme (`amber_crt` → `quant_desk` → `matrix_terminal` → `cyberpunk_neon`) — persisted to `settings.json` |
 | `r` | Refresh Radar scanners & local caches |
@@ -160,6 +165,10 @@ Press `:` anywhere in `opt` (or `opt web`) and enter:
 | Mnemonic | Action |
 |---|---|
 | `NVDA` | Open ④ Evidence Card for `NVDA` |
+| `CHAIN NVDA` (or `NVDA CHAIN`) | Open interactive **T-Shaped Options Chain Matrix + IV Smile + Dealer GEX** for `NVDA` |
+| `SCAN` / `SCAN bull_put` | Open **`[7] OPTIONS` Multi-Strategy Scanner** (optionally filtered to a strategy) |
+| `FLOW` / `VOL` | Open **Options Flow (UOA/OCC)** or **Vol-Intel (VRP)** Hub inside `[7] OPTIONS` |
+| `SURF NVDA` | Open `[3] WORKBENCH` on `NVDA` with **2D Risk Surface Heatmap** enabled |
 | `NVDA WB` | Open `[3] WORKBENCH` directly on `NVDA` |
 | `REB` | Open TFSA Core Rebalance Modal |
 | `SKEW` | Open Option-Implied Signals → Shares table (`CW IV Spread` & `Put Smirk`) |

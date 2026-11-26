@@ -204,16 +204,121 @@ class DeskDataProvider:
                 tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if "trades" not in tables:
                     return []
+                avail_cols = {r[1] for r in con.execute("PRAGMA table_info(trades)").fetchall()}
+                wanted = [
+                    "entry_id", "date", "ticker", "strategy_name", "expiration",
+                    "strike", "long_strike", "type", "entry_price", "quantity",
+                    "entry_iv", "entry_delta", "capital_at_risk",
+                ]
+                sel_cols = ", ".join(c for c in wanted if c in avail_cols)
                 rows = con.execute(
-                    "SELECT entry_id, date, ticker, strategy_name, expiration, strike, type, entry_price, quantity "
-                    "FROM trades WHERE status = 'OPEN' ORDER BY entry_id DESC LIMIT ?",
+                    f"SELECT {sel_cols} FROM trades WHERE status = 'OPEN' ORDER BY entry_id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-                return [dict(r) for r in rows]
+                today = dt.date.today()
+                out_opts: List[Dict[str, Any]] = []
+                for r in rows:
+                    d = dict(r)
+                    exp_s = str(d.get("expiration") or "")[:10]
+                    try:
+                        d["dte"] = (dt.date.fromisoformat(exp_s) - today).days if exp_s else None
+                    except ValueError:
+                        d["dte"] = None
+                    out_opts.append(d)
+                return out_opts
             finally:
                 con.close()
         except Exception:
             return []
+
+    def scan_options(
+        self,
+        *,
+        strategy: str = "all",
+        live: bool = False,
+        symbols: Optional[List[str]] = None,
+        max_friction_pct: float = 0.28,
+    ) -> Tuple[List[Any], str]:
+        from src.tui.options_engine import scan_options_desk
+
+        return scan_options_desk(
+            strategy=strategy,
+            symbols=symbols,
+            chain_db=self.chain_db,
+            ohlcv_db=self.ohlcv_db,
+            live=live,
+            max_friction_pct=max_friction_pct,
+        )
+
+    def get_chain_matrix(
+        self,
+        ticker: str,
+        *,
+        expiration: Optional[str] = None,
+        target_dte: int = 35,
+        band_pct: float = 0.15,
+        allow_live: bool = False,
+    ) -> Optional[Any]:
+        from src.tui.options_engine import load_chain_matrix
+
+        return load_chain_matrix(
+            ticker,
+            expiration=expiration,
+            target_dte=target_dte,
+            band_pct=band_pct,
+            chain_db=self.chain_db,
+            ohlcv_db=self.ohlcv_db,
+            allow_live=allow_live,
+        )
+
+    def get_options_intel(self) -> Any:
+        from src.tui.options_engine import load_options_intel
+
+        return load_options_intel(
+            chain_db=self.chain_db,
+            ohlcv_db=self.ohlcv_db,
+        )
+
+    def log_paper_option(
+        self,
+        *,
+        ticker: str,
+        strategy_name: str,
+        expiration: str,
+        strike: float,
+        opt_type: str,
+        entry_price: float,
+        quantity: float = 1.0,
+        long_strike: Optional[float] = None,
+        max_loss_usd: Optional[float] = None,
+        entry_iv: Optional[float] = None,
+        entry_delta: Optional[float] = None,
+    ) -> bool:
+        from src.paper_manager import PaperManager
+
+        mgr = PaperManager(db_path=repo_path(self.paper_db))
+        payload: Dict[str, Any] = {
+            "ticker": ticker.upper().strip(),
+            "strategy_name": strategy_name,
+            "expiration": expiration,
+            "strike": float(strike),
+            "type": opt_type.lower(),
+            "entry_price": float(entry_price),
+            "quantity": float(quantity),
+            "quality_score": 0.0,
+            "allow_untradeable": True,
+            "allow_unaffordable": True,
+            "allow_unsized": True,
+        }
+        if long_strike is not None and long_strike > 0:
+            payload["long_strike"] = float(long_strike)
+        if max_loss_usd is not None and max_loss_usd > 0:
+            payload["max_loss_usd"] = float(max_loss_usd)
+        if entry_iv is not None and entry_iv > 0:
+            payload["entry_iv"] = float(entry_iv)
+        if entry_delta is not None:
+            payload["entry_delta"] = float(entry_delta)
+        return bool(mgr.log_trade(payload))
 
     def _load_longterm_summary(self, ohlcv: Dict[str, Any]) -> List[Dict[str, Any]]:
         full_plan = repo_path(self.plan_path)

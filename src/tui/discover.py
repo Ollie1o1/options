@@ -132,12 +132,13 @@ def crumb_and_freshness(hub: Optional[Any], active: int) -> Text:
 
 
 class EvidenceCardScreen(ModalScreen[Optional[str]]):
-    """④ Full-screen Evidence Card. Esc = back; w = open the ticker in Workbench."""
+    """④ Full-screen Evidence Card. Esc = back; w = open Workbench; c = open Chain Matrix."""
 
     BINDINGS = [
         ("escape", "close", "Back"),
         ("q", "close", "Back"),
         ("w", "workbench", "Workbench"),
+        ("c", "chain", "Chain"),
     ]
 
     def __init__(self, ticker: str, builder: Callable[[str], Any]) -> None:
@@ -150,7 +151,7 @@ class EvidenceCardScreen(ModalScreen[Optional[str]]):
             yield Static(breadcrumb(4), id="card-crumb")
             with VerticalScroll(id="card-scroll"):
                 yield Static(f"Building the Evidence Card for {self.ticker}…", id="card-body")
-            yield Static("[b]Esc[/b] back to ③ IDEAS   [b]w[/b] open in Workbench   "
+            yield Static("[b]Esc[/b] back to ③ IDEAS   [b]w[/b] Workbench   [b]c[/b] Options Chain   "
                          "[b]↑↓ PgUp PgDn[/b] scroll", id="card-keys")
 
     def on_mount(self) -> None:
@@ -174,6 +175,9 @@ class EvidenceCardScreen(ModalScreen[Optional[str]]):
 
     def action_workbench(self) -> None:
         self.dismiss(self.ticker)
+
+    def action_chain(self) -> None:
+        self.dismiss(f"CHAIN:{self.ticker}")
 
 
 __all__ = [

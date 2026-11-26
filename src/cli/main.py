@@ -44,10 +44,10 @@ def cli(ctx: click.Context, as_json: bool, no_color: bool) -> None:
 
 
 @cli.command("desk")
-@click.option("--tab", type=click.Choice(["today", "radar", "workbench", "book", "lab", "discover"]), default="today")
+@click.option("--tab", type=click.Choice(["today", "radar", "workbench", "book", "lab", "discover", "options"]), default="today")
 @click.option("--offline", is_flag=True, help="Start in cache-only offline mode.")
 def desk_cmd(tab: str, offline: bool) -> None:
-    """Launch the interactive 6-tab Textual Daily Trading Cockpit."""
+    """Launch the interactive 7-tab Textual Daily Trading Cockpit."""
     try:
         from src.tui.app import run_desk
 
@@ -107,7 +107,14 @@ def commands_cmd(ctx: click.Context) -> None:
         (
             "Daily Cockpits & Guides",
             [
-                ("opt", "Launch 6-tab Bloomberg × Amber CRT Textual TUI"),
+                (
+                "opt",
+                "Launch 7-tab Bloomberg × Amber CRT Textual TUI (incl. [7] OPTIONS Hub)",
+            ),
+            (
+                "opt desk --tab options",
+                "Jump straight into [7] OPTIONS (Scanner · Chain Matrix · Flow/Vol Intel)",
+            ),
                 ("opt web", "Launch zero-reload Live Web Cockpit at http://127.0.0.1:8000/desk"),
                 ("opt morning-ritual", "60-second linear 5-step Morning Checklist (or press `m` in TUI)"),
                 ("opt refresh", "Update local prices + FRED credit/rates + Radar cache"),
@@ -177,10 +184,11 @@ def commands_cmd(ctx: click.Context) -> None:
 
     console.print(
         Panel(
-            "[bold]TUI Tabs:[/] [1] Today  [2] Radar  [3] Workbench  [4] Book  [5] Lab  [6] Discover\n"
-            "[bold]TUI Keys:[/] [:] Cmd Bar · [b] Rebalance · [l] Log Pick · [x] Close Pick · [f] Log Fill · "
-            "[o] Live Opts · [g] Toggle RRG · [a] TFSA/Tax · [[/]] Target ±2% · [-/+] Days ±10 · [t] Theme · [?] Help\n"
-            "[bold]: Mnemonics:[/] NVDA · NVDA WB · REB · SKEW · GEX SPY · EDGAR · MACRO · PM NVDA · CLOSE · THEME amber_crt\n"
+            "[bold]TUI Tabs:[/] [1] Today  [2] Radar  [3] Workbench  [4] Book  [5] Lab  [6] Discover  [7] Options\n"
+            "[bold]TUI Keys:[/] [:] Cmd Bar · [c] Chain Matrix · [p] Paper Opt · [h] 2D Heatmap · [,/.] Time ±5d · "
+            "[{/}] IV ±5% · [b] Rebalance · [l] Log Pick · [x] Close · [f] Fill · [o] Live Opts · [t] Theme · [?] Help\n"
+            "[bold]: Mnemonics:[/] NVDA · CHAIN SPY · SCAN [bull_put] · FLOW · VOL · SURF NVDA · NVDA WB · "
+            "REB · SKEW · GEX SPY · MACRO · PM NVDA\n"
             "[dim]Full reference: docs/COMMANDS.md  ·  Global flags: opt --json / opt --no-color <cmd>[/dim]",
             title="INTERACTIVE TUI & BLOOMBERG COMMAND BAR",
             border_style=acc,

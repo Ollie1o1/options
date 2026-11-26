@@ -492,3 +492,244 @@ def braille_ghost_race(
         lbl = f"{hi - pad:5.1f}" if i == 0 else (f"{lo + pad:5.1f}" if i == len(rows) - 1 else "  100" if i == len(rows) // 2 else "     ")
         out.append(f"[dim]{lbl}[/] │{ln}" if rich else f"{lbl} │{ln}")
     return "\n".join(out)
+
+
+# ── 6. IV Smile & Term Structure Braille Charts ──────────────────────────────
+
+
+def braille_iv_smile_and_term(
+    smile_points: Sequence[Tuple[float, float]],
+    term_points: Sequence[Tuple[int, float]],
+    *,
+    spot: Optional[float] = None,
+    width: int = 38,
+    height: int = 4,
+    rich: bool = True,
+) -> str:
+    """Compact dual-panel IV Smile (strike vs IV%) and Term Structure (DTE vs ATM IV%)."""
+    pal = theme_palette()
+    sections: List[str] = []
+
+    if len(smile_points) >= 3:
+        pts = sorted(smile_points, key=lambda x: x[0])
+        ks = [p[0] for p in pts]
+        ivs = [p[1] for p in pts]
+        lo, hi = min(ivs), max(ivs)
+        pad = max((hi - lo) * 0.12, 1.0)
+        grid = _BrailleGrid(width, height)
+        if spot is not None and ks[0] < spot < ks[-1]:
+            sx = int(round((spot - ks[0]) / max(ks[-1] - ks[0], 1e-6) * (grid.pw - 1)))
+            grid.draw_vline(sx, step=2, color=pal["muted"])
+        grid.plot_series(ivs, lo - pad, hi + pad, color=pal["primary"])
+        rows = grid.render_lines(rich=rich)
+        hdr = (
+            f"[bold]IV SMILE[/] [{pal['primary']}]({lo:.1f}%..{hi:.1f}%)[/]  [dim]K ${ks[0]:g} → ${ks[-1]:g}[/]"
+            if rich
+            else f"IV SMILE ({lo:.1f}%..{hi:.1f}%) K ${ks[0]:g}..${ks[-1]:g}"
+        )
+        lines = [hdr]
+        for idx, ln in enumerate(rows):
+            lbl = f"{hi:4.0f}%" if idx == 0 else (f"{lo:4.0f}%" if idx == len(rows) - 1 else "     ")
+            lines.append(f"[dim]{lbl}[/] │{ln}" if rich else f"{lbl} │{ln}")
+        sections.append("\n".join(lines))
+
+    if len(term_points) >= 2:
+        tpts = sorted(term_points, key=lambda x: x[0])
+        dtes = [p[0] for p in tpts]
+        tivs = [p[1] for p in tpts]
+        front_iv, back_iv = tivs[0], tivs[-1]
+        is_inv = front_iv > back_iv + 0.5
+        regime = "INVERTED ↘" if is_inv else "CONTANGO ↗"
+        col = pal["warn"] if is_inv else pal["good"]
+        blocks = "▁▂▃▄▅▆▇█"
+        lo_t, hi_t = min(tivs), max(tivs)
+        span_t = max(hi_t - lo_t, 0.5)
+        spark = "".join(blocks[min(7, int((v - lo_t) / span_t * 7.99))] for v in tivs[:10])
+        pts_lbl = " · ".join(f"{d}d:{v:.0f}%" for d, v in tpts[:5])
+        if rich:
+            sections.append(f"[bold]TERM STRUCTURE[/] [{col}]{spark} {regime}[/] [dim]({pts_lbl})[/]")
+        else:
+            sections.append(f"TERM STRUCTURE [{spark}] {regime} ({pts_lbl})")
+
+    return "\n".join(sections) if sections else ("[dim]IV smile / term structure unavailable.[/]" if rich else "IV smile unavailable.")
+
+
+# ── 7. Dealer GEX & OI Wall Diverging Bar Profile ────────────────────────────
+
+
+def gex_profile_bars(
+    gex_by_strike: Sequence[Dict[str, float]],
+    *,
+    spot: float,
+    gamma_flip: Optional[float] = None,
+    call_wall: Optional[float] = None,
+    put_wall: Optional[float] = None,
+    max_rows: int = 7,
+    bar_width: int = 12,
+    rich: bool = True,
+) -> str:
+    """Horizontal diverging bar chart of Dealer Net GEX ($M) around spot with Wall/Flip tags."""
+    if not gex_by_strike:
+        return "[dim]Dealer GEX profile unavailable (needs chain gamma/OI).[/]" if rich else "GEX unavailable."
+    pal = theme_palette()
+    # Sort descending by strike (top = higher strike, bottom = lower strike)
+    picked = sorted(gex_by_strike, key=lambda d: abs(float(d.get("gex_m", 0.0))), reverse=True)[:max_rows]
+    picked.sort(key=lambda d: -float(d.get("strike", 0.0)))
+    max_abs = max((abs(float(d.get("gex_m", 0.0))) for d in picked), default=1.0)
+    max_abs = max(max_abs, 0.05)
+
+    lines = [
+        f"[bold]DEALER GEX PROFILE[/] [dim](Spot ${spot:.2f}"
+        + (f" · Flip ${gamma_flip:.1f}" if gamma_flip is not None else "")
+        + (f" · C-Wall ${call_wall:g}" if call_wall is not None else "")
+        + (f" · P-Wall ${put_wall:g}" if put_wall is not None else "")
+        + ")[/]"
+        if rich
+        else f"DEALER GEX PROFILE (Spot ${spot:.2f})"
+    ]
+    for d in picked:
+        k = float(d.get("strike", 0.0))
+        v = float(d.get("gex_m", 0.0))
+        n_fill = max(1, int(round(abs(v) / max_abs * bar_width)))
+        tags: List[str] = []
+        if call_wall is not None and abs(k - float(call_wall)) < 1e-6:
+            tags.append("CW")
+        if put_wall is not None and abs(k - float(put_wall)) < 1e-6:
+            tags.append("PW")
+        if spot > 0 and abs(k - spot) / spot <= 0.008:
+            tags.append("SPOT")
+        tag_s = (" " + ",".join(tags)) if tags else ""
+        if v >= 0:
+            left = " " * bar_width
+            right = "█" * n_fill + " " * (bar_width - n_fill)
+            if rich:
+                lines.append(f"  ${k:6g} {left}│[{pal['good']}]{right}[/] [{pal['good']}]+${v:5.1f}M[/]{tag_s}")
+            else:
+                lines.append(f"  ${k:6g} {left}|{right} +${v:5.1f}M{tag_s}")
+        else:
+            left = " " * (bar_width - n_fill) + "█" * n_fill
+            right = " " * bar_width
+            if rich:
+                lines.append(f"  ${k:6g} [{pal['bad']}]{left}[/]│{right} [{pal['bad']}]-${abs(v):5.1f}M[/]{tag_s}")
+            else:
+                lines.append(f"  ${k:6g} {left}|{right} -${abs(v):5.1f}M{tag_s}")
+    return "\n".join(lines)
+
+
+# ── 8. 2D Risk Surface Heatmap (Price Shock x IV Shock) ──────────────────────
+
+
+def risk_heatmap_grid(
+    price_shocks: Sequence[float],
+    iv_shocks: Sequence[float],
+    pnl_grid: Sequence[Sequence[float]],
+    *,
+    title: str = "2D RISK SURFACE (Price × IV Shock)",
+    rich: bool = True,
+) -> str:
+    """Compact truecolor 2D P&L scenario heatmap with zero-breakeven emphasis."""
+    if not pnl_grid or not price_shocks or not iv_shocks:
+        return ""
+    pal = theme_palette()
+    flat = [float(v) for row in pnl_grid for v in row]
+    max_abs = max((abs(v) for v in flat), default=1.0)
+    max_abs = max(max_abs, 1.0)
+
+    hdr_cols = "".join(f"{p*100:+5.0f}%" for p in price_shocks)
+    lines = [
+        f"[bold]{title}[/]" if rich else title,
+        f"[dim] IV\\Px {hdr_cols}[/]" if rich else f" IV\\Px {hdr_cols}",
+    ]
+    for iv_s, row in zip(iv_shocks, pnl_grid):
+        iv_lbl = f"{iv_s*100:+4.0f}%"
+        cells: List[str] = []
+        for val in row:
+            v = float(val)
+            frac = v / max_abs  # [-1, +1]
+            if abs(v) >= 1000:
+                txt = f"{v/1000.0:+5.1f}k"
+            else:
+                txt = f"{v:+5.0f}"
+            if not rich:
+                cells.append(f"{txt:>6}")
+                continue
+            if frac >= 0.45:
+                col = "bold #5ec98d"
+            elif frac > 0.05:
+                col = "#5ec98d"
+            elif frac <= -0.45:
+                col = "bold #e06c75"
+            elif frac < -0.05:
+                col = "#e06c75"
+            else:
+                col = pal["muted"]
+            cells.append(f"[{col}]{txt:>6}[/]")
+        lines.append(f"[dim]{iv_lbl:>5}[/] " + "".join(cells) if rich else f"{iv_lbl:>5} " + "".join(cells))
+    return "\n".join(lines)
+
+
+# ── 9. Multi-Leg Payoff Overlay (Expiry Solid + T+N Shocked Dotted) ──────────
+
+
+def braille_multileg_payoff(
+    prices: Sequence[float],
+    expiry_pnl: Sequence[float],
+    shocked_pnl: Sequence[float],
+    *,
+    spot: float,
+    days_elapsed: int = 0,
+    iv_shock_pct: float = 0.0,
+    width: int = 44,
+    height: int = 5,
+    rich: bool = True,
+) -> str:
+    """High-res Braille payoff chart: solid = at expiry, dotted = T+days & IV shock."""
+    if len(prices) < 3 or len(expiry_pnl) != len(prices):
+        return ""
+    pal = theme_palette()
+    all_y = list(expiry_pnl) + list(shocked_pnl) + [0.0]
+    lo, hi = min(all_y), max(all_y)
+    pad = max((hi - lo) * 0.08, 10.0)
+    lo -= pad
+    hi += pad
+
+    grid = _BrailleGrid(width, height)
+    y0 = max(0, min(grid.ph - 1, int(round((1.0 - (0.0 - lo) / max(hi - lo, 1e-6)) * (grid.ph - 1)))))
+    grid.draw_hline(y0, step=3, color=pal["muted"])
+    if prices[0] < spot < prices[-1]:
+        sx = int(round((spot - prices[0]) / max(prices[-1] - prices[0], 1e-6) * (grid.pw - 1)))
+        grid.draw_vline(sx, step=2, color=pal["muted"])
+
+    grid.plot_series(shocked_pnl, lo, hi, color=pal["warn"], dotted=True)
+    grid.plot_series(expiry_pnl, lo, hi, color=pal["good"])
+
+    rows = grid.render_lines(rich=rich)
+    t_lbl = f"T+{days_elapsed}d" if days_elapsed > 0 else "Today"
+    iv_lbl = f" IV{iv_shock_pct:+.0f}%" if abs(iv_shock_pct) >= 0.5 else ""
+    hdr = (
+        f"[bold]PAYOFF[/] [{pal['good']}]━ Expiry[/] vs [{pal['warn']}]┄ {t_lbl}{iv_lbl}[/] · Spot ${spot:.2f}"
+        if rich
+        else f"PAYOFF Expiry vs {t_lbl}{iv_lbl} Spot ${spot:.2f}"
+    )
+    out = [hdr]
+    for i, ln in enumerate(rows):
+        lbl = f"${hi - pad:+6.0f}" if i == 0 else (f"${lo + pad:+6.0f}" if i == len(rows) - 1 else "    $0" if i == len(rows) // 2 else "       ")
+        out.append(f"[dim]{lbl}[/] │{ln}" if rich else f"{lbl} │{ln}")
+    axis = f"        ${prices[0]:6.1f}" + " " * max(1, width - 20) + f"▲${spot:5.1f}" + " " * max(1, width - 25) + f"${prices[-1]:6.1f}"
+    out.append(f"[dim]{axis[:width + 8]}[/]" if rich else axis[:width + 8])
+    return "\n".join(out)
+
+
+# ── 10. Call/Put Flow Split Gauge ────────────────────────────────────────────
+
+
+def flow_split_bar(call_share: float, *, width: int = 12, rich: bool = True) -> str:
+    """Compact Call vs Put premium flow bar (0.0 = 100% Put, 1.0 = 100% Call)."""
+    pal = theme_palette()
+    frac = max(0.0, min(1.0, float(call_share)))
+    n_c = int(round(frac * width))
+    n_p = width - n_c
+    pct = int(round(frac * 100))
+    if not rich:
+        return f"{'█' * n_c}{'░' * n_p} {pct:3d}%C"
+    return f"[{pal['good']}]{'█' * n_c}[/][{pal['bad']}]{'░' * n_p}[/] {pct:3d}%C"

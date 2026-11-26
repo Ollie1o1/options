@@ -1,21 +1,24 @@
-"""Interactive 6-tab Textual Daily Trading Cockpit (`src/tui/app.py`).
+"""Interactive 7-tab Textual Daily Trading Cockpit (`src/tui/app.py`).
 
 Tabs:
   [1] TODAY      — Core TFSA Allocation (VM_OUTLOOK_TOP3) + Top 5 Radar Setups
   [2] RADAR      — Filterable (presets + query), sortable unified Opportunity Radar + live DossierPane
-  [3] WORKBENCH  — Full Ticker Dossier + Visual RND/Edge Bars + Shares-vs-Options + Walk-Away Ladder
-  [4] BOOK       — Stock/ETF Picks (live P&L + exit alerts), Paper Options, Holdings & Scorecard
+  [3] WORKBENCH  — Full Ticker Dossier + Visual RND/2D Risk Heatmap + Shares-vs-Options + Walk-Away Ladder
+  [4] BOOK       — Stock/ETF Picks (live P&L + exit alerts), Open Paper Options Table, Holdings & Scorecard
   [5] LAB        — Real Ops Health, OHLCV Freshness, Fill Concession `k`, Forward Readouts & Playbooks
   [6] DISCOVER   — Top-down: ① Market → ② Sectors (PROVEN rank) → ③ Ideas (labelled lenses) → ④ Evidence Card
+  [7] OPTIONS    — Multi-Strategy Scanner · Interactive T-Shaped Chain Matrix + Leg Composer · Flow & Vol Intel
 """
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any, Dict, List, Optional
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import (
     Button,
     DataTable,
@@ -47,6 +50,27 @@ from .discover import (
     sector_header,
 )
 from .charts import braille_ghost_race, braille_sector_rrg
+from .options_engine import (
+    SCAN_STRATEGIES,
+    ChainMatrix,
+    OptionLeg,
+    OptionScanRow,
+    OptionsIntelBundle,
+    classify_legs,
+    filter_option_rows,
+)
+from .options_tab import (
+    OPT_CHAIN_COLUMNS,
+    OPT_FILTER_PRESETS,
+    OPT_FLOW_COLUMNS,
+    OPT_SCAN_COLUMNS,
+    fill_chain_matrix_table,
+    fill_options_intel_table,
+    fill_options_scan_table,
+    format_chain_inspector,
+    format_intel_inspector,
+    format_scan_inspector,
+)
 from .state import DeskDataProvider
 from .themes import THEME_ORDER, THEMES, persist_theme_name, saved_theme_name
 from .widgets import (
@@ -56,6 +80,7 @@ from .widgets import (
     DeskCommandProvider,
     HelpModal,
     LogFillModal,
+    PaperOptionModal,
     QuickLogModal,
     RebalanceModal,
     format_dossier_markup,
@@ -127,7 +152,9 @@ class DeskApp(App[None]):
         Binding("4", "switch_tab('book')", "Book", show=True),
         Binding("5", "switch_tab('lab')", "Lab", show=True),
         Binding("6", "switch_tab('discover')", "Discover", show=True),
+        Binding("7", "switch_tab('options')", "Options", show=True),
         Binding("d", "switch_tab('discover')", "Discover", show=False),
+        Binding("c", "open_chain", "Chain", show=True),
         Binding("slash", "focus_filter", "Filter", show=True),
         Binding("s", "cycle_sort", "Sort", show=True),
         Binding("j", "cursor_down", "Down", show=False),
@@ -136,9 +163,15 @@ class DeskApp(App[None]):
         Binding("m", "morning_ritual", "Ritual", show=True),
         Binding("b", "rebalance_modal", "Rebal", show=True),
         Binding("l", "quick_log", "Log Pick", show=True),
+        Binding("p", "paper_log_option", "Paper Opt", show=True),
         Binding("x", "close_pick", "Close Pick", show=True),
         Binding("f", "log_fill", "Log Fill", show=True),
         Binding("o", "live_options", "Live Opts", show=True),
+        Binding("h", "toggle_heatmap", "Heatmap", show=False),
+        Binding("left_curly_bracket", "nudge_iv(-5)", "IV -5%", show=False),
+        Binding("right_curly_bracket", "nudge_iv(5)", "IV +5%", show=False),
+        Binding("comma", "nudge_elapsed(-5)", "T -5d", show=False),
+        Binding("full_stop", "nudge_elapsed(5)", "T +5d", show=False),
         Binding("u", "update_prices", "Upd Prices", show=False),
         Binding("a", "toggle_account", "TFSA/Tax", show=False),
         Binding("left_square_bracket", "nudge_target(-2)", "Tgt -2%", show=False),
@@ -186,6 +219,26 @@ class DeskApp(App[None]):
         self._disc_sector: str = ""
         self._disc_tickers: List[str] = []
         self._show_rrg: bool = True
+        # Workbench & Options state
+        self._wb_show_heatmap: bool = False
+        self._wb_last_dos: Optional[TickerDossier] = None
+        self._wb_last_view: Optional[DetailedView] = None
+        self._iv_shock_pct: float = 0.0
+        self._days_elapsed: int = 0
+        self._book_paper_opts: List[Dict[str, Any]] = []
+        # [7] OPTIONS state (lazy loaded)
+        self._opt_view: str = "scanner"        # "scanner" | "chain" | "intel"
+        self._opt_scan_all: List[OptionScanRow] = []
+        self._opt_scan_filtered: List[OptionScanRow] = []
+        self._opt_scan_loaded: bool = False
+        self._opt_selected_scan: Optional[OptionScanRow] = None
+        self._opt_chain_matrix: Optional[ChainMatrix] = None
+        self._opt_chain_row_idx: int = 0
+        self._opt_staged_legs: List[OptionLeg] = []
+        self._opt_intel: Optional[OptionsIntelBundle] = None
+        self._opt_intel_mode: str = "all"
+        self._opt_intel_items: List[Dict[str, Any]] = []
+        self._opt_chain_syncing_exp: bool = False
 
     def compose(self) -> ComposeResult:
         yield Static("Loading Daily Trading Desk…", id="market-ribbon")
@@ -199,6 +252,7 @@ class DeskApp(App[None]):
                         yield Button("Rebalance [b]", id="act-rebal")
                         yield Button("Cmd [:]", id="act-bcmd")
                         yield Button("Plan [3]", id="act-workbench")
+                        yield Button("Options [7]", id="act-options")
                         yield Button("Live Opts [o]", id="act-live-opts")
                         yield Button("Discover [6]", id="act-discover")
                         yield Button("Log [l]", id="act-log")
@@ -234,6 +288,9 @@ class DeskApp(App[None]):
                     yield Label("100sh:")
                     yield Switch(value=False, id="wb-owns-switch")
                     yield Button("Run", id="wb-run-btn", variant="primary")
+                    yield Button("Chain [c]", id="wb-chain-btn")
+                    yield Button("Heatmap [h]", id="wb-heat-btn")
+                    yield Button("Paper [p]", id="wb-paper-btn")
                     yield Button("Log Fill [f]", id="wb-fill-btn")
                 with Horizontal(id="wb-split"):
                     yield Static("Enter a ticker to load Dossier.", id="wb-left")
@@ -247,7 +304,11 @@ class DeskApp(App[None]):
                 with Vertical(id="book-container"):
                     yield Static("Ghost Benchmark Race loading…", id="book-race-box")
                     yield Static("Playbook Scorecard loading…", id="book-scorecard-box")
-                    yield DataTable(id="book-picks-table", zebra_stripes=True, cursor_type="row")
+                    with Horizontal(id="book-tables-split"):
+                        yield DataTable(id="book-picks-table", zebra_stripes=True, cursor_type="row")
+                        with Vertical(id="book-options-pane"):
+                            yield Static("OPEN PAPER OPTIONS (Enter → Chain)", id="book-options-head")
+                            yield DataTable(id="book-options-table", zebra_stripes=True, cursor_type="row")
                     yield Static("", id="book-extra-box")
 
             with TabPane("[5] LAB", id="lab"):
@@ -273,6 +334,62 @@ class DeskApp(App[None]):
                             yield DataTable(id="disc-lens-table", zebra_stripes=True, cursor_type="row")
                             yield Static("", id="disc-hint")
 
+            with TabPane("[7] OPTIONS", id="options"):
+                with Vertical(id="opt-root"):
+                    with Horizontal(id="opt-subnav"):
+                        yield Button("Scanner", id="opt-nav-scanner", variant="primary")
+                        yield Button("Chain Matrix", id="opt-nav-chain")
+                        yield Button("Flow & Vol Intel", id="opt-nav-intel")
+                        yield Static("Archive-first · instant", id="opt-status")
+
+                    with Vertical(id="opt-view-scanner", classes="opt-view"):
+                        with Horizontal(id="opt-scan-bar"):
+                            yield Select(list(SCAN_STRATEGIES), value="all", id="opt-strat-select")
+                            yield Input(
+                                placeholder="Filter (bull_put, tfsa, clean, fric<12%, dte>=30)…",
+                                id="opt-filter-input",
+                            )
+                            for pid, plabel, _pq in OPT_FILTER_PRESETS:
+                                yield Button(plabel, id=pid, classes="preset-btn")
+                            yield Button("Live", id="opt-live-scan-btn", classes="preset-btn")
+                        with Horizontal(id="opt-scan-split"):
+                            yield DataTable(id="opt-scan-table", zebra_stripes=True, cursor_type="row")
+                            yield Static("Loading archived option chains…", id="opt-scan-inspector")
+
+                    with Vertical(id="opt-view-chain", classes="opt-view"):
+                        with Horizontal(id="opt-chain-bar"):
+                            yield Input(value="SPY", placeholder="Ticker", id="opt-chain-ticker")
+                            yield Select([("Default (~35d)", "__default__")], value="__default__", id="opt-chain-exp")
+                            yield Select(
+                                [("±12%", "0.12"), ("±20%", "0.20"), ("All", "0.0")],
+                                value="0.12",
+                                id="opt-chain-band",
+                            )
+                            yield Button("Load", id="opt-chain-load-btn", variant="primary", classes="preset-btn")
+                            yield Button("Live", id="opt-chain-live-btn", classes="preset-btn")
+                        with Horizontal(id="opt-chain-legbar"):
+                            yield Label("Stage:", id="opt-leg-label")
+                            yield Button("+Buy C", id="opt-leg-bc", classes="preset-btn")
+                            yield Button("+Sell C", id="opt-leg-sc", classes="preset-btn")
+                            yield Button("+Buy P", id="opt-leg-bp", classes="preset-btn")
+                            yield Button("+Sell P", id="opt-leg-sp", classes="preset-btn")
+                            yield Button("BullPut 5%", id="opt-leg-bp5", classes="preset-btn")
+                            yield Button("Clear", id="opt-leg-clear", classes="preset-btn")
+                        with Horizontal(id="opt-chain-split"):
+                            yield DataTable(id="opt-chain-table", zebra_stripes=True, cursor_type="row")
+                            yield Static("Select a ticker to load T-shaped Chain Matrix.", id="opt-chain-inspector")
+
+                    with Vertical(id="opt-view-intel", classes="opt-view"):
+                        with Horizontal(id="opt-intel-bar"):
+                            yield Button("All Intel", id="opt-intel-all", variant="primary")
+                            yield Button("Flow (UOA/OCC)", id="opt-intel-flow")
+                            yield Button("Vol / VRP", id="opt-intel-vol")
+                            yield Button("Skew / GEX", id="opt-intel-skew")
+                            yield Button("Refresh Intel", id="opt-intel-refresh")
+                        with Horizontal(id="opt-intel-split"):
+                            yield DataTable(id="opt-intel-table", zebra_stripes=True, cursor_type="row")
+                            yield Static("Loading UOA, OCC, Vol-Intel & Skew…", id="opt-intel-inspector")
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -281,6 +398,7 @@ class DeskApp(App[None]):
         self.theme = saved_theme_name()
         self._apply_responsive_class(self.size.width)
         self._setup_tables()
+        self._sync_options_subview()
         self._load_all_data(refresh=False)
 
     def on_resize(self, event) -> None:
@@ -305,10 +423,17 @@ class DeskApp(App[None]):
         bt = self.query_one("#book-picks-table", DataTable)
         bt.add_columns("ID", "Date", "Ticker", "Strategy", "Entry", "Now", "P&L%", "Shares", "Exit / Status")
 
+        bot = self.query_one("#book-options-table", DataTable)
+        bot.add_columns("ID", "Ticker", "Strategy", "Exp (DTE)", "Strike", "Entry", "Qty")
+
         lt = self.query_one("#lab-playbooks-table", DataTable)
         lt.add_columns("Evidence", "Strategy ID", "Asset", "Horizon", "Notes")
 
         self.query_one("#disc-board", DataTable).add_columns(*BOARD_COLUMNS)
+
+        self.query_one("#opt-scan-table", DataTable).add_columns(*OPT_SCAN_COLUMNS)
+        self.query_one("#opt-chain-table", DataTable).add_columns(*OPT_CHAIN_COLUMNS)
+        self.query_one("#opt-intel-table", DataTable).add_columns(*OPT_FLOW_COLUMNS)
 
     def _set_status(self, msg: str) -> None:
         self._status_msg = msg
@@ -337,6 +462,8 @@ class DeskApp(App[None]):
             self._compute_workbench(self.focused_ticker)
         elif active == "discover":
             self._ensure_hub()
+        elif active == "options":
+            self._ensure_options_loaded()
 
     def _load_all_data(self, *, refresh: bool = False) -> None:
         snap = self.provider.get_radar(refresh=refresh)
@@ -497,13 +624,11 @@ class DeskApp(App[None]):
             vehicles = self.provider.get_express(view, spot=spot, iv=iv)
         self._last_vehicles = vehicles
         self._selected_vehicle_idx = 0
+        self._wb_last_dos = dos
+        self._wb_last_view = view
         self.query_one("#wb-verdict-box", Static).update(
             f"[bold]{plain_english_vehicle_verdict(vehicles, view)}[/]"
         )
-        self.query_one("#wb-visual-box", Static).update(
-            format_workbench_visual_markup(vehicles, dos, view)
-        )
-
         vt = self.query_one("#wb-vehicles-table", DataTable)
         vt.clear()
         for idx, v in enumerate(vehicles):
@@ -522,17 +647,40 @@ class DeskApp(App[None]):
             rec_i = next((i for i, v in enumerate(vehicles) if v.recommended), 0)
             self._selected_vehicle_idx = rec_i
             self._render_wb_ladder(vehicles[rec_i])
+        self._render_wb_visual()
+
+    def _render_wb_visual(self) -> None:
+        if self._wb_last_view is None or not self.is_mounted:
+            return
+        try:
+            self.query_one("#wb-visual-box", Static).update(
+                format_workbench_visual_markup(
+                    self._last_vehicles,
+                    self._wb_last_dos,
+                    self._wb_last_view,
+                    show_heatmap=self._wb_show_heatmap,
+                    iv_shock_pct=self._iv_shock_pct,
+                    selected_idx=self._selected_vehicle_idx,
+                )
+            )
+        except NoMatches:
+            pass
 
     def _render_wb_ladder(self, v: VehicleComparison) -> None:
+        if not self.is_mounted:
+            return
         steps = list(v.walk_away_steps) if v.walk_away_steps else [v.walk_away_label]
         step_lines = "\n".join(f"  {s}" for s in steps)
         tfsa_tag = "[#5ec98d]TFSA OK[/]" if v.tfsa_legal else "[#d6a452]TAXABLE / IBKR ONLY (CRA TFSA ban)[/]"
-        self.query_one("#wb-ladder-box", Static).update(
-            f"[bold]Execution Ticket & 3-Step Walk-Away Ladder ({v.vehicle})[/] · {tfsa_tag}\n"
-            f"{step_lines}\n"
-            f"  Delta $: ${v.delta_dollars:+,.0f} · Theta/day: ${v.theta_per_day_usd:+.2f}"
-            + (f" · [#d6a452]{v.caution}[/]" if v.caution else "")
-        )
+        try:
+            self.query_one("#wb-ladder-box", Static).update(
+                f"[bold]Execution Ticket & 3-Step Walk-Away Ladder ({v.vehicle})[/] · {tfsa_tag}\n"
+                f"{step_lines}\n"
+                f"  Delta $: ${v.delta_dollars:+,.0f} · Theta/day: ${v.theta_per_day_usd:+.2f}"
+                + (f" · [#d6a452]{v.caution}[/]" if v.caution else "")
+            )
+        except NoMatches:
+            pass
 
     def _render_book(self) -> None:
         book = self.provider.get_book()
@@ -622,15 +770,42 @@ class DeskApp(App[None]):
                 key=str(p["pick_id"]),
             )
 
+        bot = self.query_one("#book-options-table", DataTable)
+        bot.clear()
+        self._book_paper_opts = list(paper_opts[:30])
+        self.query_one("#book-options-head", Static).update(
+            f"OPEN PAPER OPTIONS ({len(paper_opts)}) · [dim]Enter → Chain · [p] Paper Log[/]"
+        )
+        for r in self._book_paper_opts:
+            exp_s = str(r.get("expiration") or "")[:10]
+            dte_v = r.get("dte")
+            exp_lbl = f"{exp_s[5:]} ({dte_v}d)" if (len(exp_s) >= 10 and dte_v is not None) else exp_s
+            k_main = r.get("strike")
+            k_long = r.get("long_strike")
+            if k_main is not None and k_long:
+                k_lbl = f"{float(k_main):g}/{float(k_long):g}"
+            elif k_main is not None:
+                k_lbl = f"${float(k_main):g}"
+            else:
+                k_lbl = "—"
+            bot.add_row(
+                str(r.get("entry_id") or ""),
+                str(r.get("ticker") or ""),
+                str(r.get("strategy_name") or "")[:14],
+                exp_lbl,
+                k_lbl,
+                f"${float(r.get('entry_price') or 0):.2f}",
+                f"{float(r.get('quantity') or 1):g}",
+                key=f"{r.get('entry_id')}|{r.get('ticker')}|{exp_s}",
+            )
+
         extra_lines: List[str] = []
         if paper_opts:
-            opt_str = " · ".join(
-                f"{r['ticker']} {r['strategy_name']} ${r.get('strike') or ''} exp {str(r.get('expiration') or '')[:10]}"
-                for r in paper_opts[:5]
+            extra_lines.append(
+                f"[bold]OPEN PAPER OPTIONS ({len(paper_opts)}):[/] [dim]Inspect in table above · Enter → Chain · [p] Paper Log[/dim]"
             )
-            extra_lines.append(f"[bold]OPEN PAPER OPTIONS ({len(paper_opts)}):[/] {opt_str}")
         else:
-            extra_lines.append("[bold]OPEN PAPER OPTIONS:[/] [dim]0 open in paper_trades.db[/dim]")
+            extra_lines.append("[bold]OPEN PAPER OPTIONS:[/] [dim]0 open in paper_trades.db · press [p] to paper-log[/dim]")
         if lt_holdings:
             lt_str = " · ".join(
                 f"{h['ticker']} ({h['tranches_filled']}/{h['tranches_total']} tranches"
@@ -849,10 +1024,344 @@ class DeskApp(App[None]):
         self.focused_ticker = sym
 
         def _after(res: Optional[str]) -> None:
-            if res:
+            if not res:
+                return
+            if res.startswith("CHAIN:"):
+                self.open_options_chain(res.split(":", 1)[1])
+            else:
                 self.open_workbench(res)
 
         self.push_screen(EvidenceCardScreen(sym, self.provider.get_card), _after)
+
+    # ── [7] OPTIONS (Scanner · Chain Matrix · Flow & Vol Intel) ──────────────
+
+    def _sync_options_subview(self) -> None:
+        v = self._opt_view
+        self.query_one("#opt-view-scanner").display = (v == "scanner")
+        self.query_one("#opt-view-chain").display = (v == "chain")
+        self.query_one("#opt-view-intel").display = (v == "intel")
+        for bid, key in (
+            ("#opt-nav-scanner", "scanner"),
+            ("#opt-nav-chain", "chain"),
+            ("#opt-nav-intel", "intel"),
+        ):
+            self.query_one(bid, Button).variant = "primary" if v == key else "default"
+
+    def open_options_view(self, view: str = "scanner", *, strategy: Optional[str] = None) -> None:
+        self._opt_view = view if view in ("scanner", "chain", "intel") else "scanner"
+        self.query_one("#main-tabs", TabbedContent).active = "options"
+        self._sync_options_subview()
+        if strategy and self._opt_view == "scanner":
+            sel = self.query_one("#opt-strat-select", Select)
+            valid = {val for _lbl, val in SCAN_STRATEGIES}
+            if strategy.lower() in valid:
+                sel.value = strategy.lower()
+                self._opt_scan_loaded = False
+        self._ensure_options_loaded()
+
+    def open_options_chain(
+        self,
+        ticker: str,
+        *,
+        expiration: Optional[str] = None,
+        live: bool = False,
+    ) -> None:
+        sym = str(ticker or self.focused_ticker or "SPY").upper().strip() or "SPY"
+        self.focused_ticker = sym
+        self._opt_view = "chain"
+        self._opt_staged_legs = []
+        self.query_one("#main-tabs", TabbedContent).active = "options"
+        self._sync_options_subview()
+        self.query_one("#opt-chain-ticker", Input).value = sym
+        self._load_chain(sym, expiration=expiration, live=live)
+
+    def _ensure_options_loaded(self) -> None:
+        if self._opt_view == "scanner":
+            if not self._opt_scan_loaded:
+                self._run_options_scan(live=False)
+            else:
+                self._render_options_scanner()
+        elif self._opt_view == "chain":
+            tk = self.query_one("#opt-chain-ticker", Input).value.strip().upper() or self.focused_ticker or "SPY"
+            if self._opt_chain_matrix is None or self._opt_chain_matrix.ticker != tk:
+                self._load_chain(tk, live=False)
+        elif self._opt_view == "intel":
+            if self._opt_intel is None:
+                self._load_options_intel()
+            else:
+                self._render_options_intel()
+
+    def _run_options_scan(self, *, live: bool = False) -> None:
+        if live and self.offline:
+            self.query_one("#opt-status", Static).update("Offline mode — live scan skipped")
+            return
+        strat = str(self.query_one("#opt-strat-select", Select).value or "all")
+        self.query_one("#opt-status", Static).update(
+            f"Scanning {'live Yahoo' if live else 'archived'} chains ({strat})…"
+        )
+        self._worker_scan_options(strat, live)
+
+    @work(thread=True, exclusive=True, group="options_scan")
+    def _worker_scan_options(self, strategy: str, live: bool) -> None:
+        try:
+            rows, note = self.provider.scan_options(strategy=strategy, live=live)
+
+            def _apply() -> None:
+                self._opt_scan_all = list(rows)
+                self._opt_scan_loaded = True
+                self.query_one("#opt-status", Static).update(note)
+                self._render_options_scanner()
+
+            self.call_from_thread(_apply)
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#opt-status", Static).update,
+                f"[#e06c75]Scan error: {str(exc)[:48]}[/]",
+            )
+
+    def _render_options_scanner(self) -> None:
+        q = self.query_one("#opt-filter-input", Input).value
+        rows = filter_option_rows(self._opt_scan_all, q)
+        self._opt_scan_filtered = rows
+        tbl = self.query_one("#opt-scan-table", DataTable)
+        fill_options_scan_table(tbl, rows)
+        if rows:
+            self._opt_selected_scan = rows[0]
+            self.focused_ticker = rows[0].ticker
+            self.focused_spot = rows[0].spot
+            self.query_one("#opt-scan-inspector", Static).update(
+                format_scan_inspector(rows[0], days_elapsed=self._days_elapsed, iv_shock_pct=self._iv_shock_pct)
+            )
+        else:
+            self._opt_selected_scan = None
+            self.query_one("#opt-scan-inspector", Static).update(
+                format_scan_inspector(None)
+                + "\n\n[dim]0 candidates matched this filter — clear filter or click Live Scan.[/]"
+            )
+
+    def _load_chain(
+        self,
+        ticker: str,
+        *,
+        expiration: Optional[str] = None,
+        live: bool = False,
+    ) -> None:
+        if live and self.offline:
+            self.query_one("#opt-status", Static).update("Offline mode — live chain skipped")
+            return
+        sym = str(ticker or "SPY").upper().strip() or "SPY"
+        try:
+            band = float(str(self.query_one("#opt-chain-band", Select).value or "0.12"))
+        except ValueError:
+            band = 0.12
+        self.query_one("#opt-status", Static).update(
+            f"Loading {sym} {'live Yahoo' if live else 'archived'} option chain…"
+        )
+        self._worker_load_chain(sym, expiration, band, live)
+
+    @work(thread=True, exclusive=True, group="options_chain")
+    def _worker_load_chain(
+        self,
+        ticker: str,
+        expiration: Optional[str],
+        band_pct: float,
+        live: bool,
+    ) -> None:
+        try:
+            mat = self.provider.get_chain_matrix(
+                ticker,
+                expiration=expiration,
+                band_pct=band_pct,
+                allow_live=live,
+            )
+
+            def _apply() -> None:
+                self._opt_chain_matrix = mat
+                self._opt_chain_row_idx = 0
+                if mat is None:
+                    self.query_one("#opt-chain-table", DataTable).clear()
+                    self.query_one("#opt-status", Static).update(
+                        f"No archived chain for {ticker} — click Live to fetch from Yahoo"
+                    )
+                    self.query_one("#opt-chain-inspector", Static).update(
+                        f"[bold]{ticker}[/] has no local chain in `data/chain_archive.db`.\n"
+                        "[dim]Click [b]Live[/b] above to pull live Yahoo quotes, or run `opt alpha archive-chains`.[/]"
+                    )
+                    return
+                self.focused_ticker = mat.ticker
+                self.focused_spot = mat.spot
+                # Populate expiry selector without triggering a reload loop
+                self._opt_chain_syncing_exp = True
+                try:
+                    exp_sel = self.query_one("#opt-chain-exp", Select)
+                    opts = [(f"{e} ({d}d)", e) for e, d in mat.available_expirations]
+                    exp_sel.set_options(opts)
+                    exp_sel.value = mat.expiration
+                finally:
+                    self._opt_chain_syncing_exp = False
+                self._render_chain_matrix()
+                self.query_one("#opt-status", Static).update(
+                    f"{mat.ticker} ${mat.spot:.2f} · {mat.expiration} ({mat.dte}d) · {len(mat.rows)} strikes [{mat.source}]"
+                )
+
+            self.call_from_thread(_apply)
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#opt-status", Static).update,
+                f"[#e06c75]Chain err: {str(exc)[:48]}[/]",
+            )
+
+    def _render_chain_matrix(self) -> None:
+        mat = self._opt_chain_matrix
+        if mat is None:
+            return
+        tbl = self.query_one("#opt-chain-table", DataTable)
+        fill_chain_matrix_table(tbl, mat)
+        # Auto-focus cursor on the ATM SPOT strike row for immediate visual ergonomics
+        spot_idx = next((i for i, r in enumerate(mat.rows) if "SPOT" in r.tags), len(mat.rows) // 2)
+        if mat.rows:
+            self._opt_chain_row_idx = spot_idx
+            try:
+                tbl.move_cursor(row=spot_idx)
+            except Exception:
+                pass
+        self.query_one("#opt-chain-inspector", Static).update(
+            format_chain_inspector(
+                mat,
+                self._opt_staged_legs,
+                days_elapsed=self._days_elapsed,
+                iv_shock_pct=self._iv_shock_pct,
+            )
+        )
+
+    def _stage_chain_leg(self, opt_type: str, side: str) -> None:
+        mat = self._opt_chain_matrix
+        if mat is None or not mat.rows:
+            return
+        idx = max(0, min(self._opt_chain_row_idx, len(mat.rows) - 1))
+        pair = mat.rows[idx]
+        contract = pair.call if opt_type == "call" else pair.put
+        if contract is None:
+            self.query_one("#opt-status", Static).update(
+                f"No {opt_type} quoted at strike ${pair.strike:g}"
+            )
+            return
+        if len(self._opt_staged_legs) >= 4:
+            self.query_one("#opt-status", Static).update("Max 4 legs staged — click Clear to reset")
+            return
+        iv = contract.iv if (contract.iv is not None and 0.02 <= contract.iv <= 4.0) else ((mat.atm_iv_pct or 25.0) / 100.0)
+        leg = OptionLeg(
+            opt_type=opt_type,
+            side=side.upper(),
+            strike=contract.strike,
+            expiration=mat.expiration,
+            dte=mat.dte,
+            bid=contract.bid,
+            ask=contract.ask,
+            mid=contract.mid,
+            iv=iv,
+            delta=float(contract.delta or 0.0),
+            theta=float(contract.theta or 0.0),
+            open_interest=contract.open_interest,
+            volume=contract.volume,
+        )
+        self._opt_staged_legs.append(leg)
+        sname, _ = classify_legs(self._opt_staged_legs)
+        self.query_one("#opt-status", Static).update(
+            f"Staged {side.upper()} {opt_type.upper()} ${contract.strike:g} → {sname} ({len(self._opt_staged_legs)} legs)"
+        )
+        self.query_one("#opt-chain-inspector", Static).update(
+            format_chain_inspector(
+                mat,
+                self._opt_staged_legs,
+                days_elapsed=self._days_elapsed,
+                iv_shock_pct=self._iv_shock_pct,
+            )
+        )
+
+    def _stage_bull_put_template(self) -> None:
+        """1-click 5%-wide Bull Put spread anchored at the highlighted strike on the Chain Matrix."""
+        mat = self._opt_chain_matrix
+        if mat is None or not mat.rows:
+            return
+        idx = max(0, min(self._opt_chain_row_idx, len(mat.rows) - 1))
+        short_pair = mat.rows[idx]
+        sp = short_pair.put
+        if sp is None:
+            self.query_one("#opt-status", Static).update(f"No put quoted at ${short_pair.strike:g}")
+            return
+        target_long_k = sp.strike - max(1.0, mat.spot * 0.05)
+        put_candidates = [r.put for r in mat.rows if r.put is not None and r.strike < sp.strike]
+        if not put_candidates:
+            self.query_one("#opt-status", Static).update("No lower put strike available for wing")
+            return
+        lp = min(put_candidates, key=lambda c: abs(c.strike - target_long_k))
+        fallback_iv = (mat.atm_iv_pct or 25.0) / 100.0
+        self._opt_staged_legs = [
+            OptionLeg(
+                "put", "SELL", sp.strike, mat.expiration, mat.dte,
+                sp.bid, sp.ask, sp.mid,
+                sp.iv if (sp.iv and 0.02 <= sp.iv <= 4.0) else fallback_iv,
+                float(sp.delta or 0.0), float(sp.theta or 0.0), sp.open_interest, sp.volume,
+            ),
+            OptionLeg(
+                "put", "BUY", lp.strike, mat.expiration, mat.dte,
+                lp.bid, lp.ask, lp.mid,
+                lp.iv if (lp.iv and 0.02 <= lp.iv <= 4.0) else fallback_iv,
+                float(lp.delta or 0.0), float(lp.theta or 0.0), lp.open_interest, lp.volume,
+            ),
+        ]
+        self.query_one("#opt-status", Static).update(
+            f"Staged 5%-wide Bull Put {sp.strike:g}/{lp.strike:g}P ({mat.dte}d)"
+        )
+        self.query_one("#opt-chain-inspector", Static).update(
+            format_chain_inspector(
+                mat,
+                self._opt_staged_legs,
+                days_elapsed=self._days_elapsed,
+                iv_shock_pct=self._iv_shock_pct,
+            )
+        )
+
+    def _load_options_intel(self) -> None:
+        self.query_one("#opt-status", Static).update("Loading UOA, OCC, Vol-Intel & Skew…")
+        self._worker_load_intel()
+
+    @work(thread=True, exclusive=True, group="options_intel")
+    def _worker_load_intel(self) -> None:
+        try:
+            intel = self.provider.get_options_intel()
+
+            def _apply() -> None:
+                self._opt_intel = intel
+                self._render_options_intel()
+
+            self.call_from_thread(_apply)
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#opt-status", Static).update,
+                f"[#e06c75]Intel err: {str(exc)[:48]}[/]",
+            )
+
+    def _render_options_intel(self) -> None:
+        intel = self._opt_intel
+        if intel is None:
+            return
+        for bid, key in (
+            ("#opt-intel-all", "all"),
+            ("#opt-intel-flow", "flow"),
+            ("#opt-intel-vol", "vol"),
+            ("#opt-intel-skew", "skew"),
+        ):
+            self.query_one(bid, Button).variant = "primary" if self._opt_intel_mode == key else "default"
+        tbl = self.query_one("#opt-intel-table", DataTable)
+        self._opt_intel_items = fill_options_intel_table(tbl, intel, mode=self._opt_intel_mode)
+        self.query_one("#opt-status", Static).update(
+            f"Intel Hub: {len(self._opt_intel_items)} rows · UOA {len(intel.uoa_rows)} · "
+            f"OCC {len(intel.occ_rows)} · VRP {len(intel.vol_rows)} · Skew {len(intel.skew_rows)}"
+        )
+        first = self._opt_intel_items[0] if self._opt_intel_items else None
+        self.query_one("#opt-intel-inspector", Static).update(format_intel_inspector(first))
 
     # ── Events ───────────────────────────────────────────────────────────────
 
@@ -862,24 +1371,52 @@ class DeskApp(App[None]):
             self._compute_workbench(self.focused_ticker)
         elif pane_id == "discover":
             self._ensure_hub()
+        elif pane_id == "options":
+            self._ensure_options_loaded()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "radar-filter-input":
             self._render_radar()
+        elif event.input.id == "opt-filter-input":
+            self._render_options_scanner()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id in ("wb-ticker-input", "wb-target-input", "wb-days-input", "wb-risk-input"):
             self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
+        elif event.input.id == "opt-chain-ticker":
+            self._opt_staged_legs = []
+            self._load_chain(event.value.strip().upper(), live=False)
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id in ("wb-dir-select", "wb-acct-select"):
-            self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
-        elif event.select.id == "disc-lens-select" and isinstance(event.value, str):
-            self._disc_mode = "lens"
-            self._disc_lens = event.value
-            if self.hub is not None:
-                self.query_one("#disc-crumb", Static).update(crumb_and_freshness(self.hub, 3))
-            self._render_disc_right()
+        if not self.is_mounted:
+            return
+        try:
+            if event.select.id in ("wb-dir-select", "wb-acct-select"):
+                self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
+            elif event.select.id == "disc-lens-select" and isinstance(event.value, str):
+                self._disc_mode = "lens"
+                self._disc_lens = event.value
+                if self.hub is not None:
+                    self.query_one("#disc-crumb", Static).update(crumb_and_freshness(self.hub, 3))
+                self._render_disc_right()
+            elif event.select.id == "opt-strat-select" and isinstance(event.value, str):
+                self._opt_scan_loaded = False
+                if self.query_one("#main-tabs", TabbedContent).active == "options":
+                    self._run_options_scan(live=False)
+            elif event.select.id == "opt-chain-exp" and isinstance(event.value, str):
+                if not self._opt_chain_syncing_exp and event.value != "__default__":
+                    tk = self.query_one("#opt-chain-ticker", Input).value.strip().upper() or self.focused_ticker
+                    is_live = bool(self._opt_chain_matrix and self._opt_chain_matrix.source == "live")
+                    self._load_chain(tk, expiration=event.value, live=is_live)
+            elif event.select.id == "opt-chain-band" and isinstance(event.value, str):
+                if self._opt_chain_matrix is not None:
+                    self._load_chain(
+                        self._opt_chain_matrix.ticker,
+                        expiration=self._opt_chain_matrix.expiration,
+                        live=(self._opt_chain_matrix.source == "live"),
+                    )
+        except NoMatches:
+            pass
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "wb-owns-switch":
@@ -889,6 +1426,12 @@ class DeskApp(App[None]):
         bid = event.button.id
         if bid == "wb-run-btn":
             self._compute_workbench(self.query_one("#wb-ticker-input", Input).value)
+        elif bid == "wb-chain-btn":
+            self.open_options_chain(self.query_one("#wb-ticker-input", Input).value)
+        elif bid == "wb-heat-btn":
+            self.action_toggle_heatmap()
+        elif bid == "wb-paper-btn":
+            self.action_paper_log_option()
         elif bid == "wb-fill-btn" or bid == "act-fill":
             self.action_log_fill()
         elif bid == "act-ritual":
@@ -899,6 +1442,8 @@ class DeskApp(App[None]):
             self.action_rebalance_modal()
         elif bid == "act-bcmd":
             self.action_bloomberg_cmd()
+        elif bid == "act-options":
+            self.open_options_view("scanner")
         elif bid == "act-live-opts":
             self.action_live_options()
         elif bid == "act-workbench":
@@ -909,12 +1454,61 @@ class DeskApp(App[None]):
             self.action_quick_log()
         elif bid == "act-help":
             self.action_show_help()
+        elif bid == "opt-nav-scanner":
+            self.open_options_view("scanner")
+        elif bid == "opt-nav-chain":
+            self.open_options_view("chain")
+        elif bid == "opt-nav-intel":
+            self.open_options_view("intel")
+        elif bid == "opt-live-scan-btn":
+            self._run_options_scan(live=True)
+        elif bid == "opt-chain-load-btn":
+            self._opt_staged_legs = []
+            self._load_chain(self.query_one("#opt-chain-ticker", Input).value, live=False)
+        elif bid == "opt-chain-live-btn":
+            self._opt_staged_legs = []
+            self._load_chain(self.query_one("#opt-chain-ticker", Input).value, live=True)
+        elif bid == "opt-leg-bc":
+            self._stage_chain_leg("call", "BUY")
+        elif bid == "opt-leg-sc":
+            self._stage_chain_leg("call", "SELL")
+        elif bid == "opt-leg-bp":
+            self._stage_chain_leg("put", "BUY")
+        elif bid == "opt-leg-sp":
+            self._stage_chain_leg("put", "SELL")
+        elif bid == "opt-leg-bp5":
+            self._stage_bull_put_template()
+        elif bid == "opt-leg-clear":
+            self._opt_staged_legs = []
+            if self._opt_chain_matrix is not None:
+                self.query_one("#opt-chain-inspector", Static).update(
+                    format_chain_inspector(
+                        self._opt_chain_matrix,
+                        [],
+                        days_elapsed=self._days_elapsed,
+                        iv_shock_pct=self._iv_shock_pct,
+                    )
+                )
+            self.query_one("#opt-status", Static).update("Cleared staged legs")
+        elif bid in ("opt-intel-all", "opt-intel-flow", "opt-intel-vol", "opt-intel-skew"):
+            self._opt_intel_mode = bid.replace("opt-intel-", "")
+            self._render_options_intel()
+        elif bid == "opt-intel-refresh":
+            self._load_options_intel()
         else:
+            matched = False
             for pid, _label, pq in FILTER_PRESETS:
                 if bid == pid:
                     self.query_one("#radar-filter-input", Input).value = pq
                     self._render_radar()
+                    matched = True
                     break
+            if not matched:
+                for pid, _label, pq in OPT_FILTER_PRESETS:
+                    if bid == pid:
+                        self.query_one("#opt-filter-input", Input).value = pq
+                        self._render_options_scanner()
+                        break
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         tid = event.data_table.id
@@ -960,7 +1554,35 @@ class DeskApp(App[None]):
                 idx = int(str(event.row_key.value))
                 self._selected_vehicle_idx = idx
                 self._render_wb_ladder(self._last_vehicles[idx])
+                if self._wb_show_heatmap:
+                    self._render_wb_visual()
             except (ValueError, IndexError):
+                pass
+        elif tid == "opt-scan-table" and event.row_key is not None:
+            try:
+                idx = int(str(event.row_key.value))
+                scan_row = self._opt_scan_filtered[idx]
+                self._opt_selected_scan = scan_row
+                self.focused_ticker = scan_row.ticker
+                self.focused_spot = scan_row.spot
+                self.query_one("#opt-scan-inspector", Static).update(
+                    format_scan_inspector(scan_row, days_elapsed=self._days_elapsed, iv_shock_pct=self._iv_shock_pct)
+                )
+            except (ValueError, IndexError, NoMatches):
+                pass
+        elif tid == "opt-chain-table" and event.row_key is not None:
+            try:
+                self._opt_chain_row_idx = int(str(event.row_key.value))
+            except ValueError:
+                pass
+        elif tid == "opt-intel-table" and event.row_key is not None:
+            parts = str(event.row_key.value).split("|")
+            try:
+                idx = int(parts[0])
+                item = self._opt_intel_items[idx]
+                self.focused_ticker = str(item.get("ticker") or self.focused_ticker)
+                self.query_one("#opt-intel-inspector", Static).update(format_intel_inspector(item))
+            except (ValueError, IndexError, NoMatches):
                 pass
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -994,6 +1616,22 @@ class DeskApp(App[None]):
             parts = str(event.row_key.value).split("|")
             if len(parts) == 2:
                 self.open_evidence_card(parts[1])
+        elif tid == "book-options-table" and event.row_key is not None:
+            parts = str(event.row_key.value).split("|")
+            if len(parts) >= 2 and parts[1]:
+                exp = parts[2] if len(parts) >= 3 and parts[2] else None
+                self.open_options_chain(parts[1], expiration=exp)
+        elif tid == "opt-scan-table" and event.row_key is not None:
+            try:
+                scan_row = self._opt_scan_filtered[int(str(event.row_key.value))]
+                exp = scan_row.expiration if len(scan_row.expiration) == 10 else None
+                self.open_options_chain(scan_row.ticker, expiration=exp, live=(scan_row.source == "live"))
+            except (ValueError, IndexError):
+                pass
+        elif tid == "opt-intel-table" and event.row_key is not None:
+            parts = str(event.row_key.value).split("|")
+            if len(parts) >= 2 and parts[1]:
+                self.open_options_chain(parts[1])
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -1009,8 +1647,54 @@ class DeskApp(App[None]):
         self.query_one("#main-tabs", TabbedContent).active = tab_id
 
     def action_focus_filter(self) -> None:
+        active = self.query_one("#main-tabs", TabbedContent).active
+        if active == "options" and self._opt_view == "scanner":
+            self.query_one("#opt-filter-input", Input).focus()
+            return
         self.query_one("#main-tabs", TabbedContent).active = "radar"
         self.query_one("#radar-filter-input", Input).focus()
+
+    def action_open_chain(self) -> None:
+        self.open_options_chain(self.focused_ticker or "SPY")
+
+    def action_toggle_heatmap(self) -> None:
+        self._wb_show_heatmap = not self._wb_show_heatmap
+        if self.query_one("#main-tabs", TabbedContent).active == "workbench":
+            self._render_wb_visual()
+            self._set_status("Workbench: 2D Risk Surface" if self._wb_show_heatmap else "Workbench: RND & Edge Bars")
+
+    def action_nudge_iv(self, delta_pct: int) -> None:
+        self._iv_shock_pct = max(-40.0, min(50.0, self._iv_shock_pct + float(delta_pct)))
+        self._refresh_shock_views()
+        self._set_status(f"Scenario: T+{self._days_elapsed}d · IV {self._iv_shock_pct:+.0f}%")
+
+    def action_nudge_elapsed(self, delta_days: int) -> None:
+        self._days_elapsed = max(0, min(90, self._days_elapsed + int(delta_days)))
+        self._refresh_shock_views()
+        self._set_status(f"Scenario: T+{self._days_elapsed}d · IV {self._iv_shock_pct:+.0f}%")
+
+    def _refresh_shock_views(self) -> None:
+        active = self.query_one("#main-tabs", TabbedContent).active
+        if active == "workbench":
+            self._render_wb_visual()
+        elif active == "options":
+            if self._opt_view == "scanner" and self._opt_selected_scan is not None:
+                self.query_one("#opt-scan-inspector", Static).update(
+                    format_scan_inspector(
+                        self._opt_selected_scan,
+                        days_elapsed=self._days_elapsed,
+                        iv_shock_pct=self._iv_shock_pct,
+                    )
+                )
+            elif self._opt_view == "chain" and self._opt_chain_matrix is not None:
+                self.query_one("#opt-chain-inspector", Static).update(
+                    format_chain_inspector(
+                        self._opt_chain_matrix,
+                        self._opt_staged_legs,
+                        days_elapsed=self._days_elapsed,
+                        iv_shock_pct=self._iv_shock_pct,
+                    )
+                )
 
     def action_cycle_sort(self) -> None:
         self.sort_idx = (self.sort_idx + 1) % len(SORT_MODES)
@@ -1027,6 +1711,8 @@ class DeskApp(App[None]):
     def action_refresh(self) -> None:
         self._set_status("Refreshing Radar…")
         self.hub = None
+        self._opt_scan_loaded = False
+        self._opt_intel = None
         self._worker_refresh_radar()
 
     def action_live_options(self) -> None:
@@ -1196,11 +1882,32 @@ class DeskApp(App[None]):
             self.apply_desk_theme(arg.lower())
             self._set_status(f"Theme: {arg.lower()}")
             return
-        if cmd in ("TODAY", "RADAR", "WORKBENCH", "BOOK", "LAB", "DISCOVER"):
+        if cmd in ("TODAY", "RADAR", "WORKBENCH", "BOOK", "LAB", "DISCOVER", "OPTIONS"):
             self.action_switch_tab(cmd.lower())
+            return
+        if cmd in ("OPT", "SCAN"):
+            self.open_options_view("scanner", strategy=arg.lower() if arg else None)
+            return
+        if cmd == "CHAIN":
+            self.open_options_chain(arg or self.focused_ticker or "SPY")
+            return
+        if cmd in ("FLOW", "UOA"):
+            self._opt_intel_mode = "flow"
+            self.open_options_view("intel")
+            return
+        if cmd in ("VOL", "VRP"):
+            self._opt_intel_mode = "vol"
+            self.open_options_view("intel")
+            return
+        if cmd == "SURF":
+            self._wb_show_heatmap = True
+            self.open_workbench(arg or self.focused_ticker or "SPY")
             return
         if cmd in ("SKEW", "GEX", "EDGAR", "13D", "SPIN", "BUYBACK", "GUIDANCE", "SUPPLY", "OCC", "CAL", "CALENDAR", "MACRO", "PM", "PREMORTEM"):
             self._open_alpha_mnemonic(cmd, arg or self.focused_ticker)
+            return
+        if arg in ("CHAIN", "OPT"):
+            self.open_options_chain(cmd)
             return
         if arg in ("WB", "WORKBENCH", "EXPRESS"):
             self.open_workbench(cmd)
@@ -1243,6 +1950,100 @@ class DeskApp(App[None]):
                 playbook_id=self.focused_playbook,
             ),
             _after_modal,
+        )
+
+    def action_paper_log_option(self) -> None:
+        """Open PaperOptionModal prefilled from Options Scanner, Chain Composer, or Workbench."""
+        active = self.query_one("#main-tabs", TabbedContent).active
+        tk = self.focused_ticker or "SPY"
+        strat = "Bull Put"
+        exp = ""
+        strike = round(self.focused_spot or 100.0, 1)
+        long_strike: Optional[float] = None
+        opt_type = "put"
+        price = 1.00
+        max_loss: Optional[float] = None
+        iv: Optional[float] = None
+        delta: Optional[float] = None
+        warn = ""
+
+        if active == "options" and self._opt_view == "scanner" and self._opt_selected_scan is not None:
+            r = self._opt_selected_scan
+            tk = r.ticker
+            strat = r.strategy
+            exp = r.expiration[:10]
+            price = r.mid_price
+            max_loss = r.max_risk_usd
+            iv = (r.iv_pct / 100.0) if r.iv_pct else None
+            delta = r.short_delta
+            if r.legs:
+                primary = next((lg for lg in r.legs if lg.side == "SELL"), r.legs[0])
+                wing = next((lg for lg in r.legs if lg is not primary), None)
+                strike = primary.strike
+                opt_type = primary.opt_type
+                long_strike = wing.strike if wing is not None else None
+            if not r.tfsa_legal:
+                warn = "Multi-leg / short option — TAXABLE account only (not CRA TFSA-legal)."
+            if r.friction_pct > 0.20:
+                warn = (warn + " " if warn else "") + f"Spread friction is {r.friction_pct*100:.1f}% — use limit order."
+        elif active == "options" and self._opt_view == "chain" and self._opt_staged_legs:
+            sname, tfsa_ok = classify_legs(self._opt_staged_legs)
+            mat = self._opt_chain_matrix
+            tk = mat.ticker if mat else tk
+            strat = sname
+            primary = next((lg for lg in self._opt_staged_legs if lg.side == "SELL"), self._opt_staged_legs[0])
+            wing = next((lg for lg in self._opt_staged_legs if lg is not primary), None)
+            exp = primary.expiration[:10]
+            strike = primary.strike
+            long_strike = wing.strike if wing is not None else None
+            opt_type = primary.opt_type
+            price = max(0.05, abs(sum(lg.signed_qty * lg.mid for lg in self._opt_staged_legs)))
+            iv = primary.iv
+            delta = primary.delta
+            if not tfsa_ok:
+                warn = "TAXABLE account only (not CRA TFSA-legal)."
+        elif active == "workbench" and self._last_vehicles and 0 <= self._selected_vehicle_idx < len(self._last_vehicles):
+            v = self._last_vehicles[self._selected_vehicle_idx]
+            strat = "Bull Put" if "Credit" in v.vehicle else ("Long Call" if (self._wb_last_view and self._wb_last_view.direction != "BEARISH") else "Long Put")
+            opt_type = "put" if "Put" in strat else "call"
+            dte = self._wb_last_view.horizon_days if self._wb_last_view else 35
+            exp = (dt.date.today() + dt.timedelta(days=dte)).isoformat()
+            price = max(0.05, round((v.max_profit_usd if "Credit" in v.vehicle else v.capital_at_risk_usd) / 100.0, 2))
+            max_loss = v.capital_at_risk_usd
+            if not v.tfsa_legal:
+                warn = "TAXABLE account only (CRA TFSA ban on spreads)."
+
+        if not exp:
+            exp = (dt.date.today() + dt.timedelta(days=45)).isoformat()
+
+        def _after_paper(res: Optional[Dict[str, Any]]) -> None:
+            if not res:
+                return
+            try:
+                ok = self.provider.log_paper_option(**res)
+                if ok:
+                    self._render_book()
+                    self._set_status(f"Paper-logged {res['ticker']} {res['strategy_name']} @ ${res['entry_price']:.2f}")
+                else:
+                    self._set_status("Paper option refused by guard")
+            except Exception as exc:
+                self._set_status(f"Paper log err: {str(exc)[:36]}")
+
+        self.push_screen(
+            PaperOptionModal(
+                ticker=tk,
+                strategy_name=strat,
+                expiration=exp,
+                strike=strike,
+                opt_type=opt_type,
+                entry_price=price,
+                long_strike=long_strike,
+                max_loss_usd=max_loss,
+                entry_iv=iv,
+                entry_delta=delta,
+                warning_text=warn,
+            ),
+            _after_paper,
         )
 
     def action_close_pick(self) -> None:
