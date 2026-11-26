@@ -13,6 +13,7 @@ from .discover import card_cmd, discover_cmd
 from .express import express_cmd
 from .guide import guide_cmd, refresh_cmd
 from .lab import lab_group
+from .morning_ritual import morning_ritual_cmd
 from .notify import notify_cmd
 from .profile import profile_cmd
 from .radar import radar_cmd
@@ -107,7 +108,8 @@ def commands_cmd(ctx: click.Context) -> None:
             "Daily Cockpits & Guides",
             [
                 ("opt", "Launch 6-tab Bloomberg × Amber CRT Textual TUI"),
-                ("opt web", "Launch zero-reload local Web Cockpit at http://127.0.0.1:8000/desk"),
+                ("opt web", "Launch zero-reload Live Web Cockpit at http://127.0.0.1:8000/desk"),
+                ("opt morning-ritual", "60-second linear 5-step Morning Checklist (or press `m` in TUI)"),
                 ("opt refresh", "Update local prices + FRED credit/rates + Radar cache"),
                 ("opt today", "10-second Morning Action Brief (regime, TFSA Core, top setups)"),
                 ("opt guide", "Zero-memorization step-by-step plain-English coach"),
@@ -116,8 +118,8 @@ def commands_cmd(ctx: click.Context) -> None:
         (
             "Wealthsimple TFSA Core Loop (PROVEN: VM_OUTLOOK_TOP3 + SGOV)",
             [
-                ("opt profile --tfsa 10000 --cash-etf SGOV", "Save TFSA balance, cash ETF & risk budget"),
-                ("opt profile --import-ws <activity.csv>", "Idempotently import Wealthsimple Activity CSV"),
+                ("opt profile --tfsa 10000 --cash-etf SGOV --room-cad 7000", "Save TFSA balance, cash ETF, risk & CRA contribution room"),
+                ("opt profile --watch-downloads / --import-ws <csv>", "Auto-find & idempotently import Wealthsimple Activity CSV"),
                 ("opt rebalance [--apply]", "Compute exact fractional BUY/SELL orders (--apply saves shares)"),
             ],
         ),
@@ -137,7 +139,7 @@ def commands_cmd(ctx: click.Context) -> None:
             [
                 ("opt book", "Open/closed stock picks, live P&L, exit alerts & scorecard"),
                 ("opt log AAPL --price 210 --shares 5", "Log a manual stock/ETF pick into data/own_picks.db"),
-                ("opt close <ID|TICKER> --price 224.50", "Close an open pick and record realized P&L"),
+                ("opt close <ID|TICKER> --price 224.50 --tag PLAN_WORKED", "Close an open pick with 10s Post-Mortem tag & realized P&L"),
             ],
         ),
         (
@@ -145,7 +147,8 @@ def commands_cmd(ctx: click.Context) -> None:
             [
                 ("opt alpha skew", "Option-Implied CW IV Spread & Put Smirk -> trade in TFSA shares"),
                 ("opt alpha gex SPY", "Dealer Net GEX, Gamma Flip strike & Call/Put OI Walls"),
-                ("opt alpha edgar [--refresh]", "SEC EDGAR Form 10 spinoffs, 5d 13D activists & XBRL buybacks"),
+                ("opt alpha edgar [--refresh]", "SEC EDGAR Form 10, 13D, 8-K Guidance, 10-K Supply Chain & Buybacks"),
+                ("opt alpha archive-occ / occ-uoa", "OCC daily whole-market Volume/OI archiver & UOA surge scanner"),
                 ("opt alpha macro [--refresh]", "4-pt VIX curve, FRED Fed Net Liquidity, CFTC COT & Polymarket"),
                 ("opt alpha premortem NVDA [--ai]", "Pre-Mortem Devil's Advocate bear case & kill-switches"),
                 ("opt alpha archive-chains --limit 60", "Snapshot 60 liquid tickers from free CBOE chains"),
@@ -186,6 +189,7 @@ def commands_cmd(ctx: click.Context) -> None:
 
 
 cli.add_command(guide_cmd)
+cli.add_command(morning_ritual_cmd)
 cli.add_command(refresh_cmd)
 cli.add_command(today_cmd)
 cli.add_command(radar_cmd)

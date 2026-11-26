@@ -17,6 +17,7 @@ from src.equity_playbooks.indicators import sma
 from src.fill_experiment import fill_rate_summary, log_real_fill
 from src.own_picks import (
     build_equity_scorecard,
+    build_mistake_cost_report,
     close_equity_pick,
     list_equity_picks,
     log_equity_pick,
@@ -119,9 +120,15 @@ class DeskDataProvider:
     def get_cached_dossier(self, ticker: str) -> Optional[TickerDossier]:
         return self._dossier_cache.get(str(ticker).upper().strip())
 
-    def get_dossier(self, ticker: str, *, fetch_chain: bool = False) -> TickerDossier:
+    def get_dossier(
+        self,
+        ticker: str,
+        *,
+        fetch_chain: bool = False,
+        allow_live_spot: bool = False,
+    ) -> TickerDossier:
         sym = str(ticker).upper().strip()
-        if not fetch_chain and sym in self._dossier_cache:
+        if not fetch_chain and not allow_live_spot and sym in self._dossier_cache:
             return self._dossier_cache[sym]
         dos = build_dossier(
             sym,
@@ -129,9 +136,46 @@ class DeskDataProvider:
             cache_path=self.cache_path,
             chain_db=self.chain_db,
             fetch_chain=fetch_chain,
+            allow_live_spot=allow_live_spot,
         )
         self._dossier_cache[sym] = dos
         return dos
+
+    def get_live_quotes(self, tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Best-effort live last price & 1d % change for market-hours polling."""
+        syms = sorted({str(t).upper().strip() for t in tickers if str(t).strip()})[:25]
+        if not syms:
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        try:
+            import math
+            import yfinance as yf
+
+            for tk in syms:
+                try:
+                    h = yf.Ticker(tk).history(period="5d", timeout=8)
+                    if h is None or h.empty:
+                        continue
+                    closes = [float(x) for x in h["Close"].dropna().tolist() if math.isfinite(float(x))]
+                    if not closes:
+                        continue
+                    last = closes[-1]
+                    chg = ((last / closes[-2] - 1.0) * 100.0) if len(closes) >= 2 and closes[-2] > 0 else None
+                    out[tk] = {
+                        "price": round(last, 2),
+                        "chg_1d_pct": round(chg, 2) if chg is not None else None,
+                    }
+                except Exception:
+                    continue
+            try:
+                from src.cache_release import release_yfinance_caches
+
+                release_yfinance_caches()
+            except Exception:
+                pass
+        except ImportError:
+            pass
+        return out
 
     def get_express(
         self,
@@ -268,6 +312,7 @@ class DeskDataProvider:
         return {
             "equity_picks": enriched_picks,
             "scorecard": scorecard,
+            "mistake_costs": build_mistake_cost_report(db_path=self.own_picks_db),
             "exit_alerts": exit_alerts,
             "paper_options": self._load_open_paper_options(),
             "longterm_holdings": self._load_longterm_summary(ohlcv),
@@ -302,12 +347,14 @@ class DeskDataProvider:
         exit_price: float,
         exit_date: Optional[str] = None,
         notes: Optional[str] = None,
+        close_tag: Optional[str] = None,
     ) -> bool:
         return close_equity_pick(
             int(pick_id),
             float(exit_price),
             exit_date=exit_date,
             notes=notes,
+            close_tag=close_tag,
             db_path=self.own_picks_db,
         )
 

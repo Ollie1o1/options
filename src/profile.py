@@ -45,6 +45,8 @@ class UserProfile:
     drift_threshold_pct: float = 5.0
     rebalance_interval_days: int = 28
     last_rebalance_date: Optional[str] = None
+    tfsa_room_cad: Optional[float] = None
+    tfsa_contributed_ytd_cad: float = 0.0
     core_holdings: Dict[str, float] = field(default_factory=dict)
     imported_hashes: List[str] = field(default_factory=list)
 
@@ -95,6 +97,8 @@ def load_profile(path: str = DEFAULT_PROFILE_PATH) -> UserProfile:
         drift_threshold_pct=max(1.0, float(data.get("drift_threshold_pct", base.drift_threshold_pct))),
         rebalance_interval_days=max(7, int(data.get("rebalance_interval_days", base.rebalance_interval_days))),
         last_rebalance_date=data.get("last_rebalance_date"),
+        tfsa_room_cad=(float(data["tfsa_room_cad"]) if data.get("tfsa_room_cad") is not None else None),
+        tfsa_contributed_ytd_cad=max(0.0, float(data.get("tfsa_contributed_ytd_cad", 0.0) or 0.0)),
         core_holdings=holdings,
         imported_hashes=[str(x) for x in (data.get("imported_hashes") or [])[-500:]],
     )
@@ -282,3 +286,52 @@ def import_wealthsimple_csv(
         "skipped_non_trade": skipped_other,
         "core_holdings": dict(profile.core_holdings),
     }
+
+
+def import_wealthsimple_csv_text(
+    csv_text: str,
+    *,
+    filename: str = "wealthsimple_upload.csv",
+    profile_path: str = DEFAULT_PROFILE_PATH,
+    own_picks_db: str = "data/own_picks.db",
+    core_etfs: Set[str] = set(CORE_OUTLOOK_ETFS),
+) -> Dict[str, Any]:
+    """Import Wealthsimple CSV from raw string text (used by Web Cockpit drag-and-drop)."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", encoding="utf-8", delete=False) as tf:
+        tf.write(csv_text)
+        tmp_path = tf.name
+    try:
+        res = import_wealthsimple_csv(
+            tmp_path,
+            profile_path=profile_path,
+            own_picks_db=own_picks_db,
+            core_etfs=core_etfs,
+        )
+        res["file"] = filename
+        return res
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def find_latest_wealthsimple_csv(downloads_dir: Optional[str] = None) -> Optional[str]:
+    """Locate the newest Wealthsimple activity/statement CSV in ~/Downloads (zero-typing sync)."""
+    base = Path(downloads_dir) if downloads_dir else (Path.home() / "Downloads")
+    if not base.is_dir():
+        return None
+    candidates: List[Tuple[float, Path]] = []
+    for p in base.glob("*.csv"):
+        nm = p.name.lower()
+        if any(tok in nm for tok in ("wealthsimple", "activity", "statement", "tfsa", "monthly-statement")):
+            try:
+                candidates.append((p.stat().st_mtime, p))
+            except OSError:
+                continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: -x[0])
+    return str(candidates[0][1])

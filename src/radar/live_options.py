@@ -138,10 +138,15 @@ def refresh_local_prices(
 
 
 def _default_fetch_etf_chain(symbol: str) -> Optional[Dict[str, Any]]:
-    """Spot + the O1 expiration's (nearest 90 DTE in [60, 120]) put/call chain via yfinance."""
+    """Spot + the O1 expiration's (nearest 90 DTE in [60, 120]) put/call chain via yfinance.
+
+    If the primary expiry has thin/0-bid Yahoo quotes (common outside market hours),
+    automatically checks other [60, 120] DTE expirations before giving up so live ETF
+    spreads show reliably whenever any liquid monthly expiration is quoted.
+    """
     import yfinance as yf
 
-    from src.radar.wide_spread_rule import choose_expiration
+    from src.radar.wide_spread_rule import DTE_HI, DTE_LO, TARGET_DTE, choose_expiration
 
     tkr = yf.Ticker(symbol)
     exps = list(tkr.options or ())
@@ -158,23 +163,48 @@ def _default_fetch_etf_chain(symbol: str) -> Optional[Dict[str, Any]]:
     if chosen_exp is None:
         return {"symbol": symbol, "spot": 0.0, "expiration": "", "dte": 0, "puts": [], "calls": [],
                 "no_expiry": True}
-    chosen_dte = int(exp_dtes[chosen_exp])
 
     hist = tkr.history(period="5d")
     if hist is None or hist.empty:
         return None
-    spot = float(hist["Close"].iloc[-1])
-    ch = tkr.option_chain(chosen_exp)
-    puts = ch.puts.to_dict("records") if ch.puts is not None else []
-    calls = ch.calls.to_dict("records") if ch.calls is not None else []
-    return {
-        "symbol": symbol,
-        "spot": spot,
-        "expiration": chosen_exp,
-        "dte": chosen_dte,
-        "puts": puts,
-        "calls": calls,
-    }
+    spot = float(hist["Close"].dropna().iloc[-1])
+
+    # Candidate expirations in [60, 120] sorted by proximity to 90 DTE
+    candidates = sorted(
+        [(abs(d - TARGET_DTE), e, int(d)) for e, d in exp_dtes.items() if DTE_LO <= d <= DTE_HI]
+    )
+    best_payload: Optional[Dict[str, Any]] = None
+    best_two_sided = -1
+    for _dist, exp, dte in candidates[:3]:
+        try:
+            ch = tkr.option_chain(exp)
+        except Exception:
+            continue
+        puts = ch.puts.to_dict("records") if ch.puts is not None else []
+        calls = ch.calls.to_dict("records") if ch.calls is not None else []
+        two_sided = sum(
+            1
+            for r in puts
+            if _num(r.get("bid")) and _num(r.get("ask"))
+            and float(r.get("bid") or 0) > 0
+            and float(r.get("ask") or 0) >= float(r.get("bid") or 0)
+            and 0.80 * spot <= float(r.get("strike") or 0) <= spot
+        )
+        payload = {
+            "symbol": symbol,
+            "spot": spot,
+            "expiration": exp,
+            "dte": dte,
+            "puts": puts,
+            "calls": calls,
+        }
+        if two_sided > best_two_sided:
+            best_two_sided = two_sided
+            best_payload = payload
+        # Primary expiry has plenty of two-sided quotes — stop immediately
+        if two_sided >= 5:
+            break
+    return best_payload
 
 
 SKIP_PLAIN = {

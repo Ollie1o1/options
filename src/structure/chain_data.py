@@ -336,6 +336,12 @@ def load_live_chain_slice(
         return None
 
     def _parse(records: Sequence[Dict[str, Any]], ot: str) -> List[ChainContract]:
+        from src.data_quality import implied_vol_from_price
+        from src.radar.wide_spread_rule import risk_free_rate
+        from src.utils import bs_delta, bs_theta
+
+        r_rate, _ = risk_free_rate()
+        T = max(chosen_dte, 1) / 365.0
         out: List[ChainContract] = []
         for r in records:
             k = _clean_float(r.get("strike"))
@@ -343,7 +349,21 @@ def load_live_chain_slice(
             a = _clean_float(r.get("ask"))
             if k is None or b is None or a is None or k <= 0 or a < b or a <= 0:
                 continue
-            iv = _clean_float(r.get("impliedVolatility"))
+            mid = 0.5 * (b + a)
+            iv = None
+            if spot is not None and spot > 0 and b > 0:
+                iv = implied_vol_from_price(ot, spot, k, T, r_rate, mid)
+            if iv is None:
+                raw_iv = _clean_float(r.get("impliedVolatility"))
+                if raw_iv is not None and 0.02 <= raw_iv <= 4.0:
+                    iv = raw_iv
+            dl = th = None
+            if spot is not None and spot > 0 and iv is not None and 0.02 <= iv <= 4.0:
+                try:
+                    dl = float(bs_delta(ot, spot, k, T, r_rate, iv))
+                    th = float(bs_theta(ot, spot, k, T, r_rate, iv))
+                except Exception:
+                    pass
             oi = _clean_float(r.get("openInterest")) or 0.0
             vol = _clean_float(r.get("volume")) or 0.0
             out.append(
@@ -352,8 +372,10 @@ def load_live_chain_slice(
                     opt_type=ot,
                     bid=b,
                     ask=a,
-                    mid=0.5 * (b + a),
+                    mid=mid,
                     iv=iv,
+                    delta=dl,
+                    theta=th,
                     open_interest=int(oi),
                     volume=int(vol),
                 )

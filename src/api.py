@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # ── Internal imports (after chdir so relative paths resolve) ───────────────
@@ -342,3 +342,138 @@ async def desk_api_card(ticker: str):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return JSONResponse(payload)
+
+
+@app.get("/desk/api/live-options")
+async def desk_api_live_options(side: str = Query(default="bull_put")):
+    import asyncio
+    from .web_terminal import build_desk_live_options
+
+    loop = asyncio.get_event_loop()
+    try:
+        payload = await loop.run_in_executor(_executor, lambda: build_desk_live_options(side=side))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(payload)
+
+
+@app.get("/desk/api/quotes")
+async def desk_api_quotes(tickers: str = Query(default="SPY,QQQ")):
+    import asyncio
+    from .web_terminal import run_desk_live_quotes
+
+    syms = [x.strip().upper() for x in tickers.split(",") if x.strip()]
+    loop = asyncio.get_event_loop()
+    payload = await loop.run_in_executor(_executor, lambda: run_desk_live_quotes(syms))
+    return JSONResponse(payload)
+
+
+@app.get("/desk/api/express")
+async def desk_api_express(
+    ticker: str = Query(default="SPY"),
+    dir: str = Query(default="BULLISH"),
+    target: float = Query(default=8.0),
+    days: int = Query(default=30),
+    risk: float = Query(default=500.0),
+    account: str = Query(default="tfsa"),
+    owns: int = Query(default=0),
+    live: int = Query(default=1),
+):
+    import asyncio
+    from .web_terminal import build_desk_express
+
+    loop = asyncio.get_event_loop()
+    try:
+        payload = await loop.run_in_executor(
+            _executor,
+            lambda: build_desk_express(
+                ticker=ticker,
+                direction=dir,
+                target_pct=target,
+                days=days,
+                risk_usd=risk,
+                account_type=account,
+                owns_100=bool(owns),
+                allow_live=bool(live),
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(payload)
+
+
+@app.post("/desk/api/update-prices")
+async def desk_api_update_prices():
+    import asyncio
+    from .web_terminal import run_desk_price_update
+
+    loop = asyncio.get_event_loop()
+    try:
+        payload = await loop.run_in_executor(_executor, run_desk_price_update)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(payload)
+
+
+@app.post("/desk/api/alpha/refresh")
+async def desk_api_alpha_refresh(body: Dict[str, Any] = Body(default={})):
+    import asyncio
+    from .web_terminal import run_desk_alpha_refresh
+
+    limit = int((body or {}).get("chain_limit", 15))
+    loop = asyncio.get_event_loop()
+    try:
+        payload = await loop.run_in_executor(_executor, lambda: run_desk_alpha_refresh(chain_limit=limit))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(payload)
+
+
+@app.post("/desk/api/log-pick")
+async def desk_api_log_pick(body: Dict[str, Any] = Body(...)):
+    from .web_terminal import run_desk_log_pick
+
+    try:
+        return JSONResponse(run_desk_log_pick(body))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/desk/api/close-pick")
+async def desk_api_close_pick(body: Dict[str, Any] = Body(...)):
+    from .web_terminal import run_desk_close_pick
+
+    try:
+        return JSONResponse(run_desk_close_pick(body))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/desk/api/import-ws-csv")
+async def desk_api_import_ws_csv(body: Dict[str, Any] = Body(...)):
+    from .web_terminal import run_desk_import_ws_csv
+
+    try:
+        return JSONResponse(run_desk_import_ws_csv(body))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/desk/api/profile")
+async def desk_api_profile(body: Dict[str, Any] = Body(...)):
+    from .web_terminal import run_desk_update_profile
+
+    try:
+        return JSONResponse(run_desk_update_profile(body))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/desk/api/rebalance-apply")
+async def desk_api_rebalance_apply():
+    from .web_terminal import run_desk_apply_rebalance
+
+    try:
+        return JSONResponse(run_desk_apply_rebalance())
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
