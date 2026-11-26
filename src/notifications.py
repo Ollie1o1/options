@@ -309,6 +309,48 @@ def build_events_embed(events: Sequence[AlertEvent]) -> Dict[str, Any]:
     }
 
 
+BLOCKED_ALERT_FLAGS = ("HIST_WEAK_EDGE", "WIDE_SPREAD", "IV_RICH_FOR_LONG")
+
+
+def filter_good_option_alerts(
+    rows: Sequence[Any],
+    *,
+    max_spread_friction: float = 0.20,
+    max_tfsa_friction: float = 0.12,
+    max_tfsa_iv_vs_rv: float = 0.95,
+    min_oi: int = 50,
+) -> List[Any]:
+    """Return only high-conviction options setups worthy of an automated Discord ping.
+
+    Rules (no spam on dead/choppy sessions):
+      - Rejects any candidate carrying earnings or execution/edge red flags
+        (`EARNINGS*`, `HIST_WEAK_EDGE`, `WIDE_SPREAD`, `IV_RICH_FOR_LONG`).
+      - Rejects thin contracts (`min_oi < min_oi`).
+      - Keeps `PROMISING` defined-risk spreads with `friction_pct <= max_spread_friction`.
+      - Keeps TFSA-legal single-leg options (`tfsa_legal=True`) with tight spreads
+        (`friction_pct <= max_tfsa_friction`) AND cheap/fair implied vol
+        (`iv_vs_rv` present and `<= max_tfsa_iv_vs_rv`).
+    """
+    good: List[Any] = []
+    for r in rows:
+        flags = tuple(str(f).upper() for f in (getattr(r, "risk_flags", None) or ()))
+        if any(f.startswith("EARNINGS") or f in BLOCKED_ALERT_FLAGS for f in flags):
+            continue
+        oi = int(getattr(r, "min_oi", 0) or 0)
+        if oi < min_oi:
+            continue
+        fric = float(getattr(r, "friction_pct", 1.0) or 0.0)
+        badge = str(getattr(r, "evidence_badge", "") or "").upper()
+        tfsa_ok = bool(getattr(r, "tfsa_legal", False))
+        iv_rv = getattr(r, "iv_vs_rv", None)
+
+        if badge == "PROMISING" and fric <= max_spread_friction:
+            good.append(r)
+        elif tfsa_ok and fric <= max_tfsa_friction and iv_rv is not None and float(iv_rv) <= max_tfsa_iv_vs_rv:
+            good.append(r)
+    return good
+
+
 def build_options_embed(
     rows: Sequence[Any],
     *,
@@ -419,6 +461,243 @@ def build_option_ticket_embed(
         "color": COLOR_GOOD if friction_pct <= 0.15 else (COLOR_WARN if friction_pct <= 0.25 else COLOR_BAD),
         "fields": fields,
         "footer": {"text": f"Options Desk · {dt.datetime.now().strftime('%Y-%m-%d %H:%M')} · Paper/Limit discipline"},
+    }
+
+
+def _safe_float(val: Any) -> Optional[float]:
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return float(val)
+    return None
+
+
+def build_options_scan_api_embed(
+    payload: Dict[str, Any],
+    *,
+    strategy: str = "all",
+    query: str = "",
+) -> Dict[str, Any]:
+    """Build a Discord embed dict from `GET /desk/api/options/scan` JSON (used by `/options`)."""
+    raw_rows = payload.get("rows")
+    rows: List[Dict[str, Any]] = [r for r in raw_rows if isinstance(r, dict)] if isinstance(raw_rows, list) else []
+    note = str(payload.get("note") or "")
+    today_str = dt.date.today().isoformat()
+
+    promising = [r for r in rows if str(r.get("evidence_badge") or "").upper() == "PROMISING"]
+    tfsa_rows = [r for r in rows if bool(r.get("tfsa_legal"))]
+    other_rows = [r for r in rows if r not in promising and r not in tfsa_rows]
+
+    def _fmt_dict_row(r: Dict[str, Any]) -> str:
+        tk = str(r.get("ticker") or "?")
+        strat = str(r.get("strategy") or "Option")
+        strikes = str(r.get("strikes_label") or "")
+        dte = int(_safe_float(r.get("dte")) or 0)
+        mid = _safe_float(r.get("mid_price")) or 0.0
+        is_cr = bool(r.get("is_credit"))
+        walk = _safe_float(r.get("walk_away_limit")) or mid
+        fric = (_safe_float(r.get("friction_pct")) or 0.0) * 100.0
+        risk = _safe_float(r.get("max_risk_usd")) or 0.0
+        iv_rv = _safe_float(r.get("iv_vs_rv"))
+        iv_s = f" · IV/RV `{iv_rv:.2f}x`" if iv_rv is not None else ""
+        acct = "TFSA OK" if bool(r.get("tfsa_legal")) else "TAXABLE"
+        side_s = f"+${mid:.2f} cr" if is_cr else f"-${mid:.2f} deb"
+        return (
+            f"• **{tk}** {strat} `{strikes}` ({dte}d) — "
+            f"`{side_s}` · Limit `${walk:.2f}` · Fric `{fric:.1f}%` · Risk `${risk:,.0f}`{iv_s} · `{acct}`"
+        )
+
+    fields: List[Dict[str, Any]] = []
+    if promising:
+        fields.append(
+            {
+                "name": f"Promising Defined-Risk Spreads ({len(promising)})",
+                "value": "\n".join(_fmt_dict_row(r) for r in promising[:5])[:1000],
+                "inline": False,
+            }
+        )
+    if tfsa_rows:
+        fields.append(
+            {
+                "name": f"TFSA-Legal Single-Leg Options ({len(tfsa_rows)})",
+                "value": "\n".join(_fmt_dict_row(r) for r in tfsa_rows[:5])[:1000],
+                "inline": False,
+            }
+        )
+    if not fields and other_rows:
+        fields.append(
+            {
+                "name": f"Watchlist / Caution Candidates ({len(other_rows)})",
+                "value": "\n".join(_fmt_dict_row(r) for r in other_rows[:6])[:1000],
+                "inline": False,
+            }
+        )
+    if not fields:
+        fields.append(
+            {
+                "name": "No Setups Found",
+                "value": "0 candidates matched your filter right now.",
+                "inline": False,
+            }
+        )
+
+    q_tag = f" · `{query}`" if query.strip() else ""
+    return {
+        "title": f"Options Hub Scan · {today_str} ({strategy.upper()}){q_tag}",
+        "color": COLOR_GOOD if promising else (COLOR_INFO if tfsa_rows else COLOR_WARN),
+        "description": note or f"{len(rows)} setup(s) returned · limit orders only",
+        "fields": fields,
+        "footer": {"text": "Options Desk · Use /chain <ticker> to inspect strikes & GEX"},
+    }
+
+
+def build_chain_api_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a Discord embed dict from `GET /desk/api/options/chain` JSON (used by `/chain`)."""
+    if not payload.get("found") or not isinstance(payload.get("chain"), dict):
+        tk = str(payload.get("ticker") or "?").upper()
+        err = str(payload.get("error") or f"No chain available for {tk}.")
+        return {
+            "title": f"Chain Matrix · {tk}",
+            "color": COLOR_WARN,
+            "description": err,
+            "footer": {"text": "Options Desk · Try live=True during market hours"},
+        }
+
+    ch: Dict[str, Any] = payload["chain"]
+    tk = str(ch.get("ticker") or "?").upper()
+    spot = _safe_float(ch.get("spot")) or 0.0
+    exp = str(ch.get("expiration") or "—")
+    dte = int(_safe_float(ch.get("dte")) or 0)
+    source = str(ch.get("source") or "chain_archive")
+    atm_iv = _safe_float(ch.get("atm_iv_pct"))
+    rv20 = _safe_float(ch.get("rv20_pct"))
+    iv_rv = _safe_float(ch.get("iv_vs_rv"))
+    em_usd = _safe_float(ch.get("expected_move_usd"))
+    em_pct = _safe_float(ch.get("expected_move_pct"))
+    net_gex = _safe_float(ch.get("net_gex_m"))
+    gex_reg = str(ch.get("gex_regime") or "UNKNOWN")
+    gamma_flip = _safe_float(ch.get("gamma_flip"))
+    call_wall = _safe_float(ch.get("call_wall"))
+    put_wall = _safe_float(ch.get("put_wall"))
+
+    vol_parts: List[str] = [f"Spot `${spot:.2f}`"]
+    if atm_iv is not None:
+        vol_parts.append(f"ATM IV `{atm_iv:.1f}%`")
+    if rv20 is not None:
+        vol_parts.append(f"RV20 `{rv20:.1f}%`")
+    if iv_rv is not None:
+        vol_parts.append(f"IV/RV `{iv_rv:.2f}x`")
+    if em_usd is not None and em_pct is not None:
+        vol_parts.append(f"±1σ `${em_usd:.2f}` (`±{em_pct:.1f}%`)")
+
+    gex_parts: List[str] = []
+    if net_gex is not None:
+        gex_parts.append(f"Net GEX `{net_gex:+.1f}M` ({gex_reg})")
+    if gamma_flip is not None:
+        gex_parts.append(f"Flip `${gamma_flip:.0f}`")
+    if call_wall is not None:
+        gex_parts.append(f"Call Wall `${call_wall:.0f}`")
+    if put_wall is not None:
+        gex_parts.append(f"Put Wall `${put_wall:.0f}`")
+
+    raw_rows = ch.get("rows")
+    pair_rows: List[Dict[str, Any]] = [r for r in raw_rows if isinstance(r, dict)] if isinstance(raw_rows, list) else []
+    sorted_near = sorted(pair_rows, key=lambda r: abs((_safe_float(r.get("strike")) or 0.0) - spot))[:7]
+    sorted_near.sort(key=lambda r: _safe_float(r.get("strike")) or 0.0)
+
+    ladder_lines: List[str] = []
+    for pr in sorted_near:
+        k = _safe_float(pr.get("strike")) or 0.0
+        c_obj = pr.get("call") if isinstance(pr.get("call"), dict) else None
+        p_obj = pr.get("put") if isinstance(pr.get("put"), dict) else None
+        c_mid = _safe_float(c_obj.get("mid")) if c_obj else None
+        p_mid = _safe_float(p_obj.get("mid")) if p_obj else None
+        c_del = _safe_float(c_obj.get("delta")) if c_obj else None
+        p_del = _safe_float(p_obj.get("delta")) if p_obj else None
+        c_s = f"${c_mid:5.2f} Δ{c_del:+.2f}" if (c_mid is not None and c_del is not None) else (f"${c_mid:5.2f}" if c_mid is not None else "  —  ")
+        p_s = f"${p_mid:5.2f} Δ{p_del:+.2f}" if (p_mid is not None and p_del is not None) else (f"${p_mid:5.2f}" if p_mid is not None else "  —  ")
+        tags = pr.get("tags") if isinstance(pr.get("tags"), list) else []
+        mark = "*" if "SPOT" in tags else " "
+        ladder_lines.append(f"{mark}C {c_s:<13} | {k:6.1f} | P {p_s}")
+
+    fields: List[Dict[str, Any]] = [
+        {"name": "Vol & Expected Move", "value": " · ".join(vol_parts), "inline": False},
+    ]
+    if gex_parts:
+        fields.append({"name": "Dealer GEX & OI Walls", "value": " · ".join(gex_parts), "inline": False})
+    if ladder_lines:
+        fields.append(
+            {
+                "name": "Near-ATM Call | Strike | Put",
+                "value": "```\n" + "\n".join(ladder_lines) + "\n```",
+                "inline": False,
+            }
+        )
+    return {
+        "title": f"Chain Matrix · {tk} · {exp} ({dte}d)",
+        "color": COLOR_GOOD if gex_reg == "POSITIVE_GEX" else (COLOR_WARN if gex_reg == "NEGATIVE_GEX" else COLOR_INFO),
+        "description": f"Source: `{source}` · Snapshot `{ch.get('snap_date') or '—'}`",
+        "fields": fields,
+        "footer": {"text": "Options Desk · Run `opt desk --tab options` for full GEX bars & 2D heatmap"},
+    }
+
+
+def build_morning_api_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a Discord embed dict from `GET /desk/api/overview` JSON (used by `/morning`)."""
+    snap = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    book = payload.get("book") if isinstance(payload.get("book"), dict) else {}
+    posture = str(snap.get("regime_posture") or "NEUTRAL")
+    exits = book.get("exit_alerts") if isinstance(book.get("exit_alerts"), list) else []
+
+    spy_last = _safe_float(snap.get("spy_last"))
+    spy_chg = _safe_float(snap.get("spy_chg_1d_pct"))
+    qqq_chg = _safe_float(snap.get("qqq_chg_1d_pct"))
+    vix = _safe_float(snap.get("vix"))
+    rv20 = _safe_float(snap.get("spy_rv20"))
+    spy_s = f"${spy_last:.2f} ({spy_chg:+.1f}%)" if (spy_last is not None and spy_chg is not None) else "—"
+    qqq_s = f"{qqq_chg:+.1f}%" if qqq_chg is not None else "—"
+    vix_s = f"{vix:.1f} ({snap.get('vix_term') or '—'})" if vix is not None else "—"
+    rv_s = f"{rv20:.1f}%" if rv20 is not None else "—"
+
+    core_raw = snap.get("core_allocation") if isinstance(snap.get("core_allocation"), list) else []
+    core_lines: List[str] = []
+    for c in core_raw:
+        if not isinstance(c, dict):
+            continue
+        tk = "SGOV/CASH" if str(c.get("ticker") or "") == "CASH" else str(c.get("ticker") or "?")
+        wt = (_safe_float(c.get("target_weight")) or 0.0) * 100.0
+        core_lines.append(f"**{tk}** `{wt:.0f}%`")
+    core_txt = " · ".join(core_lines) if core_lines else "Run `opt refresh`"
+
+    opps_raw = snap.get("opportunities") if isinstance(snap.get("opportunities"), list) else []
+    tfsa_lines: List[str] = []
+    for o in opps_raw:
+        if not isinstance(o, dict):
+            continue
+        rflags = o.get("risk_flags") if isinstance(o.get("risk_flags"), list) else []
+        pb_id = str(o.get("playbook_id") or "")
+        if "TAXABLE_ONLY" in rflags or pb_id in ("vol_managed_outlook", "etf_wide_spread", "etf_bear_call"):
+            continue
+        tfsa_lines.append(f"• **{o.get('ticker', '?')}** ({o.get('playbook_label', '')}) — {str(o.get('setup_summary') or '')[:70]}")
+    setup_txt = "\n".join(tfsa_lines[:4]) if tfsa_lines else "No satellite TFSA setups firing — stay in Core ETF sleeve."
+
+    eq_picks = book.get("equity_picks") if isinstance(book.get("equity_picks"), list) else []
+    open_eq = [p for p in eq_picks if isinstance(p, dict) and str(p.get("status") or "").upper() == "OPEN"]
+    book_txt = "**EXIT ALERTS:**\n" + "\n".join(f"• {a}" for a in exits[:4]) if exits else f"{len(open_eq)} open stock/ETF pick(s) · 0 exit alerts"
+
+    color = COLOR_BAD if exits else (COLOR_GOOD if posture == "RISK_ON" else (COLOR_BAD if posture == "RISK_OFF" else COLOR_WARN))
+    return {
+        "title": f"Options Desk Brief · {dt.date.today().isoformat()} · [{posture}]",
+        "color": color,
+        "fields": [
+            {
+                "name": "Market Telemetry",
+                "value": f"SPY `{spy_s}` · QQQ `{qqq_s}` · VIX `{vix_s}` · RV20 `{rv_s}`\nNext: `{snap.get('next_macro_event') or '—'}`",
+                "inline": False,
+            },
+            {"name": "Core TFSA Sleeve", "value": core_txt, "inline": False},
+            {"name": "TFSA Satellite Watch", "value": setup_txt[:1000], "inline": False},
+            {"name": "Open Book", "value": book_txt[:1000], "inline": False},
+        ],
+        "footer": {"text": "Options Desk · Use /options or /chain <ticker> for live options scans"},
     }
 
 

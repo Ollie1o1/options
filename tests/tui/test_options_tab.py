@@ -264,6 +264,171 @@ class TestOptionsEngineAndCharts(unittest.TestCase):
             self.assertIn(r.ticker, t_emb["title"])
             self.assertGreaterEqual(len(t_emb["fields"]), 3)
 
+    def test_only_if_good_filter_and_bot_api_embeds(self) -> None:
+        from click.testing import CliRunner
+        from unittest.mock import patch
+
+        from src.cli.main import cli
+        from src.notifications import (
+            build_chain_api_embed,
+            build_morning_api_embed,
+            build_options_scan_api_embed,
+            filter_good_option_alerts,
+        )
+        from src.tui.options_engine import OptionScanRow
+        from src.web_terminal import build_desk_options_chain, build_desk_options_scan
+
+        good_bp = OptionScanRow(
+            ticker="SPY",
+            strategy="Bull Put",
+            strategy_key="bull_put",
+            expiration="2026-12-18",
+            dte=35,
+            strikes_label="575/550P",
+            spot=590.0,
+            short_delta=0.25,
+            mid_price=2.80,
+            is_credit=True,
+            walk_away_limit=2.65,
+            friction_pct=0.08,
+            max_risk_usd=2220.0,
+            max_profit_usd=280.0,
+            ror_pct=12.6,
+            iv_pct=19.0,
+            iv_vs_rv=1.15,
+            skew_vp=3.5,
+            min_oi=400,
+            total_vol=200,
+            tfsa_legal=False,
+            evidence_badge="PROMISING",
+            risk_flags=("TAXABLE_ONLY",),
+        )
+        noisy_bp = OptionScanRow(
+            ticker="NVDA",
+            strategy="Bull Put",
+            strategy_key="bull_put",
+            expiration="2026-12-18",
+            dte=35,
+            strikes_label="130/120P",
+            spot=140.0,
+            short_delta=0.25,
+            mid_price=1.20,
+            is_credit=True,
+            walk_away_limit=1.05,
+            friction_pct=0.09,
+            max_risk_usd=880.0,
+            max_profit_usd=120.0,
+            ror_pct=13.6,
+            iv_pct=48.0,
+            iv_vs_rv=1.20,
+            skew_vp=4.0,
+            min_oi=500,
+            total_vol=300,
+            tfsa_legal=False,
+            evidence_badge="PROMISING",
+            risk_flags=("TAXABLE_ONLY", "EARNINGS_IN_5D"),
+        )
+        good_tfsa = OptionScanRow(
+            ticker="QQQ",
+            strategy="Long Call",
+            strategy_key="long_call",
+            expiration="2026-12-18",
+            dte=40,
+            strikes_label="$510C",
+            spot=505.0,
+            short_delta=0.45,
+            mid_price=11.50,
+            is_credit=False,
+            walk_away_limit=11.60,
+            friction_pct=0.04,
+            max_risk_usd=1150.0,
+            max_profit_usd=10000.0,
+            ror_pct=None,
+            iv_pct=18.5,
+            iv_vs_rv=0.88,
+            skew_vp=2.1,
+            min_oi=350,
+            total_vol=150,
+            tfsa_legal=True,
+            evidence_badge="WATCHLIST",
+            risk_flags=(),
+        )
+        rich_tfsa = OptionScanRow(
+            ticker="TSLA",
+            strategy="Long Call",
+            strategy_key="long_call",
+            expiration="2026-12-18",
+            dte=40,
+            strikes_label="$260C",
+            spot=255.0,
+            short_delta=0.45,
+            mid_price=15.00,
+            is_credit=False,
+            walk_away_limit=15.20,
+            friction_pct=0.05,
+            max_risk_usd=1500.0,
+            max_profit_usd=5000.0,
+            ror_pct=None,
+            iv_pct=65.0,
+            iv_vs_rv=1.35,
+            skew_vp=2.0,
+            min_oi=350,
+            total_vol=150,
+            tfsa_legal=True,
+            evidence_badge="WATCHLIST",
+            risk_flags=("IV_RICH_FOR_LONG",),
+        )
+
+        filtered = filter_good_option_alerts([good_bp, noisy_bp, good_tfsa, rich_tfsa])
+        self.assertEqual([r.ticker for r in filtered], ["SPY", "QQQ"])
+
+        # CLI --only-if-good skips Discord quietly when nothing qualifies
+        runner = CliRunner()
+        with patch("src.tui.options_engine.scan_options_desk", return_value=([noisy_bp, rich_tfsa], "mock scan")):
+            res_quiet = runner.invoke(cli, ["notify", "--options", "--only-if-good", "--dry-run"])
+            self.assertEqual(res_quiet.exit_code, 0, res_quiet.output)
+            self.assertIn('"skipped_quiet": true', res_quiet.output)
+
+        with patch("src.tui.options_engine.scan_options_desk", return_value=([good_bp, noisy_bp], "mock scan")):
+            res_hit = runner.invoke(cli, ["notify", "--options", "--only-if-good", "--dry-run"])
+            self.assertEqual(res_hit.exit_code, 0, res_hit.output)
+            self.assertIn("High-Conviction Alert", res_hit.output)
+            self.assertIn("SPY", res_hit.output)
+            self.assertNotIn("NVDA", res_hit.output)
+
+        # Discord slash command embed builders (/options, /chain, /morning)
+        with tempfile.TemporaryDirectory() as td:
+            prov = OptionsDeskProvider(td)
+            scan_json = build_desk_options_scan(strategy="all", provider=prov)
+            opt_emb = build_options_scan_api_embed(scan_json, strategy="all")
+            self.assertIn("Options Hub Scan", opt_emb["title"])
+            self.assertGreaterEqual(len(opt_emb["fields"]), 1)
+
+            ch_json = build_desk_options_chain(ticker="SPY", expiration=prov.exp_35, provider=prov)
+            ch_emb = build_chain_api_embed(ch_json)
+            self.assertIn("SPY", ch_emb["title"])
+            self.assertTrue(any("Near-ATM" in f["name"] for f in ch_emb["fields"]))
+
+            morn_emb = build_morning_api_embed(
+                {
+                    "snapshot": {
+                        "regime_posture": "RISK_ON",
+                        "spy_last": 590.0,
+                        "spy_chg_1d_pct": 0.6,
+                        "qqq_chg_1d_pct": 0.9,
+                        "vix": 15.2,
+                        "vix_term": "CONTANGO",
+                        "spy_rv20": 13.4,
+                        "next_macro_event": "FOMC",
+                        "core_allocation": [{"ticker": "QQQ", "target_weight": 0.5}],
+                        "opportunities": [],
+                    },
+                    "book": {"equity_picks": [], "exit_alerts": []},
+                }
+            )
+            self.assertIn("RISK_ON", morn_emb["title"])
+            self.assertIn("QQQ", morn_emb["fields"][1]["value"])
+
 
 class TestOptionsTabPilot(unittest.IsolatedAsyncioTestCase):
     async def test_options_scanner_chain_composer_intel_heatmap_and_paper_log(self) -> None:
