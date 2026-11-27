@@ -45,3 +45,17 @@ delta and collected less credit per dollar of width (13.8% vs 15.3%). That offse
   which cross twice, or on live chains with 1-point strikes. The forward study (read ≥ 2027-03-01) tests that.
 - The arms' absolute returns (+1.96% crossed) are **not** evidence of an edge. They are not
   delta-adjusted, and the 2026-10-15 finding that put spreads trail their own delta still stands.
+
+## Correction — 2026-11-27 (spot audit)
+
+`docs/AUDIT_DOLT_SPOT_RESULT_20261127.md` re-ran this study with **official raw closes** in
+place of the put-call-parity spot (entry) and the ratio-scaled adjusted close (settlement):
+
+- **The verdict stands.** Crossed paired difference +0.00% [−0.18%, +0.20%] (2,239 pairs, 373
+  weeks) vs +0.03% [−0.17%, +0.22%] above; a reproduction run of the original method matched
+  the table above exactly.
+- **The arms' absolute returns were overstated:** crossed mean return on capital at risk
+  **+1.29% (selector) / +1.30% (baseline)**, not +1.96% / +1.94%. The parity spot is a forward and
+  ran +0.09% high on average, so slightly too few short puts finished in the money. Any
+  absolute reading of the numbers above should use the corrected figures (they were already
+  flagged as not evidence of an edge).

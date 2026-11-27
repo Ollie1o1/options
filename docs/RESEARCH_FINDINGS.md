@@ -8,6 +8,23 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
+## 2026-11-27 (later) — intraday data applied to the sleeve and to the DoltHub studies
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **Intraday volatility does not improve the VALIDATED sleeve.** 5-minute realised vol (E1) and a HAR forecast (E2) vs the live RV20, 129 months 2016–26, QLIKE on next-month basket variance: E1 +0.071 [−0.019, +0.158], E2 +0.110 [−0.209, +0.365] — both FAIL (97.5% CI). Re-simulated sleeves: E1/E2 Sharpe 0.885/0.898 vs 0.903 and max DD −19.4%/−22.2% vs −16.6%. A daily EWMA (diagnostic) forecasts as well as intraday but leaves Sharpe unchanged. Vol estimation is not the sleeve's binding constraint. | **CLOSED** (live sleeve unchanged) | `RESULT_SLEEVE_INTRADAY_VOL_20261127.md` |
+| 2 | **DoltHub parity spot overstated absolute returns, not the selector verdict.** Parity spot is a forward: +0.09% high, p95 \|error\| 0.37% vs official raw closes (validated against Alpaca SIP raw, every split bracketed). Selector history re-run: paired +0.00% [−0.18, +0.20] (was +0.03%); absolute crossed RoR **+1.29% (was +1.96%)**. Other Dolt modules already use true closes. | **FIXED** (correction recorded) | `AUDIT_DOLT_SPOT_RESULT_20261127.md`, `src/raw_closes.py` |
+| 3 | Alpaca's own daily closes carry post-market prints on ~3% of 2019–20 days (SPY 2020-03-12 off 2.9%); use official closes for truth, Alpaca as a cross-check. | BASELINE | same |
+
+## 2026-11-27 — intraday timing: last 30 minutes, premarket, gaps (index ETFs, shares)
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **Late-day fade (I1) FAILED, with the opposite sign.** Fading the 10:30→15:30 move from 15:30 to the close on SPY/QQQ/IWM/DIA, 2016–2023, 1¢/share each way: **−2.60 bps/day [−4.00, −1.27]**, n=1,997 days, negative 8/8 years. The midday move *continued* into the close 2016–23 (strongest in 2018, 2020 H1, 2022 H1), then the sign flipped: 2024+ fade +1.33 [−0.09, +2.82]. An adaptive follow-or-fade rule nets ≈ 0 (CIs span zero, unstable in lookback). | **CLOSED** (shares) | `RESULT_INTRADAY_LATE_DAY_AND_OPEN_20261127.md` |
+| 2 | **Premarket and gap rules: no edge.** Gap > 0.5% continuation noise (+2.8 [−3.3, +9.5], flips in 2024+); premarket direction slightly *reverses* 09:31→10:00 (≈ −2 bps) but that is the size of the opening spread; Gao-style intraday momentum absent; opening-range continuation ≈ 0. | **CLOSED** (shares) | same |
+| 3 | 0DTE options on these patterns are **untested, not supported**: needs a new forward registration (regime-conditional) plus intraday option quotes. | open question | same |
+| 4 | Alpaca 1-min SIP bars (2016+, premarket included) are now downloadable: `python -m src.intraday.alpaca_bars`. Free plan refuses the last 15 minutes. | BASELINE | `src/intraday/` |
+
 ## 2026-11-26 — paired paper study: generic selector vs liquidity-first baseline
 
 | # | Finding | Status | Detail |
