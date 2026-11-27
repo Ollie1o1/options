@@ -45,3 +45,17 @@ compare Alpaca's raw daily close for SPY and DIA (no splits) against yfinance's 
   moves by more than half the original CI half-width), the interim result doc gets a dated
   correction and the study's spot source is switched to Alpaca.
 - Either way, an `alpaca` raw-close provider is added so future Dolt work can use true closes.
+
+## Amendment A1 — 2026-11-27, after the truth-source check, before any measurement
+
+The check passed as written (SPY / DIA median |Alpaca raw − yfinance Close| = 0.0000%, p95
+0.039% / 0.032%), but its tail showed a defect: on 54 of 1,882 SPY days (49 of them in
+2019–2020) Alpaca's daily close is below both the official close and the 15:59 one-minute
+close (e.g. 2019-01-08: Alpaca 256.62, official 256.77, 15:59 bar 256.69) — consistent with
+post-market prints in older Alpaca daily bars; max 2.9% on 2020-03-12. Since 2021 the two
+agree. Truth is therefore the **official close**: yfinance `Close` (`auto_adjust=False`,
+split-adjusted only) multiplied back by every later split in yfinance's split history.
+Alpaca raw daily closes are kept as an **independent check** of that un-splitting (reported:
+agreement rate per symbol, and every split date bracketed). Measurement 3 (the `dolt_stocks`
+arithmetic) is then the truth construction itself, so it is reported as that cross-check
+rather than as an error estimate.
