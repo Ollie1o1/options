@@ -91,4 +91,14 @@ secondary) motivates (a) a forward shares paper record and (b) a forward 0DTE qu
 
 ## Amendments
 
-None. Amendments only as dated notes, before results, and only in the stricter direction.
+Amendments only as dated notes, before results, and only in the stricter direction.
+
+**A1 — 2026-11-27, before any return was computed: early-close detection.** A data-quality
+check (session counts and missing prices only, no returns) showed the frozen rule "a full
+session iff SPY has a bar starting in [15:55, 15:59]" flags **zero** early closes 2016-2024,
+because extended-hours trades after a 13:00 close still produce bars at 15:55-15:59. The rule
+therefore admitted half-days whose "15:30" and "16:00" prices are after-hours prints. New rule:
+a date is a full session iff the **Alpaca trading calendar** (`/v2/calendar`) lists it with
+`close = 16:00` **and** the original SPY-bar condition holds. Trading dates (for "previous
+trading session") are the calendar's dates. This only removes days (23 early closes since
+2016), so it is in the stricter direction.
