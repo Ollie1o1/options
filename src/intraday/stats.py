@@ -44,9 +44,10 @@ def summarise(x: Sequence[float], block: int = 10, draws: int = 10_000,
                 "lo": float("nan"), "hi": float("nan"), "p": float("nan"), "hit": float("nan")}
     means = block_bootstrap_means(arr, block, draws, seed)
     m = float(arr.mean())
-    lo, hi = np.percentile(means, [2.5, 97.5])
+    q = np.asarray(np.percentile(means, [2.5, 97.5]), dtype=float)
+    lo, hi = float(q[0]), float(q[1])
     p = float(np.mean(np.abs(means - m) >= abs(m)))
-    return {"n": n, "mean": m, "lo": float(lo), "hi": float(hi),
+    return {"n": n, "mean": m, "lo": lo, "hi": hi,
             "p": max(p, 1.0 / draws), "hit": float(np.mean(arr > 0))}
 
 
