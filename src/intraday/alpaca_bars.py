@@ -77,14 +77,15 @@ def clamp_end(end_iso: str, now: Optional[dt.datetime] = None, delay_min: int = 
 
 
 def fetch_bars(get: Callable, headers: Dict[str, str], symbol: str, start: str, end: str,
-               feed: str = "sip", max_retries: int = 6, pause: float = 0.31) -> pd.DataFrame:
+               feed: str = "sip", max_retries: int = 6, pause: float = 0.31,
+               timeframe: str = "1Min", adjustment: str = "raw") -> pd.DataFrame:
     """All 1-minute bars for one symbol in [start, end), following page tokens.
 
     `get` is `requests.get`-compatible (injected so tests need no network).
     Retries 429/5xx with exponential backoff.
     """
-    params = {"symbols": symbol, "timeframe": "1Min", "start": start, "end": end,
-              "feed": feed, "adjustment": "raw", "limit": 10000, "sort": "asc"}
+    params = {"symbols": symbol, "timeframe": timeframe, "start": start, "end": end,
+              "feed": feed, "adjustment": adjustment, "limit": 10000, "sort": "asc"}
     rows: List[dict] = []
     token: Optional[str] = None
     while True:
@@ -140,6 +141,7 @@ def needs_download(path: Path, year: int, month: int, today: dt.date) -> bool:
 
 def download(symbols: List[str], start: str, end: str, out_dir: Path = DEFAULT_OUT,
              feed: str = "sip", get: Optional[Callable] = None,
+             timeframe: str = "1Min", adjustment: str = "raw",
              log: Callable[[str], None] = print) -> Dict[str, int]:
     if get is None:
         import requests
@@ -158,7 +160,8 @@ def download(symbols: List[str], start: str, end: str, out_dir: Path = DEFAULT_O
             e = clamp_end(e)
             if e <= s:
                 continue
-            df = keep_session_window(fetch_bars(get, headers, symbol, s, e, feed=feed))
+            df = keep_session_window(fetch_bars(get, headers, symbol, s, e, feed=feed,
+                                                timeframe=timeframe, adjustment=adjustment))
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             df.to_parquet(tmp, index=False)
@@ -195,6 +198,26 @@ def fetch_calendar(start: str = "2016-01-01", end: Optional[str] = None,
     return cal
 
 
+def fetch_daily(symbols: List[str], start: str, end: str, adjustment: str = "raw",
+                get: Optional[Callable] = None, feed: str = "sip") -> pd.DataFrame:
+    """Daily bars (date, symbol, o/h/l/c/v) with the given adjustment, end clamped for the free plan."""
+    if get is None:
+        import requests
+        get = requests.get
+    key, secret = load_credentials()
+    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    parts = []
+    for sym in symbols:
+        df = fetch_bars(get, headers, sym, f"{start}T00:00:00Z", clamp_end(f"{end}T00:00:00Z"),
+                        feed=feed, timeframe="1Day", adjustment=adjustment)
+        if df.empty:
+            continue
+        df["date"] = df["t"].dt.tz_convert(ET).dt.date
+        parts.append(df.assign(symbol=sym)[["date", "symbol", "o", "h", "l", "c", "v"]])
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(
+        columns=["date", "symbol", "o", "h", "l", "c", "v"])
+
+
 def load_symbol(symbol: str, out_dir: Path = DEFAULT_OUT) -> pd.DataFrame:
     """All stored bars for a symbol, sorted, with `t` as UTC timestamps."""
     files = sorted((out_dir / symbol).glob("*.parquet"))
@@ -211,8 +234,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--end", default=dt.date.today().strftime("%Y-%m"), help="YYYY-MM")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--feed", default="sip")
+    ap.add_argument("--timeframe", default="1Min", help="1Min, 5Min, ... (intraday only)")
+    ap.add_argument("--adjustment", default="raw", choices=["raw", "split", "dividend", "all"])
     a = ap.parse_args(argv)
-    counts = download([s.upper() for s in a.symbols], a.start, a.end, Path(a.out), a.feed)
+    counts = download([s.upper() for s in a.symbols], a.start, a.end, Path(a.out), a.feed,
+                      timeframe=a.timeframe, adjustment=a.adjustment)
     for sym, n in counts.items():
         print(f"{sym}: {n:,} new bars")
     return 0
