@@ -7,8 +7,10 @@ import numpy as np
 
 
 def block_bootstrap_means(x: Sequence[float], block: int = 10, draws: int = 10_000,
-                          seed: int = 20261127, chunk: int = 1_000) -> np.ndarray:
-    """Means of `draws` moving-block resamples of the series `x` (in order)."""
+                          seed: int = 20261127, chunk: int = 1_000, circular: bool = False) -> np.ndarray:
+    """Means of `draws` moving-block resamples of the series `x` (in order).
+
+    `circular=True` wraps blocks around the end (every observation equally likely)."""
     arr = np.asarray(x, dtype=float)
     n = len(arr)
     if n == 0:
@@ -21,8 +23,12 @@ def block_bootstrap_means(x: Sequence[float], block: int = 10, draws: int = 10_0
     done = 0
     while done < draws:
         k = min(chunk, draws - done)
-        starts = rng.integers(0, n - block + 1, size=(k, n_blocks))
-        idx = (starts[:, :, None] + offsets).reshape(k, -1)[:, :n]
+        if circular:
+            starts = rng.integers(0, n, size=(k, n_blocks))
+            idx = ((starts[:, :, None] + offsets) % n).reshape(k, -1)[:, :n]
+        else:
+            starts = rng.integers(0, n - block + 1, size=(k, n_blocks))
+            idx = (starts[:, :, None] + offsets).reshape(k, -1)[:, :n]
         out[done:done + k] = arr[idx].mean(axis=1)
         done += k
     return out
