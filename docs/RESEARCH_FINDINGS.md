@@ -8,6 +8,14 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
+## 2026-11-27 (later) — intraday data applied to the sleeve and to the DoltHub studies
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **Intraday volatility does not improve the VALIDATED sleeve.** 5-minute realised vol (E1) and a HAR forecast (E2) vs the live RV20, 129 months 2016–26, QLIKE on next-month basket variance: E1 +0.071 [−0.019, +0.158], E2 +0.110 [−0.209, +0.365] — both FAIL (97.5% CI). Re-simulated sleeves: E1/E2 Sharpe 0.885/0.898 vs 0.903 and max DD −19.4%/−22.2% vs −16.6%. A daily EWMA (diagnostic) forecasts as well as intraday but leaves Sharpe unchanged. Vol estimation is not the sleeve's binding constraint. | **CLOSED** (live sleeve unchanged) | `RESULT_SLEEVE_INTRADAY_VOL_20261127.md` |
+| 2 | **DoltHub parity spot overstated absolute returns, not the selector verdict.** Parity spot is a forward: +0.09% high, p95 \|error\| 0.37% vs official raw closes (validated against Alpaca SIP raw, every split bracketed). Selector history re-run: paired +0.00% [−0.18, +0.20] (was +0.03%); absolute crossed RoR **+1.29% (was +1.96%)**. Other Dolt modules already use true closes. | **FIXED** (correction recorded) | `AUDIT_DOLT_SPOT_RESULT_20261127.md`, `src/raw_closes.py` |
+| 3 | Alpaca's own daily closes carry post-market prints on ~3% of 2019–20 days (SPY 2020-03-12 off 2.9%); use official closes for truth, Alpaca as a cross-check. | BASELINE | same |
+
 ## 2026-11-27 — intraday timing: last 30 minutes, premarket, gaps (index ETFs, shares)
 
 | # | Finding | Status | Detail |
