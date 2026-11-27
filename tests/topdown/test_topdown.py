@@ -232,7 +232,9 @@ class EvidenceCardTests(unittest.TestCase):
 
     def test_verdict_vocabulary(self) -> None:
         sig = _opp("XOM")
-        self.assertEqual(self._card(_dossier("XOM", active_signals=[sig])).verdict, "TESTED SETUP")
+        self.assertEqual(self._card(_dossier("XOM", active_signals=[sig])).verdict, "SETUP + WARNINGS")
+        rotation = _opp("XOM", "vol_managed_outlook", "VALIDATED")
+        self.assertEqual(self._card(_dossier("XOM", active_signals=[rotation])).verdict, "TESTED SETUP")
         warn = self._card(_dossier("XOM", active_signals=[sig], days_to_earnings=3, earnings_date="2026-11-27"))
         self.assertEqual(warn.verdict, "SETUP + WARNINGS")
         self.assertTrue(any("Earnings in 3d" in w for w in warn.warnings))
@@ -308,7 +310,7 @@ class HubAndRenderingTests(unittest.TestCase):
                             chain_db="/nonexistent.db", with_peer_iv=False)
             out = self._text(R.card_renderable(card))
         for needle in ("1 Verdict", "2 Price structure", "3 Peers", "4 Options", "5 Events",
-                       "7 Where every number came from", "6 Portfolio fit", "TESTED SETUP", "Corr w/ XOM", "Beta vs SPY",
+                       "7 Where every number came from", "6 Portfolio fit", "SETUP + WARNINGS", "Corr w/ XOM", "Beta vs SPY",
                        "MODEL, not market-implied"):
             self.assertIn(needle, out)
 

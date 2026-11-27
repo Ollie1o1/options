@@ -559,7 +559,6 @@ def scan_equity_pullbacks(
     pb = registry.get("equity_pullback")
     if pb is None or not pb.is_default_radar_eligible:
         return []
-    as_of = _now_utc()
     posture_map = posture_map or {}
     earnings_map = earnings_map or {}
     crash_flags = crash_flags or {}
@@ -648,8 +647,8 @@ def scan_equity_pullbacks(
                 confluence_count=1,
                 suggested_stop=round(spot * 0.94, 2),
                 suggested_target=round(max(s5, spot * 1.02), 2),
-                as_of=as_of,
-                extra={"strict": strict_hit, "rsi2": round(rsi2, 2), "sma5": round(s5, 2)},
+                as_of=str(ds[-1]),
+                extra={"strict": strict_hit, "rsi2": round(rsi2, 2), "sma5": round(s5, 2), "data_date": str(ds[-1])},
             )
         )
     return opps
@@ -932,7 +931,6 @@ def scan_archived_etf_wide_spreads(
     from src.structure.execution_plan import format_ladder_lines
 
     r_rate, _r_src = risk_free_rate()
-    as_of = _now_utc()
     opps: List[Opportunity] = []
     for sym in symbols:
         sym_u = str(sym).upper()
@@ -1030,7 +1028,7 @@ def scan_archived_etf_wide_spreads(
                 friction_label=f"{fric_ratio*100:.1f}% cr",
                 friction_value=round(fric_ratio, 4),
                 confluence_count=1,
-                as_of=as_of,
+                as_of=sl.snap_date,
                 extra={
                     "expiration": sl.expiration,
                     "dte": sl.dte,

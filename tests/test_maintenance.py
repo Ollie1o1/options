@@ -545,22 +545,17 @@ class TestCatchupSingleInstance(unittest.TestCase):
     past the DB-layer dedup. Concurrency has to be refused at the source."""
 
     def test_second_catchup_skips_windows_while_one_is_running(self):
-        import fcntl
         calls = []
         with tempfile.TemporaryDirectory() as d:
             lock_path = os.path.join(d, "catchup.lock")
-            held = open(lock_path, "w")
-            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            try:
+            with m._catchup_lock(lock_path) as held:
+                self.assertTrue(held)
                 res = m.run_catchup(
                     state_path=os.path.join(d, "state.json"),
                     now=datetime(2026, 6, 4, 14, 30),  # Thursday, in RTH band
                     runner=lambda cmd: (calls.append(cmd), 0)[1],
                     watch_fn=lambda db: None,
                     lock_path=lock_path)
-            finally:
-                fcntl.flock(held, fcntl.LOCK_UN)
-                held.close()
         self.assertEqual(calls, [])      # ran no scans
         self.assertEqual(res["ran"], [])
 
@@ -1180,18 +1175,22 @@ class TestLensSnapshotStep(unittest.TestCase):
             fn = mock.Mock(return_value={"rows_new": 12, "rows_seen": 40})
             self._run(d, datetime(2026, 11, 24, 16, 15), fn)
             fn.assert_not_called()
-            out = self._run(d, datetime(2026, 11, 24, 16, 45), fn)
+            self._run(d, datetime(2026, 11, 24, 17, 59), fn)
+            fn.assert_not_called()
+            out = self._run(d, datetime(2026, 11, 24, 18, 0), fn)
             self.assertIn("lens-snapshot:12new/40", out["ran"])
-            self._run(d, datetime(2026, 11, 24, 18, 0), fn)
-            self.assertEqual(fn.call_count, 1)
+            self._run(d, datetime(2026, 11, 24, 19, 0), fn)
+            fn.assert_called_once_with(record_date="2026-11-24", expected_session="2026-11-24")
 
     def test_a_failure_is_not_stamped_and_retries(self):
         with tempfile.TemporaryDirectory() as d:
-            fn = mock.Mock(side_effect=RuntimeError("boom"))
-            out = self._run(d, datetime(2026, 11, 24, 17, 0), fn)
+            fn = mock.Mock(side_effect=[{"complete": False, "reason": "stale"}, RuntimeError("boom"), {}])
+            out = self._run(d, datetime(2026, 11, 24, 18, 0), fn)
+            self.assertIn("lens-snapshot:incomplete(stale; will retry)", out["ran"])
+            out = self._run(d, datetime(2026, 11, 24, 18, 30), fn)
             self.assertTrue(any(r.startswith("lens-snapshot:failed") for r in out["ran"]))
-            self._run(d, datetime(2026, 11, 24, 18, 0), fn)
-            self.assertEqual(fn.call_count, 2)
+            self._run(d, datetime(2026, 11, 24, 19, 0), fn)
+            self.assertEqual(fn.call_count, 3)
 
 
 class TestDiscoveryPriceStep(unittest.TestCase):

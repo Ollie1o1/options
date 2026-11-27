@@ -374,7 +374,7 @@ def filter_good_option_alerts(
     max_tfsa_iv_vs_rv: float = 0.95,
     min_oi: int = 100,
 ) -> List[Any]:
-    """Return only high-conviction options setups worthy of an automated Discord ping.
+    """Return rows that pass the configured liquidity, cost, and warning screen.
 
     Rules (quant execution discipline — zero spam on dead/wide sessions):
       - Rejects any candidate carrying earnings or execution/edge red flags
@@ -390,7 +390,7 @@ def filter_good_option_alerts(
     good: List[Any] = []
     for r in rows:
         flags = tuple(str(f).upper() for f in (getattr(r, "risk_flags", None) or ()))
-        if any(f.startswith("EARNINGS") or f in BLOCKED_ALERT_FLAGS for f in flags):
+        if any(f.startswith(("EARN_", "EARN:", "EARNINGS")) or f in BLOCKED_ALERT_FLAGS for f in flags):
             continue
         oi = int(getattr(r, "min_oi", 0) or 0)
         if oi < min_oi:
@@ -593,7 +593,7 @@ def build_options_embed(
             ror_s = f" · RoR `{ror:.0f}%`" if ror is not None else ""
             return (
                 f"• **{r.ticker}**{spot_s} · {r.strategy} `{r.strikes_label}` {exp_lbl}{delta_s}\n"
-                f"  Cr `+${r.mid_price:.2f}` (Min `${r.walk_away_limit:.2f}`){ror_s} · "
+                f"  Cr `+${r.mid_price:.2f}` (Ref `${r.walk_away_limit:.2f}`){ror_s} · "
                 f"Risk `${r.max_risk_usd:,.0f}` · Fric `{r.friction_pct*100:.1f}%`{vol_s}{oi_s}{acct_s}"
             )
 
@@ -608,7 +608,7 @@ def build_options_embed(
         be_s = f" · BE `${be_info[0]:.2f}` (`{be_info[1]:+.1f}%`)" if be_info is not None else ""
         return (
             f"• **{r.ticker}**{spot_s} · {r.strategy} `{r.strikes_label}` {exp_lbl}{delta_s}{be_s}\n"
-            f"  Limit `${r.walk_away_limit:.2f}` · Fric `{r.friction_pct*100:.1f}%`{vol_s}{oi_s}{acct_s}"
+            f"  Ref `${r.walk_away_limit:.2f}` · Fric `{r.friction_pct*100:.1f}%`{vol_s}{oi_s}{acct_s}"
         )
 
     fields: List[Dict[str, Any]] = []
@@ -700,7 +700,7 @@ def build_options_embed(
     sess_key = resolve_market_session(session) if session else ""
     sess_title, sess_desc = SESSION_TITLES.get(sess_key, ("", ""))
     if sess_title:
-        tag = "High-Conviction · " if "High-Conviction" in title_prefix else ""
+        tag = "Passed Screen · " if "Passed Screen" in title_prefix else ""
         final_title = f"Options Desk · {tag}{sess_title} · {today_str} ({strategy.upper()})"
     else:
         final_title = f"{title_prefix} · {today_str} ({strategy.upper()})"
@@ -807,7 +807,7 @@ def build_options_scan_api_embed(
         side_s = f"+${mid:.2f} cr" if is_cr else f"-${mid:.2f} deb"
         return (
             f"• **{tk}** {strat} `{strikes}` ({dte}d) — "
-            f"`{side_s}` · Limit `${walk:.2f}` · Fric `{fric:.1f}%` · Risk `${risk:,.0f}`{iv_s} · `{acct}`"
+            f"`{side_s}` · Ref `${walk:.2f}` · Fric `{fric:.1f}%` · Risk `${risk:,.0f}`{iv_s} · `{acct}`"
         )
 
     fields: List[Dict[str, Any]] = []

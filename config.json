@@ -641,5 +641,9 @@
     "max_age_minutes": 120,
     "evidence_note": "Paper evidence only: gate-passed Bear Calls on ETFs, Aug-Oct 2026, PF 2.2, but not yet shown to beat their own market direction. Forward verdict due 2027-01-20. Size small.",
     "_note": "Push alerts (src/trade_alerts.py). Credentials live in .env: DISCORD_WEBHOOK_URL and/or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID. Rule = where the evidence points (docs/RESEARCH_FINDINGS.md)."
+  },
+  "selector_study": {
+    "enabled": true,
+    "_note": "Paper research only (docs/PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md). When enabled, the daily chain archive also covers the study's 40 frozen symbols and maintenance records the study after the archive completes. Writes data/selector_study.db only; never the ledger, gates or weights."
   }
 }

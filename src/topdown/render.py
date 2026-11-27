@@ -323,12 +323,13 @@ def lens_table(res: LensResult, *, limit: Optional[int] = None, hub: Optional[Di
     t = Table(box=box.SIMPLE_HEAD, pad_edge=False, show_edge=False)
     t.add_column("Ticker", style="bold")
     t.add_column("Sector", style="dim")
+    t.add_column("Evidence")
     t.add_column("Why it is listed")
     t.add_column("Warnings", style=RED)
     t.add_column("As of", style="dim")
     rows = res.rows if limit is None else res.rows[:limit]
     for r in rows:
-        t.add_row(r.ticker, r.sector_etf or "—", r.why, ", ".join(r.flags) or "", r.as_of or "—")
+        t.add_row(r.ticker, r.sector_etf or "—", r.evidence_label or res.lens.label, r.why, ", ".join(r.flags) or "", r.as_of or "—")
     return t
 
 
@@ -411,8 +412,8 @@ def forward_panel(rep: Sequence[Any]) -> Panel:
     lock = (Text("Outcomes are not computed yet: the read unlocks on " + READ_NOT_BEFORE
                  + f" with {MIN_WEEKS} complete weeks per lens (preregistered, so nobody can peek and re-tune).",
                  style=AMBER) if not any_open else Text(""))
-    rule = Text(f"Rule: {PREREG}. One observation = one lens-week; entry the session after each row's "
-                "data date; 10 bps cost; Bonferroni 99.17% CI across 6 lenses.", style="dim")
+    rule = Text(f"Rule: {PREREG}. One observation = one lens-week; entry after both the data date and "
+                "first record; 10 bps cost; Bonferroni 99.17% CI across 6 lenses.", style="dim")
     return Panel(Group(head, lock, t, rule), title="Discover lenses — forward record", title_align="left",
                  border_style=GREY)
 

@@ -39,12 +39,37 @@ CREATE TABLE IF NOT EXISTS chain_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_snap_symbol_date
     ON chain_snapshots (symbol, snap_date);
+CREATE TABLE IF NOT EXISTS archive_attempts (
+    snap_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    status TEXT NOT NULL,       -- archived | no_rows | error | feed_down
+    detail TEXT,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    attempted_at TEXT NOT NULL,
+    PRIMARY KEY (snap_date, symbol)
+);
 """
 
 _COLUMNS = ["symbol", "snap_date", "contract", "type", "strike", "expiration",
             "bid", "ask", "bid_size", "ask_size", "iv", "delta", "gamma",
             "theta", "vega", "rho", "open_interest", "volume",
             "last_trade_time", "spot", "snapshot_ts", "source"]
+
+
+def _record_attempt(conn: sqlite3.Connection, snap_date: str, symbol: str,
+                    status: str, detail: Optional[str] = None) -> None:
+    """Keep the last outcome of each symbol's archive attempt for the day.
+
+    Without it a missing snapshot cannot say whether the provider failed,
+    the symbol returned no usable rows, or the run never reached it.
+    An archived symbol is never downgraded by a later failed retry."""
+    conn.execute(
+        "INSERT INTO archive_attempts (snap_date, symbol, status, detail, attempts, attempted_at) "
+        "VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT(snap_date, symbol) DO UPDATE SET "
+        "attempts = attempts + 1, attempted_at = excluded.attempted_at, "
+        "status = CASE WHEN archive_attempts.status = 'archived' THEN 'archived' ELSE excluded.status END, "
+        "detail = CASE WHEN archive_attempts.status = 'archived' THEN archive_attempts.detail ELSE excluded.detail END",
+        (snap_date, symbol, status, detail, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")))
 
 
 def ensure_db(db_path: str = DEFAULT_DB) -> None:
@@ -299,6 +324,13 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
             sym = sym.upper()
             if max_consecutive_failures and streak >= max_consecutive_failures:
                 st["aborted"] = True
+                for rest in symbols[symbols.index(sym):]:
+                    rest = rest.upper()
+                    if not conn.execute("SELECT 1 FROM chain_snapshots WHERE symbol=? AND snap_date=? LIMIT 1",
+                                        (rest, today)).fetchone():
+                        _record_attempt(conn, today, rest, "feed_down",
+                                        f"run stopped after {streak} consecutive failures")
+                conn.commit()
                 break
             try:
                 done = conn.execute(
@@ -317,6 +349,8 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                         f"INSERT OR IGNORE INTO chain_snapshots ({','.join(_COLUMNS)}) "
                         f"VALUES ({','.join('?' * len(_COLUMNS))})", values)
                     written += 1
+                _record_attempt(conn, today, sym, "archived" if rows else "no_rows",
+                                None if rows else "provider returned no rows inside the archive filter")
                 conn.commit()
                 if rows:
                     st["archived"] += 1
@@ -324,9 +358,14 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                 else:
                     st["failed"].append(sym)
                     streak += 1
-            except Exception:
+            except Exception as exc:
                 st["failed"].append(sym)
                 streak += 1
+                try:
+                    _record_attempt(conn, today, sym, "error", f"{type(exc).__name__}: {exc}"[:300])
+                    conn.commit()
+                except sqlite3.Error:
+                    pass
                 continue
     finally:
         conn.close()

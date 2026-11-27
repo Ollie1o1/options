@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import sqlite3
+from contextlib import closing
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -108,7 +109,7 @@ def _load_cohort(db_path: str, phase1_start: str, max_capital_at_risk: Optional[
     # Do NOT wrap this in a try/except returning an empty cohort — that reads a
     # missing ledger as a ledger with no evidence, which is the same conflation
     # the score_adjustments NULL convention exists to avoid.
-    with sqlite3.connect(_ro_uri(db_path), uri=True) as conn:
+    with closing(sqlite3.connect(_ro_uri(db_path), uri=True)) as conn:
         if max_capital_at_risk is not None:
             sql += (" AND capital_at_risk IS NOT NULL AND capital_at_risk <= "
                     + budget_ceiling_sql(conn))
@@ -282,7 +283,7 @@ def _load_short_premium_cohort(db_path: str, phase1_start: str,
     params: list = [*SHORT_PREMIUM_STRATEGIES, phase1_start]
     rows: list = []
     try:
-        with sqlite3.connect(_ro_uri(db_path), uri=True) as conn:
+        with closing(sqlite3.connect(_ro_uri(db_path), uri=True)) as conn:
             # Same ceiling rule as `_load_cohort`. One ledger must not give
             # two answers about what "inside the budget" means.
             if max_capital_at_risk is not None:

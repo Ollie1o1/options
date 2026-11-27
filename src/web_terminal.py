@@ -1150,10 +1150,10 @@ svg { width: 100%; height: auto; display: block; }
           </div>
           <div class="grid">
             <div class="c7" style="overflow-x:auto">
-              <table id="oh-scan-tbl"><thead><tr><th>Badge</th><th>Ticker</th><th>Strategy</th><th>Exp</th><th>Strikes</th><th class="num">Mid</th><th class="num">Limit</th><th class="num">Fric%</th><th class="num">Risk$</th><th>TFSA</th></tr></thead><tbody></tbody></table>
+              <table id="oh-scan-tbl"><thead><tr><th>Badge</th><th>Ticker</th><th>Strategy</th><th>Exp</th><th>Strikes</th><th class="num">Mid</th><th class="num">Ref Price</th><th class="num">Fric%</th><th class="num">Risk$</th><th>TFSA</th></tr></thead><tbody></tbody></table>
             </div>
             <div class="c5">
-              <div id="oh-scan-insp" class="card" style="background:var(--panel)"><span class="muted">Click any candidate row to inspect its 2D Price×IV Risk Heatmap, Greeks, Walk-Away Ladder, or jump to its Chain Matrix.</span></div>
+              <div id="oh-scan-insp" class="card" style="background:var(--panel)"><span class="muted">Click any candidate row to inspect its 2D Price×IV Risk Heatmap and Greeks, or jump to its Chain Matrix.</span></div>
             </div>
           </div>
         </div>

@@ -1,9 +1,11 @@
 """`opt lab` — Quarantined Research, Ops Health, Playbook Registry & Real-Fill Tracker."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import shutil
+from typing import Any, TextIO
 
 import click
 from rich.table import Table
@@ -17,6 +19,226 @@ from .render import TIER_STYLE, make_console
 @click.group("lab")
 def lab_group() -> None:
     """Quarantined ops, playbook audit registry, forward readouts & real-fill harness."""
+
+
+@lab_group.command("scan-audit")
+@click.option("--ticker", "tickers", multiple=True, help="Limit the scan to one or more tickers.")
+@click.option("--live", is_flag=True, help="Fetch Yahoo chains. Default: read local chain snapshots.")
+@click.option("--out", type=click.File("w", encoding="utf-8", atomic=True),
+              help="Save this scan and its coverage as JSON for paper research.")
+@click.pass_context
+def lab_scan_audit(ctx: click.Context, tickers: tuple[str, ...], live: bool, out: TextIO | None) -> None:
+    """Inspect contract discovery coverage and capture the screen's decisions."""
+    from src.notifications import filter_good_option_alerts
+    from src.tui.options_engine import scan_options_desk
+
+    obj = ctx.obj or {}
+    coverage: dict[str, Any] = {}
+    capture = out is not None or obj.get("json", False)
+    inputs: list[dict[str, Any]] = []
+    rows, note = scan_options_desk(
+        symbols=tuple(dict.fromkeys(t.strip().upper() for t in tickers if t.strip())) or None,
+        live=live, ohlcv_db=obj.get("ohlcv_db", "data/equity_ohlcv.db"), pulse_out=coverage,
+        research_inputs=inputs if capture else None,
+    )
+    passed = {id(r) for r in filter_good_option_alerts(rows)}
+    payload = {
+        "schema_version": 1,
+        "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "scope": "Paper research. Screen decisions and displayed quotes only. Fills are unmeasured.",
+        "source": "yahoo_request" if live else "chain_archive",
+        "status": note,
+        "coverage": coverage.get("coverage", []),
+        "rows": [{**row.to_dict(), "passed_alert_screen": id(row) in passed} for row in rows],
+        "selector_inputs": inputs,
+    }
+    if capture:
+        raw = json.dumps(payload, indent=2, allow_nan=False)
+        if out is not None:
+            click.echo(raw, file=out)
+        if obj.get("json") and (out is None or out.name != "<stdout>"):
+            click.echo(raw)
+        if obj.get("json") or (out is not None and out.name == "<stdout>"):
+            return
+
+    click.echo(note)
+    table = Table("Ticker", "Coverage", "Expirations read", "Two-sided quotes", "Candidates")
+    for item in payload["coverage"]:
+        table.add_row(item["ticker"], item["status"], str(item.get("checked", 0)),
+                      str(item.get("two_sided", 0)), str(item["candidates"]))
+    make_console(no_color=bool(obj.get("no_color"))).print(table)
+    click.echo(f"{len(passed)}/{len(rows)} displayed candidates passed the alert screen. Fills are unmeasured.")
+
+
+@lab_group.command("scan-replay")
+@click.argument("snapshot", type=click.File("r", encoding="utf-8"))
+def lab_scan_replay(snapshot: TextIO) -> None:
+    """Compare the current generic selector with a saved scan on identical quotes."""
+    from src.tui.options_engine import replay_option_scan
+
+    try:
+        saved = json.load(snapshot)
+        if saved.get("schema_version") != 1 or not saved.get("selector_inputs"):
+            raise ValueError("Expected a version 1 scan audit with captured selector inputs.")
+        comparison = replay_option_scan(saved)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(comparison, indent=2, allow_nan=False))
+
+
+# ── Selector vs liquidity-first baseline (docs/PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md) ──
+
+_STUDY_DB = "data/selector_study.db"
+
+
+def _study_paths(f: Any) -> Any:
+    f = click.option("--study-db", default=_STUDY_DB, show_default=True, help="Study database (research only).")(f)
+    f = click.option("--chain-db", default="data/chain_archive.db", show_default=True)(f)
+    f = click.option("--ohlcv-db", default="data/equity_ohlcv.db", show_default=True)(f)
+    f = click.option("--today", default=None, help="Override today's date (YYYY-MM-DD, ET).")(f)
+    return f
+
+
+def _emit_study(ctx: click.Context, result: dict, as_json: bool) -> None:
+    from src.selector_study import readout as _ro
+
+    if as_json or (ctx.obj or {}).get("json"):
+        click.echo(json.dumps(result, indent=2, allow_nan=False, default=str))
+    elif "verdict" in result:
+        click.echo(_ro.render(result))
+    else:
+        click.echo(json.dumps(result, indent=2, default=str))
+
+
+@lab_group.group("study")
+def lab_study() -> None:
+    """Paper study: generic bull-put selector vs a matched liquidity-first baseline."""
+
+
+@lab_study.command("capture")
+@_study_paths
+@click.option("--session", "sessions", multiple=True, help="Archived session(s). Default: every archived session.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def lab_study_capture(ctx: click.Context, study_db: str, chain_db: str, ohlcv_db: str, today: str | None,
+                      sessions: tuple[str, ...], as_json: bool) -> None:
+    """Capture archived sessions and build both arms. Idempotent; retries missing symbols."""
+    from src.selector_study import capture, db, workflow
+
+    today = today or workflow._et_today()
+    conn = db.connect(repo_path(study_db))
+    try:
+        todo = list(sessions) or capture.archive_sessions(chain_db)
+        earn = _earnings_today()
+        out = [capture.capture_session(conn, s, chain_db=chain_db, earnings=earn if s == today else None)
+               for s in todo if s <= today]
+    finally:
+        conn.close()
+    _emit_study(ctx, {"captures": out}, as_json)
+
+
+def _earnings_today() -> dict:
+    try:
+        from src.tui.options_engine import _load_earnings_map
+        return _load_earnings_map()
+    except Exception:
+        return {}
+
+
+@lab_study.command("mark")
+@_study_paths
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def lab_study_mark(ctx: click.Context, study_db: str, chain_db: str, ohlcv_db: str, today: str | None,
+                   as_json: bool) -> None:
+    """Record later archived quotes for every open study entry."""
+    from src.selector_study import db, marks, workflow
+
+    conn = db.connect(repo_path(study_db))
+    try:
+        out = marks.mark_entries(conn, chain_db=chain_db, ohlcv_db=ohlcv_db, today=today or workflow._et_today())
+    finally:
+        conn.close()
+    _emit_study(ctx, {"marks": out}, as_json)
+
+
+@lab_study.command("readout")
+@_study_paths
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def lab_study_readout(ctx: click.Context, study_db: str, chain_db: str, ohlcv_db: str, today: str | None,
+                      as_json: bool) -> None:
+    """Coverage, matching, outcomes and the week-clustered paired difference."""
+    from src.selector_study import db, readout, workflow
+
+    if not os.path.exists(repo_path(study_db)):
+        raise click.ClickException(f"No study database at {study_db}. Run `opt lab study run` first.")
+    conn = db.connect(repo_path(study_db))
+    try:
+        result = readout.build(conn, today=today or workflow._et_today())
+    finally:
+        conn.close()
+    _emit_study(ctx, result, as_json)
+
+
+@lab_study.command("run")
+@_study_paths
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def lab_study_run(ctx: click.Context, study_db: str, chain_db: str, ohlcv_db: str, today: str | None,
+                  as_json: bool) -> None:
+    """Capture every archived session, mark, and print the readout."""
+    from src.selector_study import workflow
+
+    today = today or workflow._et_today()
+    out = workflow.run(study_db=repo_path(study_db), chain_db=chain_db, ohlcv_db=ohlcv_db, today=today,
+                       earnings=_earnings_today())
+    if as_json or (ctx.obj or {}).get("json"):
+        click.echo(json.dumps(out, indent=2, allow_nan=False, default=str))
+        return
+    caps = [c for c in out["captures"] if not c.get("skipped")]
+    click.echo(f"Captured {len(caps)} session(s); {len(out['captures']) - len(caps)} already frozen. "
+               f"Marks written {out['marks']['written']} over {out['marks']['entries']} entries.")
+    _emit_study(ctx, out["readout"], False)
+
+
+@lab_study.command("history")
+@click.option("--fetch", is_flag=True, help="Download missing weekly DoltHub chains first (resumable, slow).")
+@click.option("--out-dir", default="data/selector_study_dolt", show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def lab_study_history(ctx: click.Context, fetch: bool, out_dir: str, as_json: bool) -> None:
+    """Historical hold-to-expiry companion on DoltHub EOD chains (2019-2026)."""
+    from src.selector_study import dolt_history
+
+    if fetch:
+        dolt_history.fetch()
+    out = dolt_history.run(out_dir=repo_path(out_dir))
+    if as_json or (ctx.obj or {}).get("json"):
+        click.echo(json.dumps(out, indent=2, allow_nan=False, default=str))
+        return
+    click.echo(f"Converted {out['convert'].get('chains')} chains · settle {out['settle']}")
+    _emit_study(ctx, out["readout"], False)
+
+
+@lab_study.command("demo")
+@click.option("--dir", "directory", required=True, type=click.Path(file_okay=False),
+              help="Empty scratch folder for the synthetic archive and study database.")
+@click.option("--sessions", default=85, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def lab_study_demo(ctx: click.Context, directory: str, sessions: int, as_json: bool) -> None:
+    """Run the full workflow on SYNTHETIC data. Never touches data/."""
+    from src.selector_study import workflow
+
+    if os.path.abspath(directory).startswith(os.path.abspath(repo_path("data"))):
+        raise click.ClickException("Choose a folder outside data/ for synthetic files.")
+    out = workflow.demo(directory, sessions=sessions)
+    if as_json or (ctx.obj or {}).get("json"):
+        click.echo(json.dumps(out, indent=2, allow_nan=False, default=str))
+        return
+    click.echo(f"Synthetic archive: {out['synthetic']['rows']} quotes, planted {out['synthetic']['planted']}")
+    _emit_study(ctx, out["readout"], False)
 
 
 @lab_group.command("health")

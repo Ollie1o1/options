@@ -48,6 +48,7 @@ Read-only. Never writes to the ledger.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -112,7 +113,7 @@ def load_cohort(db_path: str, phase1_start: str,
         sql += " AND capital_at_risk <= ?"
         params.append(float(max_capital_at_risk))
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             sql += exclude_ruled_duplicates(conn)
             return [dict(r) for r in conn.execute(sql, params)]

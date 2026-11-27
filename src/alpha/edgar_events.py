@@ -106,10 +106,8 @@ def parse_efts_hits(
                 if cand.isalpha() and 1 <= len(cand) <= 5 and not cand.startswith("CIK"):
                     ticker = cand
                     break
-        if not ticker:
-            # Keep entity prefix so user still sees the spinoff/activist filing
-            ticker = (entity.split()[0][:6].upper() if entity else "SEC")
-        eid = f"{event_type}:{adsh or (ticker + ':' + filed)}"
+        # An entity name without a listed symbol remains an unresolved event.
+        eid = f"{event_type}:{adsh or ((ticker or entity) + ':' + filed)}"
         if eid in seen or not filed:
             continue
         seen.add(eid)
@@ -237,9 +235,12 @@ def save_edgar_events(events: Sequence[EdgarEvent], db_path: str = DEFAULT_EDGAR
             for e in events
         ]
         con.executemany(
-            "INSERT OR REPLACE INTO edgar_events "
+            "INSERT INTO edgar_events "
             "(event_id, event_type, ticker, entity_name, filed_date, summary, metric_value, source, fetched_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(event_id) DO UPDATE SET ticker=excluded.ticker, entity_name=excluded.entity_name, "
+            "filed_date=excluded.filed_date, summary=excluded.summary, metric_value=excluded.metric_value, "
+            "source=excluded.source, fetched_at=MIN(edgar_events.fetched_at, excluded.fetched_at)",
             rows,
         )
         con.commit()

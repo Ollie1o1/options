@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import statistics
+from contextlib import closing
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
@@ -112,7 +113,7 @@ def fetch_stop_exits(db_path: str) -> List[Dict[str, Any]]:
         "WHERE UPPER(status) = 'CLOSED' AND exit_reason IS NOT NULL"
     )
     out: List[Dict[str, Any]] = []
-    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         for row in conn.execute(sql):
             r = dict(row)

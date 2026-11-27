@@ -534,6 +534,11 @@ class TestPhase3AlphaLabsAndLenses(unittest.TestCase):
             sp = load_cached_edgar_events(db_path=edb, event_type="SPINOFF_FORM10")
             self.assertEqual(len(sp), 1)
             self.assertEqual(sp[0].ticker, "SPNC")
+            from dataclasses import replace
+
+            save_edgar_events([replace(evs[0], fetched_at="2099-01-01T00:00:00Z")], db_path=edb)
+            self.assertEqual(load_cached_edgar_events(db_path=edb, event_type="SPINOFF_FORM10")[0].fetched_at,
+                             evs[0].fetched_at)
 
             # Refresh with mocked getter (no network)
             def _fake_get(url: str) -> Dict[str, Any]:

@@ -65,7 +65,7 @@ def fill_lens(tbl: DataTable, res: LensResult, all_results: List[LensResult]) ->
     for i, r in enumerate(res.rows):
         tbl.add_row(
             Text(r.ticker, style="bold"), r.sector_etf or "—", tag_chips(tags.get(r.ticker, [])),
-            Text(", ".join(r.flags), style="#e06c75"), r.why[:70], r.as_of or "—",
+            Text(", ".join(r.flags), style="#e06c75"), (f"{r.evidence_label} · " + r.why if r.evidence_label else r.why)[:70], r.as_of or "—",
             key=f"{i}|{r.ticker}",
         )
         out.append(r.ticker)

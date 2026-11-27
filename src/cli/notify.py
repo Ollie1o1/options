@@ -34,7 +34,7 @@ from src.tui.state import DeskDataProvider
 @click.option("--live", is_flag=True, help="With --options: pull live Yahoo option chains across all 60 ETFs & leaders.")
 @click.option("--tickers", default="", help="With --options: comma-separated tickers (leave blank for full 60-ticker market scan).")
 @click.option("--session", default="auto", show_default=True, type=click.Choice(["auto", "morning", "midday", "afternoon", "manual"], case_sensitive=False), help="With --options: session framing for the Discord brief.")
-@click.option("--only-if-good", is_flag=True, help="With --options: only ping Discord when setups clear strict friction & edge criteria (silent on dead days).")
+@click.option("--only-if-good", is_flag=True, help="With --options: only ping Discord when setups pass the liquidity, cost, and event screen.")
 @click.option("--check", is_flag=True, help="Check for new action-only events (open pick exits, clean TFSA setups, stale pipes).")
 @click.option("--pill", is_flag=True, help="Print compact 1-line status pill for macOS menu bar / prompt.")
 @click.option("--test-macos", is_flag=True, help="Send one clean test macOS notification.")
@@ -139,6 +139,7 @@ def notify_cmd(
                     "skipped_quiet": True,
                     "discord_sent": False,
                     "note": note,
+                    "coverage": pulse.get("coverage", []),
                     "dry_run": dry_run,
                 }
                 if use_json or dry_run:
@@ -149,11 +150,11 @@ def notify_cmd(
                     return
             else:
                 embed_note = (
-                    f"Signal-only filter: {len(selected_rows)}/{len(rows)} high-conviction setup(s) · {note}"
+                    f"Signal-only filter: {len(selected_rows)}/{len(rows)} candidate(s) passed the screen · {note}"
                     if only_if_good
                     else note
                 )
-                title_prefix = "Options Desk · High-Conviction Alert" if only_if_good else "Options Desk · Top Setups"
+                title_prefix = "Options Desk · Passed Screen" if only_if_good else "Options Desk · Top Setups"
                 embed = build_options_embed(
                     selected_rows,
                     note=embed_note,
@@ -170,6 +171,7 @@ def notify_cmd(
                     "scanned": len(rows),
                     "count": len(selected_rows),
                     "note": embed_note,
+                    "coverage": pulse.get("coverage", []),
                     "dry_run": dry_run,
                     "discord_embed": embed,
                 }

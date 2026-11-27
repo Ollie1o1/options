@@ -31,6 +31,7 @@ opt today                             # 10-second Morning Action Brief (Market M
 | **Phase 3 Alpha Labs (TFSA Shares)** | `opt alpha skew` · `opt alpha gex SPY` · `opt alpha edgar --refresh` · `opt alpha macro --refresh` · `opt alpha premortem NVDA` |
 | **Discord & Quiet macOS Alerts** | `opt notify --morning` · `opt notify --check` · `opt notify --pill` · `opt notify --test-macos` |
 | **Mission Lab & Disk Cleanup** | `opt lab health` · `opt lab playbooks` · `opt lab fills` · `opt lab cleanup` |
+| **Paper Selector Study** | `opt lab scan-audit --out scan.json` · `opt lab scan-replay scan.json` · `opt lab study run` · `opt lab study history` · `opt lab study demo --dir /tmp/demo` |
 
 > **CRA TFSA Guard:** Multi-leg spreads (`etf_wide_spread`, `etf_bear_call`, debit verticals) are fenced as `[TAXABLE_ONLY]` and are never recommended when your account is set to `tfsa`.
 > **Evidence Honesty:** Only the Core ETF sector rotation (`VM_OUTLOOK_TOP3`) is labelled `PROVEN`. Phase 3 lenses (`opt_skew`, `edgar_events`, `macro`) carry explicit `WATCHLIST` or `CONTEXT` badges and source provenance. See [`docs/DISCOVER.md`](docs/DISCOVER.md) and [`docs/COMMANDS.md`](docs/COMMANDS.md).
@@ -120,6 +121,7 @@ are generated, not written by hand.
 | Is the per-contract **probability of closing green** trustworthy? | **Yes** — it passed its own out-of-sample guard | Walk-forward over 612 held-out trades: reliability slope **0.572, 95% CI [0.329, 0.815]**. With the strategy term removed entirely it is 0.871 [0.577, 1.165], so the discrimination comes from the contract, not the structure label. |
 | Does anything predict **expected profit** per contract? | **No.** | Predicting return directly: slope 0.368, CI [−0.252, 0.987]. Decomposed as `p·W + (1−p)·L`: slope 0.442, CI [−0.891, 1.774]. Both **refused** by the guard; neither is displayed. |
 | Does anything **order the board**? | **Not established.** | Pre-declared race, 2026-08-24, 612 out-of-sample closed trades, rank IC vs return on risk with days as bootstrap clusters: `cal_pop` +0.1431 [−0.0420, +0.3277], `exp_return` +0.0087, `quality_score` −0.0194, `abs_delta` −0.0821. Every interval contains zero. |
+| Does a **liquidity-first** contract pick beat the generic bull-put selector? | **No difference — historical, one crossing.** Forward test reads ≥ 2027-03-01. | DoltHub 2019-26, 2,206 weekly pairs, 370 weeks: +0.03% [−0.17%, +0.22%] of capital at risk, crossed. 89% of picks identical. `docs/RESULT_SELECTOR_BASELINE_DOLT_HISTORY_INTERIM_20261126.md` · `opt lab study readout` |
 | Does **EV** order the board? | **Frozen — reads out 2026-11-19.** | `docs/PREREG_RANKER_TEST.md`, one look at n=1,424 closed gate survivors (currently 312). Do not run early or route around it. |
 
 **What `#1` on the board means.** The highest EV *after its own trading costs*,
@@ -445,7 +447,7 @@ Launch with `python -m src.options_screener` (venv active) or `python3 run.py` (
 |---------|------|--------------|
 | `AAPL` (any ticker) | Single-stock | Deep analysis of one symbol across all expiries |
 | `ALL` | Budget scan | Multi-ticker scan filtered to a per-contract dollar budget |
-| `DISCOVER` | Discovery | Choose curated liquid names (static list), Finviz gainers, or high-IV stocks |
+| `DISCOVER` | Discovery | Choose curated liquid names, Finviz gainers, or stocks with wide four-week price ranges |
 | `SELL` | Premium Selling | Short put candidates ranked by return-on-risk |
 | `SPREADS` | Credit Spreads | Bull Put and Bear Call spread opportunities — full detail cards with thesis, breakevens, top components, execution guidance + comparison table |
 | `IRON` | Iron Condors | Delta-neutral range-bound strategies — same detail-card pipeline as singles + spreads |

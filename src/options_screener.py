@@ -4422,6 +4422,7 @@ def export_to_csv(df_picks: pd.DataFrame, mode: str,
             "quality_score", "liquidity_flag", "spread_flag", "event_flag", "price_bucket",
             "short_interest", "rvol", "gex_flip_price", "vwap", "high_premium_turnover",
             "quote_source", "quote_as_of", "quote_age_min", "quote_freshness",
+            "last_trade_as_of", "quote_snapshot_at", "data_fetched_at",
             "iv_solved", "iv_residual_pct", "iv_verified",
         ]
         
@@ -5017,7 +5018,7 @@ def prompt_for_tickers() -> List[str]:
     print("\nSelect Ticker Source:")
     print("  1. Curated Liquid (default)")
     print("  2. Top Gainers (Finviz)")
-    print("  3. High IV Stocks (Finviz)")
+    print("  3. High Stock Volatility (Finviz)")
     source_choice = prompt_input("Enter 1, 2, or 3", "1")
 
     if source_choice == "1":
@@ -5052,7 +5053,7 @@ def prompt_for_tickers() -> List[str]:
         try:
             max_tickers = int(prompt_input("How many tickers to scan (1-100)", "50"))
             max_tickers = max(1, min(100, max_tickers))
-            return get_dynamic_tickers(scan_type, max_tickers=max_tickers)
+            return get_dynamic_tickers(scan_type, max_tickers=max_tickers, on_fallback=print)
         except RuntimeError as e:
             print(f"Error: {e}")
             sys.exit(1)
@@ -6870,7 +6871,7 @@ def main():
                 ("CORE SCANS", [
                     ("1", "TICKER",    "Single-stock deep analysis (e.g. AAPL)", False),
                     ("5", "SPREADS",   "Credit Spreads (incl. Test O1 5%-wide on 60-120d)", False),
-                    ("3", "DISCOVER",  "Curated liquid names / gainers / high IV", False),
+                    ("3", "DISCOVER",  "Curated liquid names / gainers / high stock volatility", False),
                     ("8", "MY LIST",   _wl_desc, False),
                     ("7", "PORTFOLIO", "View open position P/L", False),
                 ]),
@@ -6901,7 +6902,7 @@ def main():
             print(_START_HINT)
             print("  [1] TICKER     \u2014 Single-stock deep analysis (e.g. AAPL)")
             print("  [2] ALL        \u2014 Budget-based multi-stock scan")
-            print("  [3] DISCOVER   \u2014 Curated liquid names / gainers / high IV")
+            print("  [3] DISCOVER   \u2014 Curated liquid names / gainers / high stock volatility")
             print("  [4] SELL       \u2014 Premium Selling analysis (short puts)")
             print("  [5] SPREADS    \u2014 Credit Spread analysis")
             print("  [6] IRON       \u2014 Iron Condor analysis")

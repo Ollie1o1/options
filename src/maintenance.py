@@ -23,10 +23,11 @@ import sys
 from datetime import datetime
 from typing import Callable, Optional
 
-try:                      # POSIX only; Windows falls back to no locking
+try:
     import fcntl
-except ImportError:       # pragma: no cover - not exercised on macOS/Linux
+except ImportError:
     fcntl = None
+    import msvcrt
 
 from src import phase1_checkpoint
 from src.paths import repo_path
@@ -219,7 +220,7 @@ def _open_cohort_count(db_path: str, phase1_start: str) -> int:
     # scan banner left behind an empty paper_trades.db, which then read as a
     # real book with zero trades rather than as an absent one.
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
             return int(conn.execute(sql, (phase1_start,)).fetchone()[0])
     except sqlite3.Error:
         return 0
@@ -313,22 +314,19 @@ def _catchup_lock(lock_path: str):
 
     The marker env var cannot serve here: the legitimate detached catch-up is
     itself spawned with the marker set, so guarding on it would disable the
-    normal path. flock is released by the OS if a holder is killed, so a crash
-    can't leave the catch-up wedged shut."""
-    if fcntl is None:
-        yield True
-        return
+    normal path. The OS releases the lock when the owning handle closes."""
     os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
-    with open(lock_path, "w") as fh:
+    with open(lock_path, "a+b") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             yield False
             return
-        try:
-            yield True
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+        yield True
 
 
 def run_catchup(db_path: str = "paper_trades.db",
@@ -555,8 +553,14 @@ def _run_chain_archive():
         cfg = {}
     if not cfg.get("enabled", False):
         return 0
+    configured = list(cfg.get("symbols") or [])
+    if _selector_study_enabled():
+        # The paper selector study needs its agreed symbols archived every session
+        # (docs/PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md).
+        from src.selector_study.db import AGREED_SYMBOLS
+        configured += [s for s in AGREED_SYMBOLS if s not in configured]
     symbols = chain_archive.archive_universe(
-        cfg.get("symbols") or [], "paper_trades.db",
+        configured, "paper_trades.db",
         lookback_days=int(cfg.get("ledger_lookback_days", 30) or 0))
     if not symbols:
         return 0
@@ -570,6 +574,15 @@ def _run_chain_archive():
     stats["rows"] = rows
     stats["complete"] = chain_archive.archive_complete(stats)
     return stats
+
+
+def _selector_study_enabled(config_path: str = "config.json") -> bool:
+    import json as _json
+    try:
+        with open(config_path) as f:
+            return bool((_json.load(f).get("selector_study") or {}).get("enabled", False))
+    except (OSError, ValueError):
+        return False
 
 
 def run_startup_maintenance(db_path: str = "paper_trades.db",
@@ -590,7 +603,8 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
                             online_fn: Optional[Callable[[], bool]] = None,
                             progress: Optional[Callable[[str], None]] = None,
                             discovery_prices_fn: Optional[Callable] = None,
-                            lens_snapshot_fn: Optional[Callable] = None) -> dict:
+                            lens_snapshot_fn: Optional[Callable] = None,
+                            selector_study_fn: Optional[Callable] = None) -> dict:
     """Run due maintenance jobs, crash-isolated. Returns {'cohort': line, 'ran': [...]}.
     Never raises.
 
@@ -750,6 +764,29 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     except Exception:
         pass
 
+    # 4a-i. Paper selector study (docs/PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md).
+    #     Local files only, after today's archive is complete. Capture is idempotent
+    #     and retries missing symbols, so an unstamped day is simply redone later.
+    try:
+        _cur_today = now_fn().strftime("%Y-%m-%d")
+        if (_selector_study_enabled() and state.get("last_chain_archive") == _cur_today
+                and state.get("last_selector_study") != _cur_today):
+            _step("Recording the paper selector study…")
+            if selector_study_fn is not None:
+                res = selector_study_fn(session=_cur_today) or {}
+            else:
+                from src.selector_study import workflow as _sw
+                from src.tui.options_engine import _load_earnings_map
+                res = _sw.run(sessions=[_cur_today], today=_cur_today, earnings=_load_earnings_map())
+            cap = (res.get("captures") or [{}])[0]
+            if cap.get("run_status") == "complete":
+                state["last_selector_study"] = _cur_today
+                ran.append(f"selector-study:{cap.get('pairs_new', 0)}pairs")
+            else:
+                ran.append("selector-study:partial(will retry)")
+    except Exception as exc:
+        ran.append(f"selector-study:failed({type(exc).__name__}; will retry)")
+
     # 4a-ii. Daily analyst-estimate snapshot, after the close. No free source
     #     serves revision history, so a day skipped is a day lost. Stamped only
     #     when the run did not stop on a dead feed.
@@ -794,12 +831,21 @@ def run_startup_maintenance(db_path: str = "paper_trades.db",
     try:
         from src.topdown import forward_log as _lf
         _cur = now_fn()
-        _cur_today = _cur.strftime("%Y-%m-%d")
-        if _lf.due(state, _cur_today, _cur.hour * 100 + _cur.minute):
-            _step("Recording the Discover idea lists (once a day)…")
-            counts = (lens_snapshot_fn or _lf.run_snapshot)() or {}
-            state["last_lens_snapshot"] = _cur_today
-            ran.append(f"lens-snapshot:{counts.get('rows_new', 0)}new/{counts.get('rows_seen', 0)}")
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        local = _cur.replace(tzinfo=et) if _cur.tzinfo is None else _cur.astimezone(et)
+        session = local.date().isoformat()
+        if _lf.due(state, session, local.hour * 100 + local.minute):
+            _step("Recording the Discover idea lists after equity data settles…")
+            counts = (lens_snapshot_fn or _lf.run_snapshot)(
+                record_date=session, expected_session=session,
+            ) or {}
+            if counts.get("complete", True):
+                state["last_lens_snapshot"] = session
+                ran.append(f"lens-snapshot:{counts.get('rows_new', 0)}new/{counts.get('rows_seen', 0)}")
+            else:
+                ran.append(f"lens-snapshot:incomplete({counts.get('reason', 'unknown')}; will retry)")
     except Exception as exc:
         ran.append(f"lens-snapshot:failed({type(exc).__name__}; will retry)")
 

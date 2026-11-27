@@ -55,6 +55,7 @@ class LensRow:
     flags: Tuple[str, ...] = ()
     as_of: Optional[str] = None
     playbook_id: Optional[str] = None
+    evidence_label: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -213,10 +214,20 @@ def _opp_rows(ctx: LensContext, playbooks: Sequence[str]) -> List[LensRow]:
     for o in snap.opportunities:
         if o.playbook_id not in playbooks:
             continue
+        data_date = o.extra.get("snap_date") or o.extra.get("data_date")
+        if o.playbook_id == "equity_pullback":
+            data_date = data_date or snap.ohlcv_as_of
+        data_date = data_date or o.as_of
+        label = LABEL_OF_TIER.get(o.evidence_tier)
+        if o.playbook_id == "equity_pullback" and o.evidence_tier == "CONTEXT":
+            label = "CONTEXT"
+        if "TESTED_ON_SPY_ONLY" in o.risk_flags:
+            label = "WATCHLIST"
         out.append(LensRow(
             ticker=o.ticker, sector_etf=get_sector_etf(o.ticker),
             why=o.setup_summary, metric_label="", flags=tuple(o.risk_flags),
-            as_of=(o.as_of or snap.generated_at)[:10], playbook_id=o.playbook_id,
+            as_of=str(data_date)[:10] if data_date else None, playbook_id=o.playbook_id,
+            evidence_label=label,
         ))
     return out
 
@@ -385,11 +396,13 @@ def _edgar_events(ctx: LensContext, *, limit: int = 25) -> LensResult:
     res = LensResult(LENS_BY_ID["edgar_events"])
     evs = load_cached_edgar_events(db_path=ctx.edgar_db, limit=limit)
     for e in evs:
+        if not e.ticker:
+            continue
         res.rows.append(
             LensRow(
                 ticker=e.ticker,
                 sector_etf=get_sector_etf(e.ticker),
-                why=f"[{e.event_type}] {e.summary}",
+                why=f"[{e.event_type}] {e.summary} · seen {e.fetched_at[:10]}",
                 metric_label="metric",
                 metric=e.metric_value,
                 flags=(),
@@ -398,6 +411,8 @@ def _edgar_events(ctx: LensContext, *, limit: int = 25) -> LensResult:
         )
     if not evs:
         res.note = "No cached SEC EDGAR events yet — run `opt alpha edgar --refresh` (free SEC API)."
+    elif not res.rows:
+        res.note = "Cached filings exist without a resolved ticker. See the raw EDGAR event list in Lab."
     return res
 
 
@@ -478,7 +493,10 @@ def run_lenses(ctx: LensContext, ids: Optional[Sequence[str]] = None) -> List[Le
 def lens_hits(ticker: str, results: Sequence[LensResult]) -> List[Tuple[str, str]]:
     """[(lens title, label)] for every lens that lists `ticker`."""
     sym = ticker.upper()
-    return [(r.lens.title, r.lens.label) for r in results if any(x.ticker == sym for x in r.rows)]
+    return list(dict.fromkeys(
+        (r.lens.title, x.evidence_label or r.lens.label)
+        for r in results for x in r.rows if x.ticker == sym
+    ))
 
 
 def tags_by_ticker(results: Sequence[LensResult]) -> Dict[str, List[Tuple[str, str]]]:
@@ -488,8 +506,9 @@ def tags_by_ticker(results: Sequence[LensResult]) -> Dict[str, List[Tuple[str, s
         tag = LENS_TAG.get(r.lens.id, r.lens.id.upper())
         for x in r.rows:
             lst = out.setdefault(x.ticker, [])
-            if (tag, r.lens.label) not in lst:
-                lst.append((tag, r.lens.label))
+            tagged = (tag, x.evidence_label or r.lens.label)
+            if tagged not in lst:
+                lst.append(tagged)
     return out
 
 
