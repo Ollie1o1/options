@@ -8,6 +8,15 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
+## 2026-11-27 — intraday timing: last 30 minutes, premarket, gaps (index ETFs, shares)
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **Late-day fade (I1) FAILED, with the opposite sign.** Fading the 10:30→15:30 move from 15:30 to the close on SPY/QQQ/IWM/DIA, 2016–2023, 1¢/share each way: **−2.60 bps/day [−4.00, −1.27]**, n=1,997 days, negative 8/8 years. The midday move *continued* into the close 2016–23 (strongest in 2018, 2020 H1, 2022 H1), then the sign flipped: 2024+ fade +1.33 [−0.09, +2.82]. An adaptive follow-or-fade rule nets ≈ 0 (CIs span zero, unstable in lookback). | **CLOSED** (shares) | `RESULT_INTRADAY_LATE_DAY_AND_OPEN_20261127.md` |
+| 2 | **Premarket and gap rules: no edge.** Gap > 0.5% continuation noise (+2.8 [−3.3, +9.5], flips in 2024+); premarket direction slightly *reverses* 09:31→10:00 (≈ −2 bps) but that is the size of the opening spread; Gao-style intraday momentum absent; opening-range continuation ≈ 0. | **CLOSED** (shares) | same |
+| 3 | 0DTE options on these patterns are **untested, not supported**: needs a new forward registration (regime-conditional) plus intraday option quotes. | open question | same |
+| 4 | Alpaca 1-min SIP bars (2016+, premarket included) are now downloadable: `python -m src.intraday.alpaca_bars`. Free plan refuses the last 15 minutes. | BASELINE | `src/intraday/` |
+
 ## 2026-11-26 — paired paper study: generic selector vs liquidity-first baseline
 
 | # | Finding | Status | Detail |
