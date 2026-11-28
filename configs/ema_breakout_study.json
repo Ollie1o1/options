@@ -1,0 +1,102 @@
+{
+  "last_cached_session": "2026-11-24",
+  "symbols_with_history": 375,
+  "horizons": [
+    {
+      "horizon_sessions": 5,
+      "holdout_observations": 46360,
+      "training_observations": 185405,
+      "unresolved_observations": 367,
+      "holdout_breakout_rate": 0.17234685073339084,
+      "baseline_brier": 0.12086567919450562,
+      "comparisons": [
+        {
+          "ema_sessions": 5,
+          "brier_skill": 0.00535258263823701,
+          "brier_gain_interval": [
+            -4.3227882409333765e-05,
+            0.001244841642019046
+          ],
+          "gain_2024": 0.0009094578216818106,
+          "gain_2025_26": 0.0005075104578036665,
+          "follow_up": false
+        },
+        {
+          "ema_sessions": 10,
+          "brier_skill": 0.005669066990592762,
+          "brier_gain_interval": [
+            0.0001875628758864,
+            0.0011099457766956624
+          ],
+          "gain_2024": 0.000784999546940654,
+          "gain_2025_26": 0.0006321853093231816,
+          "follow_up": false
+        }
+      ]
+    },
+    {
+      "horizon_sessions": 10,
+      "holdout_observations": 46021,
+      "training_observations": 185032,
+      "unresolved_observations": 706,
+      "holdout_breakout_rate": 0.29221442384998153,
+      "baseline_brier": 0.17346079085789334,
+      "comparisons": [
+        {
+          "ema_sessions": 20,
+          "brier_skill": 0.009654529505302642,
+          "brier_gain_interval": [
+            0.0009122567190878497,
+            0.0025308076937566593
+          ],
+          "gain_2024": 0.001417408709401769,
+          "gain_2025_26": 0.0018128791321794836,
+          "follow_up": false
+        },
+        {
+          "ema_sessions": 50,
+          "brier_skill": 0.006046574905509493,
+          "brier_gain_interval": [
+            0.000350147324629658,
+            0.0018374296916772621
+          ],
+          "gain_2024": 0.0009370356012509158,
+          "gain_2025_26": 0.0011089023605278545,
+          "follow_up": false
+        }
+      ]
+    },
+    {
+      "horizon_sessions": 20,
+      "holdout_observations": 45451,
+      "training_observations": 184343,
+      "unresolved_observations": 1276,
+      "holdout_breakout_rate": 0.43790015621218453,
+      "baseline_brier": 0.21220659613106183,
+      "comparisons": [
+        {
+          "ema_sessions": 50,
+          "brier_skill": 0.007469190790162512,
+          "brier_gain_interval": [
+            0.0001662583066818466,
+            0.00296050479519229
+          ],
+          "gain_2024": 0.0018343093405762435,
+          "gain_2025_26": 0.0014485000272387667,
+          "follow_up": false
+        },
+        {
+          "ema_sessions": 100,
+          "brier_skill": 0.004152848161707949,
+          "brier_gain_interval": [
+            -0.0001955090176387119,
+            0.001936286786302436
+          ],
+          "gain_2024": 0.0015413405508628423,
+          "gain_2025_26": 0.0005198130712492733,
+          "follow_up": false
+        }
+      ]
+    }
+  ]
+}

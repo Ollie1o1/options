@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from src.paths import repo_path
 
@@ -48,6 +51,15 @@ CREATE TABLE IF NOT EXISTS archive_attempts (
     attempted_at TEXT NOT NULL,
     PRIMARY KEY (snap_date, symbol)
 );
+CREATE TABLE IF NOT EXISTS archive_earnings (
+    symbol TEXT NOT NULL, snap_date TEXT NOT NULL, event_date TEXT NOT NULL,
+    observed_at TEXT NOT NULL, source TEXT NOT NULL,
+    PRIMARY KEY (symbol, snap_date)
+);
+CREATE TABLE IF NOT EXISTS archive_quote_times (
+    contract TEXT NOT NULL, snap_date TEXT NOT NULL, quote_at TEXT, fetched_at TEXT NOT NULL,
+    PRIMARY KEY (contract, snap_date)
+);
 """
 
 _COLUMNS = ["symbol", "snap_date", "contract", "type", "strike", "expiration",
@@ -69,7 +81,7 @@ def _record_attempt(conn: sqlite3.Connection, snap_date: str, symbol: str,
         "attempts = attempts + 1, attempted_at = excluded.attempted_at, "
         "status = CASE WHEN archive_attempts.status = 'archived' THEN 'archived' ELSE excluded.status END, "
         "detail = CASE WHEN archive_attempts.status = 'archived' THEN archive_attempts.detail ELSE excluded.detail END",
-        (snap_date, symbol, status, detail, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")))
+        (snap_date, symbol, status, detail, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
 
 
 def ensure_db(db_path: str = DEFAULT_DB) -> None:
@@ -305,13 +317,26 @@ def fetch_chain_with_fallback(
     return fetch_yfinance_chain(symbol, max_dte=max_dte, moneyness_band=moneyness_band)
 
 
+def _archivable_earnings(today: str, db_path: str) -> Dict[str, str]:
+    """Read scheduled dates already present in the local cache before capture."""
+    uri = Path(repo_path(db_path)).resolve().as_uri() + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            return dict(conn.execute(
+                "SELECT symbol,MIN(date) FROM earnings_cal WHERE date>=? GROUP BY symbol", (today,),
+            ))
+    except sqlite3.Error:
+        return {}
+
+
 def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                     today: Optional[str] = None,
                     fetcher: Optional[Callable] = None,
                     max_dte: int = 120, moneyness_band: float = 0.15,
                     min_open_interest: float = 1,
                     stats: Optional[Dict[str, Any]] = None,
-                    max_consecutive_failures: int = 6) -> int:
+                    max_consecutive_failures: int = 6,
+                    earnings_db: str = "data/dolt_options.db") -> int:
     """Snapshot each symbol once for `today`. Idempotent per (symbol, day);
     per-symbol failures are isolated. Returns rows written.
 
@@ -324,11 +349,14 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
     2026-11-18 the run fired with the Mac asleep and offline: 1 of 22 symbols
     archived, the day was stamped done, and the other 21 were lost for good.
     """
-    today = today or datetime.now().strftime("%Y-%m-%d")
+    current_session = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    today = today or current_session
     if fetcher is None:
         def _default_fetch(s: str) -> List[Dict[str, Any]]:
             return fetch_chain_with_fallback(s, max_dte=max_dte, moneyness_band=moneyness_band)
         fetcher = _default_fetch
+    scheduled = _archivable_earnings(today, earnings_db) if today == current_session else {}
+    calendar_observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     ensure_db(db_path)
     written = 0
     st: Dict[str, Any] = {"symbols": len(symbols), "already": 0, "archived": 0,
@@ -359,12 +387,23 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                 rows = filter_rows(fetcher(sym) or [], today,
                                    max_dte=max_dte, moneyness_band=moneyness_band,
                                    min_open_interest=min_open_interest)
+                fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 for r in rows:
                     values = [sym, today] + [r.get(c) for c in _COLUMNS[2:]]
-                    conn.execute(
+                    saved = conn.execute(
                         f"INSERT OR IGNORE INTO chain_snapshots ({','.join(_COLUMNS)}) "
                         f"VALUES ({','.join('?' * len(_COLUMNS))})", values)
+                    if saved.rowcount == 1:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO archive_quote_times VALUES (?,?,?,?)",
+                            (r["contract"], today, r.get("quote_at"), fetched_at),
+                        )
                     written += 1
+                if rows and sym in scheduled:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO archive_earnings VALUES (?,?,?,?,?)",
+                        (sym, today, scheduled[sym], calendar_observed_at, "DoltHub earnings cache"),
+                    )
                 _record_attempt(conn, today, sym, "archived" if rows else "no_rows",
                                 None if rows else "provider returned no rows inside the archive filter")
                 conn.commit()

@@ -409,21 +409,23 @@ def render_main() -> None:
     with tab_disc:
         from src.topdown.web import render_discover
 
-        if st.button("Rebuild Discover from local archives", key="disc-rebuild"):
-            st.session_state.pop("topdown_hub", None)
-            st.session_state.pop("topdown_cards", None)
-        if "topdown_hub" not in st.session_state:
-            with st.spinner("Building the top-down view (local data only)…"):
-                st.session_state.topdown_hub = provider.get_hub(refresh=True)
-        cards = st.session_state.setdefault("topdown_cards", {})
-        hub = st.session_state.topdown_hub
+        def _discover_hub():
+            if st.button("Rebuild Discover from local archives", key="disc-rebuild"):
+                st.session_state.pop("topdown_hub", None)
+                st.session_state.pop("topdown_cards", None)
+            if "topdown_hub" not in st.session_state:
+                with st.spinner("Building the top-down view (local data only)…"):
+                    st.session_state.topdown_hub = provider.get_hub(refresh=True)
+            return st.session_state.topdown_hub
 
         def _card(tk: str):
+            cards = st.session_state.setdefault("topdown_cards", {})
             if tk not in cards:
-                cards[tk] = hub.card(tk, dossier=provider.get_dossier(tk, fetch_chain=False))
+                cards[tk] = st.session_state.topdown_hub.card(tk, dossier=provider.get_dossier(tk, fetch_chain=False))
             return cards[tk]
 
-        render_discover(st, hub, get_card=_card, default_ticker=st.session_state.get("focused_ticker"))
+        render_discover(st, None, load_hub=_discover_hub, get_card=_card,
+                        default_ticker=st.session_state.get("focused_ticker"))
 
     # ── TAB 2: UNIFIED OPPORTUNITY RADAR ─────────────────────────────────────
     with tab_radar:
