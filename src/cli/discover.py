@@ -25,7 +25,7 @@ def _hub(ctx: click.Context):
 @click.option("--diversify", is_flag=True,
               help="Annotate & sort lens rows by lowest 126d correlation against your current holdings / core sleeve.")
 @click.option("--dte", "show_dte", is_flag=True,
-              help="Show the Options-by-Expiry (0DTE -> 240D) strip with backtested verdicts & calibrated probabilities.")
+              help="Show historical spread results by days to expiration and the source of any example quote.")
 @click.option("--sort-dte", type=click.Choice(["dte", "evidence"]), default="dte", show_default=True,
               help="Order for --dte: shortest DTE first (`dte`) or best evidence first (`evidence`).")
 @click.option("--live-dte", is_flag=True, help="Fetch live 3-tier CBOE/Alpaca/Yahoo chains for --dte.")

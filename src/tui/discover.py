@@ -40,29 +40,28 @@ SHORT_NAME = {
     "Semiconductors": "Semis",
 }
 SECTOR_COLUMNS = ("Ticker", "12-1m", "1m", "3m", "vs 200d", "Vol 20d", "Listed in")
-DTE_COLUMNS = ("DTE Bucket", "Verdict", "Best Setup", "Fric%", "Calibrated P(Win) [95% CI]", "PF", "AvgLoss", "Δ-Adj")
+DTE_COLUMNS = ("Expiry", "Study", "Historical win % [CI]", "Avg net", "Avg loss", "Quote example", "Quote context", "Fric%")
 
 
 def fill_dte_strip(tbl: DataTable, bundle: Any) -> List[str]:
-    """Fill the ③ table with Options-by-Expiry (0DTE -> 240D) & calibrated probabilities."""
+    """Fill the options-by-expiry table with historical group and example quote data."""
     tbl.clear(columns=True)
     tbl.add_columns(*DTE_COLUMNS)
     out: List[str] = []
     for i, r in enumerate(bundle.dte_rows):
-        setup = f"{r.ticker} {r.strikes} ({r.dte}d)" if r.ticker else "— (archive)"
+        setup = f"{r.ticker} {r.strikes} ({r.dte}d at snapshot)" if r.ticker else "—"
         fric_s = f"{r.friction_pct*100:.1f}%" if r.friction_pct is not None else "—"
         if r.p_win is not None and r.n_backtest > 0:
             ci = f"[{r.p_win_ci95[0]*100:.0f}-{r.p_win_ci95[1]*100:.0f}%]" if r.p_win_ci95 else ""
             pw_s = f"{r.p_win*100:.0f}% {ci} n={r.n_backtest}"
         else:
             pw_s = "—"
-        pf_s = f"{r.pf:.2f}" if r.pf is not None else "—"
+        net_s = signed(r.mean_roc * 100.0, "{:+.2f}%") if r.mean_roc is not None else Text("—", style="dim")
         al_s = f"{r.avg_loss*100:.1f}%" if r.avg_loss is not None else "—"
-        ex_s = signed(r.excess_limit * 100.0, "{:+.2f}%") if r.excess_limit is not None else Text("—", style="dim")
         verdict = Text(" CLOSED ", style="bold #0e1117 on #e06c75") if r.evidence_label == "CLOSED" else chip(r.evidence_label)
-        tk_key = r.ticker or "SPY"
+        tk_key = r.ticker or ""
         tbl.add_row(
-            Text(r.bucket_label, style="bold"), verdict, setup, fric_s, pw_s, pf_s, al_s, ex_s,
+            Text(r.bucket_label, style="bold"), verdict, pw_s, net_s, al_s, setup, r.quote_context, fric_s,
             key=f"{i}|{tk_key}",
         )
         out.append(tk_key)
@@ -70,10 +69,10 @@ def fill_dte_strip(tbl: DataTable, bundle: Any) -> List[str]:
 
 
 def dte_header(bundle: Any, *, sort_by: str = "dte") -> Text:
-    sort_lbl = "0DTE → 6M+ (shortest first)" if sort_by == "dte" else "Best evidence first"
+    sort_lbl = "0 to 240 days (shortest first)" if sort_by == "dte" else "Best evidence first"
     t = Text("OPTIONS BY EXPIRY [TAXABLE_ONLY] — ", style="bold")
     t.append(f"Sorted: {sort_lbl}\n", style="#d6a452")
-    t.append(f"Clock: {bundle.execution_window} · {bundle.execution_note}", style="dim")
+    t.append("Historical spread groups · No individual contract odds", style="dim")
     if getattr(bundle, "o1_fill_meter", ""):
         t.append(f"\nO1 Fill Meter: {bundle.o1_fill_meter}", style="#d6a452")
     return t

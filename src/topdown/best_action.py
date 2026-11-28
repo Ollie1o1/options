@@ -85,6 +85,18 @@ class DteOptionRow:
     limit_k035: Optional[float] = None
     max_risk_usd: Optional[float] = None
 
+    @property
+    def quote_context(self) -> str:
+        if not self.ticker:
+            return "No quote example"
+        if self.quote_source.startswith("archive:"):
+            return f"Archived {self.quote_source.removeprefix('archive:')}"
+        return {
+            "cboe": "Cboe snapshot · delayed",
+            "alpaca_indicative": "Alpaca indicative · delayed",
+            "live": "Yahoo snapshot · quote time unavailable",
+        }.get(self.quote_source, "Quote freshness unverified")
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -169,7 +181,6 @@ def _best_archived_spread_for_bucket(
     bucket: Dict[str, Any],
     *,
     chain_db: str,
-    spot_map: Dict[str, float],
     exec_flag: Optional[str],
 ) -> Optional[Dict[str, Any]]:
     """Find cleanest two-sided Bull Put in `chain_archive.db` matching `bucket` DTE window (offline, instant)."""
@@ -187,9 +198,6 @@ def _best_archived_spread_for_bucket(
         con = sqlite3.connect(f"file:{full}?mode=ro", uri=True)
         try:
             for sym in SCAN_ETFS:
-                spot = spot_map.get(sym)
-                if not spot or spot <= 0:
-                    continue
                 row_d = con.execute(
                     "SELECT MAX(snap_date) FROM chain_snapshots WHERE symbol = ?",
                     (sym,),
@@ -198,6 +206,16 @@ def _best_archived_spread_for_bucket(
                     continue
                 snap_s = str(row_d[0])[:10]
                 snap_d = dt.date.fromisoformat(snap_s)
+                snapshot_spots = con.execute(
+                    "SELECT DISTINCT spot FROM chain_snapshots "
+                    "WHERE symbol = ? AND snap_date = ? AND spot > 0 LIMIT 2",
+                    (sym, snap_s),
+                ).fetchall()
+                if len(snapshot_spots) != 1:
+                    continue
+                spot = snapshot_spots[0][0]
+                if not isinstance(spot, (int, float)) or not math.isfinite(spot) or spot <= 0:
+                    continue
                 exps = [
                     str(r[0])[:10]
                     for r in con.execute(
@@ -552,16 +570,14 @@ def build_best_action(
 
     # ── 3. Options DTE Term-Structure Strip (0DTE -> 240D) ───────────────────
     spot_map: Dict[str, float] = {}
-    for sym in SCAN_ETFS:
-        sp_e = _last_spot(hub.ohlcv, sym)
-        if sp_e:
-            spot_map[sym] = sp_e
-
     live_slices_map: Dict[str, Sequence[Any]] = {}
     if live_options:
         from src.structure.chain_data import load_live_chain_slices
 
         for sym in SCAN_ETFS:
+            sp_e = _last_spot(hub.ohlcv, sym)
+            if sp_e:
+                spot_map[sym] = sp_e
             try:
                 sls = load_live_chain_slices(sym, min_dte=0, max_dte=245, max_expirations=6, spot=spot_map.get(sym))
                 if sls:
@@ -585,7 +601,7 @@ def build_best_action(
         cand = (
             _best_live_spread_for_bucket(bcfg, slices_by_sym=live_slices_map, spot_map=spot_map, exec_flag=exec_flag)
             if live_options
-            else _best_archived_spread_for_bucket(bcfg, chain_db=chain_db, spot_map=spot_map, exec_flag=exec_flag)
+            else _best_archived_spread_for_bucket(bcfg, chain_db=chain_db, exec_flag=exec_flag)
         )
 
         x_lim = bev.get("excess_entry_limit")
@@ -651,38 +667,36 @@ def build_best_action(
         opt_p_txt = format_prob_badge(
             top_opt.p_win, top_opt.p_win_ci95, top_opt.n_backtest,
             mean_ret=top_opt.mean_roc, pf=top_opt.pf, avg_loss=top_opt.avg_loss,
-            horizon_tag=top_opt.bucket_label,
+            horizon_tag=f"{top_opt.bucket_label} historical group",
         )
         o1_failed_k = str(o1_verdict.get("verdict") or "") == "FAIL"
         opt_label = "AVOID" if o1_failed_k else "PROMISING"
-        wait_clock = (
-            ""
-            if str(exec_win["window"]) == "OPTIMAL_OPRA_WINDOW"
-            else " · WAIT FOR 11:30–13:30 / 15:15–15:50 ET"
-        )
-        if top_opt.ticker:
+        quote_context = "No matching quote example"
+        if top_opt.ticker and (top_opt.bucket_key != "60_120D" or top_opt.ticker == "SPY"):
+            quote_context = top_opt.quote_context
             hl = (
                 f"{top_opt.ticker} {top_opt.strikes} exp {top_opt.expiration} ({top_opt.dte}d) · "
                 f"Mid ${top_opt.credit_mid:.2f} · Fric {(top_opt.friction_pct or 0)*100:.1f}%"
             )
             tks: Tuple[str, ...] = (top_opt.ticker,)
             if top_opt.max_risk_usd and top_opt.limit_k035 is not None:
-                qty = max(1, int(prof.risk_budget_usd // max(1.0, top_opt.max_risk_usd)))
-                over_cap = (
-                    f" ⚠ 1x > ${prof.risk_budget_usd:,.0f} risk cap"
-                    if top_opt.max_risk_usd > prof.risk_budget_usd
-                    else ""
-                )
-                opt_sizing = (
-                    f"{qty}x {top_opt.ticker} {top_opt.strikes} · Limit >= ${top_opt.limit_k035:.2f} (k<=0.35) · "
-                    f"Max Risk ${top_opt.max_risk_usd * qty:,.0f}{over_cap}{wait_clock}"
-                )
+                qty = int(prof.risk_budget_usd // top_opt.max_risk_usd)
+                if qty <= 0:
+                    opt_sizing = (
+                        f"0 contracts fit the ${prof.risk_budget_usd:,.0f} risk cap · "
+                        f"One contract risks ${top_opt.max_risk_usd:,.0f} before fees"
+                    )
+                else:
+                    opt_sizing = (
+                        f"{qty} contracts fit before fees · Modeled credit ${top_opt.limit_k035:.2f} (k≤0.35) · "
+                        f"Max loss ${top_opt.max_risk_usd * qty:,.0f} before fees"
+                    )
             else:
-                opt_sizing = f"1x {top_opt.ticker} {top_opt.strikes} · Limit only (k<=0.35){wait_clock}"
+                opt_sizing = "Contract count unavailable · Missing modeled risk"
         else:
-            hl = f"Focus strictly on SPY {top_opt.bucket_label} (run `opt radar --live-options` for live NBBO)"
-            tks = ("SPY",)
-            opt_sizing = f"Limit only (k<=0.35) · Risk cap ${prof.risk_budget_usd:,.0f}{wait_clock}"
+            hl = f"{top_opt.bucket_label} historical study · No matching quote example"
+            tks = ()
+            opt_sizing = "Contract count unavailable"
 
         if o1_failed_k:
             hl = f"PAUSE O1 (realized fill k > 0.35) — {hl}"
@@ -695,7 +709,7 @@ def build_best_action(
                 evidence_label=opt_label,
                 headline=hl,
                 prob_text=opt_p_txt,
-                why=f"{top_opt.why} Clock: {exec_win['window']} ({exec_win['note']})",
+                why=f"{top_opt.why} · {quote_context} · {exec_win['note']}",
                 sizing_text=opt_sizing,
                 tickers=tks,
                 calibrated=top_opt.n_backtest > 0,

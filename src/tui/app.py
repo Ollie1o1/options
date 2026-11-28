@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, Dict, List, Optional, Tuple
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -336,7 +337,7 @@ class DeskApp(App[None]):
                                 yield Label("③ IDEAS:", id="disc-lens-label")
                                 yield Select(LENS_OPTIONS, value="core_rotation", allow_blank=True,
                                              prompt="Pick a lens…", id="disc-lens-select")
-                                yield Button("DTE 0d→6m", id="disc-dte-btn", classes="preset-btn")
+                                yield Button("Expiry studies", id="disc-dte-btn", classes="preset-btn")
                             yield Static("", id="disc-lens-head")
                             yield DataTable(id="disc-lens-table", zebra_stripes=True, cursor_type="row")
                             yield Static("", id="disc-hint")
@@ -975,9 +976,11 @@ class DeskApp(App[None]):
 
             self.call_from_thread(_apply)
         except Exception as exc:
+            message = f"Discover unavailable: {exc}"
+
             def _fail() -> None:
                 self._hub_loading = False
-                self.query_one("#disc-market", Static).update(f"[#e06c75]Discover unavailable: {exc}[/]")
+                self.query_one("#disc-market", Static).update(Text(message, style="#e06c75"))
 
             self.call_from_thread(_fail)
 
@@ -1028,8 +1031,13 @@ class DeskApp(App[None]):
         self._update_disc_hint()
 
     def _update_disc_hint(self, ticker: Optional[str] = None) -> None:
-        tk = ticker or (self._disc_tickers[0] if self._disc_tickers else None)
-        if tk:
+        tk = ticker if ticker is not None else (self._disc_tickers[0] if self._disc_tickers else None)
+        if self._disc_mode == "dte":
+            msg = (
+                f"[b]Enter[/b] = Evidence Card for [b]{tk}[/b] · Compare expirations in web Discover."
+                if tk else "Historical study only · No quote example in this row."
+            )
+        elif tk:
             msg = f"[b]Enter[/b] = ④ Evidence Card for [b]{tk}[/b] · [b]l[/b] log pick · [b]r[/b] refresh"
         else:
             msg = "Nothing listed here right now — pick another lens or sector."
@@ -1475,7 +1483,7 @@ class DeskApp(App[None]):
                 self._disc_dte_sort = "dte"
             try:
                 btn = self.query_one("#disc-dte-btn", Button)
-                btn.label = "DTE 0d→6m" if self._disc_dte_sort == "dte" else "DTE Best"
+                btn.label = "Expiry studies" if self._disc_dte_sort == "dte" else "Studies by evidence"
             except NoMatches:
                 pass
             self._render_disc_right()
@@ -1570,6 +1578,9 @@ class DeskApp(App[None]):
             parts = str(event.row_key.value).split("|")
             if len(parts) == 2:
                 tk = parts[1]
+                if not tk:
+                    self._update_disc_hint("")
+                    return
                 self.focused_ticker = tk
                 self.focused_opp = None
                 if self.hub is not None:
@@ -1657,7 +1668,7 @@ class DeskApp(App[None]):
             self.query_one("#disc-lens-table", DataTable).focus()
         elif tid == "disc-lens-table" and event.row_key is not None:
             parts = str(event.row_key.value).split("|")
-            if len(parts) == 2:
+            if len(parts) == 2 and parts[1]:
                 self.open_evidence_card(parts[1])
         elif tid == "book-options-table" and event.row_key is not None:
             parts = str(event.row_key.value).split("|")

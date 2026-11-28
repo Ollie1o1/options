@@ -5,11 +5,14 @@ The DataFrame builders are pure (no Streamlit) so they can be unit-tested; only
 """
 from __future__ import annotations
 
+import json
+import sqlite3
 from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
 from .card import EvidenceCard
+from .expiry_replay import ARCHIVE_DB, ReplayQuote, expiry_outcome, load_replay_quotes, replay_record, replay_sessions
 from .hub import DiscoveryHub
 from .lenses import LENSES, LENS_TAG_MEANING, NULL_LEDGER, LensResult, tags_by_ticker
 from .render import LABEL_MEANING
@@ -101,15 +104,17 @@ def dte_strip_frame(bundle: Any) -> pd.DataFrame:
         rows.append(
             {
                 "DTE Bucket": r.bucket_label,
-                "Verdict": r.evidence_label,
-                "Best Setup": f"{r.ticker} {r.strikes} ({r.dte}d)" if r.ticker else "—",
+                "Study verdict": r.evidence_label,
+                "Historical win rate [95% CI, n]": p_s,
+                "Average net return %": round(r.mean_roc * 100.0, 2) if r.mean_roc is not None else None,
+                "Average loss %": round(r.avg_loss * 100.0, 1) if r.avg_loss is not None else None,
+                "Example contract": f"{r.ticker} {r.strikes} ({r.dte}d at snapshot)" if r.ticker else "—",
+                "Quote context": r.quote_context,
                 "Mid $": r.credit_mid,
-                "Limit $ (k≤0.35)": getattr(r, "limit_k035", None),
-                "Max Risk $": getattr(r, "max_risk_usd", None),
+                "Modeled credit $ (k≤0.35)": r.limit_k035,
+                "Max loss $ before fees": r.max_risk_usd,
                 "Friction %": round(r.friction_pct * 100.0, 1) if r.friction_pct is not None else None,
-                "Calibrated P(Win) [95% CI, n]": p_s,
-                "PF": r.pf,
-                "Avg Loss %": round(r.avg_loss * 100.0, 1) if r.avg_loss is not None else None,
+                "Profit factor": r.pf,
                 "Δ-Adj Excess %": round(r.excess_limit * 100.0, 2) if r.excess_limit is not None else None,
                 "Why": r.why,
             }
@@ -127,8 +132,146 @@ def _box(st: Any, label: str, title: str, body: str) -> None:
     )
 
 
+def render_expiry_replay(st: Any, *, default_ticker: Optional[str] = None, chain_db: str = ARCHIVE_DB) -> None:
+    st.subheader("Compare expirations")
+    st.caption("Paper replay from archived quotes. Compare one call or put across expiration dates using the same strike.")
+    c1, c2, c3 = st.columns(3)
+    symbol = c1.text_input("Stock or ETF ticker", value=default_ticker or "SPY", key="expiry-replay-symbol").strip().upper()
+    if not symbol:
+        return
+    try:
+        sessions = replay_sessions(symbol, chain_db=chain_db)
+    except sqlite3.Error:
+        st.info("The option archive is unavailable. Use Market and studies to see historical results.")
+        return
+    if not sessions:
+        st.info(f"No archive sessions were found for {symbol}.")
+        return
+    session = c2.selectbox("Archived session", sessions, key=f"expiry-replay-session-{symbol}")
+    option_type = c3.radio("Contract type", ("Call", "Put"), horizontal=True, key="expiry-replay-type").lower()
+    try:
+        quotes = load_replay_quotes(symbol, session, option_type, chain_db=chain_db)
+    except sqlite3.Error:
+        st.info("The selected session could not be read from the option archive.")
+        return
+    if not quotes:
+        st.info(f"No usable two-sided {option_type} quotes were archived for {symbol} on {session}.")
+        return
+
+    prefix = f"expiry-replay-{symbol}-{session}-{option_type}"
+    sources = sorted({q.source or "Unknown" for q in quotes})
+    source = st.selectbox("Archived provider", sources, key=f"{prefix}-source") if len(sources) > 1 else sources[0]
+    quotes = [q for q in quotes if (q.source or "Unknown") == source]
+    expiry_count = len({q.expiration for q in quotes})
+    st.caption(f"Archive coverage · {len(quotes):,} usable {option_type} quotes across {expiry_count} expiration dates")
+    first_dte = min(q.days_to_expiration for q in quotes)
+    last_dte = max(q.days_to_expiration for q in quotes)
+    if first_dte == last_dte:
+        st.info("This session has one usable expiration from the selected provider. Choose another session to compare dates.")
+        return
+    dte_from, dte_to = st.slider(
+        "Days until expiration at the archived session", first_dte, last_dte, (first_dte, last_dte),
+        key=f"{prefix}-{source}-dte",
+    )
+    by_strike: dict[float, dict[str, ReplayQuote]] = {}
+    for quote in quotes:
+        if dte_from <= quote.days_to_expiration <= dte_to:
+            by_strike.setdefault(quote.strike, {}).setdefault(quote.expiration, quote)
+    strikes = sorted(strike for strike, dates in by_strike.items() if len(dates) > 1)
+    if not strikes:
+        st.info("No strike appears on two usable expiration dates in this range. Widen the range or choose another session.")
+        return
+
+    c1, c2 = st.columns([1, 2])
+    selection_key = f"{prefix}-{source}-{dte_from}-{dte_to}"
+    archive_spots = {q.recorded_stock_price for q in quotes if q.recorded_stock_price is not None}
+    first_strike = min(strikes, key=lambda k: abs(k - next(iter(archive_spots)))) if len(archive_spots) == 1 else strikes[0]
+    strike = c1.selectbox(
+        "Strike price", strikes, index=strikes.index(first_strike),
+        format_func=lambda x: f"${x:,.2f}", key=f"{selection_key}-strike",
+    )
+    matching = by_strike[strike]
+    dates = sorted(matching)
+    selected = c2.multiselect(
+        "Expiration dates", dates, default=dates[:2], max_selections=3,
+        format_func=lambda day: f"{day} · {matching[day].days_to_expiration} days",
+        key=f"{selection_key}-{strike}-dates",
+    )
+    if len(selected) < 2:
+        st.info("Select two or three expiration dates to compare.")
+        return
+
+    selected_quotes = [matching[day] for day in sorted(selected)]
+    recorded_prices = {q.recorded_stock_price for q in selected_quotes}
+    recorded_spot = next(iter(recorded_prices)) if len(recorded_prices) == 1 else None
+    if recorded_spot is not None:
+        st.caption(f"Recorded stock price ${recorded_spot:,.2f} · Archived provider {source}")
+    else:
+        st.caption(f"Archived provider {source} · No single recorded stock price for this comparison")
+    c1, c2 = st.columns(2)
+    expiration_price = float(c1.number_input(
+        "Stock price at each expiration", min_value=0.0, value=round(recorded_spot or strike, 2), step=0.5,
+        key=f"{selection_key}-{strike}-price",
+    ))
+    fee = float(c2.number_input("Simulated fee per contract", min_value=0.0, value=0.0, step=0.5, key="expiry-replay-fee"))
+    outcomes = [(quote, expiry_outcome(quote, expiration_price, fee)) for quote in selected_quotes]
+    display = []
+    for quote, outcome in outcomes:
+        break_even_label = "No attainable price"
+        if outcome.break_even is not None:
+            break_even_label = f"${outcome.break_even:,.4f}".rstrip("0").rstrip(".")
+            if recorded_spot:
+                change = outcome.break_even / recorded_spot - 1.0
+                break_even_label += f" ({change:+.2%} from recorded price)"
+        display.append({
+            "Expiration": quote.expiration,
+            "Days left in replay": quote.days_to_expiration,
+            "Most you could lose": f"${outcome.max_loss:,.2f}",
+            "Break-even at expiry": break_even_label,
+            "Bid–ask gap per contract": f"${outcome.bid_ask_gap:,.2f}",
+            "Simulated gain or loss": f"{outcome.pnl_at_ask:+,.2f} USD",
+        })
+    st.dataframe(display, width="stretch", hide_index=True)
+    st.caption(
+        "Results use the archived ask and your fee for one assumed 100-share contract at its own expiration. "
+        "Earnings timing and individual win odds are unavailable for this replay."
+    )
+    with st.expander("See the payoff across stock prices"):
+        thresholds = [outcome.break_even for _, outcome in outcomes if outcome.break_even is not None]
+        anchors = [strike, expiration_price, *thresholds]
+        low, high = max(0.0, min(anchors) - strike * 0.05), max(anchors) + strike * 0.05
+        prices = sorted(set(anchors + [low + (high - low) * step / 40 for step in range(41)]))
+        curve = pd.DataFrame({
+            "Stock price at expiry (USD)": prices,
+            **{
+                quote.expiration: [expiry_outcome(quote, price, fee).pnl_at_ask for price in prices]
+                for quote in selected_quotes
+            },
+        })
+        st.line_chart(curve, x="Stock price at expiry (USD)", y_label="Gain or loss per contract (USD)")
+    with st.expander("Quote details and price assumptions"):
+        st.caption("The stored timestamp depends on the provider and can be a fetch or trade time. It does not verify quote freshness.")
+        st.dataframe([
+            {
+                "Expiration": quote.expiration, "Bid per share": quote.bid, "Ask per share": quote.ask,
+                "Stored timestamp": quote.stored_timestamp or "Unknown", "Last trade time": quote.last_trade_at or "Unknown",
+                "Result at midpoint (USD)": outcome.pnl_at_midpoint,
+            }
+            for quote, outcome in outcomes
+        ], width="stretch", hide_index=True)
+        st.caption("The midpoint is an alternate price assumption. The archive contains no measured fills for this replay.")
+        st.download_button(
+            "Download replay inputs and results", data=json.dumps(replay_record(selected_quotes, expiration_price, fee), indent=2),
+            file_name=f"{symbol}-{session}-expiry-replay.json", mime="application/json",
+        )
+
+
 def render_discover(st: Any, hub: DiscoveryHub, *, get_card: Callable[[str], EvidenceCard],
                     default_ticker: Optional[str] = None) -> None:
+    view = st.radio("Discover view", ("Compare expirations", "Market and studies"), horizontal=True, key="discover-view")
+    if view == "Compare expirations":
+        render_expiry_replay(st, default_ticker=default_ticker)
+        return
     f = hub.freshness()
     st.caption(
         f"① Market › ② Sectors › ③ Ideas › ④ Evidence card — top-down, each step labelled by its evidence. "
@@ -146,12 +289,12 @@ def render_discover(st: Any, hub: DiscoveryHub, *, get_card: Callable[[str], Evi
     sort_choice = d_c1.radio(
         "Options DTE sort",
         ["dte", "evidence"],
-        format_func=lambda v: "Shortest DTE first (0DTE → 6M+)" if v == "dte" else "Best evidence first",
+        format_func=lambda v: "Shortest DTE first (0 to 240 days)" if v == "dte" else "Best evidence first",
         horizontal=True,
         label_visibility="collapsed",
         key="disc-dte-sort",
     )
-    live_dte_flag = d_c2.checkbox("Fetch live Alpaca/Yahoo options", value=False, key="disc-dte-live")
+    live_dte_flag = d_c2.checkbox("Request provider snapshots", value=False, key="disc-dte-live")
     ba = build_best_action(hub, live_options=bool(live_dte_flag), sort_dte_by=str(sort_choice))
     if ba.profile_summary:
         st.caption(f"Profile: {ba.profile_summary} · {ba.o1_fill_meter}")
@@ -164,6 +307,7 @@ def render_discover(st: Any, hub: DiscoveryHub, *, get_card: Callable[[str], Evi
             f"{sz_html}<b>{act.prob_text}</b><br><span style='color:#8b949e'>{act.why}</span>",
         )
     with st.expander(f"Options by Expiry (0DTE → 240D) [TAXABLE_ONLY] · Clock: {ba.execution_window}", expanded=True):
+        st.caption("Historical results describe the tested spread groups. Example contracts have no individual win estimate.")
         if ba.o1_fill_meter:
             st.caption(f"O1 Fill Quality Meter: **{ba.o1_fill_meter}**")
         st.dataframe(dte_strip_frame(ba), width="stretch", hide_index=True)

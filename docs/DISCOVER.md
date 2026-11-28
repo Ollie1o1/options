@@ -7,7 +7,43 @@ Discover is a **research tool**. It authorises no new trade: the only ordering i
 with validated evidence behind it is the Outlook rank of the 16 sector/asset ETFs
 (`vol_managed_outlook`, VALIDATED). Everything else says what it is and what tested it.
 
-## The four numbered steps (identical on every surface)
+## Compare expirations in web Discover
+
+Open **Discover → Compare expirations**. Choose the ticker, an archived session, and a call or put.
+Filter by days until expiration and select a strike quoted on two or more expiration dates. Choose
+up to three dates and enter a stock price to see what happens at each contract's own expiration.
+**Market and studies** opens the market, sector and evidence views. The TUI and `opt discover --dte`
+display the study groups and the source of any example quote.
+
+The comparison uses two-sided quotes from one ticker, archive session and provider. The app labels
+the stored timestamp separately from last trade time because archive timestamps have different meanings
+across providers. The reported stock price, when consistent, is the value stored with the archive.
+The payoff is a cash-equivalent exercise value at expiration, minus the archived ask and the simulated
+entry fee. The midpoint outcome is a sensitivity check. The archive doesn't record fills or verify the
+contract deliverable, so the model assumes a standard 100-share contract and screens out contract IDs
+that look adjusted. Early exits, exercise handling, dividends and earnings timing are outside this calculation.
+[OCC equity option specifications](https://www.theocc.com/clearance-and-settlement/clearing/equity-options-product-specifications)
+
+Expand **Quote details and price assumptions** to download the versioned JSON. It contains the exact
+contract IDs, dates, bid and ask, source, stored timestamps, stock-price scenario, fee, multiplier
+assumption and both payoff calculations. The replay reads the archive and returns a download to the user.
+
+### Delivery plan
+
+| Phase | Work | Acceptance check |
+|---|---|---|
+| 1. Evidence and quote labels | Show historical win rates beside average net return and average loss. Label example quotes by source and show zero when a contract exceeds the displayed risk cap. | A missing quote remains a study-only row. A delayed provider and an archived example are distinguishable. Over-cap sizing never shows one contract. |
+| 2. Expiry comparison | Add an archive-first web view with same-strike comparisons, a DTE range, an expiry price scenario and plain-language break-even and maximum loss. | A call and a put reconcile to their expiration payoff. Empty ranges, missing sessions and unusable quotes have clear states. |
+| 3. Reproducible replay | Expose bid, ask, timestamp context and midpoint sensitivity. Export the versioned inputs and results. | Reloading the same archive rows and scenario inputs reproduces both dollar results. The archive is read-only. |
+| 4. Coverage and payoff curve | Show usable quote and expiry counts by provider. Plot the modeled payoff across stock prices. | The payoff curve includes the selected scenario and each attainable break-even. Coverage describes the captured archive. |
+| 5. Paper research readouts | Complete the registered selector comparison, then design a DTE study that matches exposure and uses a common evaluation horizon. Include unfilled scenarios, fees, wider spreads, drawdown and a simpler exposure benchmark. Freeze rules before reading a new holdout. | Report the paired difference and its uncertainty. Show evidence only for the strategy, universe, and exit rule tested. Keep inconclusive and negative results discoverable. |
+| Follow-up. Events and early exits | Attach earnings only when the archive records when the date was known. Use later archived bid and ask for early exits. Consider time and volatility sensitivity once forward marks are reliable. | Replaying an earlier session cannot see later calendar revisions. Missing events or exit quotes display as unknown. |
+
+Phases 1–4 are implemented. Phase 5 starts with the existing registered forward study and its locked
+readout. Preserve the raw capture and provider metadata with each study artifact, including incomplete
+captures and corrections.
+
+## The four market and research steps
 
 | Step | Question | What you see | Evidence |
 |---|---|---|---|

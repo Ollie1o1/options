@@ -4,9 +4,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from rich.console import Console
 
@@ -120,6 +123,46 @@ class BestActionTests(unittest.TestCase):
             df = dte_strip_frame(ba_dte)
             self.assertEqual(len(df), 6)
             self.assertEqual(df.iloc[0]["DTE Bucket"], "0DTE")
+            self.assertEqual(df.iloc[0]["Average net return %"], -1.0)
+            self.assertEqual(df.iloc[0]["Quote context"], "No quote example")
+            self.assertNotIn("Calibrated P(Win) [95% CI, n]", df.columns)
+
+    def test_over_cap_never_rounds_up_to_one_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ev_p = os.path.join(td, "ev.json")
+            profile_p = os.path.join(td, "profile.json")
+            _sample_evidence(ev_p)
+            save_profile(UserProfile(risk_budget_usd=100), path=profile_p)
+            example = {
+                "ticker": "SPY", "expiration": "2027-02-26", "dte": 90, "strikes": "540/515P",
+                "credit_mid": 1.10, "limit_k035": 1.00, "max_risk_usd": 2400,
+                "friction_pct": 0.09, "flags": (), "quote_source": "archive:2026-11-28",
+            }
+            with patch("src.topdown.best_action._best_archived_spread_for_bucket", return_value=example):
+                bundle = build_best_action(
+                    _fake_hub(), evidence_path=ev_p, profile_path=profile_p, fills_db=os.path.join(td, "fills.db"),
+                )
+            card = next(action for action in bundle.actions if action.slot == "TAXABLE_OPTIONS")
+            self.assertIn("0 contracts fit the $100 risk cap", card.sizing_text)
+            self.assertIn("historical group", card.prob_text)
+            self.assertIn("Archived 2026-11-28", card.why)
+
+    def test_archive_example_uses_stock_price_from_the_same_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "archive.db")
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("CREATE TABLE chain_snapshots (symbol, snap_date, expiration, type, strike, bid, ask, delta, spot)")
+                conn.executemany("INSERT INTO chain_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+                    ("SPY", "2026-11-25", "2027-02-19", "put", 95, 1.95, 2.05, -0.25, 100),
+                    ("SPY", "2026-11-25", "2027-02-19", "put", 90, 0.95, 1.05, -0.10, 100),
+                ])
+                conn.commit()
+            hub = _fake_hub()
+            hub.ohlcv = {"SPY": (["2026-11-27"], [80.0], [1e6])}
+            bundle = build_best_action(hub, chain_db=path, fills_db=os.path.join(td, "fills.db"))
+            example = next(row for row in bundle.dte_rows if row.bucket_key == "60_120D")
+            self.assertEqual(example.strikes, "95/90P")
+            self.assertEqual(example.quote_context, "Archived 2026-11-25")
 
     def test_exact_sizing_on_target_o1_fill_meter_and_morning_brief(self) -> None:
         with tempfile.TemporaryDirectory() as td:
