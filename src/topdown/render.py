@@ -645,12 +645,97 @@ def fit_panel(card: EvidenceCard) -> Panel:
     return Panel(g, title="6 Portfolio fit", title_align="left", border_style=GREY)
 
 
+def best_action_panel(bundle: Any, *, compact: bool = False) -> Panel:
+    """0 · BEST ACTION TODAY — face-value picks by account + backtested calibrated probabilities."""
+    parts: List[Any] = []
+    for a in bundle.actions:
+        line = Text()
+        acct_style = f"bold {GREEN}" if a.account == "TFSA" else f"bold {AMBER}"
+        line.append(f"[{a.account}] ", style=acct_style)
+        line.append_text(chip(a.evidence_label))
+        line.append(f" {a.headline}", style="bold")
+        parts.append(line)
+        sub = Text("   ")
+        sub.append(a.prob_text, style=BLUE if a.calibrated else "dim")
+        if not compact:
+            sub.append(f"\n   Why: {a.why}", style="dim")
+        parts.append(sub)
+    if bundle.implied_calibration_note and not compact:
+        parts.append(Text(f"   {bundle.implied_calibration_note}", style="dim italic"))
+    parts.append(
+        source_line(
+            f"as of {bundle.as_of or '—'}",
+            f"options clock: {bundle.execution_window}",
+            "calibrated odds: configs/calibrated_evidence.json (Study 4A/4B)",
+        )
+    )
+    return Panel(
+        Group(*parts),
+        title="0 · BEST ACTION TODAY — face-value picks & backtested odds",
+        title_align="left",
+        border_style=GREEN,
+        subtitle="TFSA vs TAXABLE_ONLY separated",
+        subtitle_align="right",
+    )
+
+
+def dte_strip_panel(bundle: Any, *, sort_by: str = "dte") -> Panel:
+    """Options DTE Term-Structure Strip (0DTE -> 6M+) with backtested verdicts & calibrated P(Win)."""
+    tbl = Table(box=box.SIMPLE_HEAD, pad_edge=False, show_edge=False, expand=False)
+    tbl.add_column("DTE Bucket", style="bold", no_wrap=True)
+    tbl.add_column("Verdict", no_wrap=True)
+    tbl.add_column("Best Setup", no_wrap=True)
+    tbl.add_column("Mid", justify="right", no_wrap=True)
+    tbl.add_column("Fric", justify="right", no_wrap=True)
+    tbl.add_column("P(Win) [CI, n]", justify="right", no_wrap=True)
+    tbl.add_column("PF", justify="right", no_wrap=True)
+    tbl.add_column("AvgLoss", justify="right", no_wrap=True)
+    tbl.add_column("Δ-Adj", justify="right", no_wrap=True)
+    tbl.add_column("Note", style="dim", no_wrap=True, overflow="ellipsis", max_width=32)
+
+    for r in bundle.dte_rows:
+        setup = f"{r.ticker} {r.strikes} ({r.dte}d)" if r.ticker else "— (--live-dte)"
+        mid_s = f"${r.credit_mid:.2f}" if r.credit_mid is not None else "—"
+        fric_s = f"{r.friction_pct*100:.1f}%" if r.friction_pct is not None else "—"
+        if r.p_win is not None and r.n_backtest > 0:
+            ci = f"[{r.p_win_ci95[0]*100:.0f}-{r.p_win_ci95[1]*100:.0f}%]" if r.p_win_ci95 else ""
+            pw_s = f"{r.p_win*100:.0f}% {ci} n={r.n_backtest}"
+        else:
+            pw_s = "—"
+        pf_s = f"{r.pf:.2f}" if r.pf is not None else "—"
+        al_s = f"{r.avg_loss*100:.1f}%" if r.avg_loss is not None else "—"
+        ex_s = signed(r.excess_limit * 100.0, "{:+.2f}%") if r.excess_limit is not None else Text("—", style="dim")
+        verdict_chip = chip("AVOID" if r.evidence_label == "CLOSED" else r.evidence_label)
+        if r.evidence_label == "CLOSED":
+            verdict_chip = Text(" CLOSED ", style=f"bold #0e1117 on {RED}")
+        tbl.add_row(r.bucket_label, verdict_chip, setup, mid_s, fric_s, pw_s, pf_s, al_s, ex_s, r.why)
+
+    sort_lbl = "shortest DTE first (0DTE → 6M+)" if sort_by == "dte" else "best evidence first"
+    parts: List[Any] = [
+        Text(f"Sorted by: {sort_lbl} · [TAXABLE_ONLY] · Clock: {bundle.execution_window} ({bundle.execution_note})", style="dim"),
+        tbl,
+        source_line("OPRA cbbo-1m Study 4A/4B (k=0.35 limit net IBKR fees)", "never trade CLOSED buckets"),
+    ]
+    return Panel(Group(*parts), title="OPTIONS BY EXPIRY (0DTE → 240D) [TAXABLE_ONLY]", title_align="left", border_style=AMBER)
+
+
 def hub_overview(hub: DiscoveryHub) -> Group:
-    return Group(breadcrumb(1), freshness_line(hub), market_panel(hub), board_panel(hub), ideas_overview(hub))
+    from .best_action import build_best_action
+
+    ba = build_best_action(hub)
+    return Group(
+        breadcrumb(1),
+        freshness_line(hub),
+        best_action_panel(ba, compact=False),
+        market_panel(hub),
+        board_panel(hub),
+        ideas_overview(hub),
+    )
 
 
 __all__ = [
     "LABEL_STYLE", "LABEL_MEANING", "STEP_TITLES", "chip", "signed", "legend", "breadcrumb",
+    "best_action_panel", "dte_strip_panel",
     "market_panel", "board_table", "board_panel", "lens_header", "lens_table", "lens_panel",
     "ideas_overview", "null_ledger_panel", "tag_chips", "tag_legend", "freshness_line", "sector_members_panel", "card_renderable", "hub_overview",
     "fit_panel", "forward_panel",

@@ -90,6 +90,31 @@ def null_ledger_frame() -> pd.DataFrame:
     return pd.DataFrame([{"Idea (tested here)": a, "Result": b, "Date": c, "Source": d} for a, b, c, d in NULL_LEDGER])
 
 
+def dte_strip_frame(bundle: Any) -> pd.DataFrame:
+    rows = []
+    for r in bundle.dte_rows:
+        p_s = (
+            f"{r.p_win*100:.0f}% [{r.p_win_ci95[0]*100:.0f}–{r.p_win_ci95[1]*100:.0f}%] (n={r.n_backtest})"
+            if (r.p_win is not None and r.n_backtest > 0 and r.p_win_ci95)
+            else "—"
+        )
+        rows.append(
+            {
+                "DTE Bucket": r.bucket_label,
+                "Verdict": r.evidence_label,
+                "Best Setup": f"{r.ticker} {r.strikes} ({r.dte}d)" if r.ticker else "—",
+                "Mid $": r.credit_mid,
+                "Friction %": round(r.friction_pct * 100.0, 1) if r.friction_pct is not None else None,
+                "Calibrated P(Win) [95% CI, n]": p_s,
+                "PF": r.pf,
+                "Avg Loss %": round(r.avg_loss * 100.0, 1) if r.avg_loss is not None else None,
+                "Δ-Adj Excess %": round(r.excess_limit * 100.0, 2) if r.excess_limit is not None else None,
+                "Why": r.why,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _box(st: Any, label: str, title: str, body: str) -> None:
     border = CHIP_BG.get(label, "#8b949e")
     st.markdown(
@@ -110,6 +135,35 @@ def render_discover(st: Any, hub: DiscoveryHub, *, get_card: Callable[[str], Evi
     )
     st.markdown(" ".join(f"{chip_html(k)} <span style='color:#8b949e;font-size:0.8rem'>{v}</span>"
                          for k, v in LABEL_MEANING.items()), unsafe_allow_html=True)
+
+    # 0 · BEST ACTION TODAY + DTE-SORTED OPTIONS STRIP
+    from .best_action import build_best_action
+
+    st.markdown("### 0 · Best Action Today — face-value picks & backtested odds")
+    d_c1, d_c2 = st.columns([2, 1])
+    sort_choice = d_c1.radio(
+        "Options DTE sort",
+        ["dte", "evidence"],
+        format_func=lambda v: "Shortest DTE first (0DTE → 6M+)" if v == "dte" else "Best evidence first",
+        horizontal=True,
+        label_visibility="collapsed",
+        key="disc-dte-sort",
+    )
+    live_dte_flag = d_c2.checkbox("Fetch live Alpaca/Yahoo options", value=False, key="disc-dte-live")
+    ba = build_best_action(hub, live_options=bool(live_dte_flag), sort_dte_by=str(sort_choice))
+    for act in ba.actions:
+        _box(
+            st,
+            "AVOID" if act.evidence_label == "CLOSED" else act.evidence_label,
+            f"[{act.account}] {act.headline}",
+            f"<b>{act.prob_text}</b><br><span style='color:#8b949e'>{act.why}</span>",
+        )
+    with st.expander(f"Options by Expiry (0DTE → 240D) [TAXABLE_ONLY] · Clock: {ba.execution_window}", expanded=True):
+        st.dataframe(dte_strip_frame(ba), width="stretch", hide_index=True)
+        st.caption(
+            f"{ba.execution_note}"
+            + (f" · {ba.implied_calibration_note}" if ba.implied_calibration_note else "")
+        )
 
     # ① MARKET
     from .render import regime_read
@@ -286,5 +340,5 @@ def _render_card(st: Any, card: EvidenceCard) -> None:
 
 __all__ = [
     "chip_html", "board_frame", "ratios_frame", "lens_frame", "members_frame", "peers_frame",
-    "provenance_frame", "null_ledger_frame", "render_discover",
+    "provenance_frame", "null_ledger_frame", "dte_strip_frame", "render_discover",
 ]

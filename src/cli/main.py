@@ -133,7 +133,7 @@ def commands_cmd(ctx: click.Context) -> None:
         (
             "Discovery, Research & Trade Planning",
             [
-                ("opt discover [--sector XLE | --lens opt_skew | --diversify]", "Top-down ① Market → ② Sectors → ③ Labelled Lenses (+ correlation sort)"),
+                ("opt discover [--sector XLE | --lens opt_skew | --diversify | --dte]", "0 Best Action Today + ① Market → ② Sectors → ③ Ideas (+ 0DTE→6M+ strip)"),
                 ("opt discover --ledger", "Inspect NULL_LEDGER of ideas tested here that failed"),
                 ("opt card NVDA", "④ Evidence Card: verdict, peers, options odds & provenance"),
                 ("opt radar [--clean | --live-options]", "Unified Stock + Option Opportunity Radar"),

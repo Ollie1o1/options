@@ -24,13 +24,19 @@ def _hub(ctx: click.Context):
               help="Open one lens in full. Includes opt_skew, edgar_events, edgar_quality. An invalid ID lists all choices.")
 @click.option("--diversify", is_flag=True,
               help="Annotate & sort lens rows by lowest 126d correlation against your current holdings / core sleeve.")
+@click.option("--dte", "show_dte", is_flag=True,
+              help="Show the Options-by-Expiry (0DTE -> 240D) strip with backtested verdicts & calibrated probabilities.")
+@click.option("--sort-dte", type=click.Choice(["dte", "evidence"]), default="dte", show_default=True,
+              help="Order for --dte: shortest DTE first (`dte`) or best evidence first (`evidence`).")
+@click.option("--live-dte", is_flag=True, help="Fetch live 3-tier CBOE/Alpaca/Yahoo chains for --dte.")
 @click.option("--ledger", is_flag=True, help="Show ideas already tested here that did NOT work.")
 @click.option("--refresh-macro", is_flag=True, help="Fetch FRED credit-spread / yield-curve series first (network).")
 @click.option("--record", is_flag=True, help="Record today's idea lists to the forward log (maintenance does this daily).")
 @click.option("--forward", is_flag=True, help="Status of the forward record; outcomes stay locked until the preregistered read date.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
 @click.pass_context
-def discover_cmd(ctx: click.Context, sector: str, lens_id: str, diversify: bool, ledger: bool, refresh_macro: bool,
+def discover_cmd(ctx: click.Context, sector: str, lens_id: str, diversify: bool, show_dte: bool, sort_dte: str,
+                 live_dte: bool, ledger: bool, refresh_macro: bool,
                  record: bool, forward: bool, as_json: bool) -> None:
     """Top-down discovery: ① Market → ② Sectors (ranked by the PROVEN model) → ③ Ideas, each labelled by its evidence."""
     from src.topdown import render as R
@@ -67,12 +73,23 @@ def discover_cmd(ctx: click.Context, sector: str, lens_id: str, diversify: bool,
                           f"{counts['lenses']} lenses → data/lens_forward.db")
 
     if use_json:
+        from src.topdown.best_action import build_best_action
+
         payload = hub.to_dict()
+        payload["best_action"] = build_best_action(hub, live_options=live_dte, sort_dte_by=sort_dte).to_dict()
         if sector:
             from src.topdown.sectors import sector_members
 
             payload["sector_members"] = {sector.upper(): sector_members(sector, hub.ohlcv)}
         click.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    if show_dte or live_dte:
+        from src.topdown.best_action import build_best_action
+
+        ba = build_best_action(hub, live_options=live_dte, sort_dte_by=sort_dte)
+        console.print(R.best_action_panel(ba, compact=False))
+        console.print(R.dte_strip_panel(ba, sort_by=sort_dte))
         return
 
     if ledger:

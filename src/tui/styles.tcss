@@ -338,6 +338,11 @@ Screen.compact #wb-right {
     height: 1;
 }
 
+#disc-best-action {
+    height: auto;
+    max-height: 9;
+}
+
 #disc-market {
     height: auto;
     max-height: 10;
