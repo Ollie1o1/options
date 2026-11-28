@@ -74,6 +74,8 @@ def dte_header(bundle: Any, *, sort_by: str = "dte") -> Text:
     t = Text("OPTIONS BY EXPIRY [TAXABLE_ONLY] — ", style="bold")
     t.append(f"Sorted: {sort_lbl}\n", style="#d6a452")
     t.append(f"Clock: {bundle.execution_window} · {bundle.execution_note}", style="dim")
+    if getattr(bundle, "o1_fill_meter", ""):
+        t.append(f"\nO1 Fill Meter: {bundle.o1_fill_meter}", style="#d6a452")
     return t
 
 

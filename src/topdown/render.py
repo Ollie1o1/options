@@ -646,8 +646,10 @@ def fit_panel(card: EvidenceCard) -> Panel:
 
 
 def best_action_panel(bundle: Any, *, compact: bool = False) -> Panel:
-    """0 · BEST ACTION TODAY — face-value picks by account + backtested calibrated probabilities."""
+    """0 · BEST ACTION TODAY — face-value picks by account, exact sizing, fill meter & backtested odds."""
     parts: List[Any] = []
+    if getattr(bundle, "profile_summary", "") and not compact:
+        parts.append(Text(f"Profile · {bundle.profile_summary}", style="dim"))
     for a in bundle.actions:
         line = Text()
         acct_style = f"bold {GREEN}" if a.account == "TFSA" else f"bold {AMBER}"
@@ -656,10 +658,17 @@ def best_action_panel(bundle: Any, *, compact: bool = False) -> Panel:
         line.append(f" {a.headline}", style="bold")
         parts.append(line)
         sub = Text("   ")
+        if getattr(a, "sizing_text", ""):
+            sub.append(a.sizing_text, style=f"bold {GREEN}" if a.account == "TFSA" else f"bold {AMBER}")
+            sub.append("\n   ")
         sub.append(a.prob_text, style=BLUE if a.calibrated else "dim")
         if not compact:
             sub.append(f"\n   Why: {a.why}", style="dim")
         parts.append(sub)
+    if getattr(bundle, "o1_fill_meter", ""):
+        v_state = str((getattr(bundle, "o1_fill_verdict", None) or {}).get("verdict") or "")
+        m_style = f"bold {RED}" if v_state == "FAIL" else (f"bold {GREEN}" if v_state == "PASS" else AMBER)
+        parts.append(Text(f"   Fill Meter: {bundle.o1_fill_meter}", style=m_style))
     if bundle.implied_calibration_note and not compact:
         parts.append(Text(f"   {bundle.implied_calibration_note}", style="dim italic"))
     parts.append(
@@ -671,7 +680,7 @@ def best_action_panel(bundle: Any, *, compact: bool = False) -> Panel:
     )
     return Panel(
         Group(*parts),
-        title="0 · BEST ACTION TODAY — face-value picks & backtested odds",
+        title="0 · BEST ACTION TODAY — face-value picks, sizing & backtested odds",
         title_align="left",
         border_style=GREEN,
         subtitle="TFSA vs TAXABLE_ONLY separated",
@@ -685,17 +694,18 @@ def dte_strip_panel(bundle: Any, *, sort_by: str = "dte") -> Panel:
     tbl.add_column("DTE Bucket", style="bold", no_wrap=True)
     tbl.add_column("Verdict", no_wrap=True)
     tbl.add_column("Best Setup", no_wrap=True)
-    tbl.add_column("Mid", justify="right", no_wrap=True)
+    tbl.add_column("Limit", justify="right", no_wrap=True)
     tbl.add_column("Fric", justify="right", no_wrap=True)
     tbl.add_column("P(Win) [CI, n]", justify="right", no_wrap=True)
     tbl.add_column("PF", justify="right", no_wrap=True)
     tbl.add_column("AvgLoss", justify="right", no_wrap=True)
     tbl.add_column("Δ-Adj", justify="right", no_wrap=True)
-    tbl.add_column("Note", style="dim", no_wrap=True, overflow="ellipsis", max_width=32)
+    tbl.add_column("Note", style="dim", no_wrap=True, overflow="ellipsis", max_width=30)
 
     for r in bundle.dte_rows:
         setup = f"{r.ticker} {r.strikes} ({r.dte}d)" if r.ticker else "— (--live-dte)"
-        mid_s = f"${r.credit_mid:.2f}" if r.credit_mid is not None else "—"
+        lim_px = getattr(r, "limit_k035", None)
+        lim_s = f">=${lim_px:.2f}" if lim_px is not None else (f"${r.credit_mid:.2f}" if r.credit_mid is not None else "—")
         fric_s = f"{r.friction_pct*100:.1f}%" if r.friction_pct is not None else "—"
         if r.p_win is not None and r.n_backtest > 0:
             ci = f"[{r.p_win_ci95[0]*100:.0f}-{r.p_win_ci95[1]*100:.0f}%]" if r.p_win_ci95 else ""
@@ -708,14 +718,20 @@ def dte_strip_panel(bundle: Any, *, sort_by: str = "dte") -> Panel:
         verdict_chip = chip("AVOID" if r.evidence_label == "CLOSED" else r.evidence_label)
         if r.evidence_label == "CLOSED":
             verdict_chip = Text(" CLOSED ", style=f"bold #0e1117 on {RED}")
-        tbl.add_row(r.bucket_label, verdict_chip, setup, mid_s, fric_s, pw_s, pf_s, al_s, ex_s, r.why)
+        tbl.add_row(r.bucket_label, verdict_chip, setup, lim_s, fric_s, pw_s, pf_s, al_s, ex_s, r.why)
 
     sort_lbl = "shortest DTE first (0DTE → 6M+)" if sort_by == "dte" else "best evidence first"
     parts: List[Any] = [
         Text(f"Sorted by: {sort_lbl} · [TAXABLE_ONLY] · Clock: {bundle.execution_window} ({bundle.execution_note})", style="dim"),
-        tbl,
-        source_line("OPRA cbbo-1m Study 4A/4B (k=0.35 limit net IBKR fees)", "never trade CLOSED buckets"),
     ]
+    if getattr(bundle, "o1_fill_meter", ""):
+        parts.append(Text(f"O1 Execution Gate: {bundle.o1_fill_meter}", style=AMBER))
+    parts.extend(
+        [
+            tbl,
+            source_line("OPRA cbbo-1m Study 4A/4B (k=0.35 limit net IBKR fees)", "never trade CLOSED buckets"),
+        ]
+    )
     return Panel(Group(*parts), title="OPTIONS BY EXPIRY (0DTE → 240D) [TAXABLE_ONLY]", title_align="left", border_style=AMBER)
 
 

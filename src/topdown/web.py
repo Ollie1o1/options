@@ -104,6 +104,8 @@ def dte_strip_frame(bundle: Any) -> pd.DataFrame:
                 "Verdict": r.evidence_label,
                 "Best Setup": f"{r.ticker} {r.strikes} ({r.dte}d)" if r.ticker else "—",
                 "Mid $": r.credit_mid,
+                "Limit $ (k≤0.35)": getattr(r, "limit_k035", None),
+                "Max Risk $": getattr(r, "max_risk_usd", None),
                 "Friction %": round(r.friction_pct * 100.0, 1) if r.friction_pct is not None else None,
                 "Calibrated P(Win) [95% CI, n]": p_s,
                 "PF": r.pf,
@@ -151,14 +153,19 @@ def render_discover(st: Any, hub: DiscoveryHub, *, get_card: Callable[[str], Evi
     )
     live_dte_flag = d_c2.checkbox("Fetch live Alpaca/Yahoo options", value=False, key="disc-dte-live")
     ba = build_best_action(hub, live_options=bool(live_dte_flag), sort_dte_by=str(sort_choice))
+    if ba.profile_summary:
+        st.caption(f"Profile: {ba.profile_summary} · {ba.o1_fill_meter}")
     for act in ba.actions:
+        sz_html = f"<span style='color:#5ec98d;font-weight:600'>{act.sizing_text}</span><br>" if act.sizing_text else ""
         _box(
             st,
             "AVOID" if act.evidence_label == "CLOSED" else act.evidence_label,
             f"[{act.account}] {act.headline}",
-            f"<b>{act.prob_text}</b><br><span style='color:#8b949e'>{act.why}</span>",
+            f"{sz_html}<b>{act.prob_text}</b><br><span style='color:#8b949e'>{act.why}</span>",
         )
     with st.expander(f"Options by Expiry (0DTE → 240D) [TAXABLE_ONLY] · Clock: {ba.execution_window}", expanded=True):
+        if ba.o1_fill_meter:
+            st.caption(f"O1 Fill Quality Meter: **{ba.o1_fill_meter}**")
         st.dataframe(dte_strip_frame(ba), width="stretch", hide_index=True)
         st.caption(
             f"{ba.execution_note}"

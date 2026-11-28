@@ -242,10 +242,33 @@ def _regime_directive(posture: str, rv20: Optional[float]) -> str:
     return "Desk Stance: Selective · enforce walk-away limits and avoid chasing extended breakouts."
 
 
+def _best_action_morning_field(
+    best_action: Optional[Any] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build compact '0 · Best Action Today' Discord field when a BestActionBundle is supplied."""
+    if best_action is None:
+        return None
+    try:
+        from src.topdown.best_action import format_morning_brief_lines
+
+        lines = format_morning_brief_lines(best_action)
+        if not lines:
+            return None
+        return {
+            "name": "0 · Best Action Today (Sizing · Calibrated Odds · O1 Fill Meter)",
+            "value": "\n".join(f"• {ln}" for ln in lines[:5])[:1000],
+            "inline": False,
+        }
+    except Exception:
+        return None
+
+
 def build_morning_embed(
     snap: RadarSnapshot,
     book: Dict[str, Any],
     health: Dict[str, Any],
+    *,
+    best_action: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Build a compact, Bloomberg-style Discord Rich Embed for the daily Morning Dispatch."""
     posture = snap.regime_posture
@@ -307,11 +330,12 @@ def build_morning_embed(
         book_txt = f"{len(open_eq)} open stock/ETF pick(s) · 0 exit alerts"
 
     today_str = dt.date.today().isoformat()
-    return {
-        "title": f"Options Desk Dispatch · {today_str} · [{posture}]",
-        "color": color,
-        "description": _regime_directive(posture, rv20_val),
-        "fields": [
+    ba_field = _best_action_morning_field(best_action=best_action)
+    fields: List[Dict[str, Any]] = []
+    if ba_field is not None:
+        fields.append(ba_field)
+    fields.extend(
+        [
             {
                 "name": "Market Telemetry",
                 "value": f"SPY `{spy_s}` · QQQ `{qqq_s}` · VIX `{vix_s}` · RV20 `{rv_s}`\n{macro_line}",
@@ -337,7 +361,13 @@ def build_morning_embed(
                 "value": _pipe_led_str(health),
                 "inline": False,
             },
-        ],
+        ]
+    )
+    return {
+        "title": f"Options Desk Dispatch · {today_str} · [{posture}]",
+        "color": color,
+        "description": _regime_directive(posture, rv20_val),
+        "fields": fields,
         "footer": {"text": "Options Desk · Run `opt` for full cockpit · Live execution OFF"},
     }
 

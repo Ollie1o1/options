@@ -101,7 +101,8 @@ All Phase 3 lenses are free public feeds labelled `WATCHLIST` or `CONTEXT` (neve
 
 | Command | What it does |
 |---|---|
-| `opt notify --morning` | Push one daily Bloomberg-style Morning Dispatch embed to Discord (with TFSA Core weights, TFSA-legal satellites & Data Pipeline LEDs) |
+| `opt notify --morning` | Push one daily Bloomberg-style Morning Dispatch embed to Discord (with `0 · Best Action Today` sizing/odds, TFSA Core weights, TFSA-legal satellites & Data Pipeline LEDs) |
+| `opt notify --morning --brief` | Print the 5-line plain-text `0 · BEST ACTION TODAY` brief (exact USD/share sizing, calibrated `P(Win)`, `O1` limit & fill meter) |
 | `opt notify --morning --dry-run` | Preview the Discord embed JSON locally without sending |
 | `opt notify --check` | Signal-only alert check: pushes ONLY on Open Pick Exits, Clean TFSA Setups, Monthly Rebalance Due, or `STALE` Data Pipes (deduped daily; coalesced into one single-slot macOS banner) |
 | `opt notify --pill` | Print ultra-compact status pill (`◆ XLE/XLV/XLP VIX 27`) for menu bar / shell prompts |

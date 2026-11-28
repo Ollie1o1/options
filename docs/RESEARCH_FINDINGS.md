@@ -8,6 +8,15 @@ scheduled · **CLOSED** = answered, don't re-run · **BASELINE** = the default.
 
 ---
 
+## 2026-11-28 (early morning) — 11-year OPRA non-SPY O1 stress test & single-stock pullback gap filter
+
+Two follow-up preregistered studies completed (`469` incremental `2015–2023` weekly `15:45 ET` OPRA Wednesdays for **`$7.02`**; total cumulative Databento spend **`$20.11 / $125`** credit, leaving **`$104.89`** unused) plus Part A Discover upgrades (exact USD/share/contract sizing, live `O1` `k<=0.35` fill-quality meter, and 5-line `opt notify --morning --brief`):
+
+| # | Finding | Status | Detail |
+|---|---|---|---|
+| 1 | **Study 5A (`OPRA_10YR_TLT_QQQ_IWM`, 613 weekly Wednesdays `2015–2026`, `3,232` spreads, `$7.02`): ALL 6 non-SPY `60–120 DTE` arms (`TLT`, `QQQ`, `IWM` × Bull Put / Bear Call) are `CLOSED` — `SPY` remains the sole `O1` lead.** `TLT` Bull Put's 2024–2026 outperformance proved to be a regime illusion: the 2022–2023 bond bear (`2022` RoC `-25.4%`, `x -13.25%`; `2023` RoC `-7.8%`, `x -4.05%`) dragged 11-year `TLT` Bull Put (`n=487`, `effN=87`) to **negative raw expectancy (`-0.55%` RoC, `PF 0.94`, AvgLoss `-50.2%`, `H2 -0.64%`, crossed `-0.84%`)**. All 3 Bear Calls lost outright (`PF 0.51–0.92`; `QQQ` Bear Call `-8.22%`, `PF 0.51`). `IWM` Bull Put (`n=592`) lagged delta in both halves (`-0.68%` / `-1.37%`, `-1.01%` overall, AvgLoss `-53.7%`). `QQQ` Bull Put (`n=596`) earned `+5.63%` (`PF 2.20`) almost purely from NASDAQ beta (`x_lim +0.31% [-2.07, +2.27%]`, `H2 -0.11%`, crossed `-0.16%`). `best_action.py` now strictly prioritizes `SPY` for `60–120d (O1)`. | **CLOSED** (`TLT`, `QQQ`, `IWM` `O1`) · **`SPY` SOLE LEAD** | `RESULT_OPRA_10YR_TLT_QQQ_IWM_20261127.md` |
+| 2 | **Study 5B (`PULLBACK_INTRADAY_VS_GAP`, `10,893` single-stock trades `2018–2026` + `8,131` Alpaca Open/Close verified, `$0`): BOTH gap-exclusion hypotheses `FAILED` with the opposite sign on holdout — keep `equity_pullback` unchanged.** Excluding overnight gap-downs hurt holdout performance (`NON_GAP - TRUE_GAP_DOWN = -0.256% [-0.785, +0.283%]`; Alpaca `NO_BIG_GAP - OVERNIGHT_GAP_TRAP = -0.439% [-1.125, +0.270%]`). Because `equity_pullback` already blackouts earnings (10d) and enters at next-day close (`t+1`), non-earnings gap-downs in uptrends actually delivered the highest holdout PF (`TRUE_GAP_DOWN` `+0.58%`, `PF 1.43`; Alpaca `gap <= -1.5%` `+0.80%`, `PF 1.51`) vs intraday flushes (`+0.34%`, `PF 1.23`). | **CLOSED** (do not add gap filter) | `RESULT_PULLBACK_INTRADAY_VS_GAP_20261127.md` |
+
 ## 2026-11-27 (night) — Complete 0DTE–240D OPRA DTE curve & walk-forward probability calibration
 
 Two preregistered studies completed (`1,035,642` incremental `10:30 ET` `0DTE` OPRA rows for **`$1.54`**; cumulative Databento spend **`$13.09 / $125`** credit, `8.78M` total rows) to power `[6] DISCOVER`'s `0 · BEST ACTION TODAY`, `0DTE → 6M+` expiry strip, and backed-up probability badges:
