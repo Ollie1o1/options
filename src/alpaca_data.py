@@ -159,6 +159,7 @@ def parse_option_snapshots(
                 "last_trade_time": str(tr.get("t")) if tr.get("t") else None,
                 "spot": spot,
                 "snapshot_ts": str(q.get("t") or tr.get("t") or "") or None,
+                "quote_at": str(q["t"]) if q.get("t") else None,
                 "source": src_tag,
             }
         )

@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from src.paths import repo_path
 
@@ -34,7 +37,7 @@ CREATE TABLE IF NOT EXISTS chain_snapshots (
     bid REAL, ask REAL, bid_size REAL, ask_size REAL,
     iv REAL, delta REAL, gamma REAL, theta REAL, vega REAL, rho REAL,
     open_interest REAL, volume REAL,
-    last_trade_time TEXT, spot REAL, snapshot_ts TEXT, source TEXT,
+    last_trade_time TEXT, spot REAL, snapshot_ts TEXT, source TEXT, quote_at TEXT, fetched_at TEXT,
     PRIMARY KEY (contract, snap_date)
 );
 CREATE INDEX IF NOT EXISTS idx_snap_symbol_date
@@ -48,12 +51,17 @@ CREATE TABLE IF NOT EXISTS archive_attempts (
     attempted_at TEXT NOT NULL,
     PRIMARY KEY (snap_date, symbol)
 );
+CREATE TABLE IF NOT EXISTS archive_earnings (
+    symbol TEXT NOT NULL, snap_date TEXT NOT NULL, event_date TEXT NOT NULL,
+    observed_at TEXT NOT NULL, source TEXT NOT NULL,
+    PRIMARY KEY (symbol, snap_date)
+);
 """
 
 _COLUMNS = ["symbol", "snap_date", "contract", "type", "strike", "expiration",
             "bid", "ask", "bid_size", "ask_size", "iv", "delta", "gamma",
             "theta", "vega", "rho", "open_interest", "volume",
-            "last_trade_time", "spot", "snapshot_ts", "source"]
+            "last_trade_time", "spot", "snapshot_ts", "source", "quote_at", "fetched_at"]
 
 
 def _record_attempt(conn: sqlite3.Connection, snap_date: str, symbol: str,
@@ -77,6 +85,12 @@ def ensure_db(db_path: str = DEFAULT_DB) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(_SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(chain_snapshots)")}
+        if "quote_at" not in columns:
+            conn.execute("ALTER TABLE chain_snapshots ADD COLUMN quote_at TEXT")
+        if "fetched_at" not in columns:
+            conn.execute("ALTER TABLE chain_snapshots ADD COLUMN fetched_at TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -305,13 +319,26 @@ def fetch_chain_with_fallback(
     return fetch_yfinance_chain(symbol, max_dte=max_dte, moneyness_band=moneyness_band)
 
 
+def _archivable_earnings(today: str, db_path: str) -> Dict[str, str]:
+    """Read scheduled dates already present in the local cache before capture."""
+    uri = Path(repo_path(db_path)).resolve().as_uri() + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            return dict(conn.execute(
+                "SELECT symbol,MIN(date) FROM earnings_cal WHERE date>=? GROUP BY symbol", (today,),
+            ))
+    except sqlite3.Error:
+        return {}
+
+
 def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                     today: Optional[str] = None,
                     fetcher: Optional[Callable] = None,
                     max_dte: int = 120, moneyness_band: float = 0.15,
                     min_open_interest: float = 1,
                     stats: Optional[Dict[str, Any]] = None,
-                    max_consecutive_failures: int = 6) -> int:
+                    max_consecutive_failures: int = 6,
+                    earnings_db: str = "data/dolt_options.db") -> int:
     """Snapshot each symbol once for `today`. Idempotent per (symbol, day);
     per-symbol failures are isolated. Returns rows written.
 
@@ -324,11 +351,14 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
     2026-11-18 the run fired with the Mac asleep and offline: 1 of 22 symbols
     archived, the day was stamped done, and the other 21 were lost for good.
     """
-    today = today or datetime.now().strftime("%Y-%m-%d")
+    current_session = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    today = today or current_session
     if fetcher is None:
         def _default_fetch(s: str) -> List[Dict[str, Any]]:
             return fetch_chain_with_fallback(s, max_dte=max_dte, moneyness_band=moneyness_band)
         fetcher = _default_fetch
+    scheduled = _archivable_earnings(today, earnings_db) if today == current_session else {}
+    calendar_observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     ensure_db(db_path)
     written = 0
     st: Dict[str, Any] = {"symbols": len(symbols), "already": 0, "archived": 0,
@@ -359,12 +389,19 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                 rows = filter_rows(fetcher(sym) or [], today,
                                    max_dte=max_dte, moneyness_band=moneyness_band,
                                    min_open_interest=min_open_interest)
+                fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 for r in rows:
-                    values = [sym, today] + [r.get(c) for c in _COLUMNS[2:]]
+                    archived = {**r, "fetched_at": fetched_at}
+                    values = [sym, today] + [archived.get(c) for c in _COLUMNS[2:]]
                     conn.execute(
                         f"INSERT OR IGNORE INTO chain_snapshots ({','.join(_COLUMNS)}) "
                         f"VALUES ({','.join('?' * len(_COLUMNS))})", values)
                     written += 1
+                if rows and sym in scheduled:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO archive_earnings VALUES (?,?,?,?,?)",
+                        (sym, today, scheduled[sym], calendar_observed_at, "DoltHub earnings cache"),
+                    )
                 _record_attempt(conn, today, sym, "archived" if rows else "no_rows",
                                 None if rows else "provider returned no rows inside the archive filter")
                 conn.commit()

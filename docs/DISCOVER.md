@@ -15,18 +15,36 @@ up to three dates and enter a stock price to see what happens at each contract's
 **Market and studies** opens the market, sector and evidence views. The TUI and `opt discover --dte`
 display the study groups and the source of any example quote.
 
-The comparison uses two-sided quotes from one ticker, archive session and provider. The app labels
-the stored timestamp separately from last trade time because archive timestamps have different meanings
-across providers. The reported stock price, when consistent, is the value stored with the archive.
+The comparison uses two-sided quotes from one ticker, archive session and provider. The details show
+the quote time when the provider supplies one, when the fetch finished, and the last trade time.
+Older captures keep their original timestamp field. The reported stock price, when consistent, is the
+value stored with the archive.
 The payoff is a cash-equivalent exercise value at expiration, minus the archived ask and the simulated
 entry fee. The midpoint outcome is a sensitivity check. The archive doesn't record fills or verify the
 contract deliverable, so the model assumes a standard 100-share contract and screens out contract IDs
-that look adjusted. Early exits, exercise handling, dividends and earnings timing are outside this calculation.
+that look adjusted. Exercise handling and dividends are outside this calculation.
 [OCC equity option specifications](https://www.theocc.com/clearance-and-settlement/clearing/equity-options-product-specifications)
 
 Expand **Quote details and price assumptions** to download the versioned JSON. It contains the exact
 contract IDs, dates, bid and ask, source, stored timestamps, stock-price scenario, fee, multiplier
-assumption and both payoff calculations. The replay reads the archive and returns a download to the user.
+assumption and both payoff calculations. **Open saved replay** restores the original inputs and
+recalculates the expiration results. Later-session history comes from the local archive.
+
+### Replay timeline and reader controls
+
+- Each contract card leads with maximum loss, the stock price needed to break even at expiry, and
+  either the archived earnings date or the cost of the bid–ask gap. A scheduled date appears only
+  when the capture saved a future date already present in the local earnings calendar. Older captures
+  show earnings history as unavailable. Later calendar refreshes leave prior snapshots intact.
+- **What happened before expiration?** compares contracts on the same recorded date through the first
+  expiry. The simulated early exit starts from the entry ask and uses the later recorded bid. The
+  breakdown shows the midpoint change, the bid–ask cost, and both fees. Dates with missing quotes or
+  changed providers stay visible and break the chart line.
+- **Archive coverage by date** displays capture attempts and gaps on dates present in the local market
+  calendar. A comparison with one captured session can show the expiration scenario and will gain a
+  timeline when later quotes are present.
+- **Breakout research** shows the held-out aggregate evidence for the EMA windows and lets readers
+  inspect the uncertainty and sample behind each result. [Study protocol and results](EMA_BREAKOUT_STUDY.md)
 
 ### Delivery plan
 
@@ -37,11 +55,12 @@ assumption and both payoff calculations. The replay reads the archive and return
 | 3. Reproducible replay | Expose bid, ask, timestamp context and midpoint sensitivity. Export the versioned inputs and results. | Reloading the same archive rows and scenario inputs reproduces both dollar results. The archive is read-only. |
 | 4. Coverage and payoff curve | Show usable quote and expiry counts by provider. Plot the modeled payoff across stock prices. | The payoff curve includes the selected scenario and each attainable break-even. Coverage describes the captured archive. |
 | 5. Paper research readouts | Complete the registered selector comparison, then design a DTE study that matches exposure and uses a common evaluation horizon. Include unfilled scenarios, fees, wider spreads, drawdown and a simpler exposure benchmark. Freeze rules before reading a new holdout. | Report the paired difference and its uncertainty. Show evidence only for the strategy, universe, and exit rule tested. Keep inconclusive and negative results discoverable. |
-| Follow-up. Events and early exits | Attach earnings only when the archive records when the date was known. Use later archived bid and ask for early exits. Consider time and volatility sensitivity once forward marks are reliable. | Replaying an earlier session cannot see later calendar revisions. Missing events or exit quotes display as unknown. |
+| 6. Same-day history | Reuse saved replays, capture dated earnings context, compare later exit quotes and expose archive gaps. Avoid building the market hub for replay and breakout research. | A saved replay restores its original assumptions. The same-day timeline displays missing quotes. Earnings dates come from the current session’s capture. |
+| 7. Breakout research | Test short, medium, and long EMA windows against a fixed baseline for different forecast horizons. | Freeze the protocol before evaluating the holdout. Display forecast error, uncertainty, and sample size together. |
 
-Phases 1–4 are implemented. Phase 5 starts with the existing registered forward study and its locked
-readout. Preserve the raw capture and provider metadata with each study artifact, including incomplete
-captures and corrections.
+Phases 1–4 and 6–7 are implemented. Phase 5 starts with the existing registered forward study and its
+locked readout. Preserve the raw capture and provider metadata with each study artifact, including
+incomplete captures and corrections.
 
 ## The four market and research steps
 
