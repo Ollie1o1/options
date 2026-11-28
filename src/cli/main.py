@@ -168,7 +168,7 @@ def commands_cmd(ctx: click.Context) -> None:
         (
             "Alerts & Mission Lab",
             [
-                ("opt notify --morning [--dry-run]", "Push daily Morning Dispatch rich embed to Discord"),
+                ("opt notify --morning [--brief | --dry-run]", "5-line Best Action Today brief / Discord Morning Dispatch embed"),
                 ("opt notify --check / --pill", "Signal-only Discord + single-slot macOS alert / menu-bar pill"),
                 ("opt notify --test-macos / --test-discord", "Send a quick test alert to verify setup"),
                 ("opt lab health | playbooks | fills", "Per-pipe freshness LEDs, strategy registry & Test O1 fill k"),

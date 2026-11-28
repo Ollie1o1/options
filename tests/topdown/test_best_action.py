@@ -4,13 +4,20 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from rich.console import Console
 
-from src.topdown.best_action import build_best_action, format_prob_badge
+from src.fill_experiment import log_real_fill
+from src.notifications import build_morning_embed
+from src.profile import UserProfile, save_profile
+from src.radar.schema import RadarSnapshot
+from src.topdown.best_action import build_best_action, format_morning_brief_lines, format_prob_badge
 from src.topdown.lenses import LENS_BY_ID, LensResult, LensRow
 from src.topdown.render import best_action_panel, dte_strip_panel
 from src.topdown.web import dte_strip_frame
@@ -116,6 +123,128 @@ class BestActionTests(unittest.TestCase):
             df = dte_strip_frame(ba_dte)
             self.assertEqual(len(df), 6)
             self.assertEqual(df.iloc[0]["DTE Bucket"], "0DTE")
+            self.assertEqual(df.iloc[0]["Average net return %"], -1.0)
+            self.assertEqual(df.iloc[0]["Quote context"], "No quote example")
+            self.assertNotIn("Calibrated P(Win) [95% CI, n]", df.columns)
+
+    def test_over_cap_never_rounds_up_to_one_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ev_p = os.path.join(td, "ev.json")
+            profile_p = os.path.join(td, "profile.json")
+            _sample_evidence(ev_p)
+            save_profile(UserProfile(risk_budget_usd=100), path=profile_p)
+            example = {
+                "ticker": "SPY", "expiration": "2027-02-26", "dte": 90, "strikes": "540/515P",
+                "credit_mid": 1.10, "limit_k035": 1.00, "max_risk_usd": 2400,
+                "friction_pct": 0.09, "flags": (), "quote_source": "archive:2026-11-28",
+            }
+            with patch("src.topdown.best_action._best_archived_spread_for_bucket", return_value=example):
+                bundle = build_best_action(
+                    _fake_hub(), evidence_path=ev_p, profile_path=profile_p, fills_db=os.path.join(td, "fills.db"),
+                )
+            card = next(action for action in bundle.actions if action.slot == "TAXABLE_OPTIONS")
+            self.assertIn("0 contracts fit the $100 risk cap", card.sizing_text)
+            self.assertIn("historical group", card.prob_text)
+            self.assertIn("Archived 2026-11-28", card.why)
+
+    def test_archive_example_uses_stock_price_from_the_same_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "archive.db")
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("CREATE TABLE chain_snapshots (symbol, snap_date, expiration, type, strike, bid, ask, delta, spot)")
+                conn.executemany("INSERT INTO chain_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+                    ("SPY", "2026-11-25", "2027-02-19", "put", 95, 1.95, 2.05, -0.25, 100),
+                    ("SPY", "2026-11-25", "2027-02-19", "put", 90, 0.95, 1.05, -0.10, 100),
+                ])
+                conn.commit()
+            hub = _fake_hub()
+            hub.ohlcv = {"SPY": (["2026-11-27"], [80.0], [1e6])}
+            bundle = build_best_action(hub, chain_db=path, fills_db=os.path.join(td, "fills.db"))
+            example = next(row for row in bundle.dte_rows if row.bucket_key == "60_120D")
+            self.assertEqual(example.strikes, "95/90P")
+            self.assertEqual(example.quote_context, "Archived 2026-11-25")
+
+    def test_exact_sizing_on_target_o1_fill_meter_and_morning_brief(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ev_p = os.path.join(td, "ev.json")
+            _sample_evidence(ev_p)
+            prof_p = os.path.join(td, "profile.json")
+            fills_p = os.path.join(td, "fills.db")
+
+            # Custom $10,000 TFSA profile with core holdings already on target -> DO NOTHING TODAY
+            save_profile(
+                UserProfile(
+                    tfsa_usd=10000.0,
+                    risk_budget_usd=400.0,
+                    cash_etf="SGOV",
+                    last_rebalance_date=dt.date.today().isoformat(),
+                    core_holdings={"XLE": 26.0, "XLV": 26.0, "GLD": 26.0},
+                ),
+                path=prof_p,
+            )
+            hub = _fake_hub(spy_above_200=True, pullback_rows=[LensRow(ticker="NVDA", sector_etf="XLK", why="pullback")])
+            hub.ohlcv = {
+                "XLE": (["2026-11-27"], [100.0], [1e6]),
+                "XLV": (["2026-11-27"], [100.0], [1e6]),
+                "GLD": (["2026-11-27"], [100.0], [1e6]),
+                "NVDA": (["2026-11-27"], [125.0], [5e7]),
+            }
+            ba = build_best_action(
+                hub,
+                chain_db=os.path.join(td, "missing.db"),
+                evidence_path=ev_p,
+                profile_path=prof_p,
+                fills_db=fills_p,
+                now_et=dt.datetime(2026, 11, 25, 12, 0),
+            )
+            self.assertIn("DO NOTHING TODAY", ba.actions[0].headline)
+            self.assertIn("$10,000", ba.actions[0].sizing_text)
+            self.assertIn("NVDA $2,000", ba.actions[1].sizing_text)
+            self.assertIn("TEST O1 FILLS 0/20", ba.o1_fill_meter)
+
+            # 5-line morning brief + Discord morning embed integration
+            lines = format_morning_brief_lines(ba)
+            self.assertEqual(len(lines), 5)
+            self.assertIn("BEST ACTION TODAY", lines[0])
+            self.assertIn("TEST O1 FILLS", lines[-1])
+            snap = RadarSnapshot(
+                generated_at="2026-11-27",
+                regime_posture="RISK_ON",
+                vix=16.5,
+                vix_3m=18.2,
+                vix_term="CONTANGO",
+                spy_last=590.0,
+                spy_chg_1d_pct=0.4,
+                qqq_chg_1d_pct=0.6,
+                next_macro_event="CPI",
+            )
+            embed = build_morning_embed(snap, {"exit_alerts": [], "equity_picks": []}, {"pipes": {}}, best_action=ba)
+            self.assertIn("0 · Best Action Today", embed["fields"][0]["name"])
+
+            # Log 20 bad O1 fills (k = 0.80 > 0.35) -> O1 action escalates to AVOID / PAUSE O1
+            for _ in range(20):
+                log_real_fill(
+                    broker="ibkr",
+                    ticker="SPY",
+                    structure="O1_bull_put",
+                    side="SELL",
+                    bid=4.00,
+                    ask=6.00,
+                    limit_posted=4.20,
+                    filled=True,
+                    fill_price=4.20,
+                    db_path=fills_p,
+                )
+            ba_fail = build_best_action(
+                hub,
+                chain_db=os.path.join(td, "missing.db"),
+                evidence_path=ev_p,
+                profile_path=prof_p,
+                fills_db=fills_p,
+            )
+            self.assertEqual(ba_fail.o1_fill_verdict.get("verdict"), "FAIL")
+            self.assertEqual(ba_fail.actions[2].evidence_label, "AVOID")
+            self.assertIn("PAUSE O1", ba_fail.actions[2].headline)
 
 
 if __name__ == "__main__":

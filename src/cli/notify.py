@@ -29,6 +29,7 @@ from src.tui.state import DeskDataProvider
 
 @click.command("notify")
 @click.option("--morning", is_flag=True, help="Send the daily Morning Desk Dispatch to Discord (+ macOS only if exits/issues).")
+@click.option("--brief", is_flag=True, help="With --morning: print the 5-line plain-text `0 · BEST ACTION TODAY` morning brief.")
 @click.option("--options", "send_options", is_flag=True, help="Send top `[7] OPTIONS` setups (Bull Puts, TFSA Long Calls/Puts, etc.) to Discord.")
 @click.option("--strategy", default="all", show_default=True, help="Strategy filter for --options (all, bull_put, long_call, long_put, calendar, iron_condor).")
 @click.option("--live", is_flag=True, help="With --options: pull live Yahoo option chains across all 60 ETFs & leaders.")
@@ -45,6 +46,7 @@ from src.tui.state import DeskDataProvider
 def notify_cmd(
     ctx: click.Context,
     morning: bool,
+    brief: bool,
     send_options: bool,
     strategy: str,
     live: bool,
@@ -209,9 +211,34 @@ def notify_cmd(
     result: Dict[str, Any] = {"mode": "morning" if morning else "check", "dry_run": dry_run}
 
     if morning:
-        embed = build_morning_embed(snap, book, health)
+        from src.topdown.best_action import build_best_action, format_morning_brief_lines
+        from src.topdown.hub import build_hub
+
+        ba_bundle = None
+        brief_lines: list[str] = []
+        try:
+            hub = build_hub(
+                ohlcv_db=(ctx.obj or {}).get("ohlcv_db", "data/equity_ohlcv.db"),
+                cache_path=(ctx.obj or {}).get("cache_path", "data/radar_cache.json"),
+                own_picks_db=(ctx.obj or {}).get("own_picks_db", "data/own_picks.db"),
+                snapshot=snap,
+            )
+            ba_bundle = build_best_action(hub)
+            brief_lines = format_morning_brief_lines(ba_bundle)
+        except Exception:
+            ba_bundle = None
+        if brief:
+            if use_json:
+                click.echo(json.dumps({"brief_lines": brief_lines, "best_action": ba_bundle.to_dict() if ba_bundle else None}, indent=2, default=str))
+            else:
+                for ln in brief_lines:
+                    click.echo(ln)
+            return
+
+        embed = build_morning_embed(snap, book, health, best_action=ba_bundle)
         events = detect_action_events(snap, book, health)
         mac = summarize_for_macos(events)
+        result["brief_lines"] = brief_lines
         result["discord_embed"] = embed
         result["macos_banner"] = mac
         if not dry_run:
