@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS chain_snapshots (
     bid REAL, ask REAL, bid_size REAL, ask_size REAL,
     iv REAL, delta REAL, gamma REAL, theta REAL, vega REAL, rho REAL,
     open_interest REAL, volume REAL,
-    last_trade_time TEXT, spot REAL, snapshot_ts TEXT, source TEXT, quote_at TEXT, fetched_at TEXT,
+    last_trade_time TEXT, spot REAL, snapshot_ts TEXT, source TEXT,
     PRIMARY KEY (contract, snap_date)
 );
 CREATE INDEX IF NOT EXISTS idx_snap_symbol_date
@@ -56,12 +56,16 @@ CREATE TABLE IF NOT EXISTS archive_earnings (
     observed_at TEXT NOT NULL, source TEXT NOT NULL,
     PRIMARY KEY (symbol, snap_date)
 );
+CREATE TABLE IF NOT EXISTS archive_quote_times (
+    contract TEXT NOT NULL, snap_date TEXT NOT NULL, quote_at TEXT, fetched_at TEXT NOT NULL,
+    PRIMARY KEY (contract, snap_date)
+);
 """
 
 _COLUMNS = ["symbol", "snap_date", "contract", "type", "strike", "expiration",
             "bid", "ask", "bid_size", "ask_size", "iv", "delta", "gamma",
             "theta", "vega", "rho", "open_interest", "volume",
-            "last_trade_time", "spot", "snapshot_ts", "source", "quote_at", "fetched_at"]
+            "last_trade_time", "spot", "snapshot_ts", "source"]
 
 
 def _record_attempt(conn: sqlite3.Connection, snap_date: str, symbol: str,
@@ -77,7 +81,7 @@ def _record_attempt(conn: sqlite3.Connection, snap_date: str, symbol: str,
         "attempts = attempts + 1, attempted_at = excluded.attempted_at, "
         "status = CASE WHEN archive_attempts.status = 'archived' THEN 'archived' ELSE excluded.status END, "
         "detail = CASE WHEN archive_attempts.status = 'archived' THEN archive_attempts.detail ELSE excluded.detail END",
-        (snap_date, symbol, status, detail, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")))
+        (snap_date, symbol, status, detail, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
 
 
 def ensure_db(db_path: str = DEFAULT_DB) -> None:
@@ -85,12 +89,6 @@ def ensure_db(db_path: str = DEFAULT_DB) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(_SCHEMA)
-        conn.execute("BEGIN IMMEDIATE")
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(chain_snapshots)")}
-        if "quote_at" not in columns:
-            conn.execute("ALTER TABLE chain_snapshots ADD COLUMN quote_at TEXT")
-        if "fetched_at" not in columns:
-            conn.execute("ALTER TABLE chain_snapshots ADD COLUMN fetched_at TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -391,11 +389,15 @@ def archive_symbols(symbols: List[str], db_path: str = DEFAULT_DB,
                                    min_open_interest=min_open_interest)
                 fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 for r in rows:
-                    archived = {**r, "fetched_at": fetched_at}
-                    values = [sym, today] + [archived.get(c) for c in _COLUMNS[2:]]
-                    conn.execute(
+                    values = [sym, today] + [r.get(c) for c in _COLUMNS[2:]]
+                    saved = conn.execute(
                         f"INSERT OR IGNORE INTO chain_snapshots ({','.join(_COLUMNS)}) "
                         f"VALUES ({','.join('?' * len(_COLUMNS))})", values)
+                    if saved.rowcount == 1:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO archive_quote_times VALUES (?,?,?,?)",
+                            (r["contract"], today, r.get("quote_at"), fetched_at),
+                        )
                     written += 1
                 if rows and sym in scheduled:
                     conn.execute(

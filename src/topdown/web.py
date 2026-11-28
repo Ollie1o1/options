@@ -184,6 +184,8 @@ def render_expiry_replay(
         return
     if not sessions:
         st.info(f"No archive sessions were found for {symbol}.")
+        with st.expander("Archive coverage by date"):
+            _render_archive_coverage(st, symbol, dt.date.today().isoformat(), chain_db, equity_db, archive_key)
         return
     session = c2.selectbox("Archived session", sessions, key=f"expiry-replay-session-{symbol}")
     option_type = c3.radio("Contract type", ("Call", "Put"), horizontal=True, key="expiry-replay-type").lower()
@@ -196,10 +198,7 @@ def render_expiry_replay(
         st.info("The selected session could not be read from the option archive.")
         return
     with st.expander("Archive coverage by date"):
-        try:
-            _render_archive_coverage(st, symbol, session, chain_db, equity_db, archive_key)
-        except sqlite3.Error:
-            st.info("Archive coverage for this session is unavailable.")
+        _render_archive_coverage(st, symbol, session, chain_db, equity_db, archive_key)
     if not quotes:
         st.info(f"No usable two-sided {option_type} quotes were archived for {symbol} on {session}.")
         return
@@ -339,8 +338,15 @@ def _render_replay_results(
 
 def _render_archive_coverage(st: Any, symbol: str, session: str, chain_db: str, equity_db: str, key: tuple) -> None:
     start = (dt.date.fromisoformat(session) - dt.timedelta(days=29)).isoformat()
-    days = _replay_cache(st, "coverage", (*key, session, equity_db, archive_version(equity_db)),
-                         lambda: archive_days(symbol, start, session, chain_db=chain_db, equity_db=equity_db))
+    try:
+        days = _replay_cache(st, "coverage", (*key, session, equity_db, archive_version(equity_db)),
+                             lambda: archive_days(symbol, start, session, chain_db=chain_db, equity_db=equity_db))
+    except sqlite3.Error:
+        st.info("Archive coverage for this period is unavailable.")
+        return
+    if not days:
+        st.caption("There are no capture attempts or reference market dates for this period.")
+        return
     missing = sum(day.market_session and not day.rows for day in days)
     st.caption(f"30 days ending {session} · {sum(bool(day.rows) for day in days)} captures · {missing} gaps on known market sessions")
     st.caption("Market sessions come from the local SPY price calendar. Capture counts include every stored quote.")
@@ -461,7 +467,7 @@ def render_breakout_research(st: Any, *, report_path: str = "configs/ema_breakou
             "an uncertainty range above zero, and improvement in both test periods."
         )
         st.dataframe([
-            {"Forecast window": h["horizon_sessions"], "Historical breakout rate": h["holdout_breakout_rate"],
+            {"Forecast window": h["horizon_sessions"], "Historical breakout rate": f"{h['holdout_breakout_rate']:.1%}",
              "Unresolved observations": h["unresolved_observations"]} for h in horizons
         ], width="stretch", hide_index=True)
         st.caption("This study measures forecast accuracy in the cached universe. A profit comparison requires a separate test with costs.")

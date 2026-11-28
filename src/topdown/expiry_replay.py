@@ -146,12 +146,17 @@ def load_replay_quotes(
     with closing(_connect(chain_db)) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(chain_snapshots)")}
         provenance = ", ".join(
-            name if name in columns else "NULL"
-            for name in ("source", "snapshot_ts", "last_trade_time", "spot", "quote_at", "fetched_at")
+            f"q.{name}" if name in columns else "NULL" for name in ("source", "snapshot_ts", "last_trade_time", "spot")
         )
+        times = "NULL, NULL"
+        join = ""
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='archive_quote_times'").fetchone():
+            times = "t.quote_at, t.fetched_at"
+            join = "LEFT JOIN archive_quote_times t ON q.contract=t.contract AND q.snap_date=t.snap_date "
         rows = conn.execute(
-            f"SELECT contract, expiration, strike, bid, ask, {provenance} FROM chain_snapshots "
-            "WHERE symbol = ? AND snap_date = ? AND LOWER(type) = ? ORDER BY expiration, strike, contract",
+            f"SELECT q.contract, q.expiration, q.strike, q.bid, q.ask, {provenance}, {times} "
+            f"FROM chain_snapshots q {join}WHERE q.symbol=? AND q.snap_date=? AND LOWER(q.type)=? "
+            "ORDER BY q.expiration, q.strike, q.contract",
             (symbol, snapshot_date, option_type),
         ).fetchall()
 
