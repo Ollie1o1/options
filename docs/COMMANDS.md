@@ -46,7 +46,8 @@ CRA prohibits margin and multi-leg credit/debit spreads inside a TFSA. The desk 
 
 | Command | What it does |
 |---|---|
-| `opt discover` | Top-down research hub: ① Market → ② 16 Sectors (PROVEN Outlook rank) → ③ Labelled Idea Lenses |
+| `opt discover` | Top-down **`0 · Best Action Today`** (face-value TFSA Core + Stock + Options with calibrated odds) → ① Market → ② 16 Sectors (PROVEN Outlook rank) → ③ Labelled Idea Lenses |
+| `opt discover --dte [--sort-dte evidence] [--live-dte]` | Options-by-Expiry term-structure strip (**`0DTE → 1–7d → 8–30d → 31–60d → 60–120d (O1) → 120–240d`**) with backtested verdicts & calibrated `P(Win)` `[95% CI, n]`, `PF` & tail loss |
 | `opt discover --sector XLE` | Drill into a sector ETF's constituents sorted by 12-1m trend |
 | `opt discover --lens opt_skew` | Run a specific lens (`core_rotation`, `pullbacks`, `etf_spreads`, `leaders`, `revisions`, `insiders`, `opt_skew`, `edgar_events`, `edgar_quality`, `holdings`, `landmines`) |
 | `opt discover --lens leaders --diversify` | Annotate and rank any lens by lowest 126d correlation against your current holdings and live `VM_OUTLOOK_TOP3` sleeve |

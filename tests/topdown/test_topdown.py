@@ -281,11 +281,11 @@ class HubAndRenderingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             hub = self._hub(td)
             out = self._text(R.hub_overview(hub))
-        for needle in ("① MARKET", "② SECTORS", "③ IDEAS", "Read:", "VIX", "This month's TFSA core sleeve",
-                       "PROVEN", "PROMISING", "TESTING", "WATCHLIST", "AVOID", "Source ·", "context only",
-                       "Data:", "opt card"):
+        for needle in ("0 · BEST ACTION TODAY", "① MARKET", "② SECTORS", "③ IDEAS", "Read:", "VIX",
+                       "This month's TFSA core sleeve", "PROVEN", "PROMISING", "TESTING", "WATCHLIST",
+                       "AVOID", "Source ·", "context only", "Data:", "opt card"):
             self.assertIn(needle, out)
-        self.assertEqual(out.count("Source ·"), 2)  # market + sectors panels each end with a source line
+        self.assertEqual(out.count("Source ·"), 3)  # best-action + market + sectors panels each end with a source line
 
     def test_lens_sector_and_ledger_panels(self) -> None:
         with tempfile.TemporaryDirectory() as td:

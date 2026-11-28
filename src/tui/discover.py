@@ -40,6 +40,41 @@ SHORT_NAME = {
     "Semiconductors": "Semis",
 }
 SECTOR_COLUMNS = ("Ticker", "12-1m", "1m", "3m", "vs 200d", "Vol 20d", "Listed in")
+DTE_COLUMNS = ("DTE Bucket", "Verdict", "Best Setup", "Fric%", "Calibrated P(Win) [95% CI]", "PF", "AvgLoss", "Δ-Adj")
+
+
+def fill_dte_strip(tbl: DataTable, bundle: Any) -> List[str]:
+    """Fill the ③ table with Options-by-Expiry (0DTE -> 240D) & calibrated probabilities."""
+    tbl.clear(columns=True)
+    tbl.add_columns(*DTE_COLUMNS)
+    out: List[str] = []
+    for i, r in enumerate(bundle.dte_rows):
+        setup = f"{r.ticker} {r.strikes} ({r.dte}d)" if r.ticker else "— (archive)"
+        fric_s = f"{r.friction_pct*100:.1f}%" if r.friction_pct is not None else "—"
+        if r.p_win is not None and r.n_backtest > 0:
+            ci = f"[{r.p_win_ci95[0]*100:.0f}-{r.p_win_ci95[1]*100:.0f}%]" if r.p_win_ci95 else ""
+            pw_s = f"{r.p_win*100:.0f}% {ci} n={r.n_backtest}"
+        else:
+            pw_s = "—"
+        pf_s = f"{r.pf:.2f}" if r.pf is not None else "—"
+        al_s = f"{r.avg_loss*100:.1f}%" if r.avg_loss is not None else "—"
+        ex_s = signed(r.excess_limit * 100.0, "{:+.2f}%") if r.excess_limit is not None else Text("—", style="dim")
+        verdict = Text(" CLOSED ", style="bold #0e1117 on #e06c75") if r.evidence_label == "CLOSED" else chip(r.evidence_label)
+        tk_key = r.ticker or "SPY"
+        tbl.add_row(
+            Text(r.bucket_label, style="bold"), verdict, setup, fric_s, pw_s, pf_s, al_s, ex_s,
+            key=f"{i}|{tk_key}",
+        )
+        out.append(tk_key)
+    return out
+
+
+def dte_header(bundle: Any, *, sort_by: str = "dte") -> Text:
+    sort_lbl = "0DTE → 6M+ (shortest first)" if sort_by == "dte" else "Best evidence first"
+    t = Text("OPTIONS BY EXPIRY [TAXABLE_ONLY] — ", style="bold")
+    t.append(f"Sorted: {sort_lbl}\n", style="#d6a452")
+    t.append(f"Clock: {bundle.execution_window} · {bundle.execution_note}", style="dim")
+    return t
 
 
 def fill_board(tbl: DataTable, hub: Any) -> None:
@@ -181,7 +216,8 @@ class EvidenceCardScreen(ModalScreen[Optional[str]]):
 
 
 __all__ = [
-    "LENS_OPTIONS", "BOARD_COLUMNS", "LENS_COLUMNS", "SECTOR_COLUMNS",
-    "fill_board", "fill_lens", "fill_sector", "sector_header", "board_header", "lens_tag_legend",
+    "LENS_OPTIONS", "BOARD_COLUMNS", "LENS_COLUMNS", "SECTOR_COLUMNS", "DTE_COLUMNS",
+    "fill_board", "fill_lens", "fill_sector", "fill_dte_strip",
+    "sector_header", "board_header", "dte_header", "lens_tag_legend",
     "crumb_and_freshness", "EvidenceCardScreen", "lens_header",
 ]

@@ -42,7 +42,9 @@ from .discover import (
     EvidenceCardScreen,
     board_header,
     crumb_and_freshness,
+    dte_header,
     fill_board,
+    fill_dte_strip,
     fill_lens,
     fill_sector,
     lens_header,
@@ -215,9 +217,10 @@ class DeskApp(App[None]):
         self._last_dossier_ticker: Optional[str] = None
         self.hub: Optional[Any] = None
         self._hub_loading: bool = False
-        self._disc_mode: str = "lens"          # "lens" | "sector"
+        self._disc_mode: str = "lens"          # "lens" | "sector" | "dte"
         self._disc_lens: str = "core_rotation"
         self._disc_sector: str = ""
+        self._disc_dte_sort: str = "dte"       # "dte" (0DTE->6M+) | "evidence"
         self._disc_tickers: List[str] = []
         self._show_rrg: bool = True
         # Workbench & Options state
@@ -321,6 +324,7 @@ class DeskApp(App[None]):
             with TabPane("[6] DISCOVER", id="discover"):
                 with Vertical(id="disc-root"):
                     yield Static("① MARKET › ② SECTORS › ③ IDEAS › ④ EVIDENCE", id="disc-crumb")
+                    yield Static("0 · BEST ACTION TODAY — loading…", id="disc-best-action")
                     yield Static("① MARKET — loading…", id="disc-market")
                     with Horizontal(id="disc-split"):
                         with Vertical(id="disc-left"):
@@ -332,6 +336,7 @@ class DeskApp(App[None]):
                                 yield Label("③ IDEAS:", id="disc-lens-label")
                                 yield Select(LENS_OPTIONS, value="core_rotation", allow_blank=True,
                                              prompt="Pick a lens…", id="disc-lens-select")
+                                yield Button("DTE 0d→6m", id="disc-dte-btn", classes="preset-btn")
                             yield Static("", id="disc-lens-head")
                             yield DataTable(id="disc-lens-table", zebra_stripes=True, cursor_type="row")
                             yield Static("", id="disc-hint")
@@ -980,9 +985,12 @@ class DeskApp(App[None]):
         hub = self.hub
         if hub is None:
             return
-        from src.topdown.render import market_panel
+        from src.topdown.best_action import build_best_action
+        from src.topdown.render import best_action_panel, market_panel
 
-        self.query_one("#disc-crumb", Static).update(crumb_and_freshness(hub, 3 if self._disc_mode == "lens" else 2))
+        ba = build_best_action(hub, sort_dte_by=self._disc_dte_sort)
+        self.query_one("#disc-crumb", Static).update(crumb_and_freshness(hub, 3 if self._disc_mode in ("lens", "dte") else 2))
+        self.query_one("#disc-best-action", Static).update(best_action_panel(ba, compact=True))
         self.query_one("#disc-market", Static).update(market_panel(hub, compact=True))
         fill_board(self.query_one("#disc-board", DataTable), hub)
         rrg_box = self.query_one("#disc-rrg-box", Static)
@@ -1005,6 +1013,12 @@ class DeskApp(App[None]):
         if self._disc_mode == "sector" and self._disc_sector:
             head.update(sector_header(hub, self._disc_sector))
             self._disc_tickers = fill_sector(tbl, hub, self._disc_sector)
+        elif self._disc_mode == "dte":
+            from src.topdown.best_action import build_best_action
+
+            ba = build_best_action(hub, sort_dte_by=self._disc_dte_sort)
+            head.update(dte_header(ba, sort_by=self._disc_dte_sort))
+            self._disc_tickers = fill_dte_strip(tbl, ba)
         else:
             res = hub.lens(self._disc_lens)
             if res is None:
@@ -1453,6 +1467,18 @@ class DeskApp(App[None]):
             self.action_refresh()
         elif bid == "act-rebal":
             self.action_rebalance_modal()
+        elif bid == "disc-dte-btn":
+            if self._disc_mode == "dte":
+                self._disc_dte_sort = "evidence" if self._disc_dte_sort == "dte" else "dte"
+            else:
+                self._disc_mode = "dte"
+                self._disc_dte_sort = "dte"
+            try:
+                btn = self.query_one("#disc-dte-btn", Button)
+                btn.label = "DTE 0d→6m" if self._disc_dte_sort == "dte" else "DTE Best"
+            except NoMatches:
+                pass
+            self._render_disc_right()
         elif bid == "act-bcmd":
             self.action_bloomberg_cmd()
         elif bid == "act-options":
