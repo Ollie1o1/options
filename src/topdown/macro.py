@@ -35,6 +35,7 @@ OhlcvMap = Dict[str, Tuple[List[str], np.ndarray, np.ndarray]]
 CBOE_DIR = "data/discovery"
 FRED_CACHE = "data/fred_cache.json"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
+FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 # (numerator, denominator, label, what a RISE means)
 ROTATION_PAIRS: Tuple[Tuple[str, str, str, str], ...] = (
@@ -179,7 +180,38 @@ def ratio_reading(ohlcv: OhlcvMap, num: str, den: str, label: str, rise_means: s
 
 
 def fetch_fred_series(series_id: str, *, timeout: float = 12.0) -> List[Tuple[str, float]]:
-    """Download one FRED series as [(date, value)] (missing '.' values dropped)."""
+    """Download one FRED series as [(date, value)] (missing '.' values dropped).
+
+    Prefers the official FRED JSON API when `FRED_API_KEY` is configured (avoids
+    `fredgraph.csv` edge timeouts), falling back seamlessly to CSV when unset.
+    """
+    api_key = (os.environ.get("FRED_API_KEY") or "").strip()
+    if api_key:
+        import urllib.parse
+
+        q = urllib.parse.urlencode(
+            {"series_id": series_id, "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 900}
+        )
+        try:
+            req = urllib.request.Request(f"{FRED_API_URL}?{q}")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https host
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            api_out: List[Tuple[str, float]] = []
+            for rec in (payload or {}).get("observations") or []:
+                d = str(rec.get("date") or "")[:10]
+                raw_v = str(rec.get("value") or "").strip()
+                if not d or raw_v in ("", "."):
+                    continue
+                try:
+                    api_out.append((d, float(raw_v)))
+                except ValueError:
+                    continue
+            if api_out:
+                api_out.sort()
+                return api_out
+        except Exception:
+            pass
+
     url = FRED_URL.format(sid=series_id)
     # FRED's edge drops some custom User-Agents (connection timeout); the stock urllib header works.
     req = urllib.request.Request(url)

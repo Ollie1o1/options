@@ -173,3 +173,7 @@ def rebalance_cmd(
             f"${o.delta_usd:+,.2f}" if o.action != "HOLD" else "$0.00",
         )
     console.print(tbl)
+    console.print(
+        "[dim]Execution timing (Study 2E): any liquid 10:00-15:55 ET limit fill matches close (±1.6 bps/mo); "
+        "stay invested overnight (100%+ of VM_OUTLOOK_TOP3 return accrues overnight).[/dim]"
+    )

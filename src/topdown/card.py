@@ -60,6 +60,8 @@ class EvidenceCard:
     provenance: List[Provenance] = field(default_factory=list)
     prob_label: str = ""
     fit: Optional[Any] = None          # portfolio_fit.PortfolioFit when holdings were supplied
+    sec_quality: Optional[Dict[str, Any]] = None
+    finra_flow: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -73,6 +75,8 @@ class EvidenceCard:
             "provenance": [asdict(p) for p in self.provenance],
             "prob_label": self.prob_label,
             "portfolio_fit": self.fit.to_dict() if self.fit is not None else None,
+            "sec_quality": dict(self.sec_quality) if self.sec_quality else None,
+            "finra_flow": dict(self.finra_flow) if self.finra_flow else None,
         }
 
 
@@ -205,6 +209,56 @@ def build_evidence_card(
         srcs = sorted({h.source for h in holdings}) or ["none recorded"]
         prov.append(Provenance("Portfolio fit", "own_picks.db · longterm.db · sleeve targets", last_bar,
                                "holdings: " + ", ".join(srcs)))
+    # Cached zero-network SEC XBRL quality & FINRA short/ATS flow context
+    sec_quality: Optional[Dict[str, Any]] = None
+    try:
+        import sqlite3
+        from src.alpha.edgar_events import DEFAULT_FUNDAMENTALS_DB
+
+        sf_path = repo_path(DEFAULT_FUNDAMENTALS_DB)
+        if os.path.exists(sf_path):
+            con = sqlite3.connect(f"file:{sf_path}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            try:
+                row = con.execute(
+                    "SELECT filed_date, period_end, net_buyback_pct, gross_profit_assets_pct, fcf_assets_pct "
+                    "FROM sec_fundamentals WHERE ticker = ? ORDER BY period_end DESC LIMIT 1",
+                    (sym,),
+                ).fetchone()
+                if row is not None:
+                    sec_quality = dict(row)
+                    prov.append(
+                        Provenance(
+                            "SEC XBRL quality",
+                            "sec_fundamentals.db (EDGAR XBRL)",
+                            str(sec_quality.get("filed_date") or ""),
+                            "WATCHLIST (Study 2D top-20 FAIL vs EW_UNIV; anti-dilution context)",
+                        )
+                    )
+            finally:
+                con.close()
+    except Exception:
+        sec_quality = None
+
+    finra_flow_rec: Optional[Dict[str, Any]] = None
+    try:
+        from src.finra_flow import DEFAULT_DB as DEFAULT_FINRA_DB, scan_finra_flow_signals
+
+        if os.path.exists(repo_path(DEFAULT_FINRA_DB)):
+            sigs = scan_finra_flow_signals(symbols=[sym], limit=1)
+            if sigs:
+                finra_flow_rec = sigs[0].to_dict()
+                prov.append(
+                    Provenance(
+                        "FINRA short/ATS flow",
+                        "finra_flow.db (FINRA RegSHO/ATS)",
+                        str(finra_flow_rec.get("trade_date") or ""),
+                        "WATCHLIST context only",
+                    )
+                )
+    except Exception:
+        finra_flow_rec = None
+
     for p in prov:
         p.age_days = _age(p.as_of, today)
 
@@ -214,6 +268,7 @@ def build_evidence_card(
         verdict=verdict, verdict_style=VERDICT_STYLE[verdict],
         reasons=reasons, warnings=warnings, dossier=dossier, sector=sector_row, peers=strip,
         lens_hits=hits, provenance=prov, prob_label=probability_label(dossier), fit=fit,
+        sec_quality=sec_quality, finra_flow=finra_flow_rec,
     )
 
 

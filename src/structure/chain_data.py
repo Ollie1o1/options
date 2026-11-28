@@ -35,6 +35,8 @@ class ChainContract:
     last_trade_as_of: Optional[str] = None
     snapshot_at: Optional[str] = None
     source: Optional[str] = None
+    bid_size: int = 0
+    ask_size: int = 0
 
     @property
     def half_spread(self) -> float:
@@ -43,6 +45,12 @@ class ChainContract:
     @property
     def half_spread_pct(self) -> float:
         return self.half_spread / self.mid if self.mid > 0 else 1.0
+
+    @property
+    def min_depth(self) -> Optional[int]:
+        if self.bid_size > 0 and self.ask_size > 0:
+            return min(self.bid_size, self.ask_size)
+        return None
 
 
 @dataclass
@@ -244,7 +252,7 @@ def load_archived_chain_slice(
             columns = {str(row[1]) for row in con.execute("PRAGMA table_info(chain_snapshots)")}
             provenance = ", ".join(
                 name if name in columns else "NULL"
-                for name in ("last_trade_time", "snapshot_ts", "source")
+                for name in ("last_trade_time", "snapshot_ts", "source", "bid_size", "ask_size")
             )
             rows = con.execute(
                 f"""
@@ -261,7 +269,7 @@ def load_archived_chain_slice(
 
     calls: List[ChainContract] = []
     puts: List[ChainContract] = []
-    for k_raw, t_raw, b_raw, a_raw, iv_raw, dl_raw, th_raw, oi_raw, vol_raw, trade_at, snapshot_at, source in rows:
+    for k_raw, t_raw, b_raw, a_raw, iv_raw, dl_raw, th_raw, oi_raw, vol_raw, trade_at, snapshot_at, source, bsz_raw, asz_raw in rows:
         k = _clean_float(k_raw)
         b = _clean_float(b_raw)
         a = _clean_float(a_raw)
@@ -286,6 +294,8 @@ def load_archived_chain_slice(
             last_trade_as_of=trade_at,
             snapshot_at=snapshot_at,
             source=source,
+            bid_size=int(_clean_float(bsz_raw) or 0),
+            ask_size=int(_clean_float(asz_raw) or 0),
         )
         if ot == "call":
             calls.append(c)
@@ -433,6 +443,308 @@ def load_live_chain_slice(
     except Exception:
         pass
     return _summarize_slice(sl, spot=spot, build_rnd=build_rnd) if sl is not None else None
+
+
+def _slices_from_provider_rows(
+    symbol: str,
+    rows: Sequence[Dict[str, Any]],
+    *,
+    min_dte: int,
+    max_dte: int,
+    max_expirations: int,
+    target_dte: Optional[int],
+    spot: Optional[float],
+    source_label: str,
+    build_rnd: bool,
+    prefer_monthly: bool = True,
+    today: Optional[dt.date] = None,
+) -> List[ChainSlice]:
+    """Convert normalized CBOE / Alpaca snapshot rows into spaced, monthly-preferred `ChainSlice`s."""
+    from src.data_quality import implied_vol_from_price
+    from src.expiry_selection import select_expirations
+    from src.radar.wide_spread_rule import risk_free_rate
+    from src.utils import bs_delta, bs_theta
+
+    if not rows:
+        return []
+    today = today or dt.date.today()
+    by_exp: Dict[str, List[Dict[str, Any]]] = {}
+    inferred_spot = spot
+    for r in rows:
+        exp = str(r.get("expiration") or "")[:10]
+        if len(exp) != 10:
+            continue
+        by_exp.setdefault(exp, []).append(r)
+        if inferred_spot is None:
+            sp = _clean_float(r.get("spot"))
+            if sp is not None and sp > 0:
+                inferred_spot = sp
+
+    if not by_exp:
+        return []
+    all_exps = sorted(by_exp.keys())
+    if max_expirations == 1 and target_dte is not None:
+        cands: List[Tuple[int, int, str]] = []
+        for e in all_exps:
+            try:
+                dte = (dt.date.fromisoformat(e) - today).days
+            except ValueError:
+                continue
+            if min_dte <= dte <= max_dte:
+                cands.append((abs(dte - target_dte), dte, e))
+        cands.sort()
+        chosen_exps = [c[2] for c in cands[:1]]
+    else:
+        chosen_exps = select_expirations(
+            all_exps,
+            n=max(1, int(max_expirations)),
+            today=today,
+            min_dte=min_dte,
+            max_dte=max_dte,
+            method="spread",
+            prefer_monthly=prefer_monthly,
+        )
+
+    r_rate, _ = risk_free_rate()
+    slices: List[ChainSlice] = []
+    for exp in chosen_exps:
+        try:
+            dte = (dt.date.fromisoformat(exp) - today).days
+        except ValueError:
+            continue
+        if not (min_dte <= dte <= max_dte):
+            continue
+        T = max(dte, 1) / 365.0
+        calls: List[ChainContract] = []
+        puts: List[ChainContract] = []
+        for rec in by_exp.get(exp) or []:
+            k = _clean_float(rec.get("strike"))
+            b = _clean_float(rec.get("bid"))
+            a = _clean_float(rec.get("ask"))
+            if k is None or b is None or a is None or k <= 0 or a < b or a <= 0:
+                continue
+            mid = 0.5 * (b + a)
+            ot = "call" if str(rec.get("type") or "").lower().startswith("c") else "put"
+            iv = _clean_float(rec.get("iv"))
+            if iv is not None and iv > 5.0:
+                iv = iv / 100.0
+            if (iv is None or not (0.02 <= iv <= 4.0)) and inferred_spot and inferred_spot > 0 and b > 0:
+                iv = implied_vol_from_price(ot, inferred_spot, k, T, r_rate, mid)
+            dl = _clean_float(rec.get("delta"))
+            th = _clean_float(rec.get("theta"))
+            if dl is None and inferred_spot and inferred_spot > 0 and iv and 0.02 <= iv <= 4.0:
+                try:
+                    dl = float(bs_delta(ot, inferred_spot, k, T, r_rate, iv))
+                    th = float(bs_theta(ot, inferred_spot, k, T, r_rate, iv))
+                except Exception:
+                    pass
+            contract = ChainContract(
+                strike=k,
+                opt_type=ot,
+                bid=b,
+                ask=a,
+                mid=mid,
+                iv=iv,
+                delta=dl,
+                theta=th,
+                open_interest=int(_clean_float(rec.get("open_interest")) or 0),
+                volume=int(_clean_float(rec.get("volume")) or 0),
+                last_trade_as_of=str(rec["last_trade_time"]) if rec.get("last_trade_time") else None,
+                snapshot_at=str(rec["snapshot_ts"]) if rec.get("snapshot_ts") else None,
+                source=str(rec.get("source") or source_label),
+                bid_size=int(_clean_float(rec.get("bid_size")) or 0),
+                ask_size=int(_clean_float(rec.get("ask_size")) or 0),
+            )
+            if ot == "call":
+                calls.append(contract)
+            else:
+                puts.append(contract)
+        if not calls and not puts:
+            continue
+        if sum(c.bid > 0 for c in calls + puts) == 0:
+            continue
+        calls.sort(key=lambda x: x.strike)
+        puts.sort(key=lambda x: x.strike)
+        sl = ChainSlice(
+            symbol=symbol.upper(),
+            expiration=exp,
+            dte=dte,
+            snap_date=today.isoformat(),
+            source=source_label,
+            calls=calls,
+            puts=puts,
+            spot=inferred_spot,
+        )
+        slices.append(_summarize_slice(sl, spot=inferred_spot, build_rnd=build_rnd))
+    return slices
+
+
+def load_live_chain_slices(
+    symbol: str,
+    *,
+    min_dte: int = 14,
+    max_dte: int = 125,
+    max_expirations: int = 3,
+    target_dte: Optional[int] = None,
+    spot: Optional[float] = None,
+    build_rnd: bool = False,
+    prefer_monthly: bool = True,
+    providers: Sequence[str] = ("cboe", "alpaca", "yfinance"),
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> List[ChainSlice]:
+    """3-tier live multi-expiry option-chain router: CBOE -> Alpaca indicative -> Yahoo.
+
+    Spreads `max_expirations` across `[min_dte, max_dte]` with 3rd-Friday monthly preference
+    so live scans cover the full term structure without Yahoo's post-open 0/0 dead zone.
+    """
+    sym = str(symbol).upper().strip()
+    today = dt.date.today()
+    diag = diagnostics if diagnostics is not None else {}
+    diag.setdefault("listed", 0)
+    diag.setdefault("eligible", 0)
+    diag.setdefault("checked", 0)
+    diag.setdefault("two_sided", 0)
+    diag.setdefault("provider", "none")
+
+    # Resolve spot from local OHLCV archive (fast, offline) so providers without spot
+    # fields (e.g. Alpaca option snapshots) still build complete deltas, moneyness & RND.
+    if spot is None or spot <= 0:
+        try:
+            full_ohlcv = repo_path("data/equity_ohlcv.db")
+            if os.path.exists(full_ohlcv):
+                con = sqlite3.connect(f"file:{full_ohlcv}?mode=ro", uri=True)
+                try:
+                    row = con.execute(
+                        "SELECT close FROM ohlcv WHERE ticker = ? ORDER BY date DESC LIMIT 1",
+                        (sym,),
+                    ).fetchone()
+                    if row and row[0] is not None and float(row[0]) > 0:
+                        spot = float(row[0])
+                finally:
+                    con.close()
+        except Exception:
+            pass
+
+    for prov in providers:
+        p_key = str(prov).lower().strip()
+        if p_key == "cboe":
+            try:
+                from src.cboe_client import fetch_chain
+
+                rows = fetch_chain(sym, timeout=10)
+            except Exception:
+                rows = []
+            if rows:
+                slices = _slices_from_provider_rows(
+                    sym, rows, min_dte=min_dte, max_dte=max_dte, max_expirations=max_expirations,
+                    target_dte=target_dte, spot=spot, source_label="cboe", build_rnd=build_rnd,
+                    prefer_monthly=prefer_monthly, today=today,
+                )
+                if slices:
+                    exps_all = {str(r.get("expiration") or "")[:10] for r in rows if r.get("expiration")}
+                    diag["listed"] = len(exps_all)
+                    diag["eligible"] = len(exps_all)
+                    diag["checked"] = len(slices)
+                    diag["two_sided"] = sum(sum(c.bid > 0 for c in s.calls + s.puts) for s in slices)
+                    diag["provider"] = "cboe"
+                    return slices
+
+        elif p_key == "alpaca":
+            try:
+                from src.alpaca_data import fetch_option_chain_snapshots, has_credentials
+
+                if not has_credentials():
+                    continue
+                rows = fetch_option_chain_snapshots(
+                    sym, feed="indicative", min_dte=min_dte, max_dte=max_dte, spot=spot, today=today
+                )
+            except Exception:
+                rows = []
+            if rows:
+                slices = _slices_from_provider_rows(
+                    sym, rows, min_dte=min_dte, max_dte=max_dte, max_expirations=max_expirations,
+                    target_dte=target_dte, spot=spot, source_label="alpaca_indicative", build_rnd=build_rnd,
+                    prefer_monthly=prefer_monthly, today=today,
+                )
+                if slices:
+                    exps_all = {str(r.get("expiration") or "")[:10] for r in rows if r.get("expiration")}
+                    diag["listed"] = len(exps_all)
+                    diag["eligible"] = len(exps_all)
+                    diag["checked"] = len(slices)
+                    diag["two_sided"] = sum(sum(c.bid > 0 for c in s.calls + s.puts) for s in slices)
+                    diag["provider"] = "alpaca_indicative"
+                    return slices
+
+        elif p_key == "yfinance":
+            try:
+                import yfinance as yf
+                from src.expiry_selection import select_expirations
+
+                tkr = yf.Ticker(sym)
+                exps = list(tkr.options or ())
+                diag["listed"] = len(exps)
+                if not exps:
+                    continue
+                if max_expirations == 1 and target_dte is not None:
+                    sl_one = load_live_chain_slice(
+                        sym, target_dte=target_dte, min_dte=min_dte, max_dte=max_dte,
+                        spot=spot, build_rnd=build_rnd, max_expiry_checks=2, diagnostics=diag,
+                    )
+                    if sl_one is not None:
+                        diag["provider"] = "yfinance"
+                        return [sl_one]
+                    continue
+
+                chosen_exps = select_expirations(
+                    exps, n=max(1, int(max_expirations)), today=today,
+                    min_dte=min_dte, max_dte=max_dte, method="spread", prefer_monthly=prefer_monthly,
+                )
+                diag["eligible"] = len(chosen_exps)
+                eff_spot = spot
+                if eff_spot is None:
+                    hist = tkr.history(period="5d")
+                    if hist is not None and not hist.empty:
+                        eff_spot = float(hist["Close"].dropna().iloc[-1])
+
+                yf_rows: List[Dict[str, Any]] = []
+                for exp in chosen_exps:
+                    diag["checked"] = int(diag.get("checked", 0)) + 1
+                    try:
+                        ch = tkr.option_chain(exp)
+                    except Exception:
+                        continue
+                    for ot, df in (("call", ch.calls), ("put", ch.puts)):
+                        if df is None or df.empty:
+                            continue
+                        for rec in df.to_dict("records"):
+                            yf_rows.append(
+                                {
+                                    "expiration": exp,
+                                    "type": ot,
+                                    "strike": rec.get("strike"),
+                                    "bid": rec.get("bid"),
+                                    "ask": rec.get("ask"),
+                                    "iv": rec.get("impliedVolatility"),
+                                    "open_interest": rec.get("openInterest"),
+                                    "volume": rec.get("volume"),
+                                    "last_trade_time": rec.get("lastTradeDate"),
+                                    "spot": eff_spot,
+                                    "source": "yfinance",
+                                }
+                            )
+                slices = _slices_from_provider_rows(
+                    sym, yf_rows, min_dte=min_dte, max_dte=max_dte, max_expirations=len(chosen_exps),
+                    target_dte=None, spot=eff_spot, source_label="live", build_rnd=build_rnd,
+                    prefer_monthly=prefer_monthly, today=today,
+                )
+                if slices:
+                    diag["two_sided"] = sum(sum(c.bid > 0 for c in s.calls + s.puts) for s in slices)
+                    diag["provider"] = "yfinance"
+                    return slices
+            except Exception:
+                continue
+
+    return []
 
 
 def load_chain_for_horizon(

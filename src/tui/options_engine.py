@@ -30,6 +30,7 @@ from src.structure.chain_data import (
     ChainSlice,
     load_archived_chain_slice,
     load_live_chain_slice,
+    load_live_chain_slices,
 )
 from src.structure.execution_plan import WalkAwayLadder, build_walk_away_ladder
 from src.utils import bs_delta, bs_gamma, bs_price, bs_theta, bs_vega
@@ -730,6 +731,201 @@ def _build_candidates_for_slice(
     return out
 
 
+def scan_surface_verticals(
+    slices: Sequence[ChainSlice],
+    spot: float,
+    *,
+    side: str = "bull_put",
+    target_deltas: Sequence[float] = (0.20, 0.25, 0.30),
+    width_pcts: Sequence[float] = (0.03, 0.05, 0.07),
+    max_friction_pct: float = 0.25,
+    min_oi: int = 0,
+    ex_div_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Search the `(expiration x short_delta x wing_width)` surface for credit verticals.
+
+    Ranks spreads by execution efficiency (round-trip friction %, quoted depth,
+    smile skew capture `IV_short - IV_long`, and credit per unit of net delta).
+    Deliberately separate from `_build_candidates_for_slice` so the preregistered
+    selector-study baseline (`PREREG_SELECTOR_LIQUIDITY_BASELINE_20261126.md`) stays untouched.
+    """
+    is_put = str(side).lower() != "bear_call"
+    opt_type = "put" if is_put else "call"
+    seen: set[Tuple[str, float, float]] = set()
+    candidates: List[Dict[str, Any]] = []
+    try:
+        from src.radar.live_options import options_execution_window_guidance
+
+        exec_win = options_execution_window_guidance()
+    except Exception:
+        exec_win = {"window": "UNKNOWN", "flag": None, "note": ""}
+
+    for sl in slices:
+        if spot <= 0:
+            continue
+        for td in target_deltas:
+            short = sl.match_by_delta(opt_type, float(td), min_bid=0.10)
+            if short is None or short.open_interest < min_oi:
+                continue
+            for wp in width_pcts:
+                w_tgt = max(1.0, spot * float(wp))
+                k_tgt = (short.strike - w_tgt) if is_put else (short.strike + w_tgt)
+                long = sl.match_contract(opt_type, k_tgt, max_rel_dist=0.06, min_bid=0.02)
+                if long is None or long.open_interest < min_oi:
+                    continue
+                if is_put and long.strike >= short.strike:
+                    continue
+                if not is_put and long.strike <= short.strike:
+                    continue
+                key = (sl.expiration, short.strike, long.strike)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                width = abs(short.strike - long.strike)
+                cr_mid = short.mid - long.mid
+                cr_cross = short.bid - long.ask
+                if cr_mid <= 0.10 or cr_cross <= 0 or cr_mid >= width:
+                    continue
+                rt_spread = (short.ask - short.bid) + (long.ask - long.bid)
+                fric = rt_spread / cr_mid
+                if fric > max_friction_pct:
+                    continue
+
+                skew_capture_vp: Optional[float] = None
+                if short.iv is not None and long.iv is not None:
+                    skew_capture_vp = round((short.iv - long.iv) * 100.0, 2)
+                net_delta: Optional[float] = None
+                if short.delta is not None and long.delta is not None:
+                    net_delta = round(-short.delta + long.delta, 4)
+                credit_per_delta = (
+                    round(cr_mid / max(abs(net_delta), 0.02), 2) if net_delta is not None else None
+                )
+                depths = [d for d in (short.min_depth, long.min_depth) if d is not None]
+                min_depth = min(depths) if depths else None
+
+                flags: List[str] = ["TAXABLE_ONLY"]
+                if exec_win.get("flag"):
+                    flags.append(str(exec_win["flag"]))
+                if min_depth is not None and min_depth <= 1:
+                    flags.append("THIN_DEPTH")
+                if ex_div_date and sl.snap_date <= ex_div_date <= sl.expiration:
+                    flags.append(f"EX_DIV:{ex_div_date}")
+                if fric > 0.18:
+                    flags.append("WIDE_SPREAD")
+
+                candidates.append(
+                    {
+                        "ticker": sl.symbol,
+                        "side": "bull_put" if is_put else "bear_call",
+                        "expiration": sl.expiration,
+                        "dte": sl.dte,
+                        "short_strike": short.strike,
+                        "long_strike": long.strike,
+                        "width": round(width, 2),
+                        "width_pct": round(width / spot, 4),
+                        "short_delta": round(abs(short.delta or td), 3),
+                        "net_delta": net_delta,
+                        "credit_mid": round(cr_mid, 2),
+                        "credit_cross": round(cr_cross, 2),
+                        "friction_pct": round(fric, 4),
+                        "ror_pct": round(cr_mid / max(width - cr_mid, 0.01) * 100.0, 1),
+                        "skew_capture_vp": skew_capture_vp,
+                        "credit_per_delta": credit_per_delta,
+                        "min_oi": min(short.open_interest, long.open_interest),
+                        "min_depth": min_depth,
+                        "source": sl.source,
+                        "execution_window": exec_win["window"],
+                        "flags": flags,
+                    }
+                )
+
+    candidates.sort(
+        key=lambda c: (
+            1 if "THIN_DEPTH" in c["flags"] else 0,
+            round(float(c["friction_pct"]), 3),
+            -(float(c["skew_capture_vp"]) if c["skew_capture_vp"] is not None else -99.0),
+            -(float(c["credit_per_delta"]) if c["credit_per_delta"] is not None else 0.0),
+        )
+    )
+    return candidates
+
+
+def _live_calendars_from_slices(
+    slices: Sequence[ChainSlice],
+    spot: float,
+    *,
+    min_iv_diff_vp: float = 0.5,
+    max_friction_pct: float = 0.28,
+) -> List[OptionScanRow]:
+    """Build synchronized ATM live calendar candidates when front (14-48d) & back (60-130d) slices exist."""
+    fronts = [s for s in slices if 14 <= s.dte <= 48 and s.atm_iv is not None]
+    backs = [s for s in slices if 60 <= s.dte <= 130 and s.atm_iv is not None]
+    if not fronts or not backs or spot <= 0:
+        return []
+    front = min(fronts, key=lambda s: abs(s.dte - 30))
+    back = min(backs, key=lambda s: abs(s.dte - 90))
+    if front.expiration == back.expiration or front.atm_iv is None or back.atm_iv is None:
+        return []
+    iv_diff = round((front.atm_iv - back.atm_iv) * 100.0, 2)
+    if iv_diff < min_iv_diff_vp:
+        return []
+    out: List[OptionScanRow] = []
+    for opt_type in ("call", "put"):
+        fc = front.match_contract(opt_type, spot, max_rel_dist=0.03)
+        if fc is None:
+            continue
+        bc = back.match_contract(opt_type, fc.strike, max_rel_dist=0.01)
+        if bc is None or abs(bc.strike - fc.strike) > 1e-6:
+            continue
+        debit_mid = round(bc.mid - fc.mid, 2)
+        debit_cross = round(bc.ask - fc.bid, 2)
+        if debit_mid <= 0.05 or debit_cross <= 0.05:
+            continue
+        rt_spread = (bc.ask - bc.bid) + (fc.ask - fc.bid)
+        fric = rt_spread / max(debit_mid, 1e-6)
+        if fric > max_friction_pct:
+            continue
+        regime = "FRONT_RICH_INVERTED" if iv_diff >= 1.5 else "FLAT"
+        legs = (
+            _contract_to_leg(fc, side="SELL", expiration=front.expiration, dte=front.dte, fallback_iv=front.atm_iv),
+            _contract_to_leg(bc, side="BUY", expiration=back.expiration, dte=back.dte, fallback_iv=back.atm_iv),
+        )
+        out.append(
+            OptionScanRow(
+                ticker=front.symbol,
+                strategy="Calendar",
+                strategy_key="calendar",
+                expiration=f"{front.expiration[5:]}/{back.expiration[5:]}",
+                dte=front.dte,
+                strikes_label=f"${fc.strike:g}{opt_type[0].upper()} {front.dte}d/{back.dte}d",
+                spot=round(spot, 2),
+                short_delta=abs(fc.delta) if fc.delta is not None else None,
+                mid_price=debit_mid,
+                is_credit=False,
+                walk_away_limit=debit_mid,
+                friction_pct=round(fric, 4),
+                max_risk_usd=round(debit_mid * 100.0, 0),
+                max_profit_usd=None,
+                ror_pct=None,
+                iv_pct=round(front.atm_iv * 100.0, 1),
+                iv_vs_rv=None,
+                skew_vp=round(iv_diff, 1),
+                min_oi=min(fc.open_interest, bc.open_interest),
+                total_vol=fc.volume + bc.volume,
+                tfsa_legal=False,
+                evidence_badge="WATCHLIST",
+                risk_flags=("TAXABLE_ONLY", regime),
+                legs=legs,
+                source=front.source,
+                as_of=front.snap_date,
+                summary=f"Sell {front.dte}d / Buy {back.dte}d ${fc.strike:g}{opt_type[0].upper()} · Front +{iv_diff:.1f}vp",
+            )
+        )
+        break
+    return out
+
+
 def scan_options_desk(
     *,
     strategy: str = "all",
@@ -742,6 +938,7 @@ def scan_options_desk(
     live: bool = False,
     max_friction_pct: float = 0.28,
     max_workers: int = 6,
+    max_expirations: int = 3,
     pulse_out: Optional[Dict[str, Any]] = None,
     research_inputs: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[OptionScanRow], str]:
@@ -761,7 +958,8 @@ def scan_options_desk(
         research_inputs.clear()
 
     if strat == "calendar" and live:
-        return rows, "Calendars use synchronized archived front and back expiries."
+        # Synchronized multi-expiry live calendars use the 3-tier live router below.
+        pass
 
     # Calendar spreads handled via the dedicated term-structure scanner
     if strat in ("all", "calendar") and not live:
@@ -826,57 +1024,85 @@ def scan_options_desk(
         rv_map = {**rv_map, **live_rv}
         chg_map = {**chg_map, **live_chg}
         eff_target = 90 if strat == "bull_put" else target_dte
+        eff_max_exps = 1 if research_inputs is not None else max(1, int(max_expirations))
 
-        def _scan_one_live(tk: str) -> Tuple[Dict[str, Any], List[OptionScanRow], Optional[ChainSlice]]:
-            expiry_counts: Dict[str, int] = {}
-            sl = load_live_chain_slice(
+        def _scan_one_live(tk: str) -> Tuple[Dict[str, Any], List[OptionScanRow], List[ChainSlice]]:
+            expiry_counts: Dict[str, Any] = {}
+            slices = load_live_chain_slices(
                 tk,
-                target_dte=eff_target,
                 min_dte=min_dte,
                 max_dte=max_dte,
+                max_expirations=eff_max_exps,
+                target_dte=eff_target if eff_max_exps == 1 else None,
+                spot=spot_map.get(tk),
                 build_rnd=False,
-                max_expiry_checks=2,
+                prefer_monthly=True,
                 diagnostics=expiry_counts,
             )
             coverage: Dict[str, Any] = {"ticker": tk, **expiry_counts, "candidates": 0}
-            if sl is None:
+            if not slices:
                 coverage["status"] = (
-                    "provider unavailable" if "listed" not in expiry_counts else
-                    "no eligible expiration" if not expiry_counts["eligible"] else
+                    "provider unavailable" if not expiry_counts.get("listed") else
+                    "no eligible expiration" if not expiry_counts.get("eligible") else
                     "no usable two-sided quotes"
                 )
-                return coverage, [], None
-            spot_est = sl.spot or spot_map.get(tk, 0.0)
+                return coverage, [], []
+            spot_est = slices[0].spot or spot_map.get(tk, 0.0)
             if spot_est <= 0:
-                return {**coverage, "status": "missing underlying spot"}, [], None
-            sl.spot = spot_est
-            built = _build_candidates_for_slice(
-                sl,
-                spot_est,
-                rv20=rv_map.get(tk),
-                earnings_days=earnings.get(tk),
-                strategy_filter=strat,
-                max_friction_pct=max_friction_pct,
+                return {**coverage, "status": "missing underlying spot"}, [], []
+            built: List[OptionScanRow] = []
+            seen_local: set[Tuple[str, str, str, str]] = set()
+            for sl in slices:
+                sl.spot = spot_est
+                if strat != "calendar":
+                    for cand in _build_candidates_for_slice(
+                        sl,
+                        spot_est,
+                        rv20=rv_map.get(tk),
+                        earnings_days=earnings.get(tk),
+                        strategy_filter=strat,
+                        max_friction_pct=max_friction_pct,
+                    ):
+                        k_id = (cand.ticker, cand.strategy_key, cand.expiration, cand.strikes_label)
+                        if k_id not in seen_local:
+                            seen_local.add(k_id)
+                            built.append(cand)
+            if strat in ("all", "calendar") and len(slices) >= 2:
+                built.extend(_live_calendars_from_slices(slices, spot_est, max_friction_pct=max_friction_pct))
+            return (
+                {
+                    **coverage,
+                    "status": "scanned",
+                    "candidates": len(built),
+                    "expiration": slices[0].expiration,
+                    "expirations": [s.expiration for s in slices],
+                },
+                built,
+                slices,
             )
-            return {**coverage, "status": "scanned", "candidates": len(built), "expiration": sl.expiration}, built, sl
 
         workers = max(1, min(int(max_workers), len(scan_syms)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             outcomes = list(pool.map(_scan_one_live, scan_syms))
         coverage_rows = [coverage for coverage, _, _ in outcomes]
-        for _, candidates, sl in outcomes:
+        providers_used: set[str] = set()
+        for coverage, candidates, slices in outcomes:
             rows.extend(candidates)
-            if research_inputs is not None and sl is not None:
-                research_inputs.append(_selector_inputs(sl, rv_map.get(sl.symbol), earnings.get(sl.symbol),
-                                                        strat, max_friction_pct))
+            if coverage.get("provider") and coverage["provider"] != "none":
+                providers_used.add(str(coverage["provider"]))
+            if research_inputs is not None and slices:
+                for sl in slices:
+                    research_inputs.append(_selector_inputs(sl, rv_map.get(sl.symbol), earnings.get(sl.symbol),
+                                                            strat, max_friction_pct))
         scanned_ok = sum(coverage["status"] == "scanned" for coverage in coverage_rows)
-        expiries_checked = sum(coverage.get("checked", 0) for coverage in coverage_rows)
+        expiries_checked = sum(int(coverage.get("checked") or 0) for coverage in coverage_rows)
         if pulse_out is not None:
             pulse_out.clear()
             pulse_out.update(_build_market_pulse(chg_map, universe_size=len(scan_syms), scanned_ok=scanned_ok))
             pulse_out["coverage"] = coverage_rows
+        prov_lbl = "/".join(sorted(providers_used)) if providers_used else "live"
         note = (
-            f"Yahoo scan (quote times unknown): {len(rows)} candidates across {scanned_ok}/{len(scan_syms)} tickers"
+            f"Live scan ({prov_lbl}): {len(rows)} candidates across {scanned_ok}/{len(scan_syms)} tickers"
             f" · {expiries_checked} expirations checked"
         )
     else:
@@ -924,7 +1150,7 @@ def scan_options_desk(
             expiries: List[str] = []
             two_sided = 0
             for tgt, lo_d, hi_d in (dte_targets if sp is not None else []):
-                sl = load_archived_chain_slice(
+                arch_sl = load_archived_chain_slice(
                     tk,
                     target_dte=tgt,
                     min_dte=lo_d,
@@ -933,16 +1159,16 @@ def scan_options_desk(
                     chain_db=chain_db,
                     build_rnd=False,
                 )
-                if sl is None or sp is None:
+                if arch_sl is None or sp is None:
                     continue
-                expiries.append(sl.expiration)
-                two_sided += sum(c.bid > 0 for c in sl.calls + sl.puts)
+                expiries.append(arch_sl.expiration)
+                two_sided += sum(c.bid > 0 for c in arch_sl.calls + arch_sl.puts)
                 if research_inputs is not None:
-                    sl.spot = sp
-                    research_inputs.append(_selector_inputs(sl, rv_map.get(tk), earnings.get(tk),
+                    arch_sl.spot = sp
+                    research_inputs.append(_selector_inputs(arch_sl, rv_map.get(tk), earnings.get(tk),
                                                             strat, max_friction_pct))
                 for cand in _build_candidates_for_slice(
-                    sl,
+                    arch_sl,
                     sp,
                     rv20=rv_map.get(tk),
                     earnings_days=earnings.get(tk),

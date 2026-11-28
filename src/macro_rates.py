@@ -28,6 +28,7 @@ from typing import Callable, Optional
 SERIES = ("DGS10", "DGS2", "T10Y2Y", "DFF", "VIXCLS")
 
 _FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={id}"
+_FRED_API = "https://api.stlouisfed.org/fred/series/observations"
 _CACHE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data",
                            "macro_rates_cache.json")
 _CACHE_TTL_S = 6 * 3600
@@ -102,12 +103,32 @@ def _get_session():
 
 
 def _http_fetch(series_id: str) -> str:
-    # FRED throttles non-browser User-Agents (the custom UA hangs/times out)
-    # and rate-limits rapid bursts from one IP. Present a browser UA over a
-    # reused session. Single attempt with a tight timeout: this feeds a
-    # startup panel, so a throttled FRED must never stall the dashboard
-    # (fetch_rates_snapshot also fail-fasts after the first failure).
+    # Prefer the official FRED JSON API when FRED_API_KEY is configured (reliable,
+    # never hangs on CSV edge throttling); fall back to fredgraph.csv otherwise.
     sess = _get_session()
+    api_key = (os.environ.get("FRED_API_KEY") or "").strip()
+    if api_key:
+        try:
+            resp = sess.get(
+                _FRED_API,
+                params={
+                    "series_id": series_id,
+                    "api_key": api_key,
+                    "file_type": "json",
+                    "sort_order": "desc",
+                    "limit": 10,
+                },
+                timeout=6,
+            )
+            resp.raise_for_status()
+            obs = (resp.json() or {}).get("observations") or []
+            if obs:
+                lines = [f"observation_date,{series_id}"]
+                for rec in reversed(obs):
+                    lines.append(f"{rec.get('date', '')},{rec.get('value', '.')}")
+                return "\n".join(lines) + "\n"
+        except Exception:
+            pass
     resp = sess.get(_FRED_CSV.format(id=series_id), timeout=6)
     resp.raise_for_status()
     return resp.text

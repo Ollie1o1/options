@@ -21,14 +21,16 @@ def _hub(ctx: click.Context):
 @click.command("discover")
 @click.option("--sector", "sector", default=None, help="Drill into one sector ETF's constituents (e.g. XLE, SMH).")
 @click.option("--lens", "lens_id", default=None,
-              help="Open one lens in full. Includes opt_skew and edgar_events. An invalid ID lists all choices.")
+              help="Open one lens in full. Includes opt_skew, edgar_events, edgar_quality. An invalid ID lists all choices.")
+@click.option("--diversify", is_flag=True,
+              help="Annotate & sort lens rows by lowest 126d correlation against your current holdings / core sleeve.")
 @click.option("--ledger", is_flag=True, help="Show ideas already tested here that did NOT work.")
 @click.option("--refresh-macro", is_flag=True, help="Fetch FRED credit-spread / yield-curve series first (network).")
 @click.option("--record", is_flag=True, help="Record today's idea lists to the forward log (maintenance does this daily).")
 @click.option("--forward", is_flag=True, help="Status of the forward record; outcomes stay locked until the preregistered read date.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
 @click.pass_context
-def discover_cmd(ctx: click.Context, sector: str, lens_id: str, ledger: bool, refresh_macro: bool,
+def discover_cmd(ctx: click.Context, sector: str, lens_id: str, diversify: bool, ledger: bool, refresh_macro: bool,
                  record: bool, forward: bool, as_json: bool) -> None:
     """Top-down discovery: ① Market → ② Sectors (ranked by the PROVEN model) → ③ Ideas, each labelled by its evidence."""
     from src.topdown import render as R
@@ -84,6 +86,12 @@ def discover_cmd(ctx: click.Context, sector: str, lens_id: str, ledger: bool, re
         res = hub.lens(lens_id)
         console.print(R.breadcrumb(3))
         if res is not None:
+            if diversify and res.rows:
+                from dataclasses import replace
+                from src.topdown.portfolio_fit import rank_rows_for_diversification
+
+                div_rows = rank_rows_for_diversification(res.rows, holdings=hub.holdings(), ohlcv=hub.ohlcv)
+                res = replace(res, rows=div_rows, note=(res.note + " " if res.note else "") + "Sorted by lowest 126d correlation to your holdings/sleeve.")
             console.print(R.lens_panel(res))
         return
     console.print(R.hub_overview(hub))

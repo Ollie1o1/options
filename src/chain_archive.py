@@ -280,12 +280,28 @@ def fetch_chain_with_fallback(
     max_dte: int = 120,
     moneyness_band: float = 0.15,
 ) -> List[Dict[str, Any]]:
-    """Try free CBOE delayed chain first; fall back to yfinance + BS Greeks if CBOE returns empty."""
+    """3-tier chain archiver: CBOE -> Alpaca indicative (when OI populated) -> yfinance + BS Greeks."""
     from src import cboe_client
 
     rows = cboe_client.fetch_chain(symbol)
     if rows:
         return rows
+    try:
+        from src.alpaca_data import fetch_option_chain_snapshots, has_credentials
+
+        if has_credentials():
+            import yfinance as yf
+
+            hist = yf.Ticker(symbol).history(period="5d")
+            sp = float(hist["Close"].dropna().iloc[-1]) if (hist is not None and not hist.empty) else None
+            apca = fetch_option_chain_snapshots(
+                symbol, feed="indicative", min_dte=1, max_dte=max_dte, spot=sp, moneyness_band=moneyness_band
+            )
+            # Only adopt Alpaca for daily OI archiving if open interest is populated; otherwise Yahoo has OI.
+            if apca and sum(1 for r in apca if float(r.get("open_interest") or 0) >= 1.0) >= 10:
+                return apca
+    except Exception:
+        pass
     return fetch_yfinance_chain(symbol, max_dte=max_dte, moneyness_band=moneyness_band)
 
 

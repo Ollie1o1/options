@@ -134,6 +134,11 @@ LENSES: Tuple[Lens, ...] = (
          "Free point-in-time SEC EDGAR events targeting forced institutional selling (spinoffs), 5-day activist catalysts "
          "(13D), and net share reduction after SBC dilution. Unexhausted literature; OOS backtest pending.",
          "src/alpha/edgar_events.py (data/edgar_events.db)", "Most recent SEC filing date first"),
+    Lens("edgar_quality", "SEC XBRL Net Buybacks + Profitability",
+         "Which liquid companies shrink net share count (after SBC) with high Gross Profitability (GP/A) and FCF?", "WATCHLIST",
+         "Point-in-time SEC EDGAR XBRL fundamentals (Novy-Marx GP/A + net shareholder buyback yield) for low-turnover "
+         "TFSA shares; excluded from the frozen 2027-05-25 Discover cohort until preregistered.",
+         "src/alpha/edgar_events.py (data/sec_fundamentals.db)", "Net buyback yield + GP/A + FCF/Assets"),
     Lens("holdings", "Your holdings: buy zones & covered calls",
          "Which of your holdings are near your buy zone, or can write a covered call?", "WATCHLIST",
          "Deterministic proximity to the zones in longterm_plan.json; not a forecast.",
@@ -151,12 +156,12 @@ LENS_BY_ID: Dict[str, Lens] = {lz.id: lz for lz in LENSES}
 LENS_TAG: Dict[str, str] = {
     "core_rotation": "CORE", "pullbacks": "PULL", "etf_spreads": "SPRD", "leaders": "LEAD",
     "revisions": "REV", "insiders": "INS", "opt_skew": "OPT", "edgar_events": "EDG",
-    "holdings": "HOLD", "landmines": "MINE",
+    "edgar_quality": "QUAL", "holdings": "HOLD", "landmines": "MINE",
 }
 LENS_TAG_MEANING: Dict[str, str] = {
     "CORE": "core rotation", "PULL": "uptrend pullback", "SPRD": "ETF option spread", "LEAD": "sector leader",
     "REV": "estimate revisions", "INS": "insider cluster", "OPT": "option-implied skew",
-    "EDG": "SEC EDGAR event", "HOLD": "your holding", "MINE": "landmine",
+    "EDG": "SEC EDGAR event", "QUAL": "SEC buyback/quality", "HOLD": "your holding", "MINE": "landmine",
 }
 
 # Tested here and failed. (idea, result, date, source)
@@ -416,6 +421,39 @@ def _edgar_events(ctx: LensContext, *, limit: int = 25) -> LensResult:
     return res
 
 
+def _edgar_quality(ctx: LensContext, *, limit: int = 25) -> LensResult:
+    from src.alpha.edgar_events import load_quality_buyback_leaders
+
+    res = LensResult(LENS_BY_ID["edgar_quality"])
+    rows = load_quality_buyback_leaders(limit=limit)
+    for r in rows:
+        tk = str(r.get("ticker") or "").upper()
+        if not tk:
+            continue
+        bb = r.get("net_buyback_pct")
+        gpa = r.get("gross_profit_assets_pct")
+        fcf = r.get("fcf_assets_pct")
+        parts = [f"Net buyback {float(bb):+.1f}%" if bb is not None else "Net buyback —"]
+        if gpa is not None:
+            parts.append(f"GP/A {float(gpa):.1f}%")
+        if fcf is not None:
+            parts.append(f"FCF/A {float(fcf):.1f}%")
+        res.rows.append(
+            LensRow(
+                ticker=tk,
+                sector_etf=get_sector_etf(tk),
+                why=" · ".join(parts),
+                metric_label="buyback %",
+                metric=float(bb) if bb is not None else None,
+                flags=(),
+                as_of=str(r.get("filed_date") or "")[:10] or None,
+            )
+        )
+    if not res.rows:
+        res.note = "No cached SEC fundamentals yet — run `opt alpha fundamentals --refresh` (free SEC XBRL)."
+    return res
+
+
 def _holdings(ctx: LensContext) -> LensResult:
     res = LensResult(LENS_BY_ID["holdings"])
     res.rows = _opp_rows(ctx, ("holdings_buy_zone", "covered_call_holdings"))
@@ -443,7 +481,7 @@ def _landmines(ctx: LensContext, *, earn_days: int = 7) -> LensResult:
 _RUNNERS: Dict[str, Callable[[LensContext], LensResult]] = {
     "core_rotation": _core_rotation, "pullbacks": _pullbacks, "etf_spreads": _etf_spreads,
     "leaders": _leaders, "revisions": _revisions, "insiders": _insiders,
-    "opt_skew": _opt_skew, "edgar_events": _edgar_events,
+    "opt_skew": _opt_skew, "edgar_events": _edgar_events, "edgar_quality": _edgar_quality,
     "holdings": _holdings, "landmines": _landmines,
 }
 
