@@ -14,6 +14,64 @@ DEFAULT_LIQUID_ETFS: Tuple[str, ...] = (
     "SPY", "QQQ", "IWM", "XLE", "XLV", "XLP", "XLK", "XLF", "SMH", "GLD", "TLT",
 )
 
+# Measured institutional OPRA `cbbo-1m` 15:45 ET liquidity map for Test O1 60-120 DTE spreads
+# (docs/RESULT_H4_INTRADAY_OPTIONS_EXEC_20261127.md, 24 monthly sessions 2024-2025).
+OPRA_O1_LIQUIDITY_TIER: Dict[str, Dict[str, Any]] = {
+    "SPY": {"tier": "TIER_1", "med_fric_pct": 2.3, "med_depth": 100, "pass_rate": 1.00},
+    "QQQ": {"tier": "TIER_1", "med_fric_pct": 3.8, "med_depth": 42, "pass_rate": 1.00},
+    "GLD": {"tier": "TIER_1", "med_fric_pct": 4.9, "med_depth": 252, "pass_rate": 1.00},
+    "IWM": {"tier": "TIER_1", "med_fric_pct": 5.0, "med_depth": 67, "pass_rate": 1.00},
+    "TLT": {"tier": "TIER_1", "med_fric_pct": 7.2, "med_depth": 92, "pass_rate": 1.00},
+    "XLE": {"tier": "TIER_2_WIDE", "med_fric_pct": 12.9, "med_depth": 37, "pass_rate": 0.83},
+}
+
+
+def options_execution_window_guidance(now_et: Optional[dt.datetime] = None) -> Dict[str, Any]:
+    """Return H4 OPRA intraday options execution timing guidance (America/New_York).
+
+    Backed by docs/RESULT_H4_INTRADAY_OPTIONS_EXEC_20261127.md:
+      * 09:30-10:30 ET: spreads are 2.2x-4.0x wider than midday/close (avoid submitting limits).
+      * 11:30-13:30 ET & 15:15-15:50 ET: peak institutional OPRA liquidity and book depth.
+      * 13:55-14:15 ET: check FOMC / Fed Minutes calendar before routing orders (spread blowouts).
+    """
+    from zoneinfo import ZoneInfo
+
+    t = now_et
+    if t is None:
+        t = dt.datetime.now(ZoneInfo("America/New_York"))
+    elif t.tzinfo is not None:
+        t = t.astimezone(ZoneInfo("America/New_York"))
+    mins = t.hour * 60 + t.minute
+    if t.weekday() >= 5 or mins < 9 * 60 + 30 or mins >= 16 * 60:
+        return {
+            "window": "AFTER_HOURS",
+            "flag": "EXEC_AFTER_HOURS_INDICATIVE",
+            "note": "Market closed — submit limits during 11:30-13:30 or 15:15-15:50 ET (H4 OPRA).",
+        }
+    if mins < 10 * 60 + 45:
+        return {
+            "window": "OPEN_WIDE",
+            "flag": "EXEC_OPEN_WIDE_WAIT_1130",
+            "note": "Early session (H4 OPRA: 09:45 spreads 2.2x wider than 12:00/15:45 ET) — wait for 11:30+ ET.",
+        }
+    if 13 * 60 + 55 <= mins <= 14 * 60 + 15:
+        return {
+            "window": "FED_1400_WINDOW",
+            "flag": "EXEC_1400_CHECK_FOMC",
+            "note": "14:00 ET window — verify no FOMC decision/Minutes before routing options orders (H4 OPRA).",
+        }
+    if (11 * 60 + 30 <= mins <= 13 * 60 + 30) or (15 * 60 + 15 <= mins <= 15 * 60 + 50):
+        return {
+            "window": "OPTIMAL_OPRA_WINDOW",
+            "flag": None,
+            "note": "Peak OPRA liquidity window (H4: tightest spreads & deepest books).",
+        }
+    return {
+        "window": "NORMAL_RTH",
+        "flag": None,
+        "note": "Normal RTH session; tightest OPRA windows are 11:30-13:30 and 15:15-15:50 ET (H4).",
+    }
+
 
 def _detect_settled_yahoo_session(default_through: Optional[str]) -> Optional[str]:
     """Return latest trading date where Yahoo Finance has a finite SPY Close & Adj Close.
@@ -137,16 +195,125 @@ def refresh_local_prices(
     }
 
 
+def _payload_from_provider_rows(
+    symbol: str,
+    rows: Sequence[Dict[str, Any]],
+    *,
+    spot: Optional[float],
+    source_label: str,
+) -> Optional[Dict[str, Any]]:
+    """Build `_default_fetch_etf_chain` payload for the O1 [60, 120] DTE window from CBOE/Alpaca rows."""
+    from src.radar.wide_spread_rule import DTE_HI, DTE_LO, TARGET_DTE
+
+    today = dt.date.today()
+    by_exp: Dict[str, List[Dict[str, Any]]] = {}
+    eff_spot = spot
+    for r in rows or []:
+        exp = str(r.get("expiration") or "")[:10]
+        if len(exp) != 10:
+            continue
+        by_exp.setdefault(exp, []).append(r)
+        if eff_spot is None:
+            sp = _num(r.get("spot"))
+            if sp is not None and sp > 0:
+                eff_spot = sp
+    if not by_exp or eff_spot is None or eff_spot <= 0:
+        return None
+
+    cands: List[Tuple[float, str, int]] = []
+    for e in by_exp:
+        try:
+            dte = (dt.date.fromisoformat(e) - today).days
+        except ValueError:
+            continue
+        if DTE_LO <= dte <= DTE_HI:
+            cands.append((abs(float(dte) - TARGET_DTE), e, dte))
+    if not cands:
+        return None
+    cands.sort()
+
+    for _dist, exp, dte in cands[:3]:
+        puts: List[Dict[str, Any]] = []
+        calls: List[Dict[str, Any]] = []
+        for r in by_exp[exp]:
+            rec = {
+                "strike": r.get("strike"),
+                "bid": r.get("bid"),
+                "ask": r.get("ask"),
+                "delta": r.get("delta"),
+                "iv": r.get("iv"),
+                "openInterest": r.get("open_interest"),
+                "volume": r.get("volume"),
+            }
+            if str(r.get("type") or "").lower().startswith("p"):
+                puts.append(rec)
+            else:
+                calls.append(rec)
+        two_sided = sum(
+            1
+            for r in puts
+            if _num(r.get("bid")) and _num(r.get("ask"))
+            and float(r.get("bid") or 0) > 0
+            and float(r.get("ask") or 0) >= float(r.get("bid") or 0)
+            and 0.80 * eff_spot <= float(r.get("strike") or 0) <= eff_spot
+        )
+        if two_sided >= 3:
+            return {
+                "symbol": symbol,
+                "spot": eff_spot,
+                "expiration": exp,
+                "dte": dte,
+                "puts": puts,
+                "calls": calls,
+                "source": source_label,
+            }
+    return None
+
+
 def _default_fetch_etf_chain(symbol: str) -> Optional[Dict[str, Any]]:
-    """Spot + the O1 expiration's (nearest 90 DTE in [60, 120]) put/call chain via yfinance.
+    """Spot + O1 [60, 120] DTE chain via 3-tier router: CBOE -> Alpaca indicative -> yfinance.
 
-    If the primary expiry has thin/0-bid Yahoo quotes (common outside market hours),
-    automatically checks other [60, 120] DTE expirations before giving up so live ETF
-    spreads show reliably whenever any liquid monthly expiration is quoted.
+    Eliminates Yahoo's post-open 0/0 quote gap while preserving provenance (`source`).
     """
-    import yfinance as yf
-
     from src.radar.wide_spread_rule import DTE_HI, DTE_LO, TARGET_DTE, choose_expiration
+
+    # 1. Free CBOE delayed chain (full exchange Greeks + bid/ask sizes in 1 request)
+    try:
+        from src.cboe_client import fetch_chain
+
+        cboe_rows = fetch_chain(symbol, timeout=10)
+        if cboe_rows:
+            payload = _payload_from_provider_rows(symbol, cboe_rows, spot=None, source_label="cboe")
+            if payload is not None:
+                return payload
+    except Exception:
+        pass
+
+    # 2. Alpaca indicative snapshots (when credentials configured; avoids Yahoo 0/0 open)
+    spot_hint: Optional[float] = None
+    try:
+        from src.alpaca_data import fetch_option_chain_snapshots, has_credentials
+
+        if has_credentials():
+            import yfinance as yf
+
+            hist0 = yf.Ticker(symbol).history(period="5d")
+            if hist0 is not None and not hist0.empty:
+                spot_hint = float(hist0["Close"].dropna().iloc[-1])
+            apca_rows = fetch_option_chain_snapshots(
+                symbol, feed="indicative", min_dte=DTE_LO, max_dte=DTE_HI, spot=spot_hint
+            )
+            if apca_rows:
+                payload = _payload_from_provider_rows(
+                    symbol, apca_rows, spot=spot_hint, source_label="alpaca_indicative"
+                )
+                if payload is not None:
+                    return payload
+    except Exception:
+        pass
+
+    # 3. Yahoo Finance fallback
+    import yfinance as yf
 
     tkr = yf.Ticker(symbol)
     exps = list(tkr.options or ())
@@ -164,10 +331,13 @@ def _default_fetch_etf_chain(symbol: str) -> Optional[Dict[str, Any]]:
         return {"symbol": symbol, "spot": 0.0, "expiration": "", "dte": 0, "puts": [], "calls": [],
                 "no_expiry": True}
 
-    hist = tkr.history(period="5d")
-    if hist is None or hist.empty:
-        return None
-    spot = float(hist["Close"].dropna().iloc[-1])
+    if spot_hint is not None and spot_hint > 0:
+        spot = spot_hint
+    else:
+        hist = tkr.history(period="5d")
+        if hist is None or hist.empty:
+            return None
+        spot = float(hist["Close"].dropna().iloc[-1])
 
     # Candidate expirations in [60, 120] sorted by proximity to 90 DTE
     candidates = sorted(
@@ -197,6 +367,7 @@ def _default_fetch_etf_chain(symbol: str) -> Optional[Dict[str, Any]]:
             "dte": dte,
             "puts": puts,
             "calls": calls,
+            "source": "yfinance",
         }
         if two_sided > best_two_sided:
             best_two_sided = two_sided
@@ -358,8 +529,17 @@ def scan_live_etf_wide_spreads_detailed(
         strat_label = "Bull Put" if is_put else "Bear Call"
         short_delta = float(legs.short.delta or 0.0)
         flags = ["LIMIT_ONLY_NO_MKT", "TAXABLE_ONLY"]
+        exec_win = options_execution_window_guidance()
+        if exec_win.get("flag"):
+            flags.append(str(exec_win["flag"]))
+        opra_tier = OPRA_O1_LIQUIDITY_TIER.get(sym)
+        if opra_tier and opra_tier.get("tier") == "TIER_2_WIDE":
+            flags.append("OPRA_WIDE_TIER2")
+        if sym == "GLD" and is_put:
+            # Study 3A (2024-2026 OPRA OOS): GLD bull puts lagged linear gold delta by -4.33% [-10.9%, -0.01%].
+            flags.append("GLD_OOS_LAGGED_DELTA")
         if sym != "SPY":
-            # The LEAD verdict was measured on SPY 2010-2023 only.
+            # The LEAD verdict was measured on SPY 2010-2023 only (see Study 3A for 2024-2026 OOS).
             flags.append("TESTED_ON_SPY_ONLY")
         if abs(legs.width_pct - 0.05) > 0.01:
             # Nearest quoted strike to the 5% wing was far from it (thin or coarse chain).
@@ -405,7 +585,11 @@ def scan_live_etf_wide_spreads_detailed(
                     "long_oi": legs.long.open_interest,
                     "rule": "O1: nearest 90 DTE in [60,120], short nearest 0.25 delta (+/-0.08), long 5% of spot OTM",
                     "delta_source": "mid-implied IV, Black-Scholes" if legs.short.iv is not None else "chain",
+                    "quote_source": str(data.get("source") or "yfinance"),
                     "rate_source": r_src,
+                    "execution_window": exec_win["window"],
+                    "execution_note": exec_win["note"],
+                    "opra_liquidity_tier": opra_tier,
                 },
             )
         )

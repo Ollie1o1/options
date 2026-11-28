@@ -581,6 +581,23 @@ def card_renderable(card: EvidenceCard) -> Group:
         _kv(et, "News", Text(f"{h.get('date', '')} {h['title'][:90]}"))
     if d.cdr_ticker:
         _kv(et, "TFSA", f"Canadian CDR available: {d.cdr_ticker}")
+    if card.sec_quality:
+        sq = card.sec_quality
+        parts_sq = []
+        if sq.get("net_buyback_pct") is not None:
+            parts_sq.append(f"Net buyback {float(sq['net_buyback_pct']):+.1f}%")
+        if sq.get("gross_profit_assets_pct") is not None:
+            parts_sq.append(f"GP/A {float(sq['gross_profit_assets_pct']):.1f}%")
+        if sq.get("fcf_assets_pct") is not None:
+            parts_sq.append(f"FCF/A {float(sq['fcf_assets_pct']):.1f}%")
+        if parts_sq:
+            _kv(et, "SEC XBRL", " · ".join(parts_sq) + f"  [filed {sq.get('filed_date') or '?'}, WATCHLIST]")
+    if card.finra_flow:
+        ff = card.finra_flow
+        sr = float(ff.get("short_ratio") or 0.0) * 100.0
+        z_s = f" (z {float(ff['ratio_z']):+.1f})" if ff.get("ratio_z") is not None else ""
+        ats_s = f" · ATS block {float(ff['ats_avg_block']):,.0f} sh" if ff.get("ats_avg_block") is not None else ""
+        _kv(et, "FINRA flow", f"Short vol {sr:.1f}%{z_s}{ats_s} · {ff.get('signal_label', '')}  [WATCHLIST]")
     ev_panel = Panel(et, title="5 Events, revisions & news", title_align="left", border_style=GREY)
 
     # 6. sources

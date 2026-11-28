@@ -46,6 +46,16 @@ broker. There is no broker API. Real money is OFF until every box below is check
 7. Place the order in your broker as a **limit** order at the ticket price. Do not
    chase; if it doesn't fill near mid, let it go.
 
+## Measured Execution Windows (Empirically Verified 2026-11-27)
+
+* **Options spreads & single legs (IBKR `[TAXABLE_ONLY]`, Study H4 — 3.72M OPRA `cbbo-1m` quotes):**
+  * **Best windows:** **`11:30–13:30 ET`** (midday, `4.4%` median O1 friction, deepest resting books `87` lots) and **`15:15–15:50 ET`** (`2.1%` near-ATM spread, `5.0%` median O1 friction).
+  * **Avoid `09:30–10:30 ET`:** `09:45` spreads are `2.2×` wider on `60–120 DTE` spreads (`14.3%` vs `6.3%`) and `4×` wider on ATM options (`8.2%` vs `2.1%`); even `10:30 ET` remains `+2.2 pp` wider than `15:45 ET`.
+  * **Avoid `14:00 ET` on FOMC / Fed Minutes Wednesdays:** market makers widen/pull quotes around `14:00 ET` releases (`mean` O1 friction spikes to `12.8%`).
+  * **Multi-ETF O1 OPRA Liquidity Map (`15:45 ET`):** Tier 1 (`100%` pass rate): `SPY` (`2.3%`), `QQQ` (`3.8%`), `GLD` (`4.9%`, `252`-lot depth), `IWM` (`5.0%`), `TLT` (`7.2%`); Tier 2 caution: `XLE` (`12.9%` med, `p90 26.0%`).
+* **TFSA core ETF sleeve (`VM_OUTLOOK_TOP3` on Wealthsimple USD shares, Study 2E):**
+  * Executing monthly rebalances at any liquid window between **`10:00` and `15:55 ET`** is statistically equivalent to the close (`±1.6 bps/mo`). Never flatten the sleeve intraday: `100%+` of `VM_OUTLOOK_TOP3`'s return accrues overnight (`+15.4%` ann, Sharpe `1.57` vs `-3.0%` intraday).
+
 ## After the fill
 
 8. Record the actual fill so we can measure slippage:

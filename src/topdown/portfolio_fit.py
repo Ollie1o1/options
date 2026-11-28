@@ -144,4 +144,64 @@ def portfolio_fit(ticker: str, *, holdings: Sequence[Holding], ohlcv: Dict[str, 
     return fit
 
 
-__all__ = ["Holding", "PortfolioFit", "SAME_SECTOR_MIN", "HIGH_CORR", "load_holdings", "portfolio_fit"]
+def max_holding_correlation(
+    ticker: str,
+    *,
+    holdings: Sequence[Holding],
+    ohlcv: Dict[str, Any],
+) -> Tuple[Optional[float], Optional[str]]:
+    """Return `(max_rho, matched_holding_ticker)` over 126 sessions against current real holdings/sleeve."""
+    sym = ticker.upper().strip()
+    if sym not in ohlcv or not holdings:
+        return None, None
+    others = sorted({h.ticker for h in holdings if h.ticker != sym and h.ticker in ohlcv})
+    if not others:
+        return None, None
+    a = _logret_by_date(ohlcv, sym)
+    best_rho: Optional[float] = None
+    best_tk: Optional[str] = None
+    for tk in others:
+        rho, _b, _n = _corr_beta(a, _logret_by_date(ohlcv, tk))
+        if rho is not None and (best_rho is None or float(rho) > best_rho):
+            best_rho = round(float(rho), 2)
+            best_tk = tk
+    return best_rho, best_tk
+
+
+def rank_rows_for_diversification(
+    rows: Sequence[Any],
+    *,
+    holdings: Sequence[Holding],
+    ohlcv: Dict[str, Any],
+) -> List[Any]:
+    """Annotate `LensRow`s with max 126d holding correlation and sort low-correlation diversifiers first."""
+    from dataclasses import replace
+
+    scored: List[Tuple[float, int, Any]] = []
+    for idx, row in enumerate(rows):
+        rho, match_tk = max_holding_correlation(row.ticker, holdings=holdings, ohlcv=ohlcv)
+        flags = list(row.flags)
+        why = str(row.why)
+        if rho is not None and match_tk is not None:
+            why = f"[max rho {rho:+.2f} vs {match_tk}] " + why
+            if rho >= HIGH_CORR:
+                flags.append(f"CORR_DUP:{match_tk}({rho:.2f})")
+            elif rho <= 0.40:
+                flags.append("LOW_CORR_DIV")
+        updated = replace(row, why=why, flags=tuple(dict.fromkeys(flags)))
+        sort_val = rho if rho is not None else 9.0
+        scored.append((sort_val, idx, updated))
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return [x[2] for x in scored]
+
+
+__all__ = [
+    "Holding",
+    "PortfolioFit",
+    "SAME_SECTOR_MIN",
+    "HIGH_CORR",
+    "load_holdings",
+    "portfolio_fit",
+    "max_holding_correlation",
+    "rank_rows_for_diversification",
+]

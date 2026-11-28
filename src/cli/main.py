@@ -133,7 +133,7 @@ def commands_cmd(ctx: click.Context) -> None:
         (
             "Discovery, Research & Trade Planning",
             [
-                ("opt discover [--sector XLE | --lens opt_skew]", "Top-down ① Market → ② Sectors → ③ Labelled Lenses"),
+                ("opt discover [--sector XLE | --lens opt_skew | --diversify]", "Top-down ① Market → ② Sectors → ③ Labelled Lenses (+ correlation sort)"),
                 ("opt discover --ledger", "Inspect NULL_LEDGER of ideas tested here that failed"),
                 ("opt card NVDA", "④ Evidence Card: verdict, peers, options odds & provenance"),
                 ("opt radar [--clean | --live-options]", "Unified Stock + Option Opportunity Radar"),
@@ -155,6 +155,10 @@ def commands_cmd(ctx: click.Context) -> None:
                 ("opt alpha skew", "Option-Implied CW IV Spread & Put Smirk -> trade in TFSA shares"),
                 ("opt alpha gex SPY", "Dealer Net GEX, Gamma Flip strike & Call/Put OI Walls"),
                 ("opt alpha edgar [--refresh]", "SEC EDGAR Form 10, 13D, 8-K Guidance, 10-K Supply Chain & Buybacks"),
+                ("opt alpha fundamentals [--refresh]", "SEC XBRL Net Buyback Yield (net of SBC), Novy-Marx GP/A & FCF/Assets"),
+                ("opt alpha finra-flow [--refresh]", "FINRA Daily Reg SHO Short-Sale Ratio & Weekly ATS Dark-Pool Blocks"),
+                ("opt alpha opra-cost --symbols SPY,QQQ", "Dry-run ($0) Databento OPRA historical NBBO snapshot cost estimator"),
+                ("opt alpha surface SPY --side bull_put", "Live (expiry x delta x width) surface search with depth, skew, ex-div & H4 clock"),
                 ("opt alpha archive-occ / occ-uoa", "OCC daily whole-market Volume/OI archiver & UOA surge scanner"),
                 ("opt alpha macro [--refresh]", "4-pt VIX curve, FRED Fed Net Liquidity, CFTC COT & Polymarket"),
                 ("opt alpha premortem NVDA [--ai]", "Pre-Mortem Devil's Advocate bear case & kill-switches"),

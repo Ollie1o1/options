@@ -25,6 +25,7 @@ from src.paths import repo_path
 
 DEFAULT_PLUMBING_CACHE = "data/macro_plumbing.json"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 CBOE_IDX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{name}_History.csv"
 POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=40&order=volume24hr&ascending=false"
 CFTC_COT_URL = "https://publicreporting.cftc.gov/resource/6dca-aqww.json?$order=report_date_as_yyyy_mm_dd%20DESC&$limit=120"
@@ -133,6 +134,98 @@ def parse_fred_csv(text: str) -> List[Tuple[str, float]]:
         except ValueError:
             continue
     return out
+
+
+def _fred_api_key() -> Optional[str]:
+    key = (os.environ.get("FRED_API_KEY") or "").strip()
+    return key or None
+
+
+def parse_fred_api_json(text: str) -> List[Tuple[str, float]]:
+    """Parse official FRED / ALFRED JSON `observations` into `[(date, value)]`."""
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return []
+    out: List[Tuple[str, float]] = []
+    for rec in (payload or {}).get("observations") or []:
+        d = str(rec.get("date") or "")[:10]
+        raw_v = str(rec.get("value") or "").strip()
+        if not d or not raw_v or raw_v == ".":
+            continue
+        try:
+            out.append((d, float(raw_v)))
+        except ValueError:
+            continue
+    return out
+
+
+def fetch_fred_observations(
+    series_id: str,
+    *,
+    api_key: Optional[str] = None,
+    realtime_start: Optional[str] = None,
+    realtime_end: Optional[str] = None,
+    observation_start: Optional[str] = None,
+    observation_end: Optional[str] = None,
+    limit: Optional[int] = None,
+    sort_order: str = "asc",
+    fetcher: Optional[Callable[[str], str]] = None,
+) -> List[Tuple[str, float]]:
+    """Fetch FRED observations via official JSON API when `FRED_API_KEY` is set, else CSV fallback.
+
+    Pass `realtime_start` / `realtime_end` (YYYY-MM-DD) to query **ALFRED point-in-time vintages**
+    as originally published on that date (zero look-ahead revision bias for backtesting).
+    """
+    get = fetcher or _fetch_text
+    key = api_key if api_key is not None else _fred_api_key()
+    if key:
+        params: Dict[str, Any] = {
+            "series_id": series_id,
+            "api_key": key,
+            "file_type": "json",
+            "sort_order": sort_order,
+        }
+        if realtime_start:
+            params["realtime_start"] = realtime_start[:10]
+        if realtime_end:
+            params["realtime_end"] = realtime_end[:10]
+        if observation_start:
+            params["observation_start"] = observation_start[:10]
+        if observation_end:
+            params["observation_end"] = observation_end[:10]
+        if limit is not None and limit > 0:
+            params["limit"] = int(limit)
+        url = f"{FRED_API_URL}?{urllib.parse.urlencode(params)}"
+        pts = parse_fred_api_json(get(url))
+        if pts:
+            return sorted(pts) if sort_order == "desc" else pts
+        if realtime_start or realtime_end:
+            return []
+    if realtime_start or realtime_end:
+        raise RuntimeError("ALFRED point-in-time vintages require FRED_API_KEY")
+    return parse_fred_csv(get(FRED_CSV_URL.format(series_id=series_id)))
+
+
+def fetch_alfred_vintage(
+    series_id: str,
+    *,
+    as_of_date: str,
+    observation_start: Optional[str] = None,
+    api_key: Optional[str] = None,
+    fetcher: Optional[Callable[[str], str]] = None,
+) -> List[Tuple[str, float]]:
+    """Point-in-time ALFRED vintage of `series_id` exactly as known on `as_of_date`."""
+    d = as_of_date[:10]
+    return fetch_fred_observations(
+        series_id,
+        api_key=api_key,
+        realtime_start=d,
+        realtime_end=d,
+        observation_start=observation_start,
+        observation_end=d,
+        fetcher=fetcher,
+    )
 
 
 def compute_fed_net_liquidity(
@@ -345,9 +438,14 @@ def refresh_macro_plumbing(
 
     # 2. FRED Fed Net Liquidity (WALCL - TGA - RRP); preserve prior cached value on transient timeout
     try:
-        walcl = parse_fred_csv(get(FRED_CSV_URL.format(series_id="WALCL")))
-        tga = parse_fred_csv(get(FRED_CSV_URL.format(series_id="WTREGEN")))
-        rrp = parse_fred_csv(get(FRED_CSV_URL.format(series_id="RRPONTSYD")))
+        if fetcher is None and _fred_api_key():
+            walcl = fetch_fred_observations("WALCL", limit=60, sort_order="desc")
+            tga = fetch_fred_observations("WTREGEN", limit=60, sort_order="desc")
+            rrp = fetch_fred_observations("RRPONTSYD", limit=180, sort_order="desc")
+        else:
+            walcl = parse_fred_csv(get(FRED_CSV_URL.format(series_id="WALCL")))
+            tga = parse_fred_csv(get(FRED_CSV_URL.format(series_id="WTREGEN")))
+            rrp = parse_fred_csv(get(FRED_CSV_URL.format(series_id="RRPONTSYD")))
         liq = compute_fed_net_liquidity(walcl, tga, rrp)
         snap.fed_net_liquidity_b = liq.get("fed_net_liquidity_b")
         snap.fed_liq_chg_4w_b = liq.get("fed_liq_chg_4w_b")

@@ -243,3 +243,227 @@ def alpha_occ_uoa(ctx: click.Context, limit: int, as_json: bool) -> None:
     console.print(tbl)
     if not rows:
         console.print("[dim]No rows yet — run `opt alpha archive-occ` to populate data/occ_oi.db.[/dim]")
+
+
+@alpha_group.command("fundamentals")
+@click.option("--refresh", is_flag=True, help="Refresh SEC EDGAR XBRL Net Buyback Yield, GP/A & FCF/A.")
+@click.option("--zip-path", default=None, help="Optional path to local SEC bulk companyfacts.zip.")
+@click.option("--limit", type=int, default=40, help="Max tickers to refresh or display.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def alpha_fundamentals(ctx: click.Context, refresh: bool, zip_path: Optional[str], limit: int, as_json: bool) -> None:
+    """SEC EDGAR Point-in-Time Net Share Buybacks (net of SBC), Novy-Marx GP/A & FCF/Assets [WATCHLIST]."""
+    from src.alpha.edgar_events import load_quality_buyback_leaders, refresh_edgar_fundamentals
+
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    no_color = bool((ctx.obj or {}).get("no_color"))
+    if refresh or zip_path:
+        res = refresh_edgar_fundamentals(zip_path=zip_path, limit=limit)
+        if not use_json:
+            click.echo(f"SEC fundamentals: saved {res['saved']} issuer(s)" + (f" · errors: {len(res['errors'])}" if res["errors"] else ""))
+    rows = load_quality_buyback_leaders(limit=limit)
+    if use_json:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    console = make_console(no_color=no_color)
+    tbl = Table(title="SEC XBRL Net Buybacks + Profitability (GP/A) [WATCHLIST]", pad_edge=False)
+    tbl.add_column("Ticker", style=f"bold {accent_color()}")
+    tbl.add_column("Filed")
+    tbl.add_column("Net Buyback%", justify="right")
+    tbl.add_column("GP/Assets%", justify="right")
+    tbl.add_column("FCF/Assets%", justify="right")
+    tbl.add_column("Company", style="dim")
+    for r in rows:
+        bb = f"{float(r['net_buyback_pct']):+.1f}%" if r.get("net_buyback_pct") is not None else "—"
+        gp = f"{float(r['gross_profit_assets_pct']):.1f}%" if r.get("gross_profit_assets_pct") is not None else "—"
+        fc = f"{float(r['fcf_assets_pct']):.1f}%" if r.get("fcf_assets_pct") is not None else "—"
+        tbl.add_row(str(r["ticker"]), str(r["filed_date"]), bb, gp, fc, str(r.get("entity_name") or "")[:36])
+    console.print(tbl)
+    if not rows:
+        console.print("[dim]Empty cache — run `opt alpha fundamentals --refresh` (uses SEC_EDGAR_CONTACT).[/dim]")
+
+
+@alpha_group.command("finra-flow")
+@click.option("--refresh", is_flag=True, help="Fetch latest FINRA daily Reg SHO short volume & weekly ATS dark pools.")
+@click.option("--days", type=int, default=30, help="Lookback calendar days when refreshing.")
+@click.option("--symbols", default=None, help="Comma-separated tickers (defaults to expanded liquid universe).")
+@click.option("--limit", type=int, default=25)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def alpha_finra_flow(ctx: click.Context, refresh: bool, days: int, symbols: Optional[str], limit: int, as_json: bool) -> None:
+    """FINRA Daily Reg SHO Short-Sale Volume Ratio & Weekly ATS Dark-Pool Blocks [WATCHLIST]."""
+    import datetime as _dt
+    from src.finra_flow import fetch_ats_for_symbols, fetch_regsho_for_symbols, scan_finra_flow_signals
+
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    no_color = bool((ctx.obj or {}).get("no_color"))
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else list(EXPANDED_CHAIN_UNIVERSE)
+    if refresh:
+        start_d = (_dt.date.today() - _dt.timedelta(days=max(7, int(days)))).isoformat()
+        r1 = fetch_regsho_for_symbols(sym_list, start_date=start_d)
+        r2 = fetch_ats_for_symbols(sym_list, start_date=(_dt.date.today() - _dt.timedelta(days=max(45, int(days)))).isoformat())
+        if not use_json:
+            click.echo(f"FINRA flow refresh: RegSHO {r1['saved']} rows · ATS {r2['saved']} rows")
+    rows = scan_finra_flow_signals(symbols=sym_list if symbols else None, limit=limit)
+    if use_json:
+        click.echo(json.dumps([r.to_dict() for r in rows], indent=2))
+        return
+    console = make_console(no_color=no_color)
+    tbl = Table(title="FINRA Daily Short-Sale Ratio & ATS Dark-Pool Blocks [WATCHLIST]", pad_edge=False)
+    tbl.add_column("Ticker", style=f"bold {accent_color()}")
+    tbl.add_column("Date")
+    tbl.add_column("Short%", justify="right")
+    tbl.add_column("20d Avg", justify="right")
+    tbl.add_column("Z-Score", justify="right")
+    tbl.add_column("ATS Block", justify="right")
+    tbl.add_column("Read")
+    for r in rows:
+        a20 = f"{r.avg_20d_ratio*100:.1f}%" if r.avg_20d_ratio is not None else "—"
+        zs = f"{r.ratio_z:+.2f}" if r.ratio_z is not None else "—"
+        ab = f"{r.ats_avg_block:,.0f} sh" if r.ats_avg_block is not None else "—"
+        tbl.add_row(r.symbol, r.trade_date, f"{r.short_ratio*100:.1f}%", a20, zs, ab, r.signal_label)
+    console.print(tbl)
+    if not rows:
+        console.print("[dim]No rows yet — run `opt alpha finra-flow --refresh` (free, keyless FINRA API).[/dim]")
+
+
+@alpha_group.command("opra-cost")
+@click.option("--symbols", default="SPY,QQQ,IWM", help="Comma-separated underlying tickers.")
+@click.option("--dates", default="2025-11-03", help="Comma-separated trade dates YYYY-MM-DD.")
+@click.option("--time", "hhmm", default="15:45", help="ET snapshot HH:MM (default 15:45).")
+@click.option("--schema", default="cbbo-1m")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def alpha_opra_cost(ctx: click.Context, symbols: str, dates: str, hhmm: str, schema: str, as_json: bool) -> None:
+    """Dry-run ($0) Databento OPRA historical snapshot cost estimator."""
+    from src.databento_opra import fetch_opra_snapshots
+
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    dts = [d.strip() for d in dates.split(",") if d.strip()]
+    res = fetch_opra_snapshots(syms, dts, hhmm_et=hhmm, schema=schema, dry_run=True)
+    if use_json:
+        click.echo(json.dumps(res, indent=2))
+        return
+    click.echo(
+        f"Databento OPRA estimate ({res['dataset']} {res['schema']} @ {hhmm} ET): "
+        f"${res['total_est_usd']:.4f} across {len(syms)} symbol(s) x {len(dts)} date(s) "
+        f"(prior spend: ${res['prior_spend_usd']:.4f} / $125 credit)"
+    )
+
+
+@alpha_group.command("surface")
+@click.argument("ticker")
+@click.option("--side", type=click.Choice(["bull_put", "bear_call"], case_sensitive=False), default="bull_put")
+@click.option("--min-dte", type=int, default=21, show_default=True)
+@click.option("--max-dte", type=int, default=125, show_default=True)
+@click.option("--max-expirations", type=int, default=4, show_default=True)
+@click.option("--max-friction", type=float, default=0.25, show_default=True)
+@click.option("--limit", type=int, default=12, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def alpha_surface(
+    ctx: click.Context,
+    ticker: str,
+    side: str,
+    min_dte: int,
+    max_dte: int,
+    max_expirations: int,
+    max_friction: float,
+    limit: int,
+    as_json: bool,
+) -> None:
+    """Search the live (expiry x delta x width) credit-spread surface via CBOE/Alpaca/Yahoo [TAXABLE_ONLY]."""
+    from src.radar.live_options import options_execution_window_guidance
+    from src.structure.chain_data import load_live_chain_slices
+    from src.tui.options_engine import scan_surface_verticals
+
+    use_json = as_json or bool((ctx.obj or {}).get("json"))
+    no_color = bool((ctx.obj or {}).get("no_color"))
+    sym = ticker.upper().strip()
+    diag: dict = {}
+    slices = load_live_chain_slices(
+        sym,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        max_expirations=max_expirations,
+        diagnostics=diag,
+    )
+    spot = float(slices[0].spot) if slices and slices[0].spot else 0.0
+    ex_div: Optional[str] = None
+    try:
+        from src.alpaca_data import has_credentials, upcoming_ex_dividend_dates
+
+        if has_credentials():
+            ex_map = upcoming_ex_dividend_dates([sym])
+            if sym in ex_map:
+                ex_div = ex_map[sym][0]
+    except Exception:
+        pass
+
+    cands = scan_surface_verticals(
+        slices,
+        spot=spot,
+        side=side.lower(),
+        max_friction_pct=max_friction,
+        ex_div_date=ex_div,
+    )[: max(1, int(limit))]
+    exec_win = options_execution_window_guidance()
+
+    if use_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ticker": sym,
+                    "spot": spot,
+                    "side": side.lower(),
+                    "provider": diag.get("provider"),
+                    "expirations": [s.expiration for s in slices],
+                    "ex_div_date": ex_div,
+                    "execution_window": exec_win,
+                    "candidates": cands,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    console = make_console(no_color=no_color)
+    tbl = Table(
+        title=(
+            f"{sym} {side.upper()} Surface Search · Spot ${spot:.2f} · "
+            f"Feed {diag.get('provider') or '?'} · {exec_win['window']} [TAXABLE_ONLY]"
+        ),
+        pad_edge=False,
+    )
+    tbl.add_column("Exp (DTE)", style=f"bold {accent_color()}", no_wrap=True)
+    tbl.add_column("Strikes (W%)", no_wrap=True)
+    tbl.add_column("Δ", justify="right", no_wrap=True)
+    tbl.add_column("Mid/Cross", justify="right", no_wrap=True)
+    tbl.add_column("Fric", justify="right", no_wrap=True)
+    tbl.add_column("Dep", justify="right", no_wrap=True)
+    tbl.add_column("Skew", justify="right", no_wrap=True)
+    tbl.add_column("Cr/Δ", justify="right", no_wrap=True)
+    tbl.add_column("RoR", justify="right", no_wrap=True)
+    tbl.add_column("Flags", style="dim")
+    for c in cands:
+        dp = f"{c['min_depth']:.0f}" if c.get("min_depth") is not None else "—"
+        sk = f"{c['skew_capture_vp']:+.1f}" if c.get("skew_capture_vp") is not None else "—"
+        cd = f"{c['credit_per_delta']:.1f}" if c.get("credit_per_delta") is not None else "—"
+        exp_short = str(c["expiration"])[2:]
+        tbl.add_row(
+            f"{exp_short} ({c['dte']}d)",
+            f"{c['short_strike']:g}/{c['long_strike']:g} ({c['width_pct']*100:.0f}%)",
+            f"{c['short_delta']:.2f}",
+            f"{c['credit_mid']:.2f}/{c['credit_cross']:.2f}",
+            f"{c['friction_pct']*100:.1f}%",
+            dp,
+            sk,
+            cd,
+            f"{c['ror_pct']:.1f}%",
+            ",".join(f for f in c["flags"] if f != "TAXABLE_ONLY") or "CLEAN",
+        )
+    console.print(tbl)
+    console.print(f"[dim]{exec_win['note']}[/dim]")
+    if not cands:
+        console.print(f"[dim]No two-sided spreads <= {max_friction*100:.0f}% friction across {len(slices)} expiration(s).[/dim]")

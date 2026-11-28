@@ -48,7 +48,8 @@ CRA prohibits margin and multi-leg credit/debit spreads inside a TFSA. The desk 
 |---|---|
 | `opt discover` | Top-down research hub: ① Market → ② 16 Sectors (PROVEN Outlook rank) → ③ Labelled Idea Lenses |
 | `opt discover --sector XLE` | Drill into a sector ETF's constituents sorted by 12-1m trend |
-| `opt discover --lens opt_skew` | Run a specific lens (`core_rotation`, `pullbacks`, `etf_spreads`, `leaders`, `revisions`, `insiders`, `opt_skew`, `edgar_events`, `holdings`, `landmines`) |
+| `opt discover --lens opt_skew` | Run a specific lens (`core_rotation`, `pullbacks`, `etf_spreads`, `leaders`, `revisions`, `insiders`, `opt_skew`, `edgar_events`, `edgar_quality`, `holdings`, `landmines`) |
+| `opt discover --lens leaders --diversify` | Annotate and rank any lens by lowest 126d correlation against your current holdings and live `VM_OUTLOOK_TOP3` sleeve |
 | `opt discover --ledger` | Print the `NULL_LEDGER` of ideas tested here that **failed** (so you never re-trade dead edges) |
 | `opt discover --forward` | Inspect preregistered forward-tracking record of discovery lenses |
 | `opt card NVDA` | ④ Evidence Card — verdict, structure, peers, options odds, portfolio fit & source provenance |
@@ -83,6 +84,10 @@ All Phase 3 lenses are free public feeds labelled `WATCHLIST` or `CONTEXT` (neve
 | `opt alpha edgar` | View cached SEC EDGAR forced-flow events (Form 10 spinoffs, 5-day 13D activists, XBRL Net Buyback Yield + GP/A) |
 | `opt alpha edgar --refresh` | Fetch fresh filings from free SEC EDGAR API into `data/edgar_events.db` |
 | `opt alpha edgar --type SPINOFF_FORM10` | Filter by `SPINOFF_FORM10`, `ACTIVIST_13D`, or `NET_BUYBACK_QUALITY` |
+| `opt alpha fundamentals [--refresh]` | SEC EDGAR point-in-time XBRL Net Share Buyback Yield (net of SBC), Novy-Marx `GP/A`, and `FCF/Assets` (`data/sec_fundamentals.db`; also accepts `--zip-path companyfacts.zip`) |
+| `opt alpha finra-flow [--refresh]` | Free FINRA daily Reg SHO short-sale volume ratio + weekly ATS dark-pool block size (`data/finra_flow.db`) |
+| `opt alpha opra-cost --symbols SPY,QQQ --dates 2025-11-03` | Dry-run (`$0`) Databento OPRA historical NBBO snapshot cost estimator against your `$125` credit |
+| `opt alpha surface SPY --side bull_put` | Live `(expiry × delta × width)` credit-spread surface search ranked by friction, depth, skew capture & H4 OPRA execution window (`[TAXABLE_ONLY]`) |
 | `opt alpha macro` | View cached 4-point CBOE VIX curve, FRED Fed Net Liquidity, CFTC COT positioning & Polymarket macro odds |
 | `opt alpha macro --refresh` | Refresh all 4 free macro plumbing feeds into `data/macro_plumbing.json` |
 | `opt alpha premortem NVDA` | Deterministic Pre-Mortem Devil's Advocate: bear case, local landmines, objective kill-switches & TFSA rules |
